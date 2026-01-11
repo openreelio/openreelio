@@ -670,8 +670,8 @@ mod tests {
 
     #[test]
     fn test_param_value_conversions() {
-        let float_val = ParamValue::Float(3.14);
-        assert_eq!(float_val.as_float(), Some(3.14));
+        let float_val = ParamValue::Float(std::f64::consts::PI);
+        assert_eq!(float_val.as_float(), Some(std::f64::consts::PI));
         assert_eq!(float_val.as_int(), Some(3));
         assert_eq!(float_val.as_bool(), None);
 

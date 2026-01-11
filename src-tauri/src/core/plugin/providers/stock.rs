@@ -47,6 +47,7 @@ impl Default for StockMediaConfig {
 }
 
 /// Pexels API response structures
+#[allow(dead_code)]
 mod pexels {
     use super::*;
 
@@ -141,6 +142,7 @@ impl StockMediaProvider {
     }
 
     /// Gets the API base URL
+    #[allow(dead_code)]
     fn get_api_base(&self, source: StockSource) -> &str {
         match source {
             StockSource::Pexels => "https://api.pexels.com/v1",
@@ -149,6 +151,7 @@ impl StockMediaProvider {
     }
 
     /// URL encodes a string for query parameters (RFC 3986 compliant)
+    #[allow(dead_code)]
     fn url_encode(text: &str) -> String {
         let mut result = String::new();
         for c in text.chars() {
@@ -169,6 +172,7 @@ impl StockMediaProvider {
     }
 
     /// Builds search URL for Pexels
+    #[allow(dead_code)]
     fn build_pexels_url(&self, query: &PluginSearchQuery, asset_type: &str) -> String {
         let base = self.get_api_base(StockSource::Pexels);
         let search_text = query.text.as_deref().unwrap_or("nature");
@@ -224,6 +228,7 @@ impl StockMediaProvider {
     }
 
     /// Converts Pexels photo to asset ref
+    #[allow(dead_code)]
     fn pexels_photo_to_asset(&self, photo: &pexels::Photo) -> PluginAssetRef {
         PluginAssetRef {
             id: format!("pexels-photo-{}", photo.id),
@@ -249,6 +254,7 @@ impl StockMediaProvider {
     }
 
     /// Converts Pexels video to asset ref
+    #[allow(dead_code)]
     fn pexels_video_to_asset(&self, video: &pexels::Video) -> PluginAssetRef {
         let best_file = video
             .video_files
@@ -287,6 +293,17 @@ impl AssetProviderPlugin for StockMediaProvider {
     }
 
     async fn search(&self, query: &PluginSearchQuery) -> CoreResult<Vec<PluginAssetRef>> {
+        let cache_key = format!(
+            "{}|{:?}|{}|{}",
+            query.text.as_deref().unwrap_or(""),
+            query.asset_type,
+            query.limit,
+            query.offset
+        );
+        if let Some(cached) = self.cache.read().await.get(&cache_key).cloned() {
+            return Ok(cached);
+        }
+
         let config = self.config.read().await;
 
         if config.api_key.is_none() {
@@ -318,6 +335,7 @@ impl AssetProviderPlugin for StockMediaProvider {
             }
         }
 
+        self.cache.write().await.insert(cache_key, results.clone());
         Ok(results)
     }
 

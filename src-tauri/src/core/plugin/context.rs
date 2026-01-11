@@ -29,6 +29,7 @@ pub struct PluginContext {
     /// HTTP client configuration
     http_config: HttpConfig,
     /// Logging configuration
+    #[allow(dead_code)]
     log_config: LogConfig,
 }
 
@@ -48,7 +49,7 @@ impl Default for HttpConfig {
         Self {
             timeout_sec: 30,
             max_response_size: 50 * 1024 * 1024, // 50MB
-            user_agent: format!("OpenReelio-Plugin/1.0"),
+            user_agent: "OpenReelio-Plugin/1.0".to_string(),
         }
     }
 }

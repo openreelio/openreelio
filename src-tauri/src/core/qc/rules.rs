@@ -833,8 +833,10 @@ mod tests {
 
     #[test]
     fn test_rule_config_serialization() {
-        let mut config = RuleConfig::default();
-        config.severity_override = Some(Severity::Error);
+        let mut config = RuleConfig {
+            severity_override: Some(Severity::Error),
+            ..Default::default()
+        };
         config.set_param("threshold", 10.0);
 
         let json = serde_json::to_string(&config).unwrap();

@@ -25,34 +25,24 @@ pub struct Voice {
 }
 
 /// Voice gender
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum VoiceGender {
     Male,
     Female,
+    #[default]
     Neutral,
 }
 
-impl Default for VoiceGender {
-    fn default() -> Self {
-        VoiceGender::Neutral
-    }
-}
-
 /// Voice age range
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum VoiceAge {
     Child,
     Young,
+    #[default]
     Adult,
     Senior,
-}
-
-impl Default for VoiceAge {
-    fn default() -> Self {
-        VoiceAge::Adult
-    }
 }
 
 impl Voice {

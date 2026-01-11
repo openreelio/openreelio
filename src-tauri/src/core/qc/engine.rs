@@ -19,9 +19,10 @@ use crate::core::timeline::Sequence;
 use crate::core::{CoreError, CoreResult};
 
 /// QC severity filter for selecting which violations to report
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum QCSeverityFilter {
     /// All violations
+    #[default]
     All,
     /// Only warnings and above
     WarningAndAbove,
@@ -48,14 +49,8 @@ impl QCSeverityFilter {
     }
 }
 
-impl Default for QCSeverityFilter {
-    fn default() -> Self {
-        QCSeverityFilter::All
-    }
-}
-
 /// Configuration for the QC engine
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct QCEngineConfig {
     /// Severity filter for reporting
     pub severity_filter: QCSeverityFilter,
@@ -65,17 +60,6 @@ pub struct QCEngineConfig {
     pub rule_configs: HashMap<String, RuleConfig>,
     /// Rules to skip entirely
     pub disabled_rules: Vec<String>,
-}
-
-impl Default for QCEngineConfig {
-    fn default() -> Self {
-        Self {
-            severity_filter: QCSeverityFilter::All,
-            stop_on_critical: false,
-            rule_configs: HashMap::new(),
-            disabled_rules: Vec::new(),
-        }
-    }
 }
 
 impl QCEngineConfig {

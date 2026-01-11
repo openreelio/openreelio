@@ -26,10 +26,11 @@ pub enum AllocationStrategy {
 }
 
 /// Cache eviction policy
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum EvictionPolicy {
     /// Least Recently Used
+    #[default]
     Lru,
     /// Least Frequently Used
     Lfu,
@@ -39,12 +40,6 @@ pub enum EvictionPolicy {
     TimeExpired,
     /// Random eviction
     Random,
-}
-
-impl Default for EvictionPolicy {
-    fn default() -> Self {
-        EvictionPolicy::Lru
-    }
 }
 
 /// Memory configuration
@@ -116,8 +111,6 @@ impl MemoryConfig {
 struct PoolBlock {
     /// Block ID
     id: String,
-    /// Block size
-    size: usize,
     /// Data buffer
     data: Vec<u8>,
     /// Is currently allocated
@@ -130,7 +123,6 @@ impl PoolBlock {
     fn new(size: usize) -> Self {
         Self {
             id: ulid::Ulid::new().to_string(),
-            size,
             data: vec![0u8; size],
             allocated: false,
             allocation_count: 0,

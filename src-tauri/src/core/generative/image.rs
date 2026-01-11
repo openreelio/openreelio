@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Style presets for image generation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ImageStyle {
     /// Photorealistic style
@@ -36,13 +36,8 @@ pub enum ImageStyle {
     /// Pixel art style
     PixelArt,
     /// No specific style
+    #[default]
     None,
-}
-
-impl Default for ImageStyle {
-    fn default() -> Self {
-        ImageStyle::None
-    }
 }
 
 impl std::fmt::Display for ImageStyle {
@@ -195,7 +190,7 @@ impl ImageGenerationParams {
 
     /// Sets the count
     pub fn with_count(mut self, count: u32) -> Self {
-        self.count = count.max(1).min(10); // Clamp to reasonable range
+        self.count = count.clamp(1, 10); // Clamp to reasonable range
         self
     }
 
@@ -254,13 +249,13 @@ impl ImageGenerationParams {
         }
 
         if let Some(w) = self.width {
-            if w < 64 || w > 4096 {
+            if !(64..=4096).contains(&w) {
                 return Err("Width must be between 64 and 4096".to_string());
             }
         }
 
         if let Some(h) = self.height {
-            if h < 64 || h > 4096 {
+            if !(64..=4096).contains(&h) {
                 return Err("Height must be between 64 and 4096".to_string());
             }
         }

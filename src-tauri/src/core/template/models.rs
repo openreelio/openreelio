@@ -8,10 +8,11 @@ use super::sections::{TemplateSection, TemplateStyle};
 use crate::core::timeline::SequenceFormat;
 
 /// Template category for organization
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TemplateCategory {
     /// Short-form vertical video (TikTok, Reels, Shorts)
+    #[default]
     Shorts,
     /// Long-form video (YouTube, Vimeo)
     LongForm,
@@ -31,12 +32,6 @@ pub enum TemplateCategory {
     Vlog,
     /// Custom category
     Custom(String),
-}
-
-impl Default for TemplateCategory {
-    fn default() -> Self {
-        TemplateCategory::Shorts
-    }
 }
 
 impl std::fmt::Display for TemplateCategory {

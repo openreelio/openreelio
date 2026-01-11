@@ -557,7 +557,7 @@ mod tests {
         // Should only return segments with duration between 1.5 and 6.0 seconds
         assert!(results.iter().all(|r| {
             let dur = r.duration();
-            dur >= 1.5 && dur <= 6.0
+            (1.5..=6.0).contains(&dur)
         }));
     }
 

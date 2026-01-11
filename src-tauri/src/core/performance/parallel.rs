@@ -12,12 +12,15 @@ use tokio::sync::{RwLock, Semaphore};
 use crate::core::{CoreError, CoreResult};
 
 /// Task priority levels
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskPriority {
     /// Lowest priority (background tasks)
     Low,
     /// Normal priority
+    #[default]
     Normal,
     /// High priority (user-initiated)
     High,
@@ -34,12 +37,6 @@ impl TaskPriority {
             TaskPriority::High => 4,
             TaskPriority::Critical => 8,
         }
-    }
-}
-
-impl Default for TaskPriority {
-    fn default() -> Self {
-        TaskPriority::Normal
     }
 }
 

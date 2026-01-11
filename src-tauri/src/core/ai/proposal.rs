@@ -451,11 +451,7 @@ impl ProposalManager {
 
         proposals.retain(|_, p| {
             // Use saturating_sub to prevent underflow if system time changed
-            if p.is_resolved() && now.saturating_sub(p.updated_at) > self.expiry_ms {
-                false
-            } else {
-                true
-            }
+            !(p.is_resolved() && now.saturating_sub(p.updated_at) > self.expiry_ms)
         });
 
         initial_count - proposals.len()
