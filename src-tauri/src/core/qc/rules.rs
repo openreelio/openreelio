@@ -335,7 +335,7 @@ impl QCRule for CaptionSafeAreaRule {
     async fn check(
         &self,
         sequence: &Sequence,
-        state: &ProjectState,
+        _state: &ProjectState,
         config: &RuleConfig,
     ) -> CoreResult<Vec<QCViolation>> {
         let mut violations = Vec::new();
@@ -632,7 +632,7 @@ impl QCRule for AspectRatioRule {
     async fn check(
         &self,
         sequence: &Sequence,
-        _state: &ProjectState,
+        state: &ProjectState,
         config: &RuleConfig,
     ) -> CoreResult<Vec<QCViolation>> {
         let mut violations = Vec::new();

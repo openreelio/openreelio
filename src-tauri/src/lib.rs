@@ -155,7 +155,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(AppState::new())
         .plugin(tauri_plugin_shell::init())
-        .setup(|app| {
+        .setup(|_app| {
             // Initialize logging
             tracing_subscriber::fmt()
                 .with_env_filter(
