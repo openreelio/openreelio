@@ -292,9 +292,11 @@ impl Command for UpdateAssetCommand {
         let op_id = ulid::Ulid::new().to_string();
 
         // Note: Should be AssetModified but using AssetAdded as fallback since AssetModified doesn't exist in StateChange
-        Ok(CommandResult::new(&op_id).with_change(StateChange::AssetAdded {
-            asset_id: self.asset_id.clone(),
-        }))
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::AssetAdded {
+                asset_id: self.asset_id.clone(),
+            }),
+        )
     }
 
     fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
@@ -338,9 +340,10 @@ mod tests {
     fn test_import_asset_video() {
         let mut state = create_test_state();
 
-        let mut cmd = ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default())
-            .with_duration(120.0)
-            .with_file_size(1024 * 1024);
+        let mut cmd =
+            ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default())
+                .with_duration(120.0)
+                .with_file_size(1024 * 1024);
 
         let result = cmd.execute(&mut state).unwrap();
 
@@ -356,7 +359,8 @@ mod tests {
     fn test_import_asset_audio() {
         let mut state = create_test_state();
 
-        let mut cmd = ImportAssetCommand::audio("music.mp3", "/path/music.mp3", AudioInfo::default());
+        let mut cmd =
+            ImportAssetCommand::audio("music.mp3", "/path/music.mp3", AudioInfo::default());
         cmd.execute(&mut state).unwrap();
 
         assert_eq!(state.assets.len(), 1);
@@ -377,7 +381,8 @@ mod tests {
         let mut state = create_test_state();
 
         // Import asset
-        let mut import_cmd = ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default());
+        let mut import_cmd =
+            ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default());
         let result = import_cmd.execute(&mut state).unwrap();
         let asset_id = &result.created_ids[0];
 
@@ -393,7 +398,8 @@ mod tests {
         let mut state = create_test_state();
 
         // Import asset
-        let mut import_cmd = ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default());
+        let mut import_cmd =
+            ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default());
         let result = import_cmd.execute(&mut state).unwrap();
         let asset_id = result.created_ids[0].clone();
 
@@ -426,7 +432,8 @@ mod tests {
         let mut state = create_test_state();
 
         // Import asset
-        let mut import_cmd = ImportAssetCommand::video("old_name.mp4", "/path/video.mp4", VideoInfo::default());
+        let mut import_cmd =
+            ImportAssetCommand::video("old_name.mp4", "/path/video.mp4", VideoInfo::default());
         let result = import_cmd.execute(&mut state).unwrap();
         let asset_id = &result.created_ids[0];
 
@@ -447,9 +454,10 @@ mod tests {
     fn test_import_with_tags() {
         let mut state = create_test_state();
 
-        let mut cmd = ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default())
-            .with_tag("raw")
-            .with_tag("4k");
+        let mut cmd =
+            ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default())
+                .with_tag("raw")
+                .with_tag("4k");
 
         cmd.execute(&mut state).unwrap();
 
@@ -461,7 +469,8 @@ mod tests {
     fn test_import_undo() {
         let mut state = create_test_state();
 
-        let mut cmd = ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default());
+        let mut cmd =
+            ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default());
         cmd.execute(&mut state).unwrap();
 
         assert_eq!(state.assets.len(), 1);

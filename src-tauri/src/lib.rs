@@ -98,7 +98,11 @@ impl ActiveProject {
     pub fn save(&self) -> crate::core::CoreResult<()> {
         // Save snapshot
         let snapshot_path = Snapshot::default_path(&self.path);
-        Snapshot::save(&snapshot_path, &self.state, self.state.last_op_id.as_deref())?;
+        Snapshot::save(
+            &snapshot_path,
+            &self.state,
+            self.state.last_op_id.as_deref(),
+        )?;
 
         // Save project.json metadata
         let meta_path = self.path.join("project.json");

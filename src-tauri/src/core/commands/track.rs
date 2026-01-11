@@ -223,24 +223,40 @@ impl Command for ReorderTracksCommand {
 
         // Reorder tracks based on the provided order
         sequence.tracks.sort_by(|a, b| {
-            let a_idx = self.new_order.iter().position(|id| id == &a.id).unwrap_or(usize::MAX);
-            let b_idx = self.new_order.iter().position(|id| id == &b.id).unwrap_or(usize::MAX);
+            let a_idx = self
+                .new_order
+                .iter()
+                .position(|id| id == &a.id)
+                .unwrap_or(usize::MAX);
+            let b_idx = self
+                .new_order
+                .iter()
+                .position(|id| id == &b.id)
+                .unwrap_or(usize::MAX);
             a_idx.cmp(&b_idx)
         });
 
         let op_id = ulid::Ulid::new().to_string();
 
-        Ok(CommandResult::new(&op_id).with_change(StateChange::SequenceModified {
-            sequence_id: self.sequence_id.clone(),
-        }))
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::SequenceModified {
+                sequence_id: self.sequence_id.clone(),
+            }),
+        )
     }
 
     fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
         if let Some(original_order) = &self.original_order {
             if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
                 sequence.tracks.sort_by(|a, b| {
-                    let a_idx = original_order.iter().position(|id| id == &a.id).unwrap_or(usize::MAX);
-                    let b_idx = original_order.iter().position(|id| id == &b.id).unwrap_or(usize::MAX);
+                    let a_idx = original_order
+                        .iter()
+                        .position(|id| id == &a.id)
+                        .unwrap_or(usize::MAX);
+                    let b_idx = original_order
+                        .iter()
+                        .position(|id| id == &b.id)
+                        .unwrap_or(usize::MAX);
                     a_idx.cmp(&b_idx)
                 });
             }
@@ -308,9 +324,11 @@ impl Command for RenameTrackCommand {
 
         let op_id = ulid::Ulid::new().to_string();
 
-        Ok(CommandResult::new(&op_id).with_change(StateChange::TrackModified {
-            track_id: self.track_id.clone(),
-        }))
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::TrackModified {
+                track_id: self.track_id.clone(),
+            }),
+        )
     }
 
     fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {

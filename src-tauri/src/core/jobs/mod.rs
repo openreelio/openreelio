@@ -68,13 +68,9 @@ pub enum JobStatus {
         message: Option<String>,
     },
     /// Successfully completed
-    Completed {
-        result: serde_json::Value,
-    },
+    Completed { result: serde_json::Value },
     /// Failed with error
-    Failed {
-        error: String,
-    },
+    Failed { error: String },
     /// Cancelled by user
     Cancelled,
 }
@@ -145,7 +141,10 @@ mod tests {
 
     #[test]
     fn test_job_creation() {
-        let job = Job::new(JobType::ProxyGeneration, serde_json::json!({"assetId": "asset_001"}));
+        let job = Job::new(
+            JobType::ProxyGeneration,
+            serde_json::json!({"assetId": "asset_001"}),
+        );
 
         assert!(!job.id.is_empty());
         assert_eq!(job.job_type, JobType::ProxyGeneration);

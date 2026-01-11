@@ -8,9 +8,9 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::core::{
-    project::{OpKind, OpsLog, Operation},
-    timeline::{Clip, Sequence, Track},
     assets::Asset,
+    project::{OpKind, Operation, OpsLog},
+    timeline::{Clip, Sequence, Track},
     AssetId, ClipId, CoreError, CoreResult, SequenceId, TrackId,
 };
 
@@ -290,8 +290,14 @@ impl ProjectState {
         if let Some(sequence) = self.sequences.get_mut(seq_id) {
             // Reorder tracks based on the provided order
             sequence.tracks.sort_by(|a, b| {
-                let a_idx = order.iter().position(|id| id == &a.id).unwrap_or(usize::MAX);
-                let b_idx = order.iter().position(|id| id == &b.id).unwrap_or(usize::MAX);
+                let a_idx = order
+                    .iter()
+                    .position(|id| id == &a.id)
+                    .unwrap_or(usize::MAX);
+                let b_idx = order
+                    .iter()
+                    .position(|id| id == &b.id)
+                    .unwrap_or(usize::MAX);
                 a_idx.cmp(&b_idx)
             });
         }
@@ -405,13 +411,16 @@ impl ProjectState {
         if let Some(sequence) = self.sequences.get_mut(seq_id) {
             if let Some(track) = sequence.get_track_mut(track_id) {
                 // Update original clip
-                if let Ok(original) = serde_json::from_value::<Clip>(op.payload["originalClip"].clone()) {
+                if let Ok(original) =
+                    serde_json::from_value::<Clip>(op.payload["originalClip"].clone())
+                {
                     if let Some(clip) = track.get_clip_mut(&original.id) {
                         *clip = original;
                     }
                 }
                 // Add new clip
-                if let Ok(new_clip) = serde_json::from_value::<Clip>(op.payload["newClip"].clone()) {
+                if let Ok(new_clip) = serde_json::from_value::<Clip>(op.payload["newClip"].clone())
+                {
                     track.add_clip(new_clip);
                 }
             }
@@ -669,7 +678,10 @@ mod tests {
         let mut state = ProjectState::new("Test Project");
 
         let sequence = Sequence::new("Main Sequence", SequenceFormat::youtube_1080());
-        let op = Operation::new(OpKind::SequenceCreate, serde_json::to_value(&sequence).unwrap());
+        let op = Operation::new(
+            OpKind::SequenceCreate,
+            serde_json::to_value(&sequence).unwrap(),
+        );
 
         state.apply_operation(&op).unwrap();
 
@@ -685,7 +697,10 @@ mod tests {
         // Create sequence first
         let sequence = Sequence::new("Main Sequence", SequenceFormat::youtube_1080());
         let seq_id = sequence.id.clone();
-        let seq_op = Operation::new(OpKind::SequenceCreate, serde_json::to_value(&sequence).unwrap());
+        let seq_op = Operation::new(
+            OpKind::SequenceCreate,
+            serde_json::to_value(&sequence).unwrap(),
+        );
         state.apply_operation(&seq_op).unwrap();
 
         // Add track
@@ -711,32 +726,38 @@ mod tests {
         // Setup: sequence and track
         let sequence = Sequence::new("Main Sequence", SequenceFormat::youtube_1080());
         let seq_id = sequence.id.clone();
-        state.apply_operation(&Operation::new(
-            OpKind::SequenceCreate,
-            serde_json::to_value(&sequence).unwrap(),
-        )).unwrap();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ))
+            .unwrap();
 
         let track = Track::new("Video 1", TrackKind::Video);
         let track_id = track.id.clone();
-        state.apply_operation(&Operation::new(
-            OpKind::TrackAdd,
-            serde_json::json!({
-                "sequenceId": seq_id,
-                "track": track
-            }),
-        )).unwrap();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::TrackAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "track": track
+                }),
+            ))
+            .unwrap();
 
         // Add clip
         let clip = Clip::new("asset_001").with_source_range(0.0, 10.0);
         let clip_id = clip.id.clone();
-        state.apply_operation(&Operation::new(
-            OpKind::ClipAdd,
-            serde_json::json!({
-                "sequenceId": seq_id,
-                "trackId": track_id,
-                "clip": clip
-            }),
-        )).unwrap();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::ClipAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": clip
+                }),
+            ))
+            .unwrap();
 
         let seq = state.get_sequence(&seq_id).unwrap();
         assert_eq!(seq.tracks[0].clips.len(), 1);
@@ -753,7 +774,10 @@ mod tests {
 
         let ops = vec![
             Operation::new(OpKind::AssetImport, serde_json::to_value(&asset).unwrap()),
-            Operation::new(OpKind::SequenceCreate, serde_json::to_value(&sequence).unwrap()),
+            Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ),
         ];
 
         ops_log.append_batch(&ops).unwrap();
@@ -774,17 +798,21 @@ mod tests {
         // Setup
         let asset = Asset::new_video("video.mp4", "/path/video.mp4", VideoInfo::default());
         let asset_id = asset.id.clone();
-        state.apply_operation(&Operation::new(
-            OpKind::AssetImport,
-            serde_json::to_value(&asset).unwrap(),
-        )).unwrap();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::AssetImport,
+                serde_json::to_value(&asset).unwrap(),
+            ))
+            .unwrap();
 
         let sequence = Sequence::new("Main Sequence", SequenceFormat::youtube_1080());
         let seq_id = sequence.id.clone();
-        state.apply_operation(&Operation::new(
-            OpKind::SequenceCreate,
-            serde_json::to_value(&sequence).unwrap(),
-        )).unwrap();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ))
+            .unwrap();
 
         // Test query methods
         assert!(state.get_asset(&asset_id).is_some());
@@ -802,43 +830,51 @@ mod tests {
         // Setup sequence, track, and clip
         let sequence = Sequence::new("Main Sequence", SequenceFormat::youtube_1080());
         let seq_id = sequence.id.clone();
-        state.apply_operation(&Operation::new(
-            OpKind::SequenceCreate,
-            serde_json::to_value(&sequence).unwrap(),
-        )).unwrap();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ))
+            .unwrap();
 
         let track = Track::new("Video 1", TrackKind::Video);
         let track_id = track.id.clone();
-        state.apply_operation(&Operation::new(
-            OpKind::TrackAdd,
-            serde_json::json!({
-                "sequenceId": seq_id,
-                "track": track
-            }),
-        )).unwrap();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::TrackAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "track": track
+                }),
+            ))
+            .unwrap();
 
         let clip = Clip::new("asset_001")
             .with_source_range(0.0, 10.0)
             .place_at(0.0);
         let clip_id = clip.id.clone();
-        state.apply_operation(&Operation::new(
-            OpKind::ClipAdd,
-            serde_json::json!({
-                "sequenceId": seq_id,
-                "trackId": track_id,
-                "clip": clip
-            }),
-        )).unwrap();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::ClipAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": clip
+                }),
+            ))
+            .unwrap();
 
         // Move clip
-        state.apply_operation(&Operation::new(
-            OpKind::ClipMove,
-            serde_json::json!({
-                "sequenceId": seq_id,
-                "clipId": clip_id,
-                "timelineIn": 5.0
-            }),
-        )).unwrap();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::ClipMove,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": clip_id,
+                    "timelineIn": 5.0
+                }),
+            ))
+            .unwrap();
 
         let (_, _, moved_clip) = state.find_clip(&clip_id).unwrap();
         assert_eq!(moved_clip.place.timeline_in_sec, 5.0);
@@ -851,8 +887,16 @@ mod tests {
         let asset1 = Asset::new_video("a.mp4", "/a.mp4", VideoInfo::default());
         let asset2 = Asset::new_video("b.mp4", "/b.mp4", VideoInfo::default());
 
-        let op1 = Operation::with_id("op_001", OpKind::AssetImport, serde_json::to_value(&asset1).unwrap());
-        let op2 = Operation::with_id("op_002", OpKind::AssetImport, serde_json::to_value(&asset2).unwrap());
+        let op1 = Operation::with_id(
+            "op_001",
+            OpKind::AssetImport,
+            serde_json::to_value(&asset1).unwrap(),
+        );
+        let op2 = Operation::with_id(
+            "op_002",
+            OpKind::AssetImport,
+            serde_json::to_value(&asset2).unwrap(),
+        );
 
         state.apply_operation(&op1).unwrap();
         assert_eq!(state.op_count, 1);
@@ -906,31 +950,37 @@ mod tests {
         // Setup
         let sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
         let seq_id = sequence.id.clone();
-        state.apply_operation(&Operation::new(
-            OpKind::SequenceCreate,
-            serde_json::to_value(&sequence).unwrap(),
-        )).unwrap();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ))
+            .unwrap();
 
         let track = Track::new("Video 1", TrackKind::Video);
         let track_id = track.id.clone();
-        state.apply_operation(&Operation::new(
-            OpKind::TrackAdd,
-            serde_json::json!({
-                "sequenceId": seq_id,
-                "track": track
-            }),
-        )).unwrap();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::TrackAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "track": track
+                }),
+            ))
+            .unwrap();
 
         let clip = Clip::new("asset_001").with_source_range(0.0, 5.0);
         let clip_id = clip.id.clone();
-        state.apply_operation(&Operation::new(
-            OpKind::ClipAdd,
-            serde_json::json!({
-                "sequenceId": seq_id,
-                "trackId": track_id,
-                "clip": clip
-            }),
-        )).unwrap();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::ClipAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": clip
+                }),
+            ))
+            .unwrap();
 
         // Test find_track
         let (found_seq, found_track) = state.find_track(&track_id).unwrap();

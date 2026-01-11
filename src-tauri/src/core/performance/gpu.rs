@@ -188,7 +188,7 @@ impl GpuDevice {
             id: ulid::Ulid::new().to_string(),
             name: name.to_string(),
             vendor,
-            vram_total: 8 * 1024 * 1024 * 1024, // 8GB
+            vram_total: 8 * 1024 * 1024 * 1024,     // 8GB
             vram_available: 6 * 1024 * 1024 * 1024, // 6GB available
             compute_capability: Some("8.6".to_string()),
             capabilities: vec![
@@ -469,7 +469,10 @@ impl GpuAccelerator {
     pub async fn set_active_device(&self, device_id: &str) -> CoreResult<()> {
         let devices = self.devices.read().await;
         if !devices.iter().any(|d| d.id == device_id) {
-            return Err(CoreError::NotFound(format!("GPU device not found: {}", device_id)));
+            return Err(CoreError::NotFound(format!(
+                "GPU device not found: {}",
+                device_id
+            )));
         }
         drop(devices);
 
@@ -595,9 +598,10 @@ impl GpuAccelerator {
 
     /// Allocates VRAM for an operation
     pub async fn allocate_vram(&self, operation_id: &str, bytes: u64) -> CoreResult<()> {
-        let device = self.get_active_device().await.ok_or_else(|| {
-            CoreError::NotFound("No active GPU device".to_string())
-        })?;
+        let device = self
+            .get_active_device()
+            .await
+            .ok_or_else(|| CoreError::NotFound("No active GPU device".to_string()))?;
 
         let config = self.config.read().await;
         let max_bytes = (device.vram_total as f64 * config.max_vram_usage as f64 / 100.0) as u64;

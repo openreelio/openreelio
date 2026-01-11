@@ -14,8 +14,8 @@ pub mod providers;
 pub use api::{
     AssetProviderPlugin, CaptionStyleProviderPlugin, EditAssistantPlugin, EditContext,
     EditSuggestion, EffectPresetProviderPlugin, PluginAssetRef, PluginAssetType,
-    PluginCaptionStyle, PluginEffectPreset, PluginFetchedAsset, PluginSearchQuery,
-    PluginTemplate, TemplatePlaceholder, TemplateProviderPlugin,
+    PluginCaptionStyle, PluginEffectPreset, PluginFetchedAsset, PluginSearchQuery, PluginTemplate,
+    TemplatePlaceholder, TemplateProviderPlugin,
 };
 pub use context::PluginContext;
 pub use host::{LoadedPlugin, PluginHost, PluginHostConfig, PluginInfo, PluginState};

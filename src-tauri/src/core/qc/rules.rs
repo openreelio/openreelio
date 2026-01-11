@@ -173,7 +173,10 @@ impl QCRule for BlackFrameRule {
                                         black_duration
                                     ),
                                 )
-                                .with_location(clip.place.start_sec, clip.place.start_sec + black_duration)
+                                .with_location(
+                                    clip.place.start_sec,
+                                    clip.place.start_sec + black_duration,
+                                )
                                 .with_entities(vec![clip_id.clone()])
                                 .with_fix(fix);
 
@@ -472,7 +475,10 @@ impl QCRule for CutRhythmRule {
                             let violation = QCViolation::new(
                                 self.name(),
                                 severity,
-                                format!("Cut too short ({:.1}s < {:.1}s minimum)", duration, min_cut),
+                                format!(
+                                    "Cut too short ({:.1}s < {:.1}s minimum)",
+                                    duration, min_cut
+                                ),
                             )
                             .with_location(clip.place.start_sec, clip.place.end_sec)
                             .with_entities(vec![clip_id.clone()])
@@ -485,7 +491,10 @@ impl QCRule for CutRhythmRule {
                             let violation = QCViolation::new(
                                 self.name(),
                                 severity,
-                                format!("Cut too long ({:.1}s > {:.1}s maximum)", duration, max_cut),
+                                format!(
+                                    "Cut too long ({:.1}s > {:.1}s maximum)",
+                                    duration, max_cut
+                                ),
                             )
                             .with_location(clip.place.start_sec, clip.place.end_sec)
                             .with_entities(vec![clip_id.clone()])
@@ -573,7 +582,11 @@ impl QCRule for LicenseRule {
                 }
 
                 // Check commercial use if required
-                if check_commercial && !asset.license.allowed_use.contains(&"commercial".to_string())
+                if check_commercial
+                    && !asset
+                        .license
+                        .allowed_use
+                        .contains(&"commercial".to_string())
                 {
                     let violation = QCViolation::new(
                         self.name(),
@@ -601,7 +614,10 @@ impl QCRule for LicenseRule {
                             format!("Asset '{}' license has expired", asset.uri),
                         )
                         .with_entities(vec![asset_id.clone()])
-                        .with_details(format!("License expired on {}. Renew or replace asset.", expires));
+                        .with_details(format!(
+                            "License expired on {}. Renew or replace asset.",
+                            expires
+                        ));
 
                         violations.push(violation);
                     }

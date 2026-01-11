@@ -10,7 +10,9 @@ use tokio::sync::RwLock;
 
 use super::audio::{MusicGenerationParams, MusicGenerationResult, TTSParams, TTSResult};
 use super::image::{ImageGenerationParams, ImageGenerationResult};
-use super::providers::{GenerativeProvider, GenerativeProviderConfig, MockGenerativeProvider, ProviderCapability};
+use super::providers::{
+    GenerativeProvider, GenerativeProviderConfig, MockGenerativeProvider, ProviderCapability,
+};
 use crate::core::{CoreError, CoreResult};
 
 /// Configuration for the generative engine
@@ -197,10 +199,7 @@ impl GenerativeEngine {
     }
 
     /// Lists providers with a specific capability
-    pub async fn providers_with_capability(
-        &self,
-        capability: ProviderCapability,
-    ) -> Vec<String> {
+    pub async fn providers_with_capability(&self, capability: ProviderCapability) -> Vec<String> {
         let providers = self.providers.read().await;
         providers
             .iter()
@@ -246,10 +245,7 @@ impl GenerativeEngine {
     pub async fn generate(&self, request: GenerationRequest) -> CoreResult<GenerationResult> {
         let capability = request.required_capability();
         let provider = self.default_provider_for(capability).await.ok_or_else(|| {
-            CoreError::NotSupported(format!(
-                "No provider available for {:?}",
-                capability
-            ))
+            CoreError::NotSupported(format!("No provider available for {:?}", capability))
         })?;
 
         let result = match request {
@@ -282,9 +278,10 @@ impl GenerativeEngine {
         provider_name: &str,
         request: GenerationRequest,
     ) -> CoreResult<GenerationResult> {
-        let provider = self.get_provider(provider_name).await.ok_or_else(|| {
-            CoreError::NotFound(format!("Provider not found: {}", provider_name))
-        })?;
+        let provider = self
+            .get_provider(provider_name)
+            .await
+            .ok_or_else(|| CoreError::NotFound(format!("Provider not found: {}", provider_name)))?;
 
         let capability = request.required_capability();
         if !provider.supports(capability) {
@@ -352,7 +349,10 @@ impl GenerativeEngine {
     }
 
     /// Convenience method for image generation
-    pub async fn generate_image(&self, params: ImageGenerationParams) -> CoreResult<ImageGenerationResult> {
+    pub async fn generate_image(
+        &self,
+        params: ImageGenerationParams,
+    ) -> CoreResult<ImageGenerationResult> {
         match self.generate(GenerationRequest::Image(params)).await? {
             GenerationResult::Image(result) => Ok(result),
             _ => unreachable!(),
@@ -368,7 +368,10 @@ impl GenerativeEngine {
     }
 
     /// Convenience method for music generation
-    pub async fn generate_music(&self, params: MusicGenerationParams) -> CoreResult<MusicGenerationResult> {
+    pub async fn generate_music(
+        &self,
+        params: MusicGenerationParams,
+    ) -> CoreResult<MusicGenerationResult> {
         match self.generate(GenerationRequest::Music(params)).await? {
             GenerationResult::Music(result) => Ok(result),
             _ => unreachable!(),
@@ -419,13 +422,22 @@ mod tests {
     #[test]
     fn test_request_capability() {
         let img = GenerationRequest::Image(ImageGenerationParams::new("test"));
-        assert_eq!(img.required_capability(), ProviderCapability::ImageGeneration);
+        assert_eq!(
+            img.required_capability(),
+            ProviderCapability::ImageGeneration
+        );
 
         let speech = GenerationRequest::Speech(TTSParams::new("test"));
-        assert_eq!(speech.required_capability(), ProviderCapability::TextToSpeech);
+        assert_eq!(
+            speech.required_capability(),
+            ProviderCapability::TextToSpeech
+        );
 
         let music = GenerationRequest::Music(MusicGenerationParams::new(30.0));
-        assert_eq!(music.required_capability(), ProviderCapability::MusicGeneration);
+        assert_eq!(
+            music.required_capability(),
+            ProviderCapability::MusicGeneration
+        );
     }
 
     // ========================================================================
@@ -506,8 +518,14 @@ mod tests {
         let engine = GenerativeEngine::new();
 
         // Generate some content
-        engine.generate_image(ImageGenerationParams::new("Test 1")).await.unwrap();
-        engine.generate_speech(TTSParams::new("Test 2")).await.unwrap();
+        engine
+            .generate_image(ImageGenerationParams::new("Test 1"))
+            .await
+            .unwrap();
+        engine
+            .generate_speech(TTSParams::new("Test 2"))
+            .await
+            .unwrap();
 
         let history = engine.get_history(10).await;
         assert_eq!(history.len(), 2);

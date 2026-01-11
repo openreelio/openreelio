@@ -156,10 +156,7 @@ impl Snapshot {
     }
 
     /// Loads project from snapshot, then applies any new operations from ops log
-    pub fn load_with_replay(
-        snapshot_path: &Path,
-        ops_log: &OpsLog,
-    ) -> CoreResult<ProjectState> {
+    pub fn load_with_replay(snapshot_path: &Path, ops_log: &OpsLog) -> CoreResult<ProjectState> {
         let (mut state, last_op_id) = Self::load(snapshot_path)?;
 
         // If there's a last_op_id, replay operations since that point
@@ -195,9 +192,9 @@ mod tests {
     use super::*;
     use crate::core::{
         assets::{Asset, VideoInfo},
-        timeline::{Sequence, SequenceFormat, Track, TrackKind},
-        project::Operation,
         project::OpKind,
+        project::Operation,
+        timeline::{Sequence, SequenceFormat, Track, TrackKind},
     };
     use tempfile::TempDir;
 
@@ -374,11 +371,7 @@ mod tests {
         let ops_log = OpsLog::new(&ops_path);
 
         // Add op_001 (already in snapshot)
-        let op1 = Operation::with_id(
-            "op_001",
-            OpKind::AssetImport,
-            serde_json::json!({}),
-        );
+        let op1 = Operation::with_id("op_001", OpKind::AssetImport, serde_json::json!({}));
         ops_log.append(&op1).unwrap();
 
         // Add new operations after snapshot

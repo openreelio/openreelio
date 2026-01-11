@@ -48,7 +48,7 @@ impl Default for PluginHostConfig {
     fn default() -> Self {
         Self {
             max_memory_bytes: 256 * 1024 * 1024, // 256MB
-            max_execution_time_ms: 30000,         // 30 seconds
+            max_execution_time_ms: 30000,        // 30 seconds
             fuel_enabled: true,
             initial_fuel: 1_000_000_000, // 1 billion fuel units
             wasi_enabled: true,
@@ -121,9 +121,8 @@ impl PluginHost {
         }
 
         // Create engine
-        let engine = Engine::new(&wasmtime_config).map_err(|e| {
-            CoreError::PluginError(format!("Failed to create WASM engine: {}", e))
-        })?;
+        let engine = Engine::new(&wasmtime_config)
+            .map_err(|e| CoreError::PluginError(format!("Failed to create WASM engine: {}", e)))?;
 
         // Create data directory
         std::fs::create_dir_all(&data_dir).map_err(|e| {
@@ -161,13 +160,11 @@ impl PluginHost {
 
         // Load WASM module
         let wasm_path = plugin_dir.join(&manifest.entry);
-        let wasm_bytes = std::fs::read(&wasm_path).map_err(|e| {
-            CoreError::PluginError(format!("Failed to read WASM file: {}", e))
-        })?;
+        let wasm_bytes = std::fs::read(&wasm_path)
+            .map_err(|e| CoreError::PluginError(format!("Failed to read WASM file: {}", e)))?;
 
-        let module = Module::new(&self.engine, &wasm_bytes).map_err(|e| {
-            CoreError::PluginError(format!("Failed to compile WASM module: {}", e))
-        })?;
+        let module = Module::new(&self.engine, &wasm_bytes)
+            .map_err(|e| CoreError::PluginError(format!("Failed to compile WASM module: {}", e)))?;
 
         // Create plugin context
         let context = Arc::new(PluginContext::new(
@@ -204,9 +201,9 @@ impl PluginHost {
     pub async fn unload_plugin(&self, plugin_id: &str) -> CoreResult<()> {
         let mut plugins = self.plugins.write().await;
 
-        let plugin = plugins.remove(plugin_id).ok_or_else(|| {
-            CoreError::PluginError(format!("Plugin '{}' not found", plugin_id))
-        })?;
+        let plugin = plugins
+            .remove(plugin_id)
+            .ok_or_else(|| CoreError::PluginError(format!("Plugin '{}' not found", plugin_id)))?;
 
         // Cleanup context
         plugin.context.cleanup_temp().await?;
@@ -251,7 +248,10 @@ impl PluginHost {
     }
 
     /// Gets plugins by capability
-    pub async fn get_plugins_by_capability(&self, capability: &PluginCapability) -> Vec<PluginInfo> {
+    pub async fn get_plugins_by_capability(
+        &self,
+        capability: &PluginCapability,
+    ) -> Vec<PluginInfo> {
         let plugins = self.plugins.read().await;
         plugins
             .values()
@@ -269,7 +269,11 @@ impl PluginHost {
     }
 
     /// Creates a store for plugin execution
-    pub fn create_store(&self, plugin_id: &str, context: Arc<PluginContext>) -> CoreResult<Store<PluginStoreState>> {
+    pub fn create_store(
+        &self,
+        plugin_id: &str,
+        context: Arc<PluginContext>,
+    ) -> CoreResult<Store<PluginStoreState>> {
         let state = PluginStoreState {
             plugin_id: plugin_id.to_string(),
             context,
@@ -279,9 +283,9 @@ impl PluginHost {
         let mut store = Store::new(&self.engine, state);
 
         if self.config.fuel_enabled {
-            store.add_fuel(self.config.initial_fuel).map_err(|e| {
-                CoreError::PluginError(format!("Failed to add fuel: {}", e))
-            })?;
+            store
+                .add_fuel(self.config.initial_fuel)
+                .map_err(|e| CoreError::PluginError(format!("Failed to add fuel: {}", e)))?;
         }
 
         Ok(store)
@@ -293,9 +297,9 @@ impl PluginHost {
         plugin_id: &str,
     ) -> CoreResult<(Instance, Store<PluginStoreState>)> {
         let plugins = self.plugins.read().await;
-        let plugin = plugins.get(plugin_id).ok_or_else(|| {
-            CoreError::PluginError(format!("Plugin '{}' not found", plugin_id))
-        })?;
+        let plugin = plugins
+            .get(plugin_id)
+            .ok_or_else(|| CoreError::PluginError(format!("Plugin '{}' not found", plugin_id)))?;
 
         let context = Arc::clone(&plugin.context);
         let module = &plugin.module;
@@ -307,9 +311,9 @@ impl PluginHost {
         Self::add_host_functions(&mut linker)?;
 
         // Instantiate
-        let instance = linker.instantiate(&mut store, module).map_err(|e| {
-            CoreError::PluginError(format!("Failed to instantiate plugin: {}", e))
-        })?;
+        let instance = linker
+            .instantiate(&mut store, module)
+            .map_err(|e| CoreError::PluginError(format!("Failed to instantiate plugin: {}", e)))?;
 
         Ok((instance, store))
     }
@@ -318,25 +322,28 @@ impl PluginHost {
     fn add_host_functions(linker: &mut Linker<PluginStoreState>) -> CoreResult<()> {
         // Log function
         linker
-            .func_wrap("env", "host_log", |caller: Caller<'_, PluginStoreState>, level: i32, ptr: i32, len: i32| {
-                let mem = caller.get_export("memory")
-                    .and_then(|e| e.into_memory());
+            .func_wrap(
+                "env",
+                "host_log",
+                |caller: Caller<'_, PluginStoreState>, level: i32, ptr: i32, len: i32| {
+                    let mem = caller.get_export("memory").and_then(|e| e.into_memory());
 
-                if let Some(memory) = mem {
-                    let data = memory.data(&caller);
-                    if let Some(slice) = data.get(ptr as usize..(ptr + len) as usize) {
-                        if let Ok(message) = std::str::from_utf8(slice) {
-                            let plugin_id = &caller.data().plugin_id;
-                            match level {
-                                0 => tracing::debug!("[plugin:{}] {}", plugin_id, message),
-                                1 => tracing::info!("[plugin:{}] {}", plugin_id, message),
-                                2 => tracing::warn!("[plugin:{}] {}", plugin_id, message),
-                                _ => tracing::error!("[plugin:{}] {}", plugin_id, message),
+                    if let Some(memory) = mem {
+                        let data = memory.data(&caller);
+                        if let Some(slice) = data.get(ptr as usize..(ptr + len) as usize) {
+                            if let Ok(message) = std::str::from_utf8(slice) {
+                                let plugin_id = &caller.data().plugin_id;
+                                match level {
+                                    0 => tracing::debug!("[plugin:{}] {}", plugin_id, message),
+                                    1 => tracing::info!("[plugin:{}] {}", plugin_id, message),
+                                    2 => tracing::warn!("[plugin:{}] {}", plugin_id, message),
+                                    _ => tracing::error!("[plugin:{}] {}", plugin_id, message),
+                                }
                             }
                         }
                     }
-                }
-            })
+                },
+            )
             .map_err(|e| CoreError::PluginError(format!("Failed to add host_log: {}", e)))?;
 
         // Get current time
@@ -361,9 +368,9 @@ impl PluginHost {
     /// Sets the plugin state
     pub async fn set_plugin_state(&self, plugin_id: &str, state: PluginState) -> CoreResult<()> {
         let mut plugins = self.plugins.write().await;
-        let plugin = plugins.get_mut(plugin_id).ok_or_else(|| {
-            CoreError::PluginError(format!("Plugin '{}' not found", plugin_id))
-        })?;
+        let plugin = plugins
+            .get_mut(plugin_id)
+            .ok_or_else(|| CoreError::PluginError(format!("Plugin '{}' not found", plugin_id)))?;
         plugin.state = state;
         Ok(())
     }
@@ -480,7 +487,8 @@ mod tests {
     #[tokio::test]
     async fn test_load_plugin() {
         let temp_dir = TempDir::new().unwrap();
-        let host = PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
+        let host =
+            PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
 
         let plugin_dir = create_test_plugin_dir(&temp_dir);
         let plugin_id = host.load_plugin(&plugin_dir).await.unwrap();
@@ -491,7 +499,8 @@ mod tests {
     #[tokio::test]
     async fn test_load_plugin_missing_manifest() {
         let temp_dir = TempDir::new().unwrap();
-        let host = PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
+        let host =
+            PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
 
         let empty_dir = temp_dir.path().join("empty");
         std::fs::create_dir_all(&empty_dir).unwrap();
@@ -503,7 +512,8 @@ mod tests {
     #[tokio::test]
     async fn test_load_plugin_duplicate() {
         let temp_dir = TempDir::new().unwrap();
-        let host = PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
+        let host =
+            PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
 
         let plugin_dir = create_test_plugin_dir(&temp_dir);
         host.load_plugin(&plugin_dir).await.unwrap();
@@ -521,7 +531,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_plugin() {
         let temp_dir = TempDir::new().unwrap();
-        let host = PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
+        let host =
+            PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
 
         let plugin_dir = create_test_plugin_dir(&temp_dir);
         host.load_plugin(&plugin_dir).await.unwrap();
@@ -543,7 +554,8 @@ mod tests {
     #[tokio::test]
     async fn test_list_plugins() {
         let temp_dir = TempDir::new().unwrap();
-        let host = PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
+        let host =
+            PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
 
         // Initially empty
         assert!(host.list_plugins().await.is_empty());
@@ -564,7 +576,8 @@ mod tests {
     #[tokio::test]
     async fn test_get_plugins_by_capability() {
         let temp_dir = TempDir::new().unwrap();
-        let host = PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
+        let host =
+            PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
 
         let plugin_dir = create_test_plugin_dir(&temp_dir);
         host.load_plugin(&plugin_dir).await.unwrap();
@@ -589,7 +602,8 @@ mod tests {
     #[tokio::test]
     async fn test_unload_plugin() {
         let temp_dir = TempDir::new().unwrap();
-        let host = PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
+        let host =
+            PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
 
         let plugin_dir = create_test_plugin_dir(&temp_dir);
         host.load_plugin(&plugin_dir).await.unwrap();
@@ -615,7 +629,8 @@ mod tests {
     #[tokio::test]
     async fn test_plugin_state_transitions() {
         let temp_dir = TempDir::new().unwrap();
-        let host = PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
+        let host =
+            PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
 
         let plugin_dir = create_test_plugin_dir(&temp_dir);
         host.load_plugin(&plugin_dir).await.unwrap();
@@ -646,7 +661,8 @@ mod tests {
     #[tokio::test]
     async fn test_create_store() {
         let temp_dir = TempDir::new().unwrap();
-        let host = PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
+        let host =
+            PluginHost::new(temp_dir.path().to_path_buf(), PluginHostConfig::default()).unwrap();
 
         let plugin_dir = create_test_plugin_dir(&temp_dir);
         host.load_plugin(&plugin_dir).await.unwrap();

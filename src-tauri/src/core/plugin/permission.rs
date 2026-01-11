@@ -251,12 +251,14 @@ impl PermissionManager {
 
     /// Validates network access against plugin permissions
     pub async fn validate_network_access(&self, plugin_id: &str, url: &str) -> CoreResult<()> {
-        self.require(plugin_id, &PermissionScope::Network, url).await
+        self.require(plugin_id, &PermissionScope::Network, url)
+            .await
     }
 
     /// Validates model access against plugin permissions
     pub async fn validate_model_access(&self, plugin_id: &str, model: &str) -> CoreResult<()> {
-        self.require(plugin_id, &PermissionScope::Model, model).await
+        self.require(plugin_id, &PermissionScope::Model, model)
+            .await
     }
 
     /// Parses manifest permissions into Permission structs
@@ -312,7 +314,12 @@ impl Default for PermissionManager {
 mod tests {
     use super::*;
 
-    fn create_test_manifest(id: &str, fs: Vec<&str>, net: Vec<&str>, models: Vec<&str>) -> PluginManifest {
+    fn create_test_manifest(
+        id: &str,
+        fs: Vec<&str>,
+        net: Vec<&str>,
+        models: Vec<&str>,
+    ) -> PluginManifest {
         PluginManifest {
             id: id.to_string(),
             name: "Test Plugin".to_string(),
@@ -357,11 +364,17 @@ mod tests {
 
     #[test]
     fn test_permission_wildcard_star() {
-        let perm = Permission::new(PermissionScope::Network, "https://api.example.com*".to_string());
+        let perm = Permission::new(
+            PermissionScope::Network,
+            "https://api.example.com*".to_string(),
+        );
 
         assert!(perm.matches(&PermissionScope::Network, "https://api.example.com"));
         assert!(perm.matches(&PermissionScope::Network, "https://api.example.com/v1"));
-        assert!(perm.matches(&PermissionScope::Network, "https://api.example.com/v1/users"));
+        assert!(perm.matches(
+            &PermissionScope::Network,
+            "https://api.example.com/v1/users"
+        ));
     }
 
     #[test]
@@ -404,7 +417,8 @@ mod tests {
     #[tokio::test]
     async fn test_unregister_plugin() {
         let manager = PermissionManager::new();
-        let manifest = create_test_manifest("test-plugin", vec!["project:assets/*"], vec![], vec![]);
+        let manifest =
+            create_test_manifest("test-plugin", vec!["project:assets/*"], vec![], vec![]);
 
         manager.register_plugin(&manifest).await.unwrap();
         assert!(!manager.get_permissions("test-plugin").await.is_empty());
@@ -487,8 +501,7 @@ mod tests {
     #[tokio::test]
     async fn test_check_model_permission() {
         let manager = PermissionManager::new();
-        let manifest =
-            create_test_manifest("test-plugin", vec![], vec![], vec!["textEmbedding"]);
+        let manifest = create_test_manifest("test-plugin", vec![], vec![], vec!["textEmbedding"]);
 
         manager.register_plugin(&manifest).await.unwrap();
 
@@ -660,8 +673,7 @@ mod tests {
     #[tokio::test]
     async fn test_validate_model_access() {
         let manager = PermissionManager::new();
-        let manifest =
-            create_test_manifest("test-plugin", vec![], vec![], vec!["textEmbedding"]);
+        let manifest = create_test_manifest("test-plugin", vec![], vec![], vec!["textEmbedding"]);
 
         manager.register_plugin(&manifest).await.unwrap();
 

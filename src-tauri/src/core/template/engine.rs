@@ -207,10 +207,7 @@ impl TemplateInstance {
 
     /// Returns the total duration of filled slots
     pub fn total_duration(&self) -> f64 {
-        self.slots
-            .iter()
-            .filter_map(|s| s.duration())
-            .sum()
+        self.slots.iter().filter_map(|s| s.duration()).sum()
     }
 
     /// Gets a slot by section ID
@@ -231,9 +228,9 @@ impl TemplateInstance {
         start_sec: f64,
         end_sec: f64,
     ) -> CoreResult<()> {
-        let slot = self.get_slot_mut(section_id).ok_or_else(|| {
-            CoreError::NotFound(format!("Slot not found: {}", section_id))
-        })?;
+        let slot = self
+            .get_slot_mut(section_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Slot not found: {}", section_id)))?;
 
         slot.fill(asset_id, start_sec, end_sec);
         self.modified_at = chrono::Utc::now();
@@ -244,9 +241,9 @@ impl TemplateInstance {
 
     /// Clears a slot
     pub fn clear_slot(&mut self, section_id: &str) -> CoreResult<()> {
-        let slot = self.get_slot_mut(section_id).ok_or_else(|| {
-            CoreError::NotFound(format!("Slot not found: {}", section_id))
-        })?;
+        let slot = self
+            .get_slot_mut(section_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Slot not found: {}", section_id)))?;
 
         slot.clear();
         self.modified_at = chrono::Utc::now();
@@ -483,9 +480,9 @@ impl TemplateEngine {
 
     /// Registers a template
     pub async fn register_template(&self, template: Template) -> CoreResult<()> {
-        template.validate().map_err(|e| {
-            CoreError::ValidationError(format!("Invalid template: {}", e))
-        })?;
+        template
+            .validate()
+            .map_err(|e| CoreError::ValidationError(format!("Invalid template: {}", e)))?;
 
         let mut templates = self.templates.write().await;
         templates.insert(template.id.clone(), template);
@@ -517,9 +514,10 @@ impl TemplateEngine {
 
     /// Creates a new instance from a template
     pub async fn create_instance(&self, template_id: &str) -> CoreResult<TemplateInstance> {
-        let template = self.get_template(template_id).await.ok_or_else(|| {
-            CoreError::NotFound(format!("Template not found: {}", template_id))
-        })?;
+        let template = self
+            .get_template(template_id)
+            .await
+            .ok_or_else(|| CoreError::NotFound(format!("Template not found: {}", template_id)))?;
 
         let instance = TemplateInstance::from_template(&template);
 
@@ -599,8 +597,7 @@ mod tests {
 
     #[test]
     fn test_slot_from_section() {
-        let section = TemplateSection::new("Hook", ContentType::Video)
-            .with_required(true);
+        let section = TemplateSection::new("Hook", ContentType::Video).with_required(true);
 
         let slot = TemplateSlot::from_section(&section);
 
@@ -690,10 +687,20 @@ mod tests {
         let mut instance = TemplateInstance::from_template(&template);
 
         instance
-            .fill_slot(&instance.slots[0].section_id.clone(), "a".to_string(), 0.0, 5.0)
+            .fill_slot(
+                &instance.slots[0].section_id.clone(),
+                "a".to_string(),
+                0.0,
+                5.0,
+            )
             .unwrap();
         instance
-            .fill_slot(&instance.slots[1].section_id.clone(), "b".to_string(), 0.0, 15.0)
+            .fill_slot(
+                &instance.slots[1].section_id.clone(),
+                "b".to_string(),
+                0.0,
+                15.0,
+            )
             .unwrap();
 
         assert_eq!(instance.total_duration(), 20.0);
@@ -736,7 +743,9 @@ mod tests {
     async fn test_engine_list_by_category() {
         let engine = TemplateEngine::new();
 
-        let shorts = engine.list_templates_by_category(TemplateCategory::Shorts).await;
+        let shorts = engine
+            .list_templates_by_category(TemplateCategory::Shorts)
+            .await;
         assert!(!shorts.is_empty());
 
         for t in shorts {
@@ -786,8 +795,11 @@ mod tests {
     async fn test_engine_register_custom_template() {
         let engine = TemplateEngine::new();
 
-        let custom = Template::new("My Custom Template", TemplateCategory::Custom("Test".to_string()))
-            .with_section(TemplateSection::new("Content", ContentType::Video));
+        let custom = Template::new(
+            "My Custom Template",
+            TemplateCategory::Custom("Test".to_string()),
+        )
+        .with_section(TemplateSection::new("Content", ContentType::Video));
 
         engine.register_template(custom.clone()).await.unwrap();
 

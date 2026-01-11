@@ -57,7 +57,11 @@ impl Default for VoiceAge {
 
 impl Voice {
     /// Creates a new voice
-    pub fn new(id: impl Into<String>, name: impl Into<String>, language: impl Into<String>) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        language: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),

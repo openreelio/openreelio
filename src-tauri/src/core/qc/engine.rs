@@ -289,11 +289,7 @@ impl QCEngine {
     }
 
     /// Runs all enabled QC rules on a sequence
-    pub async fn check(
-        &self,
-        sequence: &Sequence,
-        state: &ProjectState,
-    ) -> CoreResult<QCReport> {
+    pub async fn check(&self, sequence: &Sequence, state: &ProjectState) -> CoreResult<QCReport> {
         let start_time = std::time::Instant::now();
         let config = self.config.read().await;
 
@@ -351,9 +347,9 @@ impl QCEngine {
         sequence: &Sequence,
         state: &ProjectState,
     ) -> CoreResult<Vec<QCViolation>> {
-        let rule = self.get_rule(rule_name).ok_or_else(|| {
-            CoreError::NotFound(format!("QC rule not found: {}", rule_name))
-        })?;
+        let rule = self
+            .get_rule(rule_name)
+            .ok_or_else(|| CoreError::NotFound(format!("QC rule not found: {}", rule_name)))?;
 
         let config = self.config.read().await;
         let rule_config = config.get_rule_config(rule_name);
@@ -366,11 +362,7 @@ impl QCEngine {
         report
             .violations
             .iter()
-            .filter_map(|v| {
-                v.suggested_fix
-                    .clone()
-                    .map(|fix| (v.id.clone(), fix))
-            })
+            .filter_map(|v| v.suggested_fix.clone().map(|fix| (v.id.clone(), fix)))
             .collect()
     }
 
@@ -546,9 +538,7 @@ mod tests {
         report.add_violation(QCViolation::new("Rule1", Severity::Warning, "Not fixable"));
 
         let fix = ViolationFix::new("Fix it", vec![]);
-        report.add_violation(
-            QCViolation::new("Rule2", Severity::Error, "Fixable").with_fix(fix),
-        );
+        report.add_violation(QCViolation::new("Rule2", Severity::Error, "Fixable").with_fix(fix));
 
         let fixable = report.auto_fixable_violations();
         assert_eq!(fixable.len(), 1);
@@ -615,9 +605,7 @@ mod tests {
         let mut report = QCReport::new("seq_001".to_string());
 
         let fix = ViolationFix::new("Fix it", vec![serde_json::json!({"type": "Test"})]);
-        report.add_violation(
-            QCViolation::new("Rule", Severity::Warning, "Issue").with_fix(fix),
-        );
+        report.add_violation(QCViolation::new("Rule", Severity::Warning, "Issue").with_fix(fix));
 
         let fixes = engine.get_fixes(&report);
         assert_eq!(fixes.len(), 1);
@@ -629,17 +617,18 @@ mod tests {
         let mut report = QCReport::new("seq_001".to_string());
 
         let fix1 = ViolationFix::new("Fix 1", vec![serde_json::json!({"type": "Cmd1"})]);
-        let fix2 = ViolationFix::new("Fix 2", vec![
-            serde_json::json!({"type": "Cmd2"}),
-            serde_json::json!({"type": "Cmd3"}),
-        ]);
+        let fix2 = ViolationFix::new(
+            "Fix 2",
+            vec![
+                serde_json::json!({"type": "Cmd2"}),
+                serde_json::json!({"type": "Cmd3"}),
+            ],
+        );
 
-        report.add_violation(
-            QCViolation::new("Rule1", Severity::Warning, "Issue 1").with_fix(fix1),
-        );
-        report.add_violation(
-            QCViolation::new("Rule2", Severity::Warning, "Issue 2").with_fix(fix2),
-        );
+        report
+            .add_violation(QCViolation::new("Rule1", Severity::Warning, "Issue 1").with_fix(fix1));
+        report
+            .add_violation(QCViolation::new("Rule2", Severity::Warning, "Issue 2").with_fix(fix2));
 
         let commands = engine.apply_all_fixes(&report);
         assert_eq!(commands.len(), 3);

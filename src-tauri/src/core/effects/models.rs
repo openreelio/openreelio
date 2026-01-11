@@ -151,10 +151,9 @@ impl EffectType {
 
             Self::TextOverlay | Self::Subtitle => EffectCategory::Text,
 
-            Self::BackgroundRemoval
-            | Self::AutoReframe
-            | Self::FaceBlur
-            | Self::ObjectTracking => EffectCategory::Ai,
+            Self::BackgroundRemoval | Self::AutoReframe | Self::FaceBlur | Self::ObjectTracking => {
+                EffectCategory::Ai
+            }
 
             Self::Custom(_) => EffectCategory::Custom,
         }
@@ -535,8 +534,7 @@ impl Effect {
 
             if time_offset >= kf1.time_offset && time_offset <= kf2.time_offset {
                 // Linear interpolation
-                let t =
-                    (time_offset - kf1.time_offset) / (kf2.time_offset - kf1.time_offset);
+                let t = (time_offset - kf1.time_offset) / (kf2.time_offset - kf1.time_offset);
 
                 match (&kf1.value, &kf2.value) {
                     (ParamValue::Float(v1), ParamValue::Float(v2)) => {
@@ -584,7 +582,10 @@ mod tests {
     #[test]
     fn test_effect_type_category() {
         assert_eq!(EffectType::Brightness.category(), EffectCategory::Color);
-        assert_eq!(EffectType::GaussianBlur.category(), EffectCategory::BlurSharpen);
+        assert_eq!(
+            EffectType::GaussianBlur.category(),
+            EffectCategory::BlurSharpen
+        );
         assert_eq!(EffectType::Volume.category(), EffectCategory::Audio);
         assert_eq!(EffectType::Fade.category(), EffectCategory::Transition);
         assert_eq!(EffectType::TextOverlay.category(), EffectCategory::Text);

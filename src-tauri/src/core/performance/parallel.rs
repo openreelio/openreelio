@@ -161,7 +161,9 @@ impl ParallelTask {
     /// Elapsed time in milliseconds
     pub fn elapsed_ms(&self) -> Option<i64> {
         self.started_at.map(|start| {
-            let end = self.completed_at.unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+            let end = self
+                .completed_at
+                .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
             end - start
         })
     }
@@ -302,9 +304,14 @@ impl WorkerPool {
         {
             let config = self.config.read().await;
             let tasks = self.tasks.read().await;
-            let pending_count = tasks.values().filter(|t| t.status == TaskStatus::Pending).count();
+            let pending_count = tasks
+                .values()
+                .filter(|t| t.status == TaskStatus::Pending)
+                .count();
             if pending_count >= config.queue_size {
-                return Err(CoreError::ResourceExhausted("Task queue is full".to_string()));
+                return Err(CoreError::ResourceExhausted(
+                    "Task queue is full".to_string(),
+                ));
             }
         }
 
@@ -412,21 +419,29 @@ impl WorkerPool {
     /// Gets tasks by status
     pub async fn get_tasks_by_status(&self, status: TaskStatus) -> Vec<ParallelTask> {
         let tasks = self.tasks.read().await;
-        tasks.values().filter(|t| t.status == status).cloned().collect()
+        tasks
+            .values()
+            .filter(|t| t.status == status)
+            .cloned()
+            .collect()
     }
 
     /// Gets tasks by type
     pub async fn get_tasks_by_type(&self, task_type: TaskType) -> Vec<ParallelTask> {
         let tasks = self.tasks.read().await;
-        tasks.values().filter(|t| t.task_type == task_type).cloned().collect()
+        tasks
+            .values()
+            .filter(|t| t.task_type == task_type)
+            .cloned()
+            .collect()
     }
 
     /// Cancels a task
     pub async fn cancel_task(&self, task_id: &str) -> CoreResult<()> {
         let mut tasks = self.tasks.write().await;
-        let task = tasks.get_mut(task_id).ok_or_else(|| {
-            CoreError::NotFound(format!("Task not found: {}", task_id))
-        })?;
+        let task = tasks
+            .get_mut(task_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Task not found: {}", task_id)))?;
 
         if task.status == TaskStatus::Pending || task.status == TaskStatus::Running {
             task.cancel();
@@ -533,10 +548,7 @@ impl ParallelExecutor {
     }
 
     /// Executes multiple tasks in parallel
-    pub async fn execute_batch(
-        &self,
-        tasks: Vec<ParallelTask>,
-    ) -> CoreResult<Vec<String>> {
+    pub async fn execute_batch(&self, tasks: Vec<ParallelTask>) -> CoreResult<Vec<String>> {
         let mut task_ids = Vec::with_capacity(tasks.len());
 
         for task in tasks {
@@ -548,7 +560,11 @@ impl ParallelExecutor {
     }
 
     /// Waits for all tasks to complete
-    pub async fn wait_all(&self, task_ids: &[String], timeout_ms: u64) -> CoreResult<Vec<ParallelTask>> {
+    pub async fn wait_all(
+        &self,
+        task_ids: &[String],
+        timeout_ms: u64,
+    ) -> CoreResult<Vec<ParallelTask>> {
         let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
         let mut results = Vec::with_capacity(task_ids.len());
 
@@ -570,7 +586,9 @@ impl ParallelExecutor {
             }
 
             if tokio::time::Instant::now() >= deadline {
-                return Err(CoreError::Timeout("Waiting for tasks timed out".to_string()));
+                return Err(CoreError::Timeout(
+                    "Waiting for tasks timed out".to_string(),
+                ));
             }
 
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -662,7 +680,10 @@ mod tests {
             .with_metadata("asset_id", "asset_001")
             .with_metadata("format", "h264");
 
-        assert_eq!(task.metadata.get("asset_id"), Some(&"asset_001".to_string()));
+        assert_eq!(
+            task.metadata.get("asset_id"),
+            Some(&"asset_001".to_string())
+        );
         assert_eq!(task.metadata.get("format"), Some(&"h264".to_string()));
     }
 
@@ -852,9 +873,7 @@ mod tests {
     #[tokio::test]
     async fn test_executor_wait_all() {
         let executor = ParallelExecutor::new();
-        let tasks = vec![
-            ParallelTask::new(TaskType::Compute, TaskPriority::Normal),
-        ];
+        let tasks = vec![ParallelTask::new(TaskType::Compute, TaskPriority::Normal)];
 
         let task_ids = executor.execute_batch(tasks).await.unwrap();
         let results = executor.wait_all(&task_ids, 1000).await.unwrap();
@@ -872,7 +891,10 @@ mod tests {
 
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].task_type, TaskType::ProxyGeneration);
-        assert_eq!(tasks[0].metadata.get("asset_id"), Some(&"asset_001".to_string()));
+        assert_eq!(
+            tasks[0].metadata.get("asset_id"),
+            Some(&"asset_001".to_string())
+        );
     }
 
     #[tokio::test]

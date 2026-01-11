@@ -93,8 +93,8 @@ impl MemoryConfig {
     /// Creates config for low-memory systems
     pub fn low_memory() -> Self {
         Self {
-            max_memory_bytes: 1024 * 1024 * 1024, // 1GB
-            max_cache_bytes: 256 * 1024 * 1024,   // 256MB
+            max_memory_bytes: 1024 * 1024 * 1024,  // 1GB
+            max_cache_bytes: 256 * 1024 * 1024,    // 256MB
             streaming_threshold: 50 * 1024 * 1024, // 50MB
             ..Default::default()
         }
@@ -236,7 +236,8 @@ impl MemoryPool {
                 for block in pool.iter_mut() {
                     if !block.allocated {
                         block.allocate();
-                        self.allocated_bytes.fetch_add(block_size as u64, Ordering::SeqCst);
+                        self.allocated_bytes
+                            .fetch_add(block_size as u64, Ordering::SeqCst);
                         stats.allocated_blocks += 1;
                         stats.used_size_bytes += block_size as u64;
                         stats.allocation_count += 1;
@@ -256,7 +257,8 @@ impl MemoryPool {
                 block.allocate();
                 pool.push(block);
 
-                self.allocated_bytes.fetch_add(block_size as u64, Ordering::SeqCst);
+                self.allocated_bytes
+                    .fetch_add(block_size as u64, Ordering::SeqCst);
                 stats.total_blocks += 1;
                 stats.allocated_blocks += 1;
                 stats.total_size_bytes += block_size as u64;
@@ -274,7 +276,8 @@ impl MemoryPool {
 
         // Fallback: direct allocation (not pooled)
         let alloc_id = ulid::Ulid::new().to_string();
-        self.allocated_bytes.fetch_add(size as u64, Ordering::SeqCst);
+        self.allocated_bytes
+            .fetch_add(size as u64, Ordering::SeqCst);
 
         let mut stats = self.stats.write().await;
         stats.allocation_count += 1;
@@ -296,11 +299,13 @@ impl MemoryPool {
                 for block in pool.iter_mut() {
                     if block.id == allocation.block_id {
                         block.release();
-                        self.allocated_bytes.fetch_sub(allocation.size as u64, Ordering::SeqCst);
+                        self.allocated_bytes
+                            .fetch_sub(allocation.size as u64, Ordering::SeqCst);
 
                         let mut stats = self.stats.write().await;
                         stats.allocated_blocks = stats.allocated_blocks.saturating_sub(1);
-                        stats.used_size_bytes = stats.used_size_bytes.saturating_sub(allocation.size as u64);
+                        stats.used_size_bytes =
+                            stats.used_size_bytes.saturating_sub(allocation.size as u64);
                         stats.release_count += 1;
                         return;
                     }
@@ -309,7 +314,8 @@ impl MemoryPool {
         }
 
         // Not found in pools (was direct allocation)
-        self.allocated_bytes.fetch_sub(allocation.size as u64, Ordering::SeqCst);
+        self.allocated_bytes
+            .fetch_sub(allocation.size as u64, Ordering::SeqCst);
         let mut stats = self.stats.write().await;
         stats.release_count += 1;
     }
@@ -488,7 +494,7 @@ impl CacheManager {
         // Check if single item exceeds cache size
         if data_size > config.max_cache_bytes {
             return Err(CoreError::ValidationError(
-                "Data exceeds cache size limit".to_string()
+                "Data exceeds cache size limit".to_string(),
             ));
         }
 
@@ -507,7 +513,8 @@ impl CacheManager {
 
             // Remove old entry if exists
             if let Some(old_data) = entries.remove(key) {
-                self.current_size.fetch_sub(old_data.len() as u64, Ordering::SeqCst);
+                self.current_size
+                    .fetch_sub(old_data.len() as u64, Ordering::SeqCst);
                 metadata.remove(key);
             }
 
@@ -531,7 +538,8 @@ impl CacheManager {
 
         if let Some(data) = entries.remove(key) {
             metadata.remove(key);
-            self.current_size.fetch_sub(data.len() as u64, Ordering::SeqCst);
+            self.current_size
+                .fetch_sub(data.len() as u64, Ordering::SeqCst);
 
             let mut stats = self.stats.write().await;
             stats.entry_count = entries.len();
@@ -556,29 +564,23 @@ impl CacheManager {
             }
 
             match policy {
-                EvictionPolicy::Lru => {
-                    metadata.values()
-                        .min_by_key(|e| e.last_accessed_at)
-                        .map(|e| e.key.clone())
-                }
-                EvictionPolicy::Lfu => {
-                    metadata.values()
-                        .min_by_key(|e| e.access_count)
-                        .map(|e| e.key.clone())
-                }
-                EvictionPolicy::Fifo => {
-                    metadata.values()
-                        .min_by_key(|e| e.created_at)
-                        .map(|e| e.key.clone())
-                }
-                EvictionPolicy::TimeExpired => {
-                    metadata.values()
-                        .max_by_key(|e| e.age_ms())
-                        .map(|e| e.key.clone())
-                }
-                EvictionPolicy::Random => {
-                    metadata.keys().next().cloned()
-                }
+                EvictionPolicy::Lru => metadata
+                    .values()
+                    .min_by_key(|e| e.last_accessed_at)
+                    .map(|e| e.key.clone()),
+                EvictionPolicy::Lfu => metadata
+                    .values()
+                    .min_by_key(|e| e.access_count)
+                    .map(|e| e.key.clone()),
+                EvictionPolicy::Fifo => metadata
+                    .values()
+                    .min_by_key(|e| e.created_at)
+                    .map(|e| e.key.clone()),
+                EvictionPolicy::TimeExpired => metadata
+                    .values()
+                    .max_by_key(|e| e.age_ms())
+                    .map(|e| e.key.clone()),
+                EvictionPolicy::Random => metadata.keys().next().cloned(),
             }
         };
 
@@ -765,11 +767,15 @@ impl StreamingBuffer {
     /// Loads a chunk (mock implementation)
     pub async fn load_chunk(&self, chunk_offset: u64) -> CoreResult<()> {
         if chunk_offset >= self.total_size {
-            return Err(CoreError::ValidationError("Offset beyond file size".to_string()));
+            return Err(CoreError::ValidationError(
+                "Offset beyond file size".to_string(),
+            ));
         }
 
         // Mock data - in real implementation would read from file
-        let actual_size = self.chunk_size.min((self.total_size - chunk_offset) as usize);
+        let actual_size = self
+            .chunk_size
+            .min((self.total_size - chunk_offset) as usize);
         let mock_data = vec![0u8; actual_size];
 
         let mut chunks = self.chunks.write().await;
