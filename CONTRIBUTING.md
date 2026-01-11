@@ -97,11 +97,11 @@ Unsure where to begin? Look for issues labeled:
 
 ### Pull Requests
 
-1. **Create a branch** from `dev` (not `master`)
+1. **Create a branch** from `main`
 2. **Make your changes** following our style guidelines
 3. **Write/update tests** for your changes
 4. **Run the test suite** and ensure all tests pass
-5. **Submit a PR** to the `dev` branch
+5. **Submit a PR** to the `main` branch
 
 ## Style Guidelines
 
@@ -248,7 +248,7 @@ test(qc): add unit tests for AudioPeakRule
 1. **Sync with upstream**
    ```bash
    git fetch upstream
-   git rebase upstream/dev
+   git rebase upstream/main
    ```
 
 2. **Run all checks**
@@ -262,7 +262,7 @@ test(qc): add unit tests for AudioPeakRule
 
 ### PR Requirements
 
-- [ ] PR targets the `dev` branch (not `master`)
+- [ ] PR targets the `main` branch
 - [ ] All tests pass
 - [ ] Code follows style guidelines
 - [ ] Commit messages follow conventions
@@ -297,14 +297,12 @@ refactor/101-extract-zoom-hook
 
 | Branch | Purpose | Protection |
 |--------|---------|------------|
-| `master` | Production-ready code | Requires PR, 2 approvals, passing CI |
-| `dev` | Integration branch | Requires PR, 1 approval, passing CI |
+| `main` | Default branch | Requires PR, approvals, passing CI |
 
 ## Release Process
 
-1. Features are merged to `dev`
-2. When ready for release, `dev` is merged to `master`
-3. Tags are created on `master` following semver
+1. Features are merged to `main`
+2. Tags are created on `main` following semver
 4. GitHub Actions builds and publishes releases
 
 ## Questions?
