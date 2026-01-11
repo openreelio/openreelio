@@ -334,6 +334,11 @@ impl Track {
     pub fn is_audio(&self) -> bool {
         matches!(self.kind, TrackKind::Audio)
     }
+
+    /// Returns true if this is a caption track
+    pub fn is_caption(&self) -> bool {
+        matches!(self.kind, TrackKind::Caption)
+    }
 }
 
 // =============================================================================

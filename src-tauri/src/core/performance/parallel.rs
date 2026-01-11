@@ -296,7 +296,7 @@ impl WorkerPool {
     }
 
     /// Submits a task for execution
-    pub async fn submit(&self, mut task: ParallelTask) -> CoreResult<String> {
+    pub async fn submit(&self, task: ParallelTask) -> CoreResult<String> {
         let task_id = task.id.clone();
         let task_type = task.task_type;
 
@@ -342,13 +342,15 @@ impl WorkerPool {
             let _global_permit = semaphore.acquire().await.unwrap();
 
             // Acquire type-specific permit if configured
-            let type_sems = type_semaphores.read().await;
-            let _type_permit = if let Some(type_sem) = type_sems.get(&task_type) {
+            let type_sem = {
+                let type_sems = type_semaphores.read().await;
+                type_sems.get(&task_type).cloned()
+            };
+            let _type_permit = if let Some(type_sem) = type_sem {
                 Some(type_sem.acquire().await.unwrap())
             } else {
                 None
             };
-            drop(type_sems);
 
             // Update status to running
             {

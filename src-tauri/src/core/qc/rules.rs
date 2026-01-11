@@ -227,7 +227,7 @@ impl QCRule for AudioPeakRule {
     async fn check(
         &self,
         sequence: &Sequence,
-        _state: &ProjectState,
+        state: &ProjectState,
         config: &RuleConfig,
     ) -> CoreResult<Vec<QCViolation>> {
         let mut violations = Vec::new();
@@ -751,7 +751,7 @@ impl QCRule for DurationRule {
             .unwrap_or(Self::SHORTS_MAX_SEC);
 
         // Calculate total sequence duration
-        let mut duration = 0.0;
+        let mut duration: f64 = 0.0;
         for track in &sequence.tracks {
             for clip in &track.clips {
                 duration = duration.max(clip.timeline_end());

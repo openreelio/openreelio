@@ -122,7 +122,7 @@ pub trait GenerativeProvider: Send + Sync {
     /// Generates an image
     async fn generate_image(
         &self,
-        params: &ImageGenerationParams,
+        _params: &ImageGenerationParams,
     ) -> CoreResult<ImageGenerationResult> {
         Err(CoreError::NotSupported(format!(
             "{} does not support image generation",
@@ -131,7 +131,7 @@ pub trait GenerativeProvider: Send + Sync {
     }
 
     /// Generates speech from text
-    async fn generate_speech(&self, params: &TTSParams) -> CoreResult<TTSResult> {
+    async fn generate_speech(&self, _params: &TTSParams) -> CoreResult<TTSResult> {
         Err(CoreError::NotSupported(format!(
             "{} does not support text-to-speech",
             self.name()
@@ -141,7 +141,7 @@ pub trait GenerativeProvider: Send + Sync {
     /// Generates music
     async fn generate_music(
         &self,
-        params: &MusicGenerationParams,
+        _params: &MusicGenerationParams,
     ) -> CoreResult<MusicGenerationResult> {
         Err(CoreError::NotSupported(format!(
             "{} does not support music generation",

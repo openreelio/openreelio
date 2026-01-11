@@ -262,6 +262,7 @@ impl Default for CommandExecutor {
 mod tests {
     use super::*;
     use crate::core::assets::{Asset, VideoInfo};
+    use crate::core::commands::StateChange;
 
     // Test command implementation
     struct TestAddAssetCommand {

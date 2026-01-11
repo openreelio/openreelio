@@ -489,18 +489,20 @@ impl CacheManager {
     /// Puts an entry in cache
     pub async fn put(&self, key: &str, data: Vec<u8>) -> CoreResult<()> {
         let data_size = data.len() as u64;
-        let config = self.config.read().await;
+        let max_cache_bytes = {
+            let config = self.config.read().await;
+            config.max_cache_bytes
+        };
 
         // Check if single item exceeds cache size
-        if data_size > config.max_cache_bytes {
+        if data_size > max_cache_bytes {
             return Err(CoreError::ValidationError(
                 "Data exceeds cache size limit".to_string(),
             ));
         }
 
         // Evict if necessary
-        while self.current_size.load(Ordering::SeqCst) + data_size > config.max_cache_bytes {
-            drop(config);
+        while self.current_size.load(Ordering::SeqCst) + data_size > max_cache_bytes {
             if !self.evict_one().await {
                 break;
             }

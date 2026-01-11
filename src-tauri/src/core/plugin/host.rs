@@ -15,7 +15,6 @@ use super::permission::PermissionManager;
 use crate::core::{CoreError, CoreResult};
 
 /// Plugin host managing WASM runtime and loaded plugins
-#[derive(Debug)]
 pub struct PluginHost {
     /// Wasmtime engine (shared across all plugins)
     engine: Engine,
