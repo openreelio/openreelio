@@ -797,6 +797,7 @@ mod tests {
             "My Custom Template",
             TemplateCategory::Custom("Test".to_string()),
         )
+        .with_duration_range(1.0, 10.0)
         .with_section(TemplateSection::new("Content", ContentType::Video));
 
         engine.register_template(custom.clone()).await.unwrap();

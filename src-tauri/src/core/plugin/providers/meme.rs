@@ -314,11 +314,14 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_test_provider(temp_dir: &TempDir) -> MemePackProvider {
-        MemePackProvider::new("test-meme-provider", temp_dir.path().to_path_buf())
+        MemePackProvider::new(
+            "test-meme-provider",
+            temp_dir.path().join("meme_packs").to_path_buf(),
+        )
     }
 
     fn create_test_meme_pack(temp_dir: &TempDir, pack_name: &str) {
-        let pack_dir = temp_dir.path().join(pack_name);
+        let pack_dir = temp_dir.path().join("meme_packs").join(pack_name);
         std::fs::create_dir_all(&pack_dir).unwrap();
 
         let manifest = MemePackManifest {
@@ -365,7 +368,7 @@ mod tests {
         let provider = create_test_provider(&temp_dir);
 
         assert_eq!(provider.name(), "test-meme-provider");
-        assert!(!provider.is_available()); // Directory doesn't exist yet
+        assert!(!provider.is_available()); // Base directory doesn't exist yet
     }
 
     #[tokio::test]

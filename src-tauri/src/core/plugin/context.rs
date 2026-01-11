@@ -347,13 +347,31 @@ impl PluginContext {
     // Helper Methods
     // ========================================================================
 
+    fn canonicalize_best_effort(path: &Path) -> PathBuf {
+        if let Ok(canonical) = path.canonicalize() {
+            return canonical;
+        }
+
+        for ancestor in path.ancestors() {
+            if !ancestor.exists() {
+                continue;
+            }
+
+            if let Ok(canonical_ancestor) = ancestor.canonicalize() {
+                if let Ok(remainder) = path.strip_prefix(ancestor) {
+                    return canonical_ancestor.join(remainder);
+                }
+                return canonical_ancestor;
+            }
+        }
+
+        path.to_path_buf()
+    }
+
     /// Validates that a path is within the data directory
     fn validate_path_in_data_dir(&self, path: &Path) -> CoreResult<()> {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let data_canonical = self
-            .data_dir
-            .canonicalize()
-            .unwrap_or_else(|_| self.data_dir.clone());
+        let canonical = Self::canonicalize_best_effort(path);
+        let data_canonical = Self::canonicalize_best_effort(&self.data_dir);
 
         if !canonical.starts_with(&data_canonical) {
             return Err(CoreError::PermissionDenied(format!(
@@ -367,11 +385,8 @@ impl PluginContext {
 
     /// Validates that a path is within the temp directory
     fn validate_path_in_temp_dir(&self, path: &Path) -> CoreResult<()> {
-        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let temp_canonical = self
-            .temp_dir
-            .canonicalize()
-            .unwrap_or_else(|_| self.temp_dir.clone());
+        let canonical = Self::canonicalize_best_effort(path);
+        let temp_canonical = Self::canonicalize_best_effort(&self.temp_dir);
 
         if !canonical.starts_with(&temp_canonical) {
             return Err(CoreError::PermissionDenied(format!(
