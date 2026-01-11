@@ -1,0 +1,62 @@
+[package]
+name = "openreelio"
+version = "0.1.0"
+description = "AI Agent-driven Prompt-based Video Editing IDE"
+authors = ["OpenReelio Team"]
+license = "MIT"
+repository = "https://github.com/openreelio/openreelio"
+edition = "2021"
+rust-version = "1.77"
+
+[lib]
+name = "openreelio_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+thiserror = "2.0"
+
+# ID generation
+ulid = "1.1"
+uuid = { version = "1.11", features = ["v4"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+num_cpus = "1.16"
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Async channels
+async-trait = "0.1"
+
+# WASM Plugin System
+wasmtime = "27"
+wasmtime-wasi = "27"
+
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
