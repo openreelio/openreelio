@@ -337,6 +337,13 @@ impl Template {
             ));
         }
 
+        if section_max < self.duration_range.0 {
+            return Err(format!(
+                "Section maximum duration ({:.1}s) is less than template minimum ({:.1}s)",
+                section_max, self.duration_range.0
+            ));
+        }
+
         // Validate each section
         for (i, section) in self.sections.iter().enumerate() {
             if let Err(e) = section.validate() {

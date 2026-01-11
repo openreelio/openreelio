@@ -148,6 +148,40 @@ impl Color {
     pub fn black() -> Self {
         Self::rgb(0.0, 0.0, 0.0)
     }
+
+    /// Parses a hex color string (e.g. `#RRGGBB` or `#RRGGBBAA`).
+    pub fn try_from_hex(hex: &str) -> Result<Self, String> {
+        let hex = hex.trim().trim_start_matches('#');
+        if hex.len() != 6 && hex.len() != 8 {
+            return Err("Hex color must be 6 or 8 characters".to_string());
+        }
+
+        let parse = |s: &str| u8::from_str_radix(s, 16).map_err(|e| e.to_string());
+        let r = parse(&hex[0..2])?;
+        let g = parse(&hex[2..4])?;
+        let b = parse(&hex[4..6])?;
+
+        if hex.len() == 8 {
+            let a = parse(&hex[6..8])?;
+            Ok(Self::rgba(
+                r as f32 / 255.0,
+                g as f32 / 255.0,
+                b as f32 / 255.0,
+                a as f32 / 255.0,
+            ))
+        } else {
+            Ok(Self::rgb(
+                r as f32 / 255.0,
+                g as f32 / 255.0,
+                b as f32 / 255.0,
+            ))
+        }
+    }
+
+    /// Parses a hex color string, falling back to black on invalid input.
+    pub fn from_hex(hex: &str) -> Self {
+        Self::try_from_hex(hex).unwrap_or_else(|_| Self::black())
+    }
 }
 
 impl Default for Color {

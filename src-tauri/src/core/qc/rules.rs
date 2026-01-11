@@ -7,10 +7,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use super::violation::{QCViolation, Severity, TimeRange, ViolationFix};
+use super::violation::{QCViolation, Severity, ViolationFix};
 use crate::core::project::ProjectState;
 use crate::core::timeline::Sequence;
-use crate::core::{CoreError, CoreResult};
+use crate::core::CoreResult;
 
 /// Configuration for QC rules
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,12 +126,12 @@ impl QCRule for BlackFrameRule {
     async fn check(
         &self,
         sequence: &Sequence,
-        state: &ProjectState,
+        _state: &ProjectState,
         config: &RuleConfig,
     ) -> CoreResult<Vec<QCViolation>> {
         let mut violations = Vec::new();
 
-        let threshold = config
+        let _threshold = config
             .get_param::<f64>("threshold")
             .unwrap_or(Self::DEFAULT_THRESHOLD);
         let min_duration = config
@@ -141,48 +141,41 @@ impl QCRule for BlackFrameRule {
         let severity = config.severity_override.unwrap_or(self.default_severity());
 
         // Check each clip in video tracks
-        for track_id in &sequence.tracks {
-            if let Some(track) = state.get_track(track_id) {
-                if !track.is_video() {
-                    continue;
-                }
+        for track in &sequence.tracks {
+            if !track.is_video() {
+                continue;
+            }
 
-                for clip_id in &track.items {
-                    if let Some(clip) = state.get_clip(clip_id) {
-                        // Check for black frames at start (simulated check)
-                        // In real implementation, this would analyze frame data
-                        if clip.place.start_sec == 0.0 {
-                            // Placeholder: detect black frame at start
-                            let black_duration = 0.5; // Simulated detection
-                            if black_duration >= min_duration {
-                                let fix = ViolationFix::new(
-                                    format!("Trim {:.1}s from start", black_duration),
-                                    vec![serde_json::json!({
-                                        "type": "TrimClip",
-                                        "clipId": clip_id,
-                                        "trimStart": black_duration
-                                    })],
-                                )
-                                .with_confidence(0.9);
+            for clip in &track.clips {
+                // Check for black frames at start (simulated check)
+                // In real implementation, this would analyze frame data.
+                if clip.place.timeline_in_sec == 0.0 {
+                    // Placeholder: detect black frame at start
+                    let black_duration = 0.5; // Simulated detection
+                    if black_duration >= min_duration {
+                        let fix = ViolationFix::new(
+                            format!("Trim {:.1}s from start", black_duration),
+                            vec![serde_json::json!({
+                                "type": "TrimClip",
+                                "clipId": clip.id,
+                                "trimStart": black_duration
+                            })],
+                        )
+                        .with_confidence(0.9);
 
-                                let violation = QCViolation::new(
-                                    self.name(),
-                                    severity,
-                                    format!(
-                                        "Black frame detected at start ({:.1}s)",
-                                        black_duration
-                                    ),
-                                )
-                                .with_location(
-                                    clip.place.start_sec,
-                                    clip.place.start_sec + black_duration,
-                                )
-                                .with_entities(vec![clip_id.clone()])
-                                .with_fix(fix);
+                        let violation = QCViolation::new(
+                            self.name(),
+                            severity,
+                            format!("Black frame detected at start ({:.1}s)", black_duration),
+                        )
+                        .with_location(
+                            clip.place.timeline_in_sec,
+                            clip.place.timeline_in_sec + black_duration,
+                        )
+                        .with_entities(vec![clip.id.clone()])
+                        .with_fix(fix);
 
-                                violations.push(violation);
-                            }
-                        }
+                        violations.push(violation);
                     }
                 }
             }
@@ -234,7 +227,7 @@ impl QCRule for AudioPeakRule {
     async fn check(
         &self,
         sequence: &Sequence,
-        state: &ProjectState,
+        _state: &ProjectState,
         config: &RuleConfig,
     ) -> CoreResult<Vec<QCViolation>> {
         let mut violations = Vec::new();
@@ -247,58 +240,54 @@ impl QCRule for AudioPeakRule {
             .unwrap_or(Self::DEFAULT_WARN_DB);
 
         // Check audio tracks
-        for track_id in &sequence.tracks {
-            if let Some(track) = state.get_track(track_id) {
-                if !track.is_audio() {
-                    continue;
-                }
+        for track in &sequence.tracks {
+            if !track.is_audio() {
+                continue;
+            }
 
-                for clip_id in &track.items {
-                    if let Some(clip) = state.get_clip(clip_id) {
-                        // Simulated peak detection (real implementation would analyze audio)
-                        let detected_peak = -0.5; // Simulated peak
+            for clip in &track.clips {
+                // Simulated peak detection (real implementation would analyze audio)
+                let detected_peak = -0.5; // Simulated peak
 
-                        if detected_peak > peak_db {
-                            let severity = config.severity_override.unwrap_or(Severity::Critical);
+                if detected_peak > peak_db {
+                    let severity = config.severity_override.unwrap_or(Severity::Critical);
 
-                            let fix = ViolationFix::new(
-                                "Reduce audio gain to prevent clipping",
-                                vec![serde_json::json!({
-                                    "type": "AdjustAudio",
-                                    "clipId": clip_id,
-                                    "gainDb": peak_db - detected_peak - 0.5
-                                })],
-                            )
-                            .with_confidence(0.85);
+                    let fix = ViolationFix::new(
+                        "Reduce audio gain to prevent clipping",
+                        vec![serde_json::json!({
+                            "type": "AdjustAudio",
+                            "clipId": clip.id,
+                            "gainDb": peak_db - detected_peak - 0.5
+                        })],
+                    )
+                    .with_confidence(0.85);
 
-                            let violation = QCViolation::new(
-                                self.name(),
-                                severity,
-                                format!("Audio clipping detected ({:.1} dB peak)", detected_peak),
-                            )
-                            .with_location(clip.place.start_sec, clip.place.end_sec)
-                            .with_entities(vec![clip_id.clone()])
-                            .with_details(format!(
-                                "Peak exceeds threshold of {:.1} dB. May cause distortion.",
-                                peak_db
-                            ))
-                            .with_fix(fix);
+                    let violation = QCViolation::new(
+                        self.name(),
+                        severity,
+                        format!("Audio clipping detected ({:.1} dB peak)", detected_peak),
+                    )
+                    .with_location(clip.place.timeline_in_sec, clip.timeline_end())
+                    .with_entities(vec![clip.id.clone()])
+                    .with_details(format!(
+                        "Peak exceeds threshold of {:.1} dB. May cause distortion.",
+                        peak_db
+                    ))
+                    .with_fix(fix);
 
-                            violations.push(violation);
-                        } else if detected_peak > warn_db {
-                            let severity = config.severity_override.unwrap_or(Severity::Warning);
+                    violations.push(violation);
+                } else if detected_peak > warn_db {
+                    let severity = config.severity_override.unwrap_or(Severity::Warning);
 
-                            let violation = QCViolation::new(
-                                self.name(),
-                                severity,
-                                format!("High audio level detected ({:.1} dB peak)", detected_peak),
-                            )
-                            .with_location(clip.place.start_sec, clip.place.end_sec)
-                            .with_entities(vec![clip_id.clone()]);
+                    let violation = QCViolation::new(
+                        self.name(),
+                        severity,
+                        format!("High audio level detected ({:.1} dB peak)", detected_peak),
+                    )
+                    .with_location(clip.place.timeline_in_sec, clip.timeline_end())
+                    .with_entities(vec![clip.id.clone()]);
 
-                            violations.push(violation);
-                        }
-                    }
+                    violations.push(violation);
                 }
             }
         }
@@ -346,7 +335,7 @@ impl QCRule for CaptionSafeAreaRule {
     async fn check(
         &self,
         sequence: &Sequence,
-        state: &ProjectState,
+        _state: &ProjectState,
         config: &RuleConfig,
     ) -> CoreResult<Vec<QCViolation>> {
         let mut violations = Vec::new();
@@ -358,44 +347,40 @@ impl QCRule for CaptionSafeAreaRule {
         let severity = config.severity_override.unwrap_or(self.default_severity());
 
         // Check caption tracks
-        for track_id in &sequence.tracks {
-            if let Some(track) = state.get_track(track_id) {
-                if !track.is_caption() {
-                    continue;
-                }
+        for track in &sequence.tracks {
+            if !track.is_caption() {
+                continue;
+            }
 
-                for clip_id in &track.items {
-                    if let Some(clip) = state.get_clip(clip_id) {
-                        // Check caption position (simulated - real impl would check Caption data)
-                        let caption_y_percent = 95.0; // Simulated: near bottom edge
+            for clip in &track.clips {
+                // Check caption position (simulated - real impl would check Caption data)
+                let caption_y_percent = 95.0; // Simulated: near bottom edge
 
-                        if caption_y_percent > (100.0 - margin_percent) {
-                            let fix = ViolationFix::new(
-                                format!("Move caption to {}% from bottom", margin_percent),
-                                vec![serde_json::json!({
-                                    "type": "UpdateCaption",
-                                    "clipId": clip_id,
-                                    "position": {"y": 100.0 - margin_percent - 5.0}
-                                })],
-                            )
-                            .with_confidence(0.95);
+                if caption_y_percent > (100.0 - margin_percent) {
+                    let fix = ViolationFix::new(
+                        format!("Move caption to {}% from bottom", margin_percent),
+                        vec![serde_json::json!({
+                            "type": "UpdateCaption",
+                            "clipId": clip.id,
+                            "position": {"y": 100.0 - margin_percent - 5.0}
+                        })],
+                    )
+                    .with_confidence(0.95);
 
-                            let violation = QCViolation::new(
-                                self.name(),
-                                severity,
-                                "Caption positioned outside title-safe area",
-                            )
-                            .with_location(clip.place.start_sec, clip.place.end_sec)
-                            .with_entities(vec![clip_id.clone()])
-                            .with_details(format!(
-                                "Caption at {}% exceeds safe area margin of {}%",
-                                caption_y_percent, margin_percent
-                            ))
-                            .with_fix(fix);
+                    let violation = QCViolation::new(
+                        self.name(),
+                        severity,
+                        "Caption positioned outside title-safe area",
+                    )
+                    .with_location(clip.place.timeline_in_sec, clip.timeline_end())
+                    .with_entities(vec![clip.id.clone()])
+                    .with_details(format!(
+                        "Caption at {}% exceeds safe area margin of {}%",
+                        caption_y_percent, margin_percent
+                    ))
+                    .with_fix(fix);
 
-                            violations.push(violation);
-                        }
-                    }
+                    violations.push(violation);
                 }
             }
         }
@@ -446,7 +431,7 @@ impl QCRule for CutRhythmRule {
     async fn check(
         &self,
         sequence: &Sequence,
-        state: &ProjectState,
+        _state: &ProjectState,
         config: &RuleConfig,
     ) -> CoreResult<Vec<QCViolation>> {
         let mut violations = Vec::new();
@@ -461,50 +446,38 @@ impl QCRule for CutRhythmRule {
         let severity = config.severity_override.unwrap_or(self.default_severity());
 
         // Check video tracks for cut rhythm
-        for track_id in &sequence.tracks {
-            if let Some(track) = state.get_track(track_id) {
-                if !track.is_video() {
-                    continue;
-                }
+        for track in &sequence.tracks {
+            if !track.is_video() {
+                continue;
+            }
 
-                for clip_id in &track.items {
-                    if let Some(clip) = state.get_clip(clip_id) {
-                        let duration = clip.duration();
+            for clip in &track.clips {
+                let duration = clip.duration();
 
-                        if duration < min_cut {
-                            let violation = QCViolation::new(
-                                self.name(),
-                                severity,
-                                format!(
-                                    "Cut too short ({:.1}s < {:.1}s minimum)",
-                                    duration, min_cut
-                                ),
-                            )
-                            .with_location(clip.place.start_sec, clip.place.end_sec)
-                            .with_entities(vec![clip_id.clone()])
-                            .with_details(
-                                "Very short cuts may feel jarring to viewers. Consider extending.",
-                            );
+                if duration < min_cut {
+                    let violation = QCViolation::new(
+                        self.name(),
+                        severity,
+                        format!("Cut too short ({:.1}s < {:.1}s minimum)", duration, min_cut),
+                    )
+                    .with_location(clip.place.timeline_in_sec, clip.timeline_end())
+                    .with_entities(vec![clip.id.clone()])
+                    .with_details(
+                        "Very short cuts may feel jarring to viewers. Consider extending.",
+                    );
 
-                            violations.push(violation);
-                        } else if duration > max_cut {
-                            let violation = QCViolation::new(
-                                self.name(),
-                                severity,
-                                format!(
-                                    "Cut too long ({:.1}s > {:.1}s maximum)",
-                                    duration, max_cut
-                                ),
-                            )
-                            .with_location(clip.place.start_sec, clip.place.end_sec)
-                            .with_entities(vec![clip_id.clone()])
-                            .with_details(
-                                "Long cuts may lose viewer attention. Consider splitting.",
-                            );
+                    violations.push(violation);
+                } else if duration > max_cut {
+                    let violation = QCViolation::new(
+                        self.name(),
+                        severity,
+                        format!("Cut too long ({:.1}s > {:.1}s maximum)", duration, max_cut),
+                    )
+                    .with_location(clip.place.timeline_in_sec, clip.timeline_end())
+                    .with_entities(vec![clip.id.clone()])
+                    .with_details("Long cuts may lose viewer attention. Consider splitting.");
 
-                            violations.push(violation);
-                        }
-                    }
+                    violations.push(violation);
                 }
             }
         }
@@ -545,7 +518,7 @@ impl QCRule for LicenseRule {
     async fn check(
         &self,
         sequence: &Sequence,
-        state: &ProjectState,
+        _state: &ProjectState,
         config: &RuleConfig,
     ) -> CoreResult<Vec<QCViolation>> {
         let mut violations = Vec::new();
@@ -554,14 +527,10 @@ impl QCRule for LicenseRule {
         let check_commercial = config.get_param::<bool>("check_commercial").unwrap_or(true);
 
         // Get all unique assets used in sequence
-        let mut used_asset_ids = std::collections::HashSet::new();
-        for track_id in &sequence.tracks {
-            if let Some(track) = state.get_track(track_id) {
-                for clip_id in &track.items {
-                    if let Some(clip) = state.get_clip(clip_id) {
-                        used_asset_ids.insert(clip.asset_id.clone());
-                    }
-                }
+        let mut used_asset_ids = std::collections::HashSet::<String>::new();
+        for track in &sequence.tracks {
+            for clip in &track.clips {
+                used_asset_ids.insert(clip.asset_id.clone());
             }
         }
 
@@ -607,19 +576,21 @@ impl QCRule for LicenseRule {
 
                 // Check license expiration
                 if let Some(expires) = &asset.license.expires_at {
-                    if *expires < chrono::Utc::now() {
-                        let violation = QCViolation::new(
-                            self.name(),
-                            Severity::Critical,
-                            format!("Asset '{}' license has expired", asset.uri),
-                        )
-                        .with_entities(vec![asset_id.clone()])
-                        .with_details(format!(
-                            "License expired on {}. Renew or replace asset.",
-                            expires
-                        ));
+                    if let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires) {
+                        if expires_at.with_timezone(&chrono::Utc) < chrono::Utc::now() {
+                            let violation = QCViolation::new(
+                                self.name(),
+                                Severity::Critical,
+                                format!("Asset '{}' license has expired", asset.uri),
+                            )
+                            .with_entities(vec![asset_id.clone()])
+                            .with_details(format!(
+                                "License expired on {}. Renew or replace asset.",
+                                expires
+                            ));
 
-                        violations.push(violation);
+                            violations.push(violation);
+                        }
                     }
                 }
             }
@@ -672,53 +643,48 @@ impl QCRule for AspectRatioRule {
         let seq_aspect = sequence.format.canvas.width as f64 / sequence.format.canvas.height as f64;
 
         // Check all video clips
-        for track_id in &sequence.tracks {
-            if let Some(track) = state.get_track(track_id) {
-                if !track.is_video() {
-                    continue;
-                }
+        for track in &sequence.tracks {
+            if !track.is_video() {
+                continue;
+            }
 
-                for clip_id in &track.items {
-                    if let Some(clip) = state.get_clip(clip_id) {
-                        if let Some(asset) = state.get_asset(&clip.asset_id) {
-                            if let Some(video_info) = &asset.video_info {
-                                let asset_aspect =
-                                    video_info.width as f64 / video_info.height as f64;
-                                let diff = (asset_aspect - seq_aspect).abs();
+            for clip in &track.clips {
+                if let Some(asset) = state.get_asset(&clip.asset_id) {
+                    if let Some(video_info) = asset.video.as_ref() {
+                        let asset_aspect = video_info.width as f64 / video_info.height as f64;
+                        let diff = (asset_aspect - seq_aspect).abs();
 
-                                if diff > tolerance {
-                                    let fix = ViolationFix::new(
-                                        "Apply crop/letterbox to match sequence",
-                                        vec![serde_json::json!({
-                                            "type": "SetTransform",
-                                            "clipId": clip_id,
-                                            "crop": {"fit": "cover"}
-                                        })],
-                                    )
-                                    .with_confidence(0.7);
+                        if diff > tolerance {
+                            let fix = ViolationFix::new(
+                                "Apply crop/letterbox to match sequence",
+                                vec![serde_json::json!({
+                                    "type": "SetTransform",
+                                    "clipId": clip.id,
+                                    "crop": {"fit": "cover"}
+                                })],
+                            )
+                            .with_confidence(0.7);
 
-                                    let violation = QCViolation::new(
-                                        self.name(),
-                                        severity,
-                                        format!(
-                                            "Aspect ratio mismatch: {:.2}:1 vs {:.2}:1",
-                                            asset_aspect, seq_aspect
-                                        ),
-                                    )
-                                    .with_location(clip.place.start_sec, clip.place.end_sec)
-                                    .with_entities(vec![clip_id.clone()])
-                                    .with_details(format!(
-                                        "Asset {}x{} doesn't match sequence {}x{}",
-                                        video_info.width,
-                                        video_info.height,
-                                        sequence.format.canvas.width,
-                                        sequence.format.canvas.height
-                                    ))
-                                    .with_fix(fix);
+                            let violation = QCViolation::new(
+                                self.name(),
+                                severity,
+                                format!(
+                                    "Aspect ratio mismatch: {:.2}:1 vs {:.2}:1",
+                                    asset_aspect, seq_aspect
+                                ),
+                            )
+                            .with_location(clip.place.timeline_in_sec, clip.timeline_end())
+                            .with_entities(vec![clip.id.clone()])
+                            .with_details(format!(
+                                "Asset {}x{} doesn't match sequence {}x{}",
+                                video_info.width,
+                                video_info.height,
+                                sequence.format.canvas.width,
+                                sequence.format.canvas.height
+                            ))
+                            .with_fix(fix);
 
-                                    violations.push(violation);
-                                }
-                            }
+                            violations.push(violation);
                         }
                     }
                 }
@@ -785,7 +751,12 @@ impl QCRule for DurationRule {
             .unwrap_or(Self::SHORTS_MAX_SEC);
 
         // Calculate total sequence duration
-        let duration = sequence.calculate_duration(state);
+        let mut duration = 0.0;
+        for track in &sequence.tracks {
+            for clip in &track.clips {
+                duration = duration.max(clip.timeline_end());
+            }
+        }
 
         if duration < min_duration {
             let violation = QCViolation::new(

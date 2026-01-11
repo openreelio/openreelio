@@ -409,7 +409,7 @@ Return a valid EditScript JSON object with intent, commands, requires, qcRules, 
     }
 
     /// Parses an edit script from JSON response
-    fn parse_edit_script(&self, json: &str, intent: &str) -> CoreResult<EditScript> {
+    fn parse_edit_script(&self, json: &str, _intent: &str) -> CoreResult<EditScript> {
         // Try to parse as JSON first
         if let Ok(script) = serde_json::from_str::<EditScript>(json) {
             return Ok(script);

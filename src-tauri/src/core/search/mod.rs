@@ -358,7 +358,7 @@ impl<'a> SearchEngine<'a> {
 
         let mut merged = Vec::new();
 
-        for (asset_id, mut asset_results) in by_asset {
+        for (_asset_id, mut asset_results) in by_asset {
             // Sort by start time
             asset_results.sort_by(|a, b| {
                 a.start_sec

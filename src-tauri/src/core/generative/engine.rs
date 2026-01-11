@@ -137,7 +137,6 @@ impl GenerationResult {
 }
 
 /// Main generative AI engine
-#[derive(Debug)]
 pub struct GenerativeEngine {
     /// Registered providers
     providers: Arc<RwLock<HashMap<String, Arc<dyn GenerativeProvider>>>>,

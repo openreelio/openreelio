@@ -373,7 +373,7 @@ impl Command for MoveClipCommand {
 
         if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
             // Check if cross-track move needs to be undone
-            if let Some(new_track_id) = &self.new_track_id {
+            if self.new_track_id.is_some() {
                 // Find current track (destination) and clip
                 let mut current_track_idx = None;
                 let mut clip_idx = None;
@@ -1180,7 +1180,8 @@ mod tests {
         let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
 
         // Move clip to track 2 at position 10.0
-        let mut move_cmd = MoveClipCommand::new(&seq_id, &clip_id, 10.0).to_track(&track2_id);
+        let mut move_cmd =
+            MoveClipCommand::new_simple(&seq_id, &clip_id, 10.0).to_track(&track2_id);
         move_cmd.execute(&mut state).unwrap();
 
         // Verify clip moved to track 2

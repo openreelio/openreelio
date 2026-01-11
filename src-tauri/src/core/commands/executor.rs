@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use crate::core::{
-    commands::{Command, CommandResult, StateChange},
+    commands::{Command, CommandResult},
     project::{OpKind, Operation, OpsLog, ProjectState},
     CoreError, CoreResult, OpId,
 };
@@ -670,7 +670,7 @@ mod tests {
         // Verify asset is in state
         let stored_asset = state.assets.get(&asset_id).unwrap();
         assert_eq!(stored_asset.name, "unique_name.mp4");
-        assert_eq!(stored_asset.file_size, Some(12345));
+        assert_eq!(stored_asset.file_size, 12345);
 
         // Undo
         executor.undo(&mut state).unwrap();
@@ -682,8 +682,8 @@ mod tests {
         // Verify asset data is preserved
         let restored_asset = state.assets.get(&asset_id).unwrap();
         assert_eq!(restored_asset.name, "unique_name.mp4");
-        assert_eq!(restored_asset.file_size, Some(12345));
-        assert_eq!(restored_asset.hash, Some("abc123".to_string()));
+        assert_eq!(restored_asset.file_size, 12345);
+        assert_eq!(restored_asset.hash, "abc123");
     }
 
     #[test]

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::core::{
-    jobs::{Job, JobStatus, JobType, Priority},
+    jobs::{Job, JobStatus},
     CoreResult, JobId,
 };
 
@@ -238,6 +238,7 @@ impl Default for WorkerPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::jobs::{JobType, Priority};
 
     #[test]
     fn test_worker_pool_creation() {

@@ -26,6 +26,22 @@ pub struct SequenceFormat {
 }
 
 impl SequenceFormat {
+    /// Creates a format from raw parameters
+    pub fn new(
+        width: u32,
+        height: u32,
+        fps_num: i32,
+        fps_den: i32,
+        audio_sample_rate: u32,
+    ) -> Self {
+        Self {
+            canvas: Canvas::new(width, height),
+            fps: Ratio::new(fps_num, fps_den),
+            audio_sample_rate,
+            audio_channels: 2,
+        }
+    }
+
     /// Creates a format for YouTube Shorts (1080x1920, 30fps)
     pub fn shorts_1080() -> Self {
         Self {
@@ -54,6 +70,16 @@ impl SequenceFormat {
             audio_sample_rate: 48000,
             audio_channels: 2,
         }
+    }
+
+    /// Creates a format for YouTube Shorts (alias)
+    pub fn youtube_shorts() -> Self {
+        Self::shorts_1080()
+    }
+
+    /// Creates a format for YouTube 4K (alias)
+    pub fn youtube_4k() -> Self {
+        Self::uhd_4k()
     }
 }
 

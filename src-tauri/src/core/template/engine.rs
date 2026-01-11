@@ -10,8 +10,6 @@ use tokio::sync::RwLock;
 
 use super::models::{Template, TemplateCategory, TemplateFormat};
 use super::sections::{ContentType, TemplateSection, TemplateStyle};
-use crate::core::project::ProjectState;
-use crate::core::timeline::Sequence;
 use crate::core::{CoreError, CoreResult};
 
 /// Configuration for the template engine
@@ -719,10 +717,10 @@ mod tests {
     // TemplateEngine Tests
     // ========================================================================
 
-    #[test]
-    fn test_engine_new_has_builtin_templates() {
+    #[tokio::test]
+    async fn test_engine_new_has_builtin_templates() {
         let engine = TemplateEngine::new();
-        let templates = futures::executor::block_on(engine.list_templates());
+        let templates = engine.list_templates().await;
 
         assert!(!templates.is_empty());
         assert!(templates.iter().any(|t| t.builtin));

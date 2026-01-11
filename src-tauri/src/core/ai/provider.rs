@@ -209,7 +209,7 @@ impl AIProvider for MockAIProvider {
         &self.name
     }
 
-    async fn complete(&self, request: CompletionRequest) -> CoreResult<CompletionResponse> {
+    async fn complete(&self, _request: CompletionRequest) -> CoreResult<CompletionResponse> {
         if !self.available {
             return Err(CoreError::Internal("Provider not available".to_string()));
         }

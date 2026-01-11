@@ -2,10 +2,10 @@
 //!
 //! SQLite database for storing indexed media information.
 
-use rusqlite::{Connection, Result as SqliteResult};
+use rusqlite::Connection;
 use std::path::Path;
 
-use crate::core::{AssetId, CoreError, CoreResult};
+use crate::core::{CoreError, CoreResult};
 
 // =============================================================================
 // Index Database

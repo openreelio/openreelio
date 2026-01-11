@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::process::Command;
 
-use crate::core::{AudioInfo, CoreError, CoreResult, Ratio, VideoInfo};
+use crate::core::assets::{AudioInfo, VideoInfo};
+use crate::core::{CoreError, CoreResult, Ratio};
 
 // =============================================================================
 // Types

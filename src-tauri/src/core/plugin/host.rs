@@ -325,7 +325,7 @@ impl PluginHost {
             .func_wrap(
                 "env",
                 "host_log",
-                |caller: Caller<'_, PluginStoreState>, level: i32, ptr: i32, len: i32| {
+                |mut caller: Caller<'_, PluginStoreState>, level: i32, ptr: i32, len: i32| {
                     let mem = caller.get_export("memory").and_then(|e| e.into_memory());
 
                     if let Some(memory) = mem {

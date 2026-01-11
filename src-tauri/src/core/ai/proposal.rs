@@ -289,7 +289,7 @@ impl ProposalManager {
 
     /// Creates with default settings
     pub fn with_defaults() -> Self {
-        Self::new(100, 3600_000) // 100 proposals, 1 hour expiry
+        Self::new(100, 3_600_000) // 100 proposals, 1 hour expiry
     }
 
     /// Adds a new proposal
@@ -808,7 +808,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_manager_capacity() {
-        let manager = ProposalManager::new(3, 3600_000);
+        let manager = ProposalManager::new(3, 3_600_000);
 
         // Add 3 proposals
         let p1 = Proposal::new(create_test_script());

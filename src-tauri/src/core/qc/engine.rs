@@ -217,7 +217,6 @@ impl QCReport {
 }
 
 /// Main QC Engine for running quality checks
-#[derive(Debug)]
 pub struct QCEngine {
     /// Registered rules
     rules: Vec<Arc<dyn QCRule>>,

@@ -150,7 +150,7 @@ pub trait GenerativeProvider: Send + Sync {
     }
 
     /// Gets available models for a capability
-    async fn list_models(&self, capability: ProviderCapability) -> CoreResult<Vec<ModelInfo>> {
+    async fn list_models(&self, _capability: ProviderCapability) -> CoreResult<Vec<ModelInfo>> {
         Ok(vec![])
     }
 }

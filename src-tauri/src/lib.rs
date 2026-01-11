@@ -153,11 +153,9 @@ fn greet(name: &str) -> String {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(AppState::new())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            // Initialize application state
-            app.manage(AppState::new());
-
             // Initialize logging
             tracing_subscriber::fmt()
                 .with_env_filter(

@@ -138,6 +138,18 @@ pub enum CoreError {
     // =========================================================================
     // General Errors
     // =========================================================================
+    #[error("Not supported: {0}")]
+    NotSupported(String),
+
+    #[error("Validation error: {0}")]
+    ValidationError(String),
+
+    #[error("Resource exhausted: {0}")]
+    ResourceExhausted(String),
+
+    #[error("Timeout: {0}")]
+    Timeout(String),
+
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 

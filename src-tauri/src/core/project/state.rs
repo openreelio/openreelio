@@ -11,7 +11,7 @@ use crate::core::{
     assets::Asset,
     project::{OpKind, Operation, OpsLog},
     timeline::{Clip, Sequence, Track},
-    AssetId, ClipId, CoreError, CoreResult, SequenceId, TrackId,
+    AssetId, CoreError, CoreResult, SequenceId,
 };
 
 // =============================================================================
