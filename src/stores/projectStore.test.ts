@@ -30,6 +30,7 @@ describe('projectStore', () => {
       assets: new Map(),
       sequences: new Map(),
       activeSequenceId: null,
+      selectedAssetId: null,
       error: null,
     });
   });

@@ -35,6 +35,7 @@ interface ProjectState {
   assets: Map<string, Asset>;
   sequences: Map<string, Sequence>;
   activeSequenceId: string | null;
+  selectedAssetId: string | null;
   error: string | null;
 
   // Actions
@@ -44,9 +45,10 @@ interface ProjectState {
   closeProject: () => void;
 
   // Asset actions
-  importAsset: (uri: string) => Promise<string>;
+  importAsset: (uri?: string) => Promise<string>;
   removeAsset: (assetId: string) => Promise<void>;
   getAsset: (assetId: string) => Asset | undefined;
+  selectAsset: (assetId: string | null) => void;
 
   // Sequence actions
   createSequence: (name: string, format: string) => Promise<string>;
@@ -75,6 +77,7 @@ export const useProjectStore = create<ProjectState>()(
     assets: new Map(),
     sequences: new Map(),
     activeSequenceId: null,
+    selectedAssetId: null,
     error: null,
 
     // Load existing project
@@ -92,6 +95,7 @@ export const useProjectStore = create<ProjectState>()(
           state.isLoading = false;
           state.meta = projectInfo;
           state.isDirty = false;
+          state.selectedAssetId = null;
         });
 
         // TODO: Load assets and sequences from backend
@@ -121,6 +125,7 @@ export const useProjectStore = create<ProjectState>()(
           state.assets = new Map();
           state.sequences = new Map();
           state.activeSequenceId = null;
+          state.selectedAssetId = null;
           state.isDirty = false;
         });
       } catch (error) {
@@ -158,19 +163,29 @@ export const useProjectStore = create<ProjectState>()(
         state.assets = new Map();
         state.sequences = new Map();
         state.activeSequenceId = null;
+        state.selectedAssetId = null;
         state.isDirty = false;
         state.error = null;
       });
     },
 
     // Import asset
-    importAsset: async (uri: string) => {
+    importAsset: async (uri?: string) => {
+      if (!uri) {
+        const message = 'Asset URI is required';
+        set((state) => {
+          state.error = message;
+        });
+        throw new Error(message);
+      }
+
       try {
         const result = await invoke<{ assetId: string; name: string }>('import_asset', { uri });
 
         // TODO: Fetch full asset data and add to store
         set((state) => {
           state.isDirty = true;
+          state.selectedAssetId = result.assetId;
         });
 
         return result.assetId;
@@ -190,6 +205,9 @@ export const useProjectStore = create<ProjectState>()(
         set((state) => {
           state.assets.delete(assetId);
           state.isDirty = true;
+          if (state.selectedAssetId === assetId) {
+            state.selectedAssetId = null;
+          }
         });
       } catch (error) {
         set((state) => {
@@ -202,6 +220,13 @@ export const useProjectStore = create<ProjectState>()(
     // Get asset by ID
     getAsset: (assetId: string) => {
       return get().assets.get(assetId);
+    },
+
+    // Select asset
+    selectAsset: (assetId: string | null) => {
+      set((state) => {
+        state.selectedAssetId = assetId;
+      });
     },
 
     // Create sequence

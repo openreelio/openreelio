@@ -18,6 +18,7 @@ import {
 import { useProjectStore } from '@/stores';
 import { AssetList, type Asset, type ViewMode } from './AssetList';
 import type { AssetKind } from './AssetItem';
+import type { Asset as ProjectAsset } from '@/types';
 
 // =============================================================================
 // Types
@@ -41,6 +42,23 @@ export function ProjectExplorer() {
   // Store
   const { assets, isLoading, selectedAssetId, selectAsset, importAsset, removeAsset } =
     useProjectStore();
+
+  const assetList = useMemo<Asset[]>(() => {
+    return Array.from(assets.values())
+      .map((asset: ProjectAsset): Asset | null => {
+        if (asset.kind !== 'video' && asset.kind !== 'audio' && asset.kind !== 'image') {
+          return null;
+        }
+
+        return {
+          id: asset.id,
+          name: asset.name,
+          kind: asset.kind,
+          ...(asset.durationSec != null ? { duration: asset.durationSec } : {}),
+        };
+      })
+      .filter((asset): asset is Asset => asset !== null);
+  }, [assets]);
 
   // Local state
   const [searchQuery, setSearchQuery] = useState('');
@@ -72,7 +90,7 @@ export function ProjectExplorer() {
   );
 
   const handleImport = useCallback(() => {
-    importAsset();
+    void Promise.resolve(importAsset()).catch(() => {});
   }, [importAsset]);
 
   const handleKeyDown = useCallback(
@@ -109,7 +127,7 @@ export function ProjectExplorer() {
   // Empty State Message
   // ===========================================================================
 
-  const emptyMessage = assets.length === 0 ? 'Import media to get started' : 'No assets';
+  const emptyMessage = assetList.length === 0 ? 'Import media to get started' : 'No assets';
 
   // ===========================================================================
   // Render
@@ -202,14 +220,14 @@ export function ProjectExplorer() {
 
       {/* Asset List */}
       <div className="flex-1 overflow-y-auto p-2">
-        {assets.length === 0 && !isLoading ? (
+        {assetList.length === 0 && !isLoading ? (
           <div data-testid="asset-list-empty" className="flex flex-col items-center justify-center h-full text-gray-400">
             <Plus className="w-12 h-12 mb-2 opacity-50" />
             <p className="text-sm">{emptyMessage}</p>
           </div>
         ) : (
           <AssetList
-            assets={assets as Asset[]}
+            assets={assetList}
             isLoading={isLoading}
             selectedAssetId={selectedAssetId}
             filter={filter}
