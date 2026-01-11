@@ -543,9 +543,9 @@ mod tests {
     fn test_template_validate_success() {
         let template = Template::new("Valid Template", TemplateCategory::Shorts)
             .with_duration_range(3.0, 5.0)
-            .with_section(TemplateSection::new("Hook", ContentType::Video).with_duration_range(
-                3.0, 5.0,
-            ));
+            .with_section(
+                TemplateSection::new("Hook", ContentType::Video).with_duration_range(3.0, 5.0),
+            );
 
         assert!(template.validate().is_ok());
     }
