@@ -1,0 +1,225 @@
+/**
+ * Timeline Container Component Tests
+ *
+ * Tests for the main timeline component that integrates all timeline elements.
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen, fireEvent, act } from '@testing-library/react';
+import { Timeline } from './Timeline';
+import { useTimelineStore } from '@/stores/timelineStore';
+import type { Sequence } from '@/types';
+
+// =============================================================================
+// Test Data
+// =============================================================================
+
+const mockSequence: Sequence = {
+  id: 'seq_001',
+  name: 'Main Sequence',
+  format: {
+    canvas: { width: 1920, height: 1080 },
+    fps: { num: 30, den: 1 },
+    audioSampleRate: 48000,
+  },
+  tracks: [
+    {
+      id: 'track_001',
+      kind: 'video',
+      name: 'Video 1',
+      clips: [],
+      muted: false,
+      locked: false,
+      visible: true,
+      volumeDb: 0,
+    },
+    {
+      id: 'track_002',
+      kind: 'audio',
+      name: 'Audio 1',
+      clips: [],
+      muted: false,
+      locked: false,
+      visible: true,
+      volumeDb: 0,
+    },
+  ],
+  markers: [],
+};
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+describe('Timeline', () => {
+  beforeEach(() => {
+    // Reset timeline store before each test
+    useTimelineStore.setState({
+      playhead: 0,
+      isPlaying: false,
+      playbackRate: 1,
+      selectedClipIds: [],
+      selectedTrackIds: [],
+      zoom: 100,
+      scrollX: 0,
+      scrollY: 0,
+      snapEnabled: true,
+      snapToClips: true,
+      snapToMarkers: true,
+      snapToPlayhead: true,
+    });
+  });
+
+  // ===========================================================================
+  // Rendering Tests
+  // ===========================================================================
+
+  describe('rendering', () => {
+    it('should render timeline container', () => {
+      render(<Timeline sequence={mockSequence} />);
+      expect(screen.getByTestId('timeline')).toBeInTheDocument();
+    });
+
+    it('should render time ruler', () => {
+      render(<Timeline sequence={mockSequence} />);
+      expect(screen.getByTestId('time-ruler')).toBeInTheDocument();
+    });
+
+    it('should render all tracks', () => {
+      render(<Timeline sequence={mockSequence} />);
+      expect(screen.getAllByTestId(/^track-header/)).toHaveLength(2);
+    });
+
+    it('should render playhead', () => {
+      render(<Timeline sequence={mockSequence} />);
+      expect(screen.getByTestId('playhead')).toBeInTheDocument();
+    });
+
+    it('should show empty state when no sequence', () => {
+      render(<Timeline sequence={null} />);
+      expect(screen.getByText(/no sequence/i)).toBeInTheDocument();
+    });
+  });
+
+  // ===========================================================================
+  // Clip Selection Tests
+  // ===========================================================================
+
+  describe('clip selection', () => {
+    it('should select clip when clicked', async () => {
+      const sequenceWithClips: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            clips: [
+              {
+                id: 'clip_001',
+                assetId: 'asset_001',
+                range: { sourceInSec: 0, sourceOutSec: 10 },
+                place: { timelineInSec: 0, layer: 0 },
+                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+          mockSequence.tracks[1],
+        ],
+      };
+
+      render(<Timeline sequence={sequenceWithClips} />);
+
+      const clip = screen.getByTestId('clip-clip_001');
+      fireEvent.click(clip);
+
+      expect(useTimelineStore.getState().selectedClipIds).toContain('clip_001');
+    });
+
+    it('should clear selection when clicking empty area', () => {
+      useTimelineStore.setState({ selectedClipIds: ['clip_001'] });
+
+      render(<Timeline sequence={mockSequence} />);
+
+      const timeline = screen.getByTestId('timeline-tracks-area');
+      fireEvent.click(timeline);
+
+      expect(useTimelineStore.getState().selectedClipIds).toEqual([]);
+    });
+  });
+
+  // ===========================================================================
+  // Playhead Tests
+  // ===========================================================================
+
+  describe('playhead', () => {
+    it('should position playhead based on store state', () => {
+      useTimelineStore.setState({ playhead: 5 });
+
+      render(<Timeline sequence={mockSequence} />);
+
+      const playhead = screen.getByTestId('playhead');
+      // At 5 seconds with zoom 100px/sec = 500px
+      expect(playhead).toHaveStyle({ left: '500px' });
+    });
+
+    it('should update playhead when seeking via ruler click', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      const ruler = screen.getByTestId('time-ruler');
+      // Simulate click at a position
+      fireEvent.click(ruler, { clientX: 300 });
+
+      // Playhead should update (exact position depends on implementation)
+      expect(useTimelineStore.getState().playhead).toBeGreaterThan(0);
+    });
+  });
+
+  // ===========================================================================
+  // Zoom Tests
+  // ===========================================================================
+
+  describe('zoom', () => {
+    it('should respond to zoom changes', () => {
+      const { rerender } = render(<Timeline sequence={mockSequence} />);
+
+      act(() => {
+        useTimelineStore.setState({ zoom: 50 });
+      });
+      rerender(<Timeline sequence={mockSequence} />);
+
+      // Timeline width should be based on zoom
+      const timeline = screen.getByTestId('timeline');
+      expect(timeline).toBeInTheDocument();
+    });
+  });
+
+  // ===========================================================================
+  // Keyboard Shortcuts Tests
+  // ===========================================================================
+
+  describe('keyboard shortcuts', () => {
+    it('should toggle playback on space key', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      const timeline = screen.getByTestId('timeline');
+      fireEvent.keyDown(timeline, { key: ' ' });
+
+      expect(useTimelineStore.getState().isPlaying).toBe(true);
+    });
+
+    it('should delete selected clips on delete key', () => {
+      const onDeleteClips = vi.fn();
+      useTimelineStore.setState({ selectedClipIds: ['clip_001'] });
+
+      render(<Timeline sequence={mockSequence} onDeleteClips={onDeleteClips} />);
+
+      const timeline = screen.getByTestId('timeline');
+      fireEvent.keyDown(timeline, { key: 'Delete' });
+
+      expect(onDeleteClips).toHaveBeenCalledWith(['clip_001']);
+    });
+  });
+});

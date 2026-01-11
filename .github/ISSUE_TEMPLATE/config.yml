@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question / Discussion
+    url: https://github.com/openreelio/openreelio/discussions
+    about: Ask questions and discuss ideas in GitHub Discussions
+  - name: Security Vulnerability
+    url: https://github.com/openreelio/openreelio/security/policy
+    about: Report security vulnerabilities privately
