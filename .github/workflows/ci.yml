@@ -118,7 +118,7 @@ jobs:
   # ==========================================================================
   build-check:
     name: Build Check
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.full_matrix == 'true'
+    if: github.event_name != 'schedule'
     runs-on: ${{ matrix.os }}
     needs: [frontend-test, rust-test]
 
