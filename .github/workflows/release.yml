@@ -7,7 +7,8 @@ on:
 
 env:
   NODE_VERSION: '20'
-  RUST_VERSION: '1.77'
+  # Keep this in sync with `src-tauri/Cargo.toml` (`rust-version`).
+  RUST_VERSION: '1.83.0'
 
 jobs:
   create-release:

@@ -9,7 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   NODE_VERSION: '20'
-  RUST_VERSION: '1.77'
+  # MSRV is constrained by transitive deps (e.g. ICU crates); keep this in sync with `src-tauri/Cargo.toml`.
+  RUST_VERSION: '1.83.0'
 
 jobs:
   # ==========================================================================

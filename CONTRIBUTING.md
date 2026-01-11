@@ -21,7 +21,7 @@ This project and everyone participating in it is governed by our [Code of Conduc
 
 ### Prerequisites
 
-- **Rust** 1.77+ ([rustup.rs](https://rustup.rs))
+- **Rust** 1.83+ ([rustup.rs](https://rustup.rs))
 - **Node.js** 20+ ([nodejs.org](https://nodejs.org))
 - **pnpm** 8+ (recommended) or npm
 - **FFmpeg** 6+ (for video processing)

@@ -77,7 +77,7 @@ OpenReelio is an AI-powered desktop video editor designed for content creators. 
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) 1.77+
+- [Rust](https://rustup.rs/) 1.83+
 - [Node.js](https://nodejs.org/) 20+
 - [FFmpeg](https://ffmpeg.org/) 6+
 
