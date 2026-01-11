@@ -53,7 +53,7 @@ async-trait = "0.1"
 
 # WASM Plugin System
 wasmtime = "27"
-wasmtime-wasi = "27"
+wasmtime-wasi = "40"
 
 [dev-dependencies]
 tempfile = "3"
