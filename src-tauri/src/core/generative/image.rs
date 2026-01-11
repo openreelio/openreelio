@@ -366,7 +366,10 @@ mod tests {
     #[test]
     fn test_style_prompt_modifier() {
         assert!(ImageStyle::Cinematic.prompt_modifier().is_some());
-        assert!(ImageStyle::Anime.prompt_modifier().unwrap().contains("anime"));
+        assert!(ImageStyle::Anime
+            .prompt_modifier()
+            .unwrap()
+            .contains("anime"));
         assert!(ImageStyle::None.prompt_modifier().is_none());
     }
 
@@ -405,7 +408,10 @@ mod tests {
             .with_guidance(7.5)
             .with_seed(12345);
 
-        assert_eq!(params.negative_prompt, Some("blurry, low quality".to_string()));
+        assert_eq!(
+            params.negative_prompt,
+            Some("blurry, low quality".to_string())
+        );
         assert_eq!(params.width, Some(1024));
         assert_eq!(params.height, Some(1024));
         assert_eq!(params.style, ImageStyle::Cinematic);
@@ -440,8 +446,8 @@ mod tests {
 
     #[test]
     fn test_params_full_prompt() {
-        let params = ImageGenerationParams::new("A mountain landscape")
-            .with_style(ImageStyle::Cinematic);
+        let params =
+            ImageGenerationParams::new("A mountain landscape").with_style(ImageStyle::Cinematic);
 
         let full = params.full_prompt();
         assert!(full.contains("A mountain landscape"));
@@ -456,8 +462,7 @@ mod tests {
 
     #[test]
     fn test_params_validate_success() {
-        let params = ImageGenerationParams::new("Valid prompt")
-            .with_size(1024, 1024);
+        let params = ImageGenerationParams::new("Valid prompt").with_size(1024, 1024);
 
         assert!(params.validate().is_ok());
     }

@@ -67,8 +67,7 @@ impl EditScript {
 
     /// Returns whether the script has any high-risk items
     pub fn has_high_risk(&self) -> bool {
-        matches!(self.risk.copyright, RiskLevel::High)
-            || matches!(self.risk.nsfw, NsfwRisk::Likely)
+        matches!(self.risk.copyright, RiskLevel::High) || matches!(self.risk.nsfw, NsfwRisk::Likely)
     }
 
     /// Validates the edit script
@@ -331,7 +330,10 @@ impl PreviewPlan {
 
     /// Adds a preview range
     pub fn add_range(mut self, start: f64, end: f64) -> Self {
-        self.ranges.push(PreviewRange { start_sec: start, end_sec: end });
+        self.ranges.push(PreviewRange {
+            start_sec: start,
+            end_sec: end,
+        });
         self
     }
 
@@ -474,10 +476,7 @@ mod tests {
 
     #[test]
     fn test_requirement_generate() {
-        let req = Requirement::generate(
-            "dalle",
-            serde_json::json!({ "prompt": "A sunset" }),
-        );
+        let req = Requirement::generate("dalle", serde_json::json!({ "prompt": "A sunset" }));
 
         assert_eq!(req.kind, RequirementKind::Generate);
         assert_eq!(req.provider, Some("dalle".to_string()));

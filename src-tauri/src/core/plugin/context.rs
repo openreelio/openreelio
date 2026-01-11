@@ -213,7 +213,10 @@ impl PluginContext {
             .await?;
 
         let entries = std::fs::read_dir(&full_path).map_err(|e| {
-            CoreError::PluginError(format!("Failed to list directory '{}': {}", relative_dir, e))
+            CoreError::PluginError(format!(
+                "Failed to list directory '{}': {}",
+                relative_dir, e
+            ))
         })?;
 
         let mut files = Vec::new();
@@ -241,7 +244,10 @@ impl PluginContext {
         }
 
         std::fs::write(&full_path, data).map_err(|e| {
-            CoreError::PluginError(format!("Failed to write temp file '{}': {}", relative_path, e))
+            CoreError::PluginError(format!(
+                "Failed to write temp file '{}': {}",
+                relative_path, e
+            ))
         })?;
 
         Ok(full_path)
@@ -343,7 +349,10 @@ impl PluginContext {
     /// Validates that a path is within the data directory
     fn validate_path_in_data_dir(&self, path: &Path) -> CoreResult<()> {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let data_canonical = self.data_dir.canonicalize().unwrap_or_else(|_| self.data_dir.clone());
+        let data_canonical = self
+            .data_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.data_dir.clone());
 
         if !canonical.starts_with(&data_canonical) {
             return Err(CoreError::PermissionDenied(format!(
@@ -358,7 +367,10 @@ impl PluginContext {
     /// Validates that a path is within the temp directory
     fn validate_path_in_temp_dir(&self, path: &Path) -> CoreResult<()> {
         let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-        let temp_canonical = self.temp_dir.canonicalize().unwrap_or_else(|_| self.temp_dir.clone());
+        let temp_canonical = self
+            .temp_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.temp_dir.clone());
 
         if !canonical.starts_with(&temp_canonical) {
             return Err(CoreError::PermissionDenied(format!(
@@ -435,9 +447,7 @@ mod tests {
         context
             .storage_set("key1", serde_json::json!("value1"))
             .await;
-        context
-            .storage_set("key2", serde_json::json!(42))
-            .await;
+        context.storage_set("key2", serde_json::json!(42)).await;
 
         let value1 = context.storage_get("key1").await;
         let value2 = context.storage_get("key2").await;
@@ -573,8 +583,14 @@ mod tests {
         let (context, _temp) = create_test_context().await;
 
         // Create some temp files
-        context.write_temp_file("file1.txt", b"data1").await.unwrap();
-        context.write_temp_file("file2.txt", b"data2").await.unwrap();
+        context
+            .write_temp_file("file1.txt", b"data1")
+            .await
+            .unwrap();
+        context
+            .write_temp_file("file2.txt", b"data2")
+            .await
+            .unwrap();
 
         // Cleanup
         context.cleanup_temp().await.unwrap();

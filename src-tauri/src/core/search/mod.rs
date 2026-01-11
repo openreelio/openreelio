@@ -219,9 +219,17 @@ impl<'a> SearchEngine<'a> {
         let results = transcript_results
             .into_iter()
             .map(|tr| {
-                SearchResult::new(&tr.asset_id, tr.start_sec, tr.end_sec, tr.confidence.unwrap_or(0.5))
-                    .with_reason(&format!("Transcript match: \"{}\"", truncate_text(&tr.text, 50)))
-                    .with_source(SearchResultSource::Transcript)
+                SearchResult::new(
+                    &tr.asset_id,
+                    tr.start_sec,
+                    tr.end_sec,
+                    tr.confidence.unwrap_or(0.5),
+                )
+                .with_reason(&format!(
+                    "Transcript match: \"{}\"",
+                    truncate_text(&tr.text, 50)
+                ))
+                .with_source(SearchResultSource::Transcript)
             })
             .collect();
 
@@ -240,9 +248,13 @@ impl<'a> SearchEngine<'a> {
                 let shots = ShotDetector::load_from_db(self.db, asset_id)?;
 
                 for shot in shots {
-                    let mut result =
-                        SearchResult::new(&shot.asset_id, shot.start_sec, shot.end_sec, shot.quality_score.unwrap_or(0.5))
-                            .with_source(SearchResultSource::Shot);
+                    let mut result = SearchResult::new(
+                        &shot.asset_id,
+                        shot.start_sec,
+                        shot.end_sec,
+                        shot.quality_score.unwrap_or(0.5),
+                    )
+                    .with_source(SearchResultSource::Shot);
 
                     if !shot.tags.is_empty() {
                         result = result.with_reason(&format!("Tags: {}", shot.tags.join(", ")));
@@ -283,7 +295,11 @@ impl<'a> SearchEngine<'a> {
 
         // Sort by score
         let mut sorted = merged;
-        sorted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Apply limit
         sorted.truncate(query.limit);
@@ -437,9 +453,13 @@ mod tests {
 
     #[test]
     fn test_search_query_with_assets() {
-        let query = SearchQuery::text("test").with_assets(vec!["asset_1".to_string(), "asset_2".to_string()]);
+        let query = SearchQuery::text("test")
+            .with_assets(vec!["asset_1".to_string(), "asset_2".to_string()]);
 
-        assert_eq!(query.filters.asset_ids, Some(vec!["asset_1".to_string(), "asset_2".to_string()]));
+        assert_eq!(
+            query.filters.asset_ids,
+            Some(vec!["asset_1".to_string(), "asset_2".to_string()])
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -496,7 +516,9 @@ mod tests {
         let results = engine.search(&query).unwrap();
 
         assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|r| r.source == SearchResultSource::Transcript));
+        assert!(results
+            .iter()
+            .all(|r| r.source == SearchResultSource::Transcript));
     }
 
     #[test]
@@ -544,8 +566,18 @@ mod tests {
         let db = IndexDb::in_memory().unwrap();
 
         // Add transcripts for multiple assets
-        let segments1 = vec![TranscriptSegment::with_confidence(0.0, 2.0, "Test content", 0.9)];
-        let segments2 = vec![TranscriptSegment::with_confidence(0.0, 2.0, "Test content", 0.9)];
+        let segments1 = vec![TranscriptSegment::with_confidence(
+            0.0,
+            2.0,
+            "Test content",
+            0.9,
+        )];
+        let segments2 = vec![TranscriptSegment::with_confidence(
+            0.0,
+            2.0,
+            "Test content",
+            0.9,
+        )];
 
         save_transcript(&db, "asset_001", &segments1).unwrap();
         save_transcript(&db, "asset_002", &segments2).unwrap();

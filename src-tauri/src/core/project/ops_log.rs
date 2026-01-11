@@ -511,9 +511,21 @@ this is not valid json
         let (ops_log, _temp_dir) = create_test_ops_log();
 
         let ops = vec![
-            Operation::with_id("op_001", OpKind::AssetImport, serde_json::json!({"name": "first"})),
-            Operation::with_id("op_002", OpKind::ClipAdd, serde_json::json!({"name": "second"})),
-            Operation::with_id("op_003", OpKind::ClipMove, serde_json::json!({"name": "third"})),
+            Operation::with_id(
+                "op_001",
+                OpKind::AssetImport,
+                serde_json::json!({"name": "first"}),
+            ),
+            Operation::with_id(
+                "op_002",
+                OpKind::ClipAdd,
+                serde_json::json!({"name": "second"}),
+            ),
+            Operation::with_id(
+                "op_003",
+                OpKind::ClipMove,
+                serde_json::json!({"name": "third"}),
+            ),
         ];
 
         ops_log.append_batch(&ops).unwrap();
@@ -598,7 +610,8 @@ another bad line
 
     #[test]
     fn test_operation_builder_pattern() {
-        let inverse_op = Operation::with_id("inverse_001", OpKind::ClipRemove, serde_json::json!({}));
+        let inverse_op =
+            Operation::with_id("inverse_001", OpKind::ClipRemove, serde_json::json!({}));
 
         let op = Operation::with_id("op_main", OpKind::ClipAdd, serde_json::json!({}))
             .with_user("alice")

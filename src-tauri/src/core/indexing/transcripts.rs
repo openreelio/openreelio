@@ -79,11 +79,7 @@ impl Transcript {
             .iter()
             .map(|s| s.start_sec)
             .fold(f64::INFINITY, f64::min);
-        let end = self
-            .segments
-            .iter()
-            .map(|s| s.end_sec)
-            .fold(0.0, f64::max);
+        let end = self.segments.iter().map(|s| s.end_sec).fold(0.0, f64::max);
 
         end - start
     }
@@ -169,7 +165,11 @@ impl TranscriptSegment {
 // =============================================================================
 
 /// Saves a transcript to the index database
-pub fn save_transcript(db: &IndexDb, asset_id: &str, segments: &[TranscriptSegment]) -> CoreResult<()> {
+pub fn save_transcript(
+    db: &IndexDb,
+    asset_id: &str,
+    segments: &[TranscriptSegment],
+) -> CoreResult<()> {
     let conn = db.connection();
 
     for segment in segments {
@@ -228,7 +228,11 @@ pub fn load_transcript(db: &IndexDb, asset_id: &str) -> CoreResult<Transcript> {
 }
 
 /// Searches transcripts for text
-pub fn search_transcripts(db: &IndexDb, query: &str, limit: usize) -> CoreResult<Vec<TranscriptSearchResult>> {
+pub fn search_transcripts(
+    db: &IndexDb,
+    query: &str,
+    limit: usize,
+) -> CoreResult<Vec<TranscriptSearchResult>> {
     let conn = db.connection();
 
     // Simple LIKE search (can be upgraded to FTS5 later)

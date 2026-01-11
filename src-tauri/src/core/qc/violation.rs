@@ -142,7 +142,11 @@ pub struct QCViolation {
 
 impl QCViolation {
     /// Creates a new violation
-    pub fn new(rule_name: impl Into<String>, severity: Severity, message: impl Into<String>) -> Self {
+    pub fn new(
+        rule_name: impl Into<String>,
+        severity: Severity,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             id: ulid::Ulid::new().to_string(),
             rule_name: rule_name.into(),
@@ -338,8 +342,8 @@ mod tests {
 
     #[test]
     fn test_violation_with_location() {
-        let violation = QCViolation::new("TestRule", Severity::Error, "Issue found")
-            .with_location(10.0, 15.0);
+        let violation =
+            QCViolation::new("TestRule", Severity::Error, "Issue found").with_location(10.0, 15.0);
 
         let loc = violation.location.unwrap();
         assert_eq!(loc.start_sec, 10.0);
@@ -360,17 +364,20 @@ mod tests {
             .with_entities(vec!["clip_001".to_string(), "clip_002".to_string()]);
 
         assert_eq!(violation.affected_entities.len(), 2);
-        assert!(violation.affected_entities.contains(&"clip_001".to_string()));
+        assert!(violation
+            .affected_entities
+            .contains(&"clip_001".to_string()));
     }
 
     #[test]
     fn test_violation_with_fix() {
-        let fix = ViolationFix::new("Remove black frames", vec![
-            serde_json::json!({"type": "TrimClip", "clipId": "clip_001", "newStart": 0.5}),
-        ]);
+        let fix = ViolationFix::new(
+            "Remove black frames",
+            vec![serde_json::json!({"type": "TrimClip", "clipId": "clip_001", "newStart": 0.5})],
+        );
 
-        let violation = QCViolation::new("BlackFrameRule", Severity::Warning, "Black frames")
-            .with_fix(fix);
+        let violation =
+            QCViolation::new("BlackFrameRule", Severity::Warning, "Black frames").with_fix(fix);
 
         assert!(violation.auto_fixable);
         assert!(violation.suggested_fix.is_some());

@@ -180,10 +180,7 @@ impl AIGateway {
     }
 
     /// Analyzes content and suggests edits
-    pub async fn analyze_and_suggest(
-        &self,
-        context: &EditContext,
-    ) -> CoreResult<Vec<EditScript>> {
+    pub async fn analyze_and_suggest(&self, context: &EditContext) -> CoreResult<Vec<EditScript>> {
         let provider = self.get_provider().await?;
 
         let system_prompt = r#"You are a professional video editor AI assistant.
@@ -334,7 +331,9 @@ Return JSON array of edit scripts."#;
         let guard = self.provider.read().await;
         match guard.as_ref() {
             Some(p) if p.is_available() => Ok(Arc::clone(p)),
-            Some(_) => Err(CoreError::Internal("AI provider is not available".to_string())),
+            Some(_) => Err(CoreError::Internal(
+                "AI provider is not available".to_string(),
+            )),
             None => Err(CoreError::Internal("No AI provider configured".to_string())),
         }
     }
@@ -587,7 +586,10 @@ mod tests {
         gateway.set_provider(provider).await;
 
         assert!(gateway.has_provider().await);
-        assert_eq!(gateway.provider_name().await, Some("test-provider".to_string()));
+        assert_eq!(
+            gateway.provider_name().await,
+            Some("test-provider".to_string())
+        );
 
         // Clear provider
         gateway.clear_provider().await;
@@ -635,7 +637,9 @@ mod tests {
     async fn test_validate_missing_params() {
         let gateway = AIGateway::with_defaults();
         let mut script = EditScript::new("Test");
-        script.commands.push(EditCommand::new("InsertClip", serde_json::json!({})));
+        script
+            .commands
+            .push(EditCommand::new("InsertClip", serde_json::json!({})));
 
         let result = gateway.validate_script(&script).await.unwrap();
 
@@ -742,8 +746,7 @@ This will add the clip."#;
     #[test]
     fn test_build_user_prompt_with_transcript() {
         let gateway = AIGateway::with_defaults();
-        let context = EditContext::new()
-            .with_transcript("Hello, welcome to the video.");
+        let context = EditContext::new().with_transcript("Hello, welcome to the video.");
 
         let prompt = gateway.build_user_prompt("Summarize", &context);
 

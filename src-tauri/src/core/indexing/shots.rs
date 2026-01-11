@@ -217,7 +217,11 @@ impl ShotDetector {
         boundaries.extend(scene_times.iter().cloned());
 
         // Ensure end time is included
-        if boundaries.last().map(|&t| t < total_duration).unwrap_or(true) {
+        if boundaries
+            .last()
+            .map(|&t| t < total_duration)
+            .unwrap_or(true)
+        {
             boundaries.push(total_duration);
         }
 

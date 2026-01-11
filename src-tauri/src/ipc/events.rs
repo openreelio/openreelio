@@ -318,11 +318,7 @@ impl EventEmitter {
     }
 
     /// Emits a project opened event
-    pub fn emit_project_opened(
-        app: &AppHandle,
-        name: &str,
-        path: &str,
-    ) -> Result<(), String> {
+    pub fn emit_project_opened(app: &AppHandle, name: &str, path: &str) -> Result<(), String> {
         let event = ProjectOpenedEvent {
             name: name.to_string(),
             path: path.to_string(),
@@ -396,11 +392,7 @@ impl EventEmitter {
     }
 
     /// Emits a job failed event
-    pub fn emit_job_failed(
-        app: &AppHandle,
-        job_id: &str,
-        error: &str,
-    ) -> Result<(), String> {
+    pub fn emit_job_failed(app: &AppHandle, job_id: &str, error: &str) -> Result<(), String> {
         let event = JobFailedEvent {
             job_id: job_id.to_string(),
             error: error.to_string(),

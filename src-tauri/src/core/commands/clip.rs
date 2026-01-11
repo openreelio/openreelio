@@ -38,12 +38,7 @@ pub struct InsertClipCommand {
 
 impl InsertClipCommand {
     /// Creates a new insert clip command
-    pub fn new(
-        sequence_id: &str,
-        track_id: &str,
-        asset_id: &str,
-        timeline_start: TimeSec,
-    ) -> Self {
+    pub fn new(sequence_id: &str, track_id: &str, asset_id: &str, timeline_start: TimeSec) -> Self {
         Self {
             sequence_id: sequence_id.to_string(),
             track_id: track_id.to_string(),
@@ -342,9 +337,11 @@ impl Command for MoveClipCommand {
             sequence.tracks[dest_track_idx].clips.push(clip);
 
             let op_id = ulid::Ulid::new().to_string();
-            return Ok(CommandResult::new(&op_id).with_change(StateChange::ClipModified {
-                clip_id: self.clip_id.clone(),
-            }));
+            return Ok(
+                CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                    clip_id: self.clip_id.clone(),
+                }),
+            );
         }
 
         // Same-track move: Find the clip and store old position
@@ -357,9 +354,11 @@ impl Command for MoveClipCommand {
                 clip.place.timeline_in_sec = self.new_timeline_in;
 
                 let op_id = ulid::Ulid::new().to_string();
-                return Ok(CommandResult::new(&op_id).with_change(StateChange::ClipModified {
-                    clip_id: self.clip_id.clone(),
-                }));
+                return Ok(
+                    CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                        clip_id: self.clip_id.clone(),
+                    }),
+                );
             }
         }
 
@@ -545,9 +544,11 @@ impl Command for TrimClipCommand {
                 clip.place.duration_sec = clip.range.duration() / clip.speed as f64;
 
                 let op_id = ulid::Ulid::new().to_string();
-                return Ok(CommandResult::new(&op_id).with_change(StateChange::ClipModified {
-                    clip_id: self.clip_id.clone(),
-                }));
+                return Ok(
+                    CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                        clip_id: self.clip_id.clone(),
+                    }),
+                );
             }
         }
 
@@ -753,8 +754,8 @@ mod tests {
         let mut state = ProjectState::new("Test Project");
 
         // Add asset
-        let asset = Asset::new_video("video.mp4", "/video.mp4", VideoInfo::default())
-            .with_duration(60.0);
+        let asset =
+            Asset::new_video("video.mp4", "/video.mp4", VideoInfo::default()).with_duration(60.0);
         state.assets.insert(asset.id.clone(), asset.clone());
 
         // Add sequence with track
@@ -843,8 +844,8 @@ mod tests {
         let asset_id = state.assets.keys().next().unwrap().clone();
 
         // Insert a 10-second clip
-        let mut insert_cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)
-            .with_source_range(0.0, 10.0);
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
         insert_cmd.execute(&mut state).unwrap();
 
         let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
@@ -879,8 +880,8 @@ mod tests {
         let asset_id = state.assets.keys().next().unwrap().clone();
 
         // Insert a clip at position 5-15 (10 sec duration)
-        let mut insert_cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 5.0)
-            .with_source_range(0.0, 10.0);
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 5.0).with_source_range(0.0, 10.0);
         insert_cmd.execute(&mut state).unwrap();
 
         let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
@@ -908,8 +909,8 @@ mod tests {
         let asset_id = state.assets.keys().next().unwrap().clone();
 
         // Insert clip
-        let mut insert_cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)
-            .with_source_range(0.0, 10.0);
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
         insert_cmd.execute(&mut state).unwrap();
 
         let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
@@ -1029,12 +1030,22 @@ mod tests {
         let mut move_cmd = MoveClipCommand::new_simple(&seq_id, &clip_id, 15.0);
         move_cmd.execute(&mut state).unwrap();
 
-        assert_eq!(state.sequences[&seq_id].tracks[0].clips[0].place.timeline_in_sec, 15.0);
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0]
+                .place
+                .timeline_in_sec,
+            15.0
+        );
 
         // Undo should restore position to 5.0
         move_cmd.undo(&mut state).unwrap();
 
-        assert_eq!(state.sequences[&seq_id].tracks[0].clips[0].place.timeline_in_sec, 5.0);
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0]
+                .place
+                .timeline_in_sec,
+            5.0
+        );
     }
 
     #[test]
@@ -1045,8 +1056,8 @@ mod tests {
         let asset_id = state.assets.keys().next().unwrap().clone();
 
         // Insert clip with source range 0-10
-        let mut insert_cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)
-            .with_source_range(0.0, 10.0);
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
         insert_cmd.execute(&mut state).unwrap();
 
         let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
@@ -1077,8 +1088,8 @@ mod tests {
         let asset_id = state.assets.keys().next().unwrap().clone();
 
         // Insert a 10-second clip
-        let mut insert_cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)
-            .with_source_range(0.0, 10.0);
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
         insert_cmd.execute(&mut state).unwrap();
 
         let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
@@ -1106,8 +1117,8 @@ mod tests {
         let asset_id = state.assets.keys().next().unwrap().clone();
 
         // Insert a clip with speed 2.0x (plays twice as fast)
-        let mut insert_cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)
-            .with_source_range(0.0, 20.0); // 20 sec of source
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 20.0); // 20 sec of source
         insert_cmd.execute(&mut state).unwrap();
 
         let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
@@ -1155,7 +1166,12 @@ mod tests {
         // Add second track
         let track2 = Track::new("Video 2", TrackKind::Video);
         let track2_id = track2.id.clone();
-        state.sequences.get_mut(&seq_id).unwrap().tracks.push(track2);
+        state
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .tracks
+            .push(track2);
 
         // Insert clip in track 1
         let mut insert_cmd = InsertClipCommand::new(&seq_id, &track1_id, &asset_id, 0.0);
@@ -1170,14 +1186,24 @@ mod tests {
         // Verify clip moved to track 2
         assert_eq!(state.sequences[&seq_id].tracks[0].clips.len(), 0);
         assert_eq!(state.sequences[&seq_id].tracks[1].clips.len(), 1);
-        assert_eq!(state.sequences[&seq_id].tracks[1].clips[0].place.timeline_in_sec, 10.0);
+        assert_eq!(
+            state.sequences[&seq_id].tracks[1].clips[0]
+                .place
+                .timeline_in_sec,
+            10.0
+        );
 
         // Undo should move back to track 1
         move_cmd.undo(&mut state).unwrap();
 
         assert_eq!(state.sequences[&seq_id].tracks[0].clips.len(), 1);
         assert_eq!(state.sequences[&seq_id].tracks[1].clips.len(), 0);
-        assert_eq!(state.sequences[&seq_id].tracks[0].clips[0].place.timeline_in_sec, 0.0);
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0]
+                .place
+                .timeline_in_sec,
+            0.0
+        );
     }
 
     #[test]

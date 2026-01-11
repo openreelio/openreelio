@@ -85,9 +85,7 @@ impl MetadataExtractor {
 
         // Check if file exists
         if !path.exists() {
-            return Err(CoreError::FileNotFound(
-                path.to_string_lossy().to_string(),
-            ));
+            return Err(CoreError::FileNotFound(path.to_string_lossy().to_string()));
         }
 
         // Run FFprobe
@@ -118,8 +116,9 @@ impl MetadataExtractor {
 
     /// Parse FFprobe JSON output into MediaMetadata
     fn parse_ffprobe_output(json: &str) -> CoreResult<MediaMetadata> {
-        let output: FFprobeOutput = serde_json::from_str(json)
-            .map_err(|e| CoreError::FFprobeError(format!("Failed to parse ffprobe output: {}", e)))?;
+        let output: FFprobeOutput = serde_json::from_str(json).map_err(|e| {
+            CoreError::FFprobeError(format!("Failed to parse ffprobe output: {}", e))
+        })?;
 
         let mut metadata = MediaMetadata::default();
 
@@ -160,16 +159,16 @@ impl MetadataExtractor {
             .map(|s| Self::parse_frame_rate(s))
             .unwrap_or_else(|| Ratio::new(30, 1));
 
-        let bitrate = stream
-            .bit_rate
-            .as_ref()
-            .and_then(|s| s.parse().ok());
+        let bitrate = stream.bit_rate.as_ref().and_then(|s| s.parse().ok());
 
         VideoInfo {
             width: stream.width.unwrap_or(1920),
             height: stream.height.unwrap_or(1080),
             fps,
-            codec: stream.codec_name.clone().unwrap_or_else(|| "unknown".to_string()),
+            codec: stream
+                .codec_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
             bitrate,
             has_alpha: false, // FFprobe doesn't easily expose this
         }
@@ -183,15 +182,15 @@ impl MetadataExtractor {
             .and_then(|s| s.parse().ok())
             .unwrap_or(48000);
 
-        let bitrate = stream
-            .bit_rate
-            .as_ref()
-            .and_then(|s| s.parse().ok());
+        let bitrate = stream.bit_rate.as_ref().and_then(|s| s.parse().ok());
 
         AudioInfo {
             sample_rate,
             channels: stream.channels.unwrap_or(2),
-            codec: stream.codec_name.clone().unwrap_or_else(|| "unknown".to_string()),
+            codec: stream
+                .codec_name
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
             bitrate,
         }
     }

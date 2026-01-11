@@ -186,10 +186,7 @@ impl StockMediaProvider {
             ),
             _ => format!(
                 "{}/search?query={}&per_page={}&page={}",
-                base,
-                encoded_text,
-                per_page,
-                page
+                base, encoded_text, per_page, page
             ),
         }
     }
@@ -230,7 +227,10 @@ impl StockMediaProvider {
     fn pexels_photo_to_asset(&self, photo: &pexels::Photo) -> PluginAssetRef {
         PluginAssetRef {
             id: format!("pexels-photo-{}", photo.id),
-            name: photo.alt.clone().unwrap_or_else(|| format!("Photo {}", photo.id)),
+            name: photo
+                .alt
+                .clone()
+                .unwrap_or_else(|| format!("Photo {}", photo.id)),
             asset_type: PluginAssetType::Image,
             thumbnail: Some(photo.src.small.clone()),
             duration_sec: None,
@@ -250,7 +250,9 @@ impl StockMediaProvider {
 
     /// Converts Pexels video to asset ref
     fn pexels_video_to_asset(&self, video: &pexels::Video) -> PluginAssetRef {
-        let best_file = video.video_files.iter()
+        let best_file = video
+            .video_files
+            .iter()
             .filter(|f| f.quality == "hd" || f.quality == "sd")
             .max_by_key(|f| f.width);
 
@@ -494,7 +496,10 @@ mod tests {
     #[test]
     fn test_url_encode_unicode() {
         // Korean text "고양이" (cat) should be UTF-8 encoded
-        assert_eq!(StockMediaProvider::url_encode("고양이"), "%EA%B3%A0%EC%96%91%EC%9D%B4");
+        assert_eq!(
+            StockMediaProvider::url_encode("고양이"),
+            "%EA%B3%A0%EC%96%91%EC%9D%B4"
+        );
     }
 
     #[test]

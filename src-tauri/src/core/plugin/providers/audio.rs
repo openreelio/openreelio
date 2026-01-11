@@ -159,10 +159,7 @@ impl AudioLibraryProvider {
 
                             // Index all entries
                             for audio in &manifest.entries {
-                                index.insert(
-                                    audio.id.clone(),
-                                    (lib_id.clone(), audio.clone()),
-                                );
+                                index.insert(audio.id.clone(), (lib_id.clone(), audio.clone()));
                             }
 
                             libraries.insert(lib_id, manifest);
@@ -186,13 +183,11 @@ impl AudioLibraryProvider {
 
     /// Loads a library manifest
     fn load_library_manifest(&self, path: &Path) -> CoreResult<AudioLibraryManifest> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            CoreError::PluginError(format!("Failed to read manifest: {}", e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| CoreError::PluginError(format!("Failed to read manifest: {}", e)))?;
 
-        serde_json::from_str(&content).map_err(|e| {
-            CoreError::PluginError(format!("Failed to parse manifest: {}", e))
-        })
+        serde_json::from_str(&content)
+            .map_err(|e| CoreError::PluginError(format!("Failed to parse manifest: {}", e)))
     }
 
     /// Builds the tag index for fast searching
@@ -338,8 +333,13 @@ impl AssetProviderPlugin for AudioLibraryProvider {
                 if let Some(ref text) = query.text {
                     let text_lower = text.to_lowercase();
                     let matches_name = entry.name.to_lowercase().contains(&text_lower);
-                    let matches_tags = entry.tags.iter().any(|t| t.to_lowercase().contains(&text_lower));
-                    let matches_desc = entry.description.as_ref()
+                    let matches_tags = entry
+                        .tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&text_lower));
+                    let matches_desc = entry
+                        .description
+                        .as_ref()
                         .map(|d| d.to_lowercase().contains(&text_lower))
                         .unwrap_or(false);
                     if !matches_name && !matches_tags && !matches_desc {
@@ -370,14 +370,13 @@ impl AssetProviderPlugin for AudioLibraryProvider {
     async fn fetch(&self, asset_ref: &str) -> CoreResult<PluginFetchedAsset> {
         let index = self.index.read().await;
 
-        let (lib_id, entry) = index.get(asset_ref).ok_or_else(|| {
-            CoreError::NotFound(format!("Audio not found: {}", asset_ref))
-        })?;
+        let (lib_id, entry) = index
+            .get(asset_ref)
+            .ok_or_else(|| CoreError::NotFound(format!("Audio not found: {}", asset_ref)))?;
 
         let path = self.get_audio_path(lib_id, &entry.path);
-        let data = std::fs::read(&path).map_err(|e| {
-            CoreError::PluginError(format!("Failed to read audio file: {}", e))
-        })?;
+        let data = std::fs::read(&path)
+            .map_err(|e| CoreError::PluginError(format!("Failed to read audio file: {}", e)))?;
 
         // Determine MIME type
         let mime_type = match path.extension().and_then(|e| e.to_str()) {
@@ -446,7 +445,11 @@ mod tests {
                     name: "Epic Adventure".to_string(),
                     path: "epic_adventure.mp3".to_string(),
                     category: AudioCategory::Bgm,
-                    tags: vec!["epic".to_string(), "adventure".to_string(), "cinematic".to_string()],
+                    tags: vec![
+                        "epic".to_string(),
+                        "adventure".to_string(),
+                        "cinematic".to_string(),
+                    ],
                     duration_sec: 180.0,
                     bpm: Some(120),
                     key: Some("C Major".to_string()),
@@ -472,7 +475,11 @@ mod tests {
                     name: "Forest Ambience".to_string(),
                     path: "forest.ogg".to_string(),
                     category: AudioCategory::Ambient,
-                    tags: vec!["forest".to_string(), "nature".to_string(), "birds".to_string()],
+                    tags: vec![
+                        "forest".to_string(),
+                        "nature".to_string(),
+                        "birds".to_string(),
+                    ],
                     duration_sec: 60.0,
                     bpm: None,
                     key: None,
@@ -519,7 +526,10 @@ mod tests {
         let provider = create_test_provider(&temp_dir);
         provider.initialize().await.unwrap();
 
-        let results = provider.search(&PluginSearchQuery::default()).await.unwrap();
+        let results = provider
+            .search(&PluginSearchQuery::default())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 3);
     }
 

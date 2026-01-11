@@ -524,16 +524,13 @@ mod tests {
     fn test_template_duration_calculations() {
         let template = Template::new("Test", TemplateCategory::Shorts)
             .with_section(
-                TemplateSection::new("Hook", ContentType::Video)
-                    .with_duration_range(3.0, 5.0),
+                TemplateSection::new("Hook", ContentType::Video).with_duration_range(3.0, 5.0),
             )
             .with_section(
-                TemplateSection::new("Main", ContentType::Video)
-                    .with_duration_range(10.0, 30.0),
+                TemplateSection::new("Main", ContentType::Video).with_duration_range(10.0, 30.0),
             )
             .with_section(
-                TemplateSection::new("CTA", ContentType::Video)
-                    .with_duration_range(2.0, 5.0),
+                TemplateSection::new("CTA", ContentType::Video).with_duration_range(2.0, 5.0),
             );
 
         assert_eq!(template.min_duration(), 15.0);
@@ -542,11 +539,9 @@ mod tests {
 
     #[test]
     fn test_template_validate_success() {
-        let template = Template::new("Valid Template", TemplateCategory::Shorts)
-            .with_section(
-                TemplateSection::new("Hook", ContentType::Video)
-                    .with_duration_range(3.0, 5.0),
-            );
+        let template = Template::new("Valid Template", TemplateCategory::Shorts).with_section(
+            TemplateSection::new("Hook", ContentType::Video).with_duration_range(3.0, 5.0),
+        );
 
         assert!(template.validate().is_ok());
     }

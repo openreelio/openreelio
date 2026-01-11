@@ -105,20 +105,14 @@ impl Default for WorkerPoolConfig {
 #[derive(Clone, Debug)]
 pub enum JobEvent {
     /// Job status changed
-    StatusChanged {
-        job_id: JobId,
-        status: JobStatus,
-    },
+    StatusChanged { job_id: JobId, status: JobStatus },
     /// Job completed
     Completed {
         job_id: JobId,
         result: serde_json::Value,
     },
     /// Job failed
-    Failed {
-        job_id: JobId,
-        error: String,
-    },
+    Failed { job_id: JobId, error: String },
 }
 
 /// Manages background workers for job execution
@@ -279,8 +273,8 @@ mod tests {
         let pool = WorkerPool::with_defaults();
 
         // Submit jobs with different priorities
-        let low = Job::new(JobType::Indexing, serde_json::json!({}))
-            .with_priority(Priority::Background);
+        let low =
+            Job::new(JobType::Indexing, serde_json::json!({})).with_priority(Priority::Background);
         let high = Job::new(JobType::FinalRender, serde_json::json!({}))
             .with_priority(Priority::UserRequest);
 
@@ -297,7 +291,10 @@ mod tests {
     fn test_get_job() {
         let pool = WorkerPool::with_defaults();
 
-        let job = Job::new(JobType::ThumbnailGeneration, serde_json::json!({"assetId": "test"}));
+        let job = Job::new(
+            JobType::ThumbnailGeneration,
+            serde_json::json!({"assetId": "test"}),
+        );
         let job_id = job.id.clone();
         pool.submit(job).unwrap();
 

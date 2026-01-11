@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
-    project::{OpsLog, OpKind, Operation, ProjectState},
+    project::{OpKind, Operation, OpsLog, ProjectState},
     CoreError, CoreResult, OpId,
 };
 
@@ -108,10 +108,7 @@ impl CommandExecutor {
 
         // Log the operation if persistence is enabled
         if let Some(ops_log) = &self.ops_log {
-            let operation = Operation::new(
-                Self::type_name_to_op_kind(&type_name),
-                json_data,
-            );
+            let operation = Operation::new(Self::type_name_to_op_kind(&type_name), json_data);
             ops_log.append(&operation)?;
         }
 
@@ -135,16 +132,14 @@ impl CommandExecutor {
 
     /// Undoes the last command
     pub fn undo(&mut self, state: &mut ProjectState) -> CoreResult<()> {
-        let entry = self
-            .undo_stack
-            .pop_back()
-            .ok_or(CoreError::NothingToUndo)?;
+        let entry = self.undo_stack.pop_back().ok_or(CoreError::NothingToUndo)?;
 
         // Execute undo (undo uses &self, so we just need a lock)
         {
-            let command = entry.command.lock().map_err(|_| {
-                CoreError::Internal("Failed to lock command for undo".into())
-            })?;
+            let command = entry
+                .command
+                .lock()
+                .map_err(|_| CoreError::Internal("Failed to lock command for undo".into()))?;
             command.undo(state)?;
         }
 
@@ -158,16 +153,14 @@ impl CommandExecutor {
 
     /// Redoes the last undone command
     pub fn redo(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
-        let entry = self
-            .redo_stack
-            .pop_back()
-            .ok_or(CoreError::NothingToRedo)?;
+        let entry = self.redo_stack.pop_back().ok_or(CoreError::NothingToRedo)?;
 
         // Re-execute command (redo uses &mut self)
         let result = {
-            let mut command = entry.command.lock().map_err(|_| {
-                CoreError::Internal("Failed to lock command for redo".into())
-            })?;
+            let mut command = entry
+                .command
+                .lock()
+                .map_err(|_| CoreError::Internal("Failed to lock command for redo".into()))?;
             command.redo(state)?
         };
 
@@ -213,16 +206,16 @@ impl CommandExecutor {
 
     /// Gets the last executed command type name
     pub fn last_command_type(&self) -> Option<String> {
-        self.undo_stack.back().and_then(|e| {
-            e.command.lock().ok().map(|cmd| cmd.type_name().to_string())
-        })
+        self.undo_stack
+            .back()
+            .and_then(|e| e.command.lock().ok().map(|cmd| cmd.type_name().to_string()))
     }
 
     /// Gets the last undone command type name (for redo)
     pub fn last_undone_command_type(&self) -> Option<String> {
-        self.redo_stack.back().and_then(|e| {
-            e.command.lock().ok().map(|cmd| cmd.type_name().to_string())
-        })
+        self.redo_stack
+            .back()
+            .and_then(|e| e.command.lock().ok().map(|cmd| cmd.type_name().to_string()))
     }
 
     /// Converts command type name to OpKind
@@ -278,7 +271,9 @@ mod tests {
     impl Command for TestAddAssetCommand {
         fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
             let op_id = ulid::Ulid::new().to_string();
-            state.assets.insert(self.asset.id.clone(), self.asset.clone());
+            state
+                .assets
+                .insert(self.asset.id.clone(), self.asset.clone());
 
             Ok(CommandResult::new(&op_id)
                 .with_change(StateChange::AssetAdded {
@@ -356,7 +351,9 @@ mod tests {
         let mut state = ProjectState::new("Test");
 
         let asset = Asset::new_video("test.mp4", "/test.mp4", VideoInfo::default());
-        let cmd = Box::new(TestAddAssetCommand { asset: asset.clone() });
+        let cmd = Box::new(TestAddAssetCommand {
+            asset: asset.clone(),
+        });
 
         let result = executor.execute(cmd, &mut state).unwrap();
 
@@ -371,7 +368,9 @@ mod tests {
         let mut state = ProjectState::new("Test");
 
         let asset = Asset::new_video("test.mp4", "/test.mp4", VideoInfo::default());
-        let cmd = Box::new(TestAddAssetCommand { asset: asset.clone() });
+        let cmd = Box::new(TestAddAssetCommand {
+            asset: asset.clone(),
+        });
 
         executor.execute(cmd, &mut state).unwrap();
         assert_eq!(state.assets.len(), 1);
@@ -386,7 +385,9 @@ mod tests {
         let mut state = ProjectState::new("Test");
 
         let asset = Asset::new_video("test.mp4", "/test.mp4", VideoInfo::default());
-        let cmd = Box::new(TestAddAssetCommand { asset: asset.clone() });
+        let cmd = Box::new(TestAddAssetCommand {
+            asset: asset.clone(),
+        });
 
         executor.execute(cmd, &mut state).unwrap();
         executor.undo(&mut state).unwrap();
@@ -530,7 +531,10 @@ mod tests {
         assert_eq!(executor.last_command_type(), Some("AddAsset".to_string()));
 
         executor.undo(&mut state).unwrap();
-        assert_eq!(executor.last_undone_command_type(), Some("AddAsset".to_string()));
+        assert_eq!(
+            executor.last_undone_command_type(),
+            Some("AddAsset".to_string())
+        );
     }
 
     #[test]
@@ -570,11 +574,15 @@ mod tests {
 
         // Execute commands
         let asset1 = Asset::new_video("video1.mp4", "/video1.mp4", VideoInfo::default());
-        let cmd1 = Box::new(TestAddAssetCommand { asset: asset1.clone() });
+        let cmd1 = Box::new(TestAddAssetCommand {
+            asset: asset1.clone(),
+        });
         executor.execute(cmd1, &mut state).unwrap();
 
         let asset2 = Asset::new_video("video2.mp4", "/video2.mp4", VideoInfo::default());
-        let cmd2 = Box::new(TestAddAssetCommand { asset: asset2.clone() });
+        let cmd2 = Box::new(TestAddAssetCommand {
+            asset: asset2.clone(),
+        });
         executor.execute(cmd2, &mut state).unwrap();
 
         // Verify ops log has the operations
@@ -599,7 +607,9 @@ mod tests {
             let mut state = ProjectState::new("Test");
 
             let asset = Asset::new_video("test.mp4", "/test.mp4", VideoInfo::default());
-            let cmd = Box::new(TestAddAssetCommand { asset: asset.clone() });
+            let cmd = Box::new(TestAddAssetCommand {
+                asset: asset.clone(),
+            });
             executor.execute(cmd, &mut state).unwrap();
         }
 
@@ -652,7 +662,9 @@ mod tests {
             .with_hash("abc123");
         let asset_id = asset.id.clone();
 
-        let cmd = Box::new(TestAddAssetCommand { asset: asset.clone() });
+        let cmd = Box::new(TestAddAssetCommand {
+            asset: asset.clone(),
+        });
         executor.execute(cmd, &mut state).unwrap();
 
         // Verify asset is in state

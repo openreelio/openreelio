@@ -37,8 +37,9 @@ impl IndexDb {
 
     /// Creates an in-memory database (for testing)
     pub fn in_memory() -> CoreResult<Self> {
-        let conn = Connection::open_in_memory()
-            .map_err(|e| CoreError::Internal(format!("Failed to create in-memory database: {}", e)))?;
+        let conn = Connection::open_in_memory().map_err(|e| {
+            CoreError::Internal(format!("Failed to create in-memory database: {}", e))
+        })?;
 
         let db = Self { conn };
         db.init_schema()?;

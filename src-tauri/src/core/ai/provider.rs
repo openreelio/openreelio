@@ -254,7 +254,10 @@ mod tests {
             .with_json_mode();
 
         assert_eq!(request.prompt, "Hello");
-        assert_eq!(request.system, Some("You are a helpful assistant".to_string()));
+        assert_eq!(
+            request.system,
+            Some("You are a helpful assistant".to_string())
+        );
         assert_eq!(request.max_tokens, Some(100));
         assert_eq!(request.temperature, Some(0.7));
         assert_eq!(request.model, Some("gpt-4".to_string()));

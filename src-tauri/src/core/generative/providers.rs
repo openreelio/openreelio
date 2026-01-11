@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use super::audio::{MusicGenerationParams, MusicGenerationResult, TTSParams, TTSResult};
 use super::image::{ImageGenerationParams, ImageGenerationResult};
-use super::audio::{TTSParams, TTSResult, MusicGenerationParams, MusicGenerationResult};
 use crate::core::{CoreError, CoreResult};
 
 /// Capabilities supported by a provider
@@ -120,7 +120,10 @@ pub trait GenerativeProvider: Send + Sync {
     fn is_available(&self) -> bool;
 
     /// Generates an image
-    async fn generate_image(&self, params: &ImageGenerationParams) -> CoreResult<ImageGenerationResult> {
+    async fn generate_image(
+        &self,
+        params: &ImageGenerationParams,
+    ) -> CoreResult<ImageGenerationResult> {
         Err(CoreError::NotSupported(format!(
             "{} does not support image generation",
             self.name()
@@ -136,7 +139,10 @@ pub trait GenerativeProvider: Send + Sync {
     }
 
     /// Generates music
-    async fn generate_music(&self, params: &MusicGenerationParams) -> CoreResult<MusicGenerationResult> {
+    async fn generate_music(
+        &self,
+        params: &MusicGenerationParams,
+    ) -> CoreResult<MusicGenerationResult> {
         Err(CoreError::NotSupported(format!(
             "{} does not support music generation",
             self.name()
@@ -266,9 +272,14 @@ impl GenerativeProvider for MockGenerativeProvider {
         self.available
     }
 
-    async fn generate_image(&self, params: &ImageGenerationParams) -> CoreResult<ImageGenerationResult> {
+    async fn generate_image(
+        &self,
+        params: &ImageGenerationParams,
+    ) -> CoreResult<ImageGenerationResult> {
         if !self.supports(ProviderCapability::ImageGeneration) {
-            return Err(CoreError::NotSupported("Image generation not supported".to_string()));
+            return Err(CoreError::NotSupported(
+                "Image generation not supported".to_string(),
+            ));
         }
 
         // Return mock result
@@ -302,9 +313,14 @@ impl GenerativeProvider for MockGenerativeProvider {
         })
     }
 
-    async fn generate_music(&self, params: &MusicGenerationParams) -> CoreResult<MusicGenerationResult> {
+    async fn generate_music(
+        &self,
+        params: &MusicGenerationParams,
+    ) -> CoreResult<MusicGenerationResult> {
         if !self.supports(ProviderCapability::MusicGeneration) {
-            return Err(CoreError::NotSupported("Music generation not supported".to_string()));
+            return Err(CoreError::NotSupported(
+                "Music generation not supported".to_string(),
+            ));
         }
 
         Ok(MusicGenerationResult {
@@ -329,16 +345,18 @@ impl GenerativeProvider for MockGenerativeProvider {
                 ModelInfo::new("mock-dalle", "Mock DALL-E", capability)
                     .with_cost_tier(CostTier::High),
             ],
-            ProviderCapability::TextToSpeech => vec![
-                ModelInfo::new("mock-tts", "Mock TTS", capability)
+            ProviderCapability::TextToSpeech => {
+                vec![ModelInfo::new("mock-tts", "Mock TTS", capability)
                     .with_cost_tier(CostTier::Low)
-                    .as_default(),
-            ],
-            ProviderCapability::MusicGeneration => vec![
-                ModelInfo::new("mock-music", "Mock Music Generator", capability)
-                    .with_cost_tier(CostTier::Medium)
-                    .as_default(),
-            ],
+                    .as_default()]
+            }
+            ProviderCapability::MusicGeneration => {
+                vec![
+                    ModelInfo::new("mock-music", "Mock Music Generator", capability)
+                        .with_cost_tier(CostTier::Medium)
+                        .as_default(),
+                ]
+            }
             _ => vec![],
         };
 
@@ -360,8 +378,14 @@ mod tests {
 
     #[test]
     fn test_capability_display() {
-        assert_eq!(ProviderCapability::ImageGeneration.to_string(), "Image Generation");
-        assert_eq!(ProviderCapability::TextToSpeech.to_string(), "Text-to-Speech");
+        assert_eq!(
+            ProviderCapability::ImageGeneration.to_string(),
+            "Image Generation"
+        );
+        assert_eq!(
+            ProviderCapability::TextToSpeech.to_string(),
+            "Text-to-Speech"
+        );
     }
 
     #[test]
@@ -401,7 +425,10 @@ mod tests {
             .with_setting("quality", "hd");
 
         assert_eq!(config.model_id, Some("dall-e-3".to_string()));
-        assert_eq!(config.get_setting::<String>("quality"), Some("hd".to_string()));
+        assert_eq!(
+            config.get_setting::<String>("quality"),
+            Some("hd".to_string())
+        );
     }
 
     // ========================================================================
@@ -410,7 +437,11 @@ mod tests {
 
     #[test]
     fn test_model_info_new() {
-        let model = ModelInfo::new("test-model", "Test Model", ProviderCapability::ImageGeneration);
+        let model = ModelInfo::new(
+            "test-model",
+            "Test Model",
+            ProviderCapability::ImageGeneration,
+        );
 
         assert_eq!(model.id, "test-model");
         assert_eq!(model.name, "Test Model");
@@ -488,7 +519,10 @@ mod tests {
     async fn test_mock_provider_list_models() {
         let provider = MockGenerativeProvider::new("Test");
 
-        let models = provider.list_models(ProviderCapability::ImageGeneration).await.unwrap();
+        let models = provider
+            .list_models(ProviderCapability::ImageGeneration)
+            .await
+            .unwrap();
         assert!(!models.is_empty());
         assert!(models.iter().any(|m| m.is_default));
     }

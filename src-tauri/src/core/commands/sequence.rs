@@ -243,8 +243,8 @@ mod tests {
     fn test_create_sequence_without_default_tracks() {
         let mut state = create_test_state();
 
-        let mut cmd = CreateSequenceCommand::new("Empty Sequence", "1080p")
-            .with_default_tracks(false);
+        let mut cmd =
+            CreateSequenceCommand::new("Empty Sequence", "1080p").with_default_tracks(false);
         cmd.execute(&mut state).unwrap();
 
         let seq = state.sequences.values().next().unwrap();

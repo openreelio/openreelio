@@ -335,28 +335,27 @@ pub async fn execute_command(
     // Route to appropriate command based on type
     let command: Box<dyn crate::core::commands::Command> = match command_type.as_str() {
         "insertClip" | "InsertClip" => {
-            let seq_id = payload["sequenceId"]
-                .as_str()
-                .ok_or("Missing sequenceId")?;
+            let seq_id = payload["sequenceId"].as_str().ok_or("Missing sequenceId")?;
             let track_id = payload["trackId"].as_str().ok_or("Missing trackId")?;
             let asset_id = payload["assetId"].as_str().ok_or("Missing assetId")?;
             let timeline_in = payload["timelineIn"].as_f64().unwrap_or(0.0);
 
-            Box::new(InsertClipCommand::new(seq_id, track_id, asset_id, timeline_in))
+            Box::new(InsertClipCommand::new(
+                seq_id,
+                track_id,
+                asset_id,
+                timeline_in,
+            ))
         }
         "removeClip" | "RemoveClip" => {
-            let seq_id = payload["sequenceId"]
-                .as_str()
-                .ok_or("Missing sequenceId")?;
+            let seq_id = payload["sequenceId"].as_str().ok_or("Missing sequenceId")?;
             let track_id = payload["trackId"].as_str().ok_or("Missing trackId")?;
             let clip_id = payload["clipId"].as_str().ok_or("Missing clipId")?;
 
             Box::new(RemoveClipCommand::new(seq_id, track_id, clip_id))
         }
         "moveClip" | "MoveClip" => {
-            let seq_id = payload["sequenceId"]
-                .as_str()
-                .ok_or("Missing sequenceId")?;
+            let seq_id = payload["sequenceId"].as_str().ok_or("Missing sequenceId")?;
             let track_id = payload["trackId"].as_str().ok_or("Missing trackId")?;
             let clip_id = payload["clipId"].as_str().ok_or("Missing clipId")?;
             let new_timeline_in = payload["newTimelineIn"]
@@ -373,9 +372,7 @@ pub async fn execute_command(
             ))
         }
         "trimClip" | "TrimClip" => {
-            let seq_id = payload["sequenceId"]
-                .as_str()
-                .ok_or("Missing sequenceId")?;
+            let seq_id = payload["sequenceId"].as_str().ok_or("Missing sequenceId")?;
             let track_id = payload["trackId"].as_str().ok_or("Missing trackId")?;
             let clip_id = payload["clipId"].as_str().ok_or("Missing clipId")?;
             let new_source_in = payload["newSourceIn"].as_f64();

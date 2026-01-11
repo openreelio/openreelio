@@ -345,11 +345,7 @@ impl TemplateStyle {
     }
 
     /// Sets a custom property
-    pub fn with_custom_property<T: Serialize>(
-        mut self,
-        key: impl Into<String>,
-        value: T,
-    ) -> Self {
+    pub fn with_custom_property<T: Serialize>(mut self, key: impl Into<String>, value: T) -> Self {
         if let Ok(v) = serde_json::to_value(value) {
             self.custom_properties.insert(key.into(), v);
         }
@@ -480,8 +476,8 @@ mod tests {
 
     #[test]
     fn test_section_duration_helpers() {
-        let section = TemplateSection::new("Test", ContentType::Video)
-            .with_duration_range(5.0, 15.0);
+        let section =
+            TemplateSection::new("Test", ContentType::Video).with_duration_range(5.0, 15.0);
 
         assert_eq!(section.min_duration(), 5.0);
         assert_eq!(section.max_duration(), 15.0);
@@ -507,8 +503,8 @@ mod tests {
 
     #[test]
     fn test_section_validate_negative_duration() {
-        let section = TemplateSection::new("Test", ContentType::Video)
-            .with_duration_range(-1.0, 10.0);
+        let section =
+            TemplateSection::new("Test", ContentType::Video).with_duration_range(-1.0, 10.0);
 
         let result = section.validate();
         assert!(result.is_err());
@@ -517,8 +513,8 @@ mod tests {
 
     #[test]
     fn test_section_validate_invalid_duration_range() {
-        let section = TemplateSection::new("Test", ContentType::Video)
-            .with_duration_range(10.0, 5.0);
+        let section =
+            TemplateSection::new("Test", ContentType::Video).with_duration_range(10.0, 5.0);
 
         let result = section.validate();
         assert!(result.is_err());
@@ -527,8 +523,8 @@ mod tests {
 
     #[test]
     fn test_section_serialization() {
-        let section = TemplateSection::new("Hook", ContentType::Video)
-            .with_duration_range(3.0, 5.0);
+        let section =
+            TemplateSection::new("Hook", ContentType::Video).with_duration_range(3.0, 5.0);
 
         let json = serde_json::to_string(&section).unwrap();
         let parsed: TemplateSection = serde_json::from_str(&json).unwrap();
@@ -586,21 +582,20 @@ mod tests {
             .with_custom_property("glow_enabled", true)
             .with_custom_property("glow_intensity", 0.8);
 
-        assert_eq!(style.get_custom_property::<bool>("glow_enabled"), Some(true));
+        assert_eq!(
+            style.get_custom_property::<bool>("glow_enabled"),
+            Some(true)
+        );
         assert_eq!(
             style.get_custom_property::<f64>("glow_intensity"),
             Some(0.8)
         );
-        assert_eq!(
-            style.get_custom_property::<String>("nonexistent"),
-            None
-        );
+        assert_eq!(style.get_custom_property::<String>("nonexistent"), None);
     }
 
     #[test]
     fn test_style_serialization() {
-        let style = TemplateStyle::dark_theme()
-            .with_caption_font("Montserrat", 56);
+        let style = TemplateStyle::dark_theme().with_caption_font("Montserrat", 56);
 
         let json = serde_json::to_string(&style).unwrap();
         let parsed: TemplateStyle = serde_json::from_str(&json).unwrap();

@@ -93,18 +93,16 @@ pub enum PluginCapability {
 impl PluginManifest {
     /// Loads a manifest from a JSON file
     pub fn load_from_file(path: &Path) -> CoreResult<Self> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            CoreError::PluginError(format!("Failed to read manifest file: {}", e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| CoreError::PluginError(format!("Failed to read manifest file: {}", e)))?;
 
         Self::parse(&content)
     }
 
     /// Parses a manifest from JSON string
     pub fn parse(json: &str) -> CoreResult<Self> {
-        let manifest: Self = serde_json::from_str(json).map_err(|e| {
-            CoreError::PluginError(format!("Invalid manifest JSON: {}", e))
-        })?;
+        let manifest: Self = serde_json::from_str(json)
+            .map_err(|e| CoreError::PluginError(format!("Invalid manifest JSON: {}", e)))?;
 
         manifest.validate()?;
         Ok(manifest)
@@ -276,7 +274,10 @@ mod tests {
         assert_eq!(manifest.id, "com.example.meme-pack");
         assert_eq!(manifest.name, "Meme Pack");
         assert_eq!(manifest.version, "1.0.0");
-        assert_eq!(manifest.description, Some("A collection of popular memes".to_string()));
+        assert_eq!(
+            manifest.description,
+            Some("A collection of popular memes".to_string())
+        );
         assert_eq!(manifest.author, Some("Example Author".to_string()));
         assert_eq!(manifest.entry, "plugin.wasm");
         assert_eq!(manifest.capabilities.len(), 2);
@@ -303,7 +304,10 @@ mod tests {
     fn test_parse_invalid_json() {
         let result = PluginManifest::parse("not valid json");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid manifest JSON"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid manifest JSON"));
     }
 
     #[test]
@@ -319,7 +323,10 @@ mod tests {
 
         let result = PluginManifest::parse(json);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("ID cannot be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("ID cannot be empty"));
     }
 
     #[test]
@@ -335,7 +342,10 @@ mod tests {
 
         let result = PluginManifest::parse(json);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("name cannot be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("name cannot be empty"));
     }
 
     #[test]
@@ -351,7 +361,10 @@ mod tests {
 
         let result = PluginManifest::parse(json);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid version format"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid version format"));
     }
 
     #[test]
@@ -367,7 +380,10 @@ mod tests {
 
         let result = PluginManifest::parse(json);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("at least one capability"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("at least one capability"));
     }
 
     #[test]
@@ -383,7 +399,10 @@ mod tests {
 
         let result = PluginManifest::parse(json);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("entry point cannot be empty"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("entry point cannot be empty"));
     }
 
     // ========================================================================
@@ -439,7 +458,10 @@ mod tests {
 
         let result = PluginManifest::parse(json);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid fs permission scope"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid fs permission scope"));
     }
 
     #[test]
@@ -473,7 +495,10 @@ mod tests {
 
         let result = PluginManifest::parse(json);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("must start with http://"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must start with http://"));
     }
 
     // ========================================================================

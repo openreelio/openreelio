@@ -98,9 +98,8 @@ impl MemePackProvider {
 
     /// Loads all meme packs from the base directory
     async fn load_packs(&self) -> CoreResult<()> {
-        let entries = std::fs::read_dir(&self.base_dir).map_err(|e| {
-            CoreError::PluginError(format!("Failed to read meme directory: {}", e))
-        })?;
+        let entries = std::fs::read_dir(&self.base_dir)
+            .map_err(|e| CoreError::PluginError(format!("Failed to read meme directory: {}", e)))?;
 
         let mut packs = self.packs.write().await;
         let mut index = self.index.write().await;
@@ -120,10 +119,7 @@ impl MemePackProvider {
 
                             // Index all memes
                             for meme in &manifest.memes {
-                                index.insert(
-                                    meme.id.clone(),
-                                    (pack_id.clone(), meme.clone()),
-                                );
+                                index.insert(meme.id.clone(), (pack_id.clone(), meme.clone()));
                             }
 
                             packs.insert(pack_id, manifest);
@@ -136,20 +132,22 @@ impl MemePackProvider {
             }
         }
 
-        tracing::info!("Loaded {} meme packs with {} total memes", packs.len(), index.len());
+        tracing::info!(
+            "Loaded {} meme packs with {} total memes",
+            packs.len(),
+            index.len()
+        );
 
         Ok(())
     }
 
     /// Loads a single pack manifest
     fn load_pack_manifest(&self, path: &Path) -> CoreResult<MemePackManifest> {
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            CoreError::PluginError(format!("Failed to read manifest: {}", e))
-        })?;
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| CoreError::PluginError(format!("Failed to read manifest: {}", e)))?;
 
-        serde_json::from_str(&content).map_err(|e| {
-            CoreError::PluginError(format!("Failed to parse manifest: {}", e))
-        })
+        serde_json::from_str(&content)
+            .map_err(|e| CoreError::PluginError(format!("Failed to parse manifest: {}", e)))
     }
 
     /// Gets the full path to a meme file
@@ -225,7 +223,10 @@ impl AssetProviderPlugin for MemePackProvider {
                 if let Some(ref text) = query.text {
                     let text_lower = text.to_lowercase();
                     let matches_name = entry.name.to_lowercase().contains(&text_lower);
-                    let matches_tags = entry.tags.iter().any(|t| t.to_lowercase().contains(&text_lower));
+                    let matches_tags = entry
+                        .tags
+                        .iter()
+                        .any(|t| t.to_lowercase().contains(&text_lower));
                     let matches_category = entry.category.to_lowercase().contains(&text_lower);
                     if !matches_name && !matches_tags && !matches_category {
                         return false;
@@ -234,9 +235,10 @@ impl AssetProviderPlugin for MemePackProvider {
 
                 // Filter by tags
                 if !query.tags.is_empty() {
-                    let has_all_tags = query.tags.iter().all(|qt| {
-                        entry.tags.iter().any(|et| et.eq_ignore_ascii_case(qt))
-                    });
+                    let has_all_tags = query
+                        .tags
+                        .iter()
+                        .all(|qt| entry.tags.iter().any(|et| et.eq_ignore_ascii_case(qt)));
                     if !has_all_tags {
                         return false;
                     }
@@ -258,14 +260,13 @@ impl AssetProviderPlugin for MemePackProvider {
     async fn fetch(&self, asset_ref: &str) -> CoreResult<PluginFetchedAsset> {
         let index = self.index.read().await;
 
-        let (pack_id, entry) = index.get(asset_ref).ok_or_else(|| {
-            CoreError::NotFound(format!("Meme not found: {}", asset_ref))
-        })?;
+        let (pack_id, entry) = index
+            .get(asset_ref)
+            .ok_or_else(|| CoreError::NotFound(format!("Meme not found: {}", asset_ref)))?;
 
         let path = self.get_meme_path(pack_id, &entry.path);
-        let data = std::fs::read(&path).map_err(|e| {
-            CoreError::PluginError(format!("Failed to read meme file: {}", e))
-        })?;
+        let data = std::fs::read(&path)
+            .map_err(|e| CoreError::PluginError(format!("Failed to read meme file: {}", e)))?;
 
         // Determine MIME type based on extension
         let mime_type = match path.extension().and_then(|e| e.to_str()) {
@@ -330,7 +331,11 @@ mod tests {
                     name: "Surprised Pikachu".to_string(),
                     path: "surprised_pikachu.png".to_string(),
                     asset_type: PluginAssetType::Image,
-                    tags: vec!["pokemon".to_string(), "surprised".to_string(), "reaction".to_string()],
+                    tags: vec![
+                        "pokemon".to_string(),
+                        "surprised".to_string(),
+                        "reaction".to_string(),
+                    ],
                     category: "Reactions".to_string(),
                     source: Some("Pokemon".to_string()),
                 },
@@ -382,7 +387,10 @@ mod tests {
         let provider = create_test_provider(&temp_dir);
         provider.initialize().await.unwrap();
 
-        let results = provider.search(&PluginSearchQuery::default()).await.unwrap();
+        let results = provider
+            .search(&PluginSearchQuery::default())
+            .await
+            .unwrap();
         assert_eq!(results.len(), 2);
     }
 
