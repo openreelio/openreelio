@@ -4,6 +4,7 @@ updates:
   # Frontend (npm) dependencies
   - package-ecosystem: "npm"
     directory: "/"
+    target-branch: "main"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -37,6 +38,7 @@ updates:
   # Rust (cargo) dependencies
   - package-ecosystem: "cargo"
     directory: "/src-tauri"
+    target-branch: "main"
     schedule:
       interval: "weekly"
       day: "monday"
@@ -60,6 +62,7 @@ updates:
   # GitHub Actions
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "main"
     schedule:
       interval: "weekly"
       day: "monday"
