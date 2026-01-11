@@ -1,0 +1,81 @@
+name: Documentation Issue
+description: Report a documentation problem or request documentation improvements
+title: "[Docs]: "
+labels: ["documentation"]
+assignees: []
+
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Help us improve our documentation! Please describe the issue or improvement.
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Documentation Type
+      description: What type of documentation issue is this?
+      options:
+        - Missing documentation
+        - Incorrect/outdated information
+        - Unclear explanation
+        - Typo/grammar
+        - Missing example/code sample
+        - Broken link
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: doc-area
+    attributes:
+      label: Documentation Area
+      description: Which documentation area is affected?
+      options:
+        - README
+        - API Reference
+        - Architecture Guide
+        - Plugin Development
+        - Contributing Guide
+        - Command Reference
+        - Data Models
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: location
+    attributes:
+      label: Document Location
+      description: URL or file path of the affected documentation
+      placeholder: "e.g., docs/API_SPEC.md or https://..."
+
+  - type: textarea
+    id: current
+    attributes:
+      label: Current Documentation
+      description: What does the documentation currently say? (if applicable)
+      placeholder: "Quote or describe the current documentation..."
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested Improvement
+      description: What should the documentation say instead?
+      placeholder: "Describe what should be documented or how it should be improved..."
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      description: Would you be willing to help improve this documentation?
+      options:
+        - label: I would be willing to submit a PR for this documentation improvement
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Add any other context about the documentation issue.
