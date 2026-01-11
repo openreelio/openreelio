@@ -1,14 +1,17 @@
 /// <reference types="vitest" />
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
-import { resolve } from 'path';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 // https://vitejs.dev/config/
+const rootDir = fileURLToPath(new URL('.', import.meta.url));
+
 export default defineConfig({
   plugins: [react()],
   resolve: {
     alias: {
-      '@': resolve(__dirname, 'src'),
+      '@': resolve(rootDir, 'src'),
     },
   },
   // Vitest configuration
