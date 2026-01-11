@@ -6,8 +6,8 @@ authors = ["OpenReelio Team"]
 license = "MIT"
 repository = "https://github.com/openreelio/openreelio"
 edition = "2021"
-# Note: transitive dependencies currently require Rust >= 1.83 (e.g. `icu_collections`).
-rust-version = "1.83"
+# Note: transitive dependencies require Rust >= 1.85 (e.g. crates using Edition 2024).
+rust-version = "1.85"
 
 [lib]
 name = "openreelio_lib"
