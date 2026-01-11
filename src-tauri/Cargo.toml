@@ -52,7 +52,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 async-trait = "0.1"
 
 # WASM Plugin System
-wasmtime = { version = "27", features = ["fuel"] }
+wasmtime = "27"
 wasmtime-wasi = "27"
 
 [dev-dependencies]

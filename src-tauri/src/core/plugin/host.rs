@@ -283,8 +283,8 @@ impl PluginHost {
 
         if self.config.fuel_enabled {
             store
-                .add_fuel(self.config.initial_fuel)
-                .map_err(|e| CoreError::PluginError(format!("Failed to add fuel: {}", e)))?;
+                .set_fuel(self.config.initial_fuel)
+                .map_err(|e| CoreError::PluginError(format!("Failed to set fuel: {}", e)))?;
         }
 
         Ok(store)
