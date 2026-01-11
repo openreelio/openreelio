@@ -347,7 +347,7 @@ impl WorkerPool {
                 type_sems.get(&task_type).cloned()
             };
             let _type_permit = if let Some(type_sem) = type_sem {
-                Some(type_sem.acquire().await.unwrap())
+                Some(type_sem.acquire_owned().await.unwrap())
             } else {
                 None
             };
