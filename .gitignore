@@ -10,7 +10,8 @@
 # Node.js / Frontend
 # =============================================================================
 node_modules/
-dist/
+dist/*
+!dist/.gitkeep
 dist-ssr/
 *.local
 
