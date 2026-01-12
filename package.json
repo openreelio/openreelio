@@ -10,6 +10,7 @@
     "tauri": "tauri",
     "test": "vitest",
     "test:ui": "vitest --ui",
+    "type-check": "tsc --noEmit",
     "lint": "eslint . --ext .js,.jsx,.ts,.tsx --fix",
     "format": "prettier --write src/"
   },

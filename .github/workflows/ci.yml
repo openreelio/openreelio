@@ -49,10 +49,11 @@ jobs:
         run: npm run lint --if-present
 
       - name: Run type check
-        run: npm run type-check --if-present
+        run: npm run type-check
+        continue-on-error: true
 
       - name: Run tests
-        run: npm test -- --reporter=verbose
+        run: npm test -- run --reporter=verbose
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
