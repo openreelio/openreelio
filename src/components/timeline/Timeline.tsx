@@ -4,12 +4,13 @@
  * Main timeline container that integrates all timeline elements.
  */
 
-import { useState, useCallback, useRef, type KeyboardEvent, type MouseEvent, type DragEvent } from 'react';
+import { useState, useCallback, useRef, type KeyboardEvent, type MouseEvent, type DragEvent, type WheelEvent } from 'react';
 import type { Sequence, Clip as ClipType } from '@/types';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { TimeRuler } from './TimeRuler';
 import { Track } from './Track';
 import { Playhead } from './Playhead';
+import { TimelineToolbar } from './TimelineToolbar';
 
 // =============================================================================
 // Types
@@ -51,9 +52,13 @@ export function Timeline({ sequence, onDeleteClips, onAssetDrop }: TimelineProps
     scrollY,
     selectedClipIds,
     setPlayhead,
+    setScrollX,
     selectClip,
     clearClipSelection,
     togglePlayback,
+    zoomIn,
+    zoomOut,
+    fitToWindow,
   } = useTimelineStore();
 
   // Drag and drop state
@@ -134,6 +139,39 @@ export function Timeline({ sequence, onDeleteClips, onAssetDrop }: TimelineProps
     },
     [togglePlayback, selectedClipIds, onDeleteClips, clearClipSelection]
   );
+
+  // ===========================================================================
+  // Scroll and Zoom Handlers
+  // ===========================================================================
+
+  const handleWheel = useCallback(
+    (e: WheelEvent) => {
+      // Ctrl + wheel = zoom
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        if (e.deltaY < 0) {
+          zoomIn();
+        } else {
+          zoomOut();
+        }
+        return;
+      }
+
+      // Shift + wheel = horizontal scroll
+      if (e.shiftKey) {
+        e.preventDefault();
+        setScrollX(scrollX + e.deltaX + e.deltaY);
+      }
+    },
+    [zoomIn, zoomOut, setScrollX, scrollX]
+  );
+
+  const handleFitToWindow = useCallback(() => {
+    if (tracksAreaRef.current) {
+      const viewportWidth = tracksAreaRef.current.clientWidth - TRACK_HEADER_WIDTH;
+      fitToWindow(duration, viewportWidth);
+    }
+  }, [duration, fitToWindow]);
 
   // ===========================================================================
   // Drag and Drop Handlers
@@ -229,6 +267,9 @@ export function Timeline({ sequence, onDeleteClips, onAssetDrop }: TimelineProps
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
+      {/* Timeline Toolbar */}
+      <TimelineToolbar onFitToWindow={handleFitToWindow} />
+
       {/* Time Ruler Row */}
       <div className="flex border-b border-editor-border">
         {/* Track header placeholder */}
@@ -253,6 +294,7 @@ export function Timeline({ sequence, onDeleteClips, onAssetDrop }: TimelineProps
         className="flex-1 overflow-auto relative"
         style={{ scrollBehavior: 'smooth' }}
         onClick={handleTracksAreaClick}
+        onWheel={handleWheel}
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}

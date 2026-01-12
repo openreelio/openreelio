@@ -244,6 +244,46 @@ describe('Timeline', () => {
   });
 
   // ===========================================================================
+  // Scroll and Zoom Tests
+  // ===========================================================================
+
+  describe('scroll and zoom', () => {
+    it('should render timeline toolbar', () => {
+      render(<Timeline sequence={mockSequence} />);
+      expect(screen.getByTestId('timeline-toolbar')).toBeInTheDocument();
+    });
+
+    it('should update scrollX on horizontal wheel with Shift', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      fireEvent.wheel(tracksArea, { deltaX: 100, shiftKey: true });
+
+      expect(useTimelineStore.getState().scrollX).toBeGreaterThan(0);
+    });
+
+    it('should update zoom on wheel with Ctrl (zoom in)', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      fireEvent.wheel(tracksArea, { deltaY: -100, ctrlKey: true });
+
+      // Zoom should increase (scrolling up with Ctrl)
+      expect(useTimelineStore.getState().zoom).toBeGreaterThan(100);
+    });
+
+    it('should zoom out on wheel down with Ctrl', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      fireEvent.wheel(tracksArea, { deltaY: 100, ctrlKey: true });
+
+      // Zoom should decrease (scrolling down with Ctrl)
+      expect(useTimelineStore.getState().zoom).toBeLessThan(100);
+    });
+  });
+
+  // ===========================================================================
   // Drag and Drop Tests
   // ===========================================================================
 
