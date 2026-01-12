@@ -4,7 +4,7 @@
  * Main timeline container that integrates all timeline elements.
  */
 
-import { useCallback, type KeyboardEvent, type MouseEvent } from 'react';
+import { useState, useCallback, useRef, type KeyboardEvent, type MouseEvent, type DragEvent } from 'react';
 import type { Sequence, Clip as ClipType } from '@/types';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { TimeRuler } from './TimeRuler';
@@ -15,18 +15,33 @@ import { Playhead } from './Playhead';
 // Types
 // =============================================================================
 
+export interface AssetDropData {
+  assetId: string;
+  trackId: string;
+  timelinePosition: number;
+}
+
 interface TimelineProps {
   /** Sequence to display */
   sequence: Sequence | null;
   /** Callback when clips should be deleted */
   onDeleteClips?: (clipIds: string[]) => void;
+  /** Callback when asset is dropped on timeline */
+  onAssetDrop?: (data: AssetDropData) => void;
 }
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+const TRACK_HEADER_WIDTH = 192; // w-48 = 12rem = 192px
+const TRACK_HEIGHT = 64; // h-16 = 4rem = 64px
 
 // =============================================================================
 // Component
 // =============================================================================
 
-export function Timeline({ sequence, onDeleteClips }: TimelineProps) {
+export function Timeline({ sequence, onDeleteClips, onAssetDrop }: TimelineProps) {
   // Get timeline state from store
   const {
     playhead,
@@ -40,6 +55,11 @@ export function Timeline({ sequence, onDeleteClips }: TimelineProps) {
     clearClipSelection,
     togglePlayback,
   } = useTimelineStore();
+
+  // Drag and drop state
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const tracksAreaRef = useRef<HTMLDivElement>(null);
+  const dragCounterRef = useRef(0);
 
   // Calculate total duration from sequence
   const duration = (() => {
@@ -115,6 +135,81 @@ export function Timeline({ sequence, onDeleteClips }: TimelineProps) {
     [togglePlayback, selectedClipIds, onDeleteClips, clearClipSelection]
   );
 
+  // ===========================================================================
+  // Drag and Drop Handlers
+  // ===========================================================================
+
+  const handleDragEnter = useCallback((e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current++;
+    if (e.dataTransfer.types.includes('application/json')) {
+      setIsDraggingOver(true);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer.types.includes('application/json')) {
+      e.dataTransfer.dropEffect = 'copy';
+    }
+  }, []);
+
+  const handleDragLeave = useCallback((e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) {
+      setIsDraggingOver(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback(
+    (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragCounterRef.current = 0;
+      setIsDraggingOver(false);
+
+      if (!sequence || !onAssetDrop) return;
+
+      const jsonData = e.dataTransfer.getData('application/json');
+      if (!jsonData) return;
+
+      try {
+        const assetData = JSON.parse(jsonData);
+        if (!assetData.id) return;
+
+        // Calculate timeline position from X coordinate
+        // Use event target or ref for getBoundingClientRect
+        const target = e.currentTarget as HTMLElement;
+        const rect = target.getBoundingClientRect();
+        if (!rect || rect.width === 0) return;
+
+        const relativeX = e.clientX - rect.left - TRACK_HEADER_WIDTH + scrollX;
+        const timelinePosition = Math.max(0, relativeX / zoom);
+
+        // Calculate which track based on Y coordinate
+        const relativeY = e.clientY - rect.top + scrollY;
+        const trackIndex = Math.floor(relativeY / TRACK_HEIGHT);
+        const track = sequence.tracks[trackIndex];
+
+        // Don't allow drop on locked tracks
+        if (!track || track.locked) return;
+
+        onAssetDrop({
+          assetId: assetData.id,
+          trackId: track.id,
+          timelinePosition,
+        });
+      } catch {
+        // Invalid JSON data
+      }
+    },
+    [sequence, onAssetDrop, scrollX, scrollY, zoom]
+  );
+
   // Empty state
   if (!sequence) {
     return (
@@ -153,10 +248,15 @@ export function Timeline({ sequence, onDeleteClips }: TimelineProps) {
 
       {/* Tracks Area */}
       <div
+        ref={tracksAreaRef}
         data-testid="timeline-tracks-area"
         className="flex-1 overflow-auto relative"
         style={{ scrollBehavior: 'smooth' }}
         onClick={handleTracksAreaClick}
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
       >
         <div style={{ transform: `translateY(-${scrollY}px)` }}>
           {sequence.tracks.map((track) => (
@@ -178,6 +278,18 @@ export function Timeline({ sequence, onDeleteClips }: TimelineProps) {
         >
           <Playhead position={playhead} zoom={zoom} isPlaying={isPlaying} />
         </div>
+
+        {/* Drop Indicator */}
+        {isDraggingOver && (
+          <div
+            data-testid="drop-indicator"
+            className="absolute inset-0 bg-primary-500/10 border-2 border-dashed border-primary-500 pointer-events-none flex items-center justify-center"
+          >
+            <div className="text-primary-400 text-sm font-medium">
+              Drop asset here
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -14,11 +14,15 @@ import {
   Image as ImageIcon,
   LayoutList,
   LayoutGrid,
+  AlertCircle,
+  Upload,
 } from 'lucide-react';
 import { useProjectStore } from '@/stores';
+import { useAssetImport } from '@/hooks';
 import { AssetList, type Asset, type ViewMode } from './AssetList';
 import type { AssetKind } from './AssetItem';
 import type { Asset as ProjectAsset } from '@/types';
+import { ConfirmDialog } from '@/components/ui';
 
 // =============================================================================
 // Types
@@ -40,8 +44,18 @@ export function ProjectExplorer() {
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Store
-  const { assets, isLoading, selectedAssetId, selectAsset, importAsset, removeAsset } =
+  const { assets, isLoading, selectedAssetId, selectAsset, removeAsset } =
     useProjectStore();
+
+  // Asset import hook
+  const { importFiles, importFromUris, isImporting, error: importError, clearError } = useAssetImport();
+
+  // Drag-and-drop state
+  const [isDragging, setIsDragging] = useState(false);
+  const dragCounterRef = useRef(0);
+
+  // Delete confirmation state
+  const [assetToDelete, setAssetToDelete] = useState<string | null>(null);
 
   const assetList = useMemo<Asset[]>(() => {
     return Array.from(assets.values())
@@ -90,8 +104,8 @@ export function ProjectExplorer() {
   );
 
   const handleImport = useCallback(() => {
-    void Promise.resolve(importAsset()).catch(() => {});
-  }, [importAsset]);
+    void importFiles();
+  }, [importFiles]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -101,12 +115,75 @@ export function ProjectExplorer() {
         searchInputRef.current?.focus();
       }
 
-      // Delete to remove selected asset
+      // Delete to show confirmation dialog
       if (e.key === 'Delete' && selectedAssetId) {
-        removeAsset(selectedAssetId);
+        setAssetToDelete(selectedAssetId);
       }
     },
-    [selectedAssetId, removeAsset]
+    [selectedAssetId]
+  );
+
+  const handleConfirmDelete = useCallback(() => {
+    if (assetToDelete) {
+      void removeAsset(assetToDelete);
+      setAssetToDelete(null);
+    }
+  }, [assetToDelete, removeAsset]);
+
+  const handleCancelDelete = useCallback(() => {
+    setAssetToDelete(null);
+  }, []);
+
+  // ===========================================================================
+  // Drag and Drop Handlers
+  // ===========================================================================
+
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current++;
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsDragging(true);
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current--;
+    if (dragCounterRef.current === 0) {
+      setIsDragging(false);
+    }
+  }, []);
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      dragCounterRef.current = 0;
+      setIsDragging(false);
+
+      const files = e.dataTransfer.files;
+      if (files.length > 0) {
+        // Extract file paths - in Tauri, dropped files have a path property
+        // In web context, we need to use the webkitRelativePath or name
+        const paths: string[] = [];
+        for (let i = 0; i < files.length; i++) {
+          const file = files[i];
+          // Tauri provides the full path via the path property (extended File)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const filePath = (file as any).path || file.name;
+          paths.push(filePath);
+        }
+        void importFromUris(paths);
+      }
+    },
+    [importFromUris]
   );
 
   // ===========================================================================
@@ -130,28 +207,77 @@ export function ProjectExplorer() {
   const emptyMessage = assetList.length === 0 ? 'Import media to get started' : 'No assets';
 
   // ===========================================================================
+  // Asset to Delete Name
+  // ===========================================================================
+
+  const assetToDeleteName = useMemo(() => {
+    if (!assetToDelete) return '';
+    const asset = assets.get(assetToDelete);
+    return asset?.name ?? '';
+  }, [assetToDelete, assets]);
+
+  // ===========================================================================
   // Render
   // ===========================================================================
 
   return (
     <div
       data-testid="project-explorer"
-      className="flex flex-col h-full bg-gray-800 text-white"
+      className="flex flex-col h-full bg-gray-800 text-white relative"
       tabIndex={0}
       onKeyDown={handleKeyDown}
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
     >
+      {/* Drop Zone Overlay */}
+      {isDragging && (
+        <div
+          data-testid="drop-zone"
+          className="absolute inset-0 z-50 bg-primary-500/20 border-2 border-dashed border-primary-500 flex items-center justify-center pointer-events-none"
+        >
+          <div className="flex flex-col items-center gap-2 text-primary-400">
+            <Upload className="w-12 h-12" />
+            <p className="text-sm font-medium">Drop files to import</p>
+          </div>
+        </div>
+      )}
       {/* Header */}
       <div className="flex items-center justify-between p-3 border-b border-gray-700">
         <h2 className="text-sm font-semibold">Project</h2>
         <button
           data-testid="import-button"
-          className="p-1.5 rounded hover:bg-gray-700 transition-colors"
+          className={`p-1.5 rounded transition-colors ${isImporting ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-700'}`}
           onClick={handleImport}
-          aria-label="Import asset"
+          disabled={isImporting}
+          aria-label={isImporting ? 'Importing...' : 'Import asset'}
         >
-          <Plus className="w-4 h-4" />
+          {isImporting ? (
+            <div className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+          ) : (
+            <Plus className="w-4 h-4" />
+          )}
         </button>
       </div>
+
+      {/* Import Error */}
+      {importError && (
+        <div
+          data-testid="import-error"
+          className="flex items-center gap-2 p-2 m-2 text-xs bg-red-900/50 text-red-300 border border-red-800 rounded"
+        >
+          <AlertCircle className="w-4 h-4 flex-shrink-0" />
+          <span className="flex-1">{importError}</span>
+          <button
+            onClick={clearError}
+            className="p-0.5 hover:bg-red-800 rounded"
+            aria-label="Dismiss error"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        </div>
+      )}
 
       {/* Search */}
       <div className="p-2 border-b border-gray-700">
@@ -237,6 +363,18 @@ export function ProjectExplorer() {
           />
         )}
       </div>
+
+      {/* Delete Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={assetToDelete !== null}
+        title="Delete Asset"
+        message={`Are you sure you want to delete "${assetToDeleteName}"? This action cannot be undone.`}
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        variant="danger"
+        onConfirm={handleConfirmDelete}
+        onCancel={handleCancelDelete}
+      />
     </div>
   );
 }

@@ -13,12 +13,19 @@ import { Film, Music, Image as ImageIcon } from 'lucide-react';
 
 export type AssetKind = 'video' | 'audio' | 'image';
 
+export interface Resolution {
+  width: number;
+  height: number;
+}
+
 export interface AssetData {
   id: string;
   name: string;
   kind: AssetKind;
   duration?: number;
   thumbnail?: string;
+  resolution?: Resolution;
+  fileSize?: number;
 }
 
 export interface AssetItemProps {
@@ -54,6 +61,34 @@ function formatDuration(seconds: number): string {
   }
 
   return `${minutes}:${secs.toString().padStart(2, '0')}`;
+}
+
+function formatResolution(resolution: Resolution): string {
+  return `${resolution.width}x${resolution.height}`;
+}
+
+function formatFileSize(bytes: number): string {
+  if (!isFinite(bytes) || bytes < 0) {
+    return '0 B';
+  }
+
+  const KB = 1024;
+  const MB = KB * 1024;
+  const GB = MB * 1024;
+
+  if (bytes >= GB) {
+    return `${(bytes / GB).toFixed(1)} GB`;
+  }
+
+  if (bytes >= MB) {
+    return `${(bytes / MB).toFixed(1)} MB`;
+  }
+
+  if (bytes >= KB) {
+    return `${Math.round(bytes / KB)} KB`;
+  }
+
+  return `${bytes} B`;
 }
 
 // =============================================================================
@@ -163,12 +198,26 @@ export function AssetItem({
       {/* Info */}
       <div className="flex-1 min-w-0">
         <div className="text-sm text-white truncate">{asset.name}</div>
-        {asset.duration !== undefined && (
-          <div
-            data-testid="asset-duration"
-            className="text-xs text-gray-400"
-          >
-            {formatDuration(asset.duration)}
+        {/* Metadata Row */}
+        {(asset.duration !== undefined || asset.resolution || asset.fileSize !== undefined) && (
+          <div data-testid="asset-metadata" className="flex items-center gap-1 text-xs text-gray-400 flex-wrap">
+            {asset.duration !== undefined && (
+              <span data-testid="asset-duration">{formatDuration(asset.duration)}</span>
+            )}
+            {asset.resolution && asset.kind !== 'audio' && (
+              <>
+                {asset.duration !== undefined && <span className="text-gray-600">·</span>}
+                <span data-testid="asset-resolution">{formatResolution(asset.resolution)}</span>
+              </>
+            )}
+            {asset.fileSize !== undefined && (
+              <>
+                {(asset.duration !== undefined || (asset.resolution && asset.kind !== 'audio')) && (
+                  <span className="text-gray-600">·</span>
+                )}
+                <span data-testid="asset-filesize">{formatFileSize(asset.fileSize)}</span>
+              </>
+            )}
           </div>
         )}
       </div>

@@ -1,0 +1,180 @@
+/**
+ * WelcomeScreen Component
+ *
+ * Initial screen shown when no project is loaded.
+ * Provides options to create new project or open existing one.
+ */
+
+import { useCallback } from 'react';
+import { FolderOpen, Plus, Clock, Film } from 'lucide-react';
+
+// =============================================================================
+// Types
+// =============================================================================
+
+/** Recent project entry */
+export interface RecentProject {
+  /** Unique identifier */
+  id: string;
+  /** Project name */
+  name: string;
+  /** Project file path */
+  path: string;
+  /** ISO date string of last opened */
+  lastOpened: string;
+}
+
+/** WelcomeScreen component props */
+export interface WelcomeScreenProps {
+  /** Callback when user wants to create new project */
+  onNewProject: () => void;
+  /** Callback when user wants to open a project (optionally with path) */
+  onOpenProject: (path?: string) => void;
+  /** List of recently opened projects */
+  recentProjects?: RecentProject[];
+  /** Whether an operation is in progress */
+  isLoading?: boolean;
+}
+
+// =============================================================================
+// Component
+// =============================================================================
+
+export function WelcomeScreen({
+  onNewProject,
+  onOpenProject,
+  recentProjects = [],
+  isLoading = false,
+}: WelcomeScreenProps): JSX.Element {
+  // ===========================================================================
+  // Handlers
+  // ===========================================================================
+
+  const handleNewProject = useCallback(() => {
+    onNewProject();
+  }, [onNewProject]);
+
+  const handleOpenProject = useCallback(() => {
+    onOpenProject();
+  }, [onOpenProject]);
+
+  const handleRecentProjectClick = useCallback(
+    (path: string) => {
+      onOpenProject(path);
+    },
+    [onOpenProject]
+  );
+
+  // ===========================================================================
+  // Helpers
+  // ===========================================================================
+
+  const formatLastOpened = (isoDate: string): string => {
+    const date = new Date(isoDate);
+    const now = new Date();
+    const diffMs = now.getTime() - date.getTime();
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+
+    if (diffDays === 0) return 'Today';
+    if (diffDays === 1) return 'Yesterday';
+    if (diffDays < 7) return `${diffDays} days ago`;
+    if (diffDays < 30) return `${Math.floor(diffDays / 7)} weeks ago`;
+    return date.toLocaleDateString();
+  };
+
+  // ===========================================================================
+  // Render
+  // ===========================================================================
+
+  return (
+    <div
+      data-testid="welcome-screen"
+      role="main"
+      className="flex flex-col items-center justify-center min-h-full bg-editor-bg text-editor-text p-8"
+    >
+      {/* Logo and Title */}
+      <div className="text-center mb-12">
+        <div className="w-24 h-24 mx-auto mb-6 bg-primary-600 rounded-2xl flex items-center justify-center shadow-lg">
+          <Film className="w-12 h-12 text-white" />
+        </div>
+        <h1 className="text-4xl font-bold text-editor-text mb-2">OpenReelio</h1>
+        <p className="text-editor-text-muted text-lg">
+          AI-powered video editing IDE
+        </p>
+      </div>
+
+      {/* Action Buttons */}
+      <div className="flex gap-4 mb-12">
+        <button
+          data-testid="new-project-button"
+          aria-label="Create a new project"
+          disabled={isLoading}
+          onClick={handleNewProject}
+          className="flex items-center gap-3 px-6 py-4 bg-primary-600 hover:bg-primary-700 disabled:bg-primary-800 disabled:cursor-not-allowed text-white rounded-lg transition-colors shadow-md"
+        >
+          <Plus className="w-5 h-5" />
+          <span className="font-medium">New Project</span>
+        </button>
+
+        <button
+          data-testid="open-project-button"
+          aria-label="Open an existing project"
+          disabled={isLoading}
+          onClick={handleOpenProject}
+          className="flex items-center gap-3 px-6 py-4 bg-editor-panel hover:bg-editor-sidebar border border-editor-border text-editor-text rounded-lg transition-colors shadow-md"
+        >
+          <FolderOpen className="w-5 h-5" />
+          <span className="font-medium">Open Project</span>
+        </button>
+      </div>
+
+      {/* Recent Projects */}
+      {recentProjects.length > 0 && (
+        <div
+          data-testid="recent-projects-section"
+          className="w-full max-w-md"
+        >
+          <div className="flex items-center gap-2 mb-4 text-editor-text-muted">
+            <Clock className="w-4 h-4" />
+            <h2 className="text-sm font-medium uppercase tracking-wide">
+              Recent Projects
+            </h2>
+          </div>
+
+          <ul className="space-y-2">
+            {recentProjects.map((project) => (
+              <li key={project.id}>
+                <button
+                  data-testid={`recent-project-${project.id}`}
+                  onClick={() => handleRecentProjectClick(project.path)}
+                  disabled={isLoading}
+                  className="w-full flex items-center gap-3 p-3 bg-editor-panel hover:bg-editor-sidebar border border-editor-border rounded-lg transition-colors text-left disabled:cursor-not-allowed"
+                >
+                  <div className="w-10 h-10 bg-editor-bg rounded flex items-center justify-center flex-shrink-0">
+                    <Film className="w-5 h-5 text-primary-500" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-editor-text truncate">
+                      {project.name}
+                    </p>
+                    <p className="text-xs text-editor-text-muted truncate">
+                      {project.path}
+                    </p>
+                  </div>
+                  <span className="text-xs text-editor-text-muted flex-shrink-0">
+                    {formatLastOpened(project.lastOpened)}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Version Info */}
+      <p className="mt-12 text-xs text-editor-text-muted">
+        Version 0.1.0 (MVP)
+      </p>
+    </div>
+  );
+}
