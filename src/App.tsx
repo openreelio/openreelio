@@ -1,103 +1,30 @@
 /**
  * OpenReelio Application
  *
- * Main application component using layout components.
+ * Main application component with conditional rendering based on project state.
+ * Shows WelcomeScreen when no project is loaded, Editor when project is active.
  */
 
-import { useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { Play } from 'lucide-react';
+import { useCallback, useState } from 'react';
+import { open } from '@tauri-apps/plugin-dialog';
 import { MainLayout, Header, Sidebar, BottomPanel, Panel } from './components/layout';
+import { WelcomeScreen, type RecentProject } from './components/features/welcome';
+import { Inspector } from './components/features/inspector';
+import { ProjectExplorer } from './components/explorer';
+import { PreviewPlayer } from './components/preview';
+import { Timeline } from './components/timeline';
+import { useProjectStore } from './stores';
 
 // =============================================================================
-// Project Explorer Sidebar Content
+// Console Component (Bottom Panel Content)
 // =============================================================================
 
-function ProjectExplorer() {
+function ConsolePanel(): JSX.Element {
   return (
-    <p className="text-sm text-editor-text-muted">No project loaded</p>
-  );
-}
-
-// =============================================================================
-// Inspector Sidebar Content
-// =============================================================================
-
-function Inspector() {
-  const [greetMsg, setGreetMsg] = useState('');
-  const [name, setName] = useState('');
-
-  async function greet() {
-    const message = await invoke<string>('greet', { name });
-    setGreetMsg(message);
-  }
-
-  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      greet();
-    }
-  };
-
-  return (
-    <div className="space-y-3">
-      <p className="text-xs text-editor-text-muted">Test Tauri Connection:</p>
-      <input
-        type="text"
-        value={name}
-        onChange={(e) => setName(e.target.value)}
-        onKeyDown={handleKeyDown}
-        className="w-full px-3 py-2 bg-editor-bg border border-editor-border rounded text-sm text-editor-text focus:outline-none focus:ring-1 focus:ring-primary-500"
-        placeholder="Enter your name"
-      />
-      <button
-        onClick={greet}
-        className="w-full px-3 py-2 bg-primary-600 text-white text-sm rounded hover:bg-primary-700 transition-colors"
-      >
-        Greet
-      </button>
-      {greetMsg && <p className="text-sm text-primary-400">{greetMsg}</p>}
-    </div>
-  );
-}
-
-// =============================================================================
-// Preview Player Content
-// =============================================================================
-
-function PreviewPlayer() {
-  return (
-    <div className="h-full bg-black flex items-center justify-center">
-      <div className="text-center">
-        <div className="w-32 h-32 bg-editor-panel rounded-lg flex items-center justify-center mb-4">
-          <Play className="w-16 h-16 text-editor-text-muted" />
-        </div>
-        <p className="text-editor-text-muted text-sm">Preview Player</p>
-      </div>
-    </div>
-  );
-}
-
-// =============================================================================
-// Timeline Content
-// =============================================================================
-
-function Timeline() {
-  return (
-    <Panel title="Timeline" variant="default" className="h-full">
-      <div className="h-full bg-editor-bg rounded border border-editor-border flex items-center justify-center">
-        <p className="text-editor-text-muted text-sm">Timeline will be rendered here</p>
-      </div>
-    </Panel>
-  );
-}
-
-// =============================================================================
-// Console Content
-// =============================================================================
-
-function Console() {
-  return (
-    <div className="h-full bg-editor-bg rounded border border-editor-border p-2 font-mono text-xs text-editor-text-muted overflow-auto">
+    <div
+      data-testid="console-panel"
+      className="h-full bg-editor-bg rounded border border-editor-border p-2 font-mono text-xs text-editor-text-muted overflow-auto"
+    >
       <p>OpenReelio initialized.</p>
       <p>Ready to edit.</p>
     </div>
@@ -105,10 +32,34 @@ function Console() {
 }
 
 // =============================================================================
-// Main Application Component
+// Editor View (Main Editing Interface)
 // =============================================================================
 
-function App() {
+interface EditorViewProps {
+  /** Currently active sequence for timeline (null if none active) */
+  sequence: import('./types').Sequence | null;
+}
+
+function EditorView({ sequence }: EditorViewProps): JSX.Element {
+  const { selectedAssetId, assets } = useProjectStore();
+
+  // Get selected asset for inspector
+  const selectedAsset = selectedAssetId ? assets.get(selectedAssetId) : undefined;
+
+  // Transform asset to inspector format
+  const inspectorAsset = selectedAsset
+    ? {
+        id: selectedAsset.id,
+        name: selectedAsset.name,
+        kind: selectedAsset.kind as 'video' | 'audio' | 'image' | 'graphics',
+        uri: selectedAsset.uri,
+        durationSec: selectedAsset.durationSec,
+        resolution: selectedAsset.video
+          ? { width: selectedAsset.video.width, height: selectedAsset.video.height }
+          : undefined,
+      }
+    : undefined;
+
   return (
     <MainLayout
       header={<Header />}
@@ -119,26 +70,111 @@ function App() {
       }
       rightSidebar={
         <Sidebar title="Inspector" position="right" width={288}>
-          <Inspector />
+          <Inspector selectedAsset={inspectorAsset} />
         </Sidebar>
       }
       footer={
         <BottomPanel title="Console">
-          <Console />
+          <ConsolePanel />
         </BottomPanel>
       }
     >
       {/* Center content split between preview and timeline */}
       <div className="flex flex-col h-full">
         <div className="flex-1 border-b border-editor-border">
-          <PreviewPlayer />
+          <PreviewPlayer className="h-full" />
         </div>
         <div className="flex-1">
-          <Timeline />
+          <Panel title="Timeline" variant="default" className="h-full">
+            <Timeline sequence={sequence} />
+          </Panel>
         </div>
       </div>
     </MainLayout>
   );
+}
+
+// =============================================================================
+// Main Application Component
+// =============================================================================
+
+function App(): JSX.Element {
+  const { isLoaded, isLoading, createProject, loadProject, getActiveSequence } = useProjectStore();
+
+  // Recent projects (would be loaded from storage in production)
+  const [recentProjects] = useState<RecentProject[]>([]);
+
+  // ===========================================================================
+  // Handlers
+  // ===========================================================================
+
+  const handleNewProject = useCallback(async () => {
+    // Open folder picker for project location
+    const selectedPath = await open({
+      directory: true,
+      multiple: false,
+      title: 'Select Project Location',
+    });
+
+    if (selectedPath && typeof selectedPath === 'string') {
+      // For now, use folder name as project name
+      const folderName = selectedPath.split(/[/\\]/).pop() || 'Untitled';
+      try {
+        await createProject(folderName, selectedPath);
+      } catch (error) {
+        console.error('Failed to create project:', error);
+      }
+    }
+  }, [createProject]);
+
+  const handleOpenProject = useCallback(
+    async (path?: string) => {
+      let projectPath = path;
+
+      if (!projectPath) {
+        // Open file picker for project file
+        const selectedPath = await open({
+          directory: true,
+          multiple: false,
+          title: 'Open Project',
+        });
+
+        if (selectedPath && typeof selectedPath === 'string') {
+          projectPath = selectedPath;
+        }
+      }
+
+      if (projectPath) {
+        try {
+          await loadProject(projectPath);
+        } catch (error) {
+          console.error('Failed to open project:', error);
+        }
+      }
+    },
+    [loadProject]
+  );
+
+  // ===========================================================================
+  // Render
+  // ===========================================================================
+
+  // Show Welcome Screen when no project is loaded
+  if (!isLoaded) {
+    return (
+      <WelcomeScreen
+        onNewProject={() => void handleNewProject()}
+        onOpenProject={(path) => void handleOpenProject(path)}
+        recentProjects={recentProjects}
+        isLoading={isLoading}
+      />
+    );
+  }
+
+  // Show Editor when project is loaded
+  const activeSequence = getActiveSequence();
+
+  return <EditorView sequence={activeSequence ?? null} />;
 }
 
 export default App;
