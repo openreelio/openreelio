@@ -14,16 +14,29 @@ import type { Asset } from './AssetList';
 // =============================================================================
 
 const mockUseProjectStore = vi.fn();
+const mockUseAssetImport = vi.fn();
 
 vi.mock('@/stores', () => ({
   useProjectStore: (...args: unknown[]) => mockUseProjectStore(...args),
 }));
 
-const mockAssets: Asset[] = [
+vi.mock('@/hooks', () => ({
+  useAssetImport: () => mockUseAssetImport(),
+}));
+
+const mockAssetsArray: Asset[] = [
   { id: 'asset_001', name: 'video1.mp4', kind: 'video', duration: 120 },
   { id: 'asset_002', name: 'audio1.mp3', kind: 'audio', duration: 180 },
   { id: 'asset_003', name: 'image1.jpg', kind: 'image' },
 ];
+
+// Create a Map from the array for proper store mocking
+const mockAssets = new Map(
+  mockAssetsArray.map((asset) => [
+    asset.id,
+    { ...asset, uri: `/path/to/${asset.name}`, durationSec: asset.duration },
+  ])
+);
 
 // =============================================================================
 // Tests
@@ -37,8 +50,14 @@ describe('ProjectExplorer', () => {
       isLoading: false,
       selectedAssetId: null,
       selectAsset: vi.fn(),
-      importAsset: vi.fn(),
       removeAsset: vi.fn(),
+    });
+    mockUseAssetImport.mockReturnValue({
+      importFiles: vi.fn(),
+      importFromUris: vi.fn(),
+      isImporting: false,
+      error: null,
+      clearError: vi.fn(),
     });
   });
 
@@ -94,7 +113,6 @@ describe('ProjectExplorer', () => {
         isLoading: true,
         selectedAssetId: null,
         selectAsset: vi.fn(),
-        importAsset: vi.fn(),
         removeAsset: vi.fn(),
       });
 
@@ -186,7 +204,6 @@ describe('ProjectExplorer', () => {
         isLoading: false,
         selectedAssetId: null,
         selectAsset,
-        importAsset: vi.fn(),
         removeAsset: vi.fn(),
       });
 
@@ -204,7 +221,6 @@ describe('ProjectExplorer', () => {
         isLoading: false,
         selectedAssetId: 'asset_002', // Select first item in sorted order
         selectAsset: vi.fn(),
-        importAsset: vi.fn(),
         removeAsset: vi.fn(),
       });
 
@@ -222,21 +238,65 @@ describe('ProjectExplorer', () => {
   // ===========================================================================
 
   describe('import', () => {
-    it('should call importAsset when import button clicked', () => {
-      const importAsset = vi.fn();
-      mockUseProjectStore.mockReturnValue({
-        assets: mockAssets,
-        isLoading: false,
-        selectedAssetId: null,
-        selectAsset: vi.fn(),
-        importAsset,
-        removeAsset: vi.fn(),
+    it('should call importFiles when import button clicked', () => {
+      const importFiles = vi.fn();
+      mockUseAssetImport.mockReturnValue({
+        importFiles,
+        importFromUris: vi.fn(),
+        isImporting: false,
+        error: null,
+        clearError: vi.fn(),
       });
 
       render(<ProjectExplorer />);
 
       fireEvent.click(screen.getByTestId('import-button'));
-      expect(importAsset).toHaveBeenCalled();
+      expect(importFiles).toHaveBeenCalled();
+    });
+
+    it('should disable import button when importing', () => {
+      mockUseAssetImport.mockReturnValue({
+        importFiles: vi.fn(),
+        importFromUris: vi.fn(),
+        isImporting: true,
+        error: null,
+        clearError: vi.fn(),
+      });
+
+      render(<ProjectExplorer />);
+
+      expect(screen.getByTestId('import-button')).toBeDisabled();
+    });
+
+    it('should show error message when import fails', () => {
+      mockUseAssetImport.mockReturnValue({
+        importFiles: vi.fn(),
+        importFromUris: vi.fn(),
+        isImporting: false,
+        error: '1 file(s) failed to import',
+        clearError: vi.fn(),
+      });
+
+      render(<ProjectExplorer />);
+
+      expect(screen.getByTestId('import-error')).toBeInTheDocument();
+      expect(screen.getByText('1 file(s) failed to import')).toBeInTheDocument();
+    });
+
+    it('should call clearError when dismiss button clicked', () => {
+      const clearError = vi.fn();
+      mockUseAssetImport.mockReturnValue({
+        importFiles: vi.fn(),
+        importFromUris: vi.fn(),
+        isImporting: false,
+        error: 'Some error',
+        clearError,
+      });
+
+      render(<ProjectExplorer />);
+
+      fireEvent.click(screen.getByLabelText('Dismiss error'));
+      expect(clearError).toHaveBeenCalled();
     });
   });
 
@@ -272,7 +332,6 @@ describe('ProjectExplorer', () => {
         isLoading: false,
         selectedAssetId: null,
         selectAsset: vi.fn(),
-        importAsset: vi.fn(),
         removeAsset: vi.fn(),
       });
 
@@ -286,7 +345,6 @@ describe('ProjectExplorer', () => {
         isLoading: false,
         selectedAssetId: null,
         selectAsset: vi.fn(),
-        importAsset: vi.fn(),
         removeAsset: vi.fn(),
       });
 
@@ -309,14 +367,31 @@ describe('ProjectExplorer', () => {
       expect(screen.getByTestId('asset-search')).toHaveFocus();
     });
 
-    it('should call removeAsset on Delete key when asset selected', () => {
+    it('should show confirm dialog on Delete key when asset selected', () => {
+      mockUseProjectStore.mockReturnValue({
+        assets: mockAssets,
+        isLoading: false,
+        selectedAssetId: 'asset_001',
+        selectAsset: vi.fn(),
+        removeAsset: vi.fn(),
+      });
+
+      render(<ProjectExplorer />);
+
+      const explorer = screen.getByTestId('project-explorer');
+      fireEvent.keyDown(explorer, { key: 'Delete' });
+
+      expect(screen.getByTestId('confirm-dialog')).toBeInTheDocument();
+      expect(screen.getByText(/delete.*video1\.mp4/i)).toBeInTheDocument();
+    });
+
+    it('should call removeAsset when confirmed in delete dialog', () => {
       const removeAsset = vi.fn();
       mockUseProjectStore.mockReturnValue({
         assets: mockAssets,
         isLoading: false,
         selectedAssetId: 'asset_001',
         selectAsset: vi.fn(),
-        importAsset: vi.fn(),
         removeAsset,
       });
 
@@ -325,7 +400,120 @@ describe('ProjectExplorer', () => {
       const explorer = screen.getByTestId('project-explorer');
       fireEvent.keyDown(explorer, { key: 'Delete' });
 
+      // Click confirm button
+      fireEvent.click(screen.getByTestId('confirm-button'));
+
       expect(removeAsset).toHaveBeenCalledWith('asset_001');
+    });
+
+    it('should close dialog without removing when cancelled', () => {
+      const removeAsset = vi.fn();
+      mockUseProjectStore.mockReturnValue({
+        assets: mockAssets,
+        isLoading: false,
+        selectedAssetId: 'asset_001',
+        selectAsset: vi.fn(),
+        removeAsset,
+      });
+
+      render(<ProjectExplorer />);
+
+      const explorer = screen.getByTestId('project-explorer');
+      fireEvent.keyDown(explorer, { key: 'Delete' });
+
+      // Click cancel button
+      fireEvent.click(screen.getByTestId('cancel-button'));
+
+      expect(removeAsset).not.toHaveBeenCalled();
+      expect(screen.queryByTestId('confirm-dialog')).not.toBeInTheDocument();
+    });
+  });
+
+  // ===========================================================================
+  // Drag and Drop Tests
+  // ===========================================================================
+
+  describe('drag and drop', () => {
+    it('should show drop zone on drag enter with files', () => {
+      render(<ProjectExplorer />);
+
+      const explorer = screen.getByTestId('project-explorer');
+      const dataTransfer = {
+        types: ['Files'],
+      };
+      fireEvent.dragEnter(explorer, { dataTransfer });
+
+      expect(screen.getByTestId('drop-zone')).toBeInTheDocument();
+    });
+
+    it('should hide drop zone on drag leave', () => {
+      render(<ProjectExplorer />);
+
+      const explorer = screen.getByTestId('project-explorer');
+      const dataTransfer = {
+        types: ['Files'],
+      };
+      fireEvent.dragEnter(explorer, { dataTransfer });
+      fireEvent.dragLeave(explorer);
+
+      expect(screen.queryByTestId('drop-zone')).not.toBeInTheDocument();
+    });
+
+    it('should call importFromUris on file drop', () => {
+      const importFromUris = vi.fn();
+      mockUseAssetImport.mockReturnValue({
+        importFiles: vi.fn(),
+        importFromUris,
+        isImporting: false,
+        error: null,
+        clearError: vi.fn(),
+      });
+
+      render(<ProjectExplorer />);
+
+      const explorer = screen.getByTestId('project-explorer');
+
+      // Create a mock file drop event
+      const mockFile = new File(['content'], 'video.mp4', { type: 'video/mp4' });
+      const dataTransfer = {
+        files: [mockFile],
+        types: ['Files'],
+      };
+
+      fireEvent.drop(explorer, { dataTransfer });
+
+      // Note: The component needs to extract paths from files
+      // This test verifies that drop events are handled
+      expect(importFromUris).toHaveBeenCalled();
+    });
+
+    it('should hide drop zone after drop', () => {
+      const importFromUris = vi.fn();
+      mockUseAssetImport.mockReturnValue({
+        importFiles: vi.fn(),
+        importFromUris,
+        isImporting: false,
+        error: null,
+        clearError: vi.fn(),
+      });
+
+      render(<ProjectExplorer />);
+
+      const explorer = screen.getByTestId('project-explorer');
+      const enterDataTransfer = {
+        types: ['Files'],
+      };
+      fireEvent.dragEnter(explorer, { dataTransfer: enterDataTransfer });
+
+      const mockFile = new File(['content'], 'video.mp4', { type: 'video/mp4' });
+      const dropDataTransfer = {
+        files: [mockFile],
+        types: ['Files'],
+      };
+
+      fireEvent.drop(explorer, { dataTransfer: dropDataTransfer });
+
+      expect(screen.queryByTestId('drop-zone')).not.toBeInTheDocument();
     });
   });
 });
