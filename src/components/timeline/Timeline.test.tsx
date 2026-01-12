@@ -4,8 +4,8 @@
  * Tests for the main timeline component that integrates all timeline elements.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, screen, fireEvent, act, createEvent } from '@testing-library/react';
 import { Timeline } from './Timeline';
 import { useTimelineStore } from '@/stores/timelineStore';
 import type { Sequence } from '@/types';
@@ -52,6 +52,8 @@ const mockSequence: Sequence = {
 // =============================================================================
 
 describe('Timeline', () => {
+  const originalGetBoundingClientRect = Element.prototype.getBoundingClientRect;
+
   beforeEach(() => {
     // Reset timeline store before each test
     useTimelineStore.setState({
@@ -68,6 +70,24 @@ describe('Timeline', () => {
       snapToMarkers: true,
       snapToPlayhead: true,
     });
+
+    // Mock getBoundingClientRect for drop tests
+    Element.prototype.getBoundingClientRect = vi.fn().mockReturnValue({
+      left: 0,
+      top: 0,
+      width: 800,
+      height: 400,
+      right: 800,
+      bottom: 400,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    });
+  });
+
+  afterEach(() => {
+    // Restore original
+    Element.prototype.getBoundingClientRect = originalGetBoundingClientRect;
   });
 
   // ===========================================================================
@@ -220,6 +240,182 @@ describe('Timeline', () => {
       fireEvent.keyDown(timeline, { key: 'Delete' });
 
       expect(onDeleteClips).toHaveBeenCalledWith(['clip_001']);
+    });
+  });
+
+  // ===========================================================================
+  // Drag and Drop Tests
+  // ===========================================================================
+
+  describe('drag and drop', () => {
+    it('should show drop indicator when dragging asset over tracks area', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      const assetData = JSON.stringify({ id: 'asset_001', name: 'video.mp4', kind: 'video' });
+
+      fireEvent.dragEnter(tracksArea, {
+        dataTransfer: {
+          types: ['application/json'],
+          getData: () => assetData,
+        },
+      });
+
+      expect(screen.getByTestId('drop-indicator')).toBeInTheDocument();
+    });
+
+    it('should hide drop indicator when drag leaves', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      const assetData = JSON.stringify({ id: 'asset_001', name: 'video.mp4', kind: 'video' });
+
+      fireEvent.dragEnter(tracksArea, {
+        dataTransfer: {
+          types: ['application/json'],
+          getData: () => assetData,
+        },
+      });
+
+      fireEvent.dragLeave(tracksArea);
+
+      expect(screen.queryByTestId('drop-indicator')).not.toBeInTheDocument();
+    });
+
+    it('should call onAssetDrop when asset is dropped on tracks area', () => {
+      const onAssetDrop = vi.fn();
+      render(<Timeline sequence={mockSequence} onAssetDrop={onAssetDrop} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      const assetData = { id: 'asset_001', name: 'video.mp4', kind: 'video' };
+
+      // Create drop event with proper dataTransfer
+      const dropEvent = createEvent.drop(tracksArea);
+      Object.defineProperty(dropEvent, 'dataTransfer', {
+        value: {
+          types: ['application/json'],
+          getData: vi.fn().mockReturnValue(JSON.stringify(assetData)),
+        },
+      });
+      Object.defineProperty(dropEvent, 'clientX', { value: 300 });
+      Object.defineProperty(dropEvent, 'clientY', { value: 30 });
+
+      fireEvent(tracksArea, dropEvent);
+
+      expect(onAssetDrop).toHaveBeenCalledWith(
+        expect.objectContaining({
+          assetId: 'asset_001',
+          trackId: expect.any(String),
+          timelinePosition: expect.any(Number),
+        })
+      );
+    });
+
+    it('should hide drop indicator after drop', () => {
+      const onAssetDrop = vi.fn();
+      render(<Timeline sequence={mockSequence} onAssetDrop={onAssetDrop} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      const assetData = JSON.stringify({ id: 'asset_001', name: 'video.mp4', kind: 'video' });
+
+      fireEvent.dragEnter(tracksArea, {
+        dataTransfer: {
+          types: ['application/json'],
+          getData: () => assetData,
+        },
+      });
+
+      fireEvent.drop(tracksArea, {
+        dataTransfer: {
+          types: ['application/json'],
+          getData: () => assetData,
+        },
+      });
+
+      expect(screen.queryByTestId('drop-indicator')).not.toBeInTheDocument();
+    });
+
+    it('should calculate correct timeline position from drop coordinates', () => {
+      const onAssetDrop = vi.fn();
+      useTimelineStore.setState({ zoom: 100 }); // 100px per second
+
+      render(<Timeline sequence={mockSequence} onAssetDrop={onAssetDrop} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      const assetData = { id: 'asset_001', name: 'video.mp4', kind: 'video' };
+
+      // Create drop event with proper dataTransfer
+      const dropEvent = createEvent.drop(tracksArea);
+      Object.defineProperty(dropEvent, 'dataTransfer', {
+        value: {
+          types: ['application/json'],
+          getData: vi.fn().mockReturnValue(JSON.stringify(assetData)),
+        },
+      });
+      Object.defineProperty(dropEvent, 'clientX', { value: 500 });
+      Object.defineProperty(dropEvent, 'clientY', { value: 30 });
+
+      fireEvent(tracksArea, dropEvent);
+
+      expect(onAssetDrop).toHaveBeenCalled();
+      const callArgs = onAssetDrop.mock.calls[0][0];
+      expect(callArgs.timelinePosition).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should determine correct track from drop Y position', () => {
+      const onAssetDrop = vi.fn();
+      render(<Timeline sequence={mockSequence} onAssetDrop={onAssetDrop} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      const assetData = { id: 'asset_001', name: 'video.mp4', kind: 'video' };
+
+      // Create drop event with proper dataTransfer
+      const dropEvent = createEvent.drop(tracksArea);
+      Object.defineProperty(dropEvent, 'dataTransfer', {
+        value: {
+          types: ['application/json'],
+          getData: vi.fn().mockReturnValue(JSON.stringify(assetData)),
+        },
+      });
+      Object.defineProperty(dropEvent, 'clientX', { value: 300 });
+      Object.defineProperty(dropEvent, 'clientY', { value: 30 });
+
+      fireEvent(tracksArea, dropEvent);
+
+      expect(onAssetDrop).toHaveBeenCalled();
+      const callArgs = onAssetDrop.mock.calls[0][0];
+      expect(callArgs.trackId).toBe('track_001');
+    });
+
+    it('should not allow drop on locked tracks', () => {
+      const lockedSequence: Sequence = {
+        ...mockSequence,
+        tracks: [
+          { ...mockSequence.tracks[0], locked: true },
+          mockSequence.tracks[1],
+        ],
+      };
+
+      const onAssetDrop = vi.fn();
+      render(<Timeline sequence={lockedSequence} onAssetDrop={onAssetDrop} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      const assetData = { id: 'asset_001', name: 'video.mp4', kind: 'video' };
+
+      // Create drop event with proper dataTransfer
+      const dropEvent = createEvent.drop(tracksArea);
+      Object.defineProperty(dropEvent, 'dataTransfer', {
+        value: {
+          types: ['application/json'],
+          getData: vi.fn().mockReturnValue(JSON.stringify(assetData)),
+        },
+      });
+      Object.defineProperty(dropEvent, 'clientX', { value: 300 });
+      Object.defineProperty(dropEvent, 'clientY', { value: 30 });
+
+      fireEvent(tracksArea, dropEvent);
+
+      expect(onAssetDrop).not.toHaveBeenCalled();
     });
   });
 });
