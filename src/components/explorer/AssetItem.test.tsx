@@ -181,4 +181,101 @@ describe('AssetItem', () => {
       expect(screen.getByTestId('asset-duration')).toHaveTextContent('1:02:05');
     });
   });
+
+  // ===========================================================================
+  // Resolution Display Tests
+  // ===========================================================================
+
+  describe('resolution display', () => {
+    it('should display resolution for video assets', () => {
+      const videoAsset = { ...defaultAsset, resolution: { width: 1920, height: 1080 } };
+      render(<AssetItem asset={videoAsset} />);
+      expect(screen.getByTestId('asset-resolution')).toHaveTextContent('1920x1080');
+    });
+
+    it('should display resolution for image assets', () => {
+      const imageAsset = {
+        ...defaultAsset,
+        kind: 'image' as const,
+        duration: undefined,
+        resolution: { width: 3840, height: 2160 },
+      };
+      render(<AssetItem asset={imageAsset} />);
+      expect(screen.getByTestId('asset-resolution')).toHaveTextContent('3840x2160');
+    });
+
+    it('should not display resolution for audio assets', () => {
+      const audioAsset = { ...defaultAsset, kind: 'audio' as const };
+      render(<AssetItem asset={audioAsset} />);
+      expect(screen.queryByTestId('asset-resolution')).not.toBeInTheDocument();
+    });
+
+    it('should not display resolution when not provided', () => {
+      render(<AssetItem asset={defaultAsset} />);
+      expect(screen.queryByTestId('asset-resolution')).not.toBeInTheDocument();
+    });
+  });
+
+  // ===========================================================================
+  // File Size Display Tests
+  // ===========================================================================
+
+  describe('file size display', () => {
+    it('should display file size in KB for small files', () => {
+      const asset = { ...defaultAsset, fileSize: 512000 }; // 500 KB
+      render(<AssetItem asset={asset} />);
+      expect(screen.getByTestId('asset-filesize')).toHaveTextContent('500 KB');
+    });
+
+    it('should display file size in MB for medium files', () => {
+      const asset = { ...defaultAsset, fileSize: 15728640 }; // 15 MB
+      render(<AssetItem asset={asset} />);
+      expect(screen.getByTestId('asset-filesize')).toHaveTextContent('15.0 MB');
+    });
+
+    it('should display file size in GB for large files', () => {
+      const asset = { ...defaultAsset, fileSize: 2147483648 }; // 2 GB
+      render(<AssetItem asset={asset} />);
+      expect(screen.getByTestId('asset-filesize')).toHaveTextContent('2.0 GB');
+    });
+
+    it('should not display file size when not provided', () => {
+      render(<AssetItem asset={defaultAsset} />);
+      expect(screen.queryByTestId('asset-filesize')).not.toBeInTheDocument();
+    });
+  });
+
+  // ===========================================================================
+  // Metadata Layout Tests
+  // ===========================================================================
+
+  describe('metadata layout', () => {
+    it('should display duration and resolution separated by bullet', () => {
+      const asset = {
+        ...defaultAsset,
+        duration: 120,
+        resolution: { width: 1920, height: 1080 },
+      };
+      render(<AssetItem asset={asset} />);
+
+      const metadata = screen.getByTestId('asset-metadata');
+      expect(metadata).toBeInTheDocument();
+      expect(screen.getByTestId('asset-duration')).toBeInTheDocument();
+      expect(screen.getByTestId('asset-resolution')).toBeInTheDocument();
+    });
+
+    it('should display all metadata for complete video asset', () => {
+      const asset = {
+        ...defaultAsset,
+        duration: 300,
+        resolution: { width: 1920, height: 1080 },
+        fileSize: 52428800, // 50 MB
+      };
+      render(<AssetItem asset={asset} />);
+
+      expect(screen.getByTestId('asset-duration')).toHaveTextContent('5:00');
+      expect(screen.getByTestId('asset-resolution')).toHaveTextContent('1920x1080');
+      expect(screen.getByTestId('asset-filesize')).toHaveTextContent('50.0 MB');
+    });
+  });
 });
