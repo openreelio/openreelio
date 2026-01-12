@@ -188,7 +188,7 @@ describe('PlayerControls', () => {
   describe('volume', () => {
     it('should show volume icon when not muted', () => {
       render(<PlayerControls {...defaultProps} volume={0.5} isMuted={false} />);
-      expect(screen.getByTestId('volume-icon')).toBeInTheDocument();
+      expect(screen.getByTestId('volume-high-icon')).toBeInTheDocument();
     });
 
     it('should show mute icon when muted', () => {
