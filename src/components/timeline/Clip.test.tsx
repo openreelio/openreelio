@@ -136,11 +136,12 @@ describe('Clip', () => {
       expect(screen.getByTestId('resize-handle-right')).toBeInTheDocument();
     });
 
-    it('should not show resize handles when not selected', () => {
+    it('should always show resize handles for better UX', () => {
+      // Resize handles are now always visible (with different styling when selected)
       render(<Clip clip={mockClip} zoom={100} selected={false} />);
 
-      expect(screen.queryByTestId('resize-handle-left')).not.toBeInTheDocument();
-      expect(screen.queryByTestId('resize-handle-right')).not.toBeInTheDocument();
+      expect(screen.getByTestId('resize-handle-left')).toBeInTheDocument();
+      expect(screen.getByTestId('resize-handle-right')).toBeInTheDocument();
     });
   });
 });

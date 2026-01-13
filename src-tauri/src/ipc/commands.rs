@@ -208,6 +208,86 @@ pub async fn get_assets(state: State<'_, AppState>) -> Result<Vec<serde_json::Va
         .collect())
 }
 
+/// Generates thumbnail for an asset and updates the asset's thumbnail URL
+#[tauri::command]
+pub async fn generate_asset_thumbnail(
+    asset_id: String,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+) -> Result<Option<String>, String> {
+    use crate::core::assets::thumbnail::{asset_kind_from_path, ThumbnailService};
+    use std::path::Path;
+
+    // Get asset info from state
+    let (asset_path, asset_kind, project_path) = {
+        let guard = state
+            .project
+            .lock()
+            .map_err(|_| "Failed to acquire lock".to_string())?;
+
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        let asset = project
+            .state
+            .assets
+            .get(&asset_id)
+            .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
+
+        let path = Path::new(&asset.uri);
+        let kind = asset_kind_from_path(path);
+
+        (asset.uri.clone(), kind, project.path.clone())
+    };
+
+    // Get FFmpeg runner
+    let ffmpeg_guard = ffmpeg_state.read().await;
+    let ffmpeg = ffmpeg_guard
+        .runner()
+        .ok_or_else(|| "FFmpeg not initialized".to_string())?;
+
+    // Create thumbnail service
+    let thumbnail_service = ThumbnailService::new(project_path, ffmpeg.clone());
+    let asset_path = Path::new(&asset_path);
+
+    // Generate thumbnail
+    let result = thumbnail_service
+        .generate_for_asset(&asset_id, asset_path, &asset_kind)
+        .await;
+
+    match result {
+        Ok(thumb_path) => {
+            let thumb_url = thumbnail_service.thumbnail_url(&asset_id);
+
+            // Update asset's thumbnail URL in state
+            if let Some(url) = &thumb_url {
+                let mut guard = state
+                    .project
+                    .lock()
+                    .map_err(|_| "Failed to acquire lock".to_string())?;
+
+                if let Some(project) = guard.as_mut() {
+                    if let Some(asset) = project.state.assets.get_mut(&asset_id) {
+                        asset.set_thumbnail_url(Some(url.to_string()));
+                    }
+                }
+            }
+
+            tracing::info!(
+                "Generated thumbnail for asset {}: {:?}",
+                asset_id,
+                thumb_path
+            );
+            Ok(thumb_url)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to generate thumbnail for {}: {}", asset_id, e);
+            Ok(None)
+        }
+    }
+}
+
 /// Removes an asset from the project
 #[tauri::command]
 pub async fn remove_asset(asset_id: String, state: State<'_, AppState>) -> Result<(), String> {
@@ -527,12 +607,85 @@ pub async fn cancel_job(_job_id: String) -> Result<bool, String> {
 /// Starts final render export
 #[tauri::command]
 pub async fn start_render(
-    _sequence_id: String,
-    _output_path: String,
-    _preset: String,
-) -> Result<String, String> {
-    // TODO: Implement render
-    Ok(ulid::Ulid::new().to_string()) // Return job ID
+    sequence_id: String,
+    output_path: String,
+    preset: String,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+) -> Result<RenderStartResult, String> {
+    use crate::core::render::{ExportEngine, ExportPreset, ExportSettings};
+    use std::path::PathBuf;
+
+    // Get sequence and assets from project state
+    let (sequence, assets) = {
+        let guard = state
+            .project
+            .lock()
+            .map_err(|_| "Failed to acquire lock".to_string())?;
+
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        let sequence = project
+            .state
+            .sequences
+            .get(&sequence_id)
+            .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
+            .clone();
+
+        let assets: std::collections::HashMap<String, crate::core::assets::Asset> = project
+            .state
+            .assets
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        (sequence, assets)
+    };
+
+    // Get FFmpeg runner
+    let ffmpeg_guard = ffmpeg_state.read().await;
+    let ffmpeg = ffmpeg_guard
+        .runner()
+        .ok_or_else(|| "FFmpeg not initialized".to_string())?;
+
+    // Parse preset
+    let export_preset = match preset.to_lowercase().as_str() {
+        "youtube_1080p" | "youtube1080p" => ExportPreset::Youtube1080p,
+        "youtube_4k" | "youtube4k" => ExportPreset::Youtube4k,
+        "youtube_shorts" | "youtubeshorts" => ExportPreset::YoutubeShorts,
+        "twitter" => ExportPreset::Twitter,
+        "instagram" => ExportPreset::Instagram,
+        "webm" | "webm_vp9" => ExportPreset::WebmVp9,
+        "prores" => ExportPreset::ProRes,
+        _ => ExportPreset::Youtube1080p, // Default
+    };
+
+    // Create export settings
+    let settings = ExportSettings::from_preset(export_preset, PathBuf::from(&output_path));
+
+    // Create export engine and start export
+    let engine = ExportEngine::new(ffmpeg.clone());
+    let job_id = ulid::Ulid::new().to_string();
+
+    // Run export (for now synchronous - in future, run in background with job queue)
+    match engine.export_sequence(&sequence, &assets, &settings, None).await {
+        Ok(result) => {
+            tracing::info!(
+                "Export completed: {} ({:.1}s, {} bytes)",
+                result.output_path.display(),
+                result.encoding_time_sec,
+                result.file_size
+            );
+            Ok(RenderStartResult {
+                job_id,
+                output_path: result.output_path.to_string_lossy().to_string(),
+                status: "completed".to_string(),
+            })
+        }
+        Err(e) => Err(format!("Export failed: {}", e)),
+    }
 }
 
 // =============================================================================
@@ -592,6 +745,14 @@ pub struct UndoRedoResult {
     pub success: bool,
     pub can_undo: bool,
     pub can_redo: bool,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderStartResult {
+    pub job_id: String,
+    pub output_path: String,
+    pub status: String,
 }
 
 // =============================================================================

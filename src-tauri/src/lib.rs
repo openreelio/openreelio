@@ -12,6 +12,7 @@ use std::sync::Mutex;
 
 use crate::core::{
     commands::CommandExecutor,
+    ffmpeg::create_ffmpeg_state,
     project::{OpsLog, ProjectMeta, ProjectState, Snapshot},
 };
 
@@ -152,11 +153,15 @@ fn greet(name: &str) -> String {
 /// Initialize and run the Tauri application
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Create shared FFmpeg state
+    let ffmpeg_state = create_ffmpeg_state();
+
     tauri::Builder::default()
         .manage(AppState::new())
+        .manage(ffmpeg_state.clone())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .setup(|_app| {
+        .setup(move |app| {
             // Initialize logging
             tracing_subscriber::fmt()
                 .with_env_filter(
@@ -166,6 +171,27 @@ pub fn run() {
                 .init();
 
             tracing::info!("OpenReelio starting...");
+
+            // Initialize FFmpeg
+            let ffmpeg = ffmpeg_state.clone();
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let mut state = ffmpeg.write().await;
+                match state.initialize(Some(&handle)) {
+                    Ok(()) => {
+                        if let Some(info) = state.info() {
+                            tracing::info!(
+                                "FFmpeg initialized: version {} (bundled: {})",
+                                info.version,
+                                info.is_bundled
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("FFmpeg not available: {}. Video features will be limited.", e);
+                    }
+                }
+            });
 
             Ok(())
         })
@@ -181,6 +207,7 @@ pub fn run() {
             ipc::import_asset,
             ipc::get_assets,
             ipc::remove_asset,
+            ipc::generate_asset_thumbnail,
             // Timeline commands
             ipc::get_sequences,
             ipc::create_sequence,
@@ -196,6 +223,12 @@ pub fn run() {
             ipc::cancel_job,
             // Render commands
             ipc::start_render,
+            // FFmpeg commands
+            crate::core::ffmpeg::check_ffmpeg,
+            crate::core::ffmpeg::extract_frame,
+            crate::core::ffmpeg::generate_thumbnail,
+            crate::core::ffmpeg::probe_media,
+            crate::core::ffmpeg::generate_waveform,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

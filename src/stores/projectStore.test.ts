@@ -10,9 +10,12 @@ import { invoke } from '@tauri-apps/api/core';
 import { useProjectStore } from './projectStore';
 import {
   createMockProjectMeta,
+  createMockProjectState,
   mockTauriCommand,
+  mockTauriCommands,
   mockTauriCommandError,
   getMockedInvoke,
+  resetTauriMocks,
 } from '@/test/mocks/tauri';
 
 // =============================================================================
@@ -21,7 +24,8 @@ import {
 
 describe('projectStore', () => {
   beforeEach(() => {
-    // Reset store to initial state before each test
+    // Reset mocks and store to initial state before each test
+    resetTauriMocks();
     useProjectStore.setState({
       isLoaded: false,
       isLoading: false,
@@ -66,8 +70,12 @@ describe('projectStore', () => {
         name: 'My Project',
         path: '/path/to/project',
       });
+      const mockState = createMockProjectState();
 
-      mockTauriCommand('open_project', mockMeta);
+      mockTauriCommands({
+        'open_project': mockMeta,
+        'get_project_state': mockState,
+      });
 
       const { loadProject } = useProjectStore.getState();
       await loadProject('/path/to/project');
@@ -81,13 +89,16 @@ describe('projectStore', () => {
 
     it('should set isLoading during load', async () => {
       const mockMeta = createMockProjectMeta();
+      const mockState = createMockProjectState();
 
       // Create a delayed response to capture loading state
       const mockedInvoke = getMockedInvoke();
-      let resolvePromise: (value: unknown) => void;
+      let resolveCount = 0;
+      let resolvers: Array<(value: unknown) => void> = [];
+
       mockedInvoke.mockImplementation(() => {
         return new Promise((resolve) => {
-          resolvePromise = resolve;
+          resolvers.push(resolve);
         });
       });
 
@@ -96,8 +107,10 @@ describe('projectStore', () => {
       // Check loading state
       expect(useProjectStore.getState().isLoading).toBe(true);
 
-      // Resolve the promise
-      resolvePromise!(mockMeta);
+      // Resolve both promises in order
+      resolvers[0]?.(mockMeta);
+      await Promise.resolve(); // let microtask queue process
+      resolvers[1]?.(mockState);
       await loadPromise;
 
       expect(useProjectStore.getState().isLoading).toBe(false);
@@ -118,7 +131,12 @@ describe('projectStore', () => {
 
     it('should call invoke with correct arguments', async () => {
       const mockMeta = createMockProjectMeta();
-      mockTauriCommand('open_project', mockMeta);
+      const mockState = createMockProjectState();
+
+      mockTauriCommands({
+        'open_project': mockMeta,
+        'get_project_state': mockState,
+      });
 
       await useProjectStore.getState().loadProject('/my/project/path');
 
@@ -262,7 +280,13 @@ describe('projectStore', () => {
 
   describe('importAsset', () => {
     it('should import asset successfully', async () => {
-      mockTauriCommand('import_asset', { assetId: 'asset_001', name: 'video.mp4' });
+      const mockAssets = [{ id: 'asset_001', name: 'video.mp4', uri: '/path/to/video.mp4' }];
+
+      mockTauriCommands({
+        'import_asset': { assetId: 'asset_001', name: 'video.mp4' },
+        'get_assets': mockAssets,
+        'generate_asset_thumbnail': null,
+      });
 
       const { importAsset } = useProjectStore.getState();
       const assetId = await importAsset('/path/to/video.mp4');
@@ -272,7 +296,13 @@ describe('projectStore', () => {
     });
 
     it('should call invoke with correct arguments', async () => {
-      mockTauriCommand('import_asset', { assetId: 'asset_001', name: 'video.mp4' });
+      const mockAssets = [{ id: 'asset_001', name: 'video.mp4', uri: '/path/to/video.mp4' }];
+
+      mockTauriCommands({
+        'import_asset': { assetId: 'asset_001', name: 'video.mp4' },
+        'get_assets': mockAssets,
+        'generate_asset_thumbnail': null,
+      });
 
       await useProjectStore.getState().importAsset('/path/to/video.mp4');
 

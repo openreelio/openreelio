@@ -129,6 +129,8 @@ export interface Asset {
   audio?: AudioInfo;
   license: LicenseInfo;
   tags: string[];
+  /** Thumbnail URL generated via Tauri asset protocol */
+  thumbnailUrl?: string;
 }
 
 // =============================================================================
