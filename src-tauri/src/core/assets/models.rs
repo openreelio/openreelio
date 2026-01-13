@@ -165,6 +165,9 @@ pub struct Asset {
     pub license: LicenseInfo,
     /// User-defined tags
     pub tags: Vec<String>,
+    /// Thumbnail URL (via Tauri asset protocol)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thumbnail_url: Option<String>,
 }
 
 impl Asset {
@@ -183,6 +186,7 @@ impl Asset {
             audio: None,
             license: LicenseInfo::default(),
             tags: vec![],
+            thumbnail_url: None,
         }
     }
 
@@ -201,6 +205,7 @@ impl Asset {
             audio: Some(audio_info),
             license: LicenseInfo::default(),
             tags: vec![],
+            thumbnail_url: None,
         }
     }
 
@@ -226,6 +231,7 @@ impl Asset {
             audio: None,
             license: LicenseInfo::default(),
             tags: vec![],
+            thumbnail_url: None,
         }
     }
 
@@ -257,6 +263,17 @@ impl Asset {
     pub fn with_license(mut self, license: LicenseInfo) -> Self {
         self.license = license;
         self
+    }
+
+    /// Sets the thumbnail URL
+    pub fn with_thumbnail_url(mut self, url: &str) -> Self {
+        self.thumbnail_url = Some(url.to_string());
+        self
+    }
+
+    /// Sets the thumbnail URL from an Option
+    pub fn set_thumbnail_url(&mut self, url: Option<String>) {
+        self.thumbnail_url = url;
     }
 }
 
