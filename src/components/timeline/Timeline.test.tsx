@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, act, createEvent } from '@testing-library/react';
 import { Timeline } from './Timeline';
 import { useTimelineStore } from '@/stores/timelineStore';
+import { usePlaybackStore } from '@/stores/playbackStore';
 import type { Sequence } from '@/types';
 
 // =============================================================================
@@ -69,6 +70,18 @@ describe('Timeline', () => {
       snapToClips: true,
       snapToMarkers: true,
       snapToPlayhead: true,
+    });
+
+    // Reset playback store before each test
+    usePlaybackStore.setState({
+      isPlaying: false,
+      currentTime: 0,
+      duration: 0,
+      playbackRate: 1,
+      volume: 1,
+      isMuted: false,
+      loop: false,
+      syncWithTimeline: true,
     });
 
     // Mock getBoundingClientRect for drop tests
@@ -176,7 +189,7 @@ describe('Timeline', () => {
 
   describe('playhead', () => {
     it('should position playhead based on store state', () => {
-      useTimelineStore.setState({ playhead: 5 });
+      usePlaybackStore.setState({ currentTime: 5 });
 
       render(<Timeline sequence={mockSequence} />);
 
@@ -193,7 +206,7 @@ describe('Timeline', () => {
       fireEvent.click(ruler, { clientX: 300 });
 
       // Playhead should update (exact position depends on implementation)
-      expect(useTimelineStore.getState().playhead).toBeGreaterThan(0);
+      expect(usePlaybackStore.getState().currentTime).toBeGreaterThan(0);
     });
   });
 
@@ -227,7 +240,7 @@ describe('Timeline', () => {
       const timeline = screen.getByTestId('timeline');
       fireEvent.keyDown(timeline, { key: ' ' });
 
-      expect(useTimelineStore.getState().isPlaying).toBe(true);
+      expect(usePlaybackStore.getState().isPlaying).toBe(true);
     });
 
     it('should delete selected clips on delete key', () => {

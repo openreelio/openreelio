@@ -6,7 +6,7 @@
 
 import { Video, Music, Type, Layers, Eye, EyeOff, Lock, Unlock, Volume2, VolumeX, type LucideIcon } from 'lucide-react';
 import type { Track as TrackType, Clip as ClipType, TrackKind } from '@/types';
-import { Clip } from './Clip';
+import { Clip, type ClipDragData } from './Clip';
 
 // =============================================================================
 // Types
@@ -31,6 +31,12 @@ interface TrackProps {
   onClipClick?: (clipId: string) => void;
   /** Clip double-click handler */
   onClipDoubleClick?: (clipId: string) => void;
+  /** Clip drag start handler */
+  onClipDragStart?: (trackId: string, data: ClipDragData) => void;
+  /** Clip drag handler */
+  onClipDrag?: (trackId: string, data: ClipDragData, deltaX: number) => void;
+  /** Clip drag end handler */
+  onClipDragEnd?: (trackId: string, data: ClipDragData) => void;
 }
 
 // =============================================================================
@@ -58,6 +64,9 @@ export function Track({
   onVisibilityToggle,
   onClipClick,
   onClipDoubleClick,
+  onClipDragStart,
+  onClipDrag,
+  onClipDragEnd,
 }: TrackProps) {
   const TrackIcon = TrackIcons[track.kind] || Video;
 
@@ -143,6 +152,9 @@ export function Track({
             disabled={track.locked}
             onClick={onClipClick}
             onDoubleClick={onClipDoubleClick}
+            onDragStart={(data) => onClipDragStart?.(track.id, data)}
+            onDrag={(data, deltaX) => onClipDrag?.(track.id, data, deltaX)}
+            onDragEnd={(data) => onClipDragEnd?.(track.id, data)}
           />
         ))}
       </div>
