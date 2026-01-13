@@ -13,7 +13,8 @@ import { Inspector } from './components/features/inspector';
 import { ProjectExplorer } from './components/explorer';
 import { PreviewPlayer } from './components/preview';
 import { Timeline } from './components/timeline';
-import { useProjectStore } from './stores';
+import { useProjectStore, usePlaybackStore } from './stores';
+import { usePreviewSource } from './hooks/usePreviewSource';
 
 // =============================================================================
 // Console Component (Bottom Panel Content)
@@ -42,6 +43,9 @@ interface EditorViewProps {
 
 function EditorView({ sequence }: EditorViewProps): JSX.Element {
   const { selectedAssetId, assets } = useProjectStore();
+  const { currentTime, isPlaying, setCurrentTime, setIsPlaying, setDuration } =
+    usePlaybackStore();
+  const previewSource = usePreviewSource();
 
   // Get selected asset for inspector
   const selectedAsset = selectedAssetId ? assets.get(selectedAssetId) : undefined;
@@ -82,7 +86,16 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
       {/* Center content split between preview and timeline */}
       <div className="flex flex-col h-full">
         <div className="flex-1 border-b border-editor-border">
-          <PreviewPlayer className="h-full" />
+          <PreviewPlayer
+            src={previewSource?.src}
+            poster={previewSource?.thumbnail}
+            className="h-full"
+            playhead={currentTime}
+            isPlaying={isPlaying}
+            onPlayheadChange={setCurrentTime}
+            onPlayStateChange={setIsPlaying}
+            onDurationChange={setDuration}
+          />
         </div>
         <div className="flex-1">
           <Panel title="Timeline" variant="default" className="h-full">
