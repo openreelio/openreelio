@@ -90,15 +90,35 @@ export const useProjectStore = create<ProjectState>()(
       try {
         const projectInfo = await invoke<ProjectMeta>('open_project', { path });
 
+        // Load full project state including assets and sequences
+        const projectState = await invoke<{
+          assets: Asset[];
+          sequences: Sequence[];
+          activeSequenceId: string | null;
+        }>('get_project_state');
+
         set((state) => {
           state.isLoaded = true;
           state.isLoading = false;
           state.meta = projectInfo;
           state.isDirty = false;
           state.selectedAssetId = null;
-        });
 
-        // TODO: Load assets and sequences from backend
+          // Populate assets
+          state.assets = new Map();
+          for (const asset of projectState.assets) {
+            state.assets.set(asset.id, asset);
+          }
+
+          // Populate sequences
+          state.sequences = new Map();
+          for (const sequence of projectState.sequences) {
+            state.sequences.set(sequence.id, sequence);
+          }
+
+          // Set active sequence
+          state.activeSequenceId = projectState.activeSequenceId;
+        });
       } catch (error) {
         set((state) => {
           state.isLoading = false;
@@ -182,11 +202,35 @@ export const useProjectStore = create<ProjectState>()(
       try {
         const result = await invoke<{ assetId: string; name: string }>('import_asset', { uri });
 
-        // TODO: Fetch full asset data and add to store
+        // Fetch full asset list to get the newly imported asset
+        const assets = await invoke<Asset[]>('get_assets');
+
         set((state) => {
           state.isDirty = true;
           state.selectedAssetId = result.assetId;
+
+          // Update all assets in store
+          state.assets = new Map();
+          for (const asset of assets) {
+            state.assets.set(asset.id, asset);
+          }
         });
+
+        // Generate thumbnail in background (don't await - fire and forget)
+        invoke<string | null>('generate_asset_thumbnail', { assetId: result.assetId })
+          .then((thumbnailUrl) => {
+            if (thumbnailUrl) {
+              set((state) => {
+                const asset = state.assets.get(result.assetId);
+                if (asset) {
+                  asset.thumbnailUrl = thumbnailUrl;
+                }
+              });
+            }
+          })
+          .catch((err) => {
+            console.warn('Thumbnail generation failed:', err);
+          });
 
         return result.assetId;
       } catch (error) {
@@ -232,10 +276,11 @@ export const useProjectStore = create<ProjectState>()(
     // Create sequence
     createSequence: async (name: string, format: string) => {
       try {
-        const result = await invoke<{ id: string }>('create_sequence', { name, format });
+        const result = await invoke<Sequence>('create_sequence', { name, format });
 
-        // TODO: Fetch full sequence data and add to store
+        // Add the new sequence to store
         set((state) => {
+          state.sequences.set(result.id, result);
           state.isDirty = true;
           if (!state.activeSequenceId) {
             state.activeSequenceId = result.id;
