@@ -188,7 +188,10 @@ pub fn run() {
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("FFmpeg not available: {}. Video features will be limited.", e);
+                        tracing::warn!(
+                            "FFmpeg not available: {}. Video features will be limited.",
+                            e
+                        );
                     }
                 }
             });

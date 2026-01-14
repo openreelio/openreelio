@@ -8,13 +8,13 @@
 //!
 //! Supports both bundled FFmpeg binaries (via Tauri sidecar) and system-installed FFmpeg.
 
-mod runner;
-mod detection;
 mod commands;
+mod detection;
+mod runner;
 
-pub use runner::*;
-pub use detection::*;
 pub use commands::*;
+pub use detection::*;
+pub use runner::*;
 
 /// FFmpeg-related error types
 #[derive(Debug, thiserror::Error)]

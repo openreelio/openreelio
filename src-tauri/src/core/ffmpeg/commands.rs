@@ -152,7 +152,11 @@ pub async fn generate_thumbnail(
     };
 
     runner
-        .generate_thumbnail(&PathBuf::from(&input_path), &PathBuf::from(&output_path), size)
+        .generate_thumbnail(
+            &PathBuf::from(&input_path),
+            &PathBuf::from(&output_path),
+            size,
+        )
         .await
         .map_err(|e| e.to_string())
 }

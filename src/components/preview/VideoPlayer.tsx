@@ -202,9 +202,10 @@ export function VideoPlayer({
 
   // Cleanup seeked handler on unmount
   useEffect(() => {
+    const video = videoRef.current;
     return () => {
-      if (videoRef.current && seekedHandlerRef.current) {
-        videoRef.current.removeEventListener('seeked', seekedHandlerRef.current);
+      if (video && seekedHandlerRef.current) {
+        video.removeEventListener('seeked', seekedHandlerRef.current);
       }
     };
   }, []);

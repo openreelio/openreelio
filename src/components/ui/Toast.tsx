@@ -83,6 +83,13 @@ function Toast({ toast, onClose }: ToastProps): JSX.Element {
     });
   }, []);
 
+  const handleClose = useCallback(() => {
+    setIsExiting(true);
+    setTimeout(() => {
+      onClose(toast.id);
+    }, 200);
+  }, [onClose, toast.id]);
+
   // Auto dismiss
   useEffect(() => {
     const duration = toast.duration ?? 4000;
@@ -91,14 +98,7 @@ function Toast({ toast, onClose }: ToastProps): JSX.Element {
     }, duration);
 
     return () => clearTimeout(timer);
-  }, [toast.duration]);
-
-  const handleClose = useCallback(() => {
-    setIsExiting(true);
-    setTimeout(() => {
-      onClose(toast.id);
-    }, 200);
-  }, [onClose, toast.id]);
+  }, [toast.duration, handleClose]);
 
   return (
     <div

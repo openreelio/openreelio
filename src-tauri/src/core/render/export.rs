@@ -421,9 +421,9 @@ impl ExportEngine {
 
         // Add inputs and build filter graph
         for (clip, track) in &all_clips {
-            let asset = assets
-                .get(&clip.asset_id)
-                .ok_or_else(|| ExportError::InvalidSettings(format!("Asset not found: {}", clip.asset_id)))?;
+            let asset = assets.get(&clip.asset_id).ok_or_else(|| {
+                ExportError::InvalidSettings(format!("Asset not found: {}", clip.asset_id))
+            })?;
 
             // Add input
             args.push("-i".to_string());
@@ -487,10 +487,7 @@ impl ExportEngine {
         } else {
             // Multiple clips - concat
             filter_complex.push_str(&video_streams.join(""));
-            filter_complex.push_str(&format!(
-                "concat=n={}:v=1:a=0[outv]",
-                video_streams.len()
-            ));
+            filter_complex.push_str(&format!("concat=n={}:v=1:a=0[outv]", video_streams.len()));
         }
 
         if !audio_streams.is_empty() {
@@ -499,10 +496,7 @@ impl ExportEngine {
                 filter_complex.push_str(&format!("{}[outa]", audio_streams[0]));
             } else {
                 filter_complex.push_str(&audio_streams.join(""));
-                filter_complex.push_str(&format!(
-                    "concat=n={}:v=0:a=1[outa]",
-                    audio_streams.len()
-                ));
+                filter_complex.push_str(&format!("concat=n={}:v=0:a=1[outa]", audio_streams.len()));
             }
         }
 
@@ -588,7 +582,8 @@ impl ExportEngine {
             .iter()
             .flat_map(|t| &t.clips)
             .map(|c| {
-                let clip_duration = (c.range.source_out_sec - c.range.source_in_sec) / c.speed as f64;
+                let clip_duration =
+                    (c.range.source_out_sec - c.range.source_in_sec) / c.speed as f64;
                 c.place.timeline_in_sec + clip_duration
             })
             .fold(0.0, f64::max);
@@ -729,10 +724,8 @@ mod tests {
 
     #[test]
     fn test_export_preset_youtube_1080p() {
-        let settings = ExportSettings::from_preset(
-            ExportPreset::Youtube1080p,
-            PathBuf::from("output.mp4"),
-        );
+        let settings =
+            ExportSettings::from_preset(ExportPreset::Youtube1080p, PathBuf::from("output.mp4"));
 
         assert_eq!(settings.width, Some(1920));
         assert_eq!(settings.height, Some(1080));
@@ -742,10 +735,8 @@ mod tests {
 
     #[test]
     fn test_export_preset_youtube_shorts() {
-        let settings = ExportSettings::from_preset(
-            ExportPreset::YoutubeShorts,
-            PathBuf::from("shorts.mp4"),
-        );
+        let settings =
+            ExportSettings::from_preset(ExportPreset::YoutubeShorts, PathBuf::from("shorts.mp4"));
 
         // Vertical format
         assert_eq!(settings.width, Some(1080));
@@ -754,10 +745,8 @@ mod tests {
 
     #[test]
     fn test_export_preset_webm_vp9() {
-        let settings = ExportSettings::from_preset(
-            ExportPreset::WebmVp9,
-            PathBuf::from("output.webm"),
-        );
+        let settings =
+            ExportSettings::from_preset(ExportPreset::WebmVp9, PathBuf::from("output.webm"));
 
         assert_eq!(settings.video_codec, VideoCodec::Vp9);
         assert_eq!(settings.audio_codec, AudioCodec::Opus);

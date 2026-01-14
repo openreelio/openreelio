@@ -9,7 +9,7 @@
 import { useMemo } from 'react';
 import { useProjectStore } from '@/stores';
 import { usePlaybackStore } from '@/stores/playbackStore';
-import type { Asset, Sequence, Clip } from '@/types';
+import type { Sequence, Clip } from '@/types';
 import { convertFileSrc } from '@tauri-apps/api/core';
 
 // =============================================================================
