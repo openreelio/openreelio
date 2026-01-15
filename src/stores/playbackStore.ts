@@ -37,6 +37,8 @@ export interface PlaybackActions {
   pause: () => void;
   /** Toggle play/pause */
   togglePlayback: () => void;
+  /** Set playing state directly */
+  setIsPlaying: (isPlaying: boolean) => void;
   /** Seek to specific time */
   seek: (time: number) => void;
   /** Seek forward by amount */
@@ -124,6 +126,12 @@ export const usePlaybackStore = create<PlaybackStore>()(
     togglePlayback: () => {
       set((state) => {
         state.isPlaying = !state.isPlaying;
+      });
+    },
+
+    setIsPlaying: (isPlaying: boolean) => {
+      set((state) => {
+        state.isPlaying = isPlaying;
       });
     },
 

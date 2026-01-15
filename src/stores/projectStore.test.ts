@@ -93,8 +93,7 @@ describe('projectStore', () => {
 
       // Create a delayed response to capture loading state
       const mockedInvoke = getMockedInvoke();
-      let resolveCount = 0;
-      let resolvers: Array<(value: unknown) => void> = [];
+      const resolvers: Array<(value: unknown) => void> = [];
 
       mockedInvoke.mockImplementation(() => {
         return new Promise((resolve) => {

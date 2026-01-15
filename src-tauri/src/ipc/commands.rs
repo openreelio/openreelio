@@ -670,7 +670,10 @@ pub async fn start_render(
     let job_id = ulid::Ulid::new().to_string();
 
     // Run export (for now synchronous - in future, run in background with job queue)
-    match engine.export_sequence(&sequence, &assets, &settings, None).await {
+    match engine
+        .export_sequence(&sequence, &assets, &settings, None)
+        .await
+    {
         Ok(result) => {
             tracing::info!(
                 "Export completed: {} ({:.1}s, {} bytes)",

@@ -193,11 +193,7 @@ fn get_common_ffmpeg_paths() -> Vec<PathBuf> {
 
         // Scoop installation
         if let Ok(userprofile) = std::env::var("USERPROFILE") {
-            paths.push(
-                PathBuf::from(userprofile)
-                    .join("scoop")
-                    .join("shims"),
-            );
+            paths.push(PathBuf::from(userprofile).join("scoop").join("shims"));
         }
     }
 

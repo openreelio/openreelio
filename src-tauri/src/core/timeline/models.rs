@@ -237,20 +237,15 @@ pub enum TrackKind {
 }
 
 /// Blend mode for video tracks
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BlendMode {
+    #[default]
     Normal,
     Multiply,
     Screen,
     Overlay,
     Add,
-}
-
-impl Default for BlendMode {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 /// Track (contains clips directly for denormalized storage)

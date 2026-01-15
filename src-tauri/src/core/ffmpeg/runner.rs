@@ -484,7 +484,10 @@ impl FFmpegRunner {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(FFmpegError::ProbeError(format!("FFprobe failed: {}", stderr)));
+            return Err(FFmpegError::ProbeError(format!(
+                "FFprobe failed: {}",
+                stderr
+            )));
         }
 
         let json_str = String::from_utf8_lossy(&output.stdout);
@@ -519,10 +522,7 @@ impl FFmpegRunner {
                 "-i",
                 &input.to_string_lossy(),
                 "-filter_complex",
-                &format!(
-                    "showwavespic=s={}x{}:colors=#3b82f6",
-                    width, height
-                ),
+                &format!("showwavespic=s={}x{}:colors=#3b82f6", width, height),
                 "-frames:v",
                 "1",
                 "-y",
@@ -606,15 +606,9 @@ fn parse_probe_output(json_str: &str) -> FFmpegResult<MediaInfo> {
 }
 
 fn parse_video_stream(stream: &serde_json::Value) -> FFmpegResult<VideoStreamInfo> {
-    let width = stream
-        .get("width")
-        .and_then(|w| w.as_u64())
-        .unwrap_or(0) as u32;
+    let width = stream.get("width").and_then(|w| w.as_u64()).unwrap_or(0) as u32;
 
-    let height = stream
-        .get("height")
-        .and_then(|h| h.as_u64())
-        .unwrap_or(0) as u32;
+    let height = stream.get("height").and_then(|h| h.as_u64()).unwrap_or(0) as u32;
 
     // Parse frame rate from r_frame_rate (e.g., "30/1" or "30000/1001")
     let fps = stream
@@ -670,10 +664,7 @@ fn parse_audio_stream(stream: &serde_json::Value) -> FFmpegResult<AudioStreamInf
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(44100);
 
-    let channels = stream
-        .get("channels")
-        .and_then(|c| c.as_u64())
-        .unwrap_or(2) as u8;
+    let channels = stream.get("channels").and_then(|c| c.as_u64()).unwrap_or(2) as u8;
 
     let codec = stream
         .get("codec_name")

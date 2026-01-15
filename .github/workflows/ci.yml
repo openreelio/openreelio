@@ -18,10 +18,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   NODE_VERSION: '20'
-  # MSRV is constrained by transitive deps (e.g. ICU crates); keep this in sync with `src-tauri/Cargo.toml`.
   RUST_VERSION: '1.85.0'
-  # Default to Ubuntu-only to reduce GitHub-hosted runner minutes.
-  OS_MATRIX: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.full_matrix == 'true') && '["ubuntu-latest","windows-latest","macos-latest"]' || '["ubuntu-latest"]' }}
 
 jobs:
   # ==========================================================================
@@ -68,12 +65,7 @@ jobs:
   rust-test:
     name: Rust Tests
     if: github.event_name != 'schedule'
-    runs-on: ${{ matrix.os }}
-
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ fromJson(env.OS_MATRIX) }}
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
@@ -102,6 +94,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
+      - name: Create dist directory for Tauri
+        run: mkdir -p dist
+
       - name: Check formatting
         working-directory: src-tauri
         run: cargo fmt --all -- --check
@@ -120,13 +115,8 @@ jobs:
   build-check:
     name: Build Check
     if: github.event_name != 'schedule'
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     needs: [frontend-test, rust-test]
-
-    strategy:
-      fail-fast: false
-      matrix:
-        os: ${{ fromJson(env.OS_MATRIX) }}
 
     steps:
       - name: Checkout repository

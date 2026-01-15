@@ -137,7 +137,7 @@ export function useTimeline(): UseTimelineReturn {
 
   // Selection actions
   const selectClip = useCallback(
-    (clipId: string, _additive: boolean = false) => {
+    (clipId: string) => {
       storeSelectClip(clipId);
     },
     [storeSelectClip]

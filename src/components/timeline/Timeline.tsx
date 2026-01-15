@@ -184,7 +184,7 @@ export function Timeline({
   );
 
   const handleClipDrag = useCallback(
-    (trackId: string, data: ClipDragData, deltaX: number) => {
+    (_trackId: string, data: ClipDragData, deltaX: number) => {
       if (!sequence) return;
 
       const deltaTime = deltaX / zoom;

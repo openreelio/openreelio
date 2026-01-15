@@ -6,8 +6,8 @@
 pub mod ai;
 pub mod assets;
 pub mod commands;
-pub mod ffmpeg;
 pub mod effects;
+pub mod ffmpeg;
 pub mod generative;
 pub mod indexing;
 pub mod jobs;
