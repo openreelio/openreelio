@@ -94,6 +94,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
+      - name: Create dist directory for Tauri
+        run: mkdir -p dist
+
       - name: Check formatting
         working-directory: src-tauri
         run: cargo fmt --all -- --check
