@@ -301,31 +301,30 @@ impl ExportEngine {
         input_path: &Path,
         settings: &ExportSettings,
     ) -> Vec<String> {
-        let mut args = Vec::new();
+        let video_codec = match settings.video_codec {
+            VideoCodec::H264 => "libx264",
+            VideoCodec::H265 => "libx265",
+            VideoCodec::Vp9 => "libvpx-vp9",
+            VideoCodec::ProRes => "prores_ks",
+            VideoCodec::Copy => "copy",
+        };
 
-        // Input
-        args.push("-i".to_string());
-        args.push(input_path.to_string_lossy().to_string());
+        let audio_codec = match settings.audio_codec {
+            AudioCodec::Aac => "aac",
+            AudioCodec::Mp3 => "libmp3lame",
+            AudioCodec::Opus => "libopus",
+            AudioCodec::Pcm => "pcm_s16le",
+            AudioCodec::Copy => "copy",
+        };
 
-        // Video codec
-        args.push("-c:v".to_string());
-        args.push(match settings.video_codec {
-            VideoCodec::H264 => "libx264".to_string(),
-            VideoCodec::H265 => "libx265".to_string(),
-            VideoCodec::Vp9 => "libvpx-vp9".to_string(),
-            VideoCodec::ProRes => "prores_ks".to_string(),
-            VideoCodec::Copy => "copy".to_string(),
-        });
-
-        // Audio codec
-        args.push("-c:a".to_string());
-        args.push(match settings.audio_codec {
-            AudioCodec::Aac => "aac".to_string(),
-            AudioCodec::Mp3 => "libmp3lame".to_string(),
-            AudioCodec::Opus => "libopus".to_string(),
-            AudioCodec::Pcm => "pcm_s16le".to_string(),
-            AudioCodec::Copy => "copy".to_string(),
-        });
+        let mut args = vec![
+            "-i".to_string(),
+            input_path.to_string_lossy().to_string(),
+            "-c:v".to_string(),
+            video_codec.to_string(),
+            "-c:a".to_string(),
+            audio_codec.to_string(),
+        ];
 
         // Resolution
         if let (Some(w), Some(h)) = (settings.width, settings.height) {

@@ -18,10 +18,11 @@ use crate::core::{CoreError, CoreResult};
 // =============================================================================
 
 /// Status of a proposal
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ProposalStatus {
     /// Proposal is pending review
+    #[default]
     Pending,
     /// User is reviewing the proposal
     Reviewing,
@@ -39,11 +40,6 @@ pub enum ProposalStatus {
     Expired,
 }
 
-impl Default for ProposalStatus {
-    fn default() -> Self {
-        Self::Pending
-    }
-}
 
 // =============================================================================
 // Proposal

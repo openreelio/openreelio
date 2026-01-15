@@ -37,12 +37,13 @@ pub enum JobType {
 }
 
 /// Job priority levels
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Priority {
     /// Background tasks (lowest)
     Background = 0,
     /// Normal priority
+    #[default]
     Normal = 1,
     /// Preview generation (higher)
     Preview = 2,
@@ -50,17 +51,12 @@ pub enum Priority {
     UserRequest = 3,
 }
 
-impl Default for Priority {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
-
 /// Job status
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum JobStatus {
     /// Waiting in queue
+    #[default]
     Queued,
     /// Currently running
     Running {
@@ -73,12 +69,6 @@ pub enum JobStatus {
     Failed { error: String },
     /// Cancelled by user
     Cancelled,
-}
-
-impl Default for JobStatus {
-    fn default() -> Self {
-        Self::Queued
-    }
 }
 
 /// Job definition
