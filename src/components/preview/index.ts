@@ -21,3 +21,6 @@ export type { VolumeControlsProps } from './VolumeControls';
 
 export { PlaybackButtons } from './PlaybackButtons';
 export type { PlaybackButtonsProps } from './PlaybackButtons';
+
+export { ProxyPreviewPlayer } from './ProxyPreviewPlayer';
+export type { ProxyPreviewPlayerProps } from './ProxyPreviewPlayer';
