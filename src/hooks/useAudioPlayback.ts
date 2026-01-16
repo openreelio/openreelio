@@ -245,9 +245,13 @@ export function useAudioPlayback({
       const sourceOffset = clip.range.sourceInSec + (timeIntoClip * clip.speed);
       const startDelay = Math.max(0, clip.place.timelineInSec - currentTime);
 
-      // Schedule playback
+      // Calculate duration to stop at clip's source out point
+      const remainingSourceDuration = clip.range.sourceOutSec - sourceOffset;
+      const audioDuration = Math.max(0, remainingSourceDuration);
+
+      // Schedule playback with duration to stop at clip end
       const scheduledStartTime = now + startDelay;
-      source.start(scheduledStartTime, sourceOffset);
+      source.start(scheduledStartTime, sourceOffset, audioDuration);
 
       // Track the scheduled source
       scheduledSourcesRef.current.set(clip.id, {
