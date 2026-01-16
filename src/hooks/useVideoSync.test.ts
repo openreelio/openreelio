@@ -36,7 +36,7 @@ const createMockClip = (overrides: Partial<Clip> = {}): Clip => ({
   },
   place: {
     timelineInSec: 0,
-    layer: 0,
+    durationSec: 10,
   },
   transform: {
     position: { x: 0, y: 0 },
@@ -140,7 +140,7 @@ describe('useVideoSync', () => {
 
     it('accounts for clip offset', () => {
       const clip = createMockClip({
-        place: { timelineInSec: 10, layer: 0 },
+        place: { timelineInSec: 10, durationSec: 10 },
       });
       const video = createMockVideoElement();
       const videoRefs = new Map<string, HTMLVideoElement>([[clip.id, video]]);
@@ -275,7 +275,7 @@ describe('calculateTimelineTime', () => {
   it('calculates timeline time from source time', () => {
     const clip = createMockClip({
       range: { sourceInSec: 0, sourceOutSec: 10 },
-      place: { timelineInSec: 5, layer: 0 },
+      place: { timelineInSec: 5, durationSec: 10 },
       speed: 1,
     });
 
@@ -285,7 +285,7 @@ describe('calculateTimelineTime', () => {
   it('accounts for speed', () => {
     const clip = createMockClip({
       range: { sourceInSec: 0, sourceOutSec: 10 },
-      place: { timelineInSec: 0, layer: 0 },
+      place: { timelineInSec: 0, durationSec: 10 },
       speed: 2,
     });
 
@@ -296,7 +296,7 @@ describe('calculateTimelineTime', () => {
   it('handles source offset', () => {
     const clip = createMockClip({
       range: { sourceInSec: 5, sourceOutSec: 15 },
-      place: { timelineInSec: 0, layer: 0 },
+      place: { timelineInSec: 0, durationSec: 10 },
       speed: 1,
     });
 
@@ -309,7 +309,7 @@ describe('isTimeInClip', () => {
   it('returns true when time is within clip', () => {
     const clip = createMockClip({
       range: { sourceInSec: 0, sourceOutSec: 10 },
-      place: { timelineInSec: 5, layer: 0 },
+      place: { timelineInSec: 5, durationSec: 10 },
       speed: 1,
     });
 
@@ -319,7 +319,7 @@ describe('isTimeInClip', () => {
 
   it('returns false when time is before clip', () => {
     const clip = createMockClip({
-      place: { timelineInSec: 5, layer: 0 },
+      place: { timelineInSec: 5, durationSec: 10 },
     });
 
     expect(isTimeInClip(clip, 4)).toBe(false);
@@ -328,7 +328,7 @@ describe('isTimeInClip', () => {
   it('returns false when time is at or after clip end', () => {
     const clip = createMockClip({
       range: { sourceInSec: 0, sourceOutSec: 10 },
-      place: { timelineInSec: 0, layer: 0 },
+      place: { timelineInSec: 0, durationSec: 10 },
       speed: 1,
     });
 
@@ -339,7 +339,7 @@ describe('isTimeInClip', () => {
   it('accounts for speed in clip duration', () => {
     const clip = createMockClip({
       range: { sourceInSec: 0, sourceOutSec: 10 },
-      place: { timelineInSec: 0, layer: 0 },
+      place: { timelineInSec: 0, durationSec: 10 },
       speed: 2, // 10 source sec / 2 = 5 timeline sec
     });
 
