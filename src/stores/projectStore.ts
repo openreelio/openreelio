@@ -9,7 +9,7 @@ import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
 import { invoke } from '@tauri-apps/api/core';
-import type { Asset, Sequence, Command, CommandResult } from '@/types';
+import type { Asset, Sequence, Command, CommandResult, UndoRedoResult } from '@/types';
 
 // Enable Immer's MapSet plugin for Map/Set support
 enableMapSet();
@@ -57,8 +57,8 @@ interface ProjectState {
 
   // Command execution
   executeCommand: (command: Command) => Promise<CommandResult>;
-  undo: () => Promise<void>;
-  redo: () => Promise<CommandResult>;
+  undo: () => Promise<UndoRedoResult>;
+  redo: () => Promise<UndoRedoResult>;
   canUndo: () => Promise<boolean>;
   canRedo: () => Promise<boolean>;
 }
@@ -336,10 +336,11 @@ export const useProjectStore = create<ProjectState>()(
     // Undo
     undo: async () => {
       try {
-        await invoke('undo');
+        const result = await invoke<UndoRedoResult>('undo');
         set((state) => {
           state.isDirty = true;
         });
+        return result;
       } catch (error) {
         set((state) => {
           state.error = error instanceof Error ? error.message : String(error);
@@ -351,7 +352,7 @@ export const useProjectStore = create<ProjectState>()(
     // Redo
     redo: async () => {
       try {
-        const result = await invoke<CommandResult>('redo');
+        const result = await invoke<UndoRedoResult>('redo');
         set((state) => {
           state.isDirty = true;
         });
