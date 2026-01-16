@@ -143,6 +143,7 @@ export interface SequenceFormat {
   canvas: Size2D;
   fps: Ratio;
   audioSampleRate: number;
+  audioChannels: number;
 }
 
 export interface Sequence {
@@ -155,15 +156,19 @@ export interface Sequence {
 
 export type TrackKind = 'video' | 'audio' | 'caption' | 'overlay';
 
+export type BlendMode = 'normal' | 'multiply' | 'screen' | 'overlay' | 'add';
+
 export interface Track {
   id: TrackId;
   kind: TrackKind;
   name: string;
   clips: Clip[];
+  blendMode: BlendMode;
   muted: boolean;
   locked: boolean;
   visible: boolean;
-  volumeDb: number;
+  /** Volume as linear multiplier (0.0 - 2.0, where 1.0 = 100%) */
+  volume: number;
 }
 
 export interface ClipRange {
@@ -176,8 +181,8 @@ export interface ClipRange {
 export interface ClipPlace {
   /** Timeline position in seconds */
   timelineInSec: TimeSec;
-  /** Z-order layer (0 = bottom) */
-  layer: number;
+  /** Duration on timeline in seconds (may differ from source due to speed) */
+  durationSec: TimeSec;
 }
 
 export interface Transform {
@@ -245,6 +250,12 @@ export interface CommandResult {
   changes: StateChange[];
   createdIds: string[];
   deletedIds: string[];
+}
+
+export interface UndoRedoResult {
+  success: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 export interface StateChange {
