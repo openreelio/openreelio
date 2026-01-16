@@ -7,6 +7,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { save } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import {
   X,
   Download,
@@ -48,6 +49,32 @@ export interface ExportDialogProps {
   sequenceId: string | null;
   /** Sequence name for display */
   sequenceName?: string;
+}
+
+/** Render progress event payload */
+interface RenderProgressEvent {
+  jobId: string;
+  frame: number;
+  totalFrames: number;
+  percent: number;
+  fps: number;
+  etaSeconds: number;
+  message: string;
+}
+
+/** Render complete event payload */
+interface RenderCompleteEvent {
+  jobId: string;
+  outputPath: string;
+  durationSec: number;
+  fileSize: number;
+  encodingTimeSec: number;
+}
+
+/** Render error event payload */
+interface RenderErrorEvent {
+  jobId: string;
+  error: string;
 }
 
 // =============================================================================
@@ -232,9 +259,12 @@ export function ExportDialog({
   const [selectedPreset, setSelectedPreset] = useState(EXPORT_PRESETS[0].id);
   const [outputPath, setOutputPath] = useState('');
   const [status, setStatus] = useState<ExportStatus>({ type: 'idle' });
+  const [currentJobId, setCurrentJobId] = useState<string | null>(null);
 
   // Refs
   const dialogRef = useRef<HTMLDivElement>(null);
+  const unlistenRefs = useRef<UnlistenFn[]>([]);
+  const currentJobIdRef = useRef<string | null>(null);
 
   // Reset form when dialog opens
   useEffect(() => {
@@ -242,8 +272,74 @@ export function ExportDialog({
       setSelectedPreset(EXPORT_PRESETS[0].id);
       setOutputPath('');
       setStatus({ type: 'idle' });
+      setCurrentJobId(null);
     }
   }, [isOpen]);
+
+  // Keep ref in sync with state for use in event listeners
+  useEffect(() => {
+    currentJobIdRef.current = currentJobId;
+  }, [currentJobId]);
+
+  // Set up Tauri event listeners for render progress
+  useEffect(() => {
+    const setupListeners = async () => {
+      // Clean up previous listeners
+      for (const unlisten of unlistenRefs.current) {
+        unlisten();
+      }
+      unlistenRefs.current = [];
+
+      // Listen for progress events
+      const unlistenProgress = await listen<RenderProgressEvent>('render-progress', (event) => {
+        const jobId = currentJobIdRef.current;
+        if (jobId && event.payload.jobId === jobId) {
+          const { percent, frame, totalFrames, fps, etaSeconds } = event.payload;
+          const message = totalFrames > 0
+            ? `Encoding frame ${frame}/${totalFrames} (${fps.toFixed(1)} fps, ETA: ${etaSeconds}s)`
+            : `Encoding frame ${frame}...`;
+          setStatus({ type: 'exporting', progress: percent, message });
+        }
+      });
+      unlistenRefs.current.push(unlistenProgress);
+
+      // Listen for completion events
+      const unlistenComplete = await listen<RenderCompleteEvent>('render-complete', (event) => {
+        const jobId = currentJobIdRef.current;
+        if (jobId && event.payload.jobId === jobId) {
+          setStatus({
+            type: 'completed',
+            outputPath: event.payload.outputPath,
+            duration: event.payload.encodingTimeSec,
+          });
+          setCurrentJobId(null);
+        }
+      });
+      unlistenRefs.current.push(unlistenComplete);
+
+      // Listen for error events
+      const unlistenError = await listen<RenderErrorEvent>('render-error', (event) => {
+        const jobId = currentJobIdRef.current;
+        if (jobId && event.payload.jobId === jobId) {
+          setStatus({ type: 'failed', error: event.payload.error });
+          setCurrentJobId(null);
+        }
+      });
+      unlistenRefs.current.push(unlistenError);
+    };
+
+    if (currentJobId) {
+      void setupListeners();
+    }
+
+    // Cleanup on unmount or when job changes
+    return () => {
+      for (const unlisten of unlistenRefs.current) {
+        unlisten();
+      }
+      unlistenRefs.current = [];
+    };
+  }, [currentJobId]);
 
   // Handlers
   const handleBrowse = useCallback(async () => {
@@ -269,20 +365,7 @@ export function ExportDialog({
     setStatus({ type: 'exporting', progress: 0, message: 'Starting export...' });
 
     try {
-      // Simulate progress updates (in real implementation, use Tauri events)
-      const progressInterval = setInterval(() => {
-        setStatus(prev => {
-          if (prev.type === 'exporting' && prev.progress < 90) {
-            return {
-              type: 'exporting',
-              progress: prev.progress + 10,
-              message: `Encoding frame ${Math.round(prev.progress * 30)}...`,
-            };
-          }
-          return prev;
-        });
-      }, 500);
-
+      // Start render - progress will be received via Tauri events
       const result = await invoke<{ jobId: string; outputPath: string; status: string }>(
         'start_render',
         {
@@ -292,25 +375,26 @@ export function ExportDialog({
         }
       );
 
-      clearInterval(progressInterval);
+      // Store job ID to filter events
+      setCurrentJobId(result.jobId);
 
+      // Note: The completion/error will be handled by event listeners
+      // If the invoke itself returns 'completed', it means export finished synchronously
+      // (which can happen if events weren't set up yet or for very short exports)
       if (result.status === 'completed') {
         setStatus({
           type: 'completed',
           outputPath: result.outputPath,
-          duration: 0, // Would come from actual result
+          duration: 0,
         });
-      } else {
-        setStatus({
-          type: 'failed',
-          error: 'Export did not complete successfully',
-        });
+        setCurrentJobId(null);
       }
     } catch (error) {
       setStatus({
         type: 'failed',
         error: error instanceof Error ? error.message : String(error),
       });
+      setCurrentJobId(null);
     }
   }, [sequenceId, outputPath, selectedPreset]);
 

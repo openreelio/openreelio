@@ -131,6 +131,8 @@ export interface Asset {
   tags: string[];
   /** Thumbnail URL generated via Tauri asset protocol */
   thumbnailUrl?: string;
+  /** Proxy video URL for preview playback */
+  proxyUrl?: string;
 }
 
 // =============================================================================

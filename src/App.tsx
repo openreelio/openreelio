@@ -14,7 +14,7 @@ import { ProjectExplorer } from './components/explorer';
 import { PreviewPlayer } from './components/preview';
 import { Timeline } from './components/timeline';
 import { useProjectStore, usePlaybackStore } from './stores';
-import { usePreviewSource } from './hooks/usePreviewSource';
+import { usePreviewSource, useTimelineActions } from './hooks';
 
 // =============================================================================
 // Console Component (Bottom Panel Content)
@@ -46,6 +46,15 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
   const { currentTime, isPlaying, setCurrentTime, setIsPlaying, setDuration } =
     usePlaybackStore();
   const previewSource = usePreviewSource();
+
+  // Timeline action callbacks
+  const {
+    handleClipMove,
+    handleClipTrim,
+    handleClipSplit,
+    handleAssetDrop,
+    handleDeleteClips,
+  } = useTimelineActions({ sequence });
 
   // Get selected asset for inspector
   const selectedAsset = selectedAssetId ? assets.get(selectedAssetId) : undefined;
@@ -99,7 +108,14 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
         </div>
         <div className="flex-1">
           <Panel title="Timeline" variant="default" className="h-full">
-            <Timeline sequence={sequence} />
+            <Timeline
+              sequence={sequence}
+              onClipMove={handleClipMove}
+              onClipTrim={handleClipTrim}
+              onClipSplit={handleClipSplit}
+              onAssetDrop={handleAssetDrop}
+              onDeleteClips={handleDeleteClips}
+            />
           </Panel>
         </div>
       </div>
