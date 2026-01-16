@@ -21,3 +21,11 @@ export type { UseToastReturn } from './useToast';
 
 export { useKeyboardShortcuts, KEYBOARD_SHORTCUTS } from './useKeyboardShortcuts';
 export type { UseKeyboardShortcutsOptions, KeyboardShortcut } from './useKeyboardShortcuts';
+
+export { useTimelineActions } from './useTimelineActions';
+
+export { useAudioPlayback } from './useAudioPlayback';
+export type { UseAudioPlaybackOptions, UseAudioPlaybackReturn } from './useAudioPlayback';
+
+export { useVideoSync, calculateTimelineTime, isTimeInClip, getClipTimelineDuration } from './useVideoSync';
+export type { UseVideoSyncOptions, UseVideoSyncReturn } from './useVideoSync';
