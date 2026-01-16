@@ -72,7 +72,7 @@ const createMockClip = (overrides: Partial<Clip> = {}): Clip => ({
   },
   place: {
     timelineInSec: 0,
-    layer: 0,
+    durationSec: 10,
   },
   transform: {
     position: { x: 0, y: 0 },
@@ -96,10 +96,11 @@ const createMockTrack = (overrides: Partial<Track> = {}): Track => ({
   kind: 'audio',
   name: 'Audio 1',
   clips: [createMockClip()],
+  blendMode: 'normal',
   muted: false,
   locked: false,
   visible: true,
-  volumeDb: 0,
+  volume: 1.0,
   ...overrides,
 });
 
@@ -110,6 +111,7 @@ const createMockSequence = (overrides: Partial<Sequence> = {}): Sequence => ({
     canvas: { width: 1920, height: 1080 },
     fps: { num: 30, den: 1 },
     audioSampleRate: 48000,
+    audioChannels: 2,
   },
   tracks: [createMockTrack()],
   markers: [],
