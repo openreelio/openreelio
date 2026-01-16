@@ -157,17 +157,32 @@ impl Snapshot {
 
     /// Loads project from snapshot, then applies any new operations from ops log
     pub fn load_with_replay(snapshot_path: &Path, ops_log: &OpsLog) -> CoreResult<ProjectState> {
-        let (mut state, last_op_id) = Self::load(snapshot_path)?;
+        let (mut state, snapshot_last_op_id) = Self::load(snapshot_path)?;
 
-        // If there's a last_op_id, replay operations since that point
-        if let Some(op_id) = &last_op_id {
+        // If the snapshot doesn't know which operation it includes (legacy),
+        // fall back to reconstructing from the ops log for correctness.
+        if snapshot_last_op_id.is_none() {
+            let log_count = ops_log.count()?;
+            if log_count > 0 {
+                return ProjectState::from_ops_log(ops_log, state.meta.clone());
+            }
+            return Ok(state);
+        }
+
+        // Replay operations since the snapshot's last op id
+        if let Some(op_id) = &snapshot_last_op_id {
             let result = ops_log.read_since(op_id)?;
             for op in result.operations {
                 state.apply_operation(&op)?;
             }
         }
 
-        state.last_op_id = last_op_id;
+        // Sync metadata with the ops log end state.
+        state.op_count = ops_log.count()?;
+        state.last_op_id = match ops_log.last()? {
+            Some(op) => Some(op.id),
+            None => snapshot_last_op_id,
+        };
 
         Ok(state)
     }
@@ -388,6 +403,36 @@ mod tests {
 
         // Should have both assets: 1 from snapshot + 1 from replay
         assert_eq!(restored_state.assets.len(), 2);
+        assert_eq!(restored_state.last_op_id, Some("op_002".to_string()));
+        assert_eq!(restored_state.op_count, 2);
+    }
+
+    #[test]
+    fn test_load_with_replay_falls_back_when_snapshot_has_no_last_op_id() {
+        use crate::core::project::OpsLog;
+
+        let temp_dir = TempDir::new().unwrap();
+        let snapshot_path = temp_dir.path().join("snapshot.json");
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        // Save a legacy snapshot without last_op_id.
+        let state = ProjectState::new("Legacy Replay Test");
+        Snapshot::save(&snapshot_path, &state, None).unwrap();
+
+        // Create an ops log with operations (snapshot cannot know its position).
+        let ops_log = OpsLog::new(&ops_path);
+        let asset = Asset::new_video("a.mp4", "/a.mp4", VideoInfo::default());
+        let op = Operation::with_id(
+            "op_001",
+            OpKind::AssetImport,
+            serde_json::to_value(&asset).unwrap(),
+        );
+        ops_log.append(&op).unwrap();
+
+        let restored_state = Snapshot::load_with_replay(&snapshot_path, &ops_log).unwrap();
+        assert_eq!(restored_state.assets.len(), 1);
+        assert_eq!(restored_state.last_op_id, Some("op_001".to_string()));
+        assert_eq!(restored_state.op_count, 1);
     }
 
     #[test]

@@ -102,15 +102,26 @@ impl CommandExecutor {
         // Get type name and json before executing (for logging)
         let type_name = command.type_name().to_string();
         let json_data = command.to_json();
+        let prev_op_id = state.last_op_id.clone();
 
         // Execute the command (needs &mut self)
         let result = command.execute(state)?;
 
         // Log the operation if persistence is enabled
-        if let Some(ops_log) = &self.ops_log {
-            let operation = Operation::new(Self::type_name_to_op_kind(&type_name), json_data);
+        let op_timestamp = if let Some(ops_log) = &self.ops_log {
+            let mut operation = Operation::with_id(
+                &result.op_id,
+                Self::type_name_to_op_kind(&type_name),
+                json_data,
+            );
+            if let Some(prev_op_id) = prev_op_id.as_deref() {
+                operation = operation.with_prev_op(prev_op_id);
+            }
             ops_log.append(&operation)?;
-        }
+            operation.timestamp
+        } else {
+            chrono::Utc::now().to_rfc3339()
+        };
 
         // Clear redo stack when a new command is executed
         self.redo_stack.clear();
@@ -125,6 +136,9 @@ impl CommandExecutor {
         }
 
         // Mark state as dirty
+        state.last_op_id = Some(result.op_id.clone());
+        state.op_count = state.op_count.saturating_add(1);
+        state.meta.touch_at(&op_timestamp);
         state.is_dirty = true;
 
         Ok(result)
@@ -146,6 +160,7 @@ impl CommandExecutor {
         // Move to redo stack
         self.redo_stack.push_back(entry);
 
+        state.meta.touch();
         state.is_dirty = true;
 
         Ok(())
@@ -156,13 +171,15 @@ impl CommandExecutor {
         let entry = self.redo_stack.pop_back().ok_or(CoreError::NothingToRedo)?;
 
         // Re-execute command (redo uses &mut self)
-        let result = {
+        let mut result = {
             let mut command = entry
                 .command
                 .lock()
                 .map_err(|_| CoreError::Internal("Failed to lock command for redo".into()))?;
             command.redo(state)?
         };
+        // Redo re-applies an existing history entry; keep the original op_id stable.
+        result.op_id = entry.op_id.clone();
 
         // Move back to undo stack with updated result
         let new_entry = HistoryEntry {
@@ -173,6 +190,7 @@ impl CommandExecutor {
         };
         self.undo_stack.push_back(new_entry);
 
+        state.meta.touch();
         state.is_dirty = true;
 
         Ok(result)
@@ -263,6 +281,8 @@ mod tests {
     use super::*;
     use crate::core::assets::{Asset, VideoInfo};
     use crate::core::commands::StateChange;
+    use crate::core::project::OpsLog;
+    use tempfile::TempDir;
 
     // Test command implementation
     struct TestAddAssetCommand {
@@ -361,6 +381,28 @@ mod tests {
         assert_eq!(result.created_ids.len(), 1);
         assert_eq!(state.assets.len(), 1);
         assert!(state.is_dirty);
+    }
+
+    #[test]
+    fn test_executor_persists_op_id_and_updates_state_metadata() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new("Test");
+
+        let asset = Asset::new_video("test.mp4", "/test.mp4", VideoInfo::default());
+        let cmd = Box::new(TestAddAssetCommand {
+            asset: asset.clone(),
+        });
+
+        let result = executor.execute(cmd, &mut state).unwrap();
+
+        let persisted = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted.id, result.op_id);
+        assert_eq!(state.last_op_id.as_deref(), Some(persisted.id.as_str()));
+        assert_eq!(state.op_count, 1);
+        assert_eq!(state.meta.modified_at, persisted.timestamp);
     }
 
     #[test]

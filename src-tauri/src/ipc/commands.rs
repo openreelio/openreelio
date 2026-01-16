@@ -9,8 +9,9 @@ use tauri::State;
 use crate::core::{
     commands::{
         CreateSequenceCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand,
-        RemoveAssetCommand, RemoveClipCommand, TrimClipCommand,
+        RemoveAssetCommand, RemoveClipCommand, SplitClipCommand, TrimClipCommand,
     },
+    ffmpeg::FFmpegProgress,
     CoreError,
 };
 use crate::{ActiveProject, AppState};
@@ -288,6 +289,125 @@ pub async fn generate_asset_thumbnail(
     }
 }
 
+/// Generates a proxy video for an asset for smooth preview playback
+#[tauri::command]
+pub async fn generate_proxy_for_asset(
+    asset_id: String,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+    app_handle: tauri::AppHandle,
+) -> Result<Option<String>, String> {
+    use tauri::Emitter;
+
+    // Get asset info from state
+    let (asset_path, project_path) = {
+        let guard = state
+            .project
+            .lock()
+            .map_err(|_| "Failed to acquire lock".to_string())?;
+
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        let asset = project
+            .state
+            .assets
+            .get(&asset_id)
+            .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
+
+        (asset.uri.clone(), project.path.clone())
+    };
+
+    // Get FFmpeg runner
+    let ffmpeg_guard = ffmpeg_state.read().await;
+    let ffmpeg = ffmpeg_guard
+        .runner()
+        .ok_or_else(|| "FFmpeg not initialized".to_string())?;
+
+    // Create proxy directory
+    let proxy_dir = project_path.join(".openreelio").join("proxy");
+    std::fs::create_dir_all(&proxy_dir)
+        .map_err(|e| format!("Failed to create proxy directory: {}", e))?;
+
+    // Output path for proxy
+    let proxy_path = proxy_dir.join(format!("{}.mp4", asset_id));
+    let input_path = std::path::Path::new(&asset_path);
+
+    // Create progress channel
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<FFmpegProgress>(100);
+    let asset_id_clone = asset_id.clone();
+    let app_handle_clone = app_handle.clone();
+
+    // Spawn progress forwarding task
+    tokio::spawn(async move {
+        while let Some(progress) = progress_rx.recv().await {
+            let _ = app_handle_clone.emit(
+                "proxy-progress",
+                serde_json::json!({
+                    "assetId": asset_id_clone,
+                    "percent": progress.percent,
+                    "frame": progress.frame,
+                    "totalFrames": progress.total_frames,
+                    "fps": progress.fps,
+                    "etaSeconds": progress.eta_seconds,
+                }),
+            );
+        }
+    });
+
+    // Generate proxy
+    match ffmpeg
+        .generate_proxy(input_path, &proxy_path, Some(progress_tx))
+        .await
+    {
+        Ok(()) => {
+            let proxy_url = format!("file://{}", proxy_path.display());
+
+            // Update asset's proxy URL in state
+            {
+                let mut guard = state
+                    .project
+                    .lock()
+                    .map_err(|_| "Failed to acquire lock".to_string())?;
+
+                if let Some(project) = guard.as_mut() {
+                    if let Some(asset) = project.state.assets.get_mut(&asset_id) {
+                        asset.set_proxy_url(Some(proxy_url.clone()));
+                    }
+                }
+            }
+
+            tracing::info!("Generated proxy for asset {}: {:?}", asset_id, proxy_path);
+
+            // Emit completion event
+            let _ = app_handle.emit(
+                "proxy-complete",
+                serde_json::json!({
+                    "assetId": asset_id,
+                    "proxyUrl": proxy_url,
+                }),
+            );
+
+            Ok(Some(proxy_url))
+        }
+        Err(e) => {
+            tracing::warn!("Failed to generate proxy for {}: {}", asset_id, e);
+
+            // Emit error event
+            let _ = app_handle.emit(
+                "proxy-error",
+                serde_json::json!({
+                    "assetId": asset_id,
+                    "error": e.to_string(),
+                }),
+            );
+
+            Err(format!("Proxy generation failed: {}", e))
+        }
+    }
+}
+
 /// Removes an asset from the project
 #[tauri::command]
 pub async fn remove_asset(asset_id: String, state: State<'_, AppState>) -> Result<(), String> {
@@ -427,7 +547,7 @@ pub async fn execute_command(
                 timeline_in,
             ))
         }
-        "removeClip" | "RemoveClip" => {
+        "removeClip" | "RemoveClip" | "deleteClip" | "DeleteClip" => {
             let seq_id = payload["sequenceId"].as_str().ok_or("Missing sequenceId")?;
             let track_id = payload["trackId"].as_str().ok_or("Missing trackId")?;
             let clip_id = payload["clipId"].as_str().ok_or("Missing clipId")?;
@@ -484,6 +604,14 @@ pub async fn execute_command(
             let format = payload["format"].as_str().unwrap_or("1080p");
 
             Box::new(CreateSequenceCommand::new(name, format))
+        }
+        "splitClip" | "SplitClip" => {
+            let seq_id = payload["sequenceId"].as_str().ok_or("Missing sequenceId")?;
+            let track_id = payload["trackId"].as_str().ok_or("Missing trackId")?;
+            let clip_id = payload["clipId"].as_str().ok_or("Missing clipId")?;
+            let split_time = payload["splitTime"].as_f64().ok_or("Missing splitTime")?;
+
+            Box::new(SplitClipCommand::new(seq_id, track_id, clip_id, split_time))
         }
         _ => {
             return Err(CoreError::InvalidCommand(format!(
@@ -612,9 +740,11 @@ pub async fn start_render(
     preset: String,
     state: State<'_, AppState>,
     ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+    app_handle: tauri::AppHandle,
 ) -> Result<RenderStartResult, String> {
-    use crate::core::render::{ExportEngine, ExportPreset, ExportSettings};
+    use crate::core::render::{ExportEngine, ExportPreset, ExportProgress, ExportSettings};
     use std::path::PathBuf;
+    use tauri::Emitter;
 
     // Get sequence and assets from project state
     let (sequence, assets) = {
@@ -668,10 +798,33 @@ pub async fn start_render(
     // Create export engine and start export
     let engine = ExportEngine::new(ffmpeg.clone());
     let job_id = ulid::Ulid::new().to_string();
+    let job_id_clone = job_id.clone();
 
-    // Run export (for now synchronous - in future, run in background with job queue)
+    // Create progress channel
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<ExportProgress>(100);
+    let app_handle_clone = app_handle.clone();
+
+    // Spawn progress forwarding task
+    tokio::spawn(async move {
+        while let Some(progress) = progress_rx.recv().await {
+            let _ = app_handle_clone.emit(
+                "render-progress",
+                serde_json::json!({
+                    "jobId": job_id_clone,
+                    "frame": progress.frame,
+                    "totalFrames": progress.total_frames,
+                    "percent": progress.percent,
+                    "fps": progress.fps,
+                    "etaSeconds": progress.eta_seconds,
+                    "message": progress.message,
+                }),
+            );
+        }
+    });
+
+    // Run export with progress callback
     match engine
-        .export_sequence(&sequence, &assets, &settings, None)
+        .export_sequence(&sequence, &assets, &settings, Some(progress_tx))
         .await
     {
         Ok(result) => {
@@ -681,13 +834,36 @@ pub async fn start_render(
                 result.encoding_time_sec,
                 result.file_size
             );
+
+            // Emit completion event
+            let _ = app_handle.emit(
+                "render-complete",
+                serde_json::json!({
+                    "jobId": job_id,
+                    "outputPath": result.output_path.to_string_lossy().to_string(),
+                    "durationSec": result.duration_sec,
+                    "fileSize": result.file_size,
+                    "encodingTimeSec": result.encoding_time_sec,
+                }),
+            );
+
             Ok(RenderStartResult {
                 job_id,
                 output_path: result.output_path.to_string_lossy().to_string(),
                 status: "completed".to_string(),
             })
         }
-        Err(e) => Err(format!("Export failed: {}", e)),
+        Err(e) => {
+            // Emit error event
+            let _ = app_handle.emit(
+                "render-error",
+                serde_json::json!({
+                    "jobId": job_id,
+                    "error": e.to_string(),
+                }),
+            );
+            Err(format!("Export failed: {}", e))
+        }
     }
 }
 
@@ -775,6 +951,8 @@ pub fn get_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'st
         import_asset,
         get_assets,
         remove_asset,
+        generate_asset_thumbnail,
+        generate_proxy_for_asset,
         // Timeline
         get_sequences,
         create_sequence,
