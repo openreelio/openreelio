@@ -126,8 +126,8 @@ export function ProxyPreviewPlayer({
       }
     });
 
-    // Sort by layer (lower layer = rendered first/behind)
-    return clips.sort((a, b) => a.clip.place.layer - b.clip.place.layer);
+    // Sort by trackIndex (lower track = rendered first/behind)
+    return clips.sort((a, b) => a.trackIndex - b.trackIndex);
   }, [sequence, currentTime, assets]);
 
   // Get video source URL for an asset
@@ -381,7 +381,7 @@ export function ProxyPreviewPlayer({
             <p>No clips at current time</p>
           </div>
         ) : (
-          activeClips.map(({ clip, asset }) => {
+          activeClips.map(({ clip, asset, trackIndex }) => {
             const src = getVideoSrc(asset);
             if (!src) return null;
 
@@ -394,7 +394,7 @@ export function ProxyPreviewPlayer({
                 className="absolute inset-0 w-full h-full object-contain"
                 style={{
                   opacity: clip.opacity,
-                  zIndex: clip.place.layer,
+                  zIndex: trackIndex * 10,
                 }}
                 playsInline
                 muted={isMuted || clip.audio?.muted}
