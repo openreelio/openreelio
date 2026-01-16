@@ -45,6 +45,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Utilities
 num_cpus = "1.16"
+regex = "1"
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }

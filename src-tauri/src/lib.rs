@@ -41,7 +41,9 @@ impl ActiveProject {
         let ops_path = path.join("ops.jsonl");
         let state = ProjectState::new(name);
 
-        // Create single OpsLog instance for both storage and executor
+        // Create OpsLog instances - one for ActiveProject, one for executor
+        // Both point to the same file but operate independently
+        // This is safe because OpsLog performs atomic appends
         let ops_log = OpsLog::new(&ops_path);
         let executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
 
@@ -211,6 +213,7 @@ pub fn run() {
             ipc::get_assets,
             ipc::remove_asset,
             ipc::generate_asset_thumbnail,
+            ipc::generate_proxy_for_asset,
             // Timeline commands
             ipc::get_sequences,
             ipc::create_sequence,

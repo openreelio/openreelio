@@ -7,7 +7,7 @@ pub mod gateway;
 pub mod proposal;
 pub mod provider;
 
-pub use edit_script::{EditCommand, EditScript, Requirement};
+pub use edit_script::{EditCommand, EditScript, Requirement, RiskAssessment};
 pub use gateway::{AIGateway, EditContext, ValidationResult};
 pub use proposal::{Proposal, ProposalManager, ProposalStatus};
 pub use provider::{AIProvider, CompletionRequest, CompletionResponse};
