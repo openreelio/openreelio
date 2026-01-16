@@ -168,6 +168,9 @@ pub struct Asset {
     /// Thumbnail URL (via Tauri asset protocol)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thumbnail_url: Option<String>,
+    /// Proxy video URL for preview playback (via Tauri asset protocol)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy_url: Option<String>,
 }
 
 impl Asset {
@@ -187,6 +190,7 @@ impl Asset {
             license: LicenseInfo::default(),
             tags: vec![],
             thumbnail_url: None,
+            proxy_url: None,
         }
     }
 
@@ -206,6 +210,7 @@ impl Asset {
             license: LicenseInfo::default(),
             tags: vec![],
             thumbnail_url: None,
+            proxy_url: None,
         }
     }
 
@@ -232,6 +237,7 @@ impl Asset {
             license: LicenseInfo::default(),
             tags: vec![],
             thumbnail_url: None,
+            proxy_url: None,
         }
     }
 
@@ -274,6 +280,17 @@ impl Asset {
     /// Sets the thumbnail URL from an Option
     pub fn set_thumbnail_url(&mut self, url: Option<String>) {
         self.thumbnail_url = url;
+    }
+
+    /// Sets the proxy URL using builder pattern
+    pub fn with_proxy_url(mut self, url: &str) -> Self {
+        self.proxy_url = Some(url.to_string());
+        self
+    }
+
+    /// Sets the proxy URL from an Option
+    pub fn set_proxy_url(&mut self, url: Option<String>) {
+        self.proxy_url = url;
     }
 }
 
