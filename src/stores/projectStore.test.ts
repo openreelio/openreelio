@@ -486,11 +486,13 @@ describe('projectStore', () => {
 
   describe('undo', () => {
     it('should undo successfully', async () => {
-      mockTauriCommand('undo', undefined);
+      const mockResult = { success: true, canUndo: false, canRedo: true };
+      mockTauriCommand('undo', mockResult);
 
       const { undo } = useProjectStore.getState();
-      await undo();
+      const result = await undo();
 
+      expect(result).toEqual(mockResult);
       expect(useProjectStore.getState().isDirty).toBe(true);
     });
 
@@ -505,7 +507,7 @@ describe('projectStore', () => {
 
   describe('redo', () => {
     it('should redo successfully', async () => {
-      const mockResult = { opId: 'op_001', changes: [], createdIds: [], deletedIds: [] };
+      const mockResult = { success: true, canUndo: true, canRedo: false };
       mockTauriCommand('redo', mockResult);
 
       const { redo } = useProjectStore.getState();

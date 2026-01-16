@@ -128,10 +128,10 @@ export function useAudioPlayback({
   /**
    * Get all audio clips from sequence
    */
-  const getAudioClips = useCallback((): Array<{ clip: Clip; asset: Asset; trackVolumeDb: number; trackMuted: boolean }> => {
+  const getAudioClips = useCallback((): Array<{ clip: Clip; asset: Asset; trackVolume: number; trackMuted: boolean }> => {
     if (!sequence) return [];
 
-    const audioClips: Array<{ clip: Clip; asset: Asset; trackVolumeDb: number; trackMuted: boolean }> = [];
+    const audioClips: Array<{ clip: Clip; asset: Asset; trackVolume: number; trackMuted: boolean }> = [];
 
     for (const track of sequence.tracks) {
       // Include both audio tracks and video tracks with audio
@@ -148,7 +148,7 @@ export function useAudioPlayback({
         audioClips.push({
           clip,
           asset,
-          trackVolumeDb: track.volumeDb,
+          trackVolume: track.volume,
           trackMuted: track.muted,
         });
       }
@@ -175,17 +175,17 @@ export function useAudioPlayback({
 
   /**
    * Calculate clip volume from various sources
+   * Track volume is linear (0.0-2.0), clip volumeDb is in dB
    */
-  const calculateClipVolume = useCallback((clip: Clip, trackVolumeDb: number): number => {
-    // Convert dB to linear
-    const clipVolumeDb = clip.audio?.volumeDb ?? 0;
-    const totalDb = trackVolumeDb + clipVolumeDb;
-    const linearVolume = Math.pow(10, totalDb / 20);
-
-    // Apply clip mute
+  const calculateClipVolume = useCallback((clip: Clip, trackVolume: number): number => {
+    // Apply clip mute first
     if (clip.audio?.muted) return 0;
 
-    return linearVolume;
+    // Convert clip dB to linear and multiply with track volume
+    const clipVolumeDb = clip.audio?.volumeDb ?? 0;
+    const clipLinearVolume = Math.pow(10, clipVolumeDb / 20);
+
+    return trackVolume * clipLinearVolume;
   }, []);
 
   /**
@@ -205,7 +205,7 @@ export function useAudioPlayback({
     const audioClips = getAudioClips();
 
     // Find clips that need to be scheduled
-    for (const { clip, asset, trackVolumeDb, trackMuted } of audioClips) {
+    for (const { clip, asset, trackVolume, trackMuted } of audioClips) {
       if (trackMuted) continue;
 
       // Calculate clip timing
@@ -233,7 +233,7 @@ export function useAudioPlayback({
 
       // Create gain node for this clip
       const gainNode = ctx.createGain();
-      const clipVolume = calculateClipVolume(clip, trackVolumeDb);
+      const clipVolume = calculateClipVolume(clip, trackVolume);
       gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
 
       // Connect: source -> gainNode -> masterGain -> destination
@@ -273,7 +273,7 @@ export function useAudioPlayback({
     scheduledSourcesRef.current.forEach((scheduled) => {
       const clipData = audioClips.find(c => c.clip.id === scheduled.clipId);
       if (clipData) {
-        const clipVolume = calculateClipVolume(clipData.clip, clipData.trackVolumeDb);
+        const clipVolume = calculateClipVolume(clipData.clip, clipData.trackVolume);
         scheduled.gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
         scheduled.source.playbackRate.value = playbackRate * clipData.clip.speed;
       }

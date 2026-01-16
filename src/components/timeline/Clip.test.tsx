@@ -17,7 +17,7 @@ const mockClip: ClipType = {
   id: 'clip_001',
   assetId: 'asset_001',
   range: { sourceInSec: 0, sourceOutSec: 10 },
-  place: { timelineInSec: 5, layer: 0 },
+  place: { timelineInSec: 5, durationSec: 10 },
   transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
   opacity: 1,
   speed: 1,

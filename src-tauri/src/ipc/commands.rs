@@ -868,6 +868,514 @@ pub async fn start_render(
 }
 
 // =============================================================================
+// AI Commands
+// =============================================================================
+
+/// Analyzes user intent and generates an EditScript
+#[tauri::command]
+pub async fn analyze_intent(
+    intent: String,
+    context: AIContextDto,
+    state: State<'_, AppState>,
+) -> Result<EditScriptDto, String> {
+    #[allow(unused_imports)]
+    use crate::core::ai::{EditCommand, EditScript};
+
+    // Validate input
+    if intent.trim().is_empty() {
+        return Err("Intent cannot be empty".to_string());
+    }
+
+    // Get project state for context enrichment
+    let (asset_ids, track_ids, timeline_duration) = {
+        let guard = state
+            .project
+            .lock()
+            .map_err(|_| "Failed to acquire lock".to_string())?;
+
+        if let Some(project) = guard.as_ref() {
+            let asset_ids: Vec<String> = project.state.assets.keys().cloned().collect();
+            let (track_ids, duration) = if let Some(seq_id) = &project.state.active_sequence_id {
+                if let Some(seq) = project.state.sequences.get(seq_id) {
+                    let tracks: Vec<String> = seq.tracks.iter().map(|t| t.id.clone()).collect();
+                    let dur = seq.duration();
+                    (tracks, dur)
+                } else {
+                    (vec![], 0.0)
+                }
+            } else {
+                (vec![], 0.0)
+            };
+            (asset_ids, track_ids, duration)
+        } else {
+            (vec![], vec![], 0.0)
+        }
+    };
+
+    // Parse the intent using pattern matching for common video editing commands
+    let script =
+        parse_intent_to_script(&intent, &asset_ids, &track_ids, timeline_duration, &context)?;
+
+    Ok(EditScriptDto {
+        intent: script.intent,
+        commands: script
+            .commands
+            .into_iter()
+            .map(|cmd| EditCommandDto {
+                command_type: cmd.command_type,
+                params: cmd.params,
+                description: cmd.description,
+            })
+            .collect(),
+        requires: script
+            .requires
+            .into_iter()
+            .map(|r| RequirementDto {
+                kind: format!("{:?}", r.kind).to_lowercase(),
+                query: r.query,
+                provider: r.provider,
+            })
+            .collect(),
+        qc_rules: script.qc_rules,
+        risk: RiskAssessmentDto {
+            copyright: format!("{:?}", script.risk.copyright).to_lowercase(),
+            nsfw: format!("{:?}", script.risk.nsfw).to_lowercase(),
+        },
+        explanation: script.explanation,
+    })
+}
+
+/// Creates a Proposal from an EditScript and stores it for review
+#[tauri::command]
+pub async fn create_proposal(
+    edit_script: EditScriptDto,
+    state: State<'_, AppState>,
+) -> Result<ProposalDto, String> {
+    let proposal_id = ulid::Ulid::new().to_string();
+    let created_at = chrono::Utc::now().to_rfc3339();
+
+    // For now, store proposal in-memory (could be persisted to project state later)
+    let proposal = ProposalDto {
+        id: proposal_id.clone(),
+        edit_script,
+        status: "pending".to_string(),
+        created_at,
+        preview_job_id: None,
+        applied_op_ids: None,
+    };
+
+    // Validate the script has commands
+    if proposal.edit_script.commands.is_empty() {
+        return Err("EditScript must have at least one command".to_string());
+    }
+
+    // Verify project is open
+    let guard = state
+        .project
+        .lock()
+        .map_err(|_| "Failed to acquire lock".to_string())?;
+    guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    Ok(proposal)
+}
+
+/// Applies an EditScript by executing its commands
+#[tauri::command]
+pub async fn apply_edit_script(
+    edit_script: EditScriptDto,
+    state: State<'_, AppState>,
+) -> Result<ApplyEditScriptResult, String> {
+    let mut guard = state
+        .project
+        .lock()
+        .map_err(|_| "Failed to acquire lock".to_string())?;
+
+    let project = guard
+        .as_mut()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let mut applied_op_ids: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    // Get active sequence ID
+    let sequence_id = project
+        .state
+        .active_sequence_id
+        .clone()
+        .ok_or_else(|| "No active sequence".to_string())?;
+
+    // Execute each command in order
+    for cmd in &edit_script.commands {
+        // Build payload with sequence_id injected
+        let mut payload = cmd.params.clone();
+        if payload.get("sequenceId").is_none() {
+            payload["sequenceId"] = serde_json::json!(sequence_id);
+        }
+
+        // Create command
+        let command: Result<Box<dyn crate::core::commands::Command>, String> =
+            match cmd.command_type.as_str() {
+                "InsertClip" => {
+                    let track_id = payload["trackId"]
+                        .as_str()
+                        .ok_or("Missing trackId")?
+                        .to_string();
+                    let asset_id = payload["assetId"]
+                        .as_str()
+                        .ok_or("Missing assetId")?
+                        .to_string();
+                    let timeline_in = payload["timelineStart"]
+                        .as_f64()
+                        .or_else(|| payload["timelineIn"].as_f64())
+                        .unwrap_or(0.0);
+
+                    Ok(Box::new(InsertClipCommand::new(
+                        &sequence_id,
+                        &track_id,
+                        &asset_id,
+                        timeline_in,
+                    )))
+                }
+                "SplitClip" => {
+                    let clip_id = payload["clipId"]
+                        .as_str()
+                        .ok_or("Missing clipId")?
+                        .to_string();
+                    let at_sec = payload["atTimelineSec"]
+                        .as_f64()
+                        .or_else(|| payload["splitTime"].as_f64())
+                        .ok_or("Missing split time")?;
+
+                    // Find the track containing this clip
+                    let track_id = find_track_for_clip(project, &sequence_id, &clip_id)?;
+
+                    Ok(Box::new(SplitClipCommand::new(
+                        &sequence_id,
+                        &track_id,
+                        &clip_id,
+                        at_sec,
+                    )))
+                }
+                "DeleteClip" => {
+                    let clip_id = payload["clipId"]
+                        .as_str()
+                        .ok_or("Missing clipId")?
+                        .to_string();
+
+                    let track_id = find_track_for_clip(project, &sequence_id, &clip_id)?;
+
+                    Ok(Box::new(RemoveClipCommand::new(
+                        &sequence_id,
+                        &track_id,
+                        &clip_id,
+                    )))
+                }
+                "TrimClip" => {
+                    let clip_id = payload["clipId"]
+                        .as_str()
+                        .ok_or("Missing clipId")?
+                        .to_string();
+                    let new_start = payload["newStart"].as_f64();
+                    let new_end = payload["newEnd"].as_f64();
+
+                    let track_id = find_track_for_clip(project, &sequence_id, &clip_id)?;
+
+                    Ok(Box::new(TrimClipCommand::new(
+                        &sequence_id,
+                        &track_id,
+                        &clip_id,
+                        new_start,
+                        new_end,
+                        None,
+                    )))
+                }
+                "MoveClip" => {
+                    let clip_id = payload["clipId"]
+                        .as_str()
+                        .ok_or("Missing clipId")?
+                        .to_string();
+                    let new_start = payload["newStart"].as_f64().ok_or("Missing newStart")?;
+                    let new_track_id = payload["newTrackId"].as_str().map(|s| s.to_string());
+
+                    let track_id = find_track_for_clip(project, &sequence_id, &clip_id)?;
+
+                    Ok(Box::new(MoveClipCommand::new(
+                        &sequence_id,
+                        &track_id,
+                        &clip_id,
+                        new_start,
+                        new_track_id,
+                    )))
+                }
+                _ => Err(format!("Unknown command type: {}", cmd.command_type)),
+            };
+
+        match command {
+            Ok(cmd) => match project.executor.execute(cmd, &mut project.state) {
+                Ok(result) => {
+                    applied_op_ids.push(result.op_id);
+                }
+                Err(e) => {
+                    errors.push(format!("Command execution failed: {}", e));
+                }
+            },
+            Err(e) => {
+                errors.push(e);
+            }
+        }
+    }
+
+    Ok(ApplyEditScriptResult {
+        success: errors.is_empty(),
+        applied_op_ids,
+        errors,
+    })
+}
+
+/// Validates an EditScript without executing
+#[tauri::command]
+pub async fn validate_edit_script(
+    edit_script: EditScriptDto,
+    state: State<'_, AppState>,
+) -> Result<ValidationResultDto, String> {
+    let guard = state
+        .project
+        .lock()
+        .map_err(|_| "Failed to acquire lock".to_string())?;
+
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let mut issues: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    // Check for empty commands
+    if edit_script.commands.is_empty() {
+        issues.push("EditScript has no commands".to_string());
+    }
+
+    // Validate each command
+    for (i, cmd) in edit_script.commands.iter().enumerate() {
+        match cmd.command_type.as_str() {
+            "InsertClip" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("InsertClip command {} missing trackId", i));
+                }
+                if cmd.params.get("assetId").is_none() {
+                    issues.push(format!("InsertClip command {} missing assetId", i));
+                } else if let Some(asset_id) = cmd.params.get("assetId").and_then(|v| v.as_str()) {
+                    if !project.state.assets.contains_key(asset_id) {
+                        warnings.push(format!("Asset {} not found in project", asset_id));
+                    }
+                }
+            }
+            "SplitClip" | "DeleteClip" | "TrimClip" | "MoveClip" => {
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("{} command {} missing clipId", cmd.command_type, i));
+                }
+            }
+            _ => {
+                warnings.push(format!("Unknown command type: {}", cmd.command_type));
+            }
+        }
+    }
+
+    // Check risk levels
+    if edit_script.risk.copyright == "high" {
+        warnings.push("High copyright risk detected".to_string());
+    }
+    if edit_script.risk.nsfw == "likely" || edit_script.risk.nsfw == "high" {
+        warnings.push("High NSFW risk detected".to_string());
+    }
+
+    Ok(ValidationResultDto {
+        is_valid: issues.is_empty(),
+        issues,
+        warnings,
+    })
+}
+
+// Helper function to parse natural language intent into EditScript
+fn parse_intent_to_script(
+    intent: &str,
+    asset_ids: &[String],
+    track_ids: &[String],
+    timeline_duration: f64,
+    context: &AIContextDto,
+) -> Result<crate::core::ai::EditScript, String> {
+    use crate::core::ai::{EditCommand, EditScript, RiskAssessment};
+
+    let intent_lower = intent.to_lowercase();
+    let mut script = EditScript::new(intent);
+
+    // Pattern: "Cut/trim the first X seconds"
+    if (intent_lower.contains("cut")
+        || intent_lower.contains("trim")
+        || intent_lower.contains("잘라"))
+        && (intent_lower.contains("first")
+            || intent_lower.contains("앞")
+            || intent_lower.contains("처음"))
+    {
+        // Extract seconds using regex-like pattern
+        let seconds = extract_seconds(&intent_lower).unwrap_or(5.0);
+
+        if let Some(clip_id) = context.selected_clips.first() {
+            // Split at the specified time, then delete the first part
+            let explanation = format!(
+                "This will split the clip at {} seconds. You may then delete the first segment.",
+                seconds
+            );
+            script = script
+                .add_command(
+                    EditCommand::split_clip(clip_id, seconds)
+                        .with_description(&format!("Split clip at {} seconds", seconds)),
+                )
+                .with_explanation(&explanation);
+        } else if !track_ids.is_empty() {
+            script = script.with_explanation("Please select a clip first, then try again.");
+        }
+    }
+    // Pattern: "Add/Insert clip at X seconds"
+    else if (intent_lower.contains("add")
+        || intent_lower.contains("insert")
+        || intent_lower.contains("추가"))
+        && (intent_lower.contains("clip") || intent_lower.contains("클립"))
+    {
+        let at_time = extract_seconds(&intent_lower).unwrap_or(timeline_duration);
+
+        if let (Some(asset_id), Some(track_id)) = (asset_ids.first(), track_ids.first()) {
+            let explanation = format!(
+                "Inserting clip from first available asset at {} seconds on the first track.",
+                at_time
+            );
+            script = script
+                .add_command(EditCommand::insert_clip(track_id, asset_id, at_time))
+                .with_explanation(&explanation);
+        } else {
+            script = script.with_explanation("No assets or tracks available. Import media first.");
+        }
+    }
+    // Pattern: "Delete/Remove the selected clip(s)"
+    else if (intent_lower.contains("delete")
+        || intent_lower.contains("remove")
+        || intent_lower.contains("삭제"))
+        && (intent_lower.contains("clip")
+            || intent_lower.contains("클립")
+            || intent_lower.contains("selected"))
+    {
+        if context.selected_clips.is_empty() {
+            script = script.with_explanation("No clips selected. Please select clips to delete.");
+        } else {
+            for clip_id in &context.selected_clips {
+                script = script.add_command(
+                    EditCommand::delete_clip(clip_id)
+                        .with_description(&format!("Delete clip {}", clip_id)),
+                );
+            }
+            let explanation = format!(
+                "Deleting {} selected clip(s).",
+                context.selected_clips.len()
+            );
+            script = script.with_explanation(&explanation);
+        }
+    }
+    // Pattern: "Move clip to X seconds"
+    else if (intent_lower.contains("move") || intent_lower.contains("이동"))
+        && (intent_lower.contains("clip") || intent_lower.contains("클립"))
+    {
+        let to_time = extract_seconds(&intent_lower).unwrap_or(0.0);
+
+        if let Some(clip_id) = context.selected_clips.first() {
+            let explanation = format!("Moving selected clip to {} seconds.", to_time);
+            script = script
+                .add_command(
+                    EditCommand::move_clip(clip_id, to_time, None)
+                        .with_description(&format!("Move clip to {} seconds", to_time)),
+                )
+                .with_explanation(&explanation);
+        } else {
+            script = script.with_explanation("Please select a clip to move.");
+        }
+    }
+    // Default: Return explanation that we couldn't parse the intent
+    else {
+        let explanation = format!(
+            "I couldn't understand the command '{}'. Try commands like:\n\
+            - 'Cut the first 5 seconds'\n\
+            - 'Add clip at 10 seconds'\n\
+            - 'Delete selected clips'\n\
+            - 'Move clip to 5 seconds'",
+            intent
+        );
+        script = script.with_explanation(&explanation);
+    }
+
+    script.risk = RiskAssessment::low();
+    Ok(script)
+}
+
+// Helper function to extract seconds from a string
+fn extract_seconds(text: &str) -> Option<f64> {
+    // Simple pattern: look for numbers followed by optional "s", "sec", "seconds", "초"
+    let re_patterns = [
+        r"(\d+(?:\.\d+)?)\s*(?:s|sec|seconds|초)",
+        r"(\d+(?:\.\d+)?)\s+second",
+        r"first\s+(\d+(?:\.\d+)?)",
+        r"앞\s*(\d+(?:\.\d+)?)",
+        r"(\d+(?:\.\d+)?)\s*초",
+    ];
+
+    for pattern in &re_patterns {
+        if let Ok(re) = regex::Regex::new(pattern) {
+            if let Some(caps) = re.captures(text) {
+                if let Some(num_str) = caps.get(1) {
+                    if let Ok(num) = num_str.as_str().parse::<f64>() {
+                        return Some(num);
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback: just find any number
+    if let Ok(re) = regex::Regex::new(r"(\d+(?:\.\d+)?)") {
+        if let Some(caps) = re.captures(text) {
+            if let Some(num_str) = caps.get(1) {
+                if let Ok(num) = num_str.as_str().parse::<f64>() {
+                    return Some(num);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+// Helper function to find which track contains a clip
+fn find_track_for_clip(
+    project: &crate::ActiveProject,
+    sequence_id: &str,
+    clip_id: &str,
+) -> Result<String, String> {
+    let sequence = project
+        .state
+        .sequences
+        .get(sequence_id)
+        .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?;
+
+    for track in &sequence.tracks {
+        if track.clips.iter().any(|c| c.id == clip_id) {
+            return Ok(track.id.clone());
+        }
+    }
+
+    Err(format!("Clip {} not found in sequence", clip_id))
+}
+
+// =============================================================================
 // DTOs (Data Transfer Objects)
 // =============================================================================
 
@@ -935,6 +1443,80 @@ pub struct RenderStartResult {
 }
 
 // =============================================================================
+// AI DTOs
+// =============================================================================
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AIContextDto {
+    pub playhead_position: f64,
+    pub selected_clips: Vec<String>,
+    pub selected_tracks: Vec<String>,
+    pub transcript_context: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditScriptDto {
+    pub intent: String,
+    pub commands: Vec<EditCommandDto>,
+    pub requires: Vec<RequirementDto>,
+    pub qc_rules: Vec<String>,
+    pub risk: RiskAssessmentDto,
+    pub explanation: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditCommandDto {
+    pub command_type: String,
+    pub params: serde_json::Value,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequirementDto {
+    pub kind: String,
+    pub query: Option<String>,
+    pub provider: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskAssessmentDto {
+    pub copyright: String,
+    pub nsfw: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposalDto {
+    pub id: String,
+    pub edit_script: EditScriptDto,
+    pub status: String,
+    pub created_at: String,
+    pub preview_job_id: Option<String>,
+    pub applied_op_ids: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyEditScriptResult {
+    pub success: bool,
+    pub applied_op_ids: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationResultDto {
+    pub is_valid: bool,
+    pub issues: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+// =============================================================================
 // Command Registration
 // =============================================================================
 
@@ -968,6 +1550,11 @@ pub fn get_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'st
         cancel_job,
         // Render
         start_render,
+        // AI
+        analyze_intent,
+        create_proposal,
+        apply_edit_script,
+        validate_edit_script,
     ]
 }
 

@@ -18,10 +18,11 @@ const mockTrack: TrackType = {
   kind: 'video',
   name: 'Video 1',
   clips: [],
+  blendMode: 'normal',
   muted: false,
   locked: false,
   visible: true,
-  volumeDb: 0,
+  volume: 1.0,
 };
 
 const mockClips: ClipType[] = [
@@ -29,7 +30,7 @@ const mockClips: ClipType[] = [
     id: 'clip_001',
     assetId: 'asset_001',
     range: { sourceInSec: 0, sourceOutSec: 10 },
-    place: { timelineInSec: 0, layer: 0 },
+    place: { timelineInSec: 0, durationSec: 10 },
     transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
     opacity: 1,
     speed: 1,
@@ -40,7 +41,7 @@ const mockClips: ClipType[] = [
     id: 'clip_002',
     assetId: 'asset_002',
     range: { sourceInSec: 0, sourceOutSec: 5 },
-    place: { timelineInSec: 15, layer: 0 },
+    place: { timelineInSec: 15, durationSec: 5 },
     transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
     opacity: 1,
     speed: 1,

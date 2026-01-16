@@ -45,7 +45,7 @@ const createMockClip = (overrides: Partial<Clip> = {}): Clip => ({
   },
   place: {
     timelineInSec: 0,
-    layer: 0,
+    durationSec: 10,
   },
   transform: {
     position: { x: 0, y: 0 },
@@ -69,10 +69,11 @@ const createMockTrack = (overrides: Partial<Track> = {}): Track => ({
   kind: 'video',
   name: 'Video 1',
   clips: [createMockClip()],
+  blendMode: 'normal',
   muted: false,
   locked: false,
   visible: true,
-  volumeDb: 0,
+  volume: 1.0,
   ...overrides,
 });
 
@@ -83,6 +84,7 @@ const createMockSequence = (overrides: Partial<Sequence> = {}): Sequence => ({
     canvas: { width: 1920, height: 1080 },
     fps: { num: 30, den: 1 },
     audioSampleRate: 48000,
+    audioChannels: 2,
   },
   tracks: [createMockTrack()],
   markers: [],
@@ -199,12 +201,12 @@ describe('ProxyPreviewPlayer', () => {
       const clip1 = createMockClip({
         id: 'clip-1',
         range: { sourceInSec: 0, sourceOutSec: 10 },
-        place: { timelineInSec: 0, layer: 0 },
+        place: { timelineInSec: 0, durationSec: 10 },
       });
       const clip2 = createMockClip({
         id: 'clip-2',
         range: { sourceInSec: 0, sourceOutSec: 5 },
-        place: { timelineInSec: 10, layer: 0 },
+        place: { timelineInSec: 10, durationSec: 5 },
       });
       const sequence = createMockSequence({
         tracks: [createMockTrack({ clips: [clip1, clip2] })],
@@ -221,7 +223,7 @@ describe('ProxyPreviewPlayer', () => {
     it('accounts for clip speed in duration calculation', () => {
       const clip = createMockClip({
         range: { sourceInSec: 0, sourceOutSec: 10 },
-        place: { timelineInSec: 0, layer: 0 },
+        place: { timelineInSec: 0, durationSec: 10 },
         speed: 2, // 2x speed = 5 second duration on timeline
       });
       const sequence = createMockSequence({
@@ -268,12 +270,12 @@ describe('ProxyPreviewPlayer', () => {
       const clip1 = createMockClip({
         id: 'clip-1',
         assetId: 'asset-1',
-        place: { timelineInSec: 0, layer: 0 },
+        place: { timelineInSec: 0, durationSec: 10 },
       });
       const clip2 = createMockClip({
         id: 'clip-2',
         assetId: 'asset-2',
-        place: { timelineInSec: 0, layer: 1 },
+        place: { timelineInSec: 0, durationSec: 10 },
       });
       const sequence = createMockSequence({
         tracks: [
@@ -300,12 +302,12 @@ describe('ProxyPreviewPlayer', () => {
       const clip1 = createMockClip({
         id: 'clip-1',
         assetId: 'asset-1',
-        place: { timelineInSec: 0, layer: 0 },
+        place: { timelineInSec: 0, durationSec: 10 },
       });
       const clip2 = createMockClip({
         id: 'clip-2',
         assetId: 'asset-2',
-        place: { timelineInSec: 0, layer: 10 },
+        place: { timelineInSec: 0, durationSec: 10 },
       });
       const sequence = createMockSequence({
         tracks: [

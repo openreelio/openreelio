@@ -29,3 +29,15 @@ export type { UseAudioPlaybackOptions, UseAudioPlaybackReturn } from './useAudio
 
 export { useVideoSync, calculateTimelineTime, isTimeInClip, getClipTimelineDuration } from './useVideoSync';
 export type { UseVideoSyncOptions, UseVideoSyncReturn } from './useVideoSync';
+
+export { useAIAgent } from './useAIAgent';
+export type {
+  UseAIAgentReturn,
+  AIContext,
+  EditScript,
+  EditCommand,
+  ApplyResult,
+  ValidationResult,
+  RiskAssessment,
+  Requirement,
+} from './useAIAgent';
