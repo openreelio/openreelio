@@ -56,6 +56,11 @@ impl ProjectMeta {
     pub fn touch(&mut self) {
         self.modified_at = chrono::Utc::now().to_rfc3339();
     }
+
+    /// Updates the modified timestamp to a specific timestamp (RFC3339)
+    pub fn touch_at(&mut self, timestamp_rfc3339: &str) {
+        self.modified_at = timestamp_rfc3339.to_string();
+    }
 }
 
 // =============================================================================
@@ -160,7 +165,7 @@ impl ProjectState {
 
         self.last_op_id = Some(op.id.clone());
         self.op_count += 1;
-        self.meta.touch();
+        self.meta.touch_at(&op.timestamp);
 
         Ok(())
     }

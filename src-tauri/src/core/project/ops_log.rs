@@ -339,6 +339,154 @@ impl OpsLog {
 
         Ok(error_count)
     }
+
+    /// Compacts the log by archiving old operations after a snapshot is saved.
+    /// This keeps only operations after the given snapshot op_id.
+    ///
+    /// # Arguments
+    /// * `snapshot_op_id` - The operation ID that the snapshot was created from
+    ///
+    /// # Returns
+    /// The number of operations archived
+    pub fn compact_after_snapshot(&self, snapshot_op_id: &str) -> CoreResult<usize> {
+        let read_result = self.read_all()?;
+
+        // Find the index of the snapshot operation
+        let snapshot_index = read_result
+            .operations
+            .iter()
+            .position(|op| op.id == snapshot_op_id);
+
+        // If snapshot not found, keep all operations
+        let Some(index) = snapshot_index else {
+            return Ok(0);
+        };
+
+        // If there are no operations after snapshot, nothing to compact
+        if index >= read_result.operations.len() - 1 {
+            return Ok(0);
+        }
+
+        // Archive old operations to .archive file
+        let archive_path = self.path.with_extension("jsonl.archive");
+        let ops_to_archive = &read_result.operations[..=index];
+
+        if !ops_to_archive.is_empty() {
+            // Append to archive file
+            let archive_file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&archive_path)?;
+
+            let mut writer = BufWriter::new(archive_file);
+            for op in ops_to_archive {
+                let json = serde_json::to_string(op)?;
+                writeln!(writer, "{}", json)?;
+            }
+            writer.flush()?;
+        }
+
+        // Keep only operations after snapshot
+        let ops_to_keep = &read_result.operations[index + 1..];
+        let archived_count = ops_to_archive.len();
+
+        // Write new ops.jsonl with only recent operations
+        let temp_path = self.path.with_extension("jsonl.tmp");
+        {
+            let file = File::create(&temp_path)?;
+            let mut writer = BufWriter::new(file);
+            for op in ops_to_keep {
+                let json = serde_json::to_string(op)?;
+                writeln!(writer, "{}", json)?;
+            }
+            writer.flush()?;
+        }
+
+        // Atomic rename
+        std::fs::rename(&temp_path, &self.path)?;
+
+        Ok(archived_count)
+    }
+
+    /// Checks if compaction is needed based on operation count threshold
+    pub fn should_compact(&self, threshold: usize) -> CoreResult<bool> {
+        let count = self.count()?;
+        Ok(count >= threshold)
+    }
+
+    /// Auto-compacts if the operation count exceeds the threshold.
+    /// Returns the number of archived operations, or 0 if no compaction was needed.
+    ///
+    /// # Arguments
+    /// * `threshold` - The number of operations that triggers compaction
+    /// * `snapshot_op_id` - The latest snapshot's operation ID
+    pub fn auto_compact_if_needed(
+        &self,
+        threshold: usize,
+        snapshot_op_id: &str,
+    ) -> CoreResult<usize> {
+        if !self.should_compact(threshold)? {
+            return Ok(0);
+        }
+
+        self.compact_after_snapshot(snapshot_op_id)
+    }
+
+    /// Gets the archive file path
+    pub fn archive_path(&self) -> PathBuf {
+        self.path.with_extension("jsonl.archive")
+    }
+
+    /// Checks if archive file exists
+    pub fn has_archive(&self) -> bool {
+        self.archive_path().exists()
+    }
+
+    /// Reads archived operations
+    pub fn read_archive(&self) -> CoreResult<ReadResult> {
+        let archive_path = self.archive_path();
+        if !archive_path.exists() {
+            return Ok(ReadResult {
+                operations: vec![],
+                errors: vec![],
+            });
+        }
+
+        let archive_log = OpsLog::new(&archive_path);
+        archive_log.read_all()
+    }
+
+    /// Reads all operations including archived ones (for full history replay)
+    pub fn read_all_with_archive(&self) -> CoreResult<ReadResult> {
+        let mut all_ops = Vec::new();
+        let mut all_errors = Vec::new();
+
+        // Read archived operations first
+        let archive_result = self.read_archive()?;
+        all_ops.extend(archive_result.operations);
+        all_errors.extend(
+            archive_result
+                .errors
+                .into_iter()
+                .map(|(line, err)| (line, format!("[archive] {}", err))),
+        );
+
+        // Read current operations
+        let current_result = self.read_all()?;
+        let archive_lines = all_ops.len();
+        all_ops.extend(current_result.operations);
+        all_errors.extend(
+            current_result
+                .errors
+                .into_iter()
+                .map(|(line, err)| (line + archive_lines, err)),
+        );
+
+        Ok(ReadResult {
+            operations: all_ops,
+            errors: all_errors,
+        })
+    }
 }
 
 // =============================================================================
@@ -681,5 +829,164 @@ another bad line
         let result = ops_log.read_all().unwrap();
         assert_eq!(result.operations.len(), 2);
         assert!(result.errors.is_empty()); // Empty lines are not errors
+    }
+
+    #[test]
+    fn test_ops_log_compact_after_snapshot() {
+        let (ops_log, _temp_dir) = create_test_ops_log();
+
+        // Create operations
+        let ops: Vec<Operation> = (1..=10)
+            .map(|i| {
+                Operation::with_id(
+                    &format!("op_{:03}", i),
+                    OpKind::AssetImport,
+                    serde_json::json!({}),
+                )
+            })
+            .collect();
+
+        ops_log.append_batch(&ops).unwrap();
+
+        // Compact after op_005 (simulating snapshot at op_005)
+        let archived = ops_log.compact_after_snapshot("op_005").unwrap();
+        assert_eq!(archived, 5); // op_001 to op_005 archived
+
+        // Current ops should only have op_006 to op_010
+        let result = ops_log.read_all().unwrap();
+        assert_eq!(result.operations.len(), 5);
+        assert_eq!(result.operations[0].id, "op_006");
+        assert_eq!(result.operations[4].id, "op_010");
+
+        // Archive should contain op_001 to op_005
+        assert!(ops_log.has_archive());
+        let archive_result = ops_log.read_archive().unwrap();
+        assert_eq!(archive_result.operations.len(), 5);
+        assert_eq!(archive_result.operations[0].id, "op_001");
+        assert_eq!(archive_result.operations[4].id, "op_005");
+    }
+
+    #[test]
+    fn test_ops_log_read_all_with_archive() {
+        let (ops_log, _temp_dir) = create_test_ops_log();
+
+        // Create and compact operations
+        let ops: Vec<Operation> = (1..=10)
+            .map(|i| {
+                Operation::with_id(
+                    &format!("op_{:03}", i),
+                    OpKind::AssetImport,
+                    serde_json::json!({}),
+                )
+            })
+            .collect();
+
+        ops_log.append_batch(&ops).unwrap();
+        ops_log.compact_after_snapshot("op_005").unwrap();
+
+        // Add more operations
+        let more_ops = vec![
+            Operation::with_id("op_011", OpKind::ClipAdd, serde_json::json!({})),
+            Operation::with_id("op_012", OpKind::ClipMove, serde_json::json!({})),
+        ];
+        ops_log.append_batch(&more_ops).unwrap();
+
+        // Read all with archive should return all 12 operations in order
+        let result = ops_log.read_all_with_archive().unwrap();
+        assert_eq!(result.operations.len(), 12);
+        assert_eq!(result.operations[0].id, "op_001");
+        assert_eq!(result.operations[4].id, "op_005");
+        assert_eq!(result.operations[5].id, "op_006");
+        assert_eq!(result.operations[11].id, "op_012");
+    }
+
+    #[test]
+    fn test_ops_log_should_compact() {
+        let (ops_log, _temp_dir) = create_test_ops_log();
+
+        // Empty log should not compact
+        assert!(!ops_log.should_compact(10).unwrap());
+
+        // Add 5 operations
+        let ops: Vec<Operation> = (1..=5)
+            .map(|i| {
+                Operation::with_id(
+                    &format!("op_{:03}", i),
+                    OpKind::AssetImport,
+                    serde_json::json!({}),
+                )
+            })
+            .collect();
+        ops_log.append_batch(&ops).unwrap();
+
+        // 5 ops < 10 threshold
+        assert!(!ops_log.should_compact(10).unwrap());
+
+        // 5 ops >= 5 threshold
+        assert!(ops_log.should_compact(5).unwrap());
+    }
+
+    #[test]
+    fn test_ops_log_auto_compact_if_needed() {
+        let (ops_log, _temp_dir) = create_test_ops_log();
+
+        // Create 15 operations
+        let ops: Vec<Operation> = (1..=15)
+            .map(|i| {
+                Operation::with_id(
+                    &format!("op_{:03}", i),
+                    OpKind::AssetImport,
+                    serde_json::json!({}),
+                )
+            })
+            .collect();
+        ops_log.append_batch(&ops).unwrap();
+
+        // Auto compact with threshold 10 and snapshot at op_010
+        let archived = ops_log.auto_compact_if_needed(10, "op_010").unwrap();
+        assert_eq!(archived, 10); // op_001 to op_010
+
+        // Only op_011 to op_015 should remain
+        let result = ops_log.read_all().unwrap();
+        assert_eq!(result.operations.len(), 5);
+        assert_eq!(result.operations[0].id, "op_011");
+    }
+
+    #[test]
+    fn test_ops_log_compact_snapshot_not_found() {
+        let (ops_log, _temp_dir) = create_test_ops_log();
+
+        let ops = vec![
+            Operation::with_id("op_001", OpKind::AssetImport, serde_json::json!({})),
+            Operation::with_id("op_002", OpKind::ClipAdd, serde_json::json!({})),
+        ];
+        ops_log.append_batch(&ops).unwrap();
+
+        // Try to compact with non-existent snapshot ID
+        let archived = ops_log.compact_after_snapshot("op_999").unwrap();
+        assert_eq!(archived, 0); // Nothing archived
+
+        // All operations should still be there
+        let result = ops_log.read_all().unwrap();
+        assert_eq!(result.operations.len(), 2);
+    }
+
+    #[test]
+    fn test_ops_log_compact_at_end() {
+        let (ops_log, _temp_dir) = create_test_ops_log();
+
+        let ops = vec![
+            Operation::with_id("op_001", OpKind::AssetImport, serde_json::json!({})),
+            Operation::with_id("op_002", OpKind::ClipAdd, serde_json::json!({})),
+        ];
+        ops_log.append_batch(&ops).unwrap();
+
+        // Compact at the last operation - nothing should be archived
+        let archived = ops_log.compact_after_snapshot("op_002").unwrap();
+        assert_eq!(archived, 0);
+
+        // All operations should still be there
+        let result = ops_log.read_all().unwrap();
+        assert_eq!(result.operations.len(), 2);
     }
 }
