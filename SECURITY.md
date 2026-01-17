@@ -13,7 +13,7 @@ We take the security of OpenReelio seriously. If you believe you have found a se
 
 ### Please Do
 
-- **Report privately**: Email security vulnerabilities to [security@openreelio.dev](mailto:security@openreelio.dev)
+- **Report privately**: Email security vulnerabilities to [junseo5.dev@gmail.com](mailto:junseo5.dev@gmail.com)
 - **Provide details**: Include steps to reproduce, potential impact, and any suggested fixes
 - **Allow time**: Give us reasonable time to address the issue before public disclosure
 - **Act in good faith**: Avoid accessing or modifying other users' data
