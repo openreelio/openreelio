@@ -126,9 +126,9 @@ export const ProposalDialog: React.FC<ProposalDialogProps> = ({
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent) => {
-      if (event.key === 'Enter' && !isApplying && proposal) {
+      if (event.key === 'Enter' && !isApplying && proposal && proposal.commands.length > 0) {
         event.preventDefault();
-        handleApprove();
+        void handleApprove();
       } else if (event.key === 'Escape') {
         event.preventDefault();
         handleReject();
