@@ -34,23 +34,39 @@ pub struct ActiveProject {
 }
 
 impl ActiveProject {
-    /// Creates a new project
+    /// Creates a new project with default sequence and tracks
+    ///
+    /// The default sequence is created via Command to ensure proper ops log recording.
+    /// This maintains Event Sourcing integrity - all state changes are recorded.
     pub fn create(name: &str, path: PathBuf) -> crate::core::CoreResult<Self> {
+        use crate::core::commands::CreateSequenceCommand;
+
         // Create project directory if it doesn't exist
         std::fs::create_dir_all(&path)?;
 
         let ops_path = path.join("ops.jsonl");
-        let state = ProjectState::new(name);
+
+        // Start with empty state - default sequence will be added via Command
+        let mut state = ProjectState::new_empty(name);
 
         // Create OpsLog instances - one for ActiveProject, one for executor
         // Both point to the same file but operate independently
         // This is safe because OpsLog performs atomic appends
         let ops_log = OpsLog::new(&ops_path);
-        let executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
 
-        // Save initial snapshot
+        // Create default sequence via Command to ensure ops log recording
+        // This maintains Event Sourcing principle: all changes go through commands
+        let default_sequence_cmd = CreateSequenceCommand::new("Sequence 1", "1080p");
+        executor.execute(Box::new(default_sequence_cmd), &mut state)?;
+
+        // Clear undo history so users can't accidentally undo the initial setup
+        // The operation is still recorded in ops.jsonl for recovery purposes
+        executor.clear_history();
+
+        // Save initial snapshot (includes the default sequence from command)
         let snapshot_path = Snapshot::default_path(&path);
-        Snapshot::save(&snapshot_path, &state, None)?;
+        Snapshot::save(&snapshot_path, &state, state.last_op_id.as_deref())?;
 
         // Save project.json metadata
         let meta_path = path.join("project.json");
