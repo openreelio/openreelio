@@ -4,6 +4,7 @@ on:
   pull_request:
     types: [opened, reopened, ready_for_review]
   issue_comment:
+    types: [created]
 
 jobs:
   pr_agent:
@@ -11,10 +12,8 @@ jobs:
     # This prevents external actors from triggering expensive API calls
     if: |
       github.event.sender.type != 'Bot' &&
-      (
-        (github.event_name == 'pull_request' && contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) ||
-        (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
-      )
+      contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.actor_association) &&
+      (github.event_name != 'issue_comment' || github.event.issue.pull_request)
     runs-on: ubuntu-latest
     name: AI Code Review
 
