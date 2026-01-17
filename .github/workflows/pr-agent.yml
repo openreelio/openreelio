@@ -12,8 +12,10 @@ jobs:
     # This prevents external actors from triggering expensive API calls
     if: |
       github.event.sender.type != 'Bot' &&
-      contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.actor_association) &&
-      (github.event_name != 'issue_comment' || github.event.issue.pull_request)
+      (
+        (github.event_name == 'pull_request' && contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) ||
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+      )
     runs-on: ubuntu-latest
     name: AI Code Review
 
