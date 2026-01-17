@@ -13,7 +13,7 @@ jobs:
       github.event.sender.type != 'Bot' &&
       (
         (github.event_name == 'pull_request' && contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) ||
-        (github.event_name == 'issue_comment' && contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
+        (github.event_name == 'issue_comment' && github.event.issue.pull_request && contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association))
       )
     runs-on: ubuntu-latest
     name: AI Code Review
@@ -28,4 +28,4 @@ jobs:
         uses: qodo-ai/pr-agent@v0.27
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
