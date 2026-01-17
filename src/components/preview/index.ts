@@ -24,3 +24,6 @@ export type { PlaybackButtonsProps } from './PlaybackButtons';
 
 export { ProxyPreviewPlayer } from './ProxyPreviewPlayer';
 export type { ProxyPreviewPlayerProps } from './ProxyPreviewPlayer';
+
+export { FramePreview } from './FramePreview';
+export type { FramePreviewProps } from './FramePreview';
