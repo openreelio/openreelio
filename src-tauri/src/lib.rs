@@ -252,6 +252,11 @@ pub fn run() {
             ipc::get_job_stats,
             // Render commands
             ipc::start_render,
+            // AI commands
+            ipc::analyze_intent,
+            ipc::create_proposal,
+            ipc::apply_edit_script,
+            ipc::validate_edit_script,
             // FFmpeg commands
             crate::core::ffmpeg::check_ffmpeg,
             crate::core::ffmpeg::extract_frame,
