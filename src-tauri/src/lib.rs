@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use crate::core::{
     commands::CommandExecutor,
     ffmpeg::create_ffmpeg_state,
+    jobs::WorkerPool,
     project::{OpsLog, ProjectMeta, ProjectState, Snapshot},
 };
 
@@ -120,6 +121,8 @@ impl ActiveProject {
 pub struct AppState {
     /// Currently active project (if any)
     pub project: Mutex<Option<ActiveProject>>,
+    /// Background job worker pool
+    pub job_pool: Mutex<WorkerPool>,
 }
 
 impl AppState {
@@ -127,6 +130,7 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             project: Mutex::new(None),
+            job_pool: Mutex::new(WorkerPool::with_defaults()),
         }
     }
 
@@ -226,7 +230,10 @@ pub fn run() {
             ipc::can_redo,
             // Job commands
             ipc::get_jobs,
+            ipc::submit_job,
+            ipc::get_job,
             ipc::cancel_job,
+            ipc::get_job_stats,
             // Render commands
             ipc::start_render,
             // FFmpeg commands

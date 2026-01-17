@@ -12,6 +12,7 @@ use crate::core::{
         RemoveAssetCommand, RemoveClipCommand, SplitClipCommand, TrimClipCommand,
     },
     ffmpeg::FFmpegProgress,
+    jobs::{Job, JobStatus, JobType, Priority},
     CoreError,
 };
 use crate::{ActiveProject, AppState};
@@ -714,18 +715,196 @@ pub async fn can_redo(state: State<'_, AppState>) -> Result<bool, String> {
 // Job Commands
 // =============================================================================
 
-/// Gets all jobs
-#[tauri::command]
-pub async fn get_jobs() -> Result<Vec<serde_json::Value>, String> {
-    // TODO: Implement job management
-    Ok(vec![])
+/// Job info DTO for frontend
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JobInfoDto {
+    pub id: String,
+    pub job_type: String,
+    pub priority: String,
+    pub status: JobStatusDto,
+    pub created_at: String,
+    pub completed_at: Option<String>,
 }
 
-/// Cancels a job
+/// Job status DTO for frontend
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum JobStatusDto {
+    Queued,
+    Running {
+        progress: f32,
+        message: Option<String>,
+    },
+    Completed {
+        result: serde_json::Value,
+    },
+    Failed {
+        error: String,
+    },
+    Cancelled,
+}
+
+impl From<&Job> for JobInfoDto {
+    fn from(job: &Job) -> Self {
+        let job_type = match job.job_type {
+            JobType::ProxyGeneration => "proxy_generation",
+            JobType::ThumbnailGeneration => "thumbnail_generation",
+            JobType::WaveformGeneration => "waveform_generation",
+            JobType::Indexing => "indexing",
+            JobType::Transcription => "transcription",
+            JobType::PreviewRender => "preview_render",
+            JobType::FinalRender => "final_render",
+            JobType::AICompletion => "ai_completion",
+        };
+
+        let priority = match job.priority {
+            Priority::Background => "background",
+            Priority::Normal => "normal",
+            Priority::Preview => "preview",
+            Priority::UserRequest => "user_request",
+        };
+
+        let status = match &job.status {
+            JobStatus::Queued => JobStatusDto::Queued,
+            JobStatus::Running { progress, message } => JobStatusDto::Running {
+                progress: *progress,
+                message: message.clone(),
+            },
+            JobStatus::Completed { result } => JobStatusDto::Completed {
+                result: result.clone(),
+            },
+            JobStatus::Failed { error } => JobStatusDto::Failed {
+                error: error.clone(),
+            },
+            JobStatus::Cancelled => JobStatusDto::Cancelled,
+        };
+
+        Self {
+            id: job.id.clone(),
+            job_type: job_type.to_string(),
+            priority: priority.to_string(),
+            status,
+            created_at: job.created_at.clone(),
+            completed_at: job.completed_at.clone(),
+        }
+    }
+}
+
+/// Gets all jobs from the worker pool (both active and queued)
 #[tauri::command]
-pub async fn cancel_job(_job_id: String) -> Result<bool, String> {
-    // TODO: Implement job cancellation
-    Ok(false)
+pub async fn get_jobs(state: State<'_, AppState>) -> Result<Vec<JobInfoDto>, String> {
+    let pool = state
+        .job_pool
+        .lock()
+        .map_err(|_| "Failed to acquire job pool lock".to_string())?;
+
+    // Get all jobs (active + queued)
+    let all_jobs: Vec<JobInfoDto> = pool.all_jobs().iter().map(JobInfoDto::from).collect();
+
+    tracing::debug!(
+        "get_jobs: {} total ({} active, {} queued)",
+        all_jobs.len(),
+        pool.active_jobs().len(),
+        pool.queue_len()
+    );
+
+    Ok(all_jobs)
+}
+
+/// Submits a new job to the worker pool
+#[tauri::command]
+pub async fn submit_job(
+    job_type: String,
+    priority: Option<String>,
+    payload: serde_json::Value,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let job_type_enum = match job_type.as_str() {
+        "proxy_generation" => JobType::ProxyGeneration,
+        "thumbnail_generation" => JobType::ThumbnailGeneration,
+        "waveform_generation" => JobType::WaveformGeneration,
+        "indexing" => JobType::Indexing,
+        "transcription" => JobType::Transcription,
+        "preview_render" => JobType::PreviewRender,
+        "final_render" => JobType::FinalRender,
+        "ai_completion" => JobType::AICompletion,
+        _ => return Err(format!("Unknown job type: {}", job_type)),
+    };
+
+    let priority_enum = match priority.as_deref() {
+        Some("background") => Priority::Background,
+        Some("normal") | None => Priority::Normal,
+        Some("preview") => Priority::Preview,
+        Some("user_request") => Priority::UserRequest,
+        Some(other) => return Err(format!("Unknown priority: {}", other)),
+    };
+
+    let job = Job::new(job_type_enum, payload).with_priority(priority_enum);
+
+    let pool = state
+        .job_pool
+        .lock()
+        .map_err(|_| "Failed to acquire job pool lock".to_string())?;
+
+    let job_id = pool.submit(job).map_err(|e| e.to_string())?;
+
+    tracing::info!("Submitted job: {} (type: {})", job_id, job_type);
+
+    Ok(job_id)
+}
+
+/// Gets a specific job by ID
+#[tauri::command]
+pub async fn get_job(
+    job_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<JobInfoDto>, String> {
+    let pool = state
+        .job_pool
+        .lock()
+        .map_err(|_| "Failed to acquire job pool lock".to_string())?;
+
+    Ok(pool.get_job(&job_id).as_ref().map(JobInfoDto::from))
+}
+
+/// Cancels a job by ID
+#[tauri::command]
+pub async fn cancel_job(job_id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    let pool = state
+        .job_pool
+        .lock()
+        .map_err(|_| "Failed to acquire job pool lock".to_string())?;
+
+    let cancelled = pool.cancel(&job_id);
+
+    if cancelled {
+        tracing::info!("Cancelled job: {}", job_id);
+    } else {
+        tracing::debug!("Job not found or already completed: {}", job_id);
+    }
+
+    Ok(cancelled)
+}
+
+/// Gets the current queue statistics
+#[tauri::command]
+pub async fn get_job_stats(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let pool = state
+        .job_pool
+        .lock()
+        .map_err(|_| "Failed to acquire job pool lock".to_string())?;
+
+    let active_jobs = pool.active_jobs();
+    let running_count = active_jobs.iter().filter(|j| j.is_running()).count();
+    let pending_count = pool.queue_len();
+
+    Ok(serde_json::json!({
+        "queueLength": pending_count,
+        "activeCount": active_jobs.len(),
+        "runningCount": running_count,
+        "numWorkers": pool.num_workers(),
+    }))
 }
 
 // =============================================================================
@@ -1548,6 +1727,12 @@ pub fn get_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'st
         // Jobs
         get_jobs,
         cancel_job,
+        // FFmpeg Utilities (from core::ffmpeg::commands)
+        crate::core::ffmpeg::check_ffmpeg,
+        crate::core::ffmpeg::extract_frame,
+        crate::core::ffmpeg::probe_media,
+        crate::core::ffmpeg::generate_thumbnail,
+        crate::core::ffmpeg::generate_waveform,
         // Render
         start_render,
         // AI
