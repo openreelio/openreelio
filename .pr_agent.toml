@@ -1,0 +1,29 @@
+# PR-Agent Configuration for OpenReelio
+# Documentation: https://qodo-merge-docs.qodo.ai/
+
+[config]
+model = "gemini/gemini-3-pro-preview"
+model_turbo = "gemini/gemini-3-flash-preview"
+fallback_models = ["gemini/gemini-2.5-pro", "gemini/gemini-2.5-flash"]
+use_repo_settings_file = true
+
+[pr_reviewer]
+require_focused_review = false
+require_score_review = true
+require_tests_review = true
+require_security_review = true
+require_estimate_effort_to_review = true
+num_code_suggestions = 4
+
+[pr_description]
+enable_semantic_files_types = true
+collapsible_file_list = "adaptive"
+
+[pr_code_suggestions]
+num_code_suggestions = 4
+rank_suggestions = true
+
+[github_action_config]
+auto_review = true
+auto_describe = true
+auto_improve = true

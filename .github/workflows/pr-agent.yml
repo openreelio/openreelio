@@ -1,0 +1,30 @@
+name: PR-Agent AI Code Review
+
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+jobs:
+  pr_agent:
+    # Security: Only run for trusted contributors (OWNER, MEMBER, COLLABORATOR)
+    # This prevents external actors from triggering expensive API calls
+    if: |
+      github.event.sender.type != 'Bot' &&
+      contains(fromJson('["OWNER", "MEMBER", "COLLABORATOR"]'), github.actor_association) &&
+      (github.event_name != 'issue_comment' || github.event.issue.pull_request)
+    runs-on: ubuntu-latest
+    name: AI Code Review
+
+    permissions:
+      issues: write
+      pull-requests: write
+      contents: read
+
+    steps:
+      - name: Run PR-Agent
+        uses: qodo-ai/pr-agent@v0.27
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
