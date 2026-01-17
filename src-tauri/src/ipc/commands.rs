@@ -34,7 +34,7 @@ pub async fn create_project(
         ActiveProject::create(&name, project_path.clone()).map_err(|e| e.to_ipc_error())?;
 
     let info = ProjectInfo {
-        id: ulid::Ulid::new().to_string(),
+        id: project.state.meta.id.clone(),
         name: project.state.meta.name.clone(),
         path: path.clone(),
         created_at: project.state.meta.created_at.clone(),
@@ -62,7 +62,7 @@ pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<Pr
     let project = ActiveProject::open(project_path).map_err(|e| e.to_ipc_error())?;
 
     let info = ProjectInfo {
-        id: ulid::Ulid::new().to_string(),
+        id: project.state.meta.id.clone(),
         name: project.state.meta.name.clone(),
         path: path.clone(),
         created_at: project.state.meta.created_at.clone(),
@@ -102,7 +102,7 @@ pub async fn get_project_info(state: State<'_, AppState>) -> Result<Option<Proje
         .map_err(|_| "Failed to acquire lock".to_string())?;
 
     Ok(guard.as_ref().map(|p| ProjectInfo {
-        id: ulid::Ulid::new().to_string(),
+        id: p.state.meta.id.clone(),
         name: p.state.meta.name.clone(),
         path: p.path.to_string_lossy().to_string(),
         created_at: p.state.meta.created_at.clone(),

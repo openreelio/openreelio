@@ -22,6 +22,8 @@ use crate::core::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectMeta {
+    /// Unique project ID (persisted, generated once on creation)
+    pub id: String,
     /// Project name
     pub name: String,
     /// Project version (for format migrations)
@@ -39,10 +41,11 @@ pub struct ProjectMeta {
 }
 
 impl ProjectMeta {
-    /// Creates new project metadata
+    /// Creates new project metadata with a unique ID
     pub fn new(name: &str) -> Self {
         let now = chrono::Utc::now().to_rfc3339();
         Self {
+            id: ulid::Ulid::new().to_string(),
             name: name.to_string(),
             version: "1.0.0".to_string(),
             created_at: now.clone(),
@@ -87,8 +90,39 @@ pub struct ProjectState {
 }
 
 impl ProjectState {
-    /// Creates a new empty project state
+    /// Creates a new project state with a default sequence and tracks
     pub fn new(name: &str) -> Self {
+        // Create default sequence with standard tracks
+        let mut default_sequence = Sequence::new(
+            "Sequence 1",
+            crate::core::timeline::SequenceFormat::youtube_1080(),
+        );
+
+        // Add default video track
+        let video_track = Track::new("Video 1", crate::core::timeline::TrackKind::Video);
+        default_sequence.add_track(video_track);
+
+        // Add default audio track
+        let audio_track = Track::new("Audio 1", crate::core::timeline::TrackKind::Audio);
+        default_sequence.add_track(audio_track);
+
+        let seq_id = default_sequence.id.clone();
+        let mut sequences = HashMap::new();
+        sequences.insert(seq_id.clone(), default_sequence);
+
+        Self {
+            meta: ProjectMeta::new(name),
+            assets: HashMap::new(),
+            sequences,
+            active_sequence_id: Some(seq_id),
+            last_op_id: None,
+            op_count: 0,
+            is_dirty: false,
+        }
+    }
+
+    /// Creates a new empty project state (no default sequence)
+    pub fn new_empty(name: &str) -> Self {
         Self {
             meta: ProjectMeta::new(name),
             assets: HashMap::new(),
@@ -640,6 +674,24 @@ mod tests {
 
         assert_eq!(state.meta.name, "Test Project");
         assert!(state.assets.is_empty());
+        // New project now includes default sequence with video and audio tracks
+        assert_eq!(state.sequences.len(), 1);
+        assert!(state.active_sequence_id.is_some());
+        let active_seq = state.get_active_sequence().unwrap();
+        assert_eq!(active_seq.name, "Sequence 1");
+        assert_eq!(active_seq.tracks.len(), 2);
+        assert_eq!(active_seq.tracks[0].name, "Video 1");
+        assert_eq!(active_seq.tracks[1].name, "Audio 1");
+        assert!(state.last_op_id.is_none());
+        assert_eq!(state.op_count, 0);
+    }
+
+    #[test]
+    fn test_project_state_new_empty() {
+        let state = ProjectState::new_empty("Test Project");
+
+        assert_eq!(state.meta.name, "Test Project");
+        assert!(state.assets.is_empty());
         assert!(state.sequences.is_empty());
         assert!(state.active_sequence_id.is_none());
         assert!(state.last_op_id.is_none());
@@ -680,7 +732,8 @@ mod tests {
 
     #[test]
     fn test_apply_sequence_create() {
-        let mut state = ProjectState::new("Test Project");
+        // Use new_empty to test sequence creation in isolation
+        let mut state = ProjectState::new_empty("Test Project");
 
         let sequence = Sequence::new("Main Sequence", SequenceFormat::youtube_1080());
         let op = Operation::new(
@@ -798,7 +851,8 @@ mod tests {
 
     #[test]
     fn test_project_state_query_methods() {
-        let mut state = ProjectState::new("Test Project");
+        // Use new_empty to test query methods in isolation
+        let mut state = ProjectState::new_empty("Test Project");
 
         // Setup
         let asset = Asset::new_video("video.mp4", "/path/video.mp4", VideoInfo::default());
