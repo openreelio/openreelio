@@ -17,3 +17,15 @@ export {
   getErrorSeverity,
   createErrorHandler,
 } from './errorMessages';
+
+export {
+  checkFFmpeg,
+  extractFrame,
+  probeMedia,
+  generateThumbnail,
+  generateWaveform,
+  getTempFramePath,
+  isVideoFile,
+  isAudioFile,
+  isImageFile,
+} from './ffmpeg';

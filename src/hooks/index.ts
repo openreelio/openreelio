@@ -41,3 +41,21 @@ export type {
   RiskAssessment,
   Requirement,
 } from './useAIAgent';
+
+export { useFrameExtractor } from './useFrameExtractor';
+export type {
+  UseFrameExtractorOptions,
+  UseFrameExtractorReturn,
+} from './useFrameExtractor';
+
+export { useJobs } from './useJobs';
+export type {
+  UseJobsOptions,
+  UseJobsReturn,
+} from './useJobs';
+
+export { useAudioWaveform } from './useAudioWaveform';
+export type {
+  UseAudioWaveformOptions,
+  UseAudioWaveformReturn,
+} from './useAudioWaveform';

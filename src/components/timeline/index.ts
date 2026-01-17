@@ -12,3 +12,5 @@ export { Clip } from './Clip';
 export { Playhead } from './Playhead';
 export { TimelineToolbar } from './TimelineToolbar';
 export type { TimelineToolbarProps } from './TimelineToolbar';
+export { ThumbnailStrip } from './ThumbnailStrip';
+export type { ThumbnailStripProps } from './ThumbnailStrip';

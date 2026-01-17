@@ -267,27 +267,51 @@ export interface StateChange {
 // Job Types
 // =============================================================================
 
+/** Job type identifier (snake_case to match Rust IPC) */
 export type JobType =
-  | 'ProxyGeneration'
-  | 'ThumbnailGeneration'
-  | 'WaveformGeneration'
-  | 'Indexing'
-  | 'Transcription'
-  | 'PreviewRender'
-  | 'FinalRender'
-  | 'AICompletion';
+  | 'proxy_generation'
+  | 'thumbnail_generation'
+  | 'waveform_generation'
+  | 'indexing'
+  | 'transcription'
+  | 'preview_render'
+  | 'final_render'
+  | 'ai_completion';
 
-export type JobStatus =
+/** Job priority level */
+export type JobPriority = 'background' | 'normal' | 'preview' | 'user_request';
+
+/** Job status from backend IPC */
+export type JobStatusDto =
   | { type: 'queued' }
   | { type: 'running'; progress: number; message?: string }
   | { type: 'completed'; result: unknown }
   | { type: 'failed'; error: string }
   | { type: 'cancelled' };
 
+/** Job info from backend IPC */
+export interface JobInfo {
+  id: JobId;
+  jobType: JobType;
+  priority: JobPriority;
+  status: JobStatusDto;
+  createdAt: string;
+  completedAt?: string;
+}
+
+/** Job queue statistics */
+export interface JobStats {
+  queueLength: number;
+  activeCount: number;
+  runningCount: number;
+  numWorkers: number;
+}
+
+/** Legacy Job type for backward compatibility */
 export interface Job {
   id: JobId;
   type: JobType;
-  status: JobStatus;
+  status: JobStatusDto;
 }
 
 // =============================================================================
@@ -330,3 +354,83 @@ export type ProposalStatus =
   | { type: 'applied'; opIds: OpId[] }
   | { type: 'rejected'; reason?: string }
   | { type: 'revised'; newProposalId: string };
+
+// =============================================================================
+// FFmpeg Types
+// =============================================================================
+
+/** FFmpeg availability status */
+export interface FFmpegStatus {
+  available: boolean;
+  version?: string;
+  isBundled: boolean;
+  ffmpegPath?: string;
+  ffprobePath?: string;
+}
+
+/** Media file information from FFprobe */
+export interface MediaInfo {
+  durationSec: number;
+  format: string;
+  sizeBytes: number;
+  video?: VideoStreamInfo;
+  audio?: AudioStreamInfo;
+}
+
+/** Video stream information */
+export interface VideoStreamInfo {
+  width: number;
+  height: number;
+  fps: number;
+  codec: string;
+  pixelFormat: string;
+  bitrate?: number;
+}
+
+/** Audio stream information */
+export interface AudioStreamInfo {
+  sampleRate: number;
+  channels: number;
+  codec: string;
+  bitrate?: number;
+}
+
+// =============================================================================
+// Export Types
+// =============================================================================
+
+/** Export preset options */
+export type ExportPreset =
+  | 'youtube_1080p'
+  | 'youtube_4k'
+  | 'youtube_shorts'
+  | 'twitter'
+  | 'instagram'
+  | 'webm_vp9'
+  | 'prores';
+
+/** Export progress event data */
+export interface ExportProgress {
+  jobId: JobId;
+  frame: number;
+  totalFrames: number;
+  percent: number;
+  fps: number;
+  etaSeconds: number;
+  message?: string;
+}
+
+/** Export completion event data */
+export interface ExportComplete {
+  jobId: JobId;
+  outputPath: string;
+  durationSec: number;
+  fileSize: number;
+  encodingTimeSec: number;
+}
+
+/** Export error event data */
+export interface ExportError {
+  jobId: JobId;
+  error: string;
+}
