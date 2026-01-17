@@ -370,6 +370,9 @@ export const useProjectStore = create<ProjectState>()(
           for (const sequence of projectState.sequences) {
             state.sequences.set(sequence.id, sequence);
           }
+
+          // Update active sequence ID from backend
+          state.activeSequenceId = projectState.activeSequenceId;
         });
 
         return result;
@@ -405,6 +408,9 @@ export const useProjectStore = create<ProjectState>()(
           for (const sequence of projectState.sequences) {
             state.sequences.set(sequence.id, sequence);
           }
+
+          // Update active sequence ID from backend
+          state.activeSequenceId = projectState.activeSequenceId;
         });
 
         return result;
@@ -440,6 +446,9 @@ export const useProjectStore = create<ProjectState>()(
           for (const sequence of projectState.sequences) {
             state.sequences.set(sequence.id, sequence);
           }
+
+          // Update active sequence ID from backend
+          state.activeSequenceId = projectState.activeSequenceId;
         });
 
         return result;
