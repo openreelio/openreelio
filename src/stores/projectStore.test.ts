@@ -525,8 +525,8 @@ describe('projectStore', () => {
 
       const { executeCommand } = useProjectStore.getState();
       await executeCommand({
-        type: 'CreateSequence',
-        payload: { name: 'New Sequence' },
+        type: 'CreateTrack',
+        payload: { sequenceId: 'seq_new', name: 'Video 1', kind: 'video' },
       });
 
       expect(useProjectStore.getState().activeSequenceId).toBe('seq_new');
