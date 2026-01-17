@@ -175,6 +175,23 @@ impl WorkerPool {
         self.active_jobs.lock().unwrap().values().cloned().collect()
     }
 
+    /// Gets all queued jobs (waiting to be processed)
+    pub fn queued_jobs(&self) -> Vec<Job> {
+        self.queue
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.job.clone())
+            .collect()
+    }
+
+    /// Gets all jobs (both active and queued)
+    pub fn all_jobs(&self) -> Vec<Job> {
+        let mut jobs = self.active_jobs();
+        jobs.extend(self.queued_jobs());
+        jobs
+    }
+
     /// Gets a job by ID
     pub fn get_job(&self, job_id: &str) -> Option<Job> {
         // Check active jobs
