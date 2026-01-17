@@ -2,88 +2,28 @@
 # Documentation: https://qodo-merge-docs.qodo.ai/
 
 [config]
-# Use Gemini 3 Pro as primary model (latest & most capable)
 model = "gemini/gemini-3-pro-preview"
 model_turbo = "gemini/gemini-3-flash-preview"
 fallback_models = ["gemini/gemini-2.5-pro", "gemini/gemini-2.5-flash"]
-
-# Output language for reviews
 use_repo_settings_file = true
 
 [pr_reviewer]
-# Enable comprehensive review features
 require_focused_review = false
 require_score_review = true
 require_tests_review = true
 require_security_review = true
 require_estimate_effort_to_review = true
-
-# Number of code suggestions to provide
 num_code_suggestions = 4
 
-# Custom review instructions specific to OpenReelio
-extra_instructions = """
-This is OpenReelio, an AI agent-driven video editing IDE built with Tauri 2.0 (Rust + TypeScript/React).
-
-When reviewing code, please pay special attention to:
-
-1. **Event Sourcing Pattern**: All state changes MUST go through Commands. Direct state mutation is forbidden.
-   - Check that all edits use the Command pattern
-   - Verify ops.jsonl append-only principle is maintained
-
-2. **Language Standards**: All code must be in English
-   - Comments, variable names, function names in English
-   - Error messages and logs in English
-   - Only internal working docs (plan.md) may use Korean
-
-3. **Architecture Compliance**:
-   - UI thread and Core API thread must NEVER block
-   - AI output must be EditScript or Patch, never direct state modification
-   - Heavy tasks (indexing, rendering, etc.) must go to worker queues
-
-4. **Code Quality**:
-   - Rust: cargo fmt + clippy -D warnings compliance
-   - TypeScript: No 'any' type, strict mode, explicit return types
-   - No unwrap() in production Rust code
-   - Max 50 lines per function, max 200 lines per component
-
-5. **Security**: Watch for command injection, XSS, SQL injection vulnerabilities
-
-6. **Testing**: TDD is required - check for test coverage
-"""
-
 [pr_description]
-# Enable automatic PR description generation
 enable_semantic_files_types = true
 collapsible_file_list = "adaptive"
 
-# Custom description instructions
-extra_instructions = """
-For OpenReelio PRs, please categorize changes by:
-- Core Engine (Rust): src-tauri/
-- Frontend (TypeScript/React): src/
-- Configuration: .github/, *.toml, *.json
-- Documentation: *.md
-
-Use conventional commit style for the summary.
-"""
-
 [pr_code_suggestions]
-# Code improvement suggestions
 num_code_suggestions = 4
 rank_suggestions = true
 
-extra_instructions = """
-Focus suggestions on:
-1. Event sourcing compliance
-2. Performance (avoiding UI thread blocking)
-3. Type safety improvements
-4. Error handling patterns (thiserror for Rust, proper try-catch for TS)
-5. Following existing codebase patterns
-"""
-
 [github_action_config]
-# Auto-run these commands when a PR is opened
 auto_review = true
 auto_describe = true
 auto_improve = true

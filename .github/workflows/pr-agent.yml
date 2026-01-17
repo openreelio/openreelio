@@ -25,23 +25,7 @@ jobs:
 
     steps:
       - name: Run PR-Agent
-        uses: qodo-ai/pr-agent@main
+        uses: qodo-ai/pr-agent@v0.27
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Gemini API configuration
           GOOGLE_AI_STUDIO.GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          # Model configuration - Gemini 3 Pro (latest & most capable)
-          CONFIG.MODEL: "gemini/gemini-3-pro-preview"
-          CONFIG.MODEL_TURBO: "gemini/gemini-3-flash-preview"
-          CONFIG.FALLBACK_MODELS: '["gemini/gemini-2.5-pro", "gemini/gemini-2.5-flash"]'
-          # Auto-run features on PR open
-          GITHUB_ACTION_CONFIG.AUTO_REVIEW: "true"
-          GITHUB_ACTION_CONFIG.AUTO_DESCRIBE: "true"
-          GITHUB_ACTION_CONFIG.AUTO_IMPROVE: "true"
-          # Review settings
-          PR_REVIEWER.REQUIRE_FOCUSED_REVIEW: "false"
-          PR_REVIEWER.REQUIRE_SCORE_REVIEW: "true"
-          PR_REVIEWER.REQUIRE_TESTS_REVIEW: "true"
-          PR_REVIEWER.REQUIRE_SECURITY_REVIEW: "true"
-          PR_REVIEWER.REQUIRE_ESTIMATE_EFFORT_TO_REVIEW: "true"
-          PR_REVIEWER.NUM_CODE_SUGGESTIONS: "4"
