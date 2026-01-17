@@ -15,7 +15,7 @@ First off, thank you for considering contributing to OpenReelio! It's people lik
 
 ## Code of Conduct
 
-This project and everyone participating in it is governed by our [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to [conduct@openreelio.dev](mailto:conduct@openreelio.dev).
+This project and everyone participating in it is governed by our [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code. Please report unacceptable behavior to [junseo5.dev@gmail.com](mailto:junseo5.dev@gmail.com).
 
 ## Getting Started
 
