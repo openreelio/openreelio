@@ -29,3 +29,15 @@ export {
   isAudioFile,
   isImageFile,
 } from './ffmpeg';
+
+export {
+  loadRecentProjects,
+  saveRecentProjects,
+  addRecentProject,
+  removeRecentProject,
+  removeRecentProjectByPath,
+  clearRecentProjects,
+  getRecentProjectById,
+  getRecentProjectByPath,
+  type RecentProject,
+} from './recentProjects';
