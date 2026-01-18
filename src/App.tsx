@@ -5,16 +5,18 @@
  * Shows WelcomeScreen when no project is loaded, Editor when project is active.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { MainLayout, Header, Sidebar, BottomPanel, Panel } from './components/layout';
-import { WelcomeScreen, type RecentProject } from './components/features/welcome';
+import { WelcomeScreen } from './components/features/welcome';
 import { Inspector } from './components/features/inspector';
 import { ProjectExplorer } from './components/explorer';
 import { PreviewPlayer } from './components/preview';
 import { Timeline } from './components/timeline';
+import { FFmpegWarning } from './components/ui';
 import { useProjectStore, usePlaybackStore } from './stores';
-import { usePreviewSource, useTimelineActions } from './hooks';
+import { usePreviewSource, useTimelineActions, useFFmpegStatus, useAutoSave } from './hooks';
+import { loadRecentProjects, addRecentProject, type RecentProject } from './utils';
 
 // =============================================================================
 // Console Component (Bottom Panel Content)
@@ -130,12 +132,47 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
 function App(): JSX.Element {
   const { isLoaded, isLoading, createProject, loadProject, getActiveSequence } = useProjectStore();
 
-  // Recent projects (would be loaded from storage in production)
-  const [recentProjects] = useState<RecentProject[]>([]);
+  // FFmpeg status check
+  const { isAvailable: isFFmpegAvailable, isLoading: isFFmpegLoading } = useFFmpegStatus();
+  const [showFFmpegWarning, setShowFFmpegWarning] = useState(false);
+  const [ffmpegWarningDismissed, setFFmpegWarningDismissed] = useState(false);
+
+  // Show FFmpeg warning when check completes and FFmpeg is not available
+  // Only show once per session (until dismissed)
+  // Use effect to avoid state update during render
+  useEffect(() => {
+    if (!isFFmpegLoading && !isFFmpegAvailable && !ffmpegWarningDismissed) {
+      setShowFFmpegWarning(true);
+    }
+  }, [isFFmpegLoading, isFFmpegAvailable, ffmpegWarningDismissed]);
+
+  // Recent projects - load from localStorage on mount
+  const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
+
+  // Load recent projects on mount
+  useEffect(() => {
+    const projects = loadRecentProjects();
+    setRecentProjects(projects);
+  }, []);
+
+  // Auto-save functionality (30 second delay after changes)
+  // Note: isSaving could be used in future to show saving indicator in header
+  useAutoSave({
+    delay: 30_000,
+    enabled: true,
+    onSaveError: (error) => {
+      console.error('Auto-save failed:', error);
+    },
+  });
 
   // ===========================================================================
   // Handlers
   // ===========================================================================
+
+  const handleDismissFFmpegWarning = useCallback(() => {
+    setShowFFmpegWarning(false);
+    setFFmpegWarningDismissed(true);
+  }, []);
 
   const handleNewProject = useCallback(async () => {
     // Open folder picker for project location
@@ -150,6 +187,9 @@ function App(): JSX.Element {
       const folderName = selectedPath.split(/[/\\]/).pop() || 'Untitled';
       try {
         await createProject(folderName, selectedPath);
+        // Add to recent projects
+        const updated = addRecentProject({ name: folderName, path: selectedPath });
+        setRecentProjects(updated);
       } catch (error) {
         console.error('Failed to create project:', error);
       }
@@ -176,6 +216,10 @@ function App(): JSX.Element {
       if (projectPath) {
         try {
           await loadProject(projectPath);
+          // Add to recent projects
+          const folderName = projectPath.split(/[/\\]/).pop() || 'Untitled';
+          const updated = addRecentProject({ name: folderName, path: projectPath });
+          setRecentProjects(updated);
         } catch (error) {
           console.error('Failed to open project:', error);
         }
@@ -191,19 +235,35 @@ function App(): JSX.Element {
   // Show Welcome Screen when no project is loaded
   if (!isLoaded) {
     return (
-      <WelcomeScreen
-        onNewProject={() => void handleNewProject()}
-        onOpenProject={(path) => void handleOpenProject(path)}
-        recentProjects={recentProjects}
-        isLoading={isLoading}
-      />
+      <>
+        <WelcomeScreen
+          onNewProject={() => void handleNewProject()}
+          onOpenProject={(path) => void handleOpenProject(path)}
+          recentProjects={recentProjects}
+          isLoading={isLoading}
+        />
+        <FFmpegWarning
+          isOpen={showFFmpegWarning}
+          onDismiss={handleDismissFFmpegWarning}
+          allowDismiss={true}
+        />
+      </>
     );
   }
 
   // Show Editor when project is loaded
   const activeSequence = getActiveSequence();
 
-  return <EditorView sequence={activeSequence ?? null} />;
+  return (
+    <>
+      <EditorView sequence={activeSequence ?? null} />
+      <FFmpegWarning
+        isOpen={showFFmpegWarning}
+        onDismiss={handleDismissFFmpegWarning}
+        allowDismiss={true}
+      />
+    </>
+  );
 }
 
 export default App;
