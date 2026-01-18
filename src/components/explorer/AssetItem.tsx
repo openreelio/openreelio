@@ -126,8 +126,10 @@ export function AssetItem({
   const handleDragStart = useCallback(
     (e: DragEvent) => {
       if (e.dataTransfer) {
-        e.dataTransfer.setData('application/json', JSON.stringify(asset));
-        e.dataTransfer.effectAllowed = 'copy';
+        // Set data in multiple formats for compatibility
+        e.dataTransfer.setData('application/json', JSON.stringify({ id: asset.id, name: asset.name, kind: asset.kind }));
+        e.dataTransfer.setData('text/plain', asset.id);
+        e.dataTransfer.effectAllowed = 'copyMove';
       }
       onDragStart?.(asset);
     },
