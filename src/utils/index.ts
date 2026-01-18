@@ -80,3 +80,10 @@ export {
   type ClipInfo,
   type GetSnapPointsOptions,
 } from './gridSnapping';
+
+export {
+  validateProjectName,
+  buildProjectPath,
+  isValidProjectName,
+  type ProjectNameValidationResult,
+} from './projectPath';
