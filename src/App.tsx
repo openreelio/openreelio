@@ -108,8 +108,8 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
             onDurationChange={setDuration}
           />
         </div>
-        <div className="flex-1">
-          <Panel title="Timeline" variant="default" className="h-full">
+        <div className="flex-1 overflow-hidden">
+          <Panel title="Timeline" variant="default" className="h-full" noPadding>
             <Timeline
               sequence={sequence}
               onClipMove={handleClipMove}

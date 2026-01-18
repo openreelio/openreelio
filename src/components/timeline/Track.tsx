@@ -6,7 +6,7 @@
 
 import { Video, Music, Type, Layers, Eye, EyeOff, Lock, Unlock, Volume2, VolumeX, type LucideIcon } from 'lucide-react';
 import type { Track as TrackType, Clip as ClipType, TrackKind } from '@/types';
-import { Clip, type ClipDragData } from './Clip';
+import { Clip, type ClipDragData, type DragPreviewPosition } from './Clip';
 
 // =============================================================================
 // Types
@@ -19,6 +19,10 @@ interface TrackProps {
   clips: ClipType[];
   /** Zoom level (pixels per second) */
   zoom: number;
+  /** Horizontal scroll offset in pixels */
+  scrollX?: number;
+  /** Total timeline duration in seconds (for setting content width) */
+  duration?: number;
   /** Selected clip IDs */
   selectedClipIds?: string[];
   /** Mute toggle handler */
@@ -36,7 +40,7 @@ interface TrackProps {
   /** Clip drag handler */
   onClipDrag?: (trackId: string, data: ClipDragData, deltaX: number) => void;
   /** Clip drag end handler */
-  onClipDragEnd?: (trackId: string, data: ClipDragData) => void;
+  onClipDragEnd?: (trackId: string, data: ClipDragData, finalPosition: DragPreviewPosition) => void;
 }
 
 // =============================================================================
@@ -58,6 +62,8 @@ export function Track({
   track,
   clips,
   zoom,
+  scrollX = 0,
+  duration = 60,
   selectedClipIds = [],
   onMuteToggle,
   onLockToggle,
@@ -68,6 +74,8 @@ export function Track({
   onClipDrag,
   onClipDragEnd,
 }: TrackProps) {
+  // Calculate track content width based on duration and zoom
+  const contentWidth = duration * zoom;
   const TrackIcon = TrackIcons[track.kind] || Video;
 
   return (
@@ -141,22 +149,31 @@ export function Track({
       {/* Track Content (Clips Area) */}
       <div
         data-testid="track-content"
-        className={`flex-1 h-16 bg-editor-bg relative ${!track.visible ? 'opacity-50' : ''}`}
+        className={`flex-1 h-16 bg-editor-bg relative overflow-hidden ${!track.visible ? 'opacity-50' : ''}`}
       >
-        {clips.map((clip) => (
-          <Clip
-            key={clip.id}
-            clip={clip}
-            zoom={zoom}
-            selected={selectedClipIds.includes(clip.id)}
-            disabled={track.locked}
-            onClick={onClipClick}
-            onDoubleClick={onClipDoubleClick}
-            onDragStart={(data) => onClipDragStart?.(track.id, data)}
-            onDrag={(data, deltaX) => onClipDrag?.(track.id, data, deltaX)}
-            onDragEnd={(data) => onClipDragEnd?.(track.id, data)}
-          />
-        ))}
+        {/* Scrollable clips container */}
+        <div
+          className="absolute inset-0"
+          style={{
+            width: `${contentWidth}px`,
+            transform: `translateX(-${scrollX}px)`,
+          }}
+        >
+          {clips.map((clip) => (
+            <Clip
+              key={clip.id}
+              clip={clip}
+              zoom={zoom}
+              selected={selectedClipIds.includes(clip.id)}
+              disabled={track.locked}
+              onClick={onClipClick}
+              onDoubleClick={onClipDoubleClick}
+              onDragStart={(data) => onClipDragStart?.(track.id, data)}
+              onDrag={(data, deltaX) => onClipDrag?.(track.id, data, deltaX)}
+              onDragEnd={(data, finalPosition) => onClipDragEnd?.(track.id, data, finalPosition)}
+            />
+          ))}
+        </div>
       </div>
     </div>
   );

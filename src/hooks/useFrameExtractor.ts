@@ -222,8 +222,10 @@ export function useFrameExtractor(
 
   // Clean up on unmount
   useEffect(() => {
+    const pending = pendingExtractions.current;
+
     return () => {
-      pendingExtractions.current.clear();
+      pending.clear();
     };
   }, []);
 

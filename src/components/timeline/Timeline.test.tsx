@@ -76,10 +76,11 @@ describe('Timeline', () => {
     });
 
     // Reset playback store before each test
+    // Duration must be > 0 for playback to work with TimelineEngine
     usePlaybackStore.setState({
       isPlaying: false,
       currentTime: 0,
-      duration: 0,
+      duration: 60, // Set to 60 seconds (default timeline duration)
       playbackRate: 1,
       volume: 1,
       isMuted: false,
@@ -191,8 +192,10 @@ describe('Timeline', () => {
   // ===========================================================================
 
   describe('playhead', () => {
-    it('should position playhead based on store state', () => {
-      usePlaybackStore.setState({ currentTime: 5 });
+    it('should position playhead based on store state', async () => {
+      await act(async () => {
+        usePlaybackStore.setState({ currentTime: 5 });
+      });
 
       render(<Timeline sequence={mockSequence} />);
 
@@ -237,11 +240,14 @@ describe('Timeline', () => {
   // ===========================================================================
 
   describe('keyboard shortcuts', () => {
-    it('should toggle playback on space key', () => {
+    it('should toggle playback on space key', async () => {
       render(<Timeline sequence={mockSequence} />);
 
       const timeline = screen.getByTestId('timeline');
-      fireEvent.keyDown(timeline, { key: ' ' });
+
+      await act(async () => {
+        fireEvent.keyDown(timeline, { key: ' ' });
+      });
 
       expect(usePlaybackStore.getState().isPlaying).toBe(true);
     });

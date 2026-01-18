@@ -183,6 +183,7 @@ pub fn run() {
         .manage(ffmpeg_state.clone())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .setup(move |app| {
             // Initialize logging
             tracing_subscriber::fmt()
