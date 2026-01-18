@@ -238,7 +238,10 @@ export type CommandType =
   | 'DeleteCaption'
   | 'SetSequenceFormat'
   | 'CreateTrack'
-  | 'DeleteTrack';
+  | 'DeleteTrack'
+  | 'ToggleTrackMute'
+  | 'ToggleTrackLock'
+  | 'ToggleTrackVisibility';
 
 export interface Command {
   type: CommandType;

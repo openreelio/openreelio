@@ -13,6 +13,7 @@ import type {
   ClipMoveData,
   ClipTrimData,
   ClipSplitData,
+  TrackControlData,
 } from '@/components/timeline/Timeline';
 import type { Sequence, Asset } from '@/types';
 
@@ -30,6 +31,9 @@ interface TimelineActions {
   handleClipSplit: (data: ClipSplitData) => Promise<void>;
   handleAssetDrop: (data: AssetDropData) => Promise<void>;
   handleDeleteClips: (clipIds: string[]) => Promise<void>;
+  handleTrackMuteToggle: (data: TrackControlData) => Promise<void>;
+  handleTrackLockToggle: (data: TrackControlData) => Promise<void>;
+  handleTrackVisibilityToggle: (data: TrackControlData) => Promise<void>;
 }
 
 // =============================================================================
@@ -41,7 +45,7 @@ interface TimelineActions {
  */
 async function refreshProjectState(
   setAssets: (assets: Map<string, Asset>) => void,
-  setSequences: (sequences: Map<string, Sequence>) => void
+  setSequences: (sequences: Map<string, Sequence>) => void,
 ): Promise<void> {
   try {
     const projectState = await invoke<{
@@ -83,7 +87,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
   const refreshState = useCallback(async () => {
     await refreshProjectState(
       (assets) => useProjectStore.setState({ assets }),
-      (sequences) => useProjectStore.setState({ sequences })
+      (sequences) => useProjectStore.setState({ sequences }),
     );
   }, []);
 
@@ -110,7 +114,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         console.error('Failed to move clip:', error);
       }
     },
-    [sequence, executeCommand, refreshState]
+    [sequence, executeCommand, refreshState],
   );
 
   /**
@@ -137,7 +141,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         console.error('Failed to trim clip:', error);
       }
     },
-    [sequence, executeCommand, refreshState]
+    [sequence, executeCommand, refreshState],
   );
 
   /**
@@ -162,7 +166,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         console.error('Failed to split clip:', error);
       }
     },
-    [sequence, executeCommand, refreshState]
+    [sequence, executeCommand, refreshState],
   );
 
   /**
@@ -187,7 +191,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         console.error('Failed to insert clip:', error);
       }
     },
-    [sequence, executeCommand, refreshState]
+    [sequence, executeCommand, refreshState],
   );
 
   /**
@@ -226,7 +230,76 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         console.error('Failed to delete clips:', error);
       }
     },
-    [sequence, executeCommand, refreshState]
+    [sequence, executeCommand, refreshState],
+  );
+
+  /**
+   * Handle track mute toggle
+   */
+  const handleTrackMuteToggle = useCallback(
+    async (data: TrackControlData): Promise<void> => {
+      if (!sequence) return;
+
+      try {
+        await executeCommand({
+          type: 'ToggleTrackMute',
+          payload: {
+            sequenceId: data.sequenceId,
+            trackId: data.trackId,
+          },
+        });
+        await refreshState();
+      } catch (error) {
+        console.error('Failed to toggle track mute:', error);
+      }
+    },
+    [sequence, executeCommand, refreshState],
+  );
+
+  /**
+   * Handle track lock toggle
+   */
+  const handleTrackLockToggle = useCallback(
+    async (data: TrackControlData): Promise<void> => {
+      if (!sequence) return;
+
+      try {
+        await executeCommand({
+          type: 'ToggleTrackLock',
+          payload: {
+            sequenceId: data.sequenceId,
+            trackId: data.trackId,
+          },
+        });
+        await refreshState();
+      } catch (error) {
+        console.error('Failed to toggle track lock:', error);
+      }
+    },
+    [sequence, executeCommand, refreshState],
+  );
+
+  /**
+   * Handle track visibility toggle
+   */
+  const handleTrackVisibilityToggle = useCallback(
+    async (data: TrackControlData): Promise<void> => {
+      if (!sequence) return;
+
+      try {
+        await executeCommand({
+          type: 'ToggleTrackVisibility',
+          payload: {
+            sequenceId: data.sequenceId,
+            trackId: data.trackId,
+          },
+        });
+        await refreshState();
+      } catch (error) {
+        console.error('Failed to toggle track visibility:', error);
+      }
+    },
+    [sequence, executeCommand, refreshState],
   );
 
   return {
@@ -235,5 +308,8 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleClipSplit,
     handleAssetDrop,
     handleDeleteClips,
+    handleTrackMuteToggle,
+    handleTrackLockToggle,
+    handleTrackVisibilityToggle,
   };
 }
