@@ -65,3 +65,9 @@ export type {
   FFmpegStatus,
   UseFFmpegStatusResult,
 } from './useFFmpegStatus';
+
+export { useAutoSave } from './useAutoSave';
+export type {
+  UseAutoSaveOptions,
+  UseAutoSaveReturn,
+} from './useAutoSave';
