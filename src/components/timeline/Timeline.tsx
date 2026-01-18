@@ -2,17 +2,20 @@
  * Timeline Component
  *
  * Main timeline container that integrates all timeline elements.
+ * Uses TimelineEngine for playback control and grid snapping for interactions.
  */
 
-import { useState, useCallback, useRef, type KeyboardEvent, type MouseEvent, type DragEvent, type WheelEvent } from 'react';
+import { useState, useCallback, useRef, useMemo, type KeyboardEvent, type MouseEvent, type DragEvent, type WheelEvent } from 'react';
 import type { Sequence, Clip as ClipType } from '@/types';
 import { useTimelineStore } from '@/stores/timelineStore';
-import { usePlaybackStore } from '@/stores/playbackStore';
+import { useTimelineEngine } from '@/hooks/useTimelineEngine';
+import { getGridIntervalForZoom } from '@/utils/timeline';
+import { getSnapPoints, snapToNearestPoint, calculateSnapThreshold } from '@/utils/gridSnapping';
 import { TimeRuler } from './TimeRuler';
 import { Track } from './Track';
 import { Playhead } from './Playhead';
 import { TimelineToolbar } from './TimelineToolbar';
-import type { ClipDragData } from './Clip';
+import type { ClipDragData, DragPreviewPosition } from './Clip';
 
 // =============================================================================
 // Types
@@ -82,9 +85,6 @@ export function Timeline({
   onClipTrim,
   onClipSplit,
 }: TimelineProps) {
-  // Get playback state from playback store (single source of truth for playhead)
-  const { currentTime: playhead, isPlaying, setCurrentTime: setPlayhead, togglePlayback } = usePlaybackStore();
-
   // Get timeline UI state from timeline store
   const {
     zoom,
@@ -97,16 +97,11 @@ export function Timeline({
     zoomIn,
     zoomOut,
     fitToWindow,
+    snapEnabled,
   } = useTimelineStore();
 
-  // Drag and drop state
-  const [isDraggingOver, setIsDraggingOver] = useState(false);
-  const [dragPreview, setDragPreview] = useState<{ clipId: string; left: number; width: number } | null>(null);
-  const tracksAreaRef = useRef<HTMLDivElement>(null);
-  const dragCounterRef = useRef(0);
-
-  // Calculate total duration from sequence
-  const duration = (() => {
+  // Calculate total duration from sequence (needed before TimelineEngine)
+  const duration = useMemo(() => {
     if (!sequence) return 60;
 
     const clipEndTimes = sequence.tracks.flatMap((track) =>
@@ -117,7 +112,56 @@ export function Timeline({
 
     // Return minimum 60 seconds, or max of all clip end times
     return clipEndTimes.length > 0 ? Math.max(60, ...clipEndTimes) : 60;
-  })();
+  }, [sequence]);
+
+  // Use TimelineEngine for playback control
+  const {
+    currentTime: playhead,
+    isPlaying,
+    togglePlayback,
+    seek: setPlayhead,
+    stepForward,
+    stepBackward,
+  } = useTimelineEngine({ duration, fps: 30 });
+
+  // Calculate grid interval based on zoom
+  const gridInterval = useMemo(() => getGridIntervalForZoom(zoom), [zoom]);
+
+  // Calculate snap points for all clips
+  const snapPoints = useMemo(() => {
+    if (!sequence || !snapEnabled) return [];
+
+    const clips = sequence.tracks.flatMap((track) =>
+      track.clips.map((clip) => ({
+        id: clip.id,
+        startTime: clip.place.timelineInSec,
+        endTime: clip.place.timelineInSec + (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed,
+      }))
+    );
+
+    return getSnapPoints({
+      clips,
+      playheadTime: playhead,
+      excludeClipId: null,
+      gridInterval,
+      timelineStart: 0,
+      timelineEnd: duration,
+    });
+  }, [sequence, snapEnabled, playhead, gridInterval, duration]);
+
+  // Calculate snap threshold based on zoom
+  const snapThreshold = useMemo(() => calculateSnapThreshold(zoom), [zoom]);
+
+  // Drag and drop state
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const [dragPreview, setDragPreview] = useState<{ clipId: string; left: number; width: number; trackIndex: number } | null>(null);
+  const [activeSnapPoint, setActiveSnapPoint] = useState<{ time: number; type: string } | null>(null);
+  const tracksAreaRef = useRef<HTMLDivElement>(null);
+  const dragCounterRef = useRef(0);
+
+  // Playhead scrubbing state
+  const [isScrubbing, setIsScrubbing] = useState(false);
+  const scrubStartRef = useRef<{ wasPlaying: boolean } | null>(null);
 
   // Get all clips from all tracks
   const getTrackClips = useCallback(
@@ -152,6 +196,86 @@ export function Timeline({
     [setPlayhead]
   );
 
+  // ===========================================================================
+  // Playhead Scrubbing Handlers
+  // ===========================================================================
+
+  const calculateTimeFromMouseEvent = useCallback(
+    (e: globalThis.MouseEvent | MouseEvent, applySnapping: boolean = false) => {
+      if (!tracksAreaRef.current) return null;
+      const rect = tracksAreaRef.current.getBoundingClientRect();
+      const relativeX = e.clientX - rect.left - TRACK_HEADER_WIDTH + scrollX;
+      let time = Math.max(0, Math.min(duration, relativeX / zoom));
+
+      // Apply snapping if enabled
+      if (applySnapping && snapEnabled && snapPoints.length > 0) {
+        const snapResult = snapToNearestPoint(time, snapPoints, snapThreshold);
+        if (snapResult.snapped) {
+          time = snapResult.time;
+          setActiveSnapPoint({ time: snapResult.time, type: snapResult.snapPoint?.type || 'grid' });
+        } else {
+          setActiveSnapPoint(null);
+        }
+      }
+
+      return time;
+    },
+    [scrollX, zoom, duration, snapEnabled, snapPoints, snapThreshold]
+  );
+
+  const handleScrubStart = useCallback(
+    (e: MouseEvent) => {
+      // Only start scrubbing if clicking on the tracks area background (not on clips)
+      const target = e.target as HTMLElement;
+      if (target.getAttribute('data-testid') !== 'timeline-tracks-area' &&
+          target.getAttribute('data-testid') !== 'track-content' &&
+          !target.closest('[data-testid="track-content"]')) {
+        return;
+      }
+
+      e.preventDefault();
+      setIsScrubbing(true);
+
+      // Pause playback during scrubbing and remember state
+      scrubStartRef.current = { wasPlaying: isPlaying };
+      if (isPlaying) {
+        togglePlayback();
+      }
+
+      // Set initial position (with snapping)
+      const time = calculateTimeFromMouseEvent(e, true);
+      if (time !== null) {
+        setPlayhead(time);
+      }
+
+      // Add document-level listeners for mouse move and up
+      const handleMouseMove = (moveEvent: globalThis.MouseEvent) => {
+        const newTime = calculateTimeFromMouseEvent(moveEvent, true);
+        if (newTime !== null) {
+          setPlayhead(newTime);
+        }
+      };
+
+      const handleMouseUp = () => {
+        setIsScrubbing(false);
+        setActiveSnapPoint(null);
+
+        // Resume playback if it was playing before scrubbing
+        if (scrubStartRef.current?.wasPlaying) {
+          togglePlayback();
+        }
+        scrubStartRef.current = null;
+
+        document.removeEventListener('mousemove', handleMouseMove);
+        document.removeEventListener('mouseup', handleMouseUp);
+      };
+
+      document.addEventListener('mousemove', handleMouseMove);
+      document.addEventListener('mouseup', handleMouseUp);
+    },
+    [isPlaying, togglePlayback, calculateTimeFromMouseEvent, setPlayhead]
+  );
+
   // Handle clip click
   const handleClipClick = useCallback(
     (clipId: string) => {
@@ -176,18 +300,34 @@ export function Timeline({
   // ===========================================================================
 
   const handleClipDragStart = useCallback(
-    (_trackId: string, data: ClipDragData) => {
+    (trackId: string, data: ClipDragData) => {
       // Select the clip being dragged
       selectClip(data.clipId);
+
+      // Find track index for drag preview positioning
+      if (sequence) {
+        const trackIndex = sequence.tracks.findIndex(t => t.id === trackId);
+        const clipInfo = findClip(data.clipId);
+        if (clipInfo && trackIndex >= 0) {
+          const clipDuration = (data.originalSourceOut - data.originalSourceIn) / clipInfo.clip.speed;
+          setDragPreview({
+            clipId: data.clipId,
+            left: data.originalTimelineIn * zoom,
+            width: clipDuration * zoom,
+            trackIndex,
+          });
+        }
+      }
     },
-    [selectClip]
+    [selectClip, sequence, zoom, findClip]
   );
 
   const handleClipDrag = useCallback(
-    (_trackId: string, data: ClipDragData, deltaX: number) => {
+    (trackId: string, data: ClipDragData, deltaX: number) => {
       if (!sequence) return;
 
       const deltaTime = deltaX / zoom;
+      const trackIndex = sequence.tracks.findIndex(t => t.id === trackId);
 
       if (data.type === 'move') {
         // Calculate new position
@@ -199,6 +339,7 @@ export function Timeline({
             clipId: data.clipId,
             left: newTimelineIn * zoom,
             width: clipDuration * zoom,
+            trackIndex,
           });
         }
       } else if (data.type === 'trim-left') {
@@ -213,6 +354,7 @@ export function Timeline({
           clipId: data.clipId,
           left: newTimelineIn * zoom,
           width: newDuration * zoom,
+          trackIndex,
         });
       } else if (data.type === 'trim-right') {
         // Preview trim from right
@@ -225,6 +367,7 @@ export function Timeline({
           clipId: data.clipId,
           left: data.originalTimelineIn * zoom,
           width: newDuration * zoom,
+          trackIndex,
         });
       }
     },
@@ -232,48 +375,42 @@ export function Timeline({
   );
 
   const handleClipDragEnd = useCallback(
-    (trackId: string, data: ClipDragData) => {
-      if (!sequence || !dragPreview) {
+    (trackId: string, data: ClipDragData, finalPosition: DragPreviewPosition) => {
+      if (!sequence) {
         setDragPreview(null);
         return;
       }
 
-      const deltaTime = (dragPreview.left / zoom) - data.originalTimelineIn;
-
+      // Use finalPosition from the drag hook instead of dragPreview for accuracy
       if (data.type === 'move' && onClipMove) {
-        const newTimelineIn = Math.max(0, data.originalTimelineIn + deltaTime);
         onClipMove({
           sequenceId: sequence.id,
           trackId,
           clipId: data.clipId,
-          newTimelineIn,
+          newTimelineIn: Math.max(0, finalPosition.timelineIn),
         });
       } else if ((data.type === 'trim-left' || data.type === 'trim-right') && onClipTrim) {
         if (data.type === 'trim-left') {
-          const newSourceIn = data.originalSourceIn + deltaTime;
-          const newTimelineIn = data.originalTimelineIn + deltaTime;
           onClipTrim({
             sequenceId: sequence.id,
             trackId,
             clipId: data.clipId,
-            newSourceIn: Math.max(0, newSourceIn),
-            newTimelineIn: Math.max(0, newTimelineIn),
+            newSourceIn: Math.max(0, finalPosition.sourceIn),
+            newTimelineIn: Math.max(0, finalPosition.timelineIn),
           });
         } else {
-          const newDuration = dragPreview.width / zoom;
-          const newSourceOut = data.originalSourceIn + newDuration;
           onClipTrim({
             sequenceId: sequence.id,
             trackId,
             clipId: data.clipId,
-            newSourceOut,
+            newSourceOut: finalPosition.sourceOut,
           });
         }
       }
 
       setDragPreview(null);
     },
-    [sequence, dragPreview, zoom, onClipMove, onClipTrim]
+    [sequence, onClipMove, onClipTrim]
   );
 
   // ===========================================================================
@@ -286,6 +423,14 @@ export function Timeline({
         case ' ':
           e.preventDefault();
           togglePlayback();
+          break;
+        case 'ArrowLeft':
+          e.preventDefault();
+          stepBackward();
+          break;
+        case 'ArrowRight':
+          e.preventDefault();
+          stepForward();
           break;
         case 'Delete':
         case 'Backspace':
@@ -322,7 +467,7 @@ export function Timeline({
           break;
       }
     },
-    [togglePlayback, selectedClipIds, onDeleteClips, clearClipSelection, sequence, onClipSplit, findClip, playhead]
+    [togglePlayback, stepBackward, stepForward, selectedClipIds, onDeleteClips, clearClipSelection, sequence, onClipSplit, findClip, playhead]
   );
 
   // ===========================================================================
@@ -366,7 +511,7 @@ export function Timeline({
     e.preventDefault();
     e.stopPropagation();
     dragCounterRef.current++;
-    if (e.dataTransfer.types.includes('application/json')) {
+    if (e.dataTransfer.types.includes('application/json') || e.dataTransfer.types.includes('text/plain')) {
       setIsDraggingOver(true);
     }
   }, []);
@@ -374,7 +519,7 @@ export function Timeline({
   const handleDragOver = useCallback((e: DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (e.dataTransfer.types.includes('application/json')) {
+    if (e.dataTransfer.types.includes('application/json') || e.dataTransfer.types.includes('text/plain')) {
       e.dataTransfer.dropEffect = 'copy';
     }
   }, []);
@@ -395,17 +540,28 @@ export function Timeline({
       dragCounterRef.current = 0;
       setIsDraggingOver(false);
 
-      if (!sequence || !onAssetDrop) return;
+      if (!sequence || !onAssetDrop) {
+        return;
+      }
 
-      const jsonData = e.dataTransfer.getData('application/json');
-      if (!jsonData) return;
+      // Try to get data from different formats
+      let jsonData = e.dataTransfer.getData('application/json');
+      const textData = e.dataTransfer.getData('text/plain');
+
+      if (!jsonData && textData) {
+        // If only text/plain available (asset ID), construct minimal object
+        jsonData = JSON.stringify({ id: textData });
+      }
+
+      if (!jsonData) {
+        return;
+      }
 
       try {
         const assetData = JSON.parse(jsonData);
         if (!assetData.id) return;
 
         // Calculate timeline position from X coordinate
-        // Use event target or ref for getBoundingClientRect
         const target = e.currentTarget as HTMLElement;
         const rect = target.getBoundingClientRect();
         if (!rect || rect.width === 0) return;
@@ -419,7 +575,9 @@ export function Timeline({
         const track = sequence.tracks[trackIndex];
 
         // Don't allow drop on locked tracks
-        if (!track || track.locked) return;
+        if (!track || track.locked) {
+          return;
+        }
 
         onAssetDrop({
           assetId: assetData.id,
@@ -427,7 +585,7 @@ export function Timeline({
           timelinePosition,
         });
       } catch {
-        // Invalid JSON data
+        // Invalid JSON data - silently ignore
       }
     },
     [sequence, onAssetDrop, scrollX, scrollY, zoom]
@@ -476,9 +634,9 @@ export function Timeline({
       <div
         ref={tracksAreaRef}
         data-testid="timeline-tracks-area"
-        className="flex-1 overflow-auto relative"
-        style={{ scrollBehavior: 'smooth' }}
+        className={`flex-1 overflow-hidden relative ${isScrubbing ? 'cursor-ew-resize' : ''}`}
         onClick={handleTracksAreaClick}
+        onMouseDown={handleScrubStart}
         onWheel={handleWheel}
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
@@ -492,6 +650,8 @@ export function Timeline({
               track={track}
               clips={getTrackClips(track.id)}
               zoom={zoom}
+              scrollX={scrollX}
+              duration={duration}
               selectedClipIds={selectedClipIds}
               onClipClick={handleClipClick}
               onClipDragStart={handleClipDragStart}
@@ -504,11 +664,23 @@ export function Timeline({
         {/* Drag Preview Ghost */}
         {dragPreview && (
           <div
-            className="absolute h-16 bg-primary-500/30 border-2 border-primary-500 border-dashed rounded pointer-events-none"
+            className="absolute bg-primary-500/30 border-2 border-primary-500 border-dashed rounded pointer-events-none z-20"
             style={{
               left: `${TRACK_HEADER_WIDTH + dragPreview.left - scrollX}px`,
-              top: '0px',
+              top: `${dragPreview.trackIndex * TRACK_HEIGHT}px`,
               width: `${dragPreview.width}px`,
+              height: `${TRACK_HEIGHT}px`,
+            }}
+          />
+        )}
+
+        {/* Snap Line Indicator */}
+        {activeSnapPoint && isScrubbing && (
+          <div
+            data-testid="snap-indicator"
+            className="absolute top-0 bottom-0 w-px bg-yellow-400 pointer-events-none z-30"
+            style={{
+              left: `${TRACK_HEADER_WIDTH + activeSnapPoint.time * zoom - scrollX}px`,
             }}
           />
         )}
