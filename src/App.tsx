@@ -15,10 +15,16 @@ import { Inspector } from './components/features/inspector';
 import { ProjectExplorer } from './components/explorer';
 import { PreviewPlayer } from './components/preview';
 import { Timeline } from './components/timeline';
-import { FFmpegWarning } from './components/ui';
+import { FFmpegWarning, ToastContainer, type ToastData } from './components/ui';
 import { useProjectStore, usePlaybackStore } from './stores';
 import { usePreviewSource, useTimelineActions, useFFmpegStatus, useAutoSave } from './hooks';
-import { loadRecentProjects, addRecentProject, type RecentProject } from './utils';
+import {
+  loadRecentProjects,
+  addRecentProject,
+  buildProjectPath,
+  validateProjectName,
+  type RecentProject,
+} from './utils';
 
 // =============================================================================
 // Console Component (Bottom Panel Content)
@@ -173,6 +179,23 @@ function App(): JSX.Element {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
 
+  // Toast notifications state
+  const [toasts, setToasts] = useState<ToastData[]>([]);
+
+  // Helper to add toast notification
+  const addToast = useCallback(
+    (message: string, variant: ToastData['variant'] = 'error') => {
+      const id = `toast-${Date.now()}`;
+      setToasts((prev) => [...prev, { id, message, variant }]);
+    },
+    [],
+  );
+
+  // Helper to remove toast notification
+  const removeToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
   // Show FFmpeg warning when check completes and FFmpeg is not available
   // Only show once per session (until dismissed)
   // Use effect to avoid state update during render
@@ -220,24 +243,39 @@ function App(): JSX.Element {
     async (data: ProjectCreateData) => {
       setIsCreatingProject(true);
       try {
-        // Build full project path: location/projectName
-        const projectPath = `${data.path}/${data.name.replace(/\s+/g, '_')}`;
-        await createProject(data.name, projectPath);
+        // Validate and sanitize project name to prevent path traversal
+        const validation = validateProjectName(data.name);
+
+        // Show warning if name was modified
+        if (validation.errors.length > 0 && validation.sanitized) {
+          // Log validation warnings but continue with sanitized name
+          console.warn('Project name validation warnings:', validation.errors);
+        }
+
+        // Build safe project path using validated name
+        const projectPath = buildProjectPath(data.path, data.name);
+        const projectName = validation.sanitized || data.name;
+
+        await createProject(projectName, projectPath);
+
         // Add to recent projects
         const updated = addRecentProject({
-          name: data.name,
+          name: projectName,
           path: projectPath,
         });
         setRecentProjects(updated);
         setShowCreateDialog(false);
+        addToast(`Project "${projectName}" created successfully`, 'success');
       } catch (error) {
         console.error('Failed to create project:', error);
-        // TODO: Show error toast to user
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error occurred';
+        addToast(`Failed to create project: ${errorMessage}`, 'error');
       } finally {
         setIsCreatingProject(false);
       }
     },
-    [createProject],
+    [createProject, addToast],
   );
 
   // Cancel project creation
@@ -305,6 +343,7 @@ function App(): JSX.Element {
           onDismiss={handleDismissFFmpegWarning}
           allowDismiss={true}
         />
+        <ToastContainer toasts={toasts} onClose={removeToast} />
       </>
     );
   }
@@ -320,6 +359,7 @@ function App(): JSX.Element {
         onDismiss={handleDismissFFmpegWarning}
         allowDismiss={true}
       />
+      <ToastContainer toasts={toasts} onClose={removeToast} />
     </>
   );
 }
