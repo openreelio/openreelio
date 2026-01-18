@@ -71,3 +71,18 @@ export type {
   UseAutoSaveOptions,
   UseAutoSaveReturn,
 } from './useAutoSave';
+
+export { useClipDrag } from './useClipDrag';
+export type {
+  DragType,
+  ClipDragData,
+  DragPreviewPosition,
+  UseClipDragOptions,
+  UseClipDragReturn,
+} from './useClipDrag';
+
+export { useTimelineEngine } from './useTimelineEngine';
+export type {
+  UseTimelineEngineOptions,
+  UseTimelineEngineReturn,
+} from './useTimelineEngine';
