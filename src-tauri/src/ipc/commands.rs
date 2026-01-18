@@ -41,10 +41,7 @@ pub async fn create_project(
     };
 
     // Store in app state
-    let mut guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let mut guard = state.project.lock().await;
     *guard = Some(project);
 
     Ok(info)
@@ -69,10 +66,7 @@ pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<Pr
     };
 
     // Store in app state
-    let mut guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let mut guard = state.project.lock().await;
     *guard = Some(project);
 
     Ok(info)
@@ -81,10 +75,7 @@ pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<Pr
 /// Saves the current project
 #[tauri::command]
 pub async fn save_project(state: State<'_, AppState>) -> Result<(), String> {
-    let guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let guard = state.project.lock().await;
 
     let project = guard
         .as_ref()
@@ -96,10 +87,7 @@ pub async fn save_project(state: State<'_, AppState>) -> Result<(), String> {
 /// Gets current project info
 #[tauri::command]
 pub async fn get_project_info(state: State<'_, AppState>) -> Result<Option<ProjectInfo>, String> {
-    let guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let guard = state.project.lock().await;
 
     Ok(guard.as_ref().map(|p| ProjectInfo {
         id: p.state.meta.id.clone(),
@@ -112,10 +100,7 @@ pub async fn get_project_info(state: State<'_, AppState>) -> Result<Option<Proje
 /// Gets the full project state for frontend sync
 #[tauri::command]
 pub async fn get_project_state(state: State<'_, AppState>) -> Result<ProjectStateDto, String> {
-    let guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let guard = state.project.lock().await;
 
     let project = guard
         .as_ref()
@@ -157,10 +142,7 @@ pub async fn import_asset(
     uri: String,
     state: State<'_, AppState>,
 ) -> Result<AssetImportResult, String> {
-    let mut guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let mut guard = state.project.lock().await;
 
     let project = guard
         .as_mut()
@@ -193,10 +175,7 @@ pub async fn import_asset(
 /// Gets all assets in the project
 #[tauri::command]
 pub async fn get_assets(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
-    let guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let guard = state.project.lock().await;
 
     let project = guard
         .as_ref()
@@ -222,10 +201,7 @@ pub async fn generate_asset_thumbnail(
 
     // Get asset info from state
     let (asset_path, asset_kind, project_path) = {
-        let guard = state
-            .project
-            .lock()
-            .map_err(|_| "Failed to acquire lock".to_string())?;
+        let guard = state.project.lock().await;
 
         let project = guard
             .as_ref()
@@ -264,10 +240,7 @@ pub async fn generate_asset_thumbnail(
 
             // Update asset's thumbnail URL in state
             if let Some(url) = &thumb_url {
-                let mut guard = state
-                    .project
-                    .lock()
-                    .map_err(|_| "Failed to acquire lock".to_string())?;
+                let mut guard = state.project.lock().await;
 
                 if let Some(project) = guard.as_mut() {
                     if let Some(asset) = project.state.assets.get_mut(&asset_id) {
@@ -302,10 +275,7 @@ pub async fn generate_proxy_for_asset(
 
     // Get asset info from state
     let (asset_path, project_path) = {
-        let guard = state
-            .project
-            .lock()
-            .map_err(|_| "Failed to acquire lock".to_string())?;
+        let guard = state.project.lock().await;
 
         let project = guard
             .as_ref()
@@ -367,10 +337,7 @@ pub async fn generate_proxy_for_asset(
 
             // Update asset's proxy URL in state
             {
-                let mut guard = state
-                    .project
-                    .lock()
-                    .map_err(|_| "Failed to acquire lock".to_string())?;
+                let mut guard = state.project.lock().await;
 
                 if let Some(project) = guard.as_mut() {
                     if let Some(asset) = project.state.assets.get_mut(&asset_id) {
@@ -412,10 +379,7 @@ pub async fn generate_proxy_for_asset(
 /// Removes an asset from the project
 #[tauri::command]
 pub async fn remove_asset(asset_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let mut guard = state.project.lock().await;
 
     let project = guard
         .as_mut()
@@ -437,10 +401,7 @@ pub async fn remove_asset(asset_id: String, state: State<'_, AppState>) -> Resul
 /// Gets all sequences in the project
 #[tauri::command]
 pub async fn get_sequences(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
-    let guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let guard = state.project.lock().await;
 
     let project = guard
         .as_ref()
@@ -461,10 +422,7 @@ pub async fn create_sequence(
     format: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let mut guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let mut guard = state.project.lock().await;
 
     let project = guard
         .as_mut()
@@ -495,10 +453,7 @@ pub async fn get_sequence(
     sequence_id: String,
     state: State<'_, AppState>,
 ) -> Result<serde_json::Value, String> {
-    let guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let guard = state.project.lock().await;
 
     let project = guard
         .as_ref()
@@ -524,10 +479,7 @@ pub async fn execute_command(
     payload: serde_json::Value,
     state: State<'_, AppState>,
 ) -> Result<CommandResultDto, String> {
-    let mut guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let mut guard = state.project.lock().await;
 
     let project = guard
         .as_mut()
@@ -638,10 +590,7 @@ pub async fn execute_command(
 /// Undoes the last command
 #[tauri::command]
 pub async fn undo(state: State<'_, AppState>) -> Result<UndoRedoResult, String> {
-    let mut guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let mut guard = state.project.lock().await;
 
     let project = guard
         .as_mut()
@@ -662,10 +611,7 @@ pub async fn undo(state: State<'_, AppState>) -> Result<UndoRedoResult, String> 
 /// Redoes the last undone command
 #[tauri::command]
 pub async fn redo(state: State<'_, AppState>) -> Result<UndoRedoResult, String> {
-    let mut guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let mut guard = state.project.lock().await;
 
     let project = guard
         .as_mut()
@@ -686,10 +632,7 @@ pub async fn redo(state: State<'_, AppState>) -> Result<UndoRedoResult, String> 
 /// Checks if undo is available
 #[tauri::command]
 pub async fn can_undo(state: State<'_, AppState>) -> Result<bool, String> {
-    let guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let guard = state.project.lock().await;
 
     Ok(guard
         .as_ref()
@@ -700,10 +643,7 @@ pub async fn can_undo(state: State<'_, AppState>) -> Result<bool, String> {
 /// Checks if redo is available
 #[tauri::command]
 pub async fn can_redo(state: State<'_, AppState>) -> Result<bool, String> {
-    let guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let guard = state.project.lock().await;
 
     Ok(guard
         .as_ref()
@@ -794,10 +734,7 @@ impl From<&Job> for JobInfoDto {
 /// Gets all jobs from the worker pool (both active and queued)
 #[tauri::command]
 pub async fn get_jobs(state: State<'_, AppState>) -> Result<Vec<JobInfoDto>, String> {
-    let pool = state
-        .job_pool
-        .lock()
-        .map_err(|_| "Failed to acquire job pool lock".to_string())?;
+    let pool = state.job_pool.lock().await;
 
     // Get all jobs (active + queued)
     let all_jobs: Vec<JobInfoDto> = pool.all_jobs().iter().map(JobInfoDto::from).collect();
@@ -842,10 +779,7 @@ pub async fn submit_job(
 
     let job = Job::new(job_type_enum, payload).with_priority(priority_enum);
 
-    let pool = state
-        .job_pool
-        .lock()
-        .map_err(|_| "Failed to acquire job pool lock".to_string())?;
+    let pool = state.job_pool.lock().await;
 
     let job_id = pool.submit(job).map_err(|e| e.to_string())?;
 
@@ -860,10 +794,7 @@ pub async fn get_job(
     job_id: String,
     state: State<'_, AppState>,
 ) -> Result<Option<JobInfoDto>, String> {
-    let pool = state
-        .job_pool
-        .lock()
-        .map_err(|_| "Failed to acquire job pool lock".to_string())?;
+    let pool = state.job_pool.lock().await;
 
     Ok(pool.get_job(&job_id).as_ref().map(JobInfoDto::from))
 }
@@ -871,10 +802,7 @@ pub async fn get_job(
 /// Cancels a job by ID
 #[tauri::command]
 pub async fn cancel_job(job_id: String, state: State<'_, AppState>) -> Result<bool, String> {
-    let pool = state
-        .job_pool
-        .lock()
-        .map_err(|_| "Failed to acquire job pool lock".to_string())?;
+    let pool = state.job_pool.lock().await;
 
     let cancelled = pool.cancel(&job_id);
 
@@ -890,10 +818,7 @@ pub async fn cancel_job(job_id: String, state: State<'_, AppState>) -> Result<bo
 /// Gets the current queue statistics
 #[tauri::command]
 pub async fn get_job_stats(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
-    let pool = state
-        .job_pool
-        .lock()
-        .map_err(|_| "Failed to acquire job pool lock".to_string())?;
+    let pool = state.job_pool.lock().await;
 
     let active_jobs = pool.active_jobs();
     let running_count = active_jobs.iter().filter(|j| j.is_running()).count();
@@ -927,10 +852,7 @@ pub async fn start_render(
 
     // Get sequence and assets from project state
     let (sequence, assets) = {
-        let guard = state
-            .project
-            .lock()
-            .map_err(|_| "Failed to acquire lock".to_string())?;
+        let guard = state.project.lock().await;
 
         let project = guard
             .as_ref()
@@ -1067,10 +989,7 @@ pub async fn analyze_intent(
 
     // Get project state for context enrichment
     let (asset_ids, track_ids, timeline_duration) = {
-        let guard = state
-            .project
-            .lock()
-            .map_err(|_| "Failed to acquire lock".to_string())?;
+        let guard = state.project.lock().await;
 
         if let Some(project) = guard.as_ref() {
             let asset_ids: Vec<String> = project.state.assets.keys().cloned().collect();
@@ -1149,10 +1068,7 @@ pub async fn create_proposal(
     }
 
     // Verify project is open
-    let guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let guard = state.project.lock().await;
     guard
         .as_ref()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
@@ -1166,10 +1082,7 @@ pub async fn apply_edit_script(
     edit_script: EditScriptDto,
     state: State<'_, AppState>,
 ) -> Result<ApplyEditScriptResult, String> {
-    let mut guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let mut guard = state.project.lock().await;
 
     let project = guard
         .as_mut()
@@ -1319,10 +1232,7 @@ pub async fn validate_edit_script(
     edit_script: EditScriptDto,
     state: State<'_, AppState>,
 ) -> Result<ValidationResultDto, String> {
-    let guard = state
-        .project
-        .lock()
-        .map_err(|_| "Failed to acquire lock".to_string())?;
+    let guard = state.project.lock().await;
 
     let project = guard
         .as_ref()

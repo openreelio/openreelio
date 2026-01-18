@@ -8,7 +8,7 @@ pub mod core;
 pub mod ipc;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
+use tokio::sync::Mutex;
 
 use crate::core::{
     commands::CommandExecutor,
@@ -151,8 +151,8 @@ impl AppState {
     }
 
     /// Checks if a project is currently open
-    pub fn has_project(&self) -> bool {
-        self.project.lock().map(|p| p.is_some()).unwrap_or(false)
+    pub async fn has_project(&self) -> bool {
+        self.project.lock().await.is_some()
     }
 }
 
@@ -280,7 +280,9 @@ mod tests {
     #[test]
     fn test_app_state_new() {
         let state = AppState::new();
-        assert!(!state.has_project());
+        tauri::async_runtime::block_on(async {
+            assert!(!state.has_project().await);
+        });
     }
 
     #[test]
