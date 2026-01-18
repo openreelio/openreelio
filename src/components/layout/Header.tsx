@@ -36,6 +36,7 @@ export function Header({
 }: HeaderProps) {
   const { meta, isDirty, closeProject, saveProject } = useProjectStore();
   const [isSaving, setIsSaving] = useState(false);
+  const [showCloseConfirm, setShowCloseConfirm] = useState(false);
 
   const handleSave = useCallback(async () => {
     setIsSaving(true);
@@ -48,10 +49,40 @@ export function Header({
     }
   }, [saveProject]);
 
-  const handleClose = useCallback(() => {
-    // TODO: Prompt to save if dirty
+  // Handle close button click - show confirmation if unsaved changes
+  const handleCloseClick = useCallback(() => {
+    if (isDirty) {
+      setShowCloseConfirm(true);
+    } else {
+      closeProject();
+    }
+  }, [isDirty, closeProject]);
+
+  // Save and close project
+  const handleSaveAndClose = useCallback(async () => {
+    setIsSaving(true);
+    try {
+      await saveProject();
+      setShowCloseConfirm(false);
+      closeProject();
+    } catch (error) {
+      console.error('Failed to save project:', error);
+      // Keep dialog open on error so user can retry or discard
+    } finally {
+      setIsSaving(false);
+    }
+  }, [saveProject, closeProject]);
+
+  // Discard changes and close project
+  const handleDiscardAndClose = useCallback(() => {
+    setShowCloseConfirm(false);
     closeProject();
   }, [closeProject]);
+
+  // Cancel close action
+  const handleCancelClose = useCallback(() => {
+    setShowCloseConfirm(false);
+  }, []);
 
   return (
     <div className="h-10 bg-editor-sidebar border-b border-editor-border flex items-center px-4">
@@ -114,12 +145,67 @@ export function Header({
 
           {/* Close Project Button */}
           <button
-            onClick={handleClose}
+            onClick={handleCloseClick}
             className="p-1.5 rounded hover:bg-editor-bg transition-colors text-editor-text-muted hover:text-red-400"
             title="Close project"
           >
             <X className="w-4 h-4" />
           </button>
+        </div>
+      )}
+
+      {/* Unsaved Changes Confirmation Dialog */}
+      {showCloseConfirm && (
+        <div
+          data-testid="unsaved-changes-dialog"
+          role="dialog"
+          aria-modal="true"
+          className="fixed inset-0 z-50 flex items-center justify-center"
+        >
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-black/50"
+            onClick={handleCancelClose}
+          />
+
+          {/* Dialog Content */}
+          <div className="relative z-10 w-full max-w-md bg-gray-800 rounded-lg shadow-xl p-6">
+            <h2 className="text-lg font-semibold text-white mb-2">
+              Unsaved Changes
+            </h2>
+            <p className="text-gray-300 mb-6">
+              You have unsaved changes. Do you want to save before closing?
+            </p>
+
+            {/* Actions - 3 buttons: Save, Don't Save, Cancel */}
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                className="px-4 py-2 text-sm font-medium text-gray-300 bg-gray-700 rounded hover:bg-gray-600 transition-colors"
+                onClick={handleCancelClose}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded hover:bg-red-700 transition-colors"
+                onClick={handleDiscardAndClose}
+              >
+                Don&apos;t Save
+              </button>
+              <button
+                type="button"
+                className="px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                onClick={() => void handleSaveAndClose()}
+                disabled={isSaving}
+              >
+                {isSaving && (
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                )}
+                Save
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
