@@ -59,3 +59,9 @@ export type {
   UseAudioWaveformOptions,
   UseAudioWaveformReturn,
 } from './useAudioWaveform';
+
+export { useFFmpegStatus } from './useFFmpegStatus';
+export type {
+  FFmpegStatus,
+  UseFFmpegStatusResult,
+} from './useFFmpegStatus';
