@@ -209,7 +209,8 @@ mod tests {
     use super::*;
 
     fn create_test_state() -> ProjectState {
-        ProjectState::new("Test Project")
+        // Use new_empty for isolated sequence tests
+        ProjectState::new_empty("Test Project")
     }
 
     #[test]

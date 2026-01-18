@@ -136,21 +136,49 @@ export const useProjectStore = create<ProjectState>()(
       });
 
       try {
+        // Create project on backend - this also creates default sequence via Command
         const projectInfo = await invoke<ProjectMeta>('create_project', { name, path });
 
+        // Load full project state to get default sequence and tracks
+        // This is a single atomic operation - if it fails, the project creation is considered failed
+        const projectState = await invoke<{
+          assets: Asset[];
+          sequences: Sequence[];
+          activeSequenceId: string | null;
+        }>('get_project_state');
+
+        // Only update store if both operations succeeded
         set((state) => {
           state.isLoaded = true;
           state.isLoading = false;
           state.meta = projectInfo;
+          state.selectedAssetId = null;
+          state.isDirty = false;
+
+          // Populate assets (empty for new project)
+          state.assets = new Map();
+          for (const asset of projectState.assets) {
+            state.assets.set(asset.id, asset);
+          }
+
+          // Populate sequences (includes default sequence with tracks)
+          state.sequences = new Map();
+          for (const sequence of projectState.sequences) {
+            state.sequences.set(sequence.id, sequence);
+          }
+
+          // Set active sequence
+          state.activeSequenceId = projectState.activeSequenceId;
+        });
+      } catch (error) {
+        // Reset to clean state on any failure
+        set((state) => {
+          state.isLoading = false;
+          state.isLoaded = false;
+          state.meta = null;
           state.assets = new Map();
           state.sequences = new Map();
           state.activeSequenceId = null;
-          state.selectedAssetId = null;
-          state.isDirty = false;
-        });
-      } catch (error) {
-        set((state) => {
-          state.isLoading = false;
           state.error = error instanceof Error ? error.message : String(error);
         });
         throw error;
@@ -312,7 +340,7 @@ export const useProjectStore = create<ProjectState>()(
       return state.sequences.get(state.activeSequenceId);
     },
 
-    // Execute edit command
+    // Execute edit command and refresh state from backend
     executeCommand: async (command: Command) => {
       try {
         const result = await invoke<CommandResult>('execute_command', {
@@ -320,8 +348,31 @@ export const useProjectStore = create<ProjectState>()(
           payload: command.payload,
         });
 
+        // Refresh state from backend to ensure consistency
+        // This is critical for maintaining sync between frontend and backend
+        const projectState = await invoke<{
+          assets: Asset[];
+          sequences: Sequence[];
+          activeSequenceId: string | null;
+        }>('get_project_state');
+
         set((state) => {
           state.isDirty = true;
+
+          // Update assets from backend
+          state.assets = new Map();
+          for (const asset of projectState.assets) {
+            state.assets.set(asset.id, asset);
+          }
+
+          // Update sequences from backend
+          state.sequences = new Map();
+          for (const sequence of projectState.sequences) {
+            state.sequences.set(sequence.id, sequence);
+          }
+
+          // Update active sequence ID from backend
+          state.activeSequenceId = projectState.activeSequenceId;
         });
 
         return result;
@@ -333,13 +384,35 @@ export const useProjectStore = create<ProjectState>()(
       }
     },
 
-    // Undo
+    // Undo - also refreshes state from backend to stay in sync
     undo: async () => {
       try {
         const result = await invoke<UndoRedoResult>('undo');
+
+        // Refresh state from backend after undo
+        const projectState = await invoke<{
+          assets: Asset[];
+          sequences: Sequence[];
+          activeSequenceId: string | null;
+        }>('get_project_state');
+
         set((state) => {
           state.isDirty = true;
+
+          state.assets = new Map();
+          for (const asset of projectState.assets) {
+            state.assets.set(asset.id, asset);
+          }
+
+          state.sequences = new Map();
+          for (const sequence of projectState.sequences) {
+            state.sequences.set(sequence.id, sequence);
+          }
+
+          // Update active sequence ID from backend
+          state.activeSequenceId = projectState.activeSequenceId;
         });
+
         return result;
       } catch (error) {
         set((state) => {
@@ -349,13 +422,35 @@ export const useProjectStore = create<ProjectState>()(
       }
     },
 
-    // Redo
+    // Redo - also refreshes state from backend to stay in sync
     redo: async () => {
       try {
         const result = await invoke<UndoRedoResult>('redo');
+
+        // Refresh state from backend after redo
+        const projectState = await invoke<{
+          assets: Asset[];
+          sequences: Sequence[];
+          activeSequenceId: string | null;
+        }>('get_project_state');
+
         set((state) => {
           state.isDirty = true;
+
+          state.assets = new Map();
+          for (const asset of projectState.assets) {
+            state.assets.set(asset.id, asset);
+          }
+
+          state.sequences = new Map();
+          for (const sequence of projectState.sequences) {
+            state.sequences.set(sequence.id, sequence);
+          }
+
+          // Update active sequence ID from backend
+          state.activeSequenceId = projectState.activeSequenceId;
         });
+
         return result;
       } catch (error) {
         set((state) => {

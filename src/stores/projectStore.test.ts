@@ -11,6 +11,7 @@ import { useProjectStore } from './projectStore';
 import {
   createMockProjectMeta,
   createMockProjectState,
+  createMockSequence,
   mockTauriCommand,
   mockTauriCommands,
   mockTauriCommandError,
@@ -148,13 +149,29 @@ describe('projectStore', () => {
   // ===========================================================================
 
   describe('createProject', () => {
-    it('should create project successfully', async () => {
+    it('should create project successfully with default sequence', async () => {
       const mockMeta = createMockProjectMeta({
         name: 'New Project',
         path: '/new/project/path',
       });
 
-      mockTauriCommand('create_project', mockMeta);
+      const mockDefaultSequence = createMockSequence({
+        id: 'seq_default',
+        name: 'Sequence 1',
+        tracks: [
+          { id: 'track_v1', name: 'Video 1', kind: 'video', clips: [] },
+          { id: 'track_a1', name: 'Audio 1', kind: 'audio', clips: [] },
+        ],
+      });
+
+      mockTauriCommands({
+        create_project: mockMeta,
+        get_project_state: {
+          assets: [],
+          sequences: [mockDefaultSequence],
+          activeSequenceId: 'seq_default',
+        },
+      });
 
       const { createProject } = useProjectStore.getState();
       await createProject('New Project', '/new/project/path');
@@ -163,10 +180,12 @@ describe('projectStore', () => {
       expect(state.isLoaded).toBe(true);
       expect(state.meta?.name).toBe('New Project');
       expect(state.assets.size).toBe(0);
-      expect(state.sequences.size).toBe(0);
+      // New projects now have a default sequence
+      expect(state.sequences.size).toBe(1);
+      expect(state.activeSequenceId).toBe('seq_default');
     });
 
-    it('should handle creation error', async () => {
+    it('should handle creation error and reset state completely', async () => {
       mockTauriCommandError('create_project', 'Permission denied');
 
       const { createProject } = useProjectStore.getState();
@@ -174,11 +193,25 @@ describe('projectStore', () => {
       await expect(createProject('Test', '/invalid')).rejects.toThrow('Permission denied');
 
       const state = useProjectStore.getState();
+      // Verify complete state reset on error
       expect(state.error).toBe('Permission denied');
+      expect(state.isLoaded).toBe(false);
+      expect(state.isLoading).toBe(false);
+      expect(state.meta).toBeNull();
+      expect(state.assets.size).toBe(0);
+      expect(state.sequences.size).toBe(0);
+      expect(state.activeSequenceId).toBeNull();
     });
 
     it('should call invoke with correct arguments', async () => {
-      mockTauriCommand('create_project', createMockProjectMeta());
+      mockTauriCommands({
+        create_project: createMockProjectMeta(),
+        get_project_state: {
+          assets: [],
+          sequences: [],
+          activeSequenceId: null,
+        },
+      });
 
       await useProjectStore.getState().createProject('My Project', '/path/to/new');
 
@@ -458,6 +491,12 @@ describe('projectStore', () => {
       };
 
       mockTauriCommand('execute_command', mockResult);
+      // Mock get_project_state which is called after command execution
+      mockTauriCommand('get_project_state', {
+        assets: [],
+        sequences: [],
+        activeSequenceId: null,
+      });
 
       const { executeCommand } = useProjectStore.getState();
       const result = await executeCommand({
@@ -467,6 +506,30 @@ describe('projectStore', () => {
 
       expect(result).toEqual(mockResult);
       expect(useProjectStore.getState().isDirty).toBe(true);
+    });
+
+    it('should update activeSequenceId from backend after command execution', async () => {
+      const mockResult = {
+        opId: 'op_002',
+        changes: [],
+        createdIds: ['seq_new'],
+        deletedIds: [],
+      };
+
+      mockTauriCommand('execute_command', mockResult);
+      mockTauriCommand('get_project_state', {
+        assets: [],
+        sequences: [{ id: 'seq_new', name: 'New Sequence', tracks: [] }],
+        activeSequenceId: 'seq_new',
+      });
+
+      const { executeCommand } = useProjectStore.getState();
+      await executeCommand({
+        type: 'CreateTrack',
+        payload: { sequenceId: 'seq_new', name: 'Video 1', kind: 'video' },
+      });
+
+      expect(useProjectStore.getState().activeSequenceId).toBe('seq_new');
     });
 
     it('should handle command error', async () => {
@@ -488,12 +551,33 @@ describe('projectStore', () => {
     it('should undo successfully', async () => {
       const mockResult = { success: true, canUndo: false, canRedo: true };
       mockTauriCommand('undo', mockResult);
+      // Mock get_project_state which is called after undo
+      mockTauriCommand('get_project_state', {
+        assets: [],
+        sequences: [],
+        activeSequenceId: null,
+      });
 
       const { undo } = useProjectStore.getState();
       const result = await undo();
 
       expect(result).toEqual(mockResult);
       expect(useProjectStore.getState().isDirty).toBe(true);
+    });
+
+    it('should update activeSequenceId from backend after undo', async () => {
+      const mockResult = { success: true, canUndo: true, canRedo: true };
+      mockTauriCommand('undo', mockResult);
+      mockTauriCommand('get_project_state', {
+        assets: [],
+        sequences: [{ id: 'seq_original', name: 'Original', tracks: [] }],
+        activeSequenceId: 'seq_original',
+      });
+
+      const { undo } = useProjectStore.getState();
+      await undo();
+
+      expect(useProjectStore.getState().activeSequenceId).toBe('seq_original');
     });
 
     it('should handle undo error', async () => {
@@ -509,12 +593,33 @@ describe('projectStore', () => {
     it('should redo successfully', async () => {
       const mockResult = { success: true, canUndo: true, canRedo: false };
       mockTauriCommand('redo', mockResult);
+      // Mock get_project_state which is called after redo
+      mockTauriCommand('get_project_state', {
+        assets: [],
+        sequences: [],
+        activeSequenceId: null,
+      });
 
       const { redo } = useProjectStore.getState();
       const result = await redo();
 
       expect(result).toEqual(mockResult);
       expect(useProjectStore.getState().isDirty).toBe(true);
+    });
+
+    it('should update activeSequenceId from backend after redo', async () => {
+      const mockResult = { success: true, canUndo: true, canRedo: false };
+      mockTauriCommand('redo', mockResult);
+      mockTauriCommand('get_project_state', {
+        assets: [],
+        sequences: [{ id: 'seq_redone', name: 'Redone Sequence', tracks: [] }],
+        activeSequenceId: 'seq_redone',
+      });
+
+      const { redo } = useProjectStore.getState();
+      await redo();
+
+      expect(useProjectStore.getState().activeSequenceId).toBe('seq_redone');
     });
   });
 

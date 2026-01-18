@@ -69,6 +69,9 @@ export function ProjectExplorer() {
           name: asset.name,
           kind: asset.kind,
           ...(asset.durationSec != null ? { duration: asset.durationSec } : {}),
+          ...(asset.thumbnailUrl != null ? { thumbnail: asset.thumbnailUrl } : {}),
+          ...(asset.video != null ? { resolution: { width: asset.video.width, height: asset.video.height } } : {}),
+          ...(asset.fileSize != null ? { fileSize: asset.fileSize } : {}),
         };
       })
       .filter((asset): asset is Asset => asset !== null);

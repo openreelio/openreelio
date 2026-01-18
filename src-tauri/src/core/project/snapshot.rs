@@ -214,7 +214,8 @@ mod tests {
     use tempfile::TempDir;
 
     fn create_test_state() -> ProjectState {
-        let mut state = ProjectState::new("Test Project");
+        // Use new_empty for isolated snapshot tests
+        let mut state = ProjectState::new_empty("Test Project");
 
         // Add an asset
         let asset = Asset::new_video("video.mp4", "/path/video.mp4", VideoInfo::default());
@@ -347,7 +348,8 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let snapshot_path = temp_dir.path().join("snapshot.json");
 
-        let mut state = ProjectState::new("Complex Project");
+        // Use new_empty for isolated test
+        let mut state = ProjectState::new_empty("Complex Project");
 
         // Create sequence with tracks and clips
         let mut sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
