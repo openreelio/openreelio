@@ -17,7 +17,7 @@ const createMouseEvent = (
   type: string,
   clientX: number,
   clientY: number = 0,
-  button: number = 0
+  button: number = 0,
 ): MouseEvent => {
   return new MouseEvent(type, {
     clientX,
@@ -78,7 +78,7 @@ describe('useClipDrag', () => {
       const onDragStart = vi.fn();
       const onDragEnd = vi.fn();
       const { result } = renderHook(() =>
-        useClipDrag({ ...defaultOptions, onDragStart, onDragEnd })
+        useClipDrag({ ...defaultOptions, onDragStart, onDragEnd }),
       );
 
       // Simulate mousedown
@@ -111,9 +111,7 @@ describe('useClipDrag', () => {
 
     it('calculates preview position during drag', () => {
       const onDrag = vi.fn();
-      const { result } = renderHook(() =>
-        useClipDrag({ ...defaultOptions, onDrag })
-      );
+      const { result } = renderHook(() => useClipDrag({ ...defaultOptions, onDrag }));
 
       // Start drag at x=100
       act(() => {
@@ -129,7 +127,12 @@ describe('useClipDrag', () => {
 
       expect(onDrag).toHaveBeenCalledWith(
         expect.objectContaining({ clipId: 'clip-1', type: 'move' }),
-        100 // deltaX
+        expect.objectContaining({
+          timelineIn: expect.any(Number),
+          sourceIn: expect.any(Number),
+          sourceOut: expect.any(Number),
+          duration: expect.any(Number),
+        }),
       );
 
       // Preview should show new position
@@ -138,9 +141,7 @@ describe('useClipDrag', () => {
     });
 
     it('prevents dragging past timeline start (time < 0)', () => {
-      const { result } = renderHook(() =>
-        useClipDrag({ ...defaultOptions, initialTimelineIn: 1 })
-      );
+      const { result } = renderHook(() => useClipDrag({ ...defaultOptions, initialTimelineIn: 1 }));
 
       // Start drag
       act(() => {
@@ -161,7 +162,7 @@ describe('useClipDrag', () => {
     it('does not start drag when disabled', () => {
       const onDragStart = vi.fn();
       const { result } = renderHook(() =>
-        useClipDrag({ ...defaultOptions, disabled: true, onDragStart })
+        useClipDrag({ ...defaultOptions, disabled: true, onDragStart }),
       );
 
       act(() => {
@@ -175,9 +176,7 @@ describe('useClipDrag', () => {
 
     it('ignores non-left-click', () => {
       const onDragStart = vi.fn();
-      const { result } = renderHook(() =>
-        useClipDrag({ ...defaultOptions, onDragStart })
-      );
+      const { result } = renderHook(() => useClipDrag({ ...defaultOptions, onDragStart }));
 
       // Right-click
       act(() => {
@@ -204,7 +203,7 @@ describe('useClipDrag', () => {
           initialSourceOut: 12,
           initialTimelineIn: 5,
           onDrag,
-        })
+        }),
       );
 
       // Start trim-left
@@ -235,7 +234,7 @@ describe('useClipDrag', () => {
           initialSourceIn: 0,
           initialSourceOut: 2, // 2 second clip
           minDuration: 1,
-        })
+        }),
       );
 
       act(() => {
@@ -259,7 +258,7 @@ describe('useClipDrag', () => {
           ...defaultOptions,
           initialSourceIn: 1, // Already 1 second into source
           initialSourceOut: 10,
-        })
+        }),
       );
 
       act(() => {
@@ -291,7 +290,7 @@ describe('useClipDrag', () => {
           initialSourceIn: 0,
           initialSourceOut: 10,
           onDrag,
-        })
+        }),
       );
 
       // Start trim-right
@@ -323,7 +322,7 @@ describe('useClipDrag', () => {
           initialSourceIn: 0,
           initialSourceOut: 2,
           minDuration: 1,
-        })
+        }),
       );
 
       act(() => {
@@ -352,7 +351,7 @@ describe('useClipDrag', () => {
           ...defaultOptions,
           gridInterval: 1, // 1 second grid
           initialTimelineIn: 5,
-        })
+        }),
       );
 
       act(() => {
@@ -377,7 +376,7 @@ describe('useClipDrag', () => {
           gridInterval: 1,
           initialSourceIn: 0,
           initialSourceOut: 10,
-        })
+        }),
       );
 
       act(() => {
@@ -432,7 +431,7 @@ describe('useClipDrag', () => {
           initialSourceIn: 0,
           initialSourceOut: 10,
           speed: 2, // 2x speed = 5 second clip
-        })
+        }),
       );
 
       act(() => {

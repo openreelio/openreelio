@@ -9,14 +9,22 @@ import { useCallback, useState, useEffect } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { MainLayout, Header, Sidebar, BottomPanel, Panel } from './components/layout';
 import { WelcomeScreen } from './components/features/welcome';
+import { ProjectCreationDialog, type ProjectCreateData } from './components/features/project';
+import { ExportDialog } from './components/features/export';
 import { Inspector } from './components/features/inspector';
 import { ProjectExplorer } from './components/explorer';
 import { PreviewPlayer } from './components/preview';
 import { Timeline } from './components/timeline';
-import { FFmpegWarning } from './components/ui';
+import { FFmpegWarning, ToastContainer, type ToastData } from './components/ui';
 import { useProjectStore, usePlaybackStore } from './stores';
 import { usePreviewSource, useTimelineActions, useFFmpegStatus, useAutoSave } from './hooks';
-import { loadRecentProjects, addRecentProject, type RecentProject } from './utils';
+import {
+  loadRecentProjects,
+  addRecentProject,
+  buildProjectPath,
+  validateProjectName,
+  type RecentProject,
+} from './utils';
 
 // =============================================================================
 // Console Component (Bottom Panel Content)
@@ -45,9 +53,11 @@ interface EditorViewProps {
 
 function EditorView({ sequence }: EditorViewProps): JSX.Element {
   const { selectedAssetId, assets } = useProjectStore();
-  const { currentTime, isPlaying, setCurrentTime, setIsPlaying, setDuration } =
-    usePlaybackStore();
+  const { currentTime, isPlaying, setCurrentTime, setIsPlaying, setDuration } = usePlaybackStore();
   const previewSource = usePreviewSource();
+
+  // Export dialog state
+  const [showExportDialog, setShowExportDialog] = useState(false);
 
   // Timeline action callbacks
   const {
@@ -56,6 +66,9 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
     handleClipSplit,
     handleAssetDrop,
     handleDeleteClips,
+    handleTrackMuteToggle,
+    handleTrackLockToggle,
+    handleTrackVisibilityToggle,
   } = useTimelineActions({ sequence });
 
   // Get selected asset for inspector
@@ -70,58 +83,83 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
         uri: selectedAsset.uri,
         durationSec: selectedAsset.durationSec,
         resolution: selectedAsset.video
-          ? { width: selectedAsset.video.width, height: selectedAsset.video.height }
+          ? {
+              width: selectedAsset.video.width,
+              height: selectedAsset.video.height,
+            }
           : undefined,
       }
     : undefined;
 
+  // Export handlers
+  const handleOpenExport = useCallback(() => {
+    setShowExportDialog(true);
+  }, []);
+
+  const handleCloseExport = useCallback(() => {
+    setShowExportDialog(false);
+  }, []);
+
   return (
-    <MainLayout
-      header={<Header />}
-      leftSidebar={
-        <Sidebar title="Project Explorer" position="left">
-          <ProjectExplorer />
-        </Sidebar>
-      }
-      rightSidebar={
-        <Sidebar title="Inspector" position="right" width={288}>
-          <Inspector selectedAsset={inspectorAsset} />
-        </Sidebar>
-      }
-      footer={
-        <BottomPanel title="Console">
-          <ConsolePanel />
-        </BottomPanel>
-      }
-    >
-      {/* Center content split between preview and timeline */}
-      <div className="flex flex-col h-full">
-        <div className="flex-1 border-b border-editor-border">
-          <PreviewPlayer
-            src={previewSource?.src}
-            poster={previewSource?.thumbnail}
-            className="h-full"
-            playhead={currentTime}
-            isPlaying={isPlaying}
-            onPlayheadChange={setCurrentTime}
-            onPlayStateChange={setIsPlaying}
-            onDurationChange={setDuration}
-          />
-        </div>
-        <div className="flex-1 overflow-hidden">
-          <Panel title="Timeline" variant="default" className="h-full" noPadding>
-            <Timeline
-              sequence={sequence}
-              onClipMove={handleClipMove}
-              onClipTrim={handleClipTrim}
-              onClipSplit={handleClipSplit}
-              onAssetDrop={handleAssetDrop}
-              onDeleteClips={handleDeleteClips}
+    <>
+      <MainLayout
+        header={<Header onExport={handleOpenExport} />}
+        leftSidebar={
+          <Sidebar title="Project Explorer" position="left">
+            <ProjectExplorer />
+          </Sidebar>
+        }
+        rightSidebar={
+          <Sidebar title="Inspector" position="right" width={288}>
+            <Inspector selectedAsset={inspectorAsset} />
+          </Sidebar>
+        }
+        footer={
+          <BottomPanel title="Console">
+            <ConsolePanel />
+          </BottomPanel>
+        }
+      >
+        {/* Center content split between preview and timeline */}
+        <div className="flex flex-col h-full">
+          <div className="flex-1 border-b border-editor-border">
+            <PreviewPlayer
+              src={previewSource?.src}
+              poster={previewSource?.thumbnail}
+              className="h-full"
+              playhead={currentTime}
+              isPlaying={isPlaying}
+              onPlayheadChange={setCurrentTime}
+              onPlayStateChange={setIsPlaying}
+              onDurationChange={setDuration}
             />
-          </Panel>
+          </div>
+          <div className="flex-1 overflow-hidden">
+            <Panel title="Timeline" variant="default" className="h-full" noPadding>
+              <Timeline
+                sequence={sequence}
+                onClipMove={handleClipMove}
+                onClipTrim={handleClipTrim}
+                onClipSplit={handleClipSplit}
+                onAssetDrop={handleAssetDrop}
+                onDeleteClips={handleDeleteClips}
+                onTrackMuteToggle={handleTrackMuteToggle}
+                onTrackLockToggle={handleTrackLockToggle}
+                onTrackVisibilityToggle={handleTrackVisibilityToggle}
+              />
+            </Panel>
+          </div>
         </div>
-      </div>
-    </MainLayout>
+      </MainLayout>
+
+      {/* Export Dialog */}
+      <ExportDialog
+        isOpen={showExportDialog}
+        onClose={handleCloseExport}
+        sequenceId={sequence?.id ?? null}
+        sequenceName={sequence?.name}
+      />
+    </>
   );
 }
 
@@ -136,6 +174,27 @@ function App(): JSX.Element {
   const { isAvailable: isFFmpegAvailable, isLoading: isFFmpegLoading } = useFFmpegStatus();
   const [showFFmpegWarning, setShowFFmpegWarning] = useState(false);
   const [ffmpegWarningDismissed, setFFmpegWarningDismissed] = useState(false);
+
+  // Project creation dialog state
+  const [showCreateDialog, setShowCreateDialog] = useState(false);
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
+
+  // Toast notifications state
+  const [toasts, setToasts] = useState<ToastData[]>([]);
+
+  // Helper to add toast notification
+  const addToast = useCallback(
+    (message: string, variant: ToastData['variant'] = 'error') => {
+      const id = `toast-${Date.now()}`;
+      setToasts((prev) => [...prev, { id, message, variant }]);
+    },
+    [],
+  );
+
+  // Helper to remove toast notification
+  const removeToast = useCallback((id: string) => {
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
 
   // Show FFmpeg warning when check completes and FFmpeg is not available
   // Only show once per session (until dismissed)
@@ -174,27 +233,55 @@ function App(): JSX.Element {
     setFFmpegWarningDismissed(true);
   }, []);
 
-  const handleNewProject = useCallback(async () => {
-    // Open folder picker for project location
-    const selectedPath = await open({
-      directory: true,
-      multiple: false,
-      title: 'Select Project Location',
-    });
+  // Open the project creation dialog
+  const handleNewProject = useCallback(() => {
+    setShowCreateDialog(true);
+  }, []);
 
-    if (selectedPath && typeof selectedPath === 'string') {
-      // For now, use folder name as project name
-      const folderName = selectedPath.split(/[/\\]/).pop() || 'Untitled';
+  // Handle project creation from dialog
+  const handleCreateProject = useCallback(
+    async (data: ProjectCreateData) => {
+      setIsCreatingProject(true);
       try {
-        await createProject(folderName, selectedPath);
+        // Validate and sanitize project name to prevent path traversal
+        const validation = validateProjectName(data.name);
+
+        // Show warning if name was modified
+        if (validation.errors.length > 0 && validation.sanitized) {
+          // Log validation warnings but continue with sanitized name
+          console.warn('Project name validation warnings:', validation.errors);
+        }
+
+        // Build safe project path using validated name
+        const projectPath = buildProjectPath(data.path, data.name);
+        const projectName = validation.sanitized || data.name;
+
+        await createProject(projectName, projectPath);
+
         // Add to recent projects
-        const updated = addRecentProject({ name: folderName, path: selectedPath });
+        const updated = addRecentProject({
+          name: projectName,
+          path: projectPath,
+        });
         setRecentProjects(updated);
+        setShowCreateDialog(false);
+        addToast(`Project "${projectName}" created successfully`, 'success');
       } catch (error) {
         console.error('Failed to create project:', error);
+        const errorMessage =
+          error instanceof Error ? error.message : 'Unknown error occurred';
+        addToast(`Failed to create project: ${errorMessage}`, 'error');
+      } finally {
+        setIsCreatingProject(false);
       }
-    }
-  }, [createProject]);
+    },
+    [createProject, addToast],
+  );
+
+  // Cancel project creation
+  const handleCancelCreate = useCallback(() => {
+    setShowCreateDialog(false);
+  }, []);
 
   const handleOpenProject = useCallback(
     async (path?: string) => {
@@ -218,14 +305,17 @@ function App(): JSX.Element {
           await loadProject(projectPath);
           // Add to recent projects
           const folderName = projectPath.split(/[/\\]/).pop() || 'Untitled';
-          const updated = addRecentProject({ name: folderName, path: projectPath });
+          const updated = addRecentProject({
+            name: folderName,
+            path: projectPath,
+          });
           setRecentProjects(updated);
         } catch (error) {
           console.error('Failed to open project:', error);
         }
       }
     },
-    [loadProject]
+    [loadProject],
   );
 
   // ===========================================================================
@@ -237,16 +327,23 @@ function App(): JSX.Element {
     return (
       <>
         <WelcomeScreen
-          onNewProject={() => void handleNewProject()}
+          onNewProject={handleNewProject}
           onOpenProject={(path) => void handleOpenProject(path)}
           recentProjects={recentProjects}
-          isLoading={isLoading}
+          isLoading={isLoading || isCreatingProject}
+        />
+        <ProjectCreationDialog
+          isOpen={showCreateDialog}
+          onCancel={handleCancelCreate}
+          onCreate={(data) => void handleCreateProject(data)}
+          isCreating={isCreatingProject}
         />
         <FFmpegWarning
           isOpen={showFFmpegWarning}
           onDismiss={handleDismissFFmpegWarning}
           allowDismiss={true}
         />
+        <ToastContainer toasts={toasts} onClose={removeToast} />
       </>
     );
   }
@@ -262,6 +359,7 @@ function App(): JSX.Element {
         onDismiss={handleDismissFFmpegWarning}
         allowDismiss={true}
       />
+      <ToastContainer toasts={toasts} onClose={removeToast} />
     </>
   );
 }

@@ -4,9 +4,21 @@
  * Displays a single track with its clips and controls.
  */
 
-import { Video, Music, Type, Layers, Eye, EyeOff, Lock, Unlock, Volume2, VolumeX, type LucideIcon } from 'lucide-react';
+import {
+  Video,
+  Music,
+  Type,
+  Layers,
+  Eye,
+  EyeOff,
+  Lock,
+  Unlock,
+  Volume2,
+  VolumeX,
+  type LucideIcon,
+} from 'lucide-react';
 import type { Track as TrackType, Clip as ClipType, TrackKind } from '@/types';
-import { Clip, type ClipDragData, type DragPreviewPosition } from './Clip';
+import { Clip, type ClipDragData, type DragPreviewPosition, type ClickModifiers } from './Clip';
 
 // =============================================================================
 // Types
@@ -31,14 +43,14 @@ interface TrackProps {
   onLockToggle?: (trackId: string) => void;
   /** Visibility toggle handler */
   onVisibilityToggle?: (trackId: string) => void;
-  /** Clip click handler */
-  onClipClick?: (clipId: string) => void;
+  /** Clip click handler with modifier keys */
+  onClipClick?: (clipId: string, modifiers: ClickModifiers) => void;
   /** Clip double-click handler */
   onClipDoubleClick?: (clipId: string) => void;
   /** Clip drag start handler */
   onClipDragStart?: (trackId: string, data: ClipDragData) => void;
-  /** Clip drag handler */
-  onClipDrag?: (trackId: string, data: ClipDragData, deltaX: number) => void;
+  /** Clip drag handler - receives computed preview position directly */
+  onClipDrag?: (trackId: string, data: ClipDragData, previewPosition: DragPreviewPosition) => void;
   /** Clip drag end handler */
   onClipDragEnd?: (trackId: string, data: ClipDragData, finalPosition: DragPreviewPosition) => void;
 }
@@ -90,9 +102,7 @@ export function Track({
         <TrackIcon className="w-4 h-4 text-editor-text-muted" />
 
         {/* Track name */}
-        <span className="flex-1 text-sm text-editor-text truncate">
-          {track.name}
-        </span>
+        <span className="flex-1 text-sm text-editor-text truncate">{track.name}</span>
 
         {/* Track controls */}
         <div className="flex items-center gap-1">
@@ -106,7 +116,9 @@ export function Track({
             {track.muted ? (
               <>
                 <VolumeX className="w-3.5 h-3.5" />
-                <span data-testid="muted-indicator" className="sr-only">Muted</span>
+                <span data-testid="muted-indicator" className="sr-only">
+                  Muted
+                </span>
               </>
             ) : (
               <Volume2 className="w-3.5 h-3.5" />
@@ -123,7 +135,9 @@ export function Track({
             {track.locked ? (
               <>
                 <Lock className="w-3.5 h-3.5" />
-                <span data-testid="locked-indicator" className="sr-only">Locked</span>
+                <span data-testid="locked-indicator" className="sr-only">
+                  Locked
+                </span>
               </>
             ) : (
               <Unlock className="w-3.5 h-3.5" />
@@ -137,11 +151,7 @@ export function Track({
             onClick={() => onVisibilityToggle?.(track.id)}
             title={track.visible ? 'Hide' : 'Show'}
           >
-            {track.visible ? (
-              <Eye className="w-3.5 h-3.5" />
-            ) : (
-              <EyeOff className="w-3.5 h-3.5" />
-            )}
+            {track.visible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
           </button>
         </div>
       </div>
@@ -169,7 +179,7 @@ export function Track({
               onClick={onClipClick}
               onDoubleClick={onClipDoubleClick}
               onDragStart={(data) => onClipDragStart?.(track.id, data)}
-              onDrag={(data, deltaX) => onClipDrag?.(track.id, data, deltaX)}
+              onDrag={(data, previewPosition) => onClipDrag?.(track.id, data, previewPosition)}
               onDragEnd={(data, finalPosition) => onClipDragEnd?.(track.id, data, finalPosition)}
             />
           ))}
