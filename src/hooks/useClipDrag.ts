@@ -5,7 +5,13 @@
  * Based on react-timeline-editor's row_rnd patterns.
  */
 
-import { useState, useCallback, useRef, useEffect, type MouseEvent as ReactMouseEvent } from 'react';
+import {
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
 import { snapToGrid, clampTime, MIN_CLIP_DURATION } from '@/utils/timeline';
 
 // =============================================================================
@@ -62,8 +68,8 @@ export interface UseClipDragOptions {
   maxSourceDuration?: number;
   /** Callback when drag starts */
   onDragStart?: (data: ClipDragData) => void;
-  /** Callback during drag with delta */
-  onDrag?: (data: ClipDragData, deltaX: number) => void;
+  /** Callback during drag with preview position */
+  onDrag?: (data: ClipDragData, previewPosition: DragPreviewPosition) => void;
   /** Callback when drag ends */
   onDragEnd?: (data: ClipDragData, finalPosition: DragPreviewPosition) => void;
 }
@@ -118,7 +124,7 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
     (sourceIn: number, sourceOut: number): number => {
       return (sourceOut - sourceIn) / speed;
     },
-    [speed]
+    [speed],
   );
 
   // Calculate preview position based on drag delta
@@ -151,7 +157,7 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
         // Ensure sourceIn doesn't go negative
         if (newSourceIn < 0) {
           newSourceIn = 0;
-          newTimelineIn = initialTimelineIn - (initialSourceIn / speed);
+          newTimelineIn = initialTimelineIn - initialSourceIn / speed;
         }
 
         if (gridInterval > 0) {
@@ -197,7 +203,7 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
       speed,
       maxSourceDuration,
       calculateDuration,
-    ]
+    ],
   );
 
   // Mouse move handler
@@ -213,10 +219,10 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
       setPreviewPosition(preview);
       previewPositionRef.current = preview;
 
-      // Notify parent
-      onDrag?.(dragDataRef.current, deltaX);
+      // Notify parent with the computed preview position directly
+      onDrag?.(dragDataRef.current, preview);
     },
-    [calculatePreviewPosition, onDrag]
+    [calculatePreviewPosition, onDrag],
   );
 
   // Mouse up handler
@@ -293,7 +299,7 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
       onDragStart,
       handleMouseMove,
       handleMouseUp,
-    ]
+    ],
   );
 
   // Cleanup on unmount
