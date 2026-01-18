@@ -18,7 +18,12 @@ const mockClip: ClipType = {
   assetId: 'asset_001',
   range: { sourceInSec: 0, sourceOutSec: 10 },
   place: { timelineInSec: 5, durationSec: 10 },
-  transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+  transform: {
+    position: { x: 0.5, y: 0.5 },
+    scale: { x: 1, y: 1 },
+    rotationDeg: 0,
+    anchor: { x: 0.5, y: 0.5 },
+  },
   opacity: 1,
   speed: 1,
   effects: [],
@@ -70,12 +75,16 @@ describe('Clip', () => {
   // ===========================================================================
 
   describe('interactions', () => {
-    it('should call onClick when clicked', () => {
+    it('should call onClick when clicked with modifier keys', () => {
       const onClick = vi.fn();
       render(<Clip clip={mockClip} zoom={100} selected={false} onClick={onClick} />);
 
       fireEvent.click(screen.getByTestId('clip-clip_001'));
-      expect(onClick).toHaveBeenCalledWith('clip_001');
+      expect(onClick).toHaveBeenCalledWith('clip_001', {
+        ctrlKey: false,
+        shiftKey: false,
+        metaKey: false,
+      });
     });
 
     it('should call onDoubleClick when double-clicked', () => {

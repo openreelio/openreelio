@@ -16,6 +16,13 @@ import type { Clip as ClipType } from '@/types';
 export type { ClipDragData, DragPreviewPosition };
 export type ClipDragType = 'move' | 'trim-left' | 'trim-right';
 
+/** Modifier keys pressed during click */
+export interface ClickModifiers {
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  metaKey: boolean;
+}
+
 interface ClipProps {
   /** Clip data */
   clip: ClipType;
@@ -29,14 +36,14 @@ interface ClipProps {
   gridInterval?: number;
   /** Maximum source duration (for trim bounds) */
   maxSourceDuration?: number;
-  /** Click handler */
-  onClick?: (clipId: string) => void;
+  /** Click handler with modifier keys */
+  onClick?: (clipId: string, modifiers: ClickModifiers) => void;
   /** Double-click handler */
   onDoubleClick?: (clipId: string) => void;
   /** Drag start handler */
   onDragStart?: (data: ClipDragData) => void;
-  /** Drag handler */
-  onDrag?: (data: ClipDragData, deltaX: number) => void;
+  /** Drag handler - receives computed preview position directly */
+  onDrag?: (data: ClipDragData, previewPosition: DragPreviewPosition) => void;
   /** Drag end handler */
   onDragEnd?: (data: ClipDragData, finalPosition: DragPreviewPosition) => void;
 }
@@ -108,7 +115,11 @@ export function Clip({
     if (isDragging) return;
 
     if (!disabled && onClick) {
-      onClick(clip.id);
+      onClick(clip.id, {
+        ctrlKey: e.ctrlKey,
+        shiftKey: e.shiftKey,
+        metaKey: e.metaKey,
+      });
     }
   };
 
@@ -162,11 +173,7 @@ export function Clip({
       {/* Clip content */}
       <div className="h-full p-1 overflow-hidden pointer-events-none">
         {/* Label */}
-        {clip.label && (
-          <span className="text-xs text-white truncate block">
-            {clip.label}
-          </span>
-        )}
+        {clip.label && <span className="text-xs text-white truncate block">{clip.label}</span>}
 
         {/* Indicators */}
         <div className="absolute bottom-1 right-1 flex gap-1">
