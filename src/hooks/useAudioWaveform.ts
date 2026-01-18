@@ -230,8 +230,10 @@ export function useAudioWaveform(
 
   // Clean up on unmount
   useEffect(() => {
+    const pending = pendingGenerations.current;
+
     return () => {
-      pendingGenerations.current.clear();
+      pending.clear();
     };
   }, []);
 

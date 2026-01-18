@@ -355,13 +355,15 @@ export function useAudioPlayback({
 
   // Cleanup on unmount
   useEffect(() => {
+    const audioBuffers = audioBuffersRef.current;
+
     return () => {
       stopAllSources();
       if (audioContextRef.current) {
         audioContextRef.current.close();
         audioContextRef.current = null;
       }
-      audioBuffersRef.current.clear();
+      audioBuffers.clear();
       isAudioReadyRef.current = false;
     };
   }, [stopAllSources]);
