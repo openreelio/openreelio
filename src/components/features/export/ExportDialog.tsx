@@ -375,12 +375,12 @@ export function ExportDialog({
         }
       );
 
-      // Store job ID to filter events
+      // Store job ID to filter events - this enables event listeners
       setCurrentJobId(result.jobId);
 
-      // Note: The completion/error will be handled by event listeners
-      // If the invoke itself returns 'completed', it means export finished synchronously
-      // (which can happen if events weren't set up yet or for very short exports)
+      // Handle different response statuses:
+      // - 'started': Export running in background, wait for events
+      // - 'completed': Export finished immediately (very short videos)
       if (result.status === 'completed') {
         setStatus({
           type: 'completed',
@@ -389,10 +389,13 @@ export function ExportDialog({
         });
         setCurrentJobId(null);
       }
+      // For 'started' status, continue showing progress and wait for events
     } catch (error) {
+      // Handle validation errors and other failures
+      const errorMessage = error instanceof Error ? error.message : String(error);
       setStatus({
         type: 'failed',
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage,
       });
       setCurrentJobId(null);
     }
