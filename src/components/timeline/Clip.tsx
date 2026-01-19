@@ -8,6 +8,7 @@
 import { useMemo, type MouseEvent } from 'react';
 import { useClipDrag, type DragPreviewPosition, type ClipDragData } from '@/hooks/useClipDrag';
 import type { Clip as ClipType } from '@/types';
+import { AudioClipWaveform } from './AudioClipWaveform';
 
 // =============================================================================
 // Types
@@ -23,6 +24,18 @@ export interface ClickModifiers {
   metaKey: boolean;
 }
 
+/** Waveform display configuration for audio clips */
+export interface ClipWaveformConfig {
+  /** Asset ID for waveform caching */
+  assetId: string;
+  /** Path to audio/video file for waveform generation */
+  inputPath: string;
+  /** Total asset duration in seconds */
+  totalDurationSec: number;
+  /** Whether to show waveform (for audio clips) */
+  enabled: boolean;
+}
+
 interface ClipProps {
   /** Clip data */
   clip: ClipType;
@@ -36,6 +49,8 @@ interface ClipProps {
   gridInterval?: number;
   /** Maximum source duration (for trim bounds) */
   maxSourceDuration?: number;
+  /** Waveform configuration for audio clips */
+  waveformConfig?: ClipWaveformConfig;
   /** Click handler with modifier keys */
   onClick?: (clipId: string, modifiers: ClickModifiers) => void;
   /** Double-click handler */
@@ -59,6 +74,7 @@ export function Clip({
   disabled = false,
   gridInterval = 0,
   maxSourceDuration,
+  waveformConfig,
   onClick,
   onDoubleClick,
   onDragStart,
@@ -170,10 +186,26 @@ export function Clip({
       onDoubleClick={handleDoubleClick}
       onMouseDown={handleClipMouseDown}
     >
+      {/* Audio Waveform (background layer) */}
+      {waveformConfig?.enabled && displayPosition.width > 0 && (
+        <AudioClipWaveform
+          assetId={waveformConfig.assetId}
+          inputPath={waveformConfig.inputPath}
+          width={displayPosition.width}
+          height={64} // Track height h-16 = 64px
+          sourceInSec={clip.range.sourceInSec}
+          sourceOutSec={clip.range.sourceOutSec}
+          totalDurationSec={waveformConfig.totalDurationSec}
+          opacity={0.6}
+          className="absolute inset-0"
+          showLoadingIndicator={false}
+        />
+      )}
+
       {/* Clip content */}
-      <div className="h-full p-1 overflow-hidden pointer-events-none">
+      <div className="h-full p-1 overflow-hidden pointer-events-none relative z-10">
         {/* Label */}
-        {clip.label && <span className="text-xs text-white truncate block">{clip.label}</span>}
+        {clip.label && <span className="text-xs text-white truncate block drop-shadow-sm">{clip.label}</span>}
 
         {/* Indicators */}
         <div className="absolute bottom-1 right-1 flex gap-1">

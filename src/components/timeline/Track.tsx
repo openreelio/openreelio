@@ -18,7 +18,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import type { Track as TrackType, Clip as ClipType, TrackKind } from '@/types';
-import { Clip, type ClipDragData, type DragPreviewPosition, type ClickModifiers } from './Clip';
+import { Clip, type ClipDragData, type DragPreviewPosition, type ClickModifiers, type ClipWaveformConfig } from './Clip';
 
 // =============================================================================
 // Types
@@ -37,6 +37,8 @@ interface TrackProps {
   duration?: number;
   /** Selected clip IDs */
   selectedClipIds?: string[];
+  /** Function to get waveform config for a clip */
+  getClipWaveformConfig?: (clipId: string, assetId: string) => ClipWaveformConfig | undefined;
   /** Mute toggle handler */
   onMuteToggle?: (trackId: string) => void;
   /** Lock toggle handler */
@@ -77,6 +79,7 @@ export function Track({
   scrollX = 0,
   duration = 60,
   selectedClipIds = [],
+  getClipWaveformConfig,
   onMuteToggle,
   onLockToggle,
   onVisibilityToggle,
@@ -176,6 +179,7 @@ export function Track({
               zoom={zoom}
               selected={selectedClipIds.includes(clip.id)}
               disabled={track.locked}
+              waveformConfig={getClipWaveformConfig?.(clip.id, clip.assetId)}
               onClick={onClipClick}
               onDoubleClick={onClipDoubleClick}
               onDragStart={(data) => onClipDragStart?.(track.id, data)}
