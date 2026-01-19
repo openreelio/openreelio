@@ -8,6 +8,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Undo2, Redo2 } from 'lucide-react';
 import { useProjectStore } from '@/stores';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('UndoRedoButtons');
 
 // =============================================================================
 // Types
@@ -59,7 +62,7 @@ export function UndoRedoButtons({
       setCanUndo(undoResult);
       setCanRedo(redoResult);
     } catch (error) {
-      console.error('Failed to check undo/redo availability:', error);
+      logger.error('Failed to check undo/redo availability', { error });
       setCanUndo(false);
       setCanRedo(false);
     }
@@ -91,7 +94,7 @@ export function UndoRedoButtons({
       await checkAvailability();
       onUndo?.();
     } catch (error) {
-      console.error('Failed to undo:', error);
+      logger.error('Failed to undo', { error });
     } finally {
       setIsProcessing(false);
     }
@@ -107,7 +110,7 @@ export function UndoRedoButtons({
       await checkAvailability();
       onRedo?.();
     } catch (error) {
-      console.error('Failed to redo:', error);
+      logger.error('Failed to redo', { error });
     } finally {
       setIsProcessing(false);
     }

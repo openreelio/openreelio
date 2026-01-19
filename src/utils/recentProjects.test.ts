@@ -15,6 +15,16 @@ import {
   type RecentProject,
 } from './recentProjects';
 
+// Mock the logger
+vi.mock('@/services/logger', () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
 // =============================================================================
 // Mock localStorage
 // =============================================================================
@@ -99,11 +109,10 @@ describe('recentProjects', () => {
     it('handles invalid JSON gracefully', () => {
       localStorageMock.setItem('openreelio:recent-projects', 'invalid json');
 
-      const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      // The function should handle invalid JSON and return empty array
       const projects = loadRecentProjects();
 
       expect(projects).toEqual([]);
-      consoleSpy.mockRestore();
     });
 
     it('filters out invalid project entries', () => {

@@ -10,6 +10,9 @@ import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
 import { invoke } from '@tauri-apps/api/core';
 import type { Asset, Sequence, Command, CommandResult, UndoRedoResult } from '@/types';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('ProjectStore');
 
 // Enable Immer's MapSet plugin for Map/Set support
 enableMapSet();
@@ -257,7 +260,7 @@ export const useProjectStore = create<ProjectState>()(
             }
           })
           .catch((err) => {
-            console.warn('Thumbnail generation failed:', err);
+            logger.warn('Thumbnail generation failed', { error: err });
           });
 
         return result.assetId;

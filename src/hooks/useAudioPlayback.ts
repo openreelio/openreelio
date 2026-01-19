@@ -9,6 +9,9 @@ import { useRef, useCallback, useEffect } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import type { Sequence, Asset, Clip } from '@/types';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('AudioPlayback');
 
 // =============================================================================
 // Types
@@ -120,7 +123,7 @@ export function useAudioPlayback({
 
       return audioBuffer;
     } catch (error) {
-      console.error(`Failed to load audio for asset ${assetId}:`, error);
+      logger.error('Failed to load audio for asset', { assetId, error });
       return null;
     }
   }, []);
@@ -303,7 +306,7 @@ export function useAudioPlayback({
           void scheduleAudioClips();
         }
       }).catch((error) => {
-        console.error('Failed to initialize audio:', error);
+        logger.error('Failed to initialize audio', { error });
       });
     } else {
       // Stop all sources when pausing

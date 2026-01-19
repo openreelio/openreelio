@@ -86,3 +86,53 @@ export type {
   UseTimelineEngineOptions,
   UseTimelineEngineReturn,
 } from './useTimelineEngine';
+
+export { useAsyncCleanup, useAbortController, useCancellablePromise } from './useAsyncCleanup';
+export type {
+  AsyncCleanupResult,
+  AbortControllerResult,
+  CancellablePromiseResult,
+} from './useAsyncCleanup';
+
+export { useTimelineClipOperations } from './useTimelineClipOperations';
+export type {
+  UseTimelineClipOperationsProps,
+  UseTimelineClipOperationsResult,
+} from './useTimelineClipOperations';
+
+export { useTimelineNavigation } from './useTimelineNavigation';
+export type {
+  UseTimelineNavigationProps,
+  UseTimelineNavigationResult,
+} from './useTimelineNavigation';
+
+export { useExportDialog } from './useExportDialog';
+export type {
+  UseExportDialogProps,
+  UseExportDialogResult,
+} from './useExportDialog';
+
+export { useAssetDrop } from './useAssetDrop';
+export type {
+  UseAssetDropOptions,
+  UseAssetDropResult,
+} from './useAssetDrop';
+
+export { useScrubbing } from './useScrubbing';
+export type {
+  UseScrubbingOptions,
+  UseScrubbingResult,
+} from './useScrubbing';
+
+export { useTimelineCoordinates } from './useTimelineCoordinates';
+export type {
+  UseTimelineCoordinatesOptions,
+  UseTimelineCoordinatesResult,
+} from './useTimelineCoordinates';
+
+export { useTimelineKeyboard } from './useTimelineKeyboard';
+export type {
+  UseTimelineKeyboardOptions,
+  UseTimelineKeyboardResult,
+  ClipSplitData,
+} from './useTimelineKeyboard';

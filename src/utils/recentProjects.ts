@@ -5,6 +5,10 @@
  * Provides CRUD operations with automatic sorting by last opened date.
  */
 
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('RecentProjects');
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -49,7 +53,7 @@ export function loadRecentProjects(): RecentProject[] {
 
     // Validate the structure
     if (!Array.isArray(projects)) {
-      console.warn('Invalid recent projects data, resetting');
+      logger.warn('Invalid recent projects data, resetting');
       return [];
     }
 
@@ -60,7 +64,7 @@ export function loadRecentProjects(): RecentProject[] {
 
     return validProjects;
   } catch (error) {
-    console.error('Failed to load recent projects:', error);
+    logger.error('Failed to load recent projects', { error });
     return [];
   }
 }
@@ -78,7 +82,7 @@ export function saveRecentProjects(projects: RecentProject[]): void {
 
     localStorage.setItem(STORAGE_KEY, JSON.stringify(sorted));
   } catch (error) {
-    console.error('Failed to save recent projects:', error);
+    logger.error('Failed to save recent projects', { error });
   }
 }
 
@@ -152,7 +156,7 @@ export function clearRecentProjects(): void {
   try {
     localStorage.removeItem(STORAGE_KEY);
   } catch (error) {
-    console.error('Failed to clear recent projects:', error);
+    logger.error('Failed to clear recent projects', { error });
   }
 }
 

@@ -7,6 +7,9 @@
 
 import React, { useCallback, useMemo } from 'react';
 import type { EditScript, ApplyResult } from '@/hooks/useAIAgent';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('ProposalDialog');
 
 // =============================================================================
 // Types
@@ -116,7 +119,7 @@ export const ProposalDialog: React.FC<ProposalDialogProps> = ({
     try {
       await onApprove();
     } catch (error) {
-      console.error('Failed to apply proposal:', error);
+      logger.error('Failed to apply proposal', { error });
     }
   }, [onApprove]);
 

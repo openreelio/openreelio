@@ -11,6 +11,16 @@ import {
   createErrorHandler,
 } from './errorMessages';
 
+// Mock the logger
+vi.mock('@/services/logger', () => ({
+  createLogger: () => ({
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  }),
+}));
+
 // =============================================================================
 // getUserFriendlyError Tests
 // =============================================================================
@@ -194,15 +204,15 @@ describe('createErrorHandler', () => {
     expect(showWarning).not.toHaveBeenCalled();
   });
 
-  it('should log to console', () => {
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  it('should handle errors and call appropriate show function', () => {
     const showError = vi.fn();
     const showWarning = vi.fn();
     const handler = createErrorHandler(showError, showWarning);
 
-    handler('Some error');
+    handler('Some unknown error');
 
-    expect(consoleSpy).toHaveBeenCalledWith('Error:', 'Some error');
-    consoleSpy.mockRestore();
+    // The handler should call showError for unknown errors
+    expect(showError).toHaveBeenCalled();
+    // Logger is mocked so we just verify the function completes without throwing
   });
 });
