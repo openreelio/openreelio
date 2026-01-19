@@ -111,6 +111,9 @@ export function ProgressDisplay({
   onRetry,
 }: ProgressDisplayProps): JSX.Element {
   if (status.type === 'exporting') {
+    // Validate and clamp progress value to 0-100 range
+    const progress = Math.max(0, Math.min(100, Number(status.progress) || 0));
+
     return (
       <div className="py-8 text-center" data-testid="export-progress">
         <Loader2 className="w-12 h-12 mx-auto text-primary-500 animate-spin mb-4" />
@@ -119,16 +122,21 @@ export function ProgressDisplay({
         <div className="w-full bg-editor-bg rounded-full h-2 mb-2">
           <div
             className="bg-primary-500 h-2 rounded-full transition-all duration-300"
-            style={{ width: `${status.progress}%` }}
+            style={{ width: `${progress}%` }}
             data-testid="export-progress-bar"
           />
         </div>
-        <p className="text-xs text-editor-text-muted">{Math.round(status.progress)}%</p>
+        <p className="text-xs text-editor-text-muted">{Math.round(progress)}%</p>
       </div>
     );
   }
 
   if (status.type === 'completed') {
+    // Safely format duration value
+    const duration = typeof status.duration === 'number' && !isNaN(status.duration)
+      ? status.duration.toFixed(1)
+      : '0.0';
+
     return (
       <div className="py-8 text-center" data-testid="export-completed">
         <CheckCircle className="w-12 h-12 mx-auto text-green-500 mb-4" />
@@ -137,7 +145,7 @@ export function ProgressDisplay({
           Saved to: <span className="text-editor-text">{status.outputPath}</span>
         </p>
         <p className="text-xs text-editor-text-muted">
-          Duration: {status.duration.toFixed(1)}s
+          Duration: {duration}s
         </p>
         <button
           onClick={onClose}

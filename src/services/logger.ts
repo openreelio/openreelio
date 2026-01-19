@@ -254,31 +254,20 @@ export function createLogger(moduleName: string = 'App'): Logger {
  */
 export const consoleHandler: LogHandler = (entry: LogEntry): void => {
   const timestamp = new Date(entry.timestamp).toISOString();
-  const prefix = `[${timestamp}] [${entry.module}]`;
-
-  const formatMessage = (): string => {
-    if (entry.data) {
-      return `${prefix} ${entry.message}`;
-    }
-    return `${prefix} ${entry.message}`;
-  };
+  const formattedMessage = `[${timestamp}] [${entry.module}] ${entry.message}`;
 
   switch (entry.level) {
     case LogLevel.DEBUG:
-       
-      console.debug(formatMessage(), entry.data ?? '');
+      console.debug(formattedMessage, entry.data ?? '');
       break;
     case LogLevel.INFO:
-       
-      console.info(formatMessage(), entry.data ?? '');
+      console.info(formattedMessage, entry.data ?? '');
       break;
     case LogLevel.WARN:
-       
-      console.warn(formatMessage(), entry.data ?? '');
+      console.warn(formattedMessage, entry.data ?? '');
       break;
     case LogLevel.ERROR:
-       
-      console.error(formatMessage(), entry.data ?? '');
+      console.error(formattedMessage, entry.data ?? '');
       break;
     default:
       break;

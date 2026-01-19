@@ -24,7 +24,7 @@ export interface UseScrubbingOptions {
   calculateTimeFromMouseEvent: (
     e: globalThis.MouseEvent | MouseEvent,
     applySnapping?: boolean
-  ) => number | null;
+  ) => { time: number | null; snapPoint: SnapPoint | null };
   /** Callback when snapping state changes */
   onSnapChange?: (snapPoint: SnapPoint | null) => void;
 }
@@ -119,16 +119,18 @@ export function useScrubbing({
       }
 
       // Set initial position (with snapping)
-      const time = calculateTimeFromMouseEvent(e, true);
-      if (time !== null) {
-        seek(time);
+      const result = calculateTimeFromMouseEvent(e, true);
+      if (result.time !== null) {
+        seek(result.time);
+        onSnapChange?.(result.snapPoint);
       }
 
       // Define event handlers
       const handleMouseMove = (moveEvent: globalThis.MouseEvent) => {
-        const newTime = calculateTimeFromMouseEvent(moveEvent, true);
-        if (newTime !== null) {
-          seek(newTime);
+        const moveResult = calculateTimeFromMouseEvent(moveEvent, true);
+        if (moveResult.time !== null) {
+          seek(moveResult.time);
+          onSnapChange?.(moveResult.snapPoint);
         }
       };
 

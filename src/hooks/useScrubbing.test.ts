@@ -60,7 +60,7 @@ describe('useScrubbing', () => {
     isPlaying: false,
     togglePlayback: vi.fn(),
     seek: vi.fn(),
-    calculateTimeFromMouseEvent: vi.fn().mockReturnValue(5),
+    calculateTimeFromMouseEvent: vi.fn().mockReturnValue({ time: 5, snapPoint: null }),
     onSnapChange: vi.fn(),
   });
 
@@ -205,7 +205,7 @@ describe('useScrubbing', () => {
       let callCount = 0;
       options.calculateTimeFromMouseEvent.mockImplementation(() => {
         callCount++;
-        return callCount === 1 ? 5 : 10;
+        return { time: callCount === 1 ? 5 : 10, snapPoint: null };
       });
 
       const { result } = renderHook(() => useScrubbing(options));
@@ -396,7 +396,7 @@ describe('useScrubbing', () => {
   describe('edge cases', () => {
     it('should handle null time from calculateTimeFromMouseEvent', () => {
       const options = createDefaultOptions();
-      options.calculateTimeFromMouseEvent.mockReturnValue(null);
+      options.calculateTimeFromMouseEvent.mockReturnValue({ time: null, snapPoint: null });
 
       const { result } = renderHook(() => useScrubbing(options));
 

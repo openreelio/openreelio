@@ -73,10 +73,10 @@ export function useTimelineNavigation({
         return;
       }
 
-      // Shift key: horizontal scroll
+      // Shift key: horizontal scroll (use deltaY only for consistent behavior)
       if (e.shiftKey) {
         e.preventDefault();
-        setScrollX(scrollX + e.deltaX + e.deltaY);
+        setScrollX(scrollX + e.deltaY);
       }
     },
     [zoomIn, zoomOut, setScrollX, scrollX]

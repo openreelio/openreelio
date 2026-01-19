@@ -153,7 +153,7 @@ describe('useTimelineNavigation', () => {
       expect(setScrollX).toHaveBeenCalledWith(150); // 100 + 0 + 50
     });
 
-    it('should use deltaX for horizontal scroll with Shift', () => {
+    it('should use only deltaY for horizontal scroll with Shift (ignoring deltaX)', () => {
       const { result } = renderHook(() =>
         useTimelineNavigation({
           scrollX: 100,
@@ -166,13 +166,14 @@ describe('useTimelineNavigation', () => {
         })
       );
 
+      // deltaX should be ignored when Shift is pressed, only deltaY is used
       const event = createWheelEvent({ deltaX: 30, deltaY: 20, shiftKey: true });
 
       act(() => {
         result.current.handleWheel(event);
       });
 
-      expect(setScrollX).toHaveBeenCalledWith(150); // 100 + 30 + 20
+      expect(setScrollX).toHaveBeenCalledWith(120); // 100 + 20 (deltaY only)
     });
 
     it('should not trigger zoom or scroll without modifier keys', () => {

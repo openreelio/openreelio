@@ -112,15 +112,6 @@ export function Timeline({
     trackHeaderWidth: TRACK_HEADER_WIDTH,
   });
 
-  const calculateTimeWithSnap = useCallback(
-    (e: globalThis.MouseEvent | MouseEvent, applySnapping?: boolean) => {
-      const result = calculateTimeFromMouseEvent(e, applySnapping);
-      if (result.snapPoint) setActiveSnapPoint(result.snapPoint);
-      return result.time;
-    },
-    [calculateTimeFromMouseEvent]
-  );
-
   // ===========================================================================
   // Scrubbing
   // ===========================================================================
@@ -128,7 +119,7 @@ export function Timeline({
     isPlaying,
     togglePlayback,
     seek: setPlayhead,
-    calculateTimeFromMouseEvent: calculateTimeWithSnap,
+    calculateTimeFromMouseEvent,
     onSnapChange: setActiveSnapPoint,
   });
 

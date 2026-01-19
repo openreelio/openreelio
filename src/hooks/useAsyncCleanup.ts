@@ -33,6 +33,9 @@
  */
 
 import { useRef, useEffect, useCallback, useState } from 'react';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('AsyncCleanup');
 
 // =============================================================================
 // Types
@@ -99,8 +102,11 @@ export function useAsyncCleanup(): AsyncCleanupResult {
       cleanupsRef.current.forEach((cleanup) => {
         try {
           cleanup();
-        } catch {
-          // Silently ignore cleanup errors
+        } catch (error) {
+          // Log cleanup errors for debugging but don't prevent other cleanups
+          logger.warn('Cleanup function threw an error', {
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
       });
       cleanupsRef.current.clear();

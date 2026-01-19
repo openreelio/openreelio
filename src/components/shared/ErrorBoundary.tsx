@@ -210,7 +210,8 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
           )}
         </div>
 
-        {showDetails && error && errorInfo && (
+        {/* Only show error details in development mode, regardless of showDetails prop */}
+        {showDetails && import.meta.env.DEV && error && errorInfo && (
           <details
             style={{
               marginTop: '15px',
