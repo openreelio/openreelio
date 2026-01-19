@@ -136,3 +136,22 @@ export type {
   UseTimelineKeyboardResult,
   ClipSplitData,
 } from './useTimelineKeyboard';
+
+export {
+  useVirtualizedClips,
+  sortClipsByPosition,
+  calculateTimelineExtent,
+} from './useVirtualizedClips';
+export type {
+  VirtualizationConfig,
+  VirtualizedClip,
+  UseVirtualizedClipsResult,
+} from './useVirtualizedClips';
+
+export { useLazyThumbnails } from './useLazyThumbnails';
+export type {
+  ThumbnailRequest,
+  ThumbnailState,
+  LazyThumbnailsConfig,
+  UseLazyThumbnailsResult,
+} from './useLazyThumbnails';
