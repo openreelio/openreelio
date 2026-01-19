@@ -5,7 +5,7 @@
  * Supports float sliders, integer inputs, boolean toggles, and more.
  */
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState, useEffect } from 'react';
 import { RotateCcw } from 'lucide-react';
 import type { ParamDef, ParamValue, SimpleParamValue } from '@/types';
 
@@ -178,6 +178,41 @@ export function ParameterEditor({
   const inputId = `param-${paramDef.name}`;
   const sliderId = `param-slider-${paramDef.name}`;
 
+  // Local state for text input to allow typing negative/decimal values
+  // (e.g., "-" or "0." which would be invalid as immediate numbers)
+  const [inputText, setInputText] = useState(String(numericValue));
+  const [isEditing, setIsEditing] = useState(false);
+
+  // Sync local text with external value when not editing
+  useEffect(() => {
+    if (!isEditing) {
+      setInputText(String(numericValue));
+    }
+  }, [numericValue, isEditing]);
+
+  // Commit the text input value
+  const commitInputValue = useCallback(() => {
+    const parsed = parseFloat(inputText);
+    if (!Number.isNaN(parsed)) {
+      handleNumericChange(parsed);
+    } else {
+      // Reset to current value if invalid
+      setInputText(String(numericValue));
+    }
+    setIsEditing(false);
+  }, [inputText, numericValue, handleNumericChange]);
+
+  // Handle key down for Enter key
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === 'Enter') {
+        commitInputValue();
+        e.currentTarget.blur();
+      }
+    },
+    [commitInputValue]
+  );
+
   return (
     <div className="py-1.5">
       <div className="flex items-center justify-between mb-1">
@@ -185,15 +220,16 @@ export function ParameterEditor({
         <div className="flex items-center gap-2">
           <input
             id={inputId}
-            type="number"
-            value={numericValue}
+            type="text"
+            inputMode="decimal"
+            value={inputText}
             onChange={(e) => {
-              const parsed = parseFloat(e.target.value);
-              handleNumericChange(Number.isNaN(parsed) ? 0 : parsed);
+              setIsEditing(true);
+              setInputText(e.target.value);
             }}
-            min={min}
-            max={max}
-            step={step}
+            onFocus={() => setIsEditing(true)}
+            onBlur={commitInputValue}
+            onKeyDown={handleKeyDown}
             disabled={readOnly}
             aria-describedby={sliderId}
             className="w-16 px-1.5 py-0.5 text-sm text-right bg-editor-bg border border-editor-border rounded text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"

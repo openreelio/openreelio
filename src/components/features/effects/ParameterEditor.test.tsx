@@ -69,8 +69,8 @@ describe('ParameterEditor', () => {
         />
       );
 
-      // Both slider and input have the same value, use spinbutton to be specific
-      expect(screen.getByRole('spinbutton')).toHaveValue(0.5);
+      // Text input shows string value
+      expect(screen.getByRole('textbox')).toHaveValue('0.5');
     });
 
     it('should call onChange when slider is moved', () => {
@@ -89,7 +89,7 @@ describe('ParameterEditor', () => {
       expect(onChange).toHaveBeenCalledWith('brightness', 0.5);
     });
 
-    it('should call onChange when input value changes', () => {
+    it('should call onChange when input value changes and blurs', () => {
       const onChange = vi.fn();
       render(
         <ParameterEditor
@@ -99,13 +99,14 @@ describe('ParameterEditor', () => {
         />
       );
 
-      const input = screen.getByRole('spinbutton');
+      const input = screen.getByRole('textbox');
       fireEvent.change(input, { target: { value: '0.75' } });
+      fireEvent.blur(input);
 
       expect(onChange).toHaveBeenCalledWith('brightness', 0.75);
     });
 
-    it('should clamp value to min/max range', () => {
+    it('should clamp value to min/max range on blur', () => {
       const onChange = vi.fn();
       render(
         <ParameterEditor
@@ -115,8 +116,9 @@ describe('ParameterEditor', () => {
         />
       );
 
-      const input = screen.getByRole('spinbutton');
+      const input = screen.getByRole('textbox');
       fireEvent.change(input, { target: { value: '5' } }); // Over max
+      fireEvent.blur(input);
 
       expect(onChange).toHaveBeenCalledWith('brightness', 1); // Clamped to max
     });
@@ -186,7 +188,7 @@ describe('ParameterEditor', () => {
       expect(screen.getByRole('slider')).toBeInTheDocument();
     });
 
-    it('should round to integer on change', () => {
+    it('should round to integer on blur', () => {
       const onChange = vi.fn();
       render(
         <ParameterEditor
@@ -196,8 +198,9 @@ describe('ParameterEditor', () => {
         />
       );
 
-      const input = screen.getByRole('spinbutton');
+      const input = screen.getByRole('textbox');
       fireEvent.change(input, { target: { value: '15.7' } });
+      fireEvent.blur(input);
 
       expect(onChange).toHaveBeenCalledWith('radius', 16); // Rounded
     });
@@ -219,7 +222,7 @@ describe('ParameterEditor', () => {
       );
 
       expect(screen.getByRole('slider')).toBeDisabled();
-      expect(screen.getByRole('spinbutton')).toBeDisabled();
+      expect(screen.getByRole('textbox')).toBeDisabled();
     });
   });
 
