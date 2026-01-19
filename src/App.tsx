@@ -16,8 +16,8 @@ import { ProjectExplorer } from './components/explorer';
 import { PreviewPlayer } from './components/preview';
 import { Timeline } from './components/timeline';
 import { FFmpegWarning, ToastContainer, type ToastData } from './components/ui';
-import { useProjectStore, usePlaybackStore } from './stores';
-import { usePreviewSource, useTimelineActions, useFFmpegStatus, useAutoSave } from './hooks';
+import { useProjectStore, usePlaybackStore, useTimelineStore } from './stores';
+import { usePreviewSource, useTimelineActions, useFFmpegStatus, useAutoSave, useKeyboardShortcuts, useAudioPlayback } from './hooks';
 import {
   loadRecentProjects,
   addRecentProject,
@@ -54,10 +54,35 @@ interface EditorViewProps {
 function EditorView({ sequence }: EditorViewProps): JSX.Element {
   const { selectedAssetId, assets } = useProjectStore();
   const { currentTime, isPlaying, setCurrentTime, setIsPlaying, setDuration } = usePlaybackStore();
+  const { selectedClipIds } = useTimelineStore();
   const previewSource = usePreviewSource();
 
   // Export dialog state
   const [showExportDialog, setShowExportDialog] = useState(false);
+
+  // Audio playback integration
+  // The hook handles audio scheduling, volume control, and clip synchronization
+  // It uses Web Audio API for precise timing and responds to playback store changes
+  const { initAudio, isAudioReady } = useAudioPlayback({
+    sequence,
+    assets,
+    enabled: true, // Always enabled when in editor view
+  });
+
+  // Initialize audio context on first play interaction
+  // Web Audio API requires user gesture to create AudioContext
+  useEffect(() => {
+    if (isPlaying && !isAudioReady) {
+      void initAudio();
+    }
+  }, [isPlaying, isAudioReady, initAudio]);
+
+  // Calculate effective playhead for preview:
+  // - For timeline clips, use the sourceOffset to show correct frame
+  // - For direct asset preview, use asset's own time
+  const effectivePlayhead = previewSource?.sourceType === 'timeline' && previewSource.sourceOffset !== undefined
+    ? previewSource.sourceOffset
+    : currentTime;
 
   // Timeline action callbacks
   const {
@@ -70,6 +95,44 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
     handleTrackLockToggle,
     handleTrackVisibilityToggle,
   } = useTimelineActions({ sequence });
+
+  // Split at playhead handler for keyboard shortcut
+  const handleSplitAtPlayhead = useCallback(() => {
+    if (!sequence || selectedClipIds.length !== 1) return;
+
+    const clipId = selectedClipIds[0];
+    for (const track of sequence.tracks) {
+      const clip = track.clips.find((c) => c.id === clipId);
+      if (clip) {
+        const clipEnd =
+          clip.place.timelineInSec +
+          (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+
+        // Check if playhead is within the clip
+        if (currentTime > clip.place.timelineInSec && currentTime < clipEnd) {
+          handleClipSplit?.({
+            sequenceId: sequence.id,
+            trackId: track.id,
+            clipId: clip.id,
+            splitTime: currentTime,
+          });
+        }
+        break;
+      }
+    }
+  }, [sequence, selectedClipIds, currentTime, handleClipSplit]);
+
+  // Global keyboard shortcuts
+  useKeyboardShortcuts({
+    enabled: true,
+    onDeleteClips: () => {
+      if (selectedClipIds.length > 0) {
+        handleDeleteClips?.(selectedClipIds);
+      }
+    },
+    onSplitAtPlayhead: handleSplitAtPlayhead,
+    onExport: () => setShowExportDialog(true),
+  });
 
   // Get selected asset for inspector
   const selectedAsset = selectedAssetId ? assets.get(selectedAssetId) : undefined;
@@ -127,7 +190,7 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
               src={previewSource?.src}
               poster={previewSource?.thumbnail}
               className="h-full"
-              playhead={currentTime}
+              playhead={effectivePlayhead}
               isPlaying={isPlaying}
               onPlayheadChange={setCurrentTime}
               onPlayStateChange={setIsPlaying}
