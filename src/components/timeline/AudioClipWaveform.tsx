@@ -77,7 +77,8 @@ function calculateClipRegionPercent({
   const clampedOutSec = clampNumber(sourceOutSec ?? totalDurationSec, 0, totalDurationSec);
 
   if (clampedOutSec <= clampedInSec) {
-    return { offsetPercent: 0, widthPercent: 100 };
+    // Zero or negative duration clip should have zero width
+    return { offsetPercent: 0, widthPercent: 0 };
   }
 
   const offsetPercent = (clampedInSec / totalDurationSec) * 100;

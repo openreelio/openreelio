@@ -163,10 +163,10 @@ export const useWaveformCacheStore = create<WaveformCacheStore>()(
         set((state) => {
           const newEntries = { ...state.entries };
           let evictions = 0;
+          const isNewEntry = !newEntries[key];
 
-          // Check if we need to evict entries
-          const currentSize = Object.keys(newEntries).length;
-          if (currentSize >= state.maxCacheSize && !newEntries[key]) {
+          // Check if we need to evict entries (use state.cacheSize for efficiency)
+          if (state.cacheSize >= state.maxCacheSize && isNewEntry) {
             // Find LRU entry to evict
             const entriesArray = Object.entries(newEntries);
             entriesArray.sort((a, b) => a[1].lastAccessedAt - b[1].lastAccessedAt);
@@ -188,9 +188,12 @@ export const useWaveformCacheStore = create<WaveformCacheStore>()(
             lastAccessedAt: now,
           };
 
+          // Calculate new size: previous size - evictions + (1 if new entry, 0 if update)
+          const newCacheSize = state.cacheSize - evictions + (isNewEntry ? 1 : 0);
+
           return {
             entries: newEntries,
-            cacheSize: Object.keys(newEntries).length,
+            cacheSize: newCacheSize,
             error: null, // Clear error on successful add
             stats: {
               ...state.stats,
@@ -253,15 +256,14 @@ export const useWaveformCacheStore = create<WaveformCacheStore>()(
       setMaxCacheSize: (size) => {
         set((state) => {
           const newEntries = { ...state.entries };
-          const currentSize = Object.keys(newEntries).length;
           let evictions = 0;
 
-          // Evict entries if current size exceeds new max
-          if (currentSize > size) {
+          // Evict entries if current size exceeds new max (use state.cacheSize)
+          if (state.cacheSize > size) {
             const entriesArray = Object.entries(newEntries);
             entriesArray.sort((a, b) => a[1].lastAccessedAt - b[1].lastAccessedAt);
 
-            const toEvictCount = currentSize - size;
+            const toEvictCount = state.cacheSize - size;
             const toEvict = entriesArray.slice(0, toEvictCount);
 
             for (const [evictKey] of toEvict) {
@@ -273,7 +275,7 @@ export const useWaveformCacheStore = create<WaveformCacheStore>()(
           return {
             maxCacheSize: size,
             entries: newEntries,
-            cacheSize: Object.keys(newEntries).length,
+            cacheSize: state.cacheSize - evictions,
             stats: {
               ...state.stats,
               evictions: state.stats.evictions + evictions,

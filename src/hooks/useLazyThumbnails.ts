@@ -120,6 +120,7 @@ export function useLazyThumbnails(
   const idMapRef = useRef<Map<HTMLElement, string>>(new Map());
   const observerRef = useRef<IntersectionObserver | null>(null);
   const pendingQueueRef = useRef<ThumbnailRequest[]>([]);
+  const pendingIdsRef = useRef<Set<string>>(new Set()); // O(1) lookup for queue membership
   const activeExtractionsRef = useRef<Set<string>>(new Set());
   const loadedIdsRef = useRef<Set<string>>(new Set());
   const loadingIdsRef = useRef<Set<string>>(new Set());
@@ -158,6 +159,9 @@ export function useLazyThumbnails(
     ) {
       const request = pendingQueueRef.current.shift();
       if (!request) break;
+
+      // Remove from pending set
+      pendingIdsRef.current.delete(request.id);
 
       // Skip if already loaded or loading (check refs, not state)
       if (loadedIdsRef.current.has(request.id) || loadingIdsRef.current.has(request.id)) {
@@ -224,16 +228,17 @@ export function useLazyThumbnails(
         const id = idMapRef.current.get(entry.target as HTMLElement);
         if (!id) continue;
 
-        // Check if already loaded, loading, or queued (use refs)
+        // Check if already loaded, loading, or queued (use refs with O(1) Set lookup)
         if (loadedIdsRef.current.has(id) || loadingIdsRef.current.has(id)) continue;
-        if (pendingQueueRef.current.some((r) => r.id === id)) continue;
+        if (pendingIdsRef.current.has(id)) continue;
 
         // Find the request
         const request = requestMapRef.current.get(id);
         if (!request) continue;
 
-        // Add to queue
+        // Add to queue and pending set
         pendingQueueRef.current.push(request);
+        pendingIdsRef.current.add(id);
         hasNewItems = true;
       }
 
@@ -260,11 +265,16 @@ export function useLazyThumbnails(
       observerRef.current.observe(element);
     }
 
+    // Capture refs for cleanup
+    const pendingIds = pendingIdsRef.current;
+    const activeExtractions = activeExtractionsRef.current;
+
     return () => {
       mountedRef.current = false;
       observerRef.current?.disconnect();
       pendingQueueRef.current = [];
-      activeExtractionsRef.current.clear();
+      pendingIds.clear();
+      activeExtractions.clear();
     };
   }, [handleIntersection, root, rootMargin]);
 

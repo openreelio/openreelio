@@ -62,7 +62,7 @@ export const FramePreview = memo(function FramePreview({
   const { getFrame, isExtracting, error: extractorError } = useFrameExtractor();
 
   const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastRequestRef = useRef<{ assetId: string; timeSec: number } | null>(null);
+  const lastSuccessRef = useRef<{ assetId: string; timeSec: number } | null>(null);
 
   /**
    * Debounced frame loading for smooth scrubbing
@@ -83,15 +83,15 @@ export const FramePreview = memo(function FramePreview({
     }
 
     debounceTimeoutRef.current = setTimeout(() => {
-      // Skip if same request
+      // Skip only if this exact request was already successfully loaded
+      // This allows re-attempts for failed requests
       if (
-        lastRequestRef.current?.assetId === asset.id &&
-        lastRequestRef.current?.timeSec === timeSec
+        lastSuccessRef.current?.assetId === asset.id &&
+        lastSuccessRef.current?.timeSec === timeSec
       ) {
         return;
       }
 
-      lastRequestRef.current = { assetId: asset.id, timeSec };
       setIsLoading(true);
       setError(null);
 
@@ -112,6 +112,8 @@ export const FramePreview = memo(function FramePreview({
             // Convert to Tauri asset protocol URL
             const src = convertFileSrc(framePath);
             setFrameSrc(src);
+            // Mark as successfully loaded to prevent redundant fetches
+            lastSuccessRef.current = { assetId: asset.id, timeSec };
             onFrameLoaded?.(framePath);
           } else {
             setError('Failed to extract frame');

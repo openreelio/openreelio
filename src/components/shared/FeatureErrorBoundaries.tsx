@@ -103,7 +103,7 @@ export function TimelineErrorBoundary({
   onReset,
 }: FeatureErrorBoundaryProps): JSX.Element {
   const handleError = (error: Error, errorInfo: ErrorInfo) => {
-    logger.error('Timeline error', { error: error.message, stack: error.stack });
+    logger.error('Timeline error', { error });
     onError?.(error, errorInfo);
   };
 
@@ -139,7 +139,7 @@ export function PreviewErrorBoundary({
   onReset,
 }: FeatureErrorBoundaryProps): JSX.Element {
   const handleError = (error: Error, errorInfo: ErrorInfo) => {
-    logger.error('Preview error', { error: error.message, stack: error.stack });
+    logger.error('Preview error', { error });
     onError?.(error, errorInfo);
   };
 
@@ -175,7 +175,7 @@ export function ExplorerErrorBoundary({
   onReset,
 }: FeatureErrorBoundaryProps): JSX.Element {
   const handleError = (error: Error, errorInfo: ErrorInfo) => {
-    logger.error('Explorer error', { error: error.message, stack: error.stack });
+    logger.error('Explorer error', { error });
     onError?.(error, errorInfo);
   };
 
@@ -211,7 +211,7 @@ export function InspectorErrorBoundary({
   onReset,
 }: FeatureErrorBoundaryProps): JSX.Element {
   const handleError = (error: Error, errorInfo: ErrorInfo) => {
-    logger.error('Inspector error', { error: error.message, stack: error.stack });
+    logger.error('Inspector error', { error });
     onError?.(error, errorInfo);
   };
 
