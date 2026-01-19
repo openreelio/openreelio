@@ -5,7 +5,7 @@
  * Uses the useAudioWaveform hook to generate and cache waveform images.
  */
 
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useAudioWaveform } from '@/hooks';
 import { createLogger } from '@/services/logger';
 
@@ -53,6 +53,43 @@ const MIN_WAVEFORM_WIDTH = 50;
 const DEFAULT_GENERATION_HEIGHT = 100;
 
 // =============================================================================
+// Helpers
+// =============================================================================
+
+function clampNumber(value: number, min: number, max: number): number {
+  if (!Number.isFinite(value)) return min;
+  return Math.min(max, Math.max(min, value));
+}
+
+function calculateClipRegionPercent({
+  sourceInSec,
+  sourceOutSec,
+  totalDurationSec,
+}: Pick<AudioClipWaveformProps, 'sourceInSec' | 'sourceOutSec' | 'totalDurationSec'>): {
+  offsetPercent: number;
+  widthPercent: number;
+} {
+  if (!totalDurationSec || totalDurationSec <= 0) {
+    return { offsetPercent: 0, widthPercent: 100 };
+  }
+
+  const clampedInSec = clampNumber(sourceInSec ?? 0, 0, totalDurationSec);
+  const clampedOutSec = clampNumber(sourceOutSec ?? totalDurationSec, 0, totalDurationSec);
+
+  if (clampedOutSec <= clampedInSec) {
+    return { offsetPercent: 0, widthPercent: 100 };
+  }
+
+  const offsetPercent = (clampedInSec / totalDurationSec) * 100;
+  const widthPercent = ((clampedOutSec - clampedInSec) / totalDurationSec) * 100;
+
+  return {
+    offsetPercent,
+    widthPercent: clampNumber(widthPercent, 0, 100),
+  };
+}
+
+// =============================================================================
 // Component
 // =============================================================================
 
@@ -72,65 +109,44 @@ export function AudioClipWaveform({
 }: AudioClipWaveformProps): JSX.Element | null {
   const [waveformSrc, setWaveformSrc] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [hasError, setHasError] = useState(false);
-  const mountedRef = useRef(true);
 
-  const { getWaveform, isGenerating } = useAudioWaveform();
+  const { getWaveform } = useAudioWaveform();
 
-  // Validate inputs
-  const isValid = useMemo(() => {
-    return assetId.length > 0 && inputPath.length > 0 && width >= MIN_WAVEFORM_WIDTH;
-  }, [assetId, inputPath, width]);
+  const shouldRequestWaveform =
+    assetId.length > 0 && inputPath.length > 0 && width >= MIN_WAVEFORM_WIDTH;
 
   // Calculate clip region as percentage of total duration
   const clipRegion = useMemo(() => {
-    if (!totalDurationSec || totalDurationSec <= 0) {
-      return { offsetPercent: 0, widthPercent: 100 };
-    }
-
-    const inSec = sourceInSec ?? 0;
-    const outSec = sourceOutSec ?? totalDurationSec;
-    const clipDuration = outSec - inSec;
-
-    const offsetPercent = (inSec / totalDurationSec) * 100;
-    const widthPercent = (clipDuration / totalDurationSec) * 100;
-
-    return { offsetPercent, widthPercent };
+    return calculateClipRegionPercent({ sourceInSec, sourceOutSec, totalDurationSec });
   }, [sourceInSec, sourceOutSec, totalDurationSec]);
 
   // Generate waveform on mount or when dependencies change
   useEffect(() => {
-    if (disabled || !isValid) return;
+    if (disabled || !shouldRequestWaveform) {
+      setIsLoading(false);
+      setWaveformSrc(null);
+      return;
+    }
 
-    // Track whether this effect is still the active one.
-    // This prevents stale results from overwriting newer requests.
     let isActive = true;
 
     // Reset state
     setIsLoading(true);
-    setHasError(false);
 
     const generateWaveform = async () => {
       try {
         // Request waveform generation at a standard height
         // We'll scale it in CSS for display
-        const result = await getWaveform(
-          assetId,
-          inputPath,
-          Math.max(width, MIN_WAVEFORM_WIDTH),
-          DEFAULT_GENERATION_HEIGHT
-        );
+        const result = await getWaveform(assetId, inputPath, width, DEFAULT_GENERATION_HEIGHT);
 
-        // Only apply result if this effect is still active and component is mounted
-        if (isActive && mountedRef.current) {
+        if (isActive) {
           setWaveformSrc(result);
           setIsLoading(false);
         }
       } catch (error) {
         logger.error('Failed to generate waveform', { error });
-        // Only apply error state if this effect is still active and component is mounted
-        if (isActive && mountedRef.current) {
-          setHasError(true);
+        if (isActive) {
+          setWaveformSrc(null);
           setIsLoading(false);
         }
       }
@@ -142,14 +158,7 @@ export function AudioClipWaveform({
     return () => {
       isActive = false;
     };
-  }, [assetId, inputPath, width, disabled, isValid, getWaveform]);
-
-  // Track mounted state for async operations
-  useEffect(() => {
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
+  }, [assetId, inputPath, width, disabled, shouldRequestWaveform, getWaveform]);
 
   // Don't render if disabled
   if (disabled) {
@@ -166,13 +175,15 @@ export function AudioClipWaveform({
   };
 
   // Waveform image styles with clip region calculation
+  const safeWidthPercent = clipRegion.widthPercent <= 0 ? 100 : clipRegion.widthPercent;
+  const scalePercent = (100 / safeWidthPercent) * 100;
   const imageStyle: React.CSSProperties = {
     position: 'absolute',
     top: 0,
     // Shift the image to show only the clipped region
     left: `-${clipRegion.offsetPercent}%`,
     // Scale the image so the visible portion fills the container
-    width: `${(100 / clipRegion.widthPercent) * 100}%`,
+    width: `${scalePercent}%`,
     height: '100%',
     objectFit: 'fill',
     ...(color && { filter: `drop-shadow(0 0 0 ${color})` }),
@@ -185,14 +196,17 @@ export function AudioClipWaveform({
       style={containerStyle}
     >
       {/* Loading indicator */}
-      {(isLoading || isGenerating) && showLoadingIndicator && (
-        <div className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-20">
+      {isLoading && showLoadingIndicator && (
+        <div
+          data-testid="waveform-loading"
+          className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-20"
+        >
           <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
         </div>
       )}
 
       {/* Waveform image */}
-      {waveformSrc && !isLoading && !hasError && (
+      {waveformSrc && !isLoading && (
         <img
           src={waveformSrc}
           alt=""
@@ -203,7 +217,7 @@ export function AudioClipWaveform({
       )}
 
       {/* Fallback pattern for error or loading state */}
-      {!waveformSrc && !isLoading && !hasError && (
+      {!waveformSrc && !isLoading && (
         <div
           className="absolute inset-0 opacity-30"
           style={{
