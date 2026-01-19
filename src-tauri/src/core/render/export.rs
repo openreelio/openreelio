@@ -683,7 +683,9 @@ impl ExportEngine {
         if !status.success() {
             // Get stderr from the drain task
             let stderr_msg = if let Some(handle) = stderr_handle {
-                handle.await.unwrap_or_else(|_| "Failed to read stderr".to_string())
+                handle
+                    .await
+                    .unwrap_or_else(|_| "Failed to read stderr".to_string())
             } else {
                 format!("FFmpeg exited with status: {}", status)
             };
@@ -821,7 +823,9 @@ impl ExportEngine {
         if !status.success() {
             // Get stderr from the drain task
             let stderr_msg = if let Some(handle) = stderr_handle {
-                handle.await.unwrap_or_else(|_| "Failed to read stderr".to_string())
+                handle
+                    .await
+                    .unwrap_or_else(|_| "Failed to read stderr".to_string())
             } else {
                 format!("FFmpeg exited with status: {}", status)
             };
