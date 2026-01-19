@@ -11,3 +11,10 @@ export {
   type FallbackProps,
   type WithErrorBoundaryOptions,
 } from './ErrorBoundary';
+
+export {
+  TimelineErrorBoundary,
+  PreviewErrorBoundary,
+  ExplorerErrorBoundary,
+  InspectorErrorBoundary,
+} from './FeatureErrorBoundaries';
