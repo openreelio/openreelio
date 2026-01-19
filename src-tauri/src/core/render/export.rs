@@ -563,6 +563,9 @@ impl ExportEngine {
     }
 
     /// Export a sequence to a video file
+    ///
+    /// Supports real-time progress reporting via the progress channel.
+    /// Progress updates are sent as FFmpeg processes frames.
     pub async fn export_sequence(
         &self,
         sequence: &Sequence,
@@ -570,24 +573,27 @@ impl ExportEngine {
         settings: &ExportSettings,
         progress_tx: Option<Sender<ExportProgress>>,
     ) -> Result<ExportResult, ExportError> {
+        use std::process::Stdio;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
         let start_time = std::time::Instant::now();
 
         // Build FFmpeg arguments
-        let args = self.build_complex_filter_args(sequence, assets, settings)?;
+        let mut args = self.build_complex_filter_args(sequence, assets, settings)?;
 
         // Calculate total duration based on the last clip end time on timeline
-        let total_duration: f64 = sequence
-            .tracks
-            .iter()
-            .flat_map(|t| &t.clips)
-            .map(|c| {
-                let clip_duration =
-                    (c.range.source_out_sec - c.range.source_in_sec) / c.speed as f64;
-                c.place.timeline_in_sec + clip_duration
-            })
-            .fold(0.0, f64::max);
+        let total_duration: f64 = sequence.duration();
         let fps = settings.fps.unwrap_or(30.0);
         let total_frames = (total_duration * fps) as u64;
+
+        // Add progress output to stdout for real-time tracking
+        // Insert before output path (last argument)
+        let output_path_arg = args.pop().ok_or_else(|| {
+            ExportError::InvalidSettings("No output path in FFmpeg arguments".to_string())
+        })?;
+        args.push("-progress".to_string());
+        args.push("pipe:1".to_string());
+        args.push(output_path_arg);
 
         // Send initial progress
         if let Some(ref tx) = progress_tx {
@@ -603,36 +609,82 @@ impl ExportEngine {
                 .await;
         }
 
-        // Run FFmpeg
-        let output = tokio::process::Command::new(self.ffmpeg.info().ffmpeg_path.as_path())
-            .args(&args)
-            .output()
-            .await
-            .map_err(|e| ExportError::FFmpegFailed(e.to_string()))?;
+        // Spawn FFmpeg process with piped stdout for progress
+        let mut cmd = tokio::process::Command::new(self.ffmpeg.info().ffmpeg_path.as_path());
+        cmd.args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ExportError::FFmpegFailed(stderr.to_string()));
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ExportError::FFmpegFailed(format!("Failed to spawn FFmpeg: {}", e)))?;
+
+        // Handle progress if channel provided
+        if let Some(tx) = progress_tx {
+            if let Some(stdout) = child.stdout.take() {
+                let total_dur = total_duration;
+                let total_frm = total_frames;
+
+                // Spawn progress parsing task
+                tokio::spawn(async move {
+                    let reader = BufReader::new(stdout);
+                    let mut lines = reader.lines();
+                    let mut progress_data = FFmpegProgressData::default();
+
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let is_progress_line =
+                            parse_ffmpeg_progress_line(&line, &mut progress_data);
+
+                        // Send update on progress= lines (block boundary)
+                        if is_progress_line && line.starts_with("progress=") {
+                            let progress =
+                                calculate_export_progress(&progress_data, total_dur, total_frm);
+
+                            if tx.send(progress).await.is_err() {
+                                // Channel closed, stop parsing
+                                break;
+                            }
+                        }
+                    }
+
+                    // Send final progress
+                    let _ = tx
+                        .send(ExportProgress {
+                            frame: total_frm,
+                            total_frames: total_frm,
+                            percent: 100.0,
+                            fps: 0.0,
+                            eta_seconds: 0,
+                            message: "Export complete!".to_string(),
+                        })
+                        .await;
+                });
+            }
+        }
+
+        // Wait for FFmpeg to complete
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| ExportError::FFmpegFailed(format!("Failed to wait for FFmpeg: {}", e)))?;
+
+        if !status.success() {
+            // Try to get stderr for error details
+            let stderr_msg = if let Some(mut stderr) = child.stderr.take() {
+                let mut buf = Vec::new();
+                use tokio::io::AsyncReadExt;
+                let _ = stderr.read_to_end(&mut buf).await;
+                String::from_utf8_lossy(&buf).to_string()
+            } else {
+                format!("FFmpeg exited with status: {}", status)
+            };
+            return Err(ExportError::FFmpegFailed(stderr_msg));
         }
 
         // Get file info
         let file_size = std::fs::metadata(&settings.output_path)
             .map(|m| m.len())
             .unwrap_or(0);
-
-        // Send completion progress
-        if let Some(ref tx) = progress_tx {
-            let _ = tx
-                .send(ExportProgress {
-                    frame: total_frames,
-                    total_frames,
-                    percent: 100.0,
-                    fps: 0.0,
-                    eta_seconds: 0,
-                    message: "Export complete!".to_string(),
-                })
-                .await;
-        }
 
         Ok(ExportResult {
             output_path: settings.output_path.clone(),
@@ -643,21 +695,35 @@ impl ExportEngine {
     }
 
     /// Export a single asset (simple transcode)
+    ///
+    /// Supports real-time progress reporting via the progress channel.
     pub async fn export_asset(
         &self,
         asset: &Asset,
         settings: &ExportSettings,
         progress_tx: Option<Sender<ExportProgress>>,
     ) -> Result<ExportResult, ExportError> {
+        use std::process::Stdio;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
         let start_time = std::time::Instant::now();
 
         let input_path = Path::new(&asset.uri);
-        let args = self.build_simple_export_args(input_path, settings);
+        let mut args = self.build_simple_export_args(input_path, settings);
 
         // Calculate total frames
         let duration = asset.duration_sec.unwrap_or(0.0);
         let fps = settings.fps.unwrap_or(30.0);
         let total_frames = (duration * fps) as u64;
+
+        // Add progress output to stdout for real-time tracking
+        // Insert before output path (last argument)
+        let output_path_arg = args.pop().ok_or_else(|| {
+            ExportError::InvalidSettings("No output path in FFmpeg arguments".to_string())
+        })?;
+        args.push("-progress".to_string());
+        args.push("pipe:1".to_string());
+        args.push(output_path_arg);
 
         // Send initial progress
         if let Some(ref tx) = progress_tx {
@@ -673,36 +739,80 @@ impl ExportEngine {
                 .await;
         }
 
-        // Run FFmpeg
-        let output = tokio::process::Command::new(self.ffmpeg.info().ffmpeg_path.as_path())
-            .args(&args)
-            .output()
-            .await
-            .map_err(|e| ExportError::FFmpegFailed(e.to_string()))?;
+        // Spawn FFmpeg process with piped stdout for progress
+        let mut cmd = tokio::process::Command::new(self.ffmpeg.info().ffmpeg_path.as_path());
+        cmd.args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ExportError::FFmpegFailed(stderr.to_string()));
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ExportError::FFmpegFailed(format!("Failed to spawn FFmpeg: {}", e)))?;
+
+        // Handle progress if channel provided
+        if let Some(tx) = progress_tx {
+            if let Some(stdout) = child.stdout.take() {
+                let total_dur = duration;
+                let total_frm = total_frames;
+
+                // Spawn progress parsing task
+                tokio::spawn(async move {
+                    let reader = BufReader::new(stdout);
+                    let mut lines = reader.lines();
+                    let mut progress_data = FFmpegProgressData::default();
+
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let is_progress_line =
+                            parse_ffmpeg_progress_line(&line, &mut progress_data);
+
+                        // Send update on progress= lines (block boundary)
+                        if is_progress_line && line.starts_with("progress=") {
+                            let progress =
+                                calculate_export_progress(&progress_data, total_dur, total_frm);
+
+                            if tx.send(progress).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+
+                    // Send final progress
+                    let _ = tx
+                        .send(ExportProgress {
+                            frame: total_frm,
+                            total_frames: total_frm,
+                            percent: 100.0,
+                            fps: 0.0,
+                            eta_seconds: 0,
+                            message: "Export complete!".to_string(),
+                        })
+                        .await;
+                });
+            }
+        }
+
+        // Wait for FFmpeg to complete
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| ExportError::FFmpegFailed(format!("Failed to wait for FFmpeg: {}", e)))?;
+
+        if !status.success() {
+            let stderr_msg = if let Some(mut stderr) = child.stderr.take() {
+                let mut buf = Vec::new();
+                use tokio::io::AsyncReadExt;
+                let _ = stderr.read_to_end(&mut buf).await;
+                String::from_utf8_lossy(&buf).to_string()
+            } else {
+                format!("FFmpeg exited with status: {}", status)
+            };
+            return Err(ExportError::FFmpegFailed(stderr_msg));
         }
 
         // Get file info
         let file_size = std::fs::metadata(&settings.output_path)
             .map(|m| m.len())
             .unwrap_or(0);
-
-        // Send completion progress
-        if let Some(ref tx) = progress_tx {
-            let _ = tx
-                .send(ExportProgress {
-                    frame: total_frames,
-                    total_frames,
-                    percent: 100.0,
-                    fps: 0.0,
-                    eta_seconds: 0,
-                    message: "Export complete!".to_string(),
-                })
-                .await;
-        }
 
         Ok(ExportResult {
             output_path: settings.output_path.clone(),
@@ -714,12 +824,531 @@ impl ExportEngine {
 }
 
 // =============================================================================
+// Progress Parsing
+// =============================================================================
+
+/// Parsed FFmpeg progress line data
+#[derive(Debug, Clone, Default)]
+pub struct FFmpegProgressData {
+    /// Current frame number
+    pub frame: u64,
+    /// Current FPS
+    pub fps: f32,
+    /// Current time in seconds
+    pub time_sec: f64,
+    /// Bitrate in kbps
+    pub bitrate_kbps: Option<f32>,
+    /// Speed multiplier (e.g., 2.5x)
+    pub speed: Option<f32>,
+}
+
+/// Parse FFmpeg progress output line
+///
+/// FFmpeg progress output format (when using -progress pipe:1):
+/// ```text
+/// frame=100
+/// fps=30.0
+/// out_time_ms=3333333
+/// bitrate=1234.5kbits/s
+/// speed=2.5x
+/// progress=continue
+/// ```
+pub fn parse_ffmpeg_progress_line(line: &str, data: &mut FFmpegProgressData) -> bool {
+    let line = line.trim();
+
+    if let Some(value) = line.strip_prefix("frame=") {
+        data.frame = value.trim().parse().unwrap_or(data.frame);
+        return true;
+    }
+
+    if let Some(value) = line.strip_prefix("fps=") {
+        data.fps = value.trim().parse().unwrap_or(data.fps);
+        return true;
+    }
+
+    if let Some(value) = line.strip_prefix("out_time_ms=") {
+        // out_time_ms is in microseconds despite the name
+        let microseconds: u64 = value.trim().parse().unwrap_or(0);
+        data.time_sec = microseconds as f64 / 1_000_000.0;
+        return true;
+    }
+
+    if let Some(value) = line.strip_prefix("bitrate=") {
+        // Format: "1234.5kbits/s" or "N/A"
+        if let Some(num_str) = value.strip_suffix("kbits/s") {
+            data.bitrate_kbps = num_str.trim().parse().ok();
+        }
+        return true;
+    }
+
+    if let Some(value) = line.strip_prefix("speed=") {
+        // Format: "2.5x" or "N/A"
+        if let Some(num_str) = value.strip_suffix('x') {
+            data.speed = num_str.trim().parse().ok();
+        }
+        return true;
+    }
+
+    // Return true for "progress=" lines to indicate a progress block boundary
+    line.starts_with("progress=")
+}
+
+/// Calculate export progress from parsed data
+pub fn calculate_export_progress(
+    data: &FFmpegProgressData,
+    total_duration_sec: f64,
+    total_frames: u64,
+) -> ExportProgress {
+    let percent = if total_duration_sec > 0.0 {
+        ((data.time_sec / total_duration_sec) * 100.0).min(100.0) as f32
+    } else if total_frames > 0 {
+        ((data.frame as f64 / total_frames as f64) * 100.0).min(100.0) as f32
+    } else {
+        0.0
+    };
+
+    let eta_seconds = if data.fps > 0.0 && total_duration_sec > 0.0 {
+        let remaining_time = total_duration_sec - data.time_sec;
+        let remaining_frames = (remaining_time * data.fps as f64) as u64;
+        if data.fps > 0.0 {
+            (remaining_frames as f32 / data.fps) as u64
+        } else {
+            0
+        }
+    } else if let Some(speed) = data.speed {
+        if speed > 0.0 && total_duration_sec > 0.0 {
+            let remaining_time = total_duration_sec - data.time_sec;
+            (remaining_time / speed as f64) as u64
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
+    let message = format!("Encoding frame {} ({:.1} fps)", data.frame, data.fps);
+
+    ExportProgress {
+        frame: data.frame,
+        total_frames,
+        percent,
+        fps: data.fps,
+        eta_seconds,
+        message,
+    }
+}
+
+// =============================================================================
+// Export Validation
+// =============================================================================
+
+/// Validation result for export settings
+#[derive(Debug, Clone)]
+pub struct ExportValidation {
+    /// Whether the export can proceed
+    pub is_valid: bool,
+    /// List of validation errors
+    pub errors: Vec<String>,
+    /// List of warnings (non-blocking)
+    pub warnings: Vec<String>,
+}
+
+impl ExportValidation {
+    /// Create a valid result
+    pub fn valid() -> Self {
+        Self {
+            is_valid: true,
+            errors: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Create an invalid result with errors
+    pub fn invalid(errors: Vec<String>) -> Self {
+        Self {
+            is_valid: false,
+            errors,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// Add an error
+    pub fn add_error(&mut self, error: impl Into<String>) {
+        self.errors.push(error.into());
+        self.is_valid = false;
+    }
+
+    /// Add a warning
+    pub fn add_warning(&mut self, warning: impl Into<String>) {
+        self.warnings.push(warning.into());
+    }
+}
+
+/// Validate export settings before starting export
+pub fn validate_export_settings(
+    sequence: &Sequence,
+    assets: &std::collections::HashMap<String, Asset>,
+    settings: &ExportSettings,
+) -> ExportValidation {
+    let mut validation = ExportValidation::valid();
+
+    // Check for empty sequence
+    let total_clips: usize = sequence.tracks.iter().map(|t| t.clips.len()).sum();
+    if total_clips == 0 {
+        validation.add_error("Sequence has no clips to export");
+        return validation;
+    }
+
+    // Check all clip assets exist
+    for track in &sequence.tracks {
+        for clip in &track.clips {
+            if !assets.contains_key(&clip.asset_id) {
+                validation.add_error(format!(
+                    "Asset '{}' not found for clip '{}'",
+                    clip.asset_id, clip.id
+                ));
+            }
+        }
+    }
+
+    // Check output directory exists
+    if let Some(parent) = settings.output_path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            validation.add_error(format!(
+                "Output directory does not exist: {}",
+                parent.display()
+            ));
+        }
+    }
+
+    // Check for timeline gaps (warning, not error)
+    let gaps = detect_timeline_gaps(sequence);
+    if !gaps.is_empty() {
+        validation.add_warning(format!(
+            "Timeline has {} gap(s). Black frames will be inserted.",
+            gaps.len()
+        ));
+    }
+
+    validation
+}
+
+/// Timeline gap information
+#[derive(Debug, Clone)]
+pub struct TimelineGap {
+    /// Start time of the gap in seconds
+    pub start_sec: f64,
+    /// End time of the gap in seconds
+    pub end_sec: f64,
+    /// Duration of the gap
+    pub duration_sec: f64,
+}
+
+/// Detect gaps in the timeline between clips
+pub fn detect_timeline_gaps(sequence: &Sequence) -> Vec<TimelineGap> {
+    let mut gaps = Vec::new();
+
+    // Collect all video clip intervals sorted by start time
+    let mut intervals: Vec<(f64, f64)> = Vec::new();
+
+    for track in &sequence.tracks {
+        if track.kind != TrackKind::Video {
+            continue;
+        }
+
+        for clip in &track.clips {
+            let start = clip.place.timeline_in_sec;
+            let end = clip.place.timeline_out_sec();
+            intervals.push((start, end));
+        }
+    }
+
+    if intervals.is_empty() {
+        return gaps;
+    }
+
+    // Sort by start time
+    intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Merge overlapping intervals and detect gaps
+    let mut merged: Vec<(f64, f64)> = Vec::new();
+    for (start, end) in intervals {
+        if let Some(last) = merged.last_mut() {
+            if start <= last.1 + 0.001 {
+                // Overlapping or adjacent (with small tolerance)
+                last.1 = last.1.max(end);
+            } else {
+                // Gap detected
+                gaps.push(TimelineGap {
+                    start_sec: last.1,
+                    end_sec: start,
+                    duration_sec: start - last.1,
+                });
+                merged.push((start, end));
+            }
+        } else {
+            // First interval - check for gap at the beginning
+            if start > 0.001 {
+                gaps.push(TimelineGap {
+                    start_sec: 0.0,
+                    end_sec: start,
+                    duration_sec: start,
+                });
+            }
+            merged.push((start, end));
+        }
+    }
+
+    gaps
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------------
+    // Progress Parsing Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_ffmpeg_progress_frame() {
+        let mut data = FFmpegProgressData::default();
+
+        assert!(parse_ffmpeg_progress_line("frame=100", &mut data));
+        assert_eq!(data.frame, 100);
+
+        assert!(parse_ffmpeg_progress_line("frame=999999", &mut data));
+        assert_eq!(data.frame, 999999);
+    }
+
+    #[test]
+    fn test_parse_ffmpeg_progress_fps() {
+        let mut data = FFmpegProgressData::default();
+
+        assert!(parse_ffmpeg_progress_line("fps=30.5", &mut data));
+        assert!((data.fps - 30.5).abs() < 0.01);
+
+        assert!(parse_ffmpeg_progress_line("fps=60", &mut data));
+        assert!((data.fps - 60.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_ffmpeg_progress_time() {
+        let mut data = FFmpegProgressData::default();
+
+        // out_time_ms is in microseconds (FFmpeg quirk)
+        assert!(parse_ffmpeg_progress_line("out_time_ms=5000000", &mut data));
+        assert!((data.time_sec - 5.0).abs() < 0.001);
+
+        assert!(parse_ffmpeg_progress_line(
+            "out_time_ms=30500000",
+            &mut data
+        ));
+        assert!((data.time_sec - 30.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_parse_ffmpeg_progress_bitrate() {
+        let mut data = FFmpegProgressData::default();
+
+        assert!(parse_ffmpeg_progress_line(
+            "bitrate=8500.5kbits/s",
+            &mut data
+        ));
+        assert!((data.bitrate_kbps.unwrap() - 8500.5).abs() < 0.1);
+
+        // N/A case
+        assert!(parse_ffmpeg_progress_line("bitrate=N/A", &mut data));
+    }
+
+    #[test]
+    fn test_parse_ffmpeg_progress_speed() {
+        let mut data = FFmpegProgressData::default();
+
+        assert!(parse_ffmpeg_progress_line("speed=2.5x", &mut data));
+        assert!((data.speed.unwrap() - 2.5).abs() < 0.01);
+
+        assert!(parse_ffmpeg_progress_line("speed=0.95x", &mut data));
+        assert!((data.speed.unwrap() - 0.95).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_ffmpeg_progress_complete_block() {
+        let mut data = FFmpegProgressData::default();
+
+        let lines = [
+            "frame=150",
+            "fps=29.97",
+            "out_time_ms=5005005",
+            "bitrate=8000kbits/s",
+            "speed=1.5x",
+            "progress=continue",
+        ];
+
+        for line in lines {
+            parse_ffmpeg_progress_line(line, &mut data);
+        }
+
+        assert_eq!(data.frame, 150);
+        assert!((data.fps - 29.97).abs() < 0.01);
+        assert!((data.time_sec - 5.005005).abs() < 0.001);
+        assert!((data.bitrate_kbps.unwrap() - 8000.0).abs() < 0.1);
+        assert!((data.speed.unwrap() - 1.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_calculate_export_progress_by_duration() {
+        let data = FFmpegProgressData {
+            frame: 150,
+            fps: 30.0,
+            time_sec: 5.0,
+            bitrate_kbps: Some(8000.0),
+            speed: Some(2.0),
+        };
+
+        let progress = calculate_export_progress(&data, 10.0, 300);
+
+        assert_eq!(progress.frame, 150);
+        assert!((progress.percent - 50.0).abs() < 0.1);
+        assert!(progress.fps > 0.0);
+    }
+
+    #[test]
+    fn test_calculate_export_progress_by_frames() {
+        let data = FFmpegProgressData {
+            frame: 250,
+            fps: 30.0,
+            time_sec: 0.0, // No time info
+            bitrate_kbps: None,
+            speed: None,
+        };
+
+        let progress = calculate_export_progress(&data, 0.0, 1000);
+
+        assert_eq!(progress.frame, 250);
+        assert!((progress.percent - 25.0).abs() < 0.1);
+    }
+
+    // -------------------------------------------------------------------------
+    // Validation Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_validation_empty_sequence() {
+        use crate::core::timeline::SequenceFormat;
+
+        let sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let assets = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        let validation = validate_export_settings(&sequence, &assets, &settings);
+
+        assert!(!validation.is_valid);
+        assert!(validation.errors.iter().any(|e| e.contains("no clips")));
+    }
+
+    #[test]
+    fn test_validation_missing_asset() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let clip = Clip::new("missing_asset")
+            .with_source_range(0.0, 10.0)
+            .place_at(0.0);
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let assets = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        let validation = validate_export_settings(&sequence, &assets, &settings);
+
+        assert!(!validation.is_valid);
+        assert!(validation.errors.iter().any(|e| e.contains("not found")));
+    }
+
+    // -------------------------------------------------------------------------
+    // Timeline Gap Detection Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_detect_timeline_gaps_no_gaps() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let clip1 = Clip::new("asset1")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        let clip2 = Clip::new("asset2")
+            .with_source_range(0.0, 5.0)
+            .place_at(5.0);
+
+        track.add_clip(clip1);
+        track.add_clip(clip2);
+        sequence.add_track(track);
+
+        let gaps = detect_timeline_gaps(&sequence);
+        assert!(gaps.is_empty());
+    }
+
+    #[test]
+    fn test_detect_timeline_gaps_with_gap() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let clip1 = Clip::new("asset1")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        let clip2 = Clip::new("asset2")
+            .with_source_range(0.0, 5.0)
+            .place_at(8.0); // Gap of 3 seconds
+
+        track.add_clip(clip1);
+        track.add_clip(clip2);
+        sequence.add_track(track);
+
+        let gaps = detect_timeline_gaps(&sequence);
+
+        assert_eq!(gaps.len(), 1);
+        assert!((gaps[0].start_sec - 5.0).abs() < 0.001);
+        assert!((gaps[0].end_sec - 8.0).abs() < 0.001);
+        assert!((gaps[0].duration_sec - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_detect_timeline_gaps_at_beginning() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let clip = Clip::new("asset1")
+            .with_source_range(0.0, 5.0)
+            .place_at(2.0); // Starts at 2 seconds
+
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let gaps = detect_timeline_gaps(&sequence);
+
+        assert_eq!(gaps.len(), 1);
+        assert!((gaps[0].start_sec - 0.0).abs() < 0.001);
+        assert!((gaps[0].end_sec - 2.0).abs() < 0.001);
+    }
+
+    // -------------------------------------------------------------------------
+    // Preset Tests
+    // -------------------------------------------------------------------------
 
     #[test]
     fn test_export_preset_youtube_1080p() {
