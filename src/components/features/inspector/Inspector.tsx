@@ -5,9 +5,11 @@
  * Displays and allows editing of properties.
  */
 
-import { useMemo } from 'react';
+import { useMemo, useState, useCallback } from 'react';
 import { Film, Music, Image as ImageIcon, FileText, Info, Clock, Maximize } from 'lucide-react';
 import { formatDuration } from '@/utils';
+import { EffectsList } from '../effects';
+import type { Effect, EffectId } from '@/types';
 
 // =============================================================================
 // Types
@@ -26,6 +28,8 @@ export interface SelectedClip {
     trackId: string;
     timelineInSec: number;
   };
+  /** Effects applied to this clip */
+  effects?: Effect[];
 }
 
 /** Asset selection data */
@@ -49,6 +53,12 @@ export interface InspectorProps {
   selectedAsset?: SelectedAsset;
   /** Callback when clip property changes */
   onClipChange?: (clipId: string, property: string, value: unknown) => void;
+  /** Callback when an effect is toggled */
+  onEffectToggle?: (clipId: string, effectId: EffectId, enabled: boolean) => void;
+  /** Callback when an effect is removed */
+  onEffectRemove?: (clipId: string, effectId: EffectId) => void;
+  /** Callback when add effect is requested */
+  onAddEffect?: (clipId: string) => void;
 }
 
 // =============================================================================
@@ -108,7 +118,16 @@ function PropertyRow({ label, value, testId, icon }: PropertyRowProps): JSX.Elem
 export function Inspector({
   selectedClip,
   selectedAsset,
+  onEffectToggle,
+  onEffectRemove,
+  onAddEffect,
 }: InspectorProps): JSX.Element {
+  // ===========================================================================
+  // State
+  // ===========================================================================
+
+  const [selectedEffectId, setSelectedEffectId] = useState<EffectId | undefined>();
+
   // ===========================================================================
   // Computed Values
   // ===========================================================================
@@ -117,6 +136,42 @@ export function Inspector({
     if (!selectedClip) return null;
     return selectedClip.range.sourceOutSec - selectedClip.range.sourceInSec;
   }, [selectedClip]);
+
+  // ===========================================================================
+  // Handlers
+  // ===========================================================================
+
+  const handleEffectSelect = useCallback((effectId: EffectId) => {
+    setSelectedEffectId(effectId);
+  }, []);
+
+  const handleEffectToggle = useCallback(
+    (effectId: EffectId, enabled: boolean) => {
+      if (selectedClip && onEffectToggle) {
+        onEffectToggle(selectedClip.id, effectId, enabled);
+      }
+    },
+    [selectedClip, onEffectToggle]
+  );
+
+  const handleEffectRemove = useCallback(
+    (effectId: EffectId) => {
+      if (selectedClip && onEffectRemove) {
+        onEffectRemove(selectedClip.id, effectId);
+      }
+      // Clear selection if removed effect was selected
+      if (effectId === selectedEffectId) {
+        setSelectedEffectId(undefined);
+      }
+    },
+    [selectedClip, onEffectRemove, selectedEffectId]
+  );
+
+  const handleAddEffect = useCallback(() => {
+    if (selectedClip && onAddEffect) {
+      onAddEffect(selectedClip.id);
+    }
+  }, [selectedClip, onAddEffect]);
 
   // ===========================================================================
   // Render Empty State
@@ -184,6 +239,18 @@ export function Inspector({
             label="Timeline Position"
             value={formatDuration(selectedClip.place.timelineInSec)}
             testId="clip-timeline-position"
+          />
+        </div>
+
+        {/* Effects Section */}
+        <div className="mt-6 pt-4 border-t border-editor-border">
+          <EffectsList
+            effects={selectedClip.effects ?? []}
+            selectedEffectId={selectedEffectId}
+            onSelectEffect={handleEffectSelect}
+            onToggleEffect={onEffectToggle ? handleEffectToggle : undefined}
+            onRemoveEffect={onEffectRemove ? handleEffectRemove : undefined}
+            onAddEffect={onAddEffect ? handleAddEffect : undefined}
           />
         </div>
       </div>
