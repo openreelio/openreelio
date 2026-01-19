@@ -38,8 +38,12 @@ export { TimelineToolbar } from './TimelineToolbar';
 export type { TimelineToolbarProps } from './TimelineToolbar';
 export { ThumbnailStrip } from './ThumbnailStrip';
 export type { ThumbnailStripProps } from './ThumbnailStrip';
+export { LazyThumbnailStrip } from './LazyThumbnailStrip';
+export type { LazyThumbnailStripProps } from './LazyThumbnailStrip';
 export { AudioClipWaveform } from './AudioClipWaveform';
 export type { AudioClipWaveformProps } from './AudioClipWaveform';
+export { VirtualizedTrack } from './VirtualizedTrack';
+export type { VirtualizedTrackProps } from './VirtualizedTrack';
 
 // Layer components
 export { DragPreviewLayer } from './DragPreviewLayer';

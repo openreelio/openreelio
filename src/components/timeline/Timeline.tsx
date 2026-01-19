@@ -5,7 +5,7 @@
  * Uses TimelineEngine for playback control and grid snapping for interactions.
  */
 
-import { useState, useCallback, useRef, useMemo, type MouseEvent } from 'react';
+import { useState, useCallback, useRef, useMemo, useLayoutEffect, type MouseEvent } from 'react';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineEngine } from '@/hooks/useTimelineEngine';
@@ -70,6 +70,32 @@ export function Timeline({
   // ===========================================================================
   const tracksAreaRef = useRef<HTMLDivElement>(null);
   const [activeSnapPoint, setActiveSnapPoint] = useState<SnapPoint | null>(null);
+  const [viewportWidth, setViewportWidth] = useState(0);
+
+  // ===========================================================================
+  // Viewport Width Measurement (for clip virtualization)
+  // ===========================================================================
+  useLayoutEffect(() => {
+    const element = tracksAreaRef.current;
+    if (!element) return;
+
+    // Initial measurement
+    setViewportWidth(element.clientWidth - TRACK_HEADER_WIDTH);
+
+    // Observe resize changes
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const width = entry.contentRect.width - TRACK_HEADER_WIDTH;
+        setViewportWidth(Math.max(0, width));
+      }
+    });
+
+    resizeObserver.observe(element);
+
+    return () => {
+      resizeObserver.disconnect();
+    };
+  }, []);
 
   // ===========================================================================
   // Derived Values
@@ -285,6 +311,7 @@ export function Timeline({
               zoom={zoom}
               scrollX={scrollX}
               duration={duration}
+              viewportWidth={viewportWidth}
               selectedClipIds={selectedClipIds}
               getClipWaveformConfig={getClipWaveformConfig}
               onClipClick={handleClipClick}
