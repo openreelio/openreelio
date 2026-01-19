@@ -103,10 +103,26 @@ export function ParameterEditor({
   const isBoolean = isBooleanParam(paramDef);
   const isInteger = isIntegerParam(paramDef);
 
+  // Compute numeric values (used for non-boolean params, but computed always for hooks)
+  const numericValue = typeof value === 'number' ? value : 0;
+
+  // All hooks must be called unconditionally at the top level
   const showResetButton = useMemo(
     () => isDifferentFromDefault(value, paramDef.default),
     [value, paramDef.default]
   );
+
+  // Local state for text input to allow typing negative/decimal values
+  // (e.g., "-" or "0." which would be invalid as immediate numbers)
+  const [inputText, setInputText] = useState(String(numericValue));
+  const [isEditing, setIsEditing] = useState(false);
+
+  // Sync local text with external value when not editing
+  useEffect(() => {
+    if (!isEditing && !isBoolean) {
+      setInputText(String(numericValue));
+    }
+  }, [numericValue, isEditing, isBoolean]);
 
   // Handle numeric value change
   const handleNumericChange = useCallback(
@@ -137,6 +153,29 @@ export function ParameterEditor({
     const defaultValue = getDefaultSimpleValue(paramDef.default);
     onChange(paramDef.name, defaultValue);
   }, [paramDef.name, paramDef.default, onChange]);
+
+  // Commit the text input value
+  const commitInputValue = useCallback(() => {
+    const parsed = parseFloat(inputText);
+    if (!Number.isNaN(parsed)) {
+      handleNumericChange(parsed);
+    } else {
+      // Reset to current value if invalid
+      setInputText(String(numericValue));
+    }
+    setIsEditing(false);
+  }, [inputText, numericValue, handleNumericChange]);
+
+  // Handle key down for Enter key
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === 'Enter') {
+        commitInputValue();
+        e.currentTarget.blur();
+      }
+    },
+    [commitInputValue]
+  );
 
   // Render boolean toggle
   if (isBoolean) {
@@ -171,47 +210,11 @@ export function ParameterEditor({
   }
 
   // Render numeric slider + input
-  const numericValue = typeof value === 'number' ? value : 0;
   const min = paramDef.min ?? 0;
   const max = paramDef.max ?? 100;
   const step = paramDef.step ?? (isInteger ? 1 : 0.01);
   const inputId = `param-${paramDef.name}`;
   const sliderId = `param-slider-${paramDef.name}`;
-
-  // Local state for text input to allow typing negative/decimal values
-  // (e.g., "-" or "0." which would be invalid as immediate numbers)
-  const [inputText, setInputText] = useState(String(numericValue));
-  const [isEditing, setIsEditing] = useState(false);
-
-  // Sync local text with external value when not editing
-  useEffect(() => {
-    if (!isEditing) {
-      setInputText(String(numericValue));
-    }
-  }, [numericValue, isEditing]);
-
-  // Commit the text input value
-  const commitInputValue = useCallback(() => {
-    const parsed = parseFloat(inputText);
-    if (!Number.isNaN(parsed)) {
-      handleNumericChange(parsed);
-    } else {
-      // Reset to current value if invalid
-      setInputText(String(numericValue));
-    }
-    setIsEditing(false);
-  }, [inputText, numericValue, handleNumericChange]);
-
-  // Handle key down for Enter key
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLInputElement>) => {
-      if (e.key === 'Enter') {
-        commitInputValue();
-        e.currentTarget.blur();
-      }
-    },
-    [commitInputValue]
-  );
 
   return (
     <div className="py-1.5">
