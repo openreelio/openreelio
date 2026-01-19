@@ -67,6 +67,13 @@ export interface Logger {
 }
 
 // =============================================================================
+// Constants
+// =============================================================================
+
+/** Maximum number of log entries to keep in history buffer */
+const MAX_LOG_HISTORY = 100;
+
+// =============================================================================
 // Module State
 // =============================================================================
 
@@ -78,6 +85,9 @@ const handlers: Set<LogHandler> = new Set();
 
 /** Active performance timers */
 const timers: Map<string, Map<string, number>> = new Map();
+
+/** Circular buffer of recent log entries for error reporting */
+const logHistory: LogEntry[] = [];
 
 // =============================================================================
 // Handler Management
@@ -132,6 +142,97 @@ export function getGlobalLogLevel(): LogLevel {
 }
 
 // =============================================================================
+// Utilities
+// =============================================================================
+
+/**
+ * Serialize an Error object into a plain object for logging.
+ * Error objects don't serialize well to JSON by default.
+ *
+ * @param error - Error to serialize
+ * @returns Plain object with error properties
+ */
+export function serializeError(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    const baseInfo: Record<string, unknown> = {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+    };
+    // Include any custom properties
+    Object.getOwnPropertyNames(error).forEach((key) => {
+      if (!['name', 'message', 'stack'].includes(key)) {
+        baseInfo[key] = (error as unknown as Record<string, unknown>)[key];
+      }
+    });
+    return baseInfo;
+  }
+
+  if (typeof error === 'string') {
+    return { message: error };
+  }
+
+  return { value: error };
+}
+
+/** Maximum depth for recursive normalization to prevent stack overflow */
+const MAX_NORMALIZATION_DEPTH = 10;
+
+/**
+ * Normalize log data, serializing any Error objects.
+ * Handles circular references by tracking visited objects.
+ *
+ * @param data - Data to normalize
+ * @param seen - WeakSet to track visited objects (for circular reference detection)
+ * @param depth - Current recursion depth
+ * @returns Normalized data with serialized errors
+ */
+function normalizeLogData(
+  data?: Record<string, unknown>,
+  seen: WeakSet<object> = new WeakSet(),
+  depth: number = 0
+): Record<string, unknown> | undefined {
+  if (!data) return undefined;
+
+  // Prevent infinite recursion
+  if (depth > MAX_NORMALIZATION_DEPTH) {
+    return { _truncated: true, _reason: 'Max depth exceeded' };
+  }
+
+  // Detect circular reference
+  if (seen.has(data)) {
+    return { _circular: true };
+  }
+
+  seen.add(data);
+
+  const normalized: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(data)) {
+    if (value instanceof Error) {
+      normalized[key] = serializeError(value);
+    } else if (Array.isArray(value)) {
+      // Handle arrays separately
+      normalized[key] = value.map((item) => {
+        if (item instanceof Error) {
+          return serializeError(item);
+        } else if (typeof item === 'object' && item !== null) {
+          return normalizeLogData(item as Record<string, unknown>, seen, depth + 1);
+        }
+        return item;
+      });
+    } else if (typeof value === 'object' && value !== null) {
+      // Recursively check nested objects for Error instances
+      normalized[key] = normalizeLogData(value as Record<string, unknown>, seen, depth + 1);
+    } else {
+      normalized[key] = value;
+    }
+  }
+
+  return normalized;
+}
+
+// =============================================================================
 // Internal Logging
 // =============================================================================
 
@@ -142,6 +243,12 @@ function processLog(entry: LogEntry): void {
   // Check if this log level should be processed
   if (entry.level < globalLogLevel) {
     return;
+  }
+
+  // Add to history buffer (circular, keeps last MAX_LOG_HISTORY entries)
+  logHistory.push(entry);
+  if (logHistory.length > MAX_LOG_HISTORY) {
+    logHistory.shift();
   }
 
   // Call all handlers, catching errors to prevent one handler from breaking others
@@ -169,10 +276,55 @@ function log(
     level,
     module,
     message,
-    data,
+    data: normalizeLogData(data),
   };
 
   processLog(entry);
+}
+
+// =============================================================================
+// Log History Access
+// =============================================================================
+
+/**
+ * Get a copy of the recent log history.
+ * Useful for error reporting and debugging.
+ *
+ * @param level - Optional minimum level to filter by
+ * @returns Array of recent log entries
+ */
+export function getLogHistory(level?: LogLevel): readonly LogEntry[] {
+  if (level === undefined) {
+    return [...logHistory];
+  }
+  return logHistory.filter((entry) => entry.level >= level);
+}
+
+/**
+ * Clear the log history buffer.
+ */
+export function clearLogHistory(): void {
+  logHistory.length = 0;
+}
+
+/**
+ * Export log history as a formatted string for error reports.
+ *
+ * @param level - Optional minimum level to filter by
+ * @returns Formatted log history string
+ */
+export function exportLogHistory(level?: LogLevel): string {
+  const entries = getLogHistory(level);
+  const levelNames = ['DEBUG', 'INFO', 'WARN', 'ERROR', 'SILENT'];
+
+  return entries
+    .map((entry) => {
+      const timestamp = new Date(entry.timestamp).toISOString();
+      const levelName = levelNames[entry.level] ?? 'UNKNOWN';
+      const dataStr = entry.data ? ` ${JSON.stringify(entry.data)}` : '';
+      return `[${timestamp}] [${levelName}] [${entry.module}] ${entry.message}${dataStr}`;
+    })
+    .join('\n');
 }
 
 // =============================================================================
@@ -305,6 +457,10 @@ export default {
   clearLogHandlers,
   setGlobalLogLevel,
   getGlobalLogLevel,
+  getLogHistory,
+  clearLogHistory,
+  exportLogHistory,
+  serializeError,
   consoleHandler,
   initializeLogger,
   LogLevel,

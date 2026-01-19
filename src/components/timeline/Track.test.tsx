@@ -66,7 +66,8 @@ describe('Track', () => {
     });
 
     it('should render clips in track', () => {
-      render(<Track track={mockTrack} clips={mockClips} zoom={100} />);
+      // viewportWidth must be large enough to include all clips after virtualization
+      render(<Track track={mockTrack} clips={mockClips} zoom={100} viewportWidth={3000} />);
       expect(screen.getAllByTestId(/^clip-/)).toHaveLength(2);
     });
 

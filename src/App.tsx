@@ -409,6 +409,18 @@ function App(): JSX.Element {
     [loadProject],
   );
 
+  // Error handler for EditorView - shows toast and offers reload
+  const handleEditorError = useCallback(
+    (error: Error) => {
+      logger.error('Editor view error', { error });
+      addToast(
+        `Editor error: ${error.message}. Try reloading the page if the issue persists.`,
+        'error'
+      );
+    },
+    [addToast]
+  );
+
   // ===========================================================================
   // Render
   // ===========================================================================
@@ -444,7 +456,39 @@ function App(): JSX.Element {
 
   return (
     <>
-      <EditorView sequence={activeSequence ?? null} />
+      <ErrorBoundary
+        onError={handleEditorError}
+        showDetails={import.meta.env.DEV}
+        showReloadButton={true}
+        fallbackRender={({ error, resetError }) => (
+          <div className="flex flex-col items-center justify-center h-screen bg-editor-bg text-editor-text p-8 text-center">
+            <div className="text-red-500 text-6xl mb-4">⚠️</div>
+            <h1 className="text-2xl font-bold text-red-400 mb-2">Editor Error</h1>
+            <p className="text-editor-text-muted mb-6 max-w-md">
+              The editor encountered an error. Your recent work may have been auto-saved.
+            </p>
+            <p className="text-sm text-editor-text-muted mb-6 font-mono bg-editor-surface p-2 rounded max-w-md truncate">
+              {error.message}
+            </p>
+            <div className="flex gap-4">
+              <button
+                onClick={resetError}
+                className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors"
+              >
+                Try Again
+              </button>
+              <button
+                onClick={() => window.location.reload()}
+                className="px-6 py-2 bg-gray-600 hover:bg-gray-500 text-white rounded transition-colors"
+              >
+                Reload Application
+              </button>
+            </div>
+          </div>
+        )}
+      >
+        <EditorView sequence={activeSequence ?? null} />
+      </ErrorBoundary>
       <FFmpegWarning
         isOpen={showFFmpegWarning}
         onDismiss={handleDismissFFmpegWarning}

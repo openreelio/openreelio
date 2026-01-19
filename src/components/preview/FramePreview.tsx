@@ -5,7 +5,7 @@
  * Optimized for timeline scrubbing with frame caching.
  */
 
-import { useState, useEffect, useCallback, useRef, memo } from 'react';
+import { useState, useEffect, useRef, memo } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useFrameExtractor } from '@/hooks';
 import type { Asset, TimeSec } from '@/types';
@@ -62,75 +62,89 @@ export const FramePreview = memo(function FramePreview({
   const { getFrame, isExtracting, error: extractorError } = useFrameExtractor();
 
   const debounceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastRequestRef = useRef<{ assetId: string; timeSec: number } | null>(null);
+  const lastSuccessRef = useRef<{ assetId: string; timeSec: number } | null>(null);
 
   /**
-   * Load frame from asset at specified time
+   * Debounced frame loading for smooth scrubbing
    */
-  const loadFrame = useCallback(async () => {
+  useEffect(() => {
     if (!asset) {
       setFrameSrc(null);
       setIsLoading(false);
       return;
     }
 
-    // Skip if same request
-    if (
-      lastRequestRef.current?.assetId === asset.id &&
-      lastRequestRef.current?.timeSec === timeSec
-    ) {
-      return;
-    }
+    // Track whether this effect is still active (for cleanup)
+    let isActive = true;
 
-    lastRequestRef.current = { assetId: asset.id, timeSec };
-    setIsLoading(true);
-    setError(null);
-
-    try {
-      // Get asset path (remove file:// prefix if present)
-      let assetPath = asset.uri;
-      if (assetPath.startsWith('file://')) {
-        assetPath = assetPath.replace('file://', '');
-      }
-
-      const framePath = await getFrame(assetPath, timeSec);
-
-      if (framePath) {
-        // Convert to Tauri asset protocol URL
-        const src = convertFileSrc(framePath);
-        setFrameSrc(src);
-        onFrameLoaded?.(framePath);
-      } else {
-        setError('Failed to extract frame');
-        onError?.('Failed to extract frame');
-      }
-    } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Unknown error';
-      setError(errorMessage);
-      onError?.(errorMessage);
-    } finally {
-      setIsLoading(false);
-    }
-  }, [asset, timeSec, getFrame, onFrameLoaded, onError]);
-
-  /**
-   * Debounced frame loading for smooth scrubbing
-   */
-  useEffect(() => {
+    // Clear any existing timeout
     if (debounceTimeoutRef.current) {
       clearTimeout(debounceTimeoutRef.current);
     }
 
     debounceTimeoutRef.current = setTimeout(() => {
+      // Skip only if this exact request was already successfully loaded
+      // This allows re-attempts for failed requests
+      if (
+        lastSuccessRef.current?.assetId === asset.id &&
+        lastSuccessRef.current?.timeSec === timeSec
+      ) {
+        return;
+      }
+
+      setIsLoading(true);
+      setError(null);
+
+      const loadFrame = async () => {
+        try {
+          // Get asset path (remove file:// prefix if present)
+          let assetPath = asset.uri;
+          if (assetPath.startsWith('file://')) {
+            assetPath = assetPath.replace('file://', '');
+          }
+
+          const framePath = await getFrame(assetPath, timeSec);
+
+          // Check if component is still mounted before updating state
+          if (!isActive) return;
+
+          if (framePath) {
+            // Convert to Tauri asset protocol URL
+            const src = convertFileSrc(framePath);
+            setFrameSrc(src);
+            // Mark as successfully loaded to prevent redundant fetches
+            lastSuccessRef.current = { assetId: asset.id, timeSec };
+            onFrameLoaded?.(framePath);
+          } else {
+            setError('Failed to extract frame');
+            onError?.('Failed to extract frame');
+          }
+        } catch (err) {
+          // Check if component is still mounted before updating state
+          if (!isActive) return;
+
+          const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+          setError(errorMessage);
+          onError?.(errorMessage);
+        } finally {
+          // Check if component is still mounted before updating state
+          if (isActive) {
+            setIsLoading(false);
+          }
+        }
+      };
+
       void loadFrame();
     }, DEBOUNCE_DELAY_MS);
 
+    // Cleanup: mark effect as inactive and clear timeout
     return () => {
+      isActive = false;
       if (debounceTimeoutRef.current) {
         clearTimeout(debounceTimeoutRef.current);
       }
     };
-  }, [loadFrame]);
+  }, [asset, timeSec, getFrame, onFrameLoaded, onError]);
 
   // Sync extractor error
   useEffect(() => {

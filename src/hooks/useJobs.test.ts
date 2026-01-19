@@ -311,7 +311,9 @@ describe('useJobs', () => {
       ).length;
 
       // Wait for at least one polling cycle
-      await new Promise((r) => setTimeout(r, 250));
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 250));
+      });
 
       const afterPollCallCount = mockInvoke.mock.calls.filter(
         ([cmd]) => cmd === 'get_jobs'
@@ -338,7 +340,9 @@ describe('useJobs', () => {
       ).length;
 
       // Wait some time without act() since we're not expecting state changes
-      await new Promise((r) => setTimeout(r, 250));
+      await act(async () => {
+        await new Promise((r) => setTimeout(r, 250));
+      });
 
       const afterTimeCallCount = mockInvoke.mock.calls.filter(
         ([cmd]) => cmd === 'get_jobs'

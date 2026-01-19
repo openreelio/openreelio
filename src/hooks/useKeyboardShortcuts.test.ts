@@ -1,0 +1,649 @@
+/**
+ * useKeyboardShortcuts Hook Tests
+ *
+ * Tests for global keyboard shortcut handling including:
+ * - Playback controls (Space, Arrow keys, Home, End)
+ * - Zoom controls (Ctrl+/-, Ctrl+Plus)
+ * - Edit operations (Ctrl+Z, Ctrl+Shift+Z, Delete)
+ * - File operations (Ctrl+S)
+ * - Input element filtering
+ */
+
+import { renderHook, act } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { useKeyboardShortcuts, KEYBOARD_SHORTCUTS } from './useKeyboardShortcuts';
+import { usePlaybackStore } from '@/stores/playbackStore';
+import { useTimelineStore } from '@/stores/timelineStore';
+import { useProjectStore } from '@/stores/projectStore';
+
+// =============================================================================
+// Mocks
+// =============================================================================
+
+vi.mock('@/stores/playbackStore');
+vi.mock('@/stores/timelineStore');
+vi.mock('@/stores/projectStore');
+
+// =============================================================================
+// Test Utilities
+// =============================================================================
+
+const createKeyboardEvent = (
+  key: string,
+  options: Partial<{
+    ctrlKey: boolean;
+    shiftKey: boolean;
+    altKey: boolean;
+    metaKey: boolean;
+    target: HTMLElement;
+  }> = {}
+): KeyboardEvent => {
+  const event = new KeyboardEvent('keydown', {
+    key,
+    ctrlKey: options.ctrlKey ?? false,
+    shiftKey: options.shiftKey ?? false,
+    altKey: options.altKey ?? false,
+    metaKey: options.metaKey ?? false,
+    bubbles: true,
+    cancelable: true,
+  });
+
+  // Override target if provided
+  if (options.target) {
+    Object.defineProperty(event, 'target', {
+      value: options.target,
+      writable: false,
+    });
+  }
+
+  return event;
+};
+
+const createInputElement = (tagName: 'input' | 'textarea' | 'select'): HTMLElement => {
+  const element = document.createElement(tagName);
+  return element;
+};
+
+const createContentEditableElement = (): HTMLElement => {
+  const element = document.createElement('div');
+  element.contentEditable = 'true';
+  // Explicitly define isContentEditable since JSDOM may not compute it correctly
+  Object.defineProperty(element, 'isContentEditable', {
+    value: true,
+    configurable: true,
+  });
+  return element;
+};
+
+// =============================================================================
+// Test Setup
+// =============================================================================
+
+describe('useKeyboardShortcuts', () => {
+  const mockTogglePlayback = vi.fn();
+  const mockSetCurrentTime = vi.fn();
+  const mockZoomIn = vi.fn();
+  const mockZoomOut = vi.fn();
+  const mockClearClipSelection = vi.fn();
+  const mockUndo = vi.fn().mockResolvedValue(undefined);
+  const mockRedo = vi.fn().mockResolvedValue(undefined);
+  const mockSaveProject = vi.fn().mockResolvedValue(undefined);
+
+  const defaultPlaybackStore = {
+    togglePlayback: mockTogglePlayback,
+    setCurrentTime: mockSetCurrentTime,
+    currentTime: 5,
+    duration: 60,
+  };
+
+  const defaultTimelineStore = {
+    zoomIn: mockZoomIn,
+    zoomOut: mockZoomOut,
+    selectedClipIds: [],
+    clearClipSelection: mockClearClipSelection,
+  };
+
+  const defaultProjectStore = {
+    undo: mockUndo,
+    redo: mockRedo,
+    saveProject: mockSaveProject,
+    isLoaded: true,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(usePlaybackStore).mockReturnValue(defaultPlaybackStore);
+    vi.mocked(useTimelineStore).mockReturnValue(defaultTimelineStore);
+    vi.mocked(useProjectStore).mockReturnValue(defaultProjectStore);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  // ===========================================================================
+  // Playback Shortcuts
+  // ===========================================================================
+
+  describe('playback shortcuts', () => {
+    it('should toggle playback on Space key', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent(' '));
+      });
+
+      expect(mockTogglePlayback).toHaveBeenCalledTimes(1);
+    });
+
+    it('should step back one frame on Left Arrow', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('ArrowLeft'));
+      });
+
+      // Should step back 1/30 second (one frame at 30fps)
+      expect(mockSetCurrentTime).toHaveBeenCalledWith(
+        expect.closeTo(5 - 1 / 30, 5)
+      );
+    });
+
+    it('should step forward one frame on Right Arrow', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('ArrowRight'));
+      });
+
+      // Should step forward 1/30 second (one frame at 30fps)
+      expect(mockSetCurrentTime).toHaveBeenCalledWith(
+        expect.closeTo(5 + 1 / 30, 5)
+      );
+    });
+
+    it('should not go below 0 when stepping back', () => {
+      vi.mocked(usePlaybackStore).mockReturnValue({
+        ...defaultPlaybackStore,
+        currentTime: 0,
+      });
+
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('ArrowLeft'));
+      });
+
+      // Max(0, 0 - 1/30)
+      expect(mockSetCurrentTime).toHaveBeenCalledWith(0);
+    });
+
+    it('should not exceed duration when stepping forward', () => {
+      vi.mocked(usePlaybackStore).mockReturnValue({
+        ...defaultPlaybackStore,
+        currentTime: 60,
+        duration: 60,
+      });
+
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('ArrowRight'));
+      });
+
+      // Min(60, 60 + 1/30)
+      expect(mockSetCurrentTime).toHaveBeenCalledWith(60);
+    });
+
+    it('should jump to start on Home key', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('Home'));
+      });
+
+      expect(mockSetCurrentTime).toHaveBeenCalledWith(0);
+    });
+
+    it('should jump to end on End key', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('End'));
+      });
+
+      expect(mockSetCurrentTime).toHaveBeenCalledWith(60);
+    });
+  });
+
+  // ===========================================================================
+  // Zoom Shortcuts
+  // ===========================================================================
+
+  describe('zoom shortcuts', () => {
+    it('should zoom in on Ctrl++', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('+', { ctrlKey: true }));
+      });
+
+      expect(mockZoomIn).toHaveBeenCalledTimes(1);
+    });
+
+    it('should zoom in on Ctrl+=', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('=', { ctrlKey: true }));
+      });
+
+      expect(mockZoomIn).toHaveBeenCalledTimes(1);
+    });
+
+    it('should zoom out on Ctrl+-', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('-', { ctrlKey: true }));
+      });
+
+      expect(mockZoomOut).toHaveBeenCalledTimes(1);
+    });
+
+    it('should zoom in with Meta key (Mac)', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('=', { metaKey: true }));
+      });
+
+      expect(mockZoomIn).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ===========================================================================
+  // Undo/Redo Shortcuts
+  // ===========================================================================
+
+  describe('undo/redo shortcuts', () => {
+    it('should call undo on Ctrl+Z', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('z', { ctrlKey: true }));
+      });
+
+      expect(mockUndo).toHaveBeenCalledTimes(1);
+    });
+
+    it('should call redo on Ctrl+Shift+Z', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('z', { ctrlKey: true, shiftKey: true }));
+      });
+
+      expect(mockRedo).toHaveBeenCalledTimes(1);
+    });
+
+    it('should call redo on Ctrl+Y', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('y', { ctrlKey: true }));
+      });
+
+      expect(mockRedo).toHaveBeenCalledTimes(1);
+    });
+
+    it('should use custom onUndo if provided', () => {
+      const customUndo = vi.fn();
+      renderHook(() => useKeyboardShortcuts({ onUndo: customUndo }));
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('z', { ctrlKey: true }));
+      });
+
+      expect(customUndo).toHaveBeenCalledTimes(1);
+      expect(mockUndo).not.toHaveBeenCalled();
+    });
+
+    it('should use custom onRedo if provided', () => {
+      const customRedo = vi.fn();
+      renderHook(() => useKeyboardShortcuts({ onRedo: customRedo }));
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('z', { ctrlKey: true, shiftKey: true }));
+      });
+
+      expect(customRedo).toHaveBeenCalledTimes(1);
+      expect(mockRedo).not.toHaveBeenCalled();
+    });
+
+    it('should not call undo/redo if project is not loaded', () => {
+      vi.mocked(useProjectStore).mockReturnValue({
+        ...defaultProjectStore,
+        isLoaded: false,
+      });
+
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('z', { ctrlKey: true }));
+      });
+
+      expect(mockUndo).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===========================================================================
+  // Save Shortcut
+  // ===========================================================================
+
+  describe('save shortcut', () => {
+    it('should call saveProject on Ctrl+S', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('s', { ctrlKey: true }));
+      });
+
+      expect(mockSaveProject).toHaveBeenCalledTimes(1);
+    });
+
+    it('should use custom onSave if provided', () => {
+      const customSave = vi.fn();
+      renderHook(() => useKeyboardShortcuts({ onSave: customSave }));
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('s', { ctrlKey: true }));
+      });
+
+      expect(customSave).toHaveBeenCalledTimes(1);
+      expect(mockSaveProject).not.toHaveBeenCalled();
+    });
+
+    it('should not call saveProject if project is not loaded', () => {
+      vi.mocked(useProjectStore).mockReturnValue({
+        ...defaultProjectStore,
+        isLoaded: false,
+      });
+
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('s', { ctrlKey: true }));
+      });
+
+      expect(mockSaveProject).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===========================================================================
+  // Delete Shortcut
+  // ===========================================================================
+
+  describe('delete shortcut', () => {
+    it('should call onDeleteClips on Delete key when clips are selected', () => {
+      vi.mocked(useTimelineStore).mockReturnValue({
+        ...defaultTimelineStore,
+        selectedClipIds: ['clip-1', 'clip-2'],
+      });
+
+      const onDeleteClips = vi.fn();
+      renderHook(() => useKeyboardShortcuts({ onDeleteClips }));
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('Delete'));
+      });
+
+      expect(onDeleteClips).toHaveBeenCalledTimes(1);
+    });
+
+    it('should call onDeleteClips on Backspace key when clips are selected', () => {
+      vi.mocked(useTimelineStore).mockReturnValue({
+        ...defaultTimelineStore,
+        selectedClipIds: ['clip-1'],
+      });
+
+      const onDeleteClips = vi.fn();
+      renderHook(() => useKeyboardShortcuts({ onDeleteClips }));
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('Backspace'));
+      });
+
+      expect(onDeleteClips).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not call onDeleteClips when no clips are selected', () => {
+      const onDeleteClips = vi.fn();
+      renderHook(() => useKeyboardShortcuts({ onDeleteClips }));
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('Delete'));
+      });
+
+      expect(onDeleteClips).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===========================================================================
+  // Split Shortcut
+  // ===========================================================================
+
+  describe('split shortcut', () => {
+    it('should call onSplitAtPlayhead on S key when clips are selected', () => {
+      vi.mocked(useTimelineStore).mockReturnValue({
+        ...defaultTimelineStore,
+        selectedClipIds: ['clip-1'],
+      });
+
+      const onSplitAtPlayhead = vi.fn();
+      renderHook(() => useKeyboardShortcuts({ onSplitAtPlayhead }));
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('s'));
+      });
+
+      expect(onSplitAtPlayhead).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not call onSplitAtPlayhead when no clips are selected', () => {
+      const onSplitAtPlayhead = vi.fn();
+      renderHook(() => useKeyboardShortcuts({ onSplitAtPlayhead }));
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('s'));
+      });
+
+      expect(onSplitAtPlayhead).not.toHaveBeenCalled();
+    });
+
+    it('should not call onSplitAtPlayhead on Ctrl+S (save)', () => {
+      vi.mocked(useTimelineStore).mockReturnValue({
+        ...defaultTimelineStore,
+        selectedClipIds: ['clip-1'],
+      });
+
+      const onSplitAtPlayhead = vi.fn();
+      renderHook(() => useKeyboardShortcuts({ onSplitAtPlayhead }));
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('s', { ctrlKey: true }));
+      });
+
+      expect(onSplitAtPlayhead).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===========================================================================
+  // Escape Shortcut
+  // ===========================================================================
+
+  describe('escape shortcut', () => {
+    it('should clear clip selection on Escape', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('Escape'));
+      });
+
+      expect(mockClearClipSelection).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ===========================================================================
+  // Export Shortcut
+  // ===========================================================================
+
+  describe('export shortcut', () => {
+    it('should call onExport on Ctrl+Shift+E', () => {
+      const onExport = vi.fn();
+      renderHook(() => useKeyboardShortcuts({ onExport }));
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent('e', { ctrlKey: true, shiftKey: true }));
+      });
+
+      expect(onExport).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ===========================================================================
+  // Input Element Filtering
+  // ===========================================================================
+
+  describe('input element filtering', () => {
+    it('should not handle shortcuts when target is input element', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      const inputElement = createInputElement('input');
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent(' ', { target: inputElement }));
+      });
+
+      expect(mockTogglePlayback).not.toHaveBeenCalled();
+    });
+
+    it('should not handle shortcuts when target is textarea element', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      const textareaElement = createInputElement('textarea');
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent(' ', { target: textareaElement }));
+      });
+
+      expect(mockTogglePlayback).not.toHaveBeenCalled();
+    });
+
+    it('should not handle shortcuts when target is select element', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      const selectElement = createInputElement('select');
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent(' ', { target: selectElement }));
+      });
+
+      expect(mockTogglePlayback).not.toHaveBeenCalled();
+    });
+
+    it('should not handle shortcuts when target is contentEditable element', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      const contentEditableElement = createContentEditableElement();
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent(' ', { target: contentEditableElement }));
+      });
+
+      expect(mockTogglePlayback).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===========================================================================
+  // Enabled Option
+  // ===========================================================================
+
+  describe('enabled option', () => {
+    it('should not handle shortcuts when disabled', () => {
+      renderHook(() => useKeyboardShortcuts({ enabled: false }));
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent(' '));
+      });
+
+      expect(mockTogglePlayback).not.toHaveBeenCalled();
+    });
+
+    it('should handle shortcuts when enabled is true', () => {
+      renderHook(() => useKeyboardShortcuts({ enabled: true }));
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent(' '));
+      });
+
+      expect(mockTogglePlayback).toHaveBeenCalledTimes(1);
+    });
+
+    it('should handle shortcuts by default (enabled not specified)', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      act(() => {
+        window.dispatchEvent(createKeyboardEvent(' '));
+      });
+
+      expect(mockTogglePlayback).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  // ===========================================================================
+  // Cleanup
+  // ===========================================================================
+
+  describe('cleanup', () => {
+    it('should remove event listener on unmount', () => {
+      const removeEventListenerSpy = vi.spyOn(window, 'removeEventListener');
+
+      const { unmount } = renderHook(() => useKeyboardShortcuts());
+      unmount();
+
+      expect(removeEventListenerSpy).toHaveBeenCalledWith('keydown', expect.any(Function));
+
+      removeEventListenerSpy.mockRestore();
+    });
+  });
+
+  // ===========================================================================
+  // KEYBOARD_SHORTCUTS constant
+  // ===========================================================================
+
+  describe('KEYBOARD_SHORTCUTS constant', () => {
+    it('should export a list of keyboard shortcuts', () => {
+      expect(KEYBOARD_SHORTCUTS).toBeDefined();
+      expect(Array.isArray(KEYBOARD_SHORTCUTS)).toBe(true);
+      expect(KEYBOARD_SHORTCUTS.length).toBeGreaterThan(0);
+    });
+
+    it('should have key and description for each shortcut', () => {
+      KEYBOARD_SHORTCUTS.forEach((shortcut) => {
+        expect(shortcut).toHaveProperty('key');
+        expect(shortcut).toHaveProperty('description');
+        expect(typeof shortcut.key).toBe('string');
+        expect(typeof shortcut.description).toBe('string');
+      });
+    });
+
+    it('should include Space for Play/Pause', () => {
+      const spaceShortcut = KEYBOARD_SHORTCUTS.find((s) => s.key === 'Space');
+      expect(spaceShortcut).toBeDefined();
+      expect(spaceShortcut?.description).toContain('Play');
+    });
+
+    it('should include Ctrl + Z for Undo', () => {
+      const undoShortcut = KEYBOARD_SHORTCUTS.find((s) => s.key.includes('Ctrl + Z'));
+      expect(undoShortcut).toBeDefined();
+      expect(undoShortcut?.description).toContain('Undo');
+    });
+  });
+});

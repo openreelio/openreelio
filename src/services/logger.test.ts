@@ -14,6 +14,10 @@ import {
   addLogHandler,
   removeLogHandler,
   clearLogHandlers,
+  getLogHistory,
+  clearLogHistory,
+  exportLogHistory,
+  serializeError,
   type LogEntry,
   type LogHandler,
 } from './logger';
@@ -149,7 +153,11 @@ describe('Logger', () => {
       const error = new Error('Test error');
       logger.error('Something went wrong', { error });
 
-      expect(capturedLogs[0].data?.error).toBe(error);
+      // Error objects are serialized to plain objects for JSON compatibility
+      const loggedError = capturedLogs[0].data?.error as Record<string, unknown>;
+      expect(loggedError.name).toBe('Error');
+      expect(loggedError.message).toBe('Test error');
+      expect(loggedError.stack).toBeDefined();
     });
   });
 
@@ -274,8 +282,9 @@ describe('Logger', () => {
       const error = new Error('Test error');
       logger.error('Operation failed', { error });
 
-      expect(capturedLogs[0].data?.error).toBe(error);
-      const loggedError = capturedLogs[0].data?.error as Error;
+      // Error objects are serialized to plain objects for JSON compatibility
+      const loggedError = capturedLogs[0].data?.error as Record<string, unknown>;
+      expect(loggedError.name).toBe('Error');
       expect(loggedError.message).toBe('Test error');
       expect(loggedError.stack).toBeDefined();
     });
@@ -317,5 +326,185 @@ describe('LogLevel enum', () => {
     expect(LogLevel.INFO).toBeLessThan(LogLevel.WARN);
     expect(LogLevel.WARN).toBeLessThan(LogLevel.ERROR);
     expect(LogLevel.ERROR).toBeLessThan(LogLevel.SILENT);
+  });
+});
+
+describe('Log History', () => {
+  let logger: Logger;
+
+  beforeEach(() => {
+    clearLogHandlers();
+    clearLogHistory();
+    setGlobalLogLevel(LogLevel.DEBUG);
+    logger = createLogger('HistoryTest');
+    // Add a handler so logs are processed
+    addLogHandler(() => {});
+  });
+
+  afterEach(() => {
+    clearLogHandlers();
+    clearLogHistory();
+  });
+
+  it('should store logs in history buffer', () => {
+    logger.info('Test message 1');
+    logger.warn('Test message 2');
+
+    const history = getLogHistory();
+    expect(history).toHaveLength(2);
+    expect(history[0].message).toBe('Test message 1');
+    expect(history[1].message).toBe('Test message 2');
+  });
+
+  it('should filter history by log level', () => {
+    logger.debug('Debug');
+    logger.info('Info');
+    logger.warn('Warn');
+    logger.error('Error');
+
+    const warnAndAbove = getLogHistory(LogLevel.WARN);
+    expect(warnAndAbove).toHaveLength(2);
+    expect(warnAndAbove[0].message).toBe('Warn');
+    expect(warnAndAbove[1].message).toBe('Error');
+  });
+
+  it('should clear history', () => {
+    logger.info('Message 1');
+    logger.info('Message 2');
+
+    clearLogHistory();
+
+    expect(getLogHistory()).toHaveLength(0);
+  });
+
+  it('should export history as formatted string', () => {
+    logger.info('Test message', { key: 'value' });
+
+    const exported = exportLogHistory();
+    expect(exported).toContain('[INFO]');
+    expect(exported).toContain('[HistoryTest]');
+    expect(exported).toContain('Test message');
+    expect(exported).toContain('{"key":"value"}');
+  });
+});
+
+describe('serializeError', () => {
+  it('should serialize Error object to plain object', () => {
+    const error = new Error('Test error');
+    const serialized = serializeError(error);
+
+    expect(serialized.name).toBe('Error');
+    expect(serialized.message).toBe('Test error');
+    expect(serialized.stack).toBeDefined();
+  });
+
+  it('should include custom Error properties', () => {
+    class CustomError extends Error {
+      code: number;
+      constructor(message: string, code: number) {
+        super(message);
+        this.name = 'CustomError';
+        this.code = code;
+      }
+    }
+
+    const error = new CustomError('Custom error', 42);
+    const serialized = serializeError(error);
+
+    expect(serialized.name).toBe('CustomError');
+    expect(serialized.message).toBe('Custom error');
+    expect(serialized.code).toBe(42);
+  });
+
+  it('should handle string errors', () => {
+    const serialized = serializeError('String error');
+    expect(serialized.message).toBe('String error');
+  });
+
+  it('should handle other types', () => {
+    const serialized = serializeError({ foo: 'bar' });
+    expect(serialized.value).toEqual({ foo: 'bar' });
+  });
+});
+
+describe('normalizeLogData edge cases', () => {
+  let logger: Logger;
+  let capturedLogs: LogEntry[];
+  const captureHandler: LogHandler = (entry) => {
+    capturedLogs.push(entry);
+  };
+
+  beforeEach(() => {
+    clearLogHandlers();
+    clearLogHistory();
+    setGlobalLogLevel(LogLevel.DEBUG);
+    capturedLogs = [];
+    addLogHandler(captureHandler);
+    logger = createLogger('NormalizeTest');
+  });
+
+  afterEach(() => {
+    clearLogHandlers();
+    clearLogHistory();
+  });
+
+  it('should handle circular references without stack overflow', () => {
+    // Create circular reference
+    const obj: Record<string, unknown> = { name: 'root' };
+    obj.self = obj;
+
+    // Should not throw
+    expect(() => logger.info('Circular test', { data: obj })).not.toThrow();
+
+    // Should have logged with circular marker
+    expect(capturedLogs).toHaveLength(1);
+    const loggedData = capturedLogs[0].data as Record<string, unknown>;
+    expect(loggedData.data).toBeDefined();
+    const nestedData = loggedData.data as Record<string, unknown>;
+    expect(nestedData.name).toBe('root');
+    expect(nestedData.self).toEqual({ _circular: true });
+  });
+
+  it('should handle deeply nested objects with depth limit', () => {
+    // Create deeply nested object (more than MAX_NORMALIZATION_DEPTH)
+    let nested: Record<string, unknown> = { value: 'leaf' };
+    for (let i = 0; i < 15; i++) {
+      nested = { nested };
+    }
+
+    // Should not throw
+    expect(() => logger.info('Deep nesting test', { data: nested })).not.toThrow();
+
+    // Should have logged with truncation marker at some depth
+    expect(capturedLogs).toHaveLength(1);
+  });
+
+  it('should handle arrays with Error objects', () => {
+    const errors = [new Error('Error 1'), new Error('Error 2')];
+
+    logger.error('Multiple errors', { errors });
+
+    expect(capturedLogs).toHaveLength(1);
+    const loggedData = capturedLogs[0].data as Record<string, unknown>;
+    const loggedErrors = loggedData.errors as Array<Record<string, unknown>>;
+    expect(loggedErrors).toHaveLength(2);
+    expect(loggedErrors[0].name).toBe('Error');
+    expect(loggedErrors[0].message).toBe('Error 1');
+    expect(loggedErrors[1].message).toBe('Error 2');
+  });
+
+  it('should handle arrays with nested objects', () => {
+    const items = [
+      { id: 1, error: new Error('Item 1 error') },
+      { id: 2, error: new Error('Item 2 error') },
+    ];
+
+    logger.info('Items with errors', { items });
+
+    expect(capturedLogs).toHaveLength(1);
+    const loggedData = capturedLogs[0].data as Record<string, unknown>;
+    const loggedItems = loggedData.items as Array<Record<string, unknown>>;
+    expect(loggedItems).toHaveLength(2);
+    expect((loggedItems[0].error as Record<string, unknown>).message).toBe('Item 1 error');
   });
 });

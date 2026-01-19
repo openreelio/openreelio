@@ -50,7 +50,8 @@ function isInputElement(target: EventTarget | null): boolean {
     tagName === 'input' ||
     tagName === 'textarea' ||
     tagName === 'select' ||
-    target.isContentEditable
+    target.isContentEditable ||
+    target.contentEditable === 'true'
   );
 }
 

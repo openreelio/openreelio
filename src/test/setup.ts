@@ -56,8 +56,45 @@ Object.defineProperty(window, 'matchMedia', {
 });
 
 // Mock ResizeObserver for component tests
-global.ResizeObserver = vi.fn().mockImplementation(() => ({
-  observe: vi.fn(),
-  unobserve: vi.fn(),
-  disconnect: vi.fn(),
-}));
+class MockResizeObserver {
+  observe = vi.fn();
+  unobserve = vi.fn();
+  disconnect = vi.fn();
+  constructor(_callback: ResizeObserverCallback) {
+    void _callback;
+    // Store callback if needed for testing
+  }
+}
+global.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
+
+// Mock IntersectionObserver for lazy loading tests
+class MockIntersectionObserver {
+  readonly root: Element | null = null;
+  readonly rootMargin: string = '';
+  readonly thresholds: ReadonlyArray<number> = [];
+
+  observe = vi.fn((target: Element) => {
+    // Immediately trigger intersection for testing (simulate element being visible)
+    const entry: IntersectionObserverEntry = {
+      boundingClientRect: target.getBoundingClientRect(),
+      intersectionRatio: 1,
+      intersectionRect: target.getBoundingClientRect(),
+      isIntersecting: true,
+      rootBounds: null,
+      target,
+      time: Date.now(),
+    };
+    this.callback([entry], this as unknown as IntersectionObserver);
+  });
+  unobserve = vi.fn();
+  disconnect = vi.fn();
+  takeRecords = vi.fn(() => []);
+
+  private callback: IntersectionObserverCallback;
+
+  constructor(callback: IntersectionObserverCallback, _options?: IntersectionObserverInit) {
+    void _options;
+    this.callback = callback;
+  }
+}
+global.IntersectionObserver = MockIntersectionObserver as unknown as typeof IntersectionObserver;

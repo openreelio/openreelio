@@ -5,7 +5,7 @@
  * Used to show visual preview of video content within clips.
  */
 
-import { useMemo, useState, useEffect, useCallback, memo } from 'react';
+import { useMemo, useState, useEffect, useRef, useCallback, memo } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useFrameExtractor } from '@/hooks';
 import type { Asset, TimeSec } from '@/types';
@@ -38,6 +38,8 @@ interface ThumbnailData {
   src: string | null;
   loading: boolean;
   error: boolean;
+  /** Whether this thumbnail is visible in viewport (for lazy loading) */
+  isVisible: boolean;
 }
 
 // =============================================================================
@@ -63,8 +65,26 @@ export const ThumbnailStrip = memo(function ThumbnailStrip({
   thumbnailAspectRatio = DEFAULT_THUMBNAIL_ASPECT_RATIO,
 }: ThumbnailStripProps) {
   const [thumbnails, setThumbnails] = useState<ThumbnailData[]>([]);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const thumbnailRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  // Counter to trigger load effect when new thumbnails become visible
+  const [loadTrigger, setLoadTrigger] = useState(0);
 
   const { getFrame, isExtracting } = useFrameExtractor();
+
+  // Mark a thumbnail as visible (triggered by IntersectionObserver)
+  const markVisible = useCallback((index: number) => {
+    setThumbnails((prev) => {
+      if (prev[index]?.isVisible) return prev; // Already visible
+      const next = [...prev];
+      if (next[index]) {
+        next[index] = { ...next[index], isVisible: true };
+      }
+      return next;
+    });
+    // Trigger load effect
+    setLoadTrigger((prev) => prev + 1);
+  }, []);
 
   // Calculate optimal thumbnail count based on width
   const thumbnailCount = useMemo(() => {
@@ -96,12 +116,63 @@ export const ThumbnailStrip = memo(function ThumbnailStrip({
     });
   }, [thumbnailCount, sourceInSec, sourceOutSec]);
 
-  // Load thumbnails
-  const loadThumbnails = useCallback(async () => {
+  // Initialize thumbnails when dependencies change
+  useEffect(() => {
     if (!asset || thumbnailTimes.length === 0) {
       setThumbnails([]);
       return;
     }
+
+    // Initialize thumbnail data (isVisible: false, will be set by IntersectionObserver)
+    const initialThumbnails: ThumbnailData[] = thumbnailTimes.map((timeSec) => ({
+      timeSec,
+      src: null,
+      loading: false,
+      error: false,
+      isVisible: false,
+    }));
+    setThumbnails(initialThumbnails);
+  }, [asset, thumbnailTimes]);
+
+  // Set up IntersectionObserver for lazy loading
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container || thumbnails.length === 0) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            const index = Number(entry.target.getAttribute('data-index'));
+            if (!isNaN(index)) {
+              markVisible(index);
+            }
+          }
+        });
+      },
+      {
+        root: null, // Use viewport
+        rootMargin: '50px', // Pre-load slightly before entering viewport
+        threshold: 0,
+      },
+    );
+
+    // Observe all thumbnail elements
+    thumbnailRefs.current.forEach((element) => {
+      observer.observe(element);
+    });
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [thumbnails.length, markVisible]);
+
+  // Load visible thumbnails when loadTrigger changes (triggered by markVisible)
+  useEffect(() => {
+    if (!asset) return;
+
+    // Track whether this effect is still active (for cleanup)
+    let isActive = true;
 
     // Get asset path
     let assetPath = asset.uri;
@@ -109,55 +180,85 @@ export const ThumbnailStrip = memo(function ThumbnailStrip({
       assetPath = assetPath.replace('file://', '');
     }
 
-    // Initialize thumbnail data
-    const initialThumbnails: ThumbnailData[] = thumbnailTimes.map((timeSec) => ({
-      timeSec,
-      src: null,
-      loading: true,
-      error: false,
-    }));
-    setThumbnails(initialThumbnails);
+    // Find thumbnails that are visible but not yet loaded (use functional update to get latest state)
+    setThumbnails((currentThumbnails) => {
+      const thumbsToLoad = currentThumbnails
+        .map((thumb, index) => ({ thumb, index }))
+        .filter(({ thumb }) => thumb.isVisible && !thumb.src && !thumb.loading && !thumb.error);
 
-    // Load each thumbnail
-    const loadPromises = thumbnailTimes.map(async (timeSec, index) => {
-      try {
-        const framePath = await getFrame(assetPath, timeSec);
-        if (framePath) {
-          const src = convertFileSrc(framePath);
-          setThumbnails((prev) => {
-            const next = [...prev];
-            if (next[index]) {
-              next[index] = { ...next[index], src, loading: false };
-            }
-            return next;
-          });
-        } else {
-          setThumbnails((prev) => {
-            const next = [...prev];
-            if (next[index]) {
-              next[index] = { ...next[index], loading: false, error: true };
-            }
-            return next;
-          });
+      if (thumbsToLoad.length === 0) return currentThumbnails;
+
+      // Mark as loading
+      const next = [...currentThumbnails];
+      thumbsToLoad.forEach(({ index }) => {
+        if (next[index]) {
+          next[index] = { ...next[index], loading: true };
         }
-      } catch {
-        setThumbnails((prev) => {
-          const next = [...prev];
-          if (next[index]) {
-            next[index] = { ...next[index], loading: false, error: true };
+      });
+
+      // Load each visible thumbnail asynchronously
+      const loadVisibleThumbnails = async () => {
+        const loadPromises = thumbsToLoad.map(async ({ thumb, index }) => {
+          try {
+            const framePath = await getFrame(assetPath, thumb.timeSec);
+
+            // Check if component is still mounted before updating state
+            if (!isActive) return;
+
+            if (framePath) {
+              const src = convertFileSrc(framePath);
+              setThumbnails((prev) => {
+                const updated = [...prev];
+                if (updated[index]) {
+                  updated[index] = { ...updated[index], src, loading: false };
+                }
+                return updated;
+              });
+            } else {
+              setThumbnails((prev) => {
+                const updated = [...prev];
+                if (updated[index]) {
+                  updated[index] = { ...updated[index], loading: false, error: true };
+                }
+                return updated;
+              });
+            }
+          } catch {
+            // Check if component is still mounted before updating state
+            if (!isActive) return;
+
+            setThumbnails((prev) => {
+              const updated = [...prev];
+              if (updated[index]) {
+                updated[index] = { ...updated[index], loading: false, error: true };
+              }
+              return updated;
+            });
           }
-          return next;
         });
-      }
+
+        await Promise.all(loadPromises);
+      };
+
+      void loadVisibleThumbnails();
+
+      return next;
     });
 
-    await Promise.all(loadPromises);
-  }, [asset, thumbnailTimes, getFrame]);
+    // Cleanup: mark effect as inactive to prevent state updates after unmount
+    return () => {
+      isActive = false;
+    };
+  }, [asset, getFrame, loadTrigger]);
 
-  // Load thumbnails when dependencies change
-  useEffect(() => {
-    void loadThumbnails();
-  }, [loadThumbnails]);
+  // Callback ref to register thumbnail elements for IntersectionObserver
+  const setThumbnailRef = useCallback((index: number, element: HTMLDivElement | null) => {
+    if (element) {
+      thumbnailRefs.current.set(index, element);
+    } else {
+      thumbnailRefs.current.delete(index);
+    }
+  }, []);
 
   // Empty state
   if (!asset || thumbnailCount === 0) {
@@ -177,6 +278,7 @@ export const ThumbnailStrip = memo(function ThumbnailStrip({
 
   return (
     <div
+      ref={containerRef}
       data-testid="thumbnail-strip"
       className={`flex overflow-hidden ${className}`}
       style={{ width, height }}
@@ -184,7 +286,9 @@ export const ThumbnailStrip = memo(function ThumbnailStrip({
       {thumbnails.map((thumb, index) => (
         <div
           key={`${thumb.timeSec}-${index}`}
+          ref={(el) => setThumbnailRef(index, el)}
           data-testid={`thumbnail-${index}`}
+          data-index={index}
           className="relative flex-shrink-0 bg-gray-800"
           style={{ width: thumbnailWidth, height }}
         >
