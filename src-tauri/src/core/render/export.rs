@@ -619,6 +619,18 @@ impl ExportEngine {
             .spawn()
             .map_err(|e| ExportError::FFmpegFailed(format!("Failed to spawn FFmpeg: {}", e)))?;
 
+        // Take stderr immediately and spawn a task to drain it concurrently.
+        // This prevents deadlock when FFmpeg fills the stderr pipe buffer.
+        let stderr_handle = child.stderr.take().map(|stderr| {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut buf = Vec::new();
+                let mut stderr = stderr;
+                let _ = stderr.read_to_end(&mut buf).await;
+                String::from_utf8_lossy(&buf).to_string()
+            })
+        });
+
         // Handle progress if channel provided
         if let Some(tx) = progress_tx {
             if let Some(stdout) = child.stdout.take() {
@@ -669,12 +681,9 @@ impl ExportEngine {
             .map_err(|e| ExportError::FFmpegFailed(format!("Failed to wait for FFmpeg: {}", e)))?;
 
         if !status.success() {
-            // Try to get stderr for error details
-            let stderr_msg = if let Some(mut stderr) = child.stderr.take() {
-                let mut buf = Vec::new();
-                use tokio::io::AsyncReadExt;
-                let _ = stderr.read_to_end(&mut buf).await;
-                String::from_utf8_lossy(&buf).to_string()
+            // Get stderr from the drain task
+            let stderr_msg = if let Some(handle) = stderr_handle {
+                handle.await.unwrap_or_else(|_| "Failed to read stderr".to_string())
             } else {
                 format!("FFmpeg exited with status: {}", status)
             };
@@ -749,6 +758,18 @@ impl ExportEngine {
             .spawn()
             .map_err(|e| ExportError::FFmpegFailed(format!("Failed to spawn FFmpeg: {}", e)))?;
 
+        // Take stderr immediately and spawn a task to drain it concurrently.
+        // This prevents deadlock when FFmpeg fills the stderr pipe buffer.
+        let stderr_handle = child.stderr.take().map(|stderr| {
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                let mut buf = Vec::new();
+                let mut stderr = stderr;
+                let _ = stderr.read_to_end(&mut buf).await;
+                String::from_utf8_lossy(&buf).to_string()
+            })
+        });
+
         // Handle progress if channel provided
         if let Some(tx) = progress_tx {
             if let Some(stdout) = child.stdout.take() {
@@ -798,11 +819,9 @@ impl ExportEngine {
             .map_err(|e| ExportError::FFmpegFailed(format!("Failed to wait for FFmpeg: {}", e)))?;
 
         if !status.success() {
-            let stderr_msg = if let Some(mut stderr) = child.stderr.take() {
-                let mut buf = Vec::new();
-                use tokio::io::AsyncReadExt;
-                let _ = stderr.read_to_end(&mut buf).await;
-                String::from_utf8_lossy(&buf).to_string()
+            // Get stderr from the drain task
+            let stderr_msg = if let Some(handle) = stderr_handle {
+                handle.await.unwrap_or_else(|_| "Failed to read stderr".to_string())
             } else {
                 format!("FFmpeg exited with status: {}", status)
             };
