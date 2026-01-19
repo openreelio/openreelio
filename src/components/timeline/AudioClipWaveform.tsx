@@ -99,6 +99,10 @@ export function AudioClipWaveform({
   useEffect(() => {
     if (disabled || !isValid) return;
 
+    // Track whether this effect is still the active one.
+    // This prevents stale results from overwriting newer requests.
+    let isActive = true;
+
     // Reset state
     setIsLoading(true);
     setHasError(false);
@@ -114,13 +118,15 @@ export function AudioClipWaveform({
           DEFAULT_GENERATION_HEIGHT
         );
 
-        if (mountedRef.current) {
+        // Only apply result if this effect is still active and component is mounted
+        if (isActive && mountedRef.current) {
           setWaveformSrc(result);
           setIsLoading(false);
         }
       } catch (error) {
         console.error('Failed to generate waveform:', error);
-        if (mountedRef.current) {
+        // Only apply error state if this effect is still active and component is mounted
+        if (isActive && mountedRef.current) {
           setHasError(true);
           setIsLoading(false);
         }
@@ -128,6 +134,11 @@ export function AudioClipWaveform({
     };
 
     void generateWaveform();
+
+    // Cleanup: mark this effect as inactive when dependencies change or unmount
+    return () => {
+      isActive = false;
+    };
   }, [assetId, inputPath, width, disabled, isValid, getWaveform]);
 
   // Track mounted state for async operations
