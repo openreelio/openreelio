@@ -50,6 +50,8 @@ This project and everyone participating in it is governed by our [Code of Conduc
    cd src-tauri && cargo fetch
    ```
 
+   **Windows PowerShell note:** If `npm` fails with an error about loading `npm.ps1` (ExecutionPolicy), use `npm.cmd` instead (e.g. `npm.cmd test`) or run `node scripts/check.mjs --install`.
+
 5. **Run development server**
    ```bash
    pnpm tauri dev

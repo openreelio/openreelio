@@ -17,6 +17,7 @@ import {
 } from 'react';
 import type { Sequence, Clip as ClipType } from '@/types';
 import { useTimelineStore } from '@/stores/timelineStore';
+import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineEngine } from '@/hooks/useTimelineEngine';
 import { getGridIntervalForZoom } from '@/utils/timeline';
 import { getSnapPoints, snapToNearestPoint, calculateSnapThreshold } from '@/utils/gridSnapping';
@@ -24,7 +25,7 @@ import { TimeRuler } from './TimeRuler';
 import { Track } from './Track';
 import { Playhead } from './Playhead';
 import { TimelineToolbar } from './TimelineToolbar';
-import type { ClipDragData, DragPreviewPosition } from './Clip';
+import type { ClipDragData, DragPreviewPosition, ClipWaveformConfig } from './Clip';
 
 // =============================================================================
 // Types
@@ -124,6 +125,9 @@ export function Timeline({
     snapEnabled,
   } = useTimelineStore();
 
+  // Get assets from project store for waveform generation
+  const { assets } = useProjectStore();
+
   // Calculate total duration from sequence (needed before TimelineEngine)
   const duration = useMemo(() => {
     if (!sequence) return 60;
@@ -222,6 +226,26 @@ export function Timeline({
       return null;
     },
     [sequence],
+  );
+
+  // Get waveform configuration for audio/video clips
+  const getClipWaveformConfig = useCallback(
+    (_clipId: string, assetId: string): ClipWaveformConfig | undefined => {
+      const asset = assets.get(assetId);
+      if (!asset) return undefined;
+
+      // Only show waveform for audio assets or video assets with audio
+      const hasAudio = asset.kind === 'audio' || (asset.kind === 'video' && asset.audio);
+      if (!hasAudio) return undefined;
+
+      return {
+        assetId: asset.id,
+        inputPath: asset.proxyUrl || asset.uri,
+        totalDurationSec: asset.durationSec ?? 0,
+        enabled: true,
+      };
+    },
+    [assets],
   );
 
   // Handle ruler seek
@@ -727,6 +751,7 @@ export function Timeline({
               scrollX={scrollX}
               duration={duration}
               selectedClipIds={selectedClipIds}
+              getClipWaveformConfig={getClipWaveformConfig}
               onClipClick={handleClipClick}
               onClipDragStart={handleClipDragStart}
               onClipDrag={handleClipDrag}

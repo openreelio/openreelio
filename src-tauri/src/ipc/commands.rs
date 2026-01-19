@@ -837,6 +837,9 @@ pub async fn get_job_stats(state: State<'_, AppState>) -> Result<serde_json::Val
 // =============================================================================
 
 /// Starts final render export
+///
+/// This command validates the export settings before starting the render,
+/// and reports real-time progress via Tauri events.
 #[tauri::command]
 pub async fn start_render(
     sequence_id: String,
@@ -846,7 +849,9 @@ pub async fn start_render(
     ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
     app_handle: tauri::AppHandle,
 ) -> Result<RenderStartResult, String> {
-    use crate::core::render::{ExportEngine, ExportPreset, ExportProgress, ExportSettings};
+    use crate::core::render::{
+        validate_export_settings, ExportEngine, ExportPreset, ExportProgress, ExportSettings,
+    };
     use std::path::PathBuf;
     use tauri::Emitter;
 
@@ -877,9 +882,9 @@ pub async fn start_render(
 
     // Get FFmpeg runner
     let ffmpeg_guard = ffmpeg_state.read().await;
-    let ffmpeg = ffmpeg_guard
-        .runner()
-        .ok_or_else(|| "FFmpeg not initialized".to_string())?;
+    let ffmpeg = ffmpeg_guard.runner().ok_or_else(|| {
+        "FFmpeg not initialized. Please install FFmpeg and restart the application.".to_string()
+    })?;
 
     // Parse preset
     let export_preset = match preset.to_lowercase().as_str() {
@@ -896,10 +901,23 @@ pub async fn start_render(
     // Create export settings
     let settings = ExportSettings::from_preset(export_preset, PathBuf::from(&output_path));
 
-    // Create export engine and start export
+    // Validate export settings before starting
+    let validation = validate_export_settings(&sequence, &assets, &settings);
+    if !validation.is_valid {
+        let error_msg = validation.errors.join("; ");
+        return Err(format!("Export validation failed: {}", error_msg));
+    }
+
+    // Log warnings but continue
+    for warning in &validation.warnings {
+        tracing::warn!("Export warning: {}", warning);
+    }
+
+    // Create export engine
     let engine = ExportEngine::new(ffmpeg.clone());
     let job_id = ulid::Ulid::new().to_string();
     let job_id_clone = job_id.clone();
+    let job_id_for_error = job_id.clone();
 
     // Create progress channel
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<ExportProgress>(100);
@@ -923,49 +941,64 @@ pub async fn start_render(
         }
     });
 
-    // Run export with progress callback
-    match engine
-        .export_sequence(&sequence, &assets, &settings, Some(progress_tx))
-        .await
-    {
-        Ok(result) => {
-            tracing::info!(
-                "Export completed: {} ({:.1}s, {} bytes)",
-                result.output_path.display(),
-                result.encoding_time_sec,
-                result.file_size
-            );
+    // Spawn export task in background to not block IPC
+    let sequence_clone = sequence.clone();
+    let assets_clone = assets.clone();
+    let settings_clone = settings.clone();
+    let app_handle_for_task = app_handle.clone();
+    let job_id_for_task = job_id.clone();
 
-            // Emit completion event
-            let _ = app_handle.emit(
-                "render-complete",
-                serde_json::json!({
-                    "jobId": job_id,
-                    "outputPath": result.output_path.to_string_lossy().to_string(),
-                    "durationSec": result.duration_sec,
-                    "fileSize": result.file_size,
-                    "encodingTimeSec": result.encoding_time_sec,
-                }),
-            );
+    tokio::spawn(async move {
+        match engine
+            .export_sequence(
+                &sequence_clone,
+                &assets_clone,
+                &settings_clone,
+                Some(progress_tx),
+            )
+            .await
+        {
+            Ok(result) => {
+                tracing::info!(
+                    "Export completed: {} ({:.1}s, {} bytes)",
+                    result.output_path.display(),
+                    result.encoding_time_sec,
+                    result.file_size
+                );
 
-            Ok(RenderStartResult {
-                job_id,
-                output_path: result.output_path.to_string_lossy().to_string(),
-                status: "completed".to_string(),
-            })
+                // Emit completion event
+                let _ = app_handle_for_task.emit(
+                    "render-complete",
+                    serde_json::json!({
+                        "jobId": job_id_for_task,
+                        "outputPath": result.output_path.to_string_lossy().to_string(),
+                        "durationSec": result.duration_sec,
+                        "fileSize": result.file_size,
+                        "encodingTimeSec": result.encoding_time_sec,
+                    }),
+                );
+            }
+            Err(e) => {
+                tracing::error!("Export failed: {}", e);
+
+                // Emit error event
+                let _ = app_handle_for_task.emit(
+                    "render-error",
+                    serde_json::json!({
+                        "jobId": job_id_for_task,
+                        "error": e.to_string(),
+                    }),
+                );
+            }
         }
-        Err(e) => {
-            // Emit error event
-            let _ = app_handle.emit(
-                "render-error",
-                serde_json::json!({
-                    "jobId": job_id,
-                    "error": e.to_string(),
-                }),
-            );
-            Err(format!("Export failed: {}", e))
-        }
-    }
+    });
+
+    // Return immediately with job ID - completion will be via events
+    Ok(RenderStartResult {
+        job_id: job_id_for_error,
+        output_path,
+        status: "started".to_string(),
+    })
 }
 
 // =============================================================================
