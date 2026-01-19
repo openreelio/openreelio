@@ -8,6 +8,9 @@
 import { useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useProjectStore } from '@/stores';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('TimelineActions');
 import type {
   AssetDropData,
   ClipMoveData,
@@ -68,7 +71,7 @@ async function refreshProjectState(
     }
     setSequences(sequencesMap);
   } catch (error) {
-    console.error('Failed to refresh project state:', error);
+    logger.error('Failed to refresh project state', { error });
     throw error;
   }
 }
@@ -111,7 +114,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         });
         await refreshState();
       } catch (error) {
-        console.error('Failed to move clip:', error);
+        logger.error('Failed to move clip', { error });
       }
     },
     [sequence, executeCommand, refreshState],
@@ -138,7 +141,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         });
         await refreshState();
       } catch (error) {
-        console.error('Failed to trim clip:', error);
+        logger.error('Failed to trim clip', { error });
       }
     },
     [sequence, executeCommand, refreshState],
@@ -163,7 +166,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         });
         await refreshState();
       } catch (error) {
-        console.error('Failed to split clip:', error);
+        logger.error('Failed to split clip', { error });
       }
     },
     [sequence, executeCommand, refreshState],
@@ -188,7 +191,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         });
         await refreshState();
       } catch (error) {
-        console.error('Failed to insert clip:', error);
+        logger.error('Failed to insert clip', { error });
       }
     },
     [sequence, executeCommand, refreshState],
@@ -227,7 +230,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         }
         await refreshState();
       } catch (error) {
-        console.error('Failed to delete clips:', error);
+        logger.error('Failed to delete clips', { error });
       }
     },
     [sequence, executeCommand, refreshState],
@@ -250,7 +253,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         });
         await refreshState();
       } catch (error) {
-        console.error('Failed to toggle track mute:', error);
+        logger.error('Failed to toggle track mute', { error });
       }
     },
     [sequence, executeCommand, refreshState],
@@ -273,7 +276,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         });
         await refreshState();
       } catch (error) {
-        console.error('Failed to toggle track lock:', error);
+        logger.error('Failed to toggle track lock', { error });
       }
     },
     [sequence, executeCommand, refreshState],
@@ -296,7 +299,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         });
         await refreshState();
       } catch (error) {
-        console.error('Failed to toggle track visibility:', error);
+        logger.error('Failed to toggle track visibility', { error });
       }
     },
     [sequence, executeCommand, refreshState],

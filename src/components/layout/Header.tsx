@@ -8,6 +8,9 @@ import { X, Save, FolderOpen, Download } from 'lucide-react';
 import { UndoRedoButtons } from '@/components/ui';
 import { useProjectStore } from '@/stores';
 import { useCallback, useState } from 'react';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('Header');
 
 // =============================================================================
 // Types
@@ -43,7 +46,7 @@ export function Header({
     try {
       await saveProject();
     } catch (error) {
-      console.error('Failed to save project:', error);
+      logger.error('Failed to save project', { error });
     } finally {
       setIsSaving(false);
     }
@@ -66,7 +69,7 @@ export function Header({
       setShowCloseConfirm(false);
       closeProject();
     } catch (error) {
-      console.error('Failed to save project:', error);
+      logger.error('Failed to save project', { error });
       // Keep dialog open on error so user can retry or discard
     } finally {
       setIsSaving(false);

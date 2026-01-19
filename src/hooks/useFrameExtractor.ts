@@ -8,6 +8,9 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { extractFrame, probeMedia } from '@/utils/ffmpeg';
 import type { MediaInfo } from '@/types';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('FrameExtractor');
 
 // =============================================================================
 // Types
@@ -166,7 +169,7 @@ export function useFrameExtractor(
         } catch (err) {
           const errorMessage = err instanceof Error ? err.message : 'Frame extraction failed';
           setError(errorMessage);
-          console.error('Frame extraction error:', err);
+          logger.error('Frame extraction error', { error: err });
           return null;
         } finally {
           activeExtractionCount.current -= 1;
@@ -202,7 +205,7 @@ export function useFrameExtractor(
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : 'Media probe failed';
         setError(errorMessage);
-        console.error('Media probe error:', err);
+        logger.error('Media probe error', { error: err });
         return null;
       }
     },

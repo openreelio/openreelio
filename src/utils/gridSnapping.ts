@@ -5,22 +5,10 @@
  * Supports snapping to clip edges, playhead, markers, and grid lines.
  */
 
-// =============================================================================
-// Types
-// =============================================================================
+import type { SnapPoint, SnapPointType } from '@/types';
 
-export type SnapPointType = 'clip-start' | 'clip-end' | 'playhead' | 'marker' | 'grid';
-
-export interface SnapPoint {
-  /** Time position in seconds */
-  time: number;
-  /** Type of snap point */
-  type: SnapPointType;
-  /** Associated clip ID (for clip snap points) */
-  clipId?: string;
-  /** Associated marker ID (for marker snap points) */
-  markerId?: string;
-}
+// Re-export for convenience
+export type { SnapPoint, SnapPointType } from '@/types';
 
 export interface SnapResult {
   /** Whether snapping occurred */

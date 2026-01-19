@@ -734,3 +734,27 @@ export const EFFECT_TYPE_LABELS: Partial<Record<string, string>> = {
   face_blur: 'Face Blur',
   object_tracking: 'Object Tracking',
 };
+
+// =============================================================================
+// Timeline UI Types
+// =============================================================================
+
+/**
+ * Snap point type for timeline snapping operations.
+ */
+export type SnapPointType = 'clip-start' | 'clip-end' | 'playhead' | 'marker' | 'grid';
+
+/**
+ * Represents a snap point on the timeline for aligning clips and playhead.
+ * Used for snapping during drag operations and playhead scrubbing.
+ */
+export interface SnapPoint {
+  /** Time position in seconds */
+  time: number;
+  /** Type of snap point */
+  type: SnapPointType;
+  /** Associated clip ID (for clip snap points) */
+  clipId?: string;
+  /** Associated marker ID (for marker snap points) */
+  markerId?: string;
+}

@@ -8,6 +8,7 @@
 import { useCallback, useState, useEffect } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { MainLayout, Header, Sidebar, BottomPanel, Panel } from './components/layout';
+import { ErrorBoundary } from './components/shared';
 import { WelcomeScreen } from './components/features/welcome';
 import { ProjectCreationDialog, type ProjectCreateData } from './components/features/project';
 import { ExportDialog } from './components/features/export';
@@ -18,6 +19,7 @@ import { Timeline } from './components/timeline';
 import { FFmpegWarning, ToastContainer, type ToastData } from './components/ui';
 import { useProjectStore, usePlaybackStore, useTimelineStore } from './stores';
 import { usePreviewSource, useTimelineActions, useFFmpegStatus, useAutoSave, useKeyboardShortcuts, useAudioPlayback } from './hooks';
+import { createLogger, initializeLogger } from './services/logger';
 import {
   loadRecentProjects,
   addRecentProject,
@@ -25,6 +27,12 @@ import {
   validateProjectName,
   type RecentProject,
 } from './utils';
+
+// Initialize logger on module load
+initializeLogger();
+
+// Create module logger
+const logger = createLogger('App');
 
 // =============================================================================
 // Console Component (Bottom Panel Content)
@@ -169,12 +177,22 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
         header={<Header onExport={handleOpenExport} />}
         leftSidebar={
           <Sidebar title="Project Explorer" position="left">
-            <ProjectExplorer />
+            <ErrorBoundary
+              onError={(error) => logger.error('ProjectExplorer error', { error })}
+              showDetails={import.meta.env.DEV}
+            >
+              <ProjectExplorer />
+            </ErrorBoundary>
           </Sidebar>
         }
         rightSidebar={
           <Sidebar title="Inspector" position="right" width={288}>
-            <Inspector selectedAsset={inspectorAsset} />
+            <ErrorBoundary
+              onError={(error) => logger.error('Inspector error', { error })}
+              showDetails={import.meta.env.DEV}
+            >
+              <Inspector selectedAsset={inspectorAsset} />
+            </ErrorBoundary>
           </Sidebar>
         }
         footer={
@@ -186,30 +204,40 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
         {/* Center content split between preview and timeline */}
         <div className="flex flex-col h-full">
           <div className="flex-1 border-b border-editor-border">
-            <PreviewPlayer
-              src={previewSource?.src}
-              poster={previewSource?.thumbnail}
-              className="h-full"
-              playhead={effectivePlayhead}
-              isPlaying={isPlaying}
-              onPlayheadChange={setCurrentTime}
-              onPlayStateChange={setIsPlaying}
-              onDurationChange={setDuration}
-            />
+            <ErrorBoundary
+              onError={(error) => logger.error('PreviewPlayer error', { error })}
+              showDetails={import.meta.env.DEV}
+            >
+              <PreviewPlayer
+                src={previewSource?.src}
+                poster={previewSource?.thumbnail}
+                className="h-full"
+                playhead={effectivePlayhead}
+                isPlaying={isPlaying}
+                onPlayheadChange={setCurrentTime}
+                onPlayStateChange={setIsPlaying}
+                onDurationChange={setDuration}
+              />
+            </ErrorBoundary>
           </div>
           <div className="flex-1 overflow-hidden">
             <Panel title="Timeline" variant="default" className="h-full" noPadding>
-              <Timeline
-                sequence={sequence}
-                onClipMove={handleClipMove}
-                onClipTrim={handleClipTrim}
-                onClipSplit={handleClipSplit}
-                onAssetDrop={handleAssetDrop}
-                onDeleteClips={handleDeleteClips}
-                onTrackMuteToggle={handleTrackMuteToggle}
-                onTrackLockToggle={handleTrackLockToggle}
-                onTrackVisibilityToggle={handleTrackVisibilityToggle}
-              />
+              <ErrorBoundary
+                onError={(error) => logger.error('Timeline error', { error })}
+                showDetails={import.meta.env.DEV}
+              >
+                <Timeline
+                  sequence={sequence}
+                  onClipMove={handleClipMove}
+                  onClipTrim={handleClipTrim}
+                  onClipSplit={handleClipSplit}
+                  onAssetDrop={handleAssetDrop}
+                  onDeleteClips={handleDeleteClips}
+                  onTrackMuteToggle={handleTrackMuteToggle}
+                  onTrackLockToggle={handleTrackLockToggle}
+                  onTrackVisibilityToggle={handleTrackVisibilityToggle}
+                />
+              </ErrorBoundary>
             </Panel>
           </div>
         </div>
@@ -283,7 +311,7 @@ function App(): JSX.Element {
     delay: 30_000,
     enabled: true,
     onSaveError: (error) => {
-      console.error('Auto-save failed:', error);
+      logger.error('Auto-save failed', { error });
     },
   });
 
@@ -312,7 +340,7 @@ function App(): JSX.Element {
         // Show warning if name was modified
         if (validation.errors.length > 0 && validation.sanitized) {
           // Log validation warnings but continue with sanitized name
-          console.warn('Project name validation warnings:', validation.errors);
+          logger.warn('Project name validation warnings', { errors: validation.errors });
         }
 
         // Build safe project path using validated name
@@ -330,7 +358,7 @@ function App(): JSX.Element {
         setShowCreateDialog(false);
         addToast(`Project "${projectName}" created successfully`, 'success');
       } catch (error) {
-        console.error('Failed to create project:', error);
+        logger.error('Failed to create project', { error });
         const errorMessage =
           error instanceof Error ? error.message : 'Unknown error occurred';
         addToast(`Failed to create project: ${errorMessage}`, 'error');
@@ -374,7 +402,7 @@ function App(): JSX.Element {
           });
           setRecentProjects(updated);
         } catch (error) {
-          console.error('Failed to open project:', error);
+          logger.error('Failed to open project', { error });
         }
       }
     },

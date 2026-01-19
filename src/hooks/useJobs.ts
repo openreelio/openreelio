@@ -9,6 +9,9 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { JobId, JobInfo, JobType, JobPriority, JobStats } from '@/types';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('Jobs');
 
 // =============================================================================
 // Types
@@ -106,7 +109,7 @@ export function useJobs(options: UseJobsOptions = {}): UseJobsReturn {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
-      console.error('Failed to fetch jobs:', err);
+      logger.error('Failed to fetch jobs', { error: err });
     } finally {
       setIsLoading(false);
     }
@@ -120,7 +123,7 @@ export function useJobs(options: UseJobsOptions = {}): UseJobsReturn {
       const result = await invoke<JobStats>('get_job_stats');
       setStats(result);
     } catch (err) {
-      console.error('Failed to fetch job stats:', err);
+      logger.error('Failed to fetch job stats', { error: err });
     }
   }, []);
 
@@ -174,7 +177,7 @@ export function useJobs(options: UseJobsOptions = {}): UseJobsReturn {
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         setError(message);
-        console.error('Failed to cancel job:', err);
+        logger.error('Failed to cancel job', { error: err });
         return false;
       }
     },
@@ -193,7 +196,7 @@ export function useJobs(options: UseJobsOptions = {}): UseJobsReturn {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setError(message);
-      console.error('Failed to get job:', err);
+      logger.error('Failed to get job', { error: err });
       return null;
     }
   }, []);
@@ -272,7 +275,7 @@ export function useJobs(options: UseJobsOptions = {}): UseJobsReturn {
         );
         unlistenRefs.current.push(unlistenFailed);
       } catch (err) {
-        console.error('Failed to set up job event listeners:', err);
+        logger.error('Failed to set up job event listeners', { error: err });
       }
     };
 

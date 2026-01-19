@@ -7,6 +7,9 @@
 
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useAudioWaveform } from '@/hooks';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('AudioClipWaveform');
 
 // =============================================================================
 // Types
@@ -124,7 +127,7 @@ export function AudioClipWaveform({
           setIsLoading(false);
         }
       } catch (error) {
-        console.error('Failed to generate waveform:', error);
+        logger.error('Failed to generate waveform', { error });
         // Only apply error state if this effect is still active and component is mounted
         if (isActive && mountedRef.current) {
           setHasError(true);

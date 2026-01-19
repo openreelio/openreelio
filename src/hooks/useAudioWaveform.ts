@@ -9,6 +9,9 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { AssetId } from '@/types';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('AudioWaveform');
 
 // =============================================================================
 // Types
@@ -200,7 +203,7 @@ export function useAudioWaveform(
         } catch (err) {
           const errorMessage = err instanceof Error ? err.message : 'Waveform generation failed';
           setError(errorMessage);
-          console.error('Waveform generation error:', err);
+          logger.error('Waveform generation error', { error: err });
           return null;
         } finally {
           activeGenerationCount.current -= 1;

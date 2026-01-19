@@ -9,6 +9,9 @@ import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useAIAgent, type AIContext } from '@/hooks/useAIAgent';
 import { useTimelineStore } from '@/stores';
 import { ProposalDialog } from './ProposalDialog';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('AIPromptPanel');
 
 // =============================================================================
 // Types
@@ -79,7 +82,7 @@ export const AIPromptPanel: React.FC<AIPromptPanelProps> = ({
         // Clear input on success
         setInputValue('');
       } catch (err) {
-        console.error('AI analysis failed:', err);
+        logger.error('AI analysis failed', { error: err });
         if (onError) {
           onError(err instanceof Error ? err.message : String(err));
         }

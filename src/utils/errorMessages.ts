@@ -4,6 +4,10 @@
  * Converts backend error messages to user-friendly messages.
  */
 
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('ErrorMessages');
+
 // =============================================================================
 // Error Message Mapping
 // =============================================================================
@@ -224,8 +228,8 @@ export function createErrorHandler(
       showError(message);
     }
 
-    // Also log to console for debugging
-    console.error('Error:', error);
+    // Also log for debugging
+    logger.error('Handled error', { error });
   };
 }
 

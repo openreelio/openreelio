@@ -279,7 +279,8 @@ describe('Timeline', () => {
       render(<Timeline sequence={mockSequence} />);
 
       const tracksArea = screen.getByTestId('timeline-tracks-area');
-      fireEvent.wheel(tracksArea, { deltaX: 100, shiftKey: true });
+      // Use deltaY for horizontal scroll with Shift key (standard behavior)
+      fireEvent.wheel(tracksArea, { deltaY: 100, shiftKey: true });
 
       expect(useTimelineStore.getState().scrollX).toBeGreaterThan(0);
     });
