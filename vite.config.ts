@@ -7,8 +7,24 @@ import { fileURLToPath } from 'node:url';
 // https://vitejs.dev/config/
 const rootDir = fileURLToPath(new URL('.', import.meta.url));
 
-export default defineConfig({
-  plugins: [react()],
+export default defineConfig(async ({ mode }) => {
+  const plugins = [react()];
+
+  if (mode === 'analyze') {
+    const { visualizer } = await import('rollup-plugin-visualizer');
+    plugins.push(
+      visualizer({
+        filename: 'bundle-stats.html',
+        open: true,
+        gzipSize: true,
+        brotliSize: true,
+        template: 'treemap', // 'sunburst', 'treemap', 'network'
+      }),
+    );
+  }
+
+  return {
+    plugins,
   resolve: {
     alias: {
       '@': resolve(rootDir, 'src'),
@@ -20,6 +36,7 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    exclude: ['src/**/*.bench.test.{ts,tsx}', 'src/**/*.stress.test.{ts,tsx}'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
@@ -44,5 +61,17 @@ export default defineConfig({
     minify: !process.env.TAURI_ENV_DEBUG ? 'esbuild' : false,
     // Produce sourcemaps for debug builds
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    // Rollup options for better bundle analysis
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          // Split vendor chunks for better caching
+          vendor: ['react', 'react-dom', 'react-router-dom'],
+          state: ['zustand', 'immer'],
+          icons: ['lucide-react'],
+        },
+      },
+    },
   },
+  };
 });
