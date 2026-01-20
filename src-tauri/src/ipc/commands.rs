@@ -13,6 +13,7 @@ use crate::core::{
     },
     ffmpeg::FFmpegProgress,
     jobs::{Job, JobStatus, JobType, Priority},
+    performance::memory::{CacheStats, PoolStats},
     CoreError,
 };
 use crate::{ActiveProject, AppState};
@@ -1639,6 +1640,185 @@ pub struct ValidationResultDto {
 }
 
 // =============================================================================
+// Performance/Memory Commands
+// =============================================================================
+
+/// Memory statistics DTO for frontend
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryStatsDto {
+    /// Pool statistics
+    pub pool_stats: PoolStatsDto,
+    /// Cache statistics
+    pub cache_stats: CacheStatsDto,
+    /// Total allocated bytes (Rust side)
+    pub allocated_bytes: u64,
+    /// System memory info
+    pub system_memory: Option<SystemMemoryDto>,
+}
+
+/// Pool statistics DTO
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolStatsDto {
+    pub total_blocks: usize,
+    pub allocated_blocks: usize,
+    pub total_size_bytes: u64,
+    pub used_size_bytes: u64,
+    pub allocation_count: u64,
+    pub release_count: u64,
+    pub pool_hits: u64,
+    pub pool_misses: u64,
+    pub hit_rate: f64,
+}
+
+impl From<PoolStats> for PoolStatsDto {
+    fn from(stats: PoolStats) -> Self {
+        let total = stats.pool_hits + stats.pool_misses;
+        let hit_rate = if total > 0 {
+            stats.pool_hits as f64 / total as f64
+        } else {
+            0.0
+        };
+
+        Self {
+            total_blocks: stats.total_blocks,
+            allocated_blocks: stats.allocated_blocks,
+            total_size_bytes: stats.total_size_bytes,
+            used_size_bytes: stats.used_size_bytes,
+            allocation_count: stats.allocation_count,
+            release_count: stats.release_count,
+            pool_hits: stats.pool_hits,
+            pool_misses: stats.pool_misses,
+            hit_rate,
+        }
+    }
+}
+
+/// Cache statistics DTO
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CacheStatsDto {
+    pub entry_count: usize,
+    pub total_size_bytes: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+    pub hit_rate: f64,
+}
+
+impl From<CacheStats> for CacheStatsDto {
+    fn from(stats: CacheStats) -> Self {
+        Self {
+            entry_count: stats.entry_count,
+            total_size_bytes: stats.total_size_bytes,
+            hits: stats.hits,
+            misses: stats.misses,
+            evictions: stats.evictions,
+            hit_rate: stats.hit_rate,
+        }
+    }
+}
+
+/// System memory information
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemMemoryDto {
+    /// Total physical memory in bytes
+    pub total_bytes: u64,
+    /// Available memory in bytes
+    pub available_bytes: u64,
+    /// Used memory in bytes
+    pub used_bytes: u64,
+    /// Usage percentage (0-100)
+    pub usage_percent: f64,
+}
+
+/// Memory cleanup result
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCleanupResult {
+    /// Bytes freed from pool shrink
+    pub pool_bytes_freed: u64,
+    /// Cache entries evicted
+    pub cache_entries_evicted: usize,
+    /// Total bytes freed
+    pub total_bytes_freed: u64,
+}
+
+/// Gets memory statistics from the backend
+#[tauri::command]
+pub async fn get_memory_stats(state: State<'_, AppState>) -> Result<MemoryStatsDto, String> {
+    let memory_state = state.memory_pool.lock().await;
+    let cache_state = state.cache_manager.lock().await;
+
+    let pool_stats = memory_state.get_stats().await;
+    let cache_stats = cache_state.get_stats().await;
+    let allocated_bytes = memory_state.allocated_bytes();
+
+    // Get system memory info
+    let system_memory = get_system_memory_info();
+
+    Ok(MemoryStatsDto {
+        pool_stats: PoolStatsDto::from(pool_stats),
+        cache_stats: CacheStatsDto::from(cache_stats),
+        allocated_bytes,
+        system_memory,
+    })
+}
+
+/// Triggers memory cleanup (shrink pools, evict expired cache)
+#[tauri::command]
+pub async fn trigger_memory_cleanup(
+    state: State<'_, AppState>,
+) -> Result<MemoryCleanupResult, String> {
+    let memory_state = state.memory_pool.lock().await;
+    let cache_state = state.cache_manager.lock().await;
+
+    // Shrink memory pool (free unused blocks)
+    let pool_bytes_freed = memory_state.shrink().await as u64;
+
+    // Get cache stats before potential eviction
+    let cache_before = cache_state.get_stats().await;
+
+    // Note: CacheManager doesn't have explicit evict_expired, but we can clear old entries
+    // For now, we just report current state. Future: add time-based eviction.
+
+    let cache_after = cache_state.get_stats().await;
+    let cache_entries_evicted = cache_before
+        .entry_count
+        .saturating_sub(cache_after.entry_count);
+    let cache_bytes_freed = cache_before
+        .total_size_bytes
+        .saturating_sub(cache_after.total_size_bytes);
+
+    let total_bytes_freed = pool_bytes_freed + cache_bytes_freed;
+
+    tracing::info!(
+        "Memory cleanup: pool freed {} bytes, cache evicted {} entries ({} bytes)",
+        pool_bytes_freed,
+        cache_entries_evicted,
+        cache_bytes_freed
+    );
+
+    Ok(MemoryCleanupResult {
+        pool_bytes_freed,
+        cache_entries_evicted,
+        total_bytes_freed,
+    })
+}
+
+/// Gets system memory information
+///
+/// Returns None since sysinfo is not currently enabled.
+/// To enable system memory info, add sysinfo as a dependency and feature.
+fn get_system_memory_info() -> Option<SystemMemoryDto> {
+    // sysinfo crate is not currently enabled as a dependency
+    // Return None to indicate system memory info is unavailable
+    None
+}
+
+// =============================================================================
 // Command Registration
 // =============================================================================
 
@@ -1683,6 +1863,9 @@ pub fn get_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'st
         create_proposal,
         apply_edit_script,
         validate_edit_script,
+        // Performance/Memory
+        get_memory_stats,
+        trigger_memory_cleanup,
     ]
 }
 
