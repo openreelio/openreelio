@@ -41,7 +41,10 @@ pub fn detect_bundled_ffmpeg(app_handle: &tauri::AppHandle) -> FFmpegResult<FFmp
 
     // Try resource directory first (production path)
     if let Ok(info) = detect_bundled_at_path(&resource_dir) {
-        tracing::info!("Found bundled FFmpeg at resource directory: {:?}", info.ffmpeg_path);
+        tracing::info!(
+            "Found bundled FFmpeg at resource directory: {:?}",
+            info.ffmpeg_path
+        );
         return Ok(info);
     }
 
@@ -69,7 +72,11 @@ fn detect_dev_mode_binaries() -> FFmpegResult<FFmpegInfo> {
     tracing::debug!("Checking dev mode paths: {:?}", dev_binaries_paths);
 
     for binaries_dir in dev_binaries_paths {
-        tracing::trace!("Checking path: {:?} (exists: {})", binaries_dir, binaries_dir.exists());
+        tracing::trace!(
+            "Checking path: {:?} (exists: {})",
+            binaries_dir,
+            binaries_dir.exists()
+        );
 
         if binaries_dir.exists() {
             // Platform-specific binary names
@@ -84,8 +91,10 @@ fn detect_dev_mode_binaries() -> FFmpegResult<FFmpegInfo> {
 
             tracing::trace!(
                 "Checking binaries: ffmpeg={:?} (exists: {}), ffprobe={:?} (exists: {})",
-                ffmpeg_path, ffmpeg_path.exists(),
-                ffprobe_path, ffprobe_path.exists()
+                ffmpeg_path,
+                ffmpeg_path.exists(),
+                ffprobe_path,
+                ffprobe_path.exists()
             );
 
             if ffmpeg_path.exists() && ffprobe_path.exists() {
