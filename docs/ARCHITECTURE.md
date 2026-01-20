@@ -27,8 +27,9 @@ OpenReelio uses a Tauri 2.0 desktop application architecture with:
 - **Plugin Host**: WASM-based plugin execution
 
 ### Project Folder Structure
-- project.meta - Project metadata
-- project.ops - Operation log
+- project.json - Project metadata
+- ops.jsonl - Operation log (append-only)
+- snapshot.json - Snapshot cache (rebuildable)
 - assets/ - Asset files
 - cache/ - Cache files
 
