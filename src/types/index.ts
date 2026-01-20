@@ -79,6 +79,17 @@ export interface TimeRange {
 }
 
 // =============================================================================
+// Input/Interaction Types
+// =============================================================================
+
+/** Modifier keys pressed during click events */
+export interface ClickModifiers {
+  ctrlKey: boolean;
+  shiftKey: boolean;
+  metaKey: boolean;
+}
+
+// =============================================================================
 // Asset Types
 // =============================================================================
 
@@ -219,6 +230,100 @@ export interface Marker {
   color: Color;
   markerType: 'generic' | 'chapter' | 'hook' | 'cta' | 'todo';
 }
+
+// =============================================================================
+// Caption Types
+// =============================================================================
+
+/** Vertical position of caption on screen */
+export type VerticalPosition = 'bottom' | 'top' | 'center';
+
+/** Horizontal text alignment */
+export type TextAlignment = 'left' | 'center' | 'right';
+
+/** Font weight */
+export type FontWeight = 'normal' | 'bold' | 'light';
+
+/** Custom position with x/y coordinates (percentage) */
+export interface CustomPosition {
+  xPercent: number;
+  yPercent: number;
+}
+
+/** Caption position on screen */
+export type CaptionPosition =
+  | { type: 'preset'; vertical: VerticalPosition; marginPercent: number }
+  | { type: 'custom'; xPercent: number; yPercent: number };
+
+/** RGBA color for captions (0-255) */
+export interface CaptionColor {
+  r: number;
+  g: number;
+  b: number;
+  a: number;
+}
+
+/** Caption text style */
+export interface CaptionStyle {
+  fontFamily: string;
+  fontSize: number;
+  fontWeight: FontWeight;
+  color: CaptionColor;
+  backgroundColor?: CaptionColor;
+  outlineColor?: CaptionColor;
+  outlineWidth: number;
+  shadowColor?: CaptionColor;
+  shadowOffset: number;
+  alignment: TextAlignment;
+  italic: boolean;
+  underline: boolean;
+}
+
+/** A single caption entry with text and timing */
+export interface Caption {
+  id: CaptionId;
+  startSec: number;
+  endSec: number;
+  text: string;
+  styleOverride?: CaptionStyle;
+  positionOverride?: CaptionPosition;
+  speaker?: string;
+  metadata?: Record<string, string>;
+}
+
+/** A caption track containing multiple captions */
+export interface CaptionTrack {
+  id: string;
+  name: string;
+  language: string;
+  visible: boolean;
+  locked: boolean;
+  captions: Caption[];
+  defaultStyle: CaptionStyle;
+  defaultPosition: CaptionPosition;
+}
+
+/** Default caption style */
+export const DEFAULT_CAPTION_STYLE: CaptionStyle = {
+  fontFamily: 'Arial',
+  fontSize: 48,
+  fontWeight: 'normal',
+  color: { r: 255, g: 255, b: 255, a: 255 },
+  outlineColor: { r: 0, g: 0, b: 0, a: 255 },
+  outlineWidth: 2,
+  shadowColor: { r: 0, g: 0, b: 0, a: 128 },
+  shadowOffset: 2,
+  alignment: 'center',
+  italic: false,
+  underline: false,
+};
+
+/** Default caption position */
+export const DEFAULT_CAPTION_POSITION: CaptionPosition = {
+  type: 'preset',
+  vertical: 'bottom',
+  marginPercent: 5,
+};
 
 // =============================================================================
 // Command Types

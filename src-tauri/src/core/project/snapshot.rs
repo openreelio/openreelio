@@ -148,6 +148,7 @@ impl Snapshot {
             meta: snapshot.meta,
             assets,
             sequences,
+            effects: std::collections::HashMap::new(), // Effects loaded from ops replay
             active_sequence_id: snapshot.active_sequence_id,
             last_op_id: None, // Will be set from snapshot metadata
             op_count: 0,      // Will be updated when replaying ops

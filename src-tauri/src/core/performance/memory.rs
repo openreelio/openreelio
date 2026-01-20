@@ -621,6 +621,9 @@ impl CacheManager {
 
     /// Evicts expired entries based on TTL configuration
     ///
+    /// Uses batch removal under a single set of write locks for optimal performance
+    /// when many entries expire simultaneously.
+    ///
     /// Returns the number of entries evicted
     pub async fn evict_expired(&self) -> usize {
         let ttl_ms = {
@@ -632,30 +635,43 @@ impl CacheManager {
         };
 
         let now = chrono::Utc::now().timestamp_millis();
-        let mut keys_to_evict = Vec::new();
 
-        // Find expired entries
-        {
-            let metadata = self.metadata.read().await;
-            for (key, entry) in metadata.iter() {
+        // Acquire write locks once for batch removal
+        let mut entries = self.entries.write().await;
+        let mut metadata = self.metadata.write().await;
+
+        // Find and collect expired keys
+        let keys_to_evict: Vec<String> = metadata
+            .iter()
+            .filter(|(_, entry)| {
                 let age_ms = now - entry.created_at;
-                if age_ms > ttl_ms as i64 {
-                    keys_to_evict.push(key.clone());
-                }
-            }
-        }
+                age_ms > ttl_ms as i64
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
 
-        // Evict expired entries
         let evicted_count = keys_to_evict.len();
-        for key in keys_to_evict {
-            self.remove(&key).await;
+        if evicted_count == 0 {
+            return 0;
         }
 
-        // Update eviction stats
-        if evicted_count > 0 {
-            let mut stats = self.stats.write().await;
-            stats.evictions += evicted_count as u64;
+        // Batch remove all expired entries
+        let mut total_freed: u64 = 0;
+        for key in &keys_to_evict {
+            if let Some(data) = entries.remove(key) {
+                total_freed += data.len() as u64;
+            }
+            metadata.remove(key);
         }
+
+        // Update size atomically
+        self.current_size.fetch_sub(total_freed, Ordering::SeqCst);
+
+        // Update stats
+        let mut stats = self.stats.write().await;
+        stats.entry_count = entries.len();
+        stats.total_size_bytes = self.current_size.load(Ordering::SeqCst);
+        stats.evictions += evicted_count as u64;
 
         evicted_count
     }
@@ -1129,6 +1145,43 @@ mod tests {
         let evicted = cache.evict_expired().await;
         assert_eq!(evicted, 0);
         assert!(cache.contains("key1").await);
+    }
+
+    #[tokio::test]
+    async fn test_cache_manager_batch_eviction_performance() {
+        // Test that batch eviction correctly handles multiple expired entries
+        let config = MemoryConfig {
+            cache_ttl_secs: 1,                 // 1 second TTL for quick test
+            max_cache_bytes: 10 * 1024 * 1024, // Large enough for many entries
+            ..Default::default()
+        };
+        let cache = CacheManager::with_config(config);
+
+        // Add multiple entries
+        for i in 0..10 {
+            cache
+                .put(&format!("key{}", i), vec![i as u8; 100])
+                .await
+                .unwrap();
+        }
+
+        // Verify all entries exist
+        assert_eq!(cache.get_stats().await.entry_count, 10);
+        let initial_size = cache.current_size();
+        assert_eq!(initial_size, 1000); // 10 entries * 100 bytes
+
+        // Wait for TTL to expire
+        tokio::time::sleep(tokio::time::Duration::from_millis(1100)).await;
+
+        // Batch eviction should remove all entries in one operation
+        let evicted = cache.evict_expired().await;
+        assert_eq!(evicted, 10);
+
+        // Verify cache is empty
+        let stats = cache.get_stats().await;
+        assert_eq!(stats.entry_count, 0);
+        assert_eq!(cache.current_size(), 0);
+        assert_eq!(stats.evictions, 10);
     }
 
     // ========================================================================

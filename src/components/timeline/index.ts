@@ -45,6 +45,14 @@ export type { AudioClipWaveformProps } from './AudioClipWaveform';
 export { VirtualizedTrack } from './VirtualizedTrack';
 export type { VirtualizedTrackProps } from './VirtualizedTrack';
 
+// Caption components
+export { CaptionClip } from './CaptionClip';
+export { CaptionTrack } from './CaptionTrack';
+
+// Marker components
+export { MarkerPin } from './MarkerPin';
+export { MarkerLayer } from './MarkerLayer';
+
 // Layer components
 export { DragPreviewLayer } from './DragPreviewLayer';
 export type { DragPreviewState } from './DragPreviewLayer';

@@ -23,7 +23,7 @@ This document describes all edit commands (Command) used in OpenReelio in detail
 
 1. **All edits via Command**: State changes must only occur through Commands.
 2. **Undo/Redo support**: All Commands are reversible.
-3. **Log storage**: All Commands are recorded in `project.ops.jsonl`.
+3. **Log storage**: All Commands are recorded in `ops.jsonl`.
 4. **Atomicity**: Commands either completely succeed or completely fail.
 
 ### Command Structure

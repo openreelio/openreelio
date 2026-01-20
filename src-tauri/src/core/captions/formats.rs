@@ -256,15 +256,25 @@ pub fn parse_vtt(content: &str) -> Result<Vec<Caption>, ParseError> {
             return Err(ParseError::MissingData("Caption text".to_string()));
         }
 
-        // Remove VTT tags from text
-        let text = text_lines
+        // Parse VTT tags from text, extracting speaker and stripping formatting
+        let mut speaker: Option<String> = None;
+        let cleaned_lines: Vec<String> = text_lines
             .iter()
-            .map(|l| strip_vtt_tags(l))
-            .collect::<Vec<_>>()
-            .join("\n");
+            .map(|l| {
+                let result = parse_vtt_tags(l);
+                // Use first speaker found across all lines
+                if speaker.is_none() && result.speaker.is_some() {
+                    speaker = result.speaker;
+                }
+                result.text
+            })
+            .collect();
+        let text = cleaned_lines.join("\n");
 
         let id = format!("vtt_{}", index);
-        captions.push(Caption::new(&id, start_sec, end_sec, &text));
+        let mut caption = Caption::new(&id, start_sec, end_sec, &text);
+        caption.speaker = speaker;
+        captions.push(caption);
         index += 1;
     }
 
@@ -324,22 +334,71 @@ fn parse_vtt_timestamp(ts: &str) -> Result<f64, ParseError> {
     }
 }
 
-/// Strips VTT formatting tags from text
-fn strip_vtt_tags(text: &str) -> String {
-    // Simple regex-free approach: remove <...> tags
-    let mut result = String::new();
-    let mut in_tag = false;
+/// Result of parsing VTT tags, containing extracted speaker and cleaned text
+struct VttTagParseResult {
+    /// Extracted speaker name from <v ...> tags, if any
+    speaker: Option<String>,
+    /// Text with VTT formatting tags stripped
+    text: String,
+}
 
-    for c in text.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(c),
-            _ => {}
+/// Parses VTT tags from text, extracting speaker information and stripping formatting tags
+///
+/// VTT speaker tags use the format: `<v Speaker Name>text</v>`
+/// This function extracts the speaker name while removing all VTT tags from the text.
+fn parse_vtt_tags(text: &str) -> VttTagParseResult {
+    let mut result = String::new();
+    let mut speaker: Option<String> = None;
+    let mut chars = text.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        if c == '<' {
+            // Collect tag content
+            let mut tag_content = String::new();
+            while let Some(&next_c) = chars.peek() {
+                if next_c == '>' {
+                    chars.next(); // consume '>'
+                    break;
+                }
+                tag_content.push(chars.next().unwrap());
+            }
+
+            // Check for voice/speaker tag: <v Speaker Name> or <v.class Speaker Name>
+            let tag_trimmed = tag_content.trim();
+            if tag_trimmed.starts_with('v') && speaker.is_none() {
+                // Extract speaker name after 'v' and optional class
+                let after_v = &tag_trimmed[1..];
+                // Skip optional class (e.g., ".loud")
+                let speaker_part = if after_v.starts_with('.') {
+                    // Find first space after class
+                    after_v.find(' ').map(|i| &after_v[i..])
+                } else {
+                    Some(after_v)
+                };
+
+                if let Some(name) = speaker_part {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        speaker = Some(name.to_string());
+                    }
+                }
+            }
+            // Other tags (b, i, u, c, ruby, rt, lang, /v, etc.) are simply stripped
+        } else {
+            result.push(c);
         }
     }
 
-    result
+    VttTagParseResult {
+        speaker,
+        text: result,
+    }
+}
+
+/// Strips VTT formatting tags from text (legacy function for backwards compatibility)
+#[allow(dead_code)]
+fn strip_vtt_tags(text: &str) -> String {
+    parse_vtt_tags(text).text
 }
 
 /// Exports captions to WebVTT format
@@ -643,5 +702,80 @@ Hello
         let result = parse_vtt(vtt);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ParseError::InvalidFormat(_)));
+    }
+
+    // -------------------------------------------------------------------------
+    // VTT Speaker Tag Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_vtt_tags_with_speaker() {
+        let result = parse_vtt_tags("<v John>Hello World</v>");
+        assert_eq!(result.speaker, Some("John".to_string()));
+        assert_eq!(result.text, "Hello World");
+    }
+
+    #[test]
+    fn test_parse_vtt_tags_with_speaker_full_name() {
+        let result = parse_vtt_tags("<v John Smith>Hello there</v>");
+        assert_eq!(result.speaker, Some("John Smith".to_string()));
+        assert_eq!(result.text, "Hello there");
+    }
+
+    #[test]
+    fn test_parse_vtt_tags_with_speaker_class() {
+        let result = parse_vtt_tags("<v.loud Jane Doe>Shouting!</v>");
+        assert_eq!(result.speaker, Some("Jane Doe".to_string()));
+        assert_eq!(result.text, "Shouting!");
+    }
+
+    #[test]
+    fn test_parse_vtt_tags_no_speaker() {
+        let result = parse_vtt_tags("<b>Bold</b> and <i>italic</i>");
+        assert_eq!(result.speaker, None);
+        assert_eq!(result.text, "Bold and italic");
+    }
+
+    #[test]
+    fn test_parse_vtt_tags_mixed() {
+        let result = parse_vtt_tags("<v Speaker><b>Bold</b> text</v>");
+        assert_eq!(result.speaker, Some("Speaker".to_string()));
+        assert_eq!(result.text, "Bold text");
+    }
+
+    #[test]
+    fn test_parse_vtt_with_speaker_extraction() {
+        let vtt = r#"WEBVTT
+
+00:00:01.000 --> 00:00:04.000
+<v Alice>Hello, how are you?</v>
+
+00:00:05.000 --> 00:00:08.000
+<v Bob>I'm fine, thanks!</v>
+"#;
+
+        let captions = parse_vtt(vtt).unwrap();
+        assert_eq!(captions.len(), 2);
+
+        assert_eq!(captions[0].speaker, Some("Alice".to_string()));
+        assert_eq!(captions[0].text, "Hello, how are you?");
+
+        assert_eq!(captions[1].speaker, Some("Bob".to_string()));
+        assert_eq!(captions[1].text, "I'm fine, thanks!");
+    }
+
+    #[test]
+    fn test_parse_vtt_multiline_with_speaker() {
+        let vtt = r#"WEBVTT
+
+00:00:01.000 --> 00:00:04.000
+<v Narrator>Line one
+Line two</v>
+"#;
+
+        let captions = parse_vtt(vtt).unwrap();
+        assert_eq!(captions.len(), 1);
+        assert_eq!(captions[0].speaker, Some("Narrator".to_string()));
+        assert_eq!(captions[0].text, "Line one\nLine two");
     }
 }

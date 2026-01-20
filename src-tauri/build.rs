@@ -40,7 +40,6 @@ fn main() {
 fn should_download_ffmpeg() -> bool {
     // Skip if explicitly disabled
     if env::var("SKIP_FFMPEG_DOWNLOAD").is_ok() {
-        println!("cargo:warning=SKIP_FFMPEG_DOWNLOAD set, skipping FFmpeg download");
         return false;
     }
 
@@ -55,10 +54,6 @@ fn should_download_ffmpeg() -> bool {
     let ffmpeg_exists = binaries_dir.join("ffmpeg").exists();
 
     if ffmpeg_exists {
-        println!(
-            "cargo:warning=FFmpeg binaries already exist at {}",
-            binaries_dir.display()
-        );
         return false;
     }
 
