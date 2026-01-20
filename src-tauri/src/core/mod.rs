@@ -5,6 +5,7 @@
 
 pub mod ai;
 pub mod assets;
+pub mod captions;
 pub mod commands;
 pub mod effects;
 pub mod ffmpeg;
