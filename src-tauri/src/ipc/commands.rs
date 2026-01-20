@@ -1778,16 +1778,14 @@ pub async fn trigger_memory_cleanup(
     // Shrink memory pool (free unused blocks)
     let pool_bytes_freed = memory_state.shrink().await as u64;
 
-    // Get cache stats before potential eviction
+    // Get cache stats before eviction
     let cache_before = cache_state.get_stats().await;
 
-    // Note: CacheManager doesn't have explicit evict_expired, but we can clear old entries
-    // For now, we just report current state. Future: add time-based eviction.
+    // Evict expired cache entries based on TTL
+    let cache_entries_evicted = cache_state.evict_expired().await;
 
+    // Calculate bytes freed from cache
     let cache_after = cache_state.get_stats().await;
-    let cache_entries_evicted = cache_before
-        .entry_count
-        .saturating_sub(cache_after.entry_count);
     let cache_bytes_freed = cache_before
         .total_size_bytes
         .saturating_sub(cache_after.total_size_bytes);
