@@ -9,6 +9,7 @@ use tokio::sync::mpsc::Sender;
 
 use crate::core::{
     assets::Asset,
+    effects::{Effect, FilterGraph},
     ffmpeg::FFmpegRunner,
     timeline::{Clip, Sequence, Track, TrackKind},
 };
@@ -384,14 +385,19 @@ impl ExportEngine {
         args
     }
 
-    /// Build FFmpeg complex filter for multi-clip export
+    /// Build FFmpeg complex filter for multi-clip export with effects support
     ///
-    /// NOTE: Current implementation assumes clips are contiguous on timeline.
-    /// TODO: Handle timeline gaps by generating black frames or adjusting timestamps.
-    fn build_complex_filter_args(
+    /// # Arguments
+    ///
+    /// * `sequence` - The sequence to export
+    /// * `assets` - Map of asset ID to Asset
+    /// * `effects` - Map of effect ID to Effect (for looking up clip effects)
+    /// * `settings` - Export settings
+    fn build_complex_filter_args_with_effects(
         &self,
         sequence: &Sequence,
         assets: &std::collections::HashMap<String, Asset>,
+        effects: &std::collections::HashMap<String, Effect>,
         settings: &ExportSettings,
     ) -> Result<Vec<String>, ExportError> {
         let mut args = Vec::new();
@@ -428,47 +434,103 @@ impl ExportEngine {
             args.push("-i".to_string());
             args.push(asset.uri.clone());
 
+            // Build FilterGraph for this clip's effects
+            let clip_filter_graph = self.build_clip_filter_graph(clip, effects);
+
             // Build filters based on track type
             match track.kind {
                 TrackKind::Video => {
-                    // Video trim filter
+                    // Video processing: trim -> effects -> output
+                    let trim_label = format!("trim{}", input_index);
+                    let video_out_label = format!("v{}", input_index);
+
+                    // Step 1: Trim filter
                     let trim_filter = format!(
-                        "[{}:v]trim=start={}:end={},setpts=PTS-STARTPTS[v{}]",
+                        "[{}:v]trim=start={}:end={},setpts=PTS-STARTPTS[{}]",
                         input_index,
                         clip.range.source_in_sec,
                         clip.range.source_out_sec,
-                        input_index
+                        trim_label
                     );
                     filter_complex.push_str(&trim_filter);
                     filter_complex.push(';');
-                    video_streams.push(format!("[v{}]", input_index));
 
-                    // Also extract audio from video track
+                    // Step 2: Apply video effects if any
+                    if clip_filter_graph.has_video_effects() {
+                        let effects_filter = clip_filter_graph
+                            .to_video_filter_complex(&trim_label, &video_out_label);
+                        filter_complex.push_str(&effects_filter);
+                        filter_complex.push(';');
+                    } else {
+                        // No effects - pass through with null filter
+                        filter_complex
+                            .push_str(&format!("[{}]null[{}];", trim_label, video_out_label));
+                    }
+
+                    video_streams.push(format!("[{}]", video_out_label));
+
+                    // Audio processing: trim -> effects -> output
+                    let audio_trim_label = format!("atrim{}", input_index);
+                    let audio_out_label = format!("a{}", input_index);
+
+                    // Audio trim filter
                     // Note: FFmpeg will fail if the input has no audio stream.
                     // For MVP, we assume video clips have audio. TODO: probe media first.
                     let audio_trim = format!(
-                        "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[a{}]",
+                        "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
                         input_index,
                         clip.range.source_in_sec,
                         clip.range.source_out_sec,
-                        input_index
+                        audio_trim_label
                     );
                     filter_complex.push_str(&audio_trim);
                     filter_complex.push(';');
-                    audio_streams.push(format!("[a{}]", input_index));
+
+                    // Apply audio effects if any
+                    if clip_filter_graph.has_audio_effects() {
+                        let effects_filter = clip_filter_graph
+                            .to_audio_filter_complex(&audio_trim_label, &audio_out_label);
+                        filter_complex.push_str(&effects_filter);
+                        filter_complex.push(';');
+                    } else {
+                        // No effects - pass through with anull filter
+                        filter_complex.push_str(&format!(
+                            "[{}]anull[{}];",
+                            audio_trim_label, audio_out_label
+                        ));
+                    }
+
+                    audio_streams.push(format!("[{}]", audio_out_label));
                 }
                 TrackKind::Audio => {
-                    // Audio-only track - only process audio stream
+                    // Audio-only track processing
+                    let audio_trim_label = format!("atrim{}", input_index);
+                    let audio_out_label = format!("a{}", input_index);
+
                     let audio_trim = format!(
-                        "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[a{}]",
+                        "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
                         input_index,
                         clip.range.source_in_sec,
                         clip.range.source_out_sec,
-                        input_index
+                        audio_trim_label
                     );
                     filter_complex.push_str(&audio_trim);
                     filter_complex.push(';');
-                    audio_streams.push(format!("[a{}]", input_index));
+
+                    // Apply audio effects if any
+                    if clip_filter_graph.has_audio_effects() {
+                        let effects_filter = clip_filter_graph
+                            .to_audio_filter_complex(&audio_trim_label, &audio_out_label);
+                        filter_complex.push_str(&effects_filter);
+                        filter_complex.push(';');
+                    } else {
+                        filter_complex.push_str(&format!(
+                            "[{}]anull[{}];",
+                            audio_trim_label, audio_out_label
+                        ));
+                    }
+
+                    audio_streams.push(format!("[{}]", audio_out_label));
                 }
                 _ => {
                     // Skip non-video/audio tracks (caption, overlay)
@@ -479,10 +541,16 @@ impl ExportEngine {
             input_index += 1;
         }
 
+        // Remove trailing semicolon if present
+        if filter_complex.ends_with(';') {
+            filter_complex.pop();
+        }
+        filter_complex.push(';');
+
         // Concat all streams
         if video_streams.len() == 1 {
-            // Single clip - just use the trimmed stream
-            filter_complex.push_str(&format!("{}[outv]", video_streams[0]));
+            // Single clip - just use the processed stream
+            filter_complex.push_str(&format!("{}null[outv]", video_streams[0]));
         } else {
             // Multiple clips - concat
             filter_complex.push_str(&video_streams.join(""));
@@ -492,7 +560,7 @@ impl ExportEngine {
         if !audio_streams.is_empty() {
             filter_complex.push(';');
             if audio_streams.len() == 1 {
-                filter_complex.push_str(&format!("{}[outa]", audio_streams[0]));
+                filter_complex.push_str(&format!("{}anull[outa]", audio_streams[0]));
             } else {
                 filter_complex.push_str(&audio_streams.join(""));
                 filter_complex.push_str(&format!("concat=n={}:v=0:a=1[outa]", audio_streams.len()));
@@ -562,6 +630,27 @@ impl ExportEngine {
         Ok(args)
     }
 
+    /// Build FilterGraph for a clip's effects
+    fn build_clip_filter_graph(
+        &self,
+        clip: &Clip,
+        effects: &std::collections::HashMap<String, Effect>,
+    ) -> FilterGraph {
+        let mut graph = FilterGraph::new();
+
+        // Look up each effect ID and add to graph
+        for effect_id in &clip.effects {
+            if let Some(effect) = effects.get(effect_id) {
+                graph.add_effect(effect.clone());
+            }
+        }
+
+        // Sort effects by order
+        graph.sort_by_order();
+
+        graph
+    }
+
     /// Export a sequence to a video file
     ///
     /// Supports real-time progress reporting via the progress channel.
@@ -573,13 +662,44 @@ impl ExportEngine {
         settings: &ExportSettings,
         progress_tx: Option<Sender<ExportProgress>>,
     ) -> Result<ExportResult, ExportError> {
+        self.export_sequence_with_effects(
+            sequence,
+            assets,
+            &std::collections::HashMap::new(),
+            settings,
+            progress_tx,
+        )
+        .await
+    }
+
+    /// Export a sequence to a video file with effects support
+    ///
+    /// This is the full-featured export method that includes effects processing.
+    /// Each clip's effects are converted to FFmpeg filters and applied during export.
+    ///
+    /// # Arguments
+    ///
+    /// * `sequence` - The sequence to export
+    /// * `assets` - Map of asset ID to Asset
+    /// * `effects` - Map of effect ID to Effect (for looking up clip effects)
+    /// * `settings` - Export settings
+    /// * `progress_tx` - Optional channel for progress updates
+    pub async fn export_sequence_with_effects(
+        &self,
+        sequence: &Sequence,
+        assets: &std::collections::HashMap<String, Asset>,
+        effects: &std::collections::HashMap<String, Effect>,
+        settings: &ExportSettings,
+        progress_tx: Option<Sender<ExportProgress>>,
+    ) -> Result<ExportResult, ExportError> {
         use std::process::Stdio;
         use tokio::io::{AsyncBufReadExt, BufReader};
 
         let start_time = std::time::Instant::now();
 
-        // Build FFmpeg arguments
-        let mut args = self.build_complex_filter_args(sequence, assets, settings)?;
+        // Build FFmpeg arguments with effects
+        let mut args =
+            self.build_complex_filter_args_with_effects(sequence, assets, effects, settings)?;
 
         // Calculate total duration based on the last clip end time on timeline
         let total_duration: f64 = sequence.duration();
@@ -1426,5 +1546,185 @@ mod tests {
         let json = serde_json::to_string(&progress).unwrap();
         assert!(json.contains("\"frame\":100"));
         assert!(json.contains("\"totalFrames\":1000"));
+    }
+
+    // -------------------------------------------------------------------------
+    // FilterGraph Integration Tests
+    // -------------------------------------------------------------------------
+
+    /// Helper function to build FilterGraph for a clip (mirrors ExportEngine::build_clip_filter_graph)
+    fn build_test_filter_graph(
+        clip: &Clip,
+        effects: &std::collections::HashMap<String, Effect>,
+    ) -> FilterGraph {
+        let mut graph = FilterGraph::new();
+
+        for effect_id in &clip.effects {
+            if let Some(effect) = effects.get(effect_id) {
+                graph.add_effect(effect.clone());
+            }
+        }
+
+        graph.sort_by_order();
+        graph
+    }
+
+    #[test]
+    fn test_build_clip_filter_graph_no_effects() {
+        use crate::core::timeline::Clip;
+
+        let clip = Clip::new("asset_1").with_source_range(0.0, 10.0);
+        let effects: std::collections::HashMap<String, Effect> = std::collections::HashMap::new();
+
+        let graph = build_test_filter_graph(&clip, &effects);
+
+        assert!(!graph.has_video_effects());
+        assert!(!graph.has_audio_effects());
+    }
+
+    #[test]
+    fn test_build_clip_filter_graph_with_effects() {
+        use crate::core::effects::{EffectType, ParamValue};
+        use crate::core::timeline::Clip;
+
+        // Create effect
+        let mut blur_effect = Effect::new(EffectType::GaussianBlur);
+        blur_effect.set_param("radius", ParamValue::Float(5.0));
+        let effect_id = blur_effect.id.clone();
+
+        // Create clip with effect reference
+        let mut clip = Clip::new("asset_1").with_source_range(0.0, 10.0);
+        clip.effects.push(effect_id.clone());
+
+        // Create effects map
+        let mut effects: std::collections::HashMap<String, Effect> =
+            std::collections::HashMap::new();
+        effects.insert(effect_id, blur_effect);
+
+        let graph = build_test_filter_graph(&clip, &effects);
+
+        assert!(graph.has_video_effects());
+        assert!(!graph.has_audio_effects());
+
+        // Verify the filter string contains expected FFmpeg filter
+        let filter_str = graph.to_video_filter_complex("0:v", "vout");
+        assert!(filter_str.contains("gblur"));
+    }
+
+    #[test]
+    fn test_build_clip_filter_graph_with_audio_effect() {
+        use crate::core::effects::{EffectType, ParamValue};
+        use crate::core::timeline::Clip;
+
+        // Create volume effect
+        let mut volume_effect = Effect::new(EffectType::Volume);
+        volume_effect.set_param("level", ParamValue::Float(0.5));
+        let effect_id = volume_effect.id.clone();
+
+        // Create clip with effect reference
+        let mut clip = Clip::new("asset_1").with_source_range(0.0, 10.0);
+        clip.effects.push(effect_id.clone());
+
+        // Create effects map
+        let mut effects: std::collections::HashMap<String, Effect> =
+            std::collections::HashMap::new();
+        effects.insert(effect_id, volume_effect);
+
+        let graph = build_test_filter_graph(&clip, &effects);
+
+        assert!(!graph.has_video_effects());
+        assert!(graph.has_audio_effects());
+
+        // Verify the filter string contains expected FFmpeg filter
+        let filter_str = graph.to_audio_filter_complex("0:a", "aout");
+        assert!(filter_str.contains("volume=0.5"));
+    }
+
+    #[test]
+    fn test_build_clip_filter_graph_with_multiple_effects() {
+        use crate::core::effects::{EffectType, ParamValue};
+        use crate::core::timeline::Clip;
+
+        // Create multiple effects
+        let mut blur_effect = Effect::new(EffectType::GaussianBlur);
+        blur_effect.set_param("radius", ParamValue::Float(5.0));
+        blur_effect.order = 1;
+        let blur_id = blur_effect.id.clone();
+
+        let mut brightness_effect = Effect::new(EffectType::Brightness);
+        brightness_effect.set_param("value", ParamValue::Float(0.2));
+        brightness_effect.order = 0;
+        let brightness_id = brightness_effect.id.clone();
+
+        let mut volume_effect = Effect::new(EffectType::Volume);
+        volume_effect.set_param("level", ParamValue::Float(0.8));
+        let volume_id = volume_effect.id.clone();
+
+        // Create clip with effect references
+        let mut clip = Clip::new("asset_1").with_source_range(0.0, 10.0);
+        clip.effects.push(blur_id.clone());
+        clip.effects.push(brightness_id.clone());
+        clip.effects.push(volume_id.clone());
+
+        // Create effects map
+        let mut effects: std::collections::HashMap<String, Effect> =
+            std::collections::HashMap::new();
+        effects.insert(blur_id, blur_effect);
+        effects.insert(brightness_id, brightness_effect);
+        effects.insert(volume_id, volume_effect);
+
+        let graph = build_test_filter_graph(&clip, &effects);
+
+        assert!(graph.has_video_effects());
+        assert!(graph.has_audio_effects());
+
+        // Verify video filter chain (should be sorted by order: brightness first, then blur)
+        let video_filter_str = graph.to_video_filter_complex("0:v", "vout");
+        assert!(video_filter_str.contains("eq=brightness"));
+        assert!(video_filter_str.contains("gblur"));
+    }
+
+    #[test]
+    fn test_build_clip_filter_graph_missing_effect() {
+        use crate::core::timeline::Clip;
+
+        // Create clip with non-existent effect reference
+        let mut clip = Clip::new("asset_1").with_source_range(0.0, 10.0);
+        clip.effects.push("non_existent_effect".to_string());
+
+        // Empty effects map
+        let effects: std::collections::HashMap<String, Effect> = std::collections::HashMap::new();
+
+        // Should not panic, just skip the missing effect
+        let graph = build_test_filter_graph(&clip, &effects);
+
+        assert!(!graph.has_video_effects());
+        assert!(!graph.has_audio_effects());
+    }
+
+    #[test]
+    fn test_filter_graph_disabled_effect() {
+        use crate::core::effects::{EffectType, ParamValue};
+        use crate::core::timeline::Clip;
+
+        // Create disabled effect
+        let mut blur_effect = Effect::new(EffectType::GaussianBlur);
+        blur_effect.set_param("radius", ParamValue::Float(5.0));
+        blur_effect.enabled = false;
+        let effect_id = blur_effect.id.clone();
+
+        // Create clip with effect reference
+        let mut clip = Clip::new("asset_1").with_source_range(0.0, 10.0);
+        clip.effects.push(effect_id.clone());
+
+        // Create effects map
+        let mut effects: std::collections::HashMap<String, Effect> =
+            std::collections::HashMap::new();
+        effects.insert(effect_id, blur_effect);
+
+        let graph = build_test_filter_graph(&clip, &effects);
+
+        // Disabled effects should not be added to the graph
+        assert!(!graph.has_video_effects());
     }
 }
