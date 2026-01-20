@@ -7,11 +7,24 @@
 //! - Final render/export
 //!
 //! Supports both bundled FFmpeg binaries (via Tauri sidecar) and system-installed FFmpeg.
+//!
+//! ## Bundling FFmpeg
+//!
+//! To bundle FFmpeg with the application, set `DOWNLOAD_FFMPEG=1` during build:
+//! ```bash
+//! DOWNLOAD_FFMPEG=1 cargo build --release
+//! ```
+//!
+//! This will download platform-specific FFmpeg binaries and include them in the app bundle.
 
+pub mod bundler;
 mod commands;
 mod detection;
 mod runner;
 
+pub use bundler::{
+    Arch, BundlerConfig, BundlerError, BundlerResult, DownloadSource, FFmpegPaths, Platform,
+};
 pub use commands::*;
 pub use detection::*;
 pub use runner::*;

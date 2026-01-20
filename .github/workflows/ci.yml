@@ -161,6 +161,56 @@ jobs:
         run: cargo build --release
 
   # ==========================================================================
+  # FFmpeg Bundler Tests (Multi-Platform)
+  # ==========================================================================
+  ffmpeg-bundler-test:
+    name: FFmpeg Bundler Tests (${{ matrix.os }})
+    if: github.event_name != 'schedule'
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-bundler-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bundler-
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Create dist directory for Tauri
+        run: mkdir -p dist
+
+      - name: Run bundler unit tests
+        working-directory: src-tauri
+        run: cargo test bundler --features bundled-ffmpeg -- --nocapture
+
+      - name: Run detection tests
+        working-directory: src-tauri
+        run: cargo test detection -- --nocapture
+
+  # ==========================================================================
   # Security Audit
   # ==========================================================================
   security-audit:

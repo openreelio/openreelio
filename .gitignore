@@ -94,6 +94,8 @@ coverage/
 
 # FFmpeg related
 *.ffindex
+/src-tauri/binaries/ffmpeg*
+/src-tauri/binaries/ffprobe*
 
 # =============================================================================
 # AI / Development Planning (not for public)
