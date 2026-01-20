@@ -321,9 +321,10 @@ impl Effect {
         if fade_in {
             format!("fade=t=in:st=0:d={:.4}", duration)
         } else {
-            // For fade out, we'd need the total duration
-            // Using a placeholder that should be replaced with actual end time
-            format!("fade=t=out:d={:.4}", duration)
+            // For fade out, start_time specifies when the fade begins.
+            // Caller should set start_time = clip_duration - fade_duration.
+            let start_time = self.get_float("start_time").unwrap_or(0.0);
+            format!("fade=t=out:st={:.4}:d={:.4}", start_time, duration)
         }
     }
 
@@ -655,9 +656,23 @@ mod tests {
         let mut effect = Effect::new(EffectType::Fade);
         effect.set_param("duration", ParamValue::Float(1.5));
         effect.set_param("fade_in", ParamValue::Bool(false));
+        effect.set_param("start_time", ParamValue::Float(8.5));
 
         let filter = effect.to_filter_string("in", "out");
         assert!(filter.contains("fade=t=out"));
+        assert!(filter.contains("st=8.5"));
+        assert!(filter.contains("d=1.5"));
+    }
+
+    #[test]
+    fn test_fade_out_filter_default_start() {
+        let mut effect = Effect::new(EffectType::Fade);
+        effect.set_param("duration", ParamValue::Float(2.0));
+        effect.set_param("fade_in", ParamValue::Bool(false));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(filter.contains("fade=t=out"));
+        assert!(filter.contains("st=0.0"));
     }
 
     #[test]
