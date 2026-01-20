@@ -156,9 +156,81 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Check bundle size
+        run: |
+          echo "Checking bundle sizes..."
+          # Find the main JS bundle
+          MAIN_BUNDLE=$(find dist/assets -name "index-*.js" -o -name "main-*.js" | head -1)
+          if [ -n "$MAIN_BUNDLE" ]; then
+            SIZE=$(stat -c%s "$MAIN_BUNDLE" 2>/dev/null || stat -f%z "$MAIN_BUNDLE" 2>/dev/null)
+            SIZE_KB=$((SIZE / 1024))
+            echo "Main bundle: $SIZE_KB KB ($SIZE bytes)"
+
+            # Threshold: 500KB (512000 bytes)
+            if [ "$SIZE" -gt 512000 ]; then
+              echo "::warning::Bundle size ($SIZE_KB KB) exceeds recommended limit (500 KB)"
+            else
+              echo "Bundle size is within limits"
+            fi
+          fi
+
+          # Report all bundle sizes
+          echo "All bundles:"
+          ls -lh dist/assets/*.js 2>/dev/null || echo "No JS bundles found"
+
       - name: Build Tauri app (check only)
         working-directory: src-tauri
         run: cargo build --release
+
+  # ==========================================================================
+  # FFmpeg Bundler Tests (Multi-Platform)
+  # ==========================================================================
+  ffmpeg-bundler-test:
+    name: FFmpeg Bundler Tests (${{ matrix.os }})
+    if: github.event_name != 'schedule'
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-bundler-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-bundler-
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Create dist directory for Tauri
+        run: mkdir -p dist
+
+      - name: Run bundler unit tests
+        working-directory: src-tauri
+        run: cargo test bundler --features bundled-ffmpeg -- --nocapture
+
+      - name: Run detection tests
+        working-directory: src-tauri
+        run: cargo test detection -- --nocapture
 
   # ==========================================================================
   # Security Audit

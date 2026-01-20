@@ -172,4 +172,89 @@ describe('useFFmpegStatus', () => {
       expect(mockInvoke).toHaveBeenCalledWith('check_ffmpeg');
     });
   });
+
+  // ===========================================================================
+  // Bundled FFmpeg Tests
+  // ===========================================================================
+
+  it('detects bundled FFmpeg', async () => {
+    mockInvoke.mockResolvedValueOnce({
+      available: true,
+      version: '6.1.1',
+      isBundled: true,
+      ffmpegPath: '/app/resources/binaries/ffmpeg',
+      ffprobePath: '/app/resources/binaries/ffprobe',
+    });
+
+    const { result } = renderHook(() => useFFmpegStatus());
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    expect(result.current.status?.isBundled).toBe(true);
+    expect(result.current.status?.available).toBe(true);
+    expect(result.current.status?.version).toBe('6.1.1');
+    expect(result.current.isAvailable).toBe(true);
+  });
+
+  it('falls back to system FFmpeg when bundled not found', async () => {
+    mockInvoke.mockResolvedValueOnce({
+      available: true,
+      version: '5.1.4',
+      isBundled: false,
+      ffmpegPath: '/usr/local/bin/ffmpeg',
+      ffprobePath: '/usr/local/bin/ffprobe',
+    });
+
+    const { result } = renderHook(() => useFFmpegStatus());
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    expect(result.current.status?.isBundled).toBe(false);
+    expect(result.current.status?.available).toBe(true);
+    expect(result.current.isAvailable).toBe(true);
+  });
+
+  it('shows unavailable when no FFmpeg found (bundled or system)', async () => {
+    mockInvoke.mockResolvedValueOnce({
+      available: false,
+      version: null,
+      isBundled: false,
+      ffmpegPath: null,
+      ffprobePath: null,
+    });
+
+    const { result } = renderHook(() => useFFmpegStatus());
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    expect(result.current.status?.isBundled).toBe(false);
+    expect(result.current.status?.available).toBe(false);
+    expect(result.current.isAvailable).toBe(false);
+  });
+
+  it('detects bundled FFmpeg on Windows', async () => {
+    mockInvoke.mockResolvedValueOnce({
+      available: true,
+      version: '6.1.1',
+      isBundled: true,
+      ffmpegPath: 'C:\\Program Files\\OpenReelio\\resources\\binaries\\ffmpeg.exe',
+      ffprobePath: 'C:\\Program Files\\OpenReelio\\resources\\binaries\\ffprobe.exe',
+    });
+
+    const { result } = renderHook(() => useFFmpegStatus());
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    expect(result.current.status?.isBundled).toBe(true);
+    expect(result.current.status?.ffmpegPath).toContain('ffmpeg.exe');
+    expect(result.current.status?.ffprobePath).toContain('ffprobe.exe');
+  });
 });

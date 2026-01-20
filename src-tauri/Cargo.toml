@@ -15,6 +15,15 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# FFmpeg bundler build dependencies
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+sha2 = "0.10"
+zip = "2.2"
+flate2 = "1.0"
+tar = "0.4"
+xz2 = "0.1"
+walkdir = "2"
+thiserror = "2.0"
 
 [dependencies]
 # Tauri
@@ -58,9 +67,28 @@ async-trait = "0.1"
 wasmtime = "27"
 wasmtime-wasi = "27"
 
+# FFmpeg bundler (optional - enabled via bundled-ffmpeg feature)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"], optional = true }
+sha2 = { version = "0.10", optional = true }
+zip = { version = "2.2", optional = true }
+flate2 = { version = "1.0", optional = true }
+tar = { version = "0.4", optional = true }
+xz2 = { version = "0.1", optional = true }
+walkdir = { version = "2", optional = true }
+
 [dev-dependencies]
 tempfile = "3"
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+# Enable FFmpeg bundling (downloads FFmpeg during build)
+bundled-ffmpeg = [
+    "dep:reqwest",
+    "dep:sha2",
+    "dep:zip",
+    "dep:flate2",
+    "dep:tar",
+    "dep:xz2",
+    "dep:walkdir",
+]

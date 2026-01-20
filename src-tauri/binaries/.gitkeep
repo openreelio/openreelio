@@ -1,0 +1,3 @@
+# This directory contains FFmpeg binaries for bundling
+# Binaries are downloaded during build when DOWNLOAD_FFMPEG=1 is set
+# Do not commit actual binaries - they are gitignored

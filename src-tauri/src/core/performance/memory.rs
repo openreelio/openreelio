@@ -619,6 +619,47 @@ impl CacheManager {
         self.current_size.load(Ordering::SeqCst)
     }
 
+    /// Evicts expired entries based on TTL configuration
+    ///
+    /// Returns the number of entries evicted
+    pub async fn evict_expired(&self) -> usize {
+        let ttl_ms = {
+            let config = self.config.read().await;
+            if config.cache_ttl_secs == 0 {
+                return 0; // TTL disabled
+            }
+            config.cache_ttl_secs * 1000
+        };
+
+        let now = chrono::Utc::now().timestamp_millis();
+        let mut keys_to_evict = Vec::new();
+
+        // Find expired entries
+        {
+            let metadata = self.metadata.read().await;
+            for (key, entry) in metadata.iter() {
+                let age_ms = now - entry.created_at;
+                if age_ms > ttl_ms as i64 {
+                    keys_to_evict.push(key.clone());
+                }
+            }
+        }
+
+        // Evict expired entries
+        let evicted_count = keys_to_evict.len();
+        for key in keys_to_evict {
+            self.remove(&key).await;
+        }
+
+        // Update eviction stats
+        if evicted_count > 0 {
+            let mut stats = self.stats.write().await;
+            stats.evictions += evicted_count as u64;
+        }
+
+        evicted_count
+    }
+
     fn update_hit_rate(&self, stats: &mut CacheStats) {
         let total = stats.hits + stats.misses;
         if total > 0 {
@@ -1056,6 +1097,38 @@ mod tests {
 
         let stats = cache.get_stats().await;
         assert!(stats.evictions > 0);
+    }
+
+    #[tokio::test]
+    async fn test_cache_manager_evict_expired_with_ttl_disabled() {
+        let config = MemoryConfig {
+            cache_ttl_secs: 0, // TTL disabled
+            ..Default::default()
+        };
+        let cache = CacheManager::with_config(config);
+
+        cache.put("key1", vec![1, 2, 3]).await.unwrap();
+
+        // Should return 0 since TTL is disabled
+        let evicted = cache.evict_expired().await;
+        assert_eq!(evicted, 0);
+        assert!(cache.contains("key1").await);
+    }
+
+    #[tokio::test]
+    async fn test_cache_manager_evict_expired_no_expired_entries() {
+        let config = MemoryConfig {
+            cache_ttl_secs: 300, // 5 minutes - entries won't expire immediately
+            ..Default::default()
+        };
+        let cache = CacheManager::with_config(config);
+
+        cache.put("key1", vec![1, 2, 3]).await.unwrap();
+
+        // No entries should be expired yet
+        let evicted = cache.evict_expired().await;
+        assert_eq!(evicted, 0);
+        assert!(cache.contains("key1").await);
     }
 
     // ========================================================================

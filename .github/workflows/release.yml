@@ -101,6 +101,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
+      - name: Download FFmpeg binaries
+        working-directory: src-tauri
+        run: cargo build --release
+        timeout-minutes: 15
+
+      - name: Verify FFmpeg binaries exist
+        shell: bash
+        run: |
+          echo "Checking for FFmpeg binaries..."
+          ls -la src-tauri/binaries/ || echo "No binaries directory yet"
+          if [ -d "src-tauri/binaries" ]; then
+            echo "Binaries found:"
+            ls -la src-tauri/binaries/
+          fi
+
       - name: Install frontend dependencies
         run: npm ci
 

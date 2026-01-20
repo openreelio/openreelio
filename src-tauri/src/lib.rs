@@ -14,6 +14,7 @@ use crate::core::{
     commands::CommandExecutor,
     ffmpeg::create_ffmpeg_state,
     jobs::WorkerPool,
+    performance::memory::{CacheManager, MemoryPool},
     project::{OpsLog, ProjectMeta, ProjectState, Snapshot},
 };
 
@@ -139,6 +140,10 @@ pub struct AppState {
     pub project: Mutex<Option<ActiveProject>>,
     /// Background job worker pool
     pub job_pool: Mutex<WorkerPool>,
+    /// Memory pool for efficient allocation
+    pub memory_pool: Mutex<MemoryPool>,
+    /// Cache manager for asset and render caching
+    pub cache_manager: Mutex<CacheManager>,
 }
 
 impl AppState {
@@ -147,6 +152,8 @@ impl AppState {
         Self {
             project: Mutex::new(None),
             job_pool: Mutex::new(WorkerPool::with_defaults()),
+            memory_pool: Mutex::new(MemoryPool::new()),
+            cache_manager: Mutex::new(CacheManager::new()),
         }
     }
 
@@ -264,6 +271,9 @@ pub fn run() {
             crate::core::ffmpeg::generate_thumbnail,
             crate::core::ffmpeg::probe_media,
             crate::core::ffmpeg::generate_waveform,
+            // Performance/Memory commands
+            ipc::get_memory_stats,
+            ipc::trigger_memory_cleanup,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

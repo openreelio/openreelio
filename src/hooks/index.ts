@@ -155,3 +155,15 @@ export type {
   LazyThumbnailsConfig,
   UseLazyThumbnailsResult,
 } from './useLazyThumbnails';
+
+export { useMemoryMonitor, formatBytes, calculateTrend } from './useMemoryMonitor';
+export type {
+  PoolStats,
+  CacheStats,
+  SystemMemory,
+  JSHeapStats,
+  MemoryStats,
+  CleanupResult,
+  UseMemoryMonitorOptions,
+  UseMemoryMonitorResult,
+} from './useMemoryMonitor';
