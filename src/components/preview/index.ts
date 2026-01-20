@@ -27,3 +27,6 @@ export type { ProxyPreviewPlayerProps } from './ProxyPreviewPlayer';
 
 export { FramePreview } from './FramePreview';
 export type { FramePreviewProps } from './FramePreview';
+
+export { FullscreenPreview } from './FullscreenPreview';
+export type { FullscreenPreviewProps } from './FullscreenPreview';
