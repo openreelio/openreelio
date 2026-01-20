@@ -491,18 +491,28 @@ impl ProjectState {
 
         let effect_id = effect.id.clone();
 
-        // Store the effect in the effects map
-        self.effects.insert(effect_id.clone(), effect);
+        // Find the clip first to validate it exists
+        let sequence = self
+            .sequences
+            .get_mut(seq_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Sequence not found: {}", seq_id)))?;
 
-        // Add effect reference to the clip
-        if let Some(sequence) = self.sequences.get_mut(seq_id) {
-            for track in &mut sequence.tracks {
-                if let Some(clip) = track.get_clip_mut(clip_id) {
-                    clip.effects.push(effect_id);
-                    break;
-                }
+        let mut clip_found = false;
+        for track in &mut sequence.tracks {
+            if let Some(clip) = track.get_clip_mut(clip_id) {
+                clip.effects.push(effect_id.clone());
+                clip_found = true;
+                break;
             }
         }
+
+        if !clip_found {
+            return Err(CoreError::NotFound(format!("Clip not found: {}", clip_id)));
+        }
+
+        // Store the effect in the effects map only after clip is validated
+        self.effects.insert(effect_id, effect);
+
         Ok(())
     }
 
@@ -517,18 +527,28 @@ impl ProjectState {
             .as_str()
             .ok_or_else(|| CoreError::InvalidCommand("Missing effectId".to_string()))?;
 
+        // Find the clip first to validate it exists
+        let sequence = self
+            .sequences
+            .get_mut(seq_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Sequence not found: {}", seq_id)))?;
+
+        let mut clip_found = false;
+        for track in &mut sequence.tracks {
+            if let Some(clip) = track.get_clip_mut(clip_id) {
+                clip.effects.retain(|e| e != effect_id);
+                clip_found = true;
+                break;
+            }
+        }
+
+        if !clip_found {
+            return Err(CoreError::NotFound(format!("Clip not found: {}", clip_id)));
+        }
+
         // Remove effect from the effects map
         self.effects.remove(effect_id);
 
-        // Remove effect reference from the clip
-        if let Some(sequence) = self.sequences.get_mut(seq_id) {
-            for track in &mut sequence.tracks {
-                if let Some(clip) = track.get_clip_mut(clip_id) {
-                    clip.effects.retain(|e| e != effect_id);
-                    break;
-                }
-            }
-        }
         Ok(())
     }
 
@@ -537,26 +557,30 @@ impl ProjectState {
             .as_str()
             .ok_or_else(|| CoreError::InvalidCommand("Missing effectId".to_string()))?;
 
-        if let Some(effect) = self.effects.get_mut(effect_id) {
-            // Update enabled state if provided
-            if let Some(enabled) = op.payload["enabled"].as_bool() {
-                effect.enabled = enabled;
-            }
+        let effect = self
+            .effects
+            .get_mut(effect_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Effect not found: {}", effect_id)))?;
 
-            // Update order if provided
-            if let Some(order) = op.payload["order"].as_i64() {
-                effect.order = order as u32;
-            }
+        // Update enabled state if provided
+        if let Some(enabled) = op.payload["enabled"].as_bool() {
+            effect.enabled = enabled;
+        }
 
-            // Update parameters if provided
-            if let Some(params) = op.payload["params"].as_object() {
-                for (key, value) in params {
-                    if let Ok(param_value) = serde_json::from_value(value.clone()) {
-                        effect.set_param(key, param_value);
-                    }
+        // Update order if provided
+        if let Some(order) = op.payload["order"].as_i64() {
+            effect.order = order as u32;
+        }
+
+        // Update parameters if provided
+        if let Some(params) = op.payload["params"].as_object() {
+            for (key, value) in params {
+                if let Ok(param_value) = serde_json::from_value(value.clone()) {
+                    effect.set_param(key, param_value);
                 }
             }
         }
+
         Ok(())
     }
 
@@ -1422,5 +1446,104 @@ mod tests {
         // Should be sorted by order (brightness first, then blur)
         assert_eq!(effects[0].order, 1);
         assert_eq!(effects[1].order, 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // Effect Operation Error Handling Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_effect_add_sequence_not_found() {
+        use crate::core::effects::{Effect, EffectType};
+
+        let mut state = ProjectState::new("Test Project");
+
+        let blur_effect = Effect::new(EffectType::GaussianBlur);
+
+        let result = state.apply_operation(&Operation::new(
+            OpKind::EffectAdd,
+            serde_json::json!({
+                "sequenceId": "non_existent_seq",
+                "clipId": "some_clip",
+                "effect": blur_effect
+            }),
+        ));
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_apply_effect_add_clip_not_found() {
+        use crate::core::effects::{Effect, EffectType};
+
+        let mut state = ProjectState::new("Test Project");
+
+        // Setup sequence with no clips
+        let sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ))
+            .unwrap();
+
+        let blur_effect = Effect::new(EffectType::GaussianBlur);
+
+        let result = state.apply_operation(&Operation::new(
+            OpKind::EffectAdd,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "clipId": "non_existent_clip",
+                "effect": blur_effect
+            }),
+        ));
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_apply_effect_remove_clip_not_found() {
+        let mut state = ProjectState::new("Test Project");
+
+        // Setup sequence with no clips
+        let sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ))
+            .unwrap();
+
+        let result = state.apply_operation(&Operation::new(
+            OpKind::EffectRemove,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "clipId": "non_existent_clip",
+                "effectId": "some_effect"
+            }),
+        ));
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CoreError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_apply_effect_update_not_found() {
+        let mut state = ProjectState::new("Test Project");
+
+        let result = state.apply_operation(&Operation::new(
+            OpKind::EffectUpdate,
+            serde_json::json!({
+                "effectId": "non_existent_effect",
+                "enabled": false
+            }),
+        ));
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CoreError::NotFound(_)));
     }
 }
