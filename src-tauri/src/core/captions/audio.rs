@@ -178,18 +178,22 @@ pub fn load_audio_samples(wav_path: &Path) -> AudioResult<Vec<f32>> {
         )));
     }
 
-    // Read samples based on bit depth
+    // Read samples based on bit depth (propagate errors instead of silently dropping)
     let samples: Vec<f32> = match spec.bits_per_sample {
-        16 => reader
-            .into_samples::<i16>()
-            .filter_map(Result::ok)
-            .map(|s| s as f32 / 32768.0)
-            .collect(),
-        32 => reader
-            .into_samples::<i32>()
-            .filter_map(Result::ok)
-            .map(|s| s as f32 / 2147483648.0)
-            .collect(),
+        16 => {
+            let raw_samples: Vec<i16> = reader
+                .into_samples::<i16>()
+                .collect::<Result<Vec<i16>, _>>()
+                .map_err(|e| AudioExtractionError::FFmpegFailed(format!("Failed to read audio samples: {}", e)))?;
+            raw_samples.into_iter().map(|s| s as f32 / 32768.0).collect()
+        }
+        32 => {
+            let raw_samples: Vec<i32> = reader
+                .into_samples::<i32>()
+                .collect::<Result<Vec<i32>, _>>()
+                .map_err(|e| AudioExtractionError::FFmpegFailed(format!("Failed to read audio samples: {}", e)))?;
+            raw_samples.into_iter().map(|s| s as f32 / 2147483648.0).collect()
+        }
         bits => {
             return Err(AudioExtractionError::FFmpegFailed(format!(
                 "Unsupported bit depth: {}",

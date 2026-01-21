@@ -269,20 +269,30 @@ describe('useSearch', () => {
     });
 
     it('should set isSearching during search', async () => {
+      vi.useFakeTimers();
+
       let resolveSearch: (value: typeof mockSearchResults) => void;
       const delayedPromise = new Promise<typeof mockSearchResults>((resolve) => {
         resolveSearch = resolve;
       });
       mockInvoke.mockReturnValueOnce(delayedPromise);
 
-      const { result } = renderHook(() => useSearch());
+      const { result } = renderHook(() => useSearch({ debounceMs: 300 }));
 
-      // Start search
+      // Start search (this sets up debounce timer)
       act(() => {
         void result.current.search('test');
       });
 
-      // Should be searching
+      // Initially not searching (waiting for debounce)
+      expect(result.current.state.isSearching).toBe(false);
+
+      // Advance past debounce timer
+      await act(async () => {
+        vi.advanceTimersByTime(350);
+      });
+
+      // Now should be searching
       expect(result.current.state.isSearching).toBe(true);
 
       // Complete the search
@@ -292,6 +302,8 @@ describe('useSearch', () => {
       });
 
       expect(result.current.state.isSearching).toBe(false);
+
+      vi.useRealTimers();
     });
   });
 
@@ -301,13 +313,20 @@ describe('useSearch', () => {
 
   describe('clearResults', () => {
     it('should clear all search state', async () => {
+      vi.useFakeTimers();
       mockInvoke.mockResolvedValueOnce(mockSearchResults);
 
-      const { result } = renderHook(() => useSearch());
+      const { result } = renderHook(() => useSearch({ debounceMs: 100 }));
 
-      // Perform search first
+      // Start search and wait for debounce
+      act(() => {
+        void result.current.search('test');
+      });
+
+      // Advance timer and wait for search to complete
       await act(async () => {
-        await result.current.search('test');
+        vi.advanceTimersByTime(150);
+        await Promise.resolve(); // Allow invoke to resolve
       });
 
       expect(result.current.state.results).not.toBeNull();
@@ -321,6 +340,8 @@ describe('useSearch', () => {
       expect(result.current.state.results).toBeNull();
       expect(result.current.state.error).toBeNull();
       expect(result.current.state.isSearching).toBe(false);
+
+      vi.useRealTimers();
     });
   });
 

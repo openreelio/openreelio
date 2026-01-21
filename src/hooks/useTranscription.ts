@@ -168,6 +168,10 @@ export function useTranscription(
       if (cacheResults) {
         const cached = cacheRef.current.get(assetId);
         if (cached) {
+          // LRU refresh: delete and re-insert to move to end
+          cacheRef.current.delete(assetId);
+          cacheRef.current.set(assetId, cached);
+
           logger.debug('Returning cached transcription', { assetId });
           setState((prev) => ({ ...prev, result: cached }));
           return cached;

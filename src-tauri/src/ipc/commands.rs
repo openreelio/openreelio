@@ -1936,18 +1936,19 @@ pub async fn transcribe_asset(
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
     let audio_path = temp_dir.join(format!("{}.wav", asset_id));
 
-    // Extract audio from asset
-    tracing::debug!("Extracting audio to: {}", audio_path.display());
-    extract_audio_for_transcription(&asset_path, &audio_path, None)
-        .map_err(|e| format!("Audio extraction failed: {}", e))?;
+    // RAII guard for temp file cleanup (ensures cleanup on both success and error)
+    struct TempFileGuard(PathBuf);
+    impl Drop for TempFileGuard {
+        fn drop(&mut self) {
+            if self.0.exists() {
+                let _ = std::fs::remove_file(&self.0);
+                tracing::debug!("Cleaned up temp audio file: {}", self.0.display());
+            }
+        }
+    }
+    let _temp_guard = TempFileGuard(audio_path.clone());
 
-    // Load audio samples
-    let samples = load_audio_samples(&audio_path)
-        .map_err(|e| format!("Failed to load audio samples: {}", e))?;
-
-    tracing::debug!("Loaded {} audio samples", samples.len());
-
-    // Create transcription options
+    // Create transcription options before moving into spawn_blocking
     let whisper_options = TranscriptionOptions {
         language: options.as_ref().and_then(|o| o.language.clone()),
         translate: options.as_ref().and_then(|o| o.translate).unwrap_or(false),
@@ -1955,22 +1956,37 @@ pub async fn transcribe_asset(
         initial_prompt: None,
     };
 
-    // Create whisper engine and transcribe
-    let engine = WhisperEngine::new(&model_path)
-        .map_err(|e| format!("Failed to load Whisper model: {}", e))?;
+    // Run heavy blocking operations (FFmpeg, file I/O, Whisper inference) in spawn_blocking
+    let result = tokio::task::spawn_blocking(move || {
+        // Extract audio from asset
+        tracing::debug!("Extracting audio to: {}", audio_path.display());
+        extract_audio_for_transcription(&asset_path, &audio_path, None)
+            .map_err(|e| format!("Audio extraction failed: {}", e))?;
 
-    let result = engine
-        .transcribe(&samples, &whisper_options)
-        .map_err(|e| format!("Transcription failed: {}", e))?;
+        // Load audio samples
+        let samples = load_audio_samples(&audio_path)
+            .map_err(|e| format!("Failed to load audio samples: {}", e))?;
 
-    tracing::info!(
-        "Transcription complete: {} segments, {:.1}s duration",
-        result.segments.len(),
-        result.duration
-    );
+        tracing::debug!("Loaded {} audio samples", samples.len());
 
-    // Clean up temp file
-    let _ = std::fs::remove_file(&audio_path);
+        // Create whisper engine and transcribe
+        let engine = WhisperEngine::new(&model_path)
+            .map_err(|e| format!("Failed to load Whisper model: {}", e))?;
+
+        let result = engine
+            .transcribe(&samples, &whisper_options)
+            .map_err(|e| format!("Transcription failed: {}", e))?;
+
+        tracing::info!(
+            "Transcription complete: {} segments, {:.1}s duration",
+            result.segments.len(),
+            result.duration
+        );
+
+        Ok::<_, String>(result)
+    })
+    .await
+    .map_err(|e| format!("Transcription task panicked: {}", e))??;
 
     // Convert to DTO - get full_text before consuming segments
     let full_text = result.full_text();

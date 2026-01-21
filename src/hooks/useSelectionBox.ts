@@ -110,23 +110,29 @@ export function useSelectionBox({
   const isAdditiveRef = useRef(false);
   const baseSelectionRef = useRef<string[]>([]);
 
+  // Store layout props in ref to avoid event listener re-binding on scroll/zoom
+  const layoutRef = useRef({ tracks, scrollX, scrollY, zoom });
+  layoutRef.current = { tracks, scrollX, scrollY, zoom };
+
   /**
    * Find clips that intersect with the selection rectangle
+   * Uses layoutRef to read current values without causing callback recreation
    */
   const findClipsInRect = useCallback(
     (rect: SelectionRect): string[] => {
+      const { tracks: currentTracks, scrollX: currentScrollX, scrollY: currentScrollY, zoom: currentZoom } = layoutRef.current;
       const clipIds: string[] = [];
 
-      tracks.forEach((track, trackIndex) => {
-        const trackTop = trackIndex * trackHeight - scrollY;
+      currentTracks.forEach((track, trackIndex) => {
+        const trackTop = trackIndex * trackHeight - currentScrollY;
         const trackBottom = trackTop + trackHeight;
 
         track.clips.forEach((clip) => {
           // Calculate clip position in pixels
-          const clipLeft = clip.place.timelineInSec * zoom - scrollX + trackHeaderWidth;
+          const clipLeft = clip.place.timelineInSec * currentZoom - currentScrollX + trackHeaderWidth;
           const clipDuration =
             (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
-          const clipWidth = clipDuration * zoom;
+          const clipWidth = clipDuration * currentZoom;
           const clipRight = clipLeft + clipWidth;
 
           // Check if clip intersects with selection
@@ -145,7 +151,7 @@ export function useSelectionBox({
 
       return clipIds;
     },
-    [tracks, trackHeaderWidth, trackHeight, zoom, scrollX, scrollY]
+    [trackHeaderWidth, trackHeight] // Only stable dependencies
   );
 
   /**

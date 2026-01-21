@@ -105,18 +105,22 @@ export interface UseSearchOptions {
   debounceMs?: number;
   /** Default search limit (default: 20) */
   defaultLimit?: number;
-  /** Auto-search on query change */
-  autoSearch?: boolean;
+  /** Whether to cache search results */
+  cacheResults?: boolean;
+  /** Maximum cache size (default: 100) */
+  maxCacheSize?: number;
 }
 
 /**
  * Hook return type
  */
 export interface UseSearchReturn {
-  /** Search for content */
+  /** Search for content (debounced with caching) */
   search: (query: string, options?: SearchOptions) => Promise<SearchResults | null>;
   /** Clear search results */
   clearResults: () => void;
+  /** Clear the search cache */
+  clearCache: () => void;
   /** Check if Meilisearch is available */
   isSearchAvailable: () => Promise<boolean>;
   /** Index an asset for search */
@@ -166,7 +170,12 @@ export interface UseSearchReturn {
  * ```
  */
 export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
-  const { defaultLimit = 20 } = options;
+  const {
+    debounceMs = 300,
+    defaultLimit = 20,
+    cacheResults = true,
+    maxCacheSize = 100,
+  } = options;
 
   // State
   const [state, setState] = useState<SearchState>({
@@ -178,6 +187,81 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
 
   // Ref for debounce timer
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Ref for tracking request ID (race condition prevention)
+  const requestIdRef = useRef(0);
+
+  // Cache: Map<cacheKey, SearchResults>
+  const cacheRef = useRef<Map<string, SearchResults>>(new Map());
+
+  /**
+   * Generate cache key from query and options
+   */
+  const getCacheKey = useCallback(
+    (query: string, searchOptions?: SearchOptions): string => {
+      const normalizedQuery = query.trim().toLowerCase();
+      const optionsStr = searchOptions
+        ? JSON.stringify({
+            limit: searchOptions.limit ?? defaultLimit,
+            offset: searchOptions.offset ?? 0,
+            assetIds: searchOptions.assetIds?.sort(),
+            projectId: searchOptions.projectId,
+            indexes: searchOptions.indexes?.sort(),
+          })
+        : `{"limit":${defaultLimit}}`;
+      return `${normalizedQuery}:${optionsStr}`;
+    },
+    [defaultLimit]
+  );
+
+  /**
+   * Add result to cache with LRU eviction
+   */
+  const addToCache = useCallback(
+    (cacheKey: string, results: SearchResults) => {
+      if (!cacheResults) return;
+
+      const cache = cacheRef.current;
+
+      // LRU: if key exists, delete it first to update position
+      if (cache.has(cacheKey)) {
+        cache.delete(cacheKey);
+      }
+
+      // Evict oldest entry if at max size
+      if (cache.size >= maxCacheSize) {
+        const firstKey = cache.keys().next().value;
+        if (firstKey) {
+          cache.delete(firstKey);
+        }
+      }
+
+      cache.set(cacheKey, results);
+    },
+    [cacheResults, maxCacheSize]
+  );
+
+  /**
+   * Get from cache (with LRU refresh)
+   */
+  const getFromCache = useCallback(
+    (cacheKey: string): SearchResults | null => {
+      if (!cacheResults) return null;
+
+      const cache = cacheRef.current;
+      const cached = cache.get(cacheKey);
+
+      if (cached) {
+        // LRU refresh: delete and re-insert to move to end
+        cache.delete(cacheKey);
+        cache.set(cacheKey, cached);
+        return cached;
+      }
+
+      return null;
+    },
+    [cacheResults]
+  );
 
   /**
    * Check if Meilisearch is available
@@ -193,10 +277,10 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
   }, []);
 
   /**
-   * Perform a search
+   * Perform a search with debouncing and caching
    */
   const search = useCallback(
-    async (
+    (
       query: string,
       searchOptions?: SearchOptions
     ): Promise<SearchResults | null> => {
@@ -214,62 +298,109 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
           results: null,
           error: null,
         }));
-        return null;
+        return Promise.resolve(null);
       }
 
-      // Update state to searching
-      setState((prev) => ({
-        ...prev,
-        isSearching: true,
-        query,
-        error: null,
-      }));
-
-      try {
-        const results = await invoke<SearchResults>('search_content', {
-          query,
-          options: searchOptions
-            ? {
-                limit: searchOptions.limit ?? defaultLimit,
-                offset: searchOptions.offset ?? 0,
-                assetIds: searchOptions.assetIds,
-                projectId: searchOptions.projectId,
-                indexes: searchOptions.indexes,
-              }
-            : { limit: defaultLimit },
-        });
-
-        logger.debug('Search completed', {
-          query,
-          assetCount: results.assets.length,
-          transcriptCount: results.transcripts.length,
-          processingTimeMs: results.processingTimeMs,
-        });
-
+      // Check cache first (immediate return for cached results)
+      const cacheKey = getCacheKey(query, searchOptions);
+      const cached = getFromCache(cacheKey);
+      if (cached) {
+        logger.debug('Returning cached search results', { query, cacheKey });
         setState((prev) => ({
           ...prev,
-          isSearching: false,
-          results,
+          query,
+          results: cached,
           error: null,
         }));
+        return Promise.resolve(cached);
+      }
 
-        return results;
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        logger.error('Search failed', { query, error: errorMessage });
-
+      // Return a promise that resolves after debounce
+      return new Promise((resolve) => {
+        // Update state to show we're preparing to search
         setState((prev) => ({
           ...prev,
-          isSearching: false,
-          results: null,
-          error: errorMessage,
+          query,
         }));
 
-        return null;
-      }
+        debounceRef.current = setTimeout(async () => {
+          // Increment request ID for race condition handling
+          const currentRequestId = ++requestIdRef.current;
+
+          // Update state to searching
+          setState((prev) => ({
+            ...prev,
+            isSearching: true,
+            error: null,
+          }));
+
+          try {
+            const results = await invoke<SearchResults>('search_content', {
+              query,
+              options: searchOptions
+                ? {
+                    limit: searchOptions.limit ?? defaultLimit,
+                    offset: searchOptions.offset ?? 0,
+                    assetIds: searchOptions.assetIds,
+                    projectId: searchOptions.projectId,
+                    indexes: searchOptions.indexes,
+                  }
+                : { limit: defaultLimit },
+            });
+
+            // Check if this is still the latest request (race condition guard)
+            if (currentRequestId !== requestIdRef.current) {
+              logger.debug('Discarding stale search result', {
+                query,
+                requestId: currentRequestId,
+                currentId: requestIdRef.current,
+              });
+              resolve(null);
+              return;
+            }
+
+            logger.debug('Search completed', {
+              query,
+              assetCount: results.assets.length,
+              transcriptCount: results.transcripts.length,
+              processingTimeMs: results.processingTimeMs,
+            });
+
+            // Cache the result
+            addToCache(cacheKey, results);
+
+            setState((prev) => ({
+              ...prev,
+              isSearching: false,
+              results,
+              error: null,
+            }));
+
+            resolve(results);
+          } catch (error) {
+            // Check if this is still the latest request
+            if (currentRequestId !== requestIdRef.current) {
+              resolve(null);
+              return;
+            }
+
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            logger.error('Search failed', { query, error: errorMessage });
+
+            setState((prev) => ({
+              ...prev,
+              isSearching: false,
+              results: null,
+              error: errorMessage,
+            }));
+
+            resolve(null);
+          }
+        }, debounceMs);
+      });
     },
-    [defaultLimit]
+    [defaultLimit, debounceMs, getCacheKey, getFromCache, addToCache]
   );
 
   /**
@@ -281,12 +412,23 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
       debounceRef.current = null;
     }
 
+    // Increment request ID to cancel any pending requests
+    requestIdRef.current++;
+
     setState({
       isSearching: false,
       query: '',
       results: null,
       error: null,
     });
+  }, []);
+
+  /**
+   * Clear the search cache
+   */
+  const clearCache = useCallback(() => {
+    cacheRef.current.clear();
+    logger.debug('Search cache cleared');
   }, []);
 
   /**
@@ -377,6 +519,7 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
   return {
     search,
     clearResults,
+    clearCache,
     isSearchAvailable,
     indexAsset,
     indexTranscripts,
