@@ -126,6 +126,12 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
   const frameTimesRef = useRef<number[]>([]);
   const isMountedRef = useRef(true);
 
+  // Stable ref for onFrame callback (prevents playbackLoop recreation on every render)
+  const onFrameRef = useRef(onFrame);
+  useEffect(() => {
+    onFrameRef.current = onFrame;
+  }, [onFrame]);
+
   // Target frame interval
   const frameIntervalMs = 1000 / targetFps;
 
@@ -204,8 +210,8 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       setFrameCount((prev) => prev + 1);
       updateFps(timestamp);
 
-      // Call frame callback
-      onFrame(newTime);
+      // Call frame callback (using ref for stability)
+      onFrameRef.current(newTime);
 
       // Schedule next frame
       rafIdRef.current = requestAnimationFrame(playbackLoop);
@@ -219,7 +225,6 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       setCurrentTime,
       setIsPlaying,
       onEnded,
-      onFrame,
       updateFps,
     ]
   );

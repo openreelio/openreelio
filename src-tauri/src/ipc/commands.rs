@@ -515,14 +515,14 @@ pub async fn execute_command(
         } => Box::new(RemoveClipCommand::new(&sequence_id, &track_id, &clip_id)),
         CommandPayload::MoveClip {
             sequence_id,
-            track_id: _,
+            track_id,
             clip_id,
             new_timeline_in,
             new_track_id,
         } => {
             Box::new(MoveClipCommand::new(
                 &sequence_id,
-                "unknown", // Source track ID not needed for creation, resolved during execution
+                &track_id,
                 &clip_id,
                 new_timeline_in,
                 new_track_id,
@@ -530,14 +530,14 @@ pub async fn execute_command(
         }
         CommandPayload::TrimClip {
             sequence_id,
-            track_id: _,
+            track_id,
             clip_id,
             new_source_in,
             new_source_out,
             new_timeline_in,
         } => Box::new(TrimClipCommand::new(
             &sequence_id,
-            "unknown",
+            &track_id,
             &clip_id,
             new_source_in,
             new_source_out,

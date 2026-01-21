@@ -186,17 +186,26 @@ export class FrameCache {
 
   /**
    * Delete a specific entry from the cache.
+   * Revokes blob URLs to prevent memory leaks.
    *
    * @param key - Cache key
    */
   delete(key: string): void {
-    this.entries.delete(key);
+    const entry = this.entries.get(key);
+    if (entry) {
+      this.revokeIfBlobUrl(entry.url);
+      this.entries.delete(key);
+    }
   }
 
   /**
    * Clear all entries from the cache.
+   * Revokes all blob URLs to prevent memory leaks.
    */
   clear(): void {
+    for (const entry of this.entries.values()) {
+      this.revokeIfBlobUrl(entry.url);
+    }
     this.entries.clear();
     this.hits = 0;
     this.misses = 0;
@@ -205,6 +214,7 @@ export class FrameCache {
   /**
    * Remove all expired entries.
    * Useful for periodic cleanup.
+   * Revokes blob URLs to prevent memory leaks.
    */
   prune(): void {
     const keysToDelete: string[] = [];
@@ -216,7 +226,7 @@ export class FrameCache {
     }
 
     for (const key of keysToDelete) {
-      this.entries.delete(key);
+      this.delete(key);
     }
   }
 
@@ -273,6 +283,7 @@ export class FrameCache {
 
   /**
    * Evict the least recently used entry.
+   * Revokes blob URL to prevent memory leaks.
    */
   private evictLeastRecentlyUsed(): void {
     let oldestKey: string | null = null;
@@ -286,7 +297,20 @@ export class FrameCache {
     }
 
     if (oldestKey !== null) {
-      this.entries.delete(oldestKey);
+      this.delete(oldestKey);
+    }
+  }
+
+  /**
+   * Revoke a blob URL to free memory.
+   */
+  private revokeIfBlobUrl(url: string): void {
+    if (url.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(url);
+      } catch {
+        // Ignore errors (URL may already be revoked)
+      }
     }
   }
 

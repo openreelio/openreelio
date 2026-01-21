@@ -74,6 +74,12 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   const [isFrameLoading, setIsFrameLoading] = useState(false);
   const [frameError, setFrameError] = useState<Error | null>(null);
 
+  // Ref to track latest render request time (for race condition prevention)
+  const lastRenderTimeRef = useRef<number>(0);
+
+  // Ref to track last prefetch time (to avoid thrashing)
+  const lastPrefetchTimeRef = useRef<number>(0);
+
   // Store state
   const {
     isPlaying,
@@ -159,6 +165,9 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
   const renderFrame = useCallback(
     async (time: number) => {
+      // Update last render time for race condition prevention
+      lastRenderTimeRef.current = time;
+
       const canvas = canvasRef.current;
       if (!canvas) return;
 
@@ -176,11 +185,22 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
       try {
         const frameUrl = await extractFrame(info.sourceTime);
+
+        // Check if this is still the latest request (race condition prevention)
+        if (time !== lastRenderTimeRef.current) {
+          return;
+        }
+
         if (frameUrl) {
           // Load and render the image
           const img = new Image();
           img.crossOrigin = 'anonymous';
           img.onload = () => {
+            // Double-check we're still rendering this frame
+            if (time !== lastRenderTimeRef.current) {
+              return;
+            }
+
             // Clear canvas
             ctx.fillStyle = '#000000';
             ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -196,16 +216,20 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
             ctx.drawImage(img, x, y, img.width * scale, img.height * scale);
           };
           img.onerror = () => {
-            // Failed to load image - render black
-            ctx.fillStyle = '#000000';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            // Failed to load image - render black (only if still current)
+            if (time === lastRenderTimeRef.current) {
+              ctx.fillStyle = '#000000';
+              ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
           };
           img.src = frameUrl;
         }
       } catch {
-        // Error extracting frame - render black
-        ctx.fillStyle = '#000000';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        // Error extracting frame - render black (only if still current)
+        if (time === lastRenderTimeRef.current) {
+          ctx.fillStyle = '#000000';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
       }
 
       onFrameRender?.(time);
@@ -238,12 +262,16 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     }
   }, [currentTime, isPlaying, renderFrame]);
 
-  // Prefetch frames ahead during playback
+  // Prefetch frames ahead during playback (throttled to avoid thrashing)
   useEffect(() => {
     if (isPlaying && activeAsset) {
-      const prefetchStart = currentTime;
-      const prefetchEnd = Math.min(currentTime + 2, duration);
-      prefetchFrames(prefetchStart, prefetchEnd);
+      // Only prefetch if we've moved significantly (> 1 second) to avoid thrashing
+      if (Math.abs(currentTime - lastPrefetchTimeRef.current) > 1) {
+        const prefetchStart = currentTime;
+        const prefetchEnd = Math.min(currentTime + 2, duration);
+        prefetchFrames(prefetchStart, prefetchEnd);
+        lastPrefetchTimeRef.current = currentTime;
+      }
     }
   }, [isPlaying, currentTime, duration, activeAsset, prefetchFrames]);
 

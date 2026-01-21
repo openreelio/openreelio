@@ -77,6 +77,7 @@ impl Default for CustomPosition {
 #[serde(rename_all = "camelCase", tag = "type")]
 pub enum CaptionPosition {
     /// Preset vertical position
+    #[serde(rename_all = "camelCase")]
     Preset {
         vertical: VerticalPosition,
         #[serde(alias = "margin_percent")]

@@ -375,6 +375,9 @@ export function useAssetFrameExtractor(
   // Last requested timestamp for debouncing
   const lastRequestedTimestampRef = useRef<number | null>(null);
 
+  // Pending resolve function to avoid hanging promises
+  const pendingResolveRef = useRef<((value: string | null) => void) | null>(null);
+
   // Actual input path (proxy if available, otherwise original)
   const inputPath = proxyPath || assetPath;
 
@@ -474,23 +477,25 @@ export function useAssetFrameExtractor(
         return cached;
       }
 
-      // Clear existing debounce timer
+      // Clear existing debounce timer and resolve pending promise
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
+        // Resolve any pending promise with null to avoid hanging
+        pendingResolveRef.current?.(null);
+        pendingResolveRef.current = null;
       }
 
       // Return promise that resolves after debounce
       return new Promise((resolve) => {
+        pendingResolveRef.current = resolve;
         debounceTimerRef.current = setTimeout(async () => {
           // Only extract if this is still the latest request
           if (lastRequestedTimestampRef.current === timestamp) {
             const result = await extractFrameAtTime(timestamp);
             resolve(result);
-          } else {
-            // Request was superseded, extract the latest instead
-            const latestResult = await extractFrameAtTime(lastRequestedTimestampRef.current!);
-            resolve(latestResult);
           }
+          // Superseded requests are resolved with null by the next timer setup
+          pendingResolveRef.current = null;
         }, DEBOUNCE_MS);
       });
     },
