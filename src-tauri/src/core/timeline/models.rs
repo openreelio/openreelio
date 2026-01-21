@@ -4,6 +4,8 @@
 //! Uses denormalized structure for efficient Event Sourcing operations.
 
 use serde::{Deserialize, Serialize};
+use specta::Type;
+use tracing::warn;
 
 use crate::core::{AssetId, ClipId, Color, EffectId, Point2D, Ratio, SequenceId, TimeSec, TrackId};
 
@@ -12,7 +14,7 @@ use crate::core::{AssetId, ClipId, Color, EffectId, Point2D, Ratio, SequenceId, 
 // =============================================================================
 
 /// Sequence format specification
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SequenceFormat {
     /// Canvas size
@@ -34,9 +36,22 @@ impl SequenceFormat {
         fps_den: i32,
         audio_sample_rate: u32,
     ) -> Self {
+        let canvas = if width == 0 || height == 0 {
+            warn!(
+                "SequenceFormat created with invalid dimensions {}x{}, defaulting to 1920x1080",
+                width, height
+            );
+            Canvas::new(1920, 1080)
+        } else {
+            Canvas::new(width, height)
+        };
+
+        // Ratio::new now handles zero denominator
+        let fps = Ratio::new(fps_num, fps_den);
+
         Self {
-            canvas: Canvas::new(width, height),
-            fps: Ratio::new(fps_num, fps_den),
+            canvas,
+            fps,
             audio_sample_rate,
             audio_channels: 2,
         }
@@ -90,7 +105,7 @@ impl Default for SequenceFormat {
 }
 
 /// Canvas size
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct Canvas {
     pub width: u32,
     pub height: u32,
@@ -112,7 +127,7 @@ impl Canvas {
 // =============================================================================
 
 /// Marker type enumeration
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum MarkerType {
     Generic,
@@ -123,7 +138,7 @@ pub enum MarkerType {
 }
 
 /// Timeline marker
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Marker {
     pub id: String,
@@ -151,7 +166,7 @@ impl Marker {
 
 /// Sequence (timeline container)
 /// Uses denormalized structure - tracks are stored directly, not as IDs
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Sequence {
     pub id: SequenceId,
@@ -227,7 +242,7 @@ impl Sequence {
 // =============================================================================
 
 /// Track type/kind enumeration
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum TrackKind {
     Video,
@@ -237,7 +252,7 @@ pub enum TrackKind {
 }
 
 /// Blend mode for video tracks
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum BlendMode {
     #[default]
@@ -249,7 +264,7 @@ pub enum BlendMode {
 }
 
 /// Track (contains clips directly for denormalized storage)
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Track {
     pub id: TrackId,
@@ -341,7 +356,7 @@ impl Track {
 // =============================================================================
 
 /// Clip range within source asset
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipRange {
     /// Start time within source (seconds)
@@ -371,7 +386,7 @@ impl Default for ClipRange {
 }
 
 /// Clip placement on timeline
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipPlace {
     /// Start time on timeline (seconds)
@@ -382,9 +397,19 @@ pub struct ClipPlace {
 
 impl ClipPlace {
     pub fn new(timeline_in: TimeSec, duration: TimeSec) -> Self {
+        let duration_sec = if duration < 0.0 {
+            warn!(
+                "ClipPlace created with negative duration {}, clamping to 0.0",
+                duration
+            );
+            0.0
+        } else {
+            duration
+        };
+
         Self {
             timeline_in_sec: timeline_in,
-            duration_sec: duration,
+            duration_sec,
         }
     }
 
@@ -416,7 +441,7 @@ impl Default for ClipPlace {
 // =============================================================================
 
 /// 2D Transform for clips
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Transform {
     /// Position (normalized 0.0-1.0, center = 0.5, 0.5)
@@ -445,7 +470,7 @@ impl Default for Transform {
 // =============================================================================
 
 /// Audio settings for clips
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioSettings {
     /// Volume in dB (-60 to +6)
@@ -471,7 +496,7 @@ impl Default for AudioSettings {
 // =============================================================================
 
 /// Clip (media segment on timeline)
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Clip {
     pub id: ClipId,
@@ -514,7 +539,27 @@ impl Clip {
     }
 
     /// Creates a new clip with specific range
-    pub fn with_range(asset_id: &str, source_in: TimeSec, source_out: TimeSec) -> Self {
+    pub fn with_range(asset_id: &str, mut source_in: TimeSec, mut source_out: TimeSec) -> Self {
+        if source_in > source_out {
+            warn!(
+                "Clip created with source_in > source_out ({} > {}), swapping",
+                source_in, source_out
+            );
+            std::mem::swap(&mut source_in, &mut source_out);
+        }
+
+        // Prevent negative duration
+        if source_in < 0.0 {
+            warn!(
+                "Clip created with negative source_in {}, clamping to 0.0",
+                source_in
+            );
+            source_in = 0.0;
+            if source_out < 0.0 {
+                source_out = 0.0;
+            }
+        }
+
         let duration = source_out - source_in;
         Self {
             id: ulid::Ulid::new().to_string(),

@@ -1,13 +1,16 @@
 //! Asset Model Definitions
 //!
 //! Defines the Asset struct and related types for managing media assets.
+//! All types are exported to TypeScript via tauri-specta.
 
 use serde::{Deserialize, Serialize};
+use specta::Type;
+use tracing::warn;
 
 use crate::core::{AssetId, Ratio};
 
 /// Asset type enumeration
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum AssetKind {
     Video,
@@ -20,7 +23,7 @@ pub enum AssetKind {
 }
 
 /// Video-specific metadata
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoInfo {
     /// Width in pixels
@@ -52,7 +55,7 @@ impl Default for VideoInfo {
 }
 
 /// Audio-specific metadata
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioInfo {
     /// Sample rate in Hz
@@ -78,7 +81,7 @@ impl Default for AudioInfo {
 }
 
 /// License source type
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum LicenseSource {
     User,
@@ -88,7 +91,7 @@ pub enum LicenseSource {
 }
 
 /// License type enumeration
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "snake_case")]
 pub enum LicenseType {
     RoyaltyFree,
@@ -101,7 +104,7 @@ pub enum LicenseType {
 }
 
 /// License information for an asset
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct LicenseInfo {
     /// Source of the asset
@@ -135,7 +138,7 @@ impl Default for LicenseInfo {
 }
 
 /// Main Asset structure
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Asset {
     /// Unique identifier (ULID)
@@ -175,7 +178,25 @@ pub struct Asset {
 
 impl Asset {
     /// Creates a new video asset with generated ULID
-    pub fn new_video(name: &str, uri: &str, video_info: VideoInfo) -> Self {
+    pub fn new_video(name: &str, uri: &str, mut video_info: VideoInfo) -> Self {
+        // Validate video info
+        if video_info.width == 0 || video_info.height == 0 {
+            warn!(
+                "Video asset '{}' created with invalid dimensions {}x{}. Defaulting to 1920x1080",
+                name, video_info.width, video_info.height
+            );
+            video_info.width = 1920;
+            video_info.height = 1080;
+        }
+
+        if video_info.fps.den == 0 {
+            warn!(
+                "Video asset '{}' has invalid FPS ratio, defaulting to 30/1",
+                name
+            );
+            video_info.fps = Ratio::new(30, 1);
+        }
+
         Self {
             id: ulid::Ulid::new().to_string(),
             kind: AssetKind::Video,
@@ -215,7 +236,16 @@ impl Asset {
     }
 
     /// Creates a new image asset with generated ULID
-    pub fn new_image(name: &str, uri: &str, width: u32, height: u32) -> Self {
+    pub fn new_image(name: &str, uri: &str, mut width: u32, mut height: u32) -> Self {
+        if width == 0 || height == 0 {
+            warn!(
+                "Image asset '{}' created with invalid dimensions {}x{}. Defaulting to 1920x1080",
+                name, width, height
+            );
+            width = 1920;
+            height = 1080;
+        }
+
         Self {
             id: ulid::Ulid::new().to_string(),
             kind: AssetKind::Image,

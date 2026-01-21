@@ -1,10 +1,13 @@
 //! FFmpeg IPC Commands
 //!
 //! Tauri commands for FFmpeg operations exposed to the frontend.
+//! All types are exported to TypeScript via tauri-specta.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+use specta::Type;
 
 use super::{detect_system_ffmpeg, FFmpegError, FFmpegInfo, FFmpegRunner, MediaInfo};
 
@@ -71,13 +74,19 @@ pub fn create_ffmpeg_state() -> SharedFFmpegState {
     Arc::new(RwLock::new(FFmpegState::new()))
 }
 
-/// Response for check_ffmpeg command
-#[derive(Debug, Clone, serde::Serialize)]
+/// FFmpeg availability and version information.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct FFmpegStatus {
+    /// Whether FFmpeg is available
     pub available: bool,
+    /// FFmpeg version string (if available)
     pub version: Option<String>,
+    /// Whether using bundled FFmpeg (vs system)
     pub is_bundled: bool,
+    /// Path to ffmpeg executable
     pub ffmpeg_path: Option<String>,
+    /// Path to ffprobe executable
     pub ffprobe_path: Option<String>,
 }
 
