@@ -519,15 +519,13 @@ pub async fn execute_command(
             clip_id,
             new_timeline_in,
             new_track_id,
-        } => {
-            Box::new(MoveClipCommand::new(
-                &sequence_id,
-                &track_id,
-                &clip_id,
-                new_timeline_in,
-                new_track_id,
-            ))
-        }
+        } => Box::new(MoveClipCommand::new(
+            &sequence_id,
+            &track_id,
+            &clip_id,
+            new_timeline_in,
+            new_track_id,
+        )),
         CommandPayload::TrimClip {
             sequence_id,
             track_id,
