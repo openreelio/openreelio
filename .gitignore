@@ -87,6 +87,9 @@ coverage/
 # User project folders (local tests)
 /test-projects/
 
+# Local runtime caches / generated artifacts
+/src-tauri/.openreelio/
+
 # Temporary files
 *.tmp
 *.temp
