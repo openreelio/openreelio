@@ -53,14 +53,37 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 
 ### Current Progress
 
+> **Last Updated**: 2026-01-21
+
 | Phase | Description | Status | Completion |
 |-------|-------------|--------|------------|
 | Phase 0 | Build Environment | ✅ Complete | 100% |
 | Phase 1 | Project & Assets | ✅ Nearly Complete | 90% |
-| Phase 2 | Timeline Core | 🔄 In Progress | 60% |
+| Phase 2 | Timeline Core | 🔄 In Progress | 75% |
 | Phase 3 | Preview System | 🔄 In Progress | 50% |
 | Phase 4 | Export Pipeline | ✅ Nearly Complete | 85% |
-| Phase 5 | Polish & UX | 🔄 In Progress | 40% |
+| Phase 5 | Polish & UX | 🔄 In Progress | 45% |
+
+### Phase 2 Detailed Status
+
+**Completed:**
+- ✅ Single clip drag & trim (`useClipDrag` hook)
+- ✅ Grid snapping for clip operations
+- ✅ Selection box (drag-to-select)
+- ✅ Shift+click additive selection
+- ✅ Clip visual representation with waveforms
+- ✅ Track mute/lock/visibility controls
+- ✅ Playhead scrubbing
+- ✅ Timeline zoom & scroll
+
+**In Progress:**
+- 🔄 Cross-track drag (move clips between tracks)
+- 🔄 Multi-clip drag (move selected clips together)
+- 🔄 Enhanced snapping (clip edges, playhead)
+
+**Pending:**
+- ⏳ Drop validity feedback (valid/invalid drop zones)
+- ⏳ Track reordering (drag track headers)
 
 ### Phase 2: Timeline Core (Current Priority)
 

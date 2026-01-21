@@ -1,10 +1,30 @@
 # OpenReelio Work Plan
 
 > **Last Updated**: 2026-01-21
-> **Current Phase**: MVP v0.1.0 Completion
+> **Current Phase**: MVP v0.1.0 Completion - Timeline Core Enhancement
 > **Target**: Complete MVP, then proceed to v0.2.0 AI Integration
+> **Active Sprint**: Cross-track drag & Multi-clip drag
 
 This document provides actionable task breakdowns for immediate development work.
+
+---
+
+## Active Implementation: Timeline Core Enhancement
+
+### Completed Components
+- ✅ `useClipDrag` - Single clip drag/trim with grid snapping
+- ✅ `useSelectionBox` - Drag-to-select with Shift additive
+- ✅ `useTimelineClipOperations` - Preview state & IPC integration
+- ✅ `Clip.tsx` - Full clip rendering with trim handles
+
+### Current Sprint Tasks
+
+| Task | Status | Description |
+|------|--------|-------------|
+| Cross-track drag | 🔄 IN PROGRESS | Enable moving clips between tracks |
+| Multi-clip drag | ⏳ PENDING | Move selected clips together |
+| Enhanced snapping | ⏳ PENDING | Snap to clip edges and playhead |
+| Drop feedback | ⏳ PENDING | Visual feedback for valid/invalid drops |
 
 ---
 
