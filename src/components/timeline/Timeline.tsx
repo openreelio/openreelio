@@ -18,6 +18,7 @@ import { useTimelineNavigation } from '@/hooks/useTimelineNavigation';
 import { useSelectionBox } from '@/hooks/useSelectionBox';
 import { TimeRuler } from './TimeRuler';
 import { Track } from './Track';
+import { CaptionTrack } from './CaptionTrack';
 import { Playhead } from './Playhead';
 import { TimelineToolbar } from './TimelineToolbar';
 import { DragPreviewLayer } from './DragPreviewLayer';
@@ -25,7 +26,13 @@ import { SnapIndicator, type SnapPoint } from './SnapIndicator';
 import { SelectionBox } from './SelectionBox';
 import type { ClipWaveformConfig } from './Clip';
 import type { TimelineProps } from './types';
-import { TRACK_HEADER_WIDTH, TRACK_HEIGHT, DEFAULT_TIMELINE_DURATION, DEFAULT_FPS } from './constants';
+import type { CaptionTrack as CaptionTrackType, Caption } from '@/types';
+import {
+  TRACK_HEADER_WIDTH,
+  TRACK_HEIGHT,
+  DEFAULT_TIMELINE_DURATION,
+  DEFAULT_FPS,
+} from './constants';
 
 // Re-export types for backward compatibility
 export type {
@@ -34,7 +41,51 @@ export type {
   ClipTrimData,
   ClipSplitData,
   TrackControlData,
+  CaptionUpdateData,
 } from './types';
+import type { Track as TrackType } from '@/types';
+
+// Adapter to convert Track (with clips) to CaptionTrack (with captions)
+function adaptTrackToCaptionTrack(track: TrackType): CaptionTrackType {
+  const captions: Caption[] = track.clips.map((clip) => ({
+    id: clip.id,
+    startSec: clip.place.timelineInSec,
+    endSec:
+      clip.place.timelineInSec + (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed,
+    text: clip.label || '',
+    speaker: undefined,
+    styleOverride: undefined,
+    positionOverride: undefined,
+    metadata: {},
+  }));
+
+  return {
+    id: track.id,
+    name: track.name,
+    language: 'en',
+    visible: track.visible,
+    locked: track.locked,
+    captions,
+    defaultStyle: {
+      fontFamily: 'Arial',
+      fontSize: 48,
+      fontWeight: 'normal',
+      color: { r: 255, g: 255, b: 255, a: 255 },
+      outlineColor: { r: 0, g: 0, b: 0, a: 255 },
+      outlineWidth: 2,
+      shadowColor: { r: 0, g: 0, b: 0, a: 128 },
+      shadowOffset: 2,
+      alignment: 'center',
+      italic: false,
+      underline: false,
+    },
+    defaultPosition: {
+      type: 'preset',
+      vertical: 'bottom',
+      marginPercent: 5,
+    },
+  };
+}
 
 export function Timeline({
   sequence,
@@ -108,10 +159,12 @@ export function Timeline({
       track.clips.map(
         (clip) =>
           clip.place.timelineInSec +
-          (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed
-      )
+          (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed,
+      ),
     );
-    return clipEndTimes.length > 0 ? Math.max(DEFAULT_TIMELINE_DURATION, ...clipEndTimes) : DEFAULT_TIMELINE_DURATION;
+    return clipEndTimes.length > 0
+      ? Math.max(DEFAULT_TIMELINE_DURATION, ...clipEndTimes)
+      : DEFAULT_TIMELINE_DURATION;
   }, [sequence]);
 
   // ===========================================================================
@@ -170,19 +223,14 @@ export function Timeline({
   // ===========================================================================
   // Clip Operations Hook
   // ===========================================================================
-  const {
-    dragPreview,
-    getTrackClips,
-    handleClipDragStart,
-    handleClipDrag,
-    handleClipDragEnd,
-  } = useTimelineClipOperations({
-    sequence,
-    zoom,
-    onClipMove,
-    onClipTrim,
-    selectClip,
-  });
+  const { dragPreview, getTrackClips, handleClipDragStart, handleClipDrag, handleClipDragEnd } =
+    useTimelineClipOperations({
+      sequence,
+      zoom,
+      onClipMove,
+      onClipTrim,
+      selectClip,
+    });
 
   // ===========================================================================
   // Navigation Hook
@@ -248,7 +296,7 @@ export function Timeline({
         enabled: true,
       };
     },
-    [assets]
+    [assets],
   );
 
   const handleSeek = useCallback((time: number) => setPlayhead(time), [setPlayhead]);
@@ -265,7 +313,7 @@ export function Timeline({
         selectClip(clipId, false);
       }
     },
-    [selectClip, selectClips, selectedClipIds]
+    [selectClip, selectClips, selectedClipIds],
   );
 
   const handleTracksAreaClick = useCallback(
@@ -277,7 +325,7 @@ export function Timeline({
         clearClipSelection();
       }
     },
-    [clearClipSelection, isSelecting]
+    [clearClipSelection, isSelecting],
   );
 
   /**
@@ -294,15 +342,14 @@ export function Timeline({
         handleScrubStart(e);
       }
     },
-    [handleSelectionMouseDown, handleScrubStart]
+    [handleSelectionMouseDown, handleScrubStart],
   );
 
   const createTrackHandler = useCallback(
-    (callback?: (data: { sequenceId: string; trackId: string }) => void) =>
-      (trackId: string) => {
-        if (sequence && callback) callback({ sequenceId: sequence.id, trackId });
-      },
-    [sequence]
+    (callback?: (data: { sequenceId: string; trackId: string }) => void) => (trackId: string) => {
+      if (sequence && callback) callback({ sequenceId: sequence.id, trackId });
+    },
+    [sequence],
   );
 
   // ===========================================================================
@@ -310,7 +357,10 @@ export function Timeline({
   // ===========================================================================
   if (!sequence) {
     return (
-      <div data-testid="timeline" className="h-full flex items-center justify-center text-editor-text-muted">
+      <div
+        data-testid="timeline"
+        className="h-full flex items-center justify-center text-editor-text-muted"
+      >
         No sequence loaded
       </div>
     );
@@ -345,26 +395,47 @@ export function Timeline({
         onDrop={handleDrop}
       >
         <div style={{ transform: `translateY(-${scrollY}px)` }}>
-          {sequence.tracks.map((track) => (
-            <Track
-              key={track.id}
-              track={track}
-              clips={getTrackClips(track.id)}
-              zoom={zoom}
-              scrollX={scrollX}
-              duration={duration}
-              viewportWidth={viewportWidth}
-              selectedClipIds={selectedClipIds}
-              getClipWaveformConfig={getClipWaveformConfig}
-              onClipClick={handleClipClick}
-              onClipDragStart={handleClipDragStart}
-              onClipDrag={handleClipDrag}
-              onClipDragEnd={handleClipDragEnd}
-              onMuteToggle={createTrackHandler(onTrackMuteToggle)}
-              onLockToggle={createTrackHandler(onTrackLockToggle)}
-              onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
-            />
-          ))}
+          {sequence.tracks.map((track) => {
+            if (track.kind === 'caption') {
+              const captionTrack = adaptTrackToCaptionTrack(track);
+              return (
+                <CaptionTrack
+                  key={track.id}
+                  track={captionTrack}
+                  zoom={zoom}
+                  scrollX={scrollX}
+                  duration={duration}
+                  viewportWidth={viewportWidth}
+                  selectedCaptionIds={selectedClipIds} // Re-using selectedClipIds as caption IDs share the same space
+                  onLockToggle={createTrackHandler(onTrackLockToggle)}
+                  onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
+                  onCaptionClick={handleClipClick} // Use same handler as clips
+                  // onCaptionDoubleClick={...} // Could add double click handler to focus inspector
+                />
+              );
+            }
+
+            return (
+              <Track
+                key={track.id}
+                track={track}
+                clips={getTrackClips(track.id)}
+                zoom={zoom}
+                scrollX={scrollX}
+                duration={duration}
+                viewportWidth={viewportWidth}
+                selectedClipIds={selectedClipIds}
+                getClipWaveformConfig={getClipWaveformConfig}
+                onClipClick={handleClipClick}
+                onClipDragStart={handleClipDragStart}
+                onClipDrag={handleClipDrag}
+                onClipDragEnd={handleClipDragEnd}
+                onMuteToggle={createTrackHandler(onTrackMuteToggle)}
+                onLockToggle={createTrackHandler(onTrackLockToggle)}
+                onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
+              />
+            );
+          })}
         </div>
         <DragPreviewLayer
           dragPreview={dragPreview}

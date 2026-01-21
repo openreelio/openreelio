@@ -75,8 +75,29 @@ export interface ClipSplitData {
   splitTime: number;
 }
 
+/**
+ * Data for updating a caption.
+ */
+export interface CaptionUpdateData {
+  /** ID of the sequence containing the caption */
+  sequenceId: string;
+  /** ID of the track containing the caption */
+  trackId: string;
+  /** ID of the caption being updated */
+  captionId: string;
+  /** New text content */
+  text?: string;
+  /** New start time */
+  startSec?: number;
+  /** New end time */
+  endSec?: number;
+  /** Style updates (JSON string or object) */
+  style?: unknown;
+}
+
 // =============================================================================
 // Track Control Types
+
 // =============================================================================
 
 /**
@@ -95,6 +116,9 @@ export interface TrackControlData {
 
 /**
  * Props for the main Timeline component.
+ *
+ * Note: Caption updates are handled through the Inspector component, not Timeline.
+ * When a caption is selected in the timeline, its properties are edited via Inspector.
  */
 export interface TimelineProps {
   /** Sequence to display */
