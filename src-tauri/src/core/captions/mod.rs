@@ -37,8 +37,10 @@
 //! let captions = parse_srt(&srt_content)?;
 //! ```
 
+pub mod audio;
 mod formats;
 mod models;
+pub mod whisper;
 
 // Re-export models
 pub use models::{
