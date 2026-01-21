@@ -83,6 +83,56 @@ export interface SearchResults {
   processingTimeMs: number;
 }
 
+// =============================================================================
+// SQLite Search Types (always available)
+// =============================================================================
+
+/**
+ * Options for SQLite-based asset search
+ */
+export interface AssetSearchOptions {
+  /** Maximum number of results (default: hook's defaultLimit) */
+  limit?: number;
+  /** Filter by specific asset IDs */
+  assetIds?: string[];
+  /** Search modality: 'visual', 'audio', 'transcript', or all (default) */
+  modality?: 'visual' | 'audio' | 'transcript';
+}
+
+/**
+ * Single result from SQLite asset search
+ */
+export interface AssetSearchResultItem {
+  /** Asset ID */
+  assetId: string;
+  /** Asset name */
+  assetName: string;
+  /** Start time in seconds */
+  startSec: number;
+  /** End time in seconds */
+  endSec: number;
+  /** Relevance score (0.0 - 1.0) */
+  score: number;
+  /** Reasons for the match */
+  reasons: string[];
+  /** Thumbnail URI (if available) */
+  thumbnailUri: string | null;
+  /** Source of the match: "transcript", "shot", "audio", "multiple", "unknown" */
+  source: string;
+}
+
+/**
+ * Response from SQLite asset search
+ */
+export interface AssetSearchResponse {
+  /** Search results */
+  results: AssetSearchResultItem[];
+  /** Total number of results found */
+  total: number;
+  /** Query processing time in milliseconds */
+  processingTimeMs: number;
+}
+
 /**
  * Search state
  */
@@ -115,8 +165,10 @@ export interface UseSearchOptions {
  * Hook return type
  */
 export interface UseSearchReturn {
-  /** Search for content (debounced with caching) */
+  /** Search for content (debounced with caching) - Meilisearch */
   search: (query: string, options?: SearchOptions) => Promise<SearchResults | null>;
+  /** Search assets using SQLite backend (always available) */
+  searchAssets: (query: string, options?: AssetSearchOptions) => Promise<AssetSearchResponse | null>;
   /** Clear search results */
   clearResults: () => void;
   /** Clear the search cache */
@@ -516,8 +568,72 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
     []
   );
 
+  /**
+   * Search assets using SQLite backend (always available)
+   *
+   * Unlike the Meilisearch-based search, this function uses the local SQLite
+   * database which is always available without additional service dependencies.
+   */
+  const searchAssets = useCallback(
+    async (
+      query: string,
+      searchOptions?: AssetSearchOptions
+    ): Promise<AssetSearchResponse | null> => {
+      // Skip empty queries
+      if (!query.trim()) {
+        return null;
+      }
+
+      // Update state to searching
+      setState((prev) => ({
+        ...prev,
+        isSearching: true,
+        error: null,
+      }));
+
+      try {
+        const response = await invoke<AssetSearchResponse>('search_assets', {
+          query: {
+            text: query.trim(),
+            resultLimit: searchOptions?.limit ?? defaultLimit,
+            modality: searchOptions?.modality ?? null,
+            filterAssetIds: searchOptions?.assetIds ?? null,
+          },
+        });
+
+        logger.debug('SQLite search completed', {
+          query,
+          resultCount: response.results.length,
+          processingTimeMs: response.processingTimeMs,
+        });
+
+        setState((prev) => ({
+          ...prev,
+          isSearching: false,
+          error: null,
+        }));
+
+        return response;
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        logger.error('SQLite search failed', { query, error: errorMessage });
+
+        setState((prev) => ({
+          ...prev,
+          isSearching: false,
+          error: errorMessage,
+        }));
+
+        return null;
+      }
+    },
+    [defaultLimit]
+  );
+
   return {
     search,
+    searchAssets,
     clearResults,
     clearCache,
     isSearchAvailable,
