@@ -42,11 +42,19 @@ export type {
   Requirement,
 } from './useAIAgent';
 
-export { useFrameExtractor } from './useFrameExtractor';
+export { useFrameExtractor, useAssetFrameExtractor } from './useFrameExtractor';
 export type {
   UseFrameExtractorOptions,
   UseFrameExtractorReturn,
+  UseAssetFrameExtractorOptions,
+  UseAssetFrameExtractorReturn,
 } from './useFrameExtractor';
+
+export { usePlaybackLoop } from './usePlaybackLoop';
+export type {
+  UsePlaybackLoopOptions,
+  UsePlaybackLoopReturn,
+} from './usePlaybackLoop';
 
 export { useJobs } from './useJobs';
 export type {
@@ -195,4 +203,8 @@ export type {
   SearchState,
   UseSearchOptions,
   UseSearchReturn,
+  // SQLite-based search types (always available)
+  AssetSearchOptions,
+  AssetSearchResultItem,
+  AssetSearchResponse,
 } from './useSearch';

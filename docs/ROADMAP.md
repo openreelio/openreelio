@@ -39,7 +39,7 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 
 | Milestone | Focus | Key Deliverables | Status |
 |-----------|-------|------------------|--------|
-| **v0.1.0** | Core Editor | Timeline, Preview, Export | 🔄 In Progress (60%) |
+| **v0.1.0** | Core Editor | Timeline, Preview, Export | 🔄 In Progress (85%) |
 | **v0.2.0** | AI Integration | Whisper, Meilisearch, Shot Detection | 📋 Planned |
 | **v0.3.0** | Effects & Animation | Transitions, Keyframes, Audio FX | 📋 Planned |
 | **v0.4.0** | Plugin Ecosystem | WASM Host, Marketplace | 📋 Planned |
@@ -58,11 +58,11 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 | Phase | Description | Status | Completion |
 |-------|-------------|--------|------------|
 | Phase 0 | Build Environment | ✅ Complete | 100% |
-| Phase 1 | Project & Assets | ✅ Nearly Complete | 90% |
-| Phase 2 | Timeline Core | 🔄 In Progress | 75% |
-| Phase 3 | Preview System | 🔄 In Progress | 50% |
-| Phase 4 | Export Pipeline | ✅ Nearly Complete | 85% |
-| Phase 5 | Polish & UX | 🔄 In Progress | 45% |
+| Phase 1 | Project & Assets | ✅ Complete | 95% |
+| Phase 2 | Timeline Core | ✅ Complete | 95% |
+| Phase 3 | Preview System | ✅ Complete | 90% |
+| Phase 4 | Export Pipeline | ✅ Complete | 85% |
+| Phase 5 | Polish & UX | 🔄 In Progress | 60% |
 
 ### Phase 2 Detailed Status
 
@@ -75,26 +75,23 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 - ✅ Track mute/lock/visibility controls
 - ✅ Playhead scrubbing
 - ✅ Timeline zoom & scroll
-
-**In Progress:**
-- 🔄 Cross-track drag (move clips between tracks)
-- 🔄 Multi-clip drag (move selected clips together)
-- 🔄 Enhanced snapping (clip edges, playhead)
+- ✅ Cross-track drag (commit 219b41b)
+- ✅ Multi-clip drag (commit 219b41b)
+- ✅ Enhanced snapping with snap points (commit 1d4fa56)
+- ✅ Caption editing in Inspector (commit 19165c8)
+- ✅ Specta Type integration for IPC (commit 507588c)
 
 **Pending:**
 - ⏳ Drop validity feedback (valid/invalid drop zones)
 - ⏳ Track reordering (drag track headers)
 
-### Phase 2: Timeline Core (Current Priority)
+### Phase 2: Timeline Core (Current Priority: LOW - Nearly Complete)
 
 **Remaining Tasks:**
 
 | Task | Description | Priority | Estimated Effort |
 |------|-------------|----------|------------------|
-| Clip Drag & Drop | Drag clips between tracks | HIGH | 2-3 days |
-| Clip Trimming | Drag edges to trim in/out points | HIGH | 2 days |
-| Multi-select | Shift/Ctrl click selection | MEDIUM | 1 day |
-| Snapping Polish | Snap to playhead, clips, markers | MEDIUM | 1 day |
+| Drop Feedback | Visual feedback for valid/invalid drop | LOW | 1 day |
 | Track Reordering | Drag track headers to reorder | LOW | 1 day |
 
 **Technical Requirements:**
@@ -102,17 +99,22 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 - 60fps drag interaction
 - Undo/redo for all operations
 
-### Phase 3: Preview System (Next Priority)
+### Phase 3: Preview System (90% Complete)
+
+**Completed:**
+- ✅ Frame extraction via FFmpeg (`useFrameExtractor` hook)
+- ✅ Playback loop with RAF-based 30fps (`usePlaybackLoop` hook)
+- ✅ Audio sync with Web Audio API (`useAudioPlayback` hook)
+- ✅ Timeline scrubbing (`useScrubbing` hook)
+- ✅ Frame caching with LRU eviction (`FrameCache` service)
+- ✅ Canvas-based composite rendering (`TimelinePreviewPlayer`)
+- ✅ Fullscreen preview with PiP support
 
 **Remaining Tasks:**
 
 | Task | Description | Priority | Estimated Effort |
 |------|-------------|----------|------------------|
-| Frame Extraction | FFmpeg frame at timestamp | HIGH | 2 days |
-| Playback Loop | 30fps preview with frame caching | HIGH | 3 days |
-| Audio Sync | Audio playback synchronized with video | HIGH | 2 days |
-| Scrubbing | Real-time scrub on timeline drag | MEDIUM | 1 day |
-| Proxy Playback | Use proxy videos for smooth preview | MEDIUM | 2 days |
+| Proxy Playback | Use proxy videos for smooth preview | HIGH | 2 days |
 
 ### Phase 5: Polish & UX
 

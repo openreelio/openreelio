@@ -74,11 +74,13 @@ impl Default for CustomPosition {
 
 /// Caption position on screen
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
+#[serde(rename_all = "camelCase", tag = "type")]
 pub enum CaptionPosition {
     /// Preset vertical position
+    #[serde(rename_all = "camelCase")]
     Preset {
         vertical: VerticalPosition,
+        #[serde(alias = "margin_percent")]
         margin_percent: f64,
     },
     /// Custom x/y position

@@ -4,11 +4,13 @@
  * Application header with branding, project info, menu bar, and toolbar.
  */
 
-import { X, Save, FolderOpen, Download } from 'lucide-react';
+import { X, Save, FolderOpen, Download, Search } from 'lucide-react';
 import { UndoRedoButtons } from '@/components/ui';
+import { SearchPanel } from '@/components/features/search';
 import { useProjectStore } from '@/stores';
-import { useCallback, useState } from 'react';
+import { useCallback, useState, useEffect } from 'react';
 import { createLogger } from '@/services/logger';
+import type { AssetSearchResultItem } from '@/hooks/useSearch';
 
 const logger = createLogger('Header');
 
@@ -25,6 +27,8 @@ interface HeaderProps {
   showToolbar?: boolean;
   /** Export button click handler */
   onExport?: () => void;
+  /** Callback when a search result is selected */
+  onSearchResultSelect?: (result: AssetSearchResultItem) => void;
 }
 
 // =============================================================================
@@ -36,10 +40,37 @@ export function Header({
   version = '0.1.0',
   showToolbar = true,
   onExport,
+  onSearchResultSelect,
 }: HeaderProps) {
   const { meta, isDirty, closeProject, saveProject } = useProjectStore();
   const [isSaving, setIsSaving] = useState(false);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+  const [showSearch, setShowSearch] = useState(false);
+
+  // Keyboard shortcut for search (Ctrl/Cmd + K)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
+        e.preventDefault();
+        setShowSearch(true);
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
+  const handleSearchClose = useCallback(() => {
+    setShowSearch(false);
+  }, []);
+
+  const handleSearchResultSelect = useCallback(
+    (result: AssetSearchResultItem) => {
+      onSearchResultSelect?.(result);
+      setShowSearch(false);
+    },
+    [onSearchResultSelect]
+  );
 
   const handleSave = useCallback(async () => {
     setIsSaving(true);
@@ -110,6 +141,20 @@ export function Header({
           </div>
         </>
       )}
+
+      {/* Separator */}
+      <div className="mx-3 h-4 w-px bg-editor-border" />
+
+      {/* Search Button */}
+      <button
+        onClick={() => setShowSearch(true)}
+        className="flex items-center gap-2 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-gray-400 hover:text-white hover:border-gray-600 transition-colors"
+        title="Search (Ctrl+K)"
+      >
+        <Search className="w-4 h-4" />
+        <span className="text-sm">Search</span>
+        <kbd className="hidden sm:inline-block text-xs bg-gray-700 px-1.5 py-0.5 rounded">⌘K</kbd>
+      </button>
 
       {/* Spacer */}
       <div className="flex-1" />
@@ -211,6 +256,15 @@ export function Header({
           </div>
         </div>
       )}
+
+      {/* Search Panel */}
+      <SearchPanel
+        isOpen={showSearch}
+        onClose={handleSearchClose}
+        onResultSelect={handleSearchResultSelect}
+        showBackdrop
+        className="fixed top-1/4 left-1/2 -translate-x-1/2 w-full max-w-2xl"
+      />
     </div>
   );
 }

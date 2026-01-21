@@ -256,6 +256,8 @@ impl CommandExecutor {
             "AddCaption" => OpKind::CaptionAdd,
             "RemoveCaption" => OpKind::CaptionRemove,
             "UpdateCaption" => OpKind::CaptionUpdate,
+            "CreateCaption" => OpKind::CaptionAdd,
+            "DeleteCaption" => OpKind::CaptionRemove,
             "CreateSequence" => OpKind::SequenceCreate,
             "UpdateSequence" => OpKind::SequenceUpdate,
             "RemoveSequence" => OpKind::SequenceRemove,

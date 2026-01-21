@@ -475,6 +475,8 @@ pub async fn get_sequence(
 // Edit Commands
 // =============================================================================
 
+use crate::ipc::payloads::CommandPayload;
+
 /// Executes an edit command
 #[tauri::command]
 pub async fn execute_command(
@@ -482,106 +484,107 @@ pub async fn execute_command(
     payload: serde_json::Value,
     state: State<'_, AppState>,
 ) -> Result<CommandResultDto, String> {
+    let started_at = std::time::Instant::now();
+    let command_type_for_log = command_type.clone();
     let mut guard = state.project.lock().await;
 
     let project = guard
         .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    // Route to appropriate command based on type
-    let command: Box<dyn crate::core::commands::Command> = match command_type.as_str() {
-        "insertClip" | "InsertClip" => {
-            let seq_id = payload["sequenceId"].as_str().ok_or("Missing sequenceId")?;
-            let track_id = payload["trackId"].as_str().ok_or("Missing trackId")?;
-            let asset_id = payload["assetId"].as_str().ok_or("Missing assetId")?;
-            let timeline_in = payload["timelineIn"].as_f64().unwrap_or(0.0);
+    // Strict validation via CommandPayload::parse
+    let typed_command = CommandPayload::parse(command_type, payload)?;
 
-            Box::new(InsertClipCommand::new(
-                seq_id,
-                track_id,
-                asset_id,
-                timeline_in,
-            ))
-        }
-        "removeClip" | "RemoveClip" | "deleteClip" | "DeleteClip" => {
-            let seq_id = payload["sequenceId"].as_str().ok_or("Missing sequenceId")?;
-            let track_id = payload["trackId"].as_str().ok_or("Missing trackId")?;
-            let clip_id = payload["clipId"].as_str().ok_or("Missing clipId")?;
-
-            Box::new(RemoveClipCommand::new(seq_id, track_id, clip_id))
-        }
-        "moveClip" | "MoveClip" => {
-            let seq_id = payload["sequenceId"].as_str().ok_or("Missing sequenceId")?;
-            let track_id = payload["trackId"].as_str().ok_or("Missing trackId")?;
-            let clip_id = payload["clipId"].as_str().ok_or("Missing clipId")?;
-            let new_timeline_in = payload["newTimelineIn"]
-                .as_f64()
-                .ok_or("Missing newTimelineIn")?;
-            let new_track_id = payload["newTrackId"].as_str().map(|s| s.to_string());
-
-            Box::new(MoveClipCommand::new(
-                seq_id,
-                track_id,
-                clip_id,
-                new_timeline_in,
-                new_track_id,
-            ))
-        }
-        "trimClip" | "TrimClip" => {
-            let seq_id = payload["sequenceId"].as_str().ok_or("Missing sequenceId")?;
-            let track_id = payload["trackId"].as_str().ok_or("Missing trackId")?;
-            let clip_id = payload["clipId"].as_str().ok_or("Missing clipId")?;
-            let new_source_in = payload["newSourceIn"].as_f64();
-            let new_source_out = payload["newSourceOut"].as_f64();
-            let new_timeline_in = payload["newTimelineIn"].as_f64();
-
-            Box::new(TrimClipCommand::new(
-                seq_id,
-                track_id,
-                clip_id,
-                new_source_in,
-                new_source_out,
-                new_timeline_in,
-            ))
-        }
-        "importAsset" | "ImportAsset" => {
-            let name = payload["name"].as_str().ok_or("Missing name")?;
-            let uri = payload["uri"].as_str().ok_or("Missing uri")?;
-
-            Box::new(ImportAssetCommand::new(name, uri))
-        }
-        "removeAsset" | "RemoveAsset" => {
-            let asset_id = payload["assetId"].as_str().ok_or("Missing assetId")?;
-
-            Box::new(RemoveAssetCommand::new(asset_id))
-        }
-        "createSequence" | "CreateSequence" => {
-            let name = payload["name"].as_str().ok_or("Missing name")?;
-            let format = payload["format"].as_str().unwrap_or("1080p");
-
-            Box::new(CreateSequenceCommand::new(name, format))
-        }
-        "splitClip" | "SplitClip" => {
-            let seq_id = payload["sequenceId"].as_str().ok_or("Missing sequenceId")?;
-            let track_id = payload["trackId"].as_str().ok_or("Missing trackId")?;
-            let clip_id = payload["clipId"].as_str().ok_or("Missing clipId")?;
-            let split_time = payload["splitTime"].as_f64().ok_or("Missing splitTime")?;
-
-            Box::new(SplitClipCommand::new(seq_id, track_id, clip_id, split_time))
-        }
-        _ => {
-            return Err(CoreError::InvalidCommand(format!(
-                "Unknown command type: {}",
-                command_type
-            ))
-            .to_ipc_error())
-        }
+    // Map strict CommandPayload to the internal Command trait objects
+    let command: Box<dyn crate::core::commands::Command> = match typed_command {
+        CommandPayload::InsertClip {
+            sequence_id,
+            track_id,
+            asset_id,
+            timeline_start,
+        } => Box::new(InsertClipCommand::new(
+            &sequence_id,
+            &track_id,
+            &asset_id,
+            timeline_start.unwrap_or(0.0),
+        )),
+        CommandPayload::RemoveClip {
+            sequence_id,
+            track_id,
+            clip_id,
+        } => Box::new(RemoveClipCommand::new(&sequence_id, &track_id, &clip_id)),
+        CommandPayload::MoveClip {
+            sequence_id,
+            track_id,
+            clip_id,
+            new_timeline_in,
+            new_track_id,
+        } => Box::new(MoveClipCommand::new(
+            &sequence_id,
+            &track_id,
+            &clip_id,
+            new_timeline_in,
+            new_track_id,
+        )),
+        CommandPayload::TrimClip {
+            sequence_id,
+            track_id,
+            clip_id,
+            new_source_in,
+            new_source_out,
+            new_timeline_in,
+        } => Box::new(TrimClipCommand::new(
+            &sequence_id,
+            &track_id,
+            &clip_id,
+            new_source_in,
+            new_source_out,
+            new_timeline_in,
+        )),
+        CommandPayload::ImportAsset { name, uri } => Box::new(ImportAssetCommand::new(&name, &uri)),
+        CommandPayload::RemoveAsset { asset_id } => Box::new(RemoveAssetCommand::new(&asset_id)),
+        CommandPayload::CreateSequence { name, format } => Box::new(CreateSequenceCommand::new(
+            &name,
+            &format.unwrap_or_else(|| "1080p".to_string()),
+        )),
+        CommandPayload::SplitClip {
+            sequence_id,
+            track_id,
+            clip_id,
+            split_time,
+        } => Box::new(SplitClipCommand::new(
+            &sequence_id,
+            &track_id,
+            &clip_id,
+            split_time,
+        )),
+        CommandPayload::UpdateCaption {
+            sequence_id,
+            track_id,
+            caption_id,
+            text,
+            start_sec,
+            end_sec,
+            style: _,
+            position: _,
+        } => Box::new(
+            crate::core::commands::UpdateCaptionCommand::new(&sequence_id, &track_id, &caption_id)
+                .with_text(text)
+                .with_time_range(start_sec, end_sec),
+        ),
     };
 
     let result = project
         .executor
         .execute(command, &mut project.state)
         .map_err(|e| e.to_ipc_error())?;
+
+    tracing::debug!(
+        command_type = %command_type_for_log,
+        op_id = %result.op_id,
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "execute_command completed"
+    );
 
     Ok(CommandResultDto {
         op_id: result.op_id,
@@ -2210,6 +2213,152 @@ pub struct SearchResultsDto {
     pub processing_time_ms: u64,
 }
 
+// =============================================================================
+// SQLite Search Commands (Always Available)
+// =============================================================================
+
+/// Search query parameters for SQLite-based search
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchQueryDto {
+    /// Text to search for
+    pub text: Option<String>,
+    /// Search modality: "text", "visual", "audio", "hybrid"
+    pub modality: Option<String>,
+    /// Duration filter: [min, max] in seconds
+    pub duration_range: Option<(f64, f64)>,
+    /// Filter by specific asset IDs
+    pub asset_ids: Option<Vec<String>>,
+    /// Minimum quality score (0.0 - 1.0)
+    pub min_quality: Option<f64>,
+    /// Maximum number of results
+    pub limit: Option<usize>,
+}
+
+/// A single search result from SQLite search
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResultDto {
+    /// Asset ID
+    pub asset_id: String,
+    /// Start time in seconds
+    pub start_sec: f64,
+    /// End time in seconds
+    pub end_sec: f64,
+    /// Relevance score (0.0 - 1.0)
+    pub score: f64,
+    /// Reasons for the match
+    pub reasons: Vec<String>,
+    /// Thumbnail URI (if available)
+    pub thumbnail_uri: Option<String>,
+    /// Source of the match: "transcript", "shot", "audio", "multiple", "unknown"
+    pub source: String,
+}
+
+/// Search response with results and metadata
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResponseDto {
+    /// Search results
+    pub results: Vec<SearchResultDto>,
+    /// Total number of results found
+    pub total: usize,
+    /// Query processing time in milliseconds
+    pub processing_time_ms: u64,
+}
+
+/// Searches assets using SQLite-based search engine (always available)
+///
+/// This command performs search across transcripts and shots stored in the
+/// project's index database. Unlike Meilisearch, this is always available
+/// without additional feature flags.
+#[tauri::command]
+pub async fn search_assets(
+    query: SearchQueryDto,
+    state: State<'_, AppState>,
+) -> Result<SearchResponseDto, String> {
+    use crate::core::indexing::IndexDb;
+    use crate::core::search::{SearchEngine, SearchFilters, SearchModality, SearchQuery};
+    use std::time::Instant;
+
+    let start = Instant::now();
+
+    // Get project and index database
+    let guard = state.project.lock().await;
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    // Open (or create) the project's index database.
+    //
+    // Note: We avoid storing a persistent rusqlite Connection in `ActiveProject`
+    // because `rusqlite::Connection` is not `Send` and would complicate cross-thread state.
+    let index_db_path = project.path.join("index.db");
+    let index_db = (if index_db_path.exists() {
+        IndexDb::open(&index_db_path)
+    } else {
+        IndexDb::create(&index_db_path)
+    })
+    .map_err(|e| e.to_ipc_error())?;
+
+    // Build search query
+    let modality = match query.modality.as_deref() {
+        Some("visual") => SearchModality::Visual,
+        Some("audio") => SearchModality::Audio,
+        Some("hybrid") => SearchModality::Hybrid,
+        _ => SearchModality::Text,
+    };
+
+    let search_query = SearchQuery {
+        text: query.text,
+        duration_hint: query.duration_range,
+        modality,
+        filters: SearchFilters {
+            asset_ids: query.asset_ids,
+            min_quality: query.min_quality,
+            ..Default::default()
+        },
+        limit: query.limit.unwrap_or(20),
+    };
+
+    // Perform search
+    let engine = SearchEngine::new(&index_db);
+    let results = engine.search(&search_query).map_err(|e| e.to_ipc_error())?;
+
+    // Convert to DTOs
+    let result_dtos: Vec<SearchResultDto> = results
+        .iter()
+        .map(|r| SearchResultDto {
+            asset_id: r.asset_id.clone(),
+            start_sec: r.start_sec,
+            end_sec: r.end_sec,
+            score: r.score,
+            reasons: r.reasons.clone(),
+            thumbnail_uri: r.thumbnail_uri.clone(),
+            source: match r.source {
+                crate::core::search::SearchResultSource::Transcript => "transcript".to_string(),
+                crate::core::search::SearchResultSource::Shot => "shot".to_string(),
+                crate::core::search::SearchResultSource::Audio => "audio".to_string(),
+                crate::core::search::SearchResultSource::Multiple => "multiple".to_string(),
+                crate::core::search::SearchResultSource::Unknown => "unknown".to_string(),
+            },
+        })
+        .collect();
+
+    let total = result_dtos.len();
+    let processing_time_ms = start.elapsed().as_millis() as u64;
+
+    Ok(SearchResponseDto {
+        results: result_dtos,
+        total,
+        processing_time_ms,
+    })
+}
+
+// =============================================================================
+// Meilisearch Commands (Feature-Gated)
+// =============================================================================
+
 /// Checks if Meilisearch is available
 #[tauri::command]
 pub async fn is_meilisearch_available() -> Result<bool, String> {
@@ -2378,7 +2527,8 @@ pub fn get_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'st
         is_transcription_available,
         transcribe_asset,
         submit_transcription_job,
-        // Search (Meilisearch)
+        // Search
+        search_assets,
         is_meilisearch_available,
         search_content,
         index_asset_for_search,

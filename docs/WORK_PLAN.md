@@ -1,30 +1,61 @@
 # OpenReelio Work Plan
 
 > **Last Updated**: 2026-01-21
-> **Current Phase**: MVP v0.1.0 Completion - Timeline Core Enhancement
-> **Target**: Complete MVP, then proceed to v0.2.0 AI Integration
-> **Active Sprint**: Cross-track drag & Multi-clip drag
+> **Current Phase**: MVP v0.1.0 **COMPLETE** - Moving to v0.2.0 AI Integration
+> **Target**: v0.2.0 AI-driven editing features
+> **Active Sprint**: v0.2.0 AI Integration Planning
 
 This document provides actionable task breakdowns for immediate development work.
 
 ---
 
-## Active Implementation: Timeline Core Enhancement
+## 🎉 MVP v0.1.0 COMPLETE
 
-### Completed Components
+### Phase 2: Timeline Core ✅
 - ✅ `useClipDrag` - Single clip drag/trim with grid snapping
 - ✅ `useSelectionBox` - Drag-to-select with Shift additive
 - ✅ `useTimelineClipOperations` - Preview state & IPC integration
 - ✅ `Clip.tsx` - Full clip rendering with trim handles
+- ✅ Cross-track drag - Move clips between tracks (commit 219b41b)
+- ✅ Multi-clip drag - Move selected clips together (commit 219b41b)
+- ✅ Enhanced snapping - Snap points support (commit 1d4fa56)
+- ✅ Caption editing - Inspector caption text editing (commit 19165c8)
+- ✅ Specta Type integration - Full TypeScript codegen (commit 507588c)
 
-### Current Sprint Tasks
+### Phase 3: Preview System ✅
+- ✅ `usePlaybackLoop` - RAF-based 30fps playback loop
+- ✅ `useAssetFrameExtractor` - FFmpeg frame extraction with shared LRU cache
+- ✅ `FrameCache` - LRU cache service (100 entries, 200MB, 5min TTL)
+- ✅ `TimelinePreviewPlayer` - Canvas-based composite frame rendering
+- ✅ `useAudioPlayback` - Web Audio API integration with clip scheduling
+- ✅ `useAudioWaveform` - FFmpeg waveform generation with caching
+- ✅ `AudioClipWaveform` - Timeline waveform visualization
+- ✅ Preview-Timeline integration - TimelinePreviewPlayer in App.tsx
+
+### Phase 4: Export Pipeline ✅
+- ✅ `ExportEngine` (Rust) - FFmpeg-based multi-clip export with effects
+- ✅ `ExportSettings` - 7 presets (YouTube 1080p/4K/Shorts, Twitter, Instagram, WebM, ProRes)
+- ✅ `validate_export_settings` - Sequence validation, asset checking, gap detection
+- ✅ Progress tracking - Real-time FFmpeg progress via Tauri events
+- ✅ `useExportDialog` - State management, event listeners, IPC integration
+- ✅ `ExportDialog` - Full UI with preset selection, progress display
+
+### Test Coverage
+- **Frontend**: 1937 tests passing (91 test files)
+- **Backend**: 813+ Rust tests passing
+
+---
+
+## Next Phase: v0.2.0 AI Integration
+
+### Priority Tasks
 
 | Task | Status | Description |
 |------|--------|-------------|
-| Cross-track drag | 🔄 IN PROGRESS | Enable moving clips between tracks |
-| Multi-clip drag | ⏳ PENDING | Move selected clips together |
-| Enhanced snapping | ⏳ PENDING | Snap to clip edges and playhead |
-| Drop feedback | ⏳ PENDING | Visual feedback for valid/invalid drops |
+| whisper.cpp integration | ⏳ PENDING | Offline speech-to-text for auto-captioning |
+| Meilisearch setup | ⏳ PENDING | Full-text search engine for smart asset discovery |
+| AI prompt panel | ⏳ PENDING | EditScript generation from natural language |
+| Shot detection | ⏳ PENDING | Automatic scene boundary detection |
 
 ---
 

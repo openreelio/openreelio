@@ -100,6 +100,7 @@ describe('useSearch', () => {
       const { result } = renderHook(() => useSearch());
 
       expect(typeof result.current.search).toBe('function');
+      expect(typeof result.current.searchAssets).toBe('function');
       expect(typeof result.current.clearResults).toBe('function');
       expect(typeof result.current.isSearchAvailable).toBe('function');
       expect(typeof result.current.indexAsset).toBe('function');
@@ -504,6 +505,201 @@ describe('useSearch', () => {
           await result.current.removeAssetFromSearch('asset_001');
         })
       ).rejects.toThrow('Removal failed');
+    });
+  });
+
+  // ===========================================================================
+  // SQLite-based Search Assets Tests (always available)
+  // ===========================================================================
+
+  describe('searchAssets (SQLite-based)', () => {
+    const mockSqliteSearchResults = {
+      results: [
+        {
+          assetId: 'asset_001',
+          assetName: 'Interview.mp4',
+          startSec: 10.5,
+          endSec: 15.0,
+          score: 0.95,
+          reasons: ['Transcript match: "hello world"'],
+          thumbnailUri: '/path/to/thumb.jpg',
+          source: 'transcript',
+        },
+        {
+          assetId: 'asset_002',
+          assetName: 'B-roll.mp4',
+          startSec: 0.0,
+          endSec: 5.0,
+          score: 0.75,
+          reasons: ['Shot label: "outdoor scene"'],
+          thumbnailUri: null,
+          source: 'shot',
+        },
+      ],
+      total: 2,
+      processingTimeMs: 12,
+    };
+
+    it('should search assets using SQLite backend', async () => {
+      mockInvoke.mockResolvedValueOnce(mockSqliteSearchResults);
+
+      const { result } = renderHook(() => useSearch());
+
+      let searchResult: Awaited<ReturnType<typeof result.current.searchAssets>>;
+
+      await act(async () => {
+        searchResult = await result.current.searchAssets('hello world');
+      });
+
+      expect(searchResult!).toEqual(mockSqliteSearchResults);
+      expect(mockInvoke).toHaveBeenCalledWith('search_assets', {
+        query: {
+          text: 'hello world',
+          resultLimit: 20,
+          modality: null,
+          filterAssetIds: null,
+        },
+      });
+    });
+
+    it('should pass search options to SQLite search', async () => {
+      mockInvoke.mockResolvedValueOnce(mockSqliteSearchResults);
+
+      const { result } = renderHook(() => useSearch());
+
+      await act(async () => {
+        await result.current.searchAssets('test query', {
+          limit: 50,
+          assetIds: ['asset_001', 'asset_002'],
+          modality: 'visual',
+        });
+      });
+
+      expect(mockInvoke).toHaveBeenCalledWith('search_assets', {
+        query: {
+          text: 'test query',
+          resultLimit: 50,
+          modality: 'visual',
+          filterAssetIds: ['asset_001', 'asset_002'],
+        },
+      });
+    });
+
+    it('should return null for empty query in SQLite search', async () => {
+      const { result } = renderHook(() => useSearch());
+
+      let searchResult: Awaited<ReturnType<typeof result.current.searchAssets>>;
+
+      await act(async () => {
+        searchResult = await result.current.searchAssets('');
+      });
+
+      expect(searchResult!).toBeNull();
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should return null for whitespace-only query in SQLite search', async () => {
+      const { result } = renderHook(() => useSearch());
+
+      let searchResult: Awaited<ReturnType<typeof result.current.searchAssets>>;
+
+      await act(async () => {
+        searchResult = await result.current.searchAssets('   ');
+      });
+
+      expect(searchResult!).toBeNull();
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should handle SQLite search errors', async () => {
+      mockInvoke.mockRejectedValueOnce(new Error('Database error'));
+
+      const { result } = renderHook(() => useSearch());
+
+      let searchResult: Awaited<ReturnType<typeof result.current.searchAssets>>;
+
+      await act(async () => {
+        searchResult = await result.current.searchAssets('test');
+      });
+
+      expect(searchResult!).toBeNull();
+      expect(result.current.state.error).toBe('Database error');
+    });
+
+    it('should update state during SQLite search', async () => {
+      let resolveSearch: (value: typeof mockSqliteSearchResults) => void;
+      const delayedPromise = new Promise<typeof mockSqliteSearchResults>((resolve) => {
+        resolveSearch = resolve;
+      });
+      mockInvoke.mockReturnValueOnce(delayedPromise);
+
+      const { result } = renderHook(() => useSearch());
+
+      // Start search
+      act(() => {
+        void result.current.searchAssets('test');
+      });
+
+      // Should be searching
+      expect(result.current.state.isSearching).toBe(true);
+
+      // Complete the search
+      await act(async () => {
+        resolveSearch!(mockSqliteSearchResults);
+        await delayedPromise;
+      });
+
+      expect(result.current.state.isSearching).toBe(false);
+    });
+
+    it('should use hook defaultLimit for SQLite search', async () => {
+      mockInvoke.mockResolvedValueOnce(mockSqliteSearchResults);
+
+      const { result } = renderHook(() => useSearch({ defaultLimit: 100 }));
+
+      await act(async () => {
+        await result.current.searchAssets('test');
+      });
+
+      expect(mockInvoke).toHaveBeenCalledWith('search_assets', {
+        query: {
+          text: 'test',
+          resultLimit: 100,
+          modality: null,
+          filterAssetIds: null,
+        },
+      });
+    });
+
+    it('should support all modality options', async () => {
+      const { result } = renderHook(() => useSearch());
+
+      // Test visual modality
+      mockInvoke.mockResolvedValueOnce(mockSqliteSearchResults);
+      await act(async () => {
+        await result.current.searchAssets('test', { modality: 'visual' });
+      });
+      expect(mockInvoke).toHaveBeenLastCalledWith('search_assets', {
+        query: expect.objectContaining({ modality: 'visual' }),
+      });
+
+      // Test audio modality
+      mockInvoke.mockResolvedValueOnce(mockSqliteSearchResults);
+      await act(async () => {
+        await result.current.searchAssets('test', { modality: 'audio' });
+      });
+      expect(mockInvoke).toHaveBeenLastCalledWith('search_assets', {
+        query: expect.objectContaining({ modality: 'audio' }),
+      });
+
+      // Test transcript modality
+      mockInvoke.mockResolvedValueOnce(mockSqliteSearchResults);
+      await act(async () => {
+        await result.current.searchAssets('test', { modality: 'transcript' });
+      });
+      expect(mockInvoke).toHaveBeenLastCalledWith('search_assets', {
+        query: expect.objectContaining({ modality: 'transcript' }),
+      });
     });
   });
 });
