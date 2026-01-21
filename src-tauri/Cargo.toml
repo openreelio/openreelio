@@ -56,12 +56,23 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Utilities
 num_cpus = "1.16"
 regex = "1"
+dirs = "5.0"
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 # Async channels
 async-trait = "0.1"
+
+# Audio processing for transcription
+hound = "3.5"
+
+# Whisper transcription (optional - enabled via whisper feature)
+whisper-rs = { version = "0.13", optional = true }
+
+# Meilisearch client (optional - enabled via meilisearch feature)
+meilisearch-sdk = { version = "0.27", optional = true }
+futures = { version = "0.3", optional = true }
 
 # WASM Plugin System
 wasmtime = "27"
@@ -92,3 +103,7 @@ bundled-ffmpeg = [
     "dep:xz2",
     "dep:walkdir",
 ]
+# Enable Whisper transcription support
+whisper = ["dep:whisper-rs"]
+# Enable Meilisearch full-text search
+meilisearch = ["dep:meilisearch-sdk", "dep:futures", "dep:reqwest"]
