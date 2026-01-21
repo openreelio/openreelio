@@ -14,12 +14,11 @@ import { ProjectCreationDialog, type ProjectCreateData } from './components/feat
 import { ExportDialog } from './components/features/export';
 import { Inspector, type SelectedCaption } from './components/features/inspector';
 import { ProjectExplorer } from './components/explorer';
-import { PreviewPlayer } from './components/preview';
+import { TimelinePreviewPlayer } from './components/preview';
 import { Timeline } from './components/timeline';
 import { FFmpegWarning, ToastContainer, type ToastData } from './components/ui';
 import { useProjectStore, usePlaybackStore, useTimelineStore } from './stores';
 import {
-  usePreviewSource,
   useTimelineActions,
   useFFmpegStatus,
   useAutoSave,
@@ -68,9 +67,9 @@ interface EditorViewProps {
 
 function EditorView({ sequence }: EditorViewProps): JSX.Element {
   const { selectedAssetId, assets } = useProjectStore();
-  const { currentTime, isPlaying, setCurrentTime, setIsPlaying, setDuration } = usePlaybackStore();
+  const currentTime = usePlaybackStore((state) => state.currentTime);
+  const setDuration = usePlaybackStore((state) => state.setDuration);
   const { selectedClipIds } = useTimelineStore();
-  const previewSource = usePreviewSource();
 
   // Export dialog state
   const [showExportDialog, setShowExportDialog] = useState(false);
@@ -86,19 +85,34 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
 
   // Initialize audio context on first play interaction
   // Web Audio API requires user gesture to create AudioContext
+  const isPlaying = usePlaybackStore((state) => state.isPlaying);
   useEffect(() => {
     if (isPlaying && !isAudioReady) {
       void initAudio();
     }
   }, [isPlaying, isAudioReady, initAudio]);
 
-  // Calculate effective playhead for preview:
-  // - For timeline clips, use the sourceOffset to show correct frame
-  // - For direct asset preview, use asset's own time
-  const effectivePlayhead =
-    previewSource?.sourceType === 'timeline' && previewSource.sourceOffset !== undefined
-      ? previewSource.sourceOffset
-      : currentTime;
+  // Sync sequence duration to playback store
+  // Calculate total duration from all clips across all tracks
+  useEffect(() => {
+    if (!sequence) {
+      setDuration(0);
+      return;
+    }
+
+    let maxEndTime = 0;
+    for (const track of sequence.tracks) {
+      for (const clip of track.clips) {
+        const clipEnd = clip.place.timelineInSec + clip.place.durationSec;
+        if (clipEnd > maxEndTime) {
+          maxEndTime = clipEnd;
+        }
+      }
+    }
+
+    // Set at least 10 seconds for empty sequences to allow playback testing
+    setDuration(Math.max(maxEndTime, 10));
+  }, [sequence, setDuration]);
 
   // Timeline action callbacks
   const {
@@ -271,18 +285,14 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
         <div className="flex flex-col h-full">
           <div className="flex-1 border-b border-editor-border">
             <ErrorBoundary
-              onError={(error) => logger.error('PreviewPlayer error', { error })}
+              onError={(error) => logger.error('TimelinePreviewPlayer error', { error })}
               showDetails={import.meta.env.DEV}
             >
-              <PreviewPlayer
-                src={previewSource?.src}
-                poster={previewSource?.thumbnail}
-                className="h-full"
-                playhead={effectivePlayhead}
-                isPlaying={isPlaying}
-                onPlayheadChange={setCurrentTime}
-                onPlayStateChange={setIsPlaying}
-                onDurationChange={setDuration}
+              <TimelinePreviewPlayer
+                className="h-full w-full"
+                showControls
+                showTimecode
+                showStats={import.meta.env.DEV}
               />
             </ErrorBoundary>
           </div>
