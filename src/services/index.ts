@@ -18,3 +18,10 @@ export {
   type LogEntry,
   type LogHandler,
 } from './logger';
+
+export {
+  FrameCache,
+  frameCache,
+  type FrameCacheConfig,
+  type CacheStats,
+} from './frameCache';
