@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { Inspector } from './Inspector';
 
 // Mock Tauri API
@@ -124,6 +124,68 @@ describe('Inspector', () => {
 
     // 125.5 seconds = 2:05.50
     expect(screen.getByTestId('asset-duration')).toHaveTextContent('2:05');
+  });
+
+  // ===========================================================================
+  // Caption Selection Tests
+  // ===========================================================================
+
+  it('renders caption properties when caption is selected', () => {
+    const selectedCaption = {
+      id: 'cap-1',
+      text: 'Hello World',
+      startSec: 0,
+      endSec: 5,
+      style: {
+        fontFamily: 'Arial',
+        fontSize: 24,
+        fontWeight: 'normal' as const,
+        color: { r: 255, g: 255, b: 255, a: 255 },
+        outlineColor: { r: 0, g: 0, b: 0, a: 255 },
+        outlineWidth: 2,
+        shadowColor: { r: 0, g: 0, b: 0, a: 128 },
+        shadowOffset: 2,
+        alignment: 'center' as const,
+        italic: false,
+        underline: false,
+      },
+    };
+
+    render(<Inspector selectedCaption={selectedCaption} />);
+
+    expect(screen.getByText('Caption Properties')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('Hello World')).toBeInTheDocument();
+  });
+
+  it('calls onCaptionChange when text is updated', () => {
+    const selectedCaption = {
+      id: 'cap-1',
+      text: 'Hello',
+      startSec: 0,
+      endSec: 5,
+      style: {
+        fontFamily: 'Arial',
+        fontSize: 24,
+        fontWeight: 'normal' as const,
+        color: { r: 255, g: 255, b: 255, a: 255 },
+        outlineColor: { r: 0, g: 0, b: 0, a: 255 },
+        outlineWidth: 2,
+        shadowColor: { r: 0, g: 0, b: 0, a: 128 },
+        shadowOffset: 2,
+        alignment: 'center' as const,
+        italic: false,
+        underline: false,
+      },
+    };
+
+    const handleCaptionChange = vi.fn();
+
+    render(<Inspector selectedCaption={selectedCaption} onCaptionChange={handleCaptionChange} />);
+
+    const textarea = screen.getByDisplayValue('Hello');
+    fireEvent.change(textarea, { target: { value: 'Hello World' } });
+
+    expect(handleCaptionChange).toHaveBeenCalledWith('cap-1', 'text', 'Hello World');
   });
 
   // ===========================================================================

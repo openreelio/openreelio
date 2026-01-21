@@ -3,4 +3,4 @@
  */
 
 export { Inspector } from './Inspector';
-export type { InspectorProps, SelectedClip, SelectedAsset } from './Inspector';
+export type { InspectorProps, SelectedClip, SelectedAsset, SelectedCaption } from './Inspector';
