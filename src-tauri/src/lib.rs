@@ -3,6 +3,11 @@
 //! AI Agent-driven, prompt-based video editing IDE.
 //! This library contains the core editing engine, command system,
 //! and all business logic for the application.
+//!
+//! ## TypeScript Bindings
+//!
+//! All IPC types are automatically exported to TypeScript via tauri-specta.
+//! Run `cargo build` in development mode to regenerate `src/bindings.ts`.
 
 pub mod core;
 pub mod ipc;
@@ -175,8 +180,74 @@ impl Default for AppState {
 
 /// Tauri command: Greet (placeholder for testing)
 #[tauri::command]
+#[specta::specta]
 fn greet(name: &str) -> String {
     format!("Hello, {}! Welcome to OpenReelio.", name)
+}
+
+/// Collects all commands for tauri-specta type export.
+/// This is used by the bindings generator.
+#[macro_export]
+macro_rules! collect_commands {
+    () => {
+        tauri_specta::collect_commands![
+            greet,
+            // Project commands
+            $crate::ipc::create_project,
+            $crate::ipc::open_project,
+            $crate::ipc::save_project,
+            $crate::ipc::get_project_info,
+            $crate::ipc::get_project_state,
+            // Asset commands
+            $crate::ipc::import_asset,
+            $crate::ipc::get_assets,
+            $crate::ipc::remove_asset,
+            $crate::ipc::generate_asset_thumbnail,
+            $crate::ipc::generate_proxy_for_asset,
+            // Timeline commands
+            $crate::ipc::get_sequences,
+            $crate::ipc::create_sequence,
+            $crate::ipc::get_sequence,
+            // Edit commands
+            $crate::ipc::execute_command,
+            $crate::ipc::undo,
+            $crate::ipc::redo,
+            $crate::ipc::can_undo,
+            $crate::ipc::can_redo,
+            // Job commands
+            $crate::ipc::get_jobs,
+            $crate::ipc::submit_job,
+            $crate::ipc::get_job,
+            $crate::ipc::cancel_job,
+            $crate::ipc::get_job_stats,
+            // Render commands
+            $crate::ipc::start_render,
+            // AI commands
+            $crate::ipc::analyze_intent,
+            $crate::ipc::create_proposal,
+            $crate::ipc::apply_edit_script,
+            $crate::ipc::validate_edit_script,
+            // FFmpeg commands
+            $crate::core::ffmpeg::check_ffmpeg,
+            $crate::core::ffmpeg::extract_frame,
+            $crate::core::ffmpeg::generate_thumbnail,
+            $crate::core::ffmpeg::probe_media,
+            $crate::core::ffmpeg::generate_waveform,
+            // Performance/Memory commands
+            $crate::ipc::get_memory_stats,
+            $crate::ipc::trigger_memory_cleanup,
+            // Transcription commands
+            $crate::ipc::is_transcription_available,
+            $crate::ipc::transcribe_asset,
+            $crate::ipc::submit_transcription_job,
+            // Search commands
+            $crate::ipc::is_meilisearch_available,
+            $crate::ipc::search_content,
+            $crate::ipc::index_asset_for_search,
+            $crate::ipc::index_transcripts_for_search,
+            $crate::ipc::remove_asset_from_search,
+        ]
+    };
 }
 
 /// Initialize and run the Tauri application
@@ -274,6 +345,16 @@ pub fn run() {
             // Performance/Memory commands
             ipc::get_memory_stats,
             ipc::trigger_memory_cleanup,
+            // Transcription commands
+            ipc::is_transcription_available,
+            ipc::transcribe_asset,
+            ipc::submit_transcription_job,
+            // Search commands
+            ipc::is_meilisearch_available,
+            ipc::search_content,
+            ipc::index_asset_for_search,
+            ipc::index_transcripts_for_search,
+            ipc::remove_asset_from_search,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -2,8 +2,10 @@
 //!
 //! Handles broadcasting state changes to the frontend via Tauri's event system.
 //! Events are emitted after successful command execution to keep the UI in sync.
+//! All event types are exported to TypeScript via tauri-specta.
 
 use serde::{Deserialize, Serialize};
+use specta::Type;
 use tauri::{AppHandle, Emitter};
 
 use crate::core::commands::{CommandResult, StateChange};
@@ -58,8 +60,8 @@ pub mod event_names {
 // Event Payloads
 // =============================================================================
 
-/// Generic state change event payload
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Generic state change event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct StateChangedEvent {
     /// Operation ID that caused the change
@@ -83,8 +85,8 @@ impl From<&CommandResult> for StateChangedEvent {
     }
 }
 
-/// Project opened event payload
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Project opened event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectOpenedEvent {
     /// Project name
@@ -93,48 +95,48 @@ pub struct ProjectOpenedEvent {
     pub path: String,
 }
 
-/// Project saved event payload
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Project saved event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSavedEvent {
     /// Project path
     pub path: String,
-    /// Timestamp
+    /// ISO 8601 timestamp
     pub timestamp: String,
 }
 
-/// Asset event payload
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Asset event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetEvent {
     /// Asset ID
     pub asset_id: String,
 }
 
-/// Clip event payload
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Clip event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipEvent {
     /// Clip ID
     pub clip_id: String,
-    /// Sequence ID
+    /// Parent sequence ID
     pub sequence_id: Option<String>,
-    /// Track ID
+    /// Parent track ID
     pub track_id: Option<String>,
 }
 
-/// Track event payload
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Track event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TrackEvent {
     /// Track ID
     pub track_id: String,
-    /// Sequence ID
+    /// Parent sequence ID
     pub sequence_id: Option<String>,
 }
 
-/// History (undo/redo) state event payload
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// History (undo/redo) state event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct HistoryChangedEvent {
     /// Whether undo is available
@@ -147,8 +149,8 @@ pub struct HistoryChangedEvent {
     pub redo_count: usize,
 }
 
-/// Job progress event payload
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Job progress event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct JobProgressEvent {
     /// Job ID
@@ -159,8 +161,8 @@ pub struct JobProgressEvent {
     pub message: Option<String>,
 }
 
-/// Job completed event payload
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Job completed event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct JobCompletedEvent {
     /// Job ID
@@ -169,14 +171,138 @@ pub struct JobCompletedEvent {
     pub result: Option<serde_json::Value>,
 }
 
-/// Job failed event payload
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Job failed event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct JobFailedEvent {
     /// Job ID
     pub job_id: String,
     /// Error message
     pub error: String,
+}
+
+// =============================================================================
+// Render/Export Events (for tauri-specta)
+// =============================================================================
+
+/// Render progress event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderProgressEvent {
+    /// Job ID for this render
+    pub job_id: String,
+    /// Current frame being rendered
+    pub frame: u64,
+    /// Total frames to render
+    pub total_frames: u64,
+    /// Progress percentage (0-100)
+    pub percent: f32,
+    /// Current render speed (fps)
+    pub fps: f32,
+    /// Estimated time remaining in seconds
+    pub eta_seconds: f32,
+    /// Optional status message
+    pub message: Option<String>,
+}
+
+/// Render complete event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderCompleteEvent {
+    /// Job ID that completed
+    pub job_id: String,
+    /// Output file path
+    pub output_path: String,
+    /// Total duration of exported video in seconds
+    pub duration_sec: f64,
+    /// Output file size in bytes
+    pub file_size: u64,
+    /// Total encoding time in seconds
+    pub encoding_time_sec: f64,
+}
+
+/// Render error event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderErrorEvent {
+    /// Job ID that failed
+    pub job_id: String,
+    /// Error message
+    pub error: String,
+}
+
+// =============================================================================
+// Proxy Generation Events
+// =============================================================================
+
+/// Proxy progress event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyProgressEvent {
+    /// Asset ID being processed
+    pub asset_id: String,
+    /// Progress percentage (0-100)
+    pub percent: f32,
+    /// Current frame being processed
+    pub frame: u64,
+    /// Total frames to process
+    pub total_frames: u64,
+    /// Current processing speed (fps)
+    pub fps: f32,
+    /// Estimated time remaining in seconds
+    pub eta_seconds: f32,
+}
+
+/// Proxy complete event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyCompleteEvent {
+    /// Asset ID that was processed
+    pub asset_id: String,
+    /// URL/path to the generated proxy file
+    pub proxy_url: String,
+}
+
+/// Proxy error event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyErrorEvent {
+    /// Asset ID that failed
+    pub asset_id: String,
+    /// Error message
+    pub error: String,
+}
+
+// =============================================================================
+// Transcription Events
+// =============================================================================
+
+/// Transcription progress event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionProgressEvent {
+    /// Asset ID being transcribed
+    pub asset_id: String,
+    /// Job ID
+    pub job_id: String,
+    /// Progress percentage (0-100)
+    pub percent: f32,
+    /// Current stage ("extracting", "transcribing", "finalizing")
+    pub stage: String,
+}
+
+/// Transcription complete event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionCompleteEvent {
+    /// Asset ID that was transcribed
+    pub asset_id: String,
+    /// Job ID
+    pub job_id: String,
+    /// Number of segments generated
+    pub segment_count: usize,
+    /// Detected language
+    pub language: String,
 }
 
 // =============================================================================
