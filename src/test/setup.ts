@@ -40,6 +40,20 @@ afterEach(() => {
 // DOM Environment Setup
 // =============================================================================
 
+// Mock canvas APIs for jsdom (avoids noisy "Not implemented: getContext" errors)
+Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
+  writable: true,
+  value: vi.fn(() => {
+    return {
+      // minimal 2D context surface used by our components
+      fillStyle: '#000000',
+      fillRect: vi.fn(),
+      drawImage: vi.fn(),
+      clearRect: vi.fn(),
+    } as unknown as CanvasRenderingContext2D;
+  }),
+});
+
 // Ensure window.matchMedia is available for responsive tests
 Object.defineProperty(window, 'matchMedia', {
   writable: true,

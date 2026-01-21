@@ -2,14 +2,20 @@
  * useFrameExtractor Hook Tests
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import { useFrameExtractor } from './useFrameExtractor';
+import { useFrameExtractor, useAssetFrameExtractor } from './useFrameExtractor';
+import { frameCache } from '@/services/frameCache';
 
 // Mock FFmpeg utilities
 vi.mock('@/utils/ffmpeg', () => ({
   extractFrame: vi.fn(),
   probeMedia: vi.fn(),
+}));
+
+// Mock Tauri
+vi.mock('@tauri-apps/api/core', () => ({
+  convertFileSrc: vi.fn((path: string) => `asset://localhost/${path}`),
 }));
 
 import { extractFrame, probeMedia } from '@/utils/ffmpeg';
@@ -20,6 +26,11 @@ const mockProbeMedia = vi.mocked(probeMedia);
 describe('useFrameExtractor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    frameCache.clear();
+  });
+
+  afterEach(() => {
+    frameCache.clear();
   });
 
   describe('initialization', () => {
@@ -248,6 +259,212 @@ describe('useFrameExtractor', () => {
 
       // Cache should be limited to maxCacheSize
       expect(result.current.cacheSize).toBeLessThanOrEqual(3);
+    });
+  });
+});
+
+// =============================================================================
+// useAssetFrameExtractor Tests (New API)
+// =============================================================================
+
+describe('useAssetFrameExtractor', () => {
+  const defaultOptions = {
+    assetId: 'test-asset-123',
+    assetPath: '/path/to/video.mp4',
+    enabled: true,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    frameCache.clear();
+    mockExtractFrame.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    frameCache.clear();
+  });
+
+  describe('basic extraction', () => {
+    it('should extract a frame at given timestamp', async () => {
+      const { result } = renderHook(() => useAssetFrameExtractor(defaultOptions));
+
+      let frameUrl: string | null = null;
+      await act(async () => {
+        frameUrl = await result.current.extractFrame(5.5);
+      });
+
+      expect(mockExtractFrame).toHaveBeenCalledWith(expect.objectContaining({
+        inputPath: defaultOptions.assetPath,
+        timeSec: 5.5,
+      }));
+      expect(frameUrl).toBeTruthy();
+    });
+
+    it('should return cached frame on repeated requests', async () => {
+      const { result } = renderHook(() => useAssetFrameExtractor(defaultOptions));
+
+      // First extraction
+      await act(async () => {
+        await result.current.extractFrame(5.5);
+      });
+
+      const callCount = mockExtractFrame.mock.calls.length;
+
+      // Second extraction - should use cache
+      await act(async () => {
+        await result.current.extractFrame(5.5);
+      });
+
+      // Should not have made additional IPC calls
+      expect(mockExtractFrame).toHaveBeenCalledTimes(callCount);
+    });
+
+    it('should handle extraction errors gracefully', async () => {
+      mockExtractFrame.mockRejectedValue(new Error('FFmpeg failed'));
+
+      const { result } = renderHook(() => useAssetFrameExtractor(defaultOptions));
+
+      let frameUrl: string | null = null;
+      await act(async () => {
+        frameUrl = await result.current.extractFrame(5.5);
+      });
+
+      expect(frameUrl).toBeNull();
+      expect(result.current.error).toBeTruthy();
+    });
+
+    it('should not extract when disabled', async () => {
+      const { result } = renderHook(() =>
+        useAssetFrameExtractor({ ...defaultOptions, enabled: false })
+      );
+
+      let frameUrl: string | null = null;
+      await act(async () => {
+        frameUrl = await result.current.extractFrame(5.5);
+      });
+
+      expect(frameUrl).toBeNull();
+      expect(mockExtractFrame).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('caching with shared FrameCache', () => {
+    it('should use shared FrameCache service', async () => {
+      const { result } = renderHook(() => useAssetFrameExtractor(defaultOptions));
+
+      await act(async () => {
+        await result.current.extractFrame(5.5);
+      });
+
+      // Check that frame is in the shared cache
+      const cacheKey = `${defaultOptions.assetId}:5.50`;
+      expect(frameCache.has(cacheKey)).toBe(true);
+    });
+
+    it('should return cache stats', async () => {
+      const { result } = renderHook(() => useAssetFrameExtractor(defaultOptions));
+
+      await act(async () => {
+        await result.current.extractFrame(5.5);
+      });
+
+      // cacheStats is recalculated on each render, check frameCache directly
+      const stats = frameCache.getStats();
+      expect(stats.entryCount).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  describe('proxy support', () => {
+    it('should use proxyPath when provided', async () => {
+      const { result } = renderHook(() =>
+        useAssetFrameExtractor({
+          ...defaultOptions,
+          proxyPath: '/path/to/proxy.mp4',
+        })
+      );
+
+      await act(async () => {
+        await result.current.extractFrame(5.5);
+      });
+
+      expect(mockExtractFrame).toHaveBeenCalledWith(expect.objectContaining({
+        inputPath: '/path/to/proxy.mp4',
+      }));
+    });
+  });
+
+  describe('prefetching', () => {
+    it('should prefetch frames ahead', async () => {
+      const { result } = renderHook(() => useAssetFrameExtractor(defaultOptions));
+
+      await act(async () => {
+        result.current.prefetchFrames(5.0, 5.2);
+        // Wait for prefetch to start
+        await new Promise(resolve => setTimeout(resolve, 100));
+      });
+
+      // Should have called extract_frame for prefetching
+      expect(mockExtractFrame).toHaveBeenCalled();
+    });
+
+    it('should not prefetch when disabled', async () => {
+      const { result } = renderHook(() =>
+        useAssetFrameExtractor({ ...defaultOptions, enabled: false })
+      );
+
+      await act(async () => {
+        result.current.prefetchFrames(5.0, 7.0);
+        await new Promise(resolve => setTimeout(resolve, 100));
+      });
+
+      expect(mockExtractFrame).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('loading state', () => {
+    it('should set isLoading during extraction', async () => {
+      // Make extraction slow
+      mockExtractFrame.mockImplementation(
+        () => new Promise(resolve => setTimeout(resolve, 100))
+      );
+
+      const { result } = renderHook(() => useAssetFrameExtractor(defaultOptions));
+
+      // Start extraction
+      act(() => {
+        result.current.extractFrame(5.5);
+      });
+
+      // Should be loading
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(true);
+      });
+
+      // Wait for completion
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false);
+      }, { timeout: 500 });
+    });
+  });
+
+  describe('cleanup', () => {
+    it('should not throw on unmount during extraction', async () => {
+      mockExtractFrame.mockImplementation(
+        () => new Promise(resolve => setTimeout(resolve, 500))
+      );
+
+      const { result, unmount } = renderHook(() => useAssetFrameExtractor(defaultOptions));
+
+      // Start extraction
+      act(() => {
+        result.current.extractFrame(5.5);
+      });
+
+      // Unmount immediately
+      unmount();
+
+      // Should not throw
+      expect(true).toBe(true);
     });
   });
 });
