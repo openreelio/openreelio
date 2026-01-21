@@ -13,6 +13,7 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from 'react';
 import { snapToGrid, clampTime, MIN_CLIP_DURATION } from '@/utils/timeline';
+import { snapToNearestPoint, type SnapPoint } from '@/utils/gridSnapping';
 
 // =============================================================================
 // Types
@@ -66,6 +67,10 @@ export interface UseClipDragOptions {
   speed?: number;
   /** Maximum source duration (for trim bounds) */
   maxSourceDuration?: number;
+  /** Snap points for intelligent snapping (clip edges, playhead, etc.) */
+  snapPoints?: SnapPoint[];
+  /** Snap threshold in seconds (distance within which snapping occurs) */
+  snapThreshold?: number;
   /** Callback when drag starts */
   onDragStart?: (data: ClipDragData) => void;
   /** Callback during drag with preview position */
@@ -84,6 +89,8 @@ export interface UseClipDragReturn {
   dragType: DragType | null;
   /** Preview position during drag */
   previewPosition: DragPreviewPosition | null;
+  /** Currently active snap point (if snapping) */
+  activeSnapPoint: SnapPoint | null;
   /** Mouse down handler to start drag */
   handleMouseDown: (e: ReactMouseEvent, type: DragType) => void;
 }
@@ -104,6 +111,8 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
     minDuration = MIN_CLIP_DURATION,
     speed = 1,
     maxSourceDuration,
+    snapPoints = [],
+    snapThreshold = 0,
     onDragStart,
     onDrag,
     onDragEnd,
@@ -113,6 +122,7 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
   const [isDragging, setIsDragging] = useState(false);
   const [dragType, setDragType] = useState<DragType | null>(null);
   const [previewPosition, setPreviewPosition] = useState<DragPreviewPosition | null>(null);
+  const [activeSnapPoint, setActiveSnapPoint] = useState<SnapPoint | null>(null);
 
   // Refs for drag tracking
   const dragDataRef = useRef<ClipDragData | null>(null);
@@ -214,15 +224,33 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
       const deltaX = e.clientX - dragDataRef.current.startX;
       const type = dragDataRef.current.type;
 
-      // Calculate and set preview position
-      const preview = calculatePreviewPosition(deltaX, type);
+      // Calculate base preview position
+      let preview = calculatePreviewPosition(deltaX, type);
+
+      // Apply snap points if available (takes priority over grid snapping)
+      if (snapPoints.length > 0 && snapThreshold > 0 && type === 'move') {
+        const snapResult = snapToNearestPoint(preview.timelineIn, snapPoints, snapThreshold);
+
+        if (snapResult.snapped && snapResult.snapPoint) {
+          preview = {
+            ...preview,
+            timelineIn: snapResult.time,
+          };
+          setActiveSnapPoint(snapResult.snapPoint);
+        } else {
+          setActiveSnapPoint(null);
+        }
+      } else {
+        setActiveSnapPoint(null);
+      }
+
       setPreviewPosition(preview);
       previewPositionRef.current = preview;
 
       // Notify parent with the computed preview position directly
       onDrag?.(dragDataRef.current, preview);
     },
-    [calculatePreviewPosition, onDrag],
+    [calculatePreviewPosition, onDrag, snapPoints, snapThreshold],
   );
 
   // Mouse up handler
@@ -235,6 +263,7 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
     setIsDragging(false);
     setDragType(null);
     setPreviewPosition(null);
+    setActiveSnapPoint(null);
     dragDataRef.current = null;
     previewPositionRef.current = null;
 
@@ -315,6 +344,7 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
     isDragging,
     dragType,
     previewPosition,
+    activeSnapPoint,
     handleMouseDown,
   };
 }
