@@ -443,4 +443,212 @@ describe('useClipDrag', () => {
       expect(result.current.previewPosition?.duration).toBe(5);
     });
   });
+
+  // ===========================================================================
+  // Snap Points Integration Tests
+  // ===========================================================================
+
+  describe('snap points integration', () => {
+    it('should snap to nearby clip edge when snapPoints provided', () => {
+      const snapPoints = [
+        { time: 10, type: 'clip-end' as const, clipId: 'other-clip' },
+      ];
+
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          initialTimelineIn: 5,
+          snapPoints,
+          snapThreshold: 0.2, // 0.2 seconds = 20px at zoom 100
+        }),
+      );
+
+      // Start drag
+      act(() => {
+        const event = createMouseEvent('mousedown', 500);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      // Move to position that would be 9.9s (within 0.2s of 10s snap point)
+      // Delta = 490px = 4.9s → 5 + 4.9 = 9.9s
+      act(() => {
+        const event = createMouseEvent('mousemove', 990);
+        document.dispatchEvent(event);
+      });
+
+      // Should snap to 10s
+      expect(result.current.previewPosition?.timelineIn).toBe(10);
+    });
+
+    it('should snap to playhead when within threshold', () => {
+      const snapPoints = [
+        { time: 15, type: 'playhead' as const },
+      ];
+
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          initialTimelineIn: 5,
+          snapPoints,
+          snapThreshold: 0.15,
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 500);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      // Move to position ~14.9s (within 0.15s of 15s playhead)
+      act(() => {
+        const event = createMouseEvent('mousemove', 1490);
+        document.dispatchEvent(event);
+      });
+
+      // Should snap to 15s playhead
+      expect(result.current.previewPosition?.timelineIn).toBe(15);
+    });
+
+    it('should NOT snap when outside threshold', () => {
+      const snapPoints = [
+        { time: 10, type: 'clip-end' as const, clipId: 'other-clip' },
+      ];
+
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          initialTimelineIn: 5,
+          snapPoints,
+          snapThreshold: 0.1, // 0.1 seconds
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 500);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      // Move to 9.5s (0.5s away from 10s snap point, beyond threshold)
+      act(() => {
+        const event = createMouseEvent('mousemove', 950);
+        document.dispatchEvent(event);
+      });
+
+      // Should NOT snap, stay at 9.5s
+      expect(result.current.previewPosition?.timelineIn).toBeCloseTo(9.5, 1);
+    });
+
+    it('should report active snap point when snapping', () => {
+      const snapPoints = [
+        { time: 10, type: 'clip-end' as const, clipId: 'other-clip' },
+      ];
+
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          initialTimelineIn: 5,
+          snapPoints,
+          snapThreshold: 0.2,
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 500);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      // Move to position that will snap to 10s
+      act(() => {
+        const event = createMouseEvent('mousemove', 990);
+        document.dispatchEvent(event);
+      });
+
+      // Should report the active snap point
+      expect(result.current.activeSnapPoint).toBeDefined();
+      expect(result.current.activeSnapPoint?.time).toBe(10);
+      expect(result.current.activeSnapPoint?.type).toBe('clip-end');
+    });
+
+    it('should clear active snap point when not snapping', () => {
+      const snapPoints = [
+        { time: 10, type: 'clip-end' as const, clipId: 'other-clip' },
+      ];
+
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          initialTimelineIn: 5,
+          snapPoints,
+          snapThreshold: 0.1,
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 500);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      // Move to position outside snap threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 800);
+        document.dispatchEvent(event);
+      });
+
+      expect(result.current.activeSnapPoint).toBeNull();
+    });
+
+    it('should prioritize playhead over clip edges when equidistant', () => {
+      const snapPoints = [
+        { time: 10, type: 'clip-end' as const, clipId: 'other-clip' },
+        { time: 10, type: 'playhead' as const },
+      ];
+
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          initialTimelineIn: 5,
+          snapPoints,
+          snapThreshold: 0.2,
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 500);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      // Move to snap at 10s
+      act(() => {
+        const event = createMouseEvent('mousemove', 1000);
+        document.dispatchEvent(event);
+      });
+
+      // Should snap to playhead (higher priority)
+      expect(result.current.activeSnapPoint?.type).toBe('playhead');
+    });
+
+    it('should still use gridInterval when no snapPoints provided', () => {
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          initialTimelineIn: 5,
+          gridInterval: 1, // 1 second grid
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 500);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      // Move by 150px (1.5 seconds)
+      act(() => {
+        const event = createMouseEvent('mousemove', 650);
+        document.dispatchEvent(event);
+      });
+
+      // Should snap to 7s (grid snapping)
+      expect(result.current.previewPosition?.timelineIn).toBe(7);
+    });
+  });
 });

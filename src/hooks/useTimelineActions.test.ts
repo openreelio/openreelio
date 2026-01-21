@@ -139,6 +139,60 @@ describe('useTimelineActions', () => {
   });
 
   // ===========================================================================
+  // Caption Update Tests
+  // ===========================================================================
+
+  describe('handleUpdateCaption', () => {
+    it('should execute UpdateCaption command with correct parameters', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [createMockTrack({ id: 'track_001' })],
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_001',
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleUpdateCaption({
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          captionId: 'cap_001',
+          text: 'Updated Text',
+          style: { fontSize: 24 },
+        });
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'UpdateCaption',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          captionId: 'cap_001',
+          text: 'Updated Text',
+          style: { fontSize: 24 },
+        },
+      });
+    });
+  });
+
+  // ===========================================================================
   // Asset Drop Tests
   // ===========================================================================
 

@@ -1,9 +1,11 @@
 //! Tauri IPC Commands
 //!
 //! Defines all commands exposed to the frontend via Tauri's invoke system.
+//! All types are exported to TypeScript via tauri-specta for type-safe API calls.
 
 use std::path::PathBuf;
 
+use specta::Type;
 use tauri::State;
 
 use crate::core::{
@@ -656,33 +658,48 @@ pub async fn can_redo(state: State<'_, AppState>) -> Result<bool, String> {
 // Job Commands
 // =============================================================================
 
-/// Job info DTO for frontend
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Background job information.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct JobInfoDto {
+    /// Unique job ID
     pub id: String,
+    /// Job type (e.g., "proxy_generation", "transcription")
     pub job_type: String,
+    /// Priority level ("background", "normal", "preview", "user_request")
     pub priority: String,
+    /// Current job status
     pub status: JobStatusDto,
+    /// ISO 8601 creation timestamp
     pub created_at: String,
+    /// ISO 8601 completion timestamp (if completed)
     pub completed_at: Option<String>,
 }
 
-/// Job status DTO for frontend
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Job execution status.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum JobStatusDto {
+    /// Job is waiting in queue
     Queued,
+    /// Job is currently executing
     Running {
+        /// Progress percentage (0.0 - 1.0)
         progress: f32,
+        /// Optional status message
         message: Option<String>,
     },
+    /// Job completed successfully
     Completed {
+        /// Result data
         result: serde_json::Value,
     },
+    /// Job failed with error
     Failed {
+        /// Error message
         error: String,
     },
+    /// Job was cancelled by user
     Cancelled,
 }
 
@@ -1502,66 +1519,101 @@ fn find_track_for_clip(
 // DTOs (Data Transfer Objects)
 // =============================================================================
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Project information returned when creating or opening a project.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectInfo {
+    /// Unique project identifier (ULID format)
     pub id: String,
+    /// Human-readable project name
     pub name: String,
+    /// Absolute path to project directory
     pub path: String,
+    /// ISO 8601 timestamp of project creation
     pub created_at: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Project metadata information.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectMetaDto {
+    /// Project display name
     pub name: String,
+    /// Project format version
     pub version: String,
+    /// ISO 8601 creation timestamp
     pub created_at: String,
+    /// ISO 8601 last modification timestamp
     pub modified_at: String,
+    /// Optional project description
     pub description: Option<String>,
+    /// Optional author name
     pub author: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Full project state for frontend synchronization.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectStateDto {
+    /// Project metadata
     pub meta: ProjectMetaDto,
+    /// All assets in the project
     pub assets: Vec<serde_json::Value>,
+    /// All sequences in the project
     pub sequences: Vec<serde_json::Value>,
+    /// Currently active sequence ID
     pub active_sequence_id: Option<String>,
+    /// Whether project has unsaved changes
     pub is_dirty: bool,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Result of importing an asset into the project.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetImportResult {
+    /// Generated asset ID (ULID)
     pub asset_id: String,
+    /// Asset display name (from filename)
     pub name: String,
+    /// Operation ID for undo/redo tracking
     pub op_id: String,
+    /// Background job ID for proxy/thumbnail generation (if any)
     pub job_id: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Result of executing an edit command.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandResultDto {
+    /// Operation ID for tracking in undo/redo history
     pub op_id: String,
+    /// IDs of entities created by this command
     pub created_ids: Vec<String>,
+    /// IDs of entities deleted by this command
     pub deleted_ids: Vec<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Result of an undo or redo operation.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct UndoRedoResult {
+    /// Whether the operation was successful
     pub success: bool,
+    /// Whether more undo operations are available
     pub can_undo: bool,
+    /// Whether more redo operations are available
     pub can_redo: bool,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Result of starting a render export job.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderStartResult {
+    /// Job ID for tracking render progress
     pub job_id: String,
+    /// Output file path
     pub output_path: String,
+    /// Initial status ("started")
     pub status: String,
 }
 
@@ -1569,73 +1621,111 @@ pub struct RenderStartResult {
 // AI DTOs
 // =============================================================================
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Context information for AI intent analysis.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AIContextDto {
+    /// Current playhead position in seconds
     pub playhead_position: f64,
+    /// IDs of currently selected clips
     pub selected_clips: Vec<String>,
+    /// IDs of currently selected tracks
     pub selected_tracks: Vec<String>,
+    /// Nearby transcript text for context
     pub transcript_context: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// AI-generated edit script containing commands to execute.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct EditScriptDto {
+    /// Original user intent/prompt
     pub intent: String,
+    /// List of edit commands to execute
     pub commands: Vec<EditCommandDto>,
+    /// External requirements (assets to fetch, etc.)
     pub requires: Vec<RequirementDto>,
+    /// QC rules to apply after execution
     pub qc_rules: Vec<String>,
+    /// Risk assessment for the edit
     pub risk: RiskAssessmentDto,
+    /// Human-readable explanation of the edit
     pub explanation: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// A single edit command within an EditScript.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct EditCommandDto {
+    /// Command type (e.g., "InsertClip", "SplitClip")
     pub command_type: String,
+    /// Command parameters as JSON
     pub params: serde_json::Value,
+    /// Human-readable description of what this command does
     pub description: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// External requirement for an EditScript (e.g., asset to fetch).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RequirementDto {
+    /// Requirement type (e.g., "assetSearch", "assetGenerate")
     pub kind: String,
+    /// Search query or generation prompt
     pub query: Option<String>,
+    /// Provider to use (e.g., "unsplash", "pexels")
     pub provider: Option<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Risk assessment for an AI-generated edit.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RiskAssessmentDto {
+    /// Copyright risk level ("none", "low", "medium", "high")
     pub copyright: String,
+    /// NSFW risk level ("none", "low", "medium", "high")
     pub nsfw: String,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// AI proposal awaiting user approval.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ProposalDto {
+    /// Unique proposal ID
     pub id: String,
+    /// The edit script to be applied
     pub edit_script: EditScriptDto,
+    /// Current status ("pending", "applied", "rejected")
     pub status: String,
+    /// ISO 8601 creation timestamp
     pub created_at: String,
+    /// Job ID for preview generation (if any)
     pub preview_job_id: Option<String>,
+    /// Operation IDs if proposal was applied
     pub applied_op_ids: Option<Vec<String>>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Result of applying an EditScript.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyEditScriptResult {
+    /// Whether all commands were applied successfully
     pub success: bool,
+    /// Operation IDs of successfully applied commands
     pub applied_op_ids: Vec<String>,
+    /// Error messages for failed commands
     pub errors: Vec<String>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Result of validating an EditScript.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidationResultDto {
+    /// Whether the EditScript is valid
     pub is_valid: bool,
+    /// Critical issues that prevent execution
     pub issues: Vec<String>,
+    /// Non-critical warnings
     pub warnings: Vec<String>,
 }
 
@@ -1643,32 +1733,41 @@ pub struct ValidationResultDto {
 // Performance/Memory Commands
 // =============================================================================
 
-/// Memory statistics DTO for frontend
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Memory usage statistics.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryStatsDto {
-    /// Pool statistics
+    /// Memory pool statistics
     pub pool_stats: PoolStatsDto,
     /// Cache statistics
     pub cache_stats: CacheStatsDto,
     /// Total allocated bytes (Rust side)
     pub allocated_bytes: u64,
-    /// System memory info
+    /// System memory info (if available)
     pub system_memory: Option<SystemMemoryDto>,
 }
 
-/// Pool statistics DTO
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Memory pool statistics.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PoolStatsDto {
+    /// Total number of memory blocks in pool
     pub total_blocks: usize,
+    /// Number of currently allocated blocks
     pub allocated_blocks: usize,
+    /// Total pool size in bytes
     pub total_size_bytes: u64,
+    /// Currently used size in bytes
     pub used_size_bytes: u64,
+    /// Total allocation requests
     pub allocation_count: u64,
+    /// Total release operations
     pub release_count: u64,
+    /// Allocations served from pool
     pub pool_hits: u64,
+    /// Allocations that required new allocation
     pub pool_misses: u64,
+    /// Hit rate (0.0 - 1.0)
     pub hit_rate: f64,
 }
 
@@ -1695,15 +1794,21 @@ impl From<PoolStats> for PoolStatsDto {
     }
 }
 
-/// Cache statistics DTO
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Cache usage statistics.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CacheStatsDto {
+    /// Number of entries in cache
     pub entry_count: usize,
+    /// Total cache size in bytes
     pub total_size_bytes: u64,
+    /// Cache hit count
     pub hits: u64,
+    /// Cache miss count
     pub misses: u64,
+    /// Number of evicted entries
     pub evictions: u64,
+    /// Cache hit rate (0.0 - 1.0)
     pub hit_rate: f64,
 }
 
@@ -1720,8 +1825,8 @@ impl From<CacheStats> for CacheStatsDto {
     }
 }
 
-/// System memory information
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// System memory information.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SystemMemoryDto {
     /// Total physical memory in bytes
@@ -1734,8 +1839,8 @@ pub struct SystemMemoryDto {
     pub usage_percent: f64,
 }
 
-/// Memory cleanup result
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Result of memory cleanup operation.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryCleanupResult {
     /// Bytes freed from pool shrink
@@ -1820,41 +1925,41 @@ fn get_system_memory_info() -> Option<SystemMemoryDto> {
 // Transcription Commands
 // =============================================================================
 
-/// DTO for transcription result
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Result of speech-to-text transcription.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptionResultDto {
-    /// Detected or specified language
+    /// Detected or specified language code
     pub language: String,
-    /// Transcribed segments
+    /// Transcribed segments with timestamps
     pub segments: Vec<TranscriptionSegmentDto>,
-    /// Total duration in seconds
+    /// Total audio duration in seconds
     pub duration: f64,
-    /// Full transcription text
+    /// Full transcription text (all segments concatenated)
     pub full_text: String,
 }
 
-/// DTO for a transcription segment
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// A single transcription segment with timing.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptionSegmentDto {
     /// Start time in seconds
     pub start_time: f64,
     /// End time in seconds
     pub end_time: f64,
-    /// Transcribed text
+    /// Transcribed text for this segment
     pub text: String,
 }
 
-/// DTO for transcription options
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+/// Options for transcription request.
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptionOptionsDto {
     /// Language code (e.g., "en", "ko") or "auto" for detection
     pub language: Option<String>,
     /// Whether to translate to English
     pub translate: Option<bool>,
-    /// Whisper model to use (tiny, base, small, medium, large)
+    /// Whisper model to use ("tiny", "base", "small", "medium", "large")
     pub model: Option<String>,
 }
 
@@ -2037,8 +2142,8 @@ pub async fn submit_transcription_job(
 // Search Commands (Meilisearch)
 // =============================================================================
 
-/// DTO for search options
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Options for full-text search queries.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchOptionsDto {
     /// Maximum number of results per index
@@ -2049,37 +2154,37 @@ pub struct SearchOptionsDto {
     pub asset_ids: Option<Vec<String>>,
     /// Filter by project ID
     pub project_id: Option<String>,
-    /// Search only specific indexes (assets, transcripts)
+    /// Search only specific indexes ("assets", "transcripts")
     pub indexes: Option<Vec<String>>,
 }
 
-/// DTO for asset search results
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Search result for an asset.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetSearchResultDto {
     /// Asset ID
     pub id: String,
-    /// Asset name
+    /// Asset display name
     pub name: String,
     /// File path
     pub path: String,
-    /// Asset kind
+    /// Asset kind ("video", "audio", "image", etc.)
     pub kind: String,
-    /// Duration in seconds
+    /// Duration in seconds (for video/audio)
     pub duration: Option<f64>,
-    /// Tags
+    /// Associated tags
     pub tags: Vec<String>,
 }
 
-/// DTO for transcript search results
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Search result for a transcript segment.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TranscriptSearchResultDto {
     /// Segment ID
     pub id: String,
-    /// Asset ID
+    /// Parent asset ID
     pub asset_id: String,
-    /// Text content
+    /// Matched text content
     pub text: String,
     /// Start time in seconds
     pub start_time: f64,
@@ -2089,19 +2194,19 @@ pub struct TranscriptSearchResultDto {
     pub language: Option<String>,
 }
 
-/// DTO for combined search results
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+/// Combined search results from all indexes.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchResultsDto {
-    /// Asset results
+    /// Matching assets
     pub assets: Vec<AssetSearchResultDto>,
-    /// Transcript results
+    /// Matching transcript segments
     pub transcripts: Vec<TranscriptSearchResultDto>,
-    /// Total number of asset hits (estimated)
+    /// Total asset matches (estimated)
     pub asset_total: Option<usize>,
-    /// Total number of transcript hits (estimated)
+    /// Total transcript matches (estimated)
     pub transcript_total: Option<usize>,
-    /// Processing time in milliseconds
+    /// Query processing time in milliseconds
     pub processing_time_ms: u64,
 }
 

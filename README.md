@@ -80,6 +80,7 @@ OpenReelio is an AI-powered desktop video editor designed for content creators. 
 - [Rust](https://rustup.rs/) 1.85+
 - [Node.js](https://nodejs.org/) 20+
 - [FFmpeg](https://ffmpeg.org/) 6+
+- (Optional) LLVM/Clang for Whisper: building with `--features whisper` requires `libclang` (bindgen). On Windows, install LLVM and set `LIBCLANG_PATH` to the folder containing `libclang.dll`.
 
 ### From Source
 
@@ -155,6 +156,9 @@ cd src-tauri && cargo test
 npm run lint
 cargo clippy
 ```
+
+Notes:
+- Windows PowerShell may block `npm` due to `npm.ps1` execution policy. Use `npm.cmd ...` (or adjust PowerShell execution policy) if you see `PSSecurityException`.
 
 ## Roadmap
 

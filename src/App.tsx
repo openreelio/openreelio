@@ -5,20 +5,27 @@
  * Shows WelcomeScreen when no project is loaded, Editor when project is active.
  */
 
-import { useCallback, useState, useEffect } from 'react';
+import { useCallback, useState, useEffect, useMemo } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { MainLayout, Header, Sidebar, BottomPanel, Panel } from './components/layout';
 import { ErrorBoundary } from './components/shared';
 import { WelcomeScreen } from './components/features/welcome';
 import { ProjectCreationDialog, type ProjectCreateData } from './components/features/project';
 import { ExportDialog } from './components/features/export';
-import { Inspector } from './components/features/inspector';
+import { Inspector, type SelectedCaption } from './components/features/inspector';
 import { ProjectExplorer } from './components/explorer';
 import { PreviewPlayer } from './components/preview';
 import { Timeline } from './components/timeline';
 import { FFmpegWarning, ToastContainer, type ToastData } from './components/ui';
 import { useProjectStore, usePlaybackStore, useTimelineStore } from './stores';
-import { usePreviewSource, useTimelineActions, useFFmpegStatus, useAutoSave, useKeyboardShortcuts, useAudioPlayback } from './hooks';
+import {
+  usePreviewSource,
+  useTimelineActions,
+  useFFmpegStatus,
+  useAutoSave,
+  useKeyboardShortcuts,
+  useAudioPlayback,
+} from './hooks';
 import { createLogger, initializeLogger } from './services/logger';
 import {
   loadRecentProjects,
@@ -88,9 +95,10 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
   // Calculate effective playhead for preview:
   // - For timeline clips, use the sourceOffset to show correct frame
   // - For direct asset preview, use asset's own time
-  const effectivePlayhead = previewSource?.sourceType === 'timeline' && previewSource.sourceOffset !== undefined
-    ? previewSource.sourceOffset
-    : currentTime;
+  const effectivePlayhead =
+    previewSource?.sourceType === 'timeline' && previewSource.sourceOffset !== undefined
+      ? previewSource.sourceOffset
+      : currentTime;
 
   // Timeline action callbacks
   const {
@@ -102,6 +110,7 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
     handleTrackMuteToggle,
     handleTrackLockToggle,
     handleTrackVisibilityToggle,
+    handleUpdateCaption,
   } = useTimelineActions({ sequence });
 
   // Split at playhead handler for keyboard shortcut
@@ -162,6 +171,59 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
       }
     : undefined;
 
+  // Get selected caption for inspector
+  const selectedCaption: SelectedCaption | undefined = useMemo(() => {
+    if (!sequence || !selectedClipIds || selectedClipIds.length !== 1) return undefined;
+    const clipId = selectedClipIds[0];
+
+    for (const track of sequence.tracks) {
+      if (track.kind === 'caption') {
+        const clip = track.clips.find((c) => c.id === clipId);
+        if (clip) {
+          // Calculate duration adjusting for speed
+          const duration = (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+
+          return {
+            id: clip.id,
+            text: clip.label || '', // Using label as text storage for now
+            startSec: clip.place.timelineInSec,
+            endSec: clip.place.timelineInSec + duration,
+            // Style mapping could be added here if Clip supports it
+          };
+        }
+      }
+    }
+    return undefined;
+  }, [sequence, selectedClipIds]);
+
+  // Handle caption updates
+  const onCaptionChange = useCallback(
+    (captionId: string, property: string, value: unknown) => {
+      if (!sequence) return;
+
+      // Find trackId for this caption
+      let trackId: string | undefined;
+      for (const track of sequence.tracks) {
+        if (track.clips.some((c) => c.id === captionId)) {
+          trackId = track.id;
+          break;
+        }
+      }
+
+      if (!trackId) return;
+
+      if (property === 'text' && typeof value === 'string') {
+        handleUpdateCaption({
+          sequenceId: sequence.id,
+          trackId,
+          captionId,
+          text: value,
+        });
+      }
+    },
+    [sequence, handleUpdateCaption],
+  );
+
   // Export handlers
   const handleOpenExport = useCallback(() => {
     setShowExportDialog(true);
@@ -191,7 +253,11 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
               onError={(error) => logger.error('Inspector error', { error })}
               showDetails={import.meta.env.DEV}
             >
-              <Inspector selectedAsset={inspectorAsset} />
+              <Inspector
+                selectedAsset={inspectorAsset}
+                selectedCaption={selectedCaption}
+                onCaptionChange={onCaptionChange}
+              />
             </ErrorBoundary>
           </Sidebar>
         }
@@ -274,13 +340,10 @@ function App(): JSX.Element {
   const [toasts, setToasts] = useState<ToastData[]>([]);
 
   // Helper to add toast notification
-  const addToast = useCallback(
-    (message: string, variant: ToastData['variant'] = 'error') => {
-      const id = `toast-${Date.now()}`;
-      setToasts((prev) => [...prev, { id, message, variant }]);
-    },
-    [],
-  );
+  const addToast = useCallback((message: string, variant: ToastData['variant'] = 'error') => {
+    const id = `toast-${Date.now()}`;
+    setToasts((prev) => [...prev, { id, message, variant }]);
+  }, []);
 
   // Helper to remove toast notification
   const removeToast = useCallback((id: string) => {
@@ -359,8 +422,7 @@ function App(): JSX.Element {
         addToast(`Project "${projectName}" created successfully`, 'success');
       } catch (error) {
         logger.error('Failed to create project', { error });
-        const errorMessage =
-          error instanceof Error ? error.message : 'Unknown error occurred';
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
         addToast(`Failed to create project: ${errorMessage}`, 'error');
       } finally {
         setIsCreatingProject(false);
@@ -415,10 +477,10 @@ function App(): JSX.Element {
       logger.error('Editor view error', { error });
       addToast(
         `Editor error: ${error.message}. Try reloading the page if the issue persists.`,
-        'error'
+        'error',
       );
     },
-    [addToast]
+    [addToast],
   );
 
   // ===========================================================================

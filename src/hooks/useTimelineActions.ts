@@ -17,6 +17,7 @@ import type {
   ClipTrimData,
   ClipSplitData,
   TrackControlData,
+  CaptionUpdateData,
 } from '@/components/timeline/Timeline';
 import type { Sequence, Asset } from '@/types';
 
@@ -37,6 +38,7 @@ interface TimelineActions {
   handleTrackMuteToggle: (data: TrackControlData) => Promise<void>;
   handleTrackLockToggle: (data: TrackControlData) => Promise<void>;
   handleTrackVisibilityToggle: (data: TrackControlData) => Promise<void>;
+  handleUpdateCaption: (data: CaptionUpdateData) => Promise<void>;
 }
 
 // =============================================================================
@@ -305,6 +307,34 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     [sequence, executeCommand, refreshState],
   );
 
+  /**
+   * Handle caption update
+   */
+  const handleUpdateCaption = useCallback(
+    async (data: CaptionUpdateData): Promise<void> => {
+      if (!sequence) return;
+
+      try {
+        await executeCommand({
+          type: 'UpdateCaption',
+          payload: {
+            sequenceId: data.sequenceId,
+            trackId: data.trackId,
+            captionId: data.captionId,
+            text: data.text,
+            startSec: data.startSec,
+            endSec: data.endSec,
+            style: data.style,
+          },
+        });
+        await refreshState();
+      } catch (error) {
+        logger.error('Failed to update caption', { error });
+      }
+    },
+    [sequence, executeCommand, refreshState],
+  );
+
   return {
     handleClipMove,
     handleClipTrim,
@@ -314,5 +344,6 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleTrackMuteToggle,
     handleTrackLockToggle,
     handleTrackVisibilityToggle,
+    handleUpdateCaption,
   };
 }

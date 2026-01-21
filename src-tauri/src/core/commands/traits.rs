@@ -3,11 +3,12 @@
 //! Defines the trait that all edit commands must implement.
 
 use serde::{Deserialize, Serialize};
+use specta::Type;
 
 use crate::core::{project::ProjectState, CoreResult, OpId};
 
-/// Command execution result
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Command execution result.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CommandResult {
     /// Generated Operation ID
@@ -53,24 +54,39 @@ impl CommandResult {
     }
 }
 
-/// State change types
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// State change types for event broadcasting.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum StateChange {
+    /// A new clip was created
     ClipCreated { clip_id: String },
+    /// An existing clip was modified
     ClipModified { clip_id: String },
+    /// A clip was deleted
     ClipDeleted { clip_id: String },
+    /// A new track was created
     TrackCreated { track_id: String },
+    /// An existing track was modified
     TrackModified { track_id: String },
+    /// A track was deleted
     TrackDeleted { track_id: String },
+    /// A new asset was imported
     AssetAdded { asset_id: String },
+    /// An asset was removed from the project
     AssetRemoved { asset_id: String },
+    /// A new caption was created
     CaptionCreated { caption_id: String },
+    /// An existing caption was modified
     CaptionModified { caption_id: String },
+    /// A caption was deleted
     CaptionDeleted { caption_id: String },
+    /// An effect was applied to a clip
     EffectApplied { effect_id: String },
+    /// An effect was removed from a clip
     EffectRemoved { effect_id: String },
+    /// A new sequence was created
     SequenceCreated { sequence_id: String },
+    /// An existing sequence was modified
     SequenceModified { sequence_id: String },
 }
 

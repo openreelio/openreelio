@@ -27,3 +27,6 @@ pub use types::*;
 
 mod error;
 pub use error::*;
+
+#[cfg(test)]
+mod tests_destructive;

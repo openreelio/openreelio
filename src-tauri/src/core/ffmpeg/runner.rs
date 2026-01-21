@@ -1,11 +1,13 @@
 //! FFmpeg Runner Module
 //!
 //! Executes FFmpeg commands for video processing operations.
+//! Media info types are exported to TypeScript via tauri-specta.
 
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 
+use specta::Type;
 use tokio::sync::mpsc;
 
 use super::{FFmpegError, FFmpegInfo, FFmpegResult};
@@ -29,8 +31,9 @@ pub struct FFmpegProgress {
     pub eta_seconds: Option<u64>,
 }
 
-/// Media information extracted by FFprobe
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Media information extracted by FFprobe.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct MediaInfo {
     /// Duration in seconds
     pub duration_sec: f64,
@@ -44,8 +47,9 @@ pub struct MediaInfo {
     pub size_bytes: u64,
 }
 
-/// Video stream information
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Video stream information.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct VideoStreamInfo {
     /// Width in pixels
     pub width: u32,
@@ -61,8 +65,9 @@ pub struct VideoStreamInfo {
     pub bitrate: Option<u64>,
 }
 
-/// Audio stream information
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+/// Audio stream information.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub struct AudioStreamInfo {
     /// Sample rate in Hz
     pub sample_rate: u32,

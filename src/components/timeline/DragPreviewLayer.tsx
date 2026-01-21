@@ -18,6 +18,8 @@ export interface DragPreviewState {
   width: number;
   /** Index of the target track */
   trackIndex: number;
+  /** Whether the drop target is valid (compatible track type) */
+  isValidDrop?: boolean;
 }
 
 interface DragPreviewLayerProps {
@@ -61,10 +63,16 @@ export function DragPreviewLayer({
     return null;
   }
 
+  // Determine visual style based on drop validity
+  const isValid = dragPreview.isValidDrop !== false;
+  const bgClass = isValid ? 'bg-primary-500/30' : 'bg-red-500/30';
+  const borderClass = isValid ? 'border-primary-500' : 'border-red-500';
+
   return (
     <div
       data-testid="drag-preview"
-      className="absolute bg-primary-500/30 border-2 border-primary-500 border-dashed rounded pointer-events-none z-20"
+      data-valid-drop={isValid}
+      className={`absolute ${bgClass} border-2 ${borderClass} border-dashed rounded pointer-events-none z-20`}
       style={{
         left: `${trackHeaderWidth + dragPreview.left - scrollX}px`,
         top: `${dragPreview.trackIndex * trackHeight}px`,

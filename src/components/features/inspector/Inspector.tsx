@@ -6,10 +6,19 @@
  */
 
 import { useMemo, useState, useCallback } from 'react';
-import { Film, Music, Image as ImageIcon, FileText, Info, Clock, Maximize } from 'lucide-react';
+import {
+  Film,
+  Music,
+  Image as ImageIcon,
+  FileText,
+  Info,
+  Clock,
+  Maximize,
+  Type,
+} from 'lucide-react';
 import { formatDuration } from '@/utils';
 import { EffectsList } from '../effects';
-import type { Effect, EffectId } from '@/types';
+import type { Effect, EffectId, CaptionStyle } from '@/types';
 
 // =============================================================================
 // Types
@@ -45,14 +54,27 @@ export interface SelectedAsset {
   };
 }
 
+/** Caption selection data */
+export interface SelectedCaption {
+  id: string;
+  text: string;
+  startSec: number;
+  endSec: number;
+  style?: CaptionStyle;
+}
+
 /** Inspector component props */
 export interface InspectorProps {
   /** Currently selected clip */
   selectedClip?: SelectedClip;
   /** Currently selected asset */
   selectedAsset?: SelectedAsset;
+  /** Currently selected caption */
+  selectedCaption?: SelectedCaption;
   /** Callback when clip property changes */
   onClipChange?: (clipId: string, property: string, value: unknown) => void;
+  /** Callback when caption property changes */
+  onCaptionChange?: (captionId: string, property: string, value: unknown) => void;
   /** Callback when an effect is toggled */
   onEffectToggle?: (clipId: string, effectId: EffectId, enabled: boolean) => void;
   /** Callback when an effect is removed */
@@ -101,10 +123,7 @@ function PropertyRow({ label, value, testId, icon }: PropertyRowProps): JSX.Elem
         {icon}
         {label}
       </span>
-      <span
-        data-testid={testId}
-        className="text-editor-text text-sm font-medium"
-      >
+      <span data-testid={testId} className="text-editor-text text-sm font-medium">
         {value}
       </span>
     </div>
@@ -118,6 +137,9 @@ function PropertyRow({ label, value, testId, icon }: PropertyRowProps): JSX.Elem
 export function Inspector({
   selectedClip,
   selectedAsset,
+  selectedCaption,
+  // onClipChange is reserved for future clip property editing
+  onCaptionChange,
   onEffectToggle,
   onEffectRemove,
   onAddEffect,
@@ -151,7 +173,7 @@ export function Inspector({
         onEffectToggle(selectedClip.id, effectId, enabled);
       }
     },
-    [selectedClip, onEffectToggle]
+    [selectedClip, onEffectToggle],
   );
 
   const handleEffectRemove = useCallback(
@@ -164,7 +186,7 @@ export function Inspector({
         setSelectedEffectId(undefined);
       }
     },
-    [selectedClip, onEffectRemove, selectedEffectId]
+    [selectedClip, onEffectRemove, selectedEffectId],
   );
 
   const handleAddEffect = useCallback(() => {
@@ -177,7 +199,7 @@ export function Inspector({
   // Render Empty State
   // ===========================================================================
 
-  if (!selectedClip && !selectedAsset) {
+  if (!selectedClip && !selectedAsset && !selectedCaption) {
     return (
       <div
         data-testid="inspector"
@@ -186,9 +208,7 @@ export function Inspector({
         className="flex flex-col items-center justify-center h-full p-4 text-center"
       >
         <Info className="w-12 h-12 text-editor-text-muted opacity-50 mb-3" />
-        <p className="text-editor-text-muted text-sm">
-          No selection
-        </p>
+        <p className="text-editor-text-muted text-sm">No selection</p>
         <p className="text-editor-text-muted text-xs mt-1">
           Select a clip or asset to view properties
         </p>
@@ -214,11 +234,7 @@ export function Inspector({
         </h3>
 
         <div className="space-y-1">
-          <PropertyRow
-            label="Name"
-            value={selectedClip.name}
-            testId="clip-name"
-          />
+          <PropertyRow label="Name" value={selectedClip.name} testId="clip-name" />
           <PropertyRow
             label="Duration"
             value={`${clipDuration?.toFixed(2)}s`}
@@ -275,16 +291,8 @@ export function Inspector({
         </h3>
 
         <div className="space-y-1">
-          <PropertyRow
-            label="Name"
-            value={selectedAsset.name}
-            testId="asset-name"
-          />
-          <PropertyRow
-            label="Type"
-            value={selectedAsset.kind}
-            testId="asset-type"
-          />
+          <PropertyRow label="Name" value={selectedAsset.name} testId="asset-name" />
+          <PropertyRow label="Type" value={selectedAsset.kind} testId="asset-type" />
           {selectedAsset.durationSec !== undefined && (
             <PropertyRow
               label="Duration"
@@ -307,6 +315,58 @@ export function Inspector({
           <p className="text-xs text-editor-text-muted truncate" title={selectedAsset.uri}>
             {selectedAsset.uri}
           </p>
+        </div>
+      </div>
+    );
+  }
+
+  // ===========================================================================
+  // Render Caption Properties
+  // ===========================================================================
+
+  if (selectedCaption) {
+    return (
+      <div
+        data-testid="inspector"
+        role="complementary"
+        aria-label="Properties inspector"
+        className="p-4"
+      >
+        <h3 className="text-sm font-semibold text-editor-text mb-4 flex items-center gap-2">
+          <Type className="w-4 h-4 text-primary-500" />
+          Caption Properties
+        </h3>
+
+        <div className="space-y-4">
+          <div className="space-y-2">
+            <label className="text-xs font-medium text-editor-text-muted">Content</label>
+            <textarea
+              className="w-full h-24 bg-editor-input bg-opacity-50 border border-editor-border rounded p-2 text-sm text-editor-text focus:border-primary-500 focus:ring-1 focus:ring-primary-500 focus:outline-none resize-none"
+              value={selectedCaption.text}
+              onChange={(e) => onCaptionChange?.(selectedCaption.id, 'text', e.target.value)}
+              placeholder="Enter caption text..."
+            />
+          </div>
+
+          <div className="space-y-1">
+            <PropertyRow
+              label="Start Time"
+              value={formatDuration(selectedCaption.startSec)}
+              testId="caption-start"
+              icon={<Clock className="w-3 h-3" />}
+            />
+            <PropertyRow
+              label="End Time"
+              value={formatDuration(selectedCaption.endSec)}
+              testId="caption-end"
+              icon={<Clock className="w-3 h-3" />}
+            />
+            <PropertyRow
+              label="Duration"
+              value={`${(selectedCaption.endSec - selectedCaption.startSec).toFixed(2)}s`}
+              testId="caption-duration"
+            />
+          </div>
         </div>
       </div>
     );
