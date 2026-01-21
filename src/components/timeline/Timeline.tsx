@@ -15,12 +15,14 @@ import { useAssetDrop } from '@/hooks/useAssetDrop';
 import { useTimelineKeyboard } from '@/hooks/useTimelineKeyboard';
 import { useTimelineClipOperations } from '@/hooks/useTimelineClipOperations';
 import { useTimelineNavigation } from '@/hooks/useTimelineNavigation';
+import { useSelectionBox } from '@/hooks/useSelectionBox';
 import { TimeRuler } from './TimeRuler';
 import { Track } from './Track';
 import { Playhead } from './Playhead';
 import { TimelineToolbar } from './TimelineToolbar';
 import { DragPreviewLayer } from './DragPreviewLayer';
 import { SnapIndicator, type SnapPoint } from './SnapIndicator';
+import { SelectionBox } from './SelectionBox';
 import type { ClipWaveformConfig } from './Clip';
 import type { TimelineProps } from './types';
 import { TRACK_HEADER_WIDTH, TRACK_HEIGHT, DEFAULT_TIMELINE_DURATION, DEFAULT_FPS } from './constants';
@@ -211,6 +213,26 @@ export function Timeline({
     });
 
   // ===========================================================================
+  // Selection Box (drag-to-select)
+  // ===========================================================================
+  const {
+    isSelecting,
+    selectionRect,
+    handleMouseDown: handleSelectionMouseDown,
+  } = useSelectionBox({
+    containerRef: tracksAreaRef,
+    trackHeaderWidth: TRACK_HEADER_WIDTH,
+    trackHeight: TRACK_HEIGHT,
+    zoom,
+    scrollX,
+    scrollY,
+    tracks: sequence?.tracks ?? [],
+    onSelectClips: selectClips,
+    currentSelection: selectedClipIds,
+    enabled: !isScrubbing && !dragPreview,
+  });
+
+  // ===========================================================================
   // Utility Functions
   // ===========================================================================
   const getClipWaveformConfig = useCallback(
@@ -248,11 +270,31 @@ export function Timeline({
 
   const handleTracksAreaClick = useCallback(
     (e: MouseEvent) => {
+      // Don't clear selection if we were doing a selection box drag
+      if (isSelecting) return;
+
       if ((e.target as HTMLElement).getAttribute('data-testid') === 'timeline-tracks-area') {
         clearClipSelection();
       }
     },
-    [clearClipSelection]
+    [clearClipSelection, isSelecting]
+  );
+
+  /**
+   * Combined mouse down handler for scrubbing and selection box
+   */
+  const handleTracksAreaMouseDown = useCallback(
+    (e: MouseEvent) => {
+      // Try selection box first (only activates on empty area)
+      // handleSelectionMouseDown returns true if it started a selection
+      const selectionStarted = handleSelectionMouseDown(e);
+
+      // If selection didn't start, try scrubbing
+      if (!selectionStarted) {
+        handleScrubStart(e);
+      }
+    },
+    [handleSelectionMouseDown, handleScrubStart]
   );
 
   const createTrackHandler = useCallback(
@@ -293,9 +335,9 @@ export function Timeline({
       <div
         ref={tracksAreaRef}
         data-testid="timeline-tracks-area"
-        className={`flex-1 overflow-hidden relative ${isScrubbing ? 'cursor-ew-resize' : ''}`}
+        className={`flex-1 overflow-hidden relative ${isScrubbing ? 'cursor-ew-resize' : ''} ${isSelecting ? 'cursor-crosshair' : ''}`}
         onClick={handleTracksAreaClick}
-        onMouseDown={handleScrubStart}
+        onMouseDown={handleTracksAreaMouseDown}
         onWheel={handleWheel}
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
@@ -351,6 +393,7 @@ export function Timeline({
             <div className="text-primary-400 text-sm font-medium">Drop asset here</div>
           </div>
         )}
+        <SelectionBox rect={selectionRect} isActive={isSelecting} />
       </div>
     </div>
   );

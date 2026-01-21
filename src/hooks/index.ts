@@ -167,3 +167,32 @@ export type {
   UseMemoryMonitorOptions,
   UseMemoryMonitorResult,
 } from './useMemoryMonitor';
+
+export { useSelectionBox } from './useSelectionBox';
+export type {
+  Point,
+  SelectionRect,
+  UseSelectionBoxOptions,
+  UseSelectionBoxReturn,
+} from './useSelectionBox';
+
+export { useTranscription } from './useTranscription';
+export type {
+  TranscriptionSegment,
+  TranscriptionResult,
+  TranscriptionOptions,
+  TranscriptionState,
+  UseTranscriptionOptions,
+  UseTranscriptionReturn,
+} from './useTranscription';
+
+export { useSearch } from './useSearch';
+export type {
+  SearchOptions,
+  AssetSearchResult,
+  TranscriptSearchResult,
+  SearchResults,
+  SearchState,
+  UseSearchOptions,
+  UseSearchReturn,
+} from './useSearch';
