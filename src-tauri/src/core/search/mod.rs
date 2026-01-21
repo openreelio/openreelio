@@ -1,6 +1,15 @@
 //! Search System Module
 //!
 //! Provides media search capabilities across indexed content.
+//!
+//! This module contains two search subsystems:
+//!
+//! 1. **SQLite-based search** (default): Uses the IndexDb for local search
+//! 2. **Meilisearch** (optional): Full-text search engine for advanced search
+//!
+//! The Meilisearch integration is conditionally compiled with the `meilisearch` feature.
+
+pub mod meilisearch;
 
 use serde::{Deserialize, Serialize};
 
