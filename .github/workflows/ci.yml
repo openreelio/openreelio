@@ -103,11 +103,11 @@ jobs:
 
       - name: Run clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run tests
         working-directory: src-tauri
-        run: cargo test --all-features --verbose
+        run: cargo test --locked --all-features --verbose
 
   # ==========================================================================
   # Build Check
@@ -180,7 +180,7 @@ jobs:
 
       - name: Build Tauri app (check only)
         working-directory: src-tauri
-        run: cargo build --release
+        run: cargo build --locked --release
 
   # ==========================================================================
   # FFmpeg Bundler Tests (Multi-Platform)
@@ -226,11 +226,11 @@ jobs:
 
       - name: Run bundler unit tests
         working-directory: src-tauri
-        run: cargo test bundler --features bundled-ffmpeg -- --nocapture
+        run: cargo test --locked bundler --features bundled-ffmpeg -- --nocapture
 
       - name: Run detection tests
         working-directory: src-tauri
-        run: cargo test detection -- --nocapture
+        run: cargo test --locked detection -- --nocapture
 
   # ==========================================================================
   # Security Audit
