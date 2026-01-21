@@ -585,19 +585,173 @@ impl ProjectState {
     }
 
     // =========================================================================
-    // Caption Operation Handlers (placeholder implementations)
+    // Caption Operation Handlers
     // =========================================================================
 
-    fn apply_caption_add(&mut self, _op: &Operation) -> CoreResult<()> {
-        // TODO: Implement when Caption model is ready
+    fn apply_caption_add(&mut self, op: &Operation) -> CoreResult<()> {
+        use crate::core::timeline::{Clip, ClipPlace, ClipRange};
+
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let track_id = op.payload["trackId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing trackId".to_string()))?;
+
+        let sequence = self
+            .sequences
+            .get_mut(seq_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Sequence not found: {}", seq_id)))?;
+        let track = sequence
+            .get_track_mut(track_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Track not found: {}", track_id)))?;
+        if !track.is_caption() {
+            return Err(CoreError::ValidationError(format!(
+                "Track is not a caption track: {}",
+                track_id
+            )));
+        }
+
+        // Prefer full clip payload (forward-compatible), otherwise build from primitives.
+        if !op.payload["clip"].is_null() {
+            let clip: Clip = serde_json::from_value(op.payload["clip"].clone())
+                .map_err(|e| CoreError::InvalidCommand(format!("Invalid clip data: {}", e)))?;
+            track.add_clip(clip);
+            return Ok(());
+        }
+
+        let start_sec = op.payload["startSec"]
+            .as_f64()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing startSec".to_string()))?;
+        let end_sec = op.payload["endSec"]
+            .as_f64()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing endSec".to_string()))?;
+        if !start_sec.is_finite()
+            || !end_sec.is_finite()
+            || start_sec < 0.0
+            || end_sec < 0.0
+            || start_sec >= end_sec
+        {
+            return Err(CoreError::InvalidTimeRange(start_sec, end_sec));
+        }
+
+        let duration = end_sec - start_sec;
+        let text = op.payload["text"].as_str().unwrap_or("").to_string();
+
+        let mut clip = Clip::new("caption");
+        clip.speed = 1.0;
+        clip.place = ClipPlace::new(start_sec, duration);
+        clip.range = ClipRange::new(0.0, duration);
+        clip.label = if text.trim().is_empty() {
+            None
+        } else {
+            Some(text)
+        };
+
+        track.add_clip(clip);
         Ok(())
     }
 
-    fn apply_caption_remove(&mut self, _op: &Operation) -> CoreResult<()> {
+    fn apply_caption_remove(&mut self, op: &Operation) -> CoreResult<()> {
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let track_id = op.payload["trackId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing trackId".to_string()))?;
+        let caption_id = op
+            .payload
+            .get("captionId")
+            .and_then(|v| v.as_str())
+            .or_else(|| op.payload.get("clipId").and_then(|v| v.as_str()))
+            .ok_or_else(|| CoreError::InvalidCommand("Missing captionId".to_string()))?;
+
+        let sequence = self
+            .sequences
+            .get_mut(seq_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Sequence not found: {}", seq_id)))?;
+        let track = sequence
+            .get_track_mut(track_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Track not found: {}", track_id)))?;
+        if !track.is_caption() {
+            return Err(CoreError::ValidationError(format!(
+                "Track is not a caption track: {}",
+                track_id
+            )));
+        }
+
+        track.remove_clip(&caption_id.to_string());
         Ok(())
     }
 
-    fn apply_caption_update(&mut self, _op: &Operation) -> CoreResult<()> {
+    fn apply_caption_update(&mut self, op: &Operation) -> CoreResult<()> {
+        use crate::core::timeline::{ClipPlace, ClipRange};
+
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let track_id = op.payload["trackId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing trackId".to_string()))?;
+        let caption_id = op
+            .payload
+            .get("captionId")
+            .and_then(|v| v.as_str())
+            .or_else(|| op.payload.get("clipId").and_then(|v| v.as_str()))
+            .ok_or_else(|| CoreError::InvalidCommand("Missing captionId".to_string()))?;
+
+        let sequence = self
+            .sequences
+            .get_mut(seq_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Sequence not found: {}", seq_id)))?;
+        let track = sequence
+            .get_track_mut(track_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Track not found: {}", track_id)))?;
+        if !track.is_caption() {
+            return Err(CoreError::ValidationError(format!(
+                "Track is not a caption track: {}",
+                track_id
+            )));
+        }
+
+        let clip = track
+            .get_clip_mut(caption_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Caption not found: {}", caption_id)))?;
+
+        clip.speed = 1.0;
+
+        if let Some(text) = op.payload.get("text").and_then(|v| v.as_str()) {
+            let trimmed = text.trim();
+            clip.label = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+        }
+
+        let start_sec = op.payload.get("startSec").and_then(|v| v.as_f64());
+        let end_sec = op.payload.get("endSec").and_then(|v| v.as_f64());
+        if start_sec.is_some() || end_sec.is_some() {
+            let old_start = clip.place.timeline_in_sec;
+            let old_end = clip.place.timeline_out_sec();
+
+            let new_start = start_sec.unwrap_or(old_start);
+            let new_end = end_sec.unwrap_or(old_end);
+
+            if !new_start.is_finite() || !new_end.is_finite() || new_start < 0.0 || new_end < 0.0 {
+                return Err(CoreError::ValidationError(
+                    "Caption time range must be finite and non-negative".to_string(),
+                ));
+            }
+            if new_start >= new_end {
+                return Err(CoreError::InvalidTimeRange(new_start, new_end));
+            }
+
+            let duration = new_end - new_start;
+            clip.place = ClipPlace::new(new_start, duration);
+            clip.range = ClipRange::new(0.0, duration);
+        }
+
         Ok(())
     }
 
@@ -1545,5 +1699,63 @@ mod tests {
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), CoreError::NotFound(_)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Caption Operation Replay Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_apply_caption_update_updates_caption_clip() {
+        use crate::core::timeline::{ClipPlace, ClipRange};
+
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let mut sequence = Sequence::new("Sequence 1", SequenceFormat::youtube_1080());
+        let mut caption_track = Track::new_caption("Captions");
+
+        let mut caption_clip = Clip::new("caption");
+        caption_clip.label = Some("Old".to_string());
+        caption_clip.place = ClipPlace {
+            timeline_in_sec: 1.0,
+            duration_sec: 2.0,
+        };
+        caption_clip.range = ClipRange {
+            source_in_sec: 0.0,
+            source_out_sec: 2.0,
+        };
+
+        let caption_id = caption_clip.id.clone();
+        caption_track.add_clip(caption_clip);
+
+        let track_id = caption_track.id.clone();
+        sequence.add_track(caption_track);
+
+        let seq_id = sequence.id.clone();
+        state.active_sequence_id = Some(seq_id.clone());
+        state.sequences.insert(seq_id.clone(), sequence);
+
+        let op = Operation::with_id(
+            "op_test",
+            OpKind::CaptionUpdate,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "trackId": track_id,
+                "captionId": caption_id,
+                "text": "New",
+                "startSec": 3.0,
+                "endSec": 5.5,
+            }),
+        );
+
+        state.apply_operation(&op).unwrap();
+
+        let sequence = state.get_active_sequence().unwrap();
+        let track = sequence.tracks.iter().find(|t| t.id == track_id).unwrap();
+        let clip = track.get_clip(&caption_id).unwrap();
+
+        assert_eq!(clip.label.as_deref(), Some("New"));
+        assert_eq!(clip.place.timeline_in_sec, 3.0);
+        assert!((clip.place.duration_sec - 2.5).abs() < f64::EPSILON);
     }
 }
