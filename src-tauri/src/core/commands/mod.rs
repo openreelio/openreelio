@@ -4,6 +4,7 @@
 //! All editing operations are performed through Commands in this module.
 
 mod asset;
+mod caption;
 mod clip;
 mod executor;
 mod sequence;
@@ -11,6 +12,7 @@ mod track;
 mod traits;
 
 pub use asset::*;
+pub use caption::*;
 pub use clip::*;
 pub use executor::*;
 pub use sequence::*;
@@ -19,4 +21,3 @@ pub use traits::*;
 
 // Future command modules
 // pub mod effect;
-// pub mod caption;
