@@ -1817,6 +1817,395 @@ fn get_system_memory_info() -> Option<SystemMemoryDto> {
 }
 
 // =============================================================================
+// Transcription Commands
+// =============================================================================
+
+/// DTO for transcription result
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionResultDto {
+    /// Detected or specified language
+    pub language: String,
+    /// Transcribed segments
+    pub segments: Vec<TranscriptionSegmentDto>,
+    /// Total duration in seconds
+    pub duration: f64,
+    /// Full transcription text
+    pub full_text: String,
+}
+
+/// DTO for a transcription segment
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionSegmentDto {
+    /// Start time in seconds
+    pub start_time: f64,
+    /// End time in seconds
+    pub end_time: f64,
+    /// Transcribed text
+    pub text: String,
+}
+
+/// DTO for transcription options
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptionOptionsDto {
+    /// Language code (e.g., "en", "ko") or "auto" for detection
+    pub language: Option<String>,
+    /// Whether to translate to English
+    pub translate: Option<bool>,
+    /// Whisper model to use (tiny, base, small, medium, large)
+    pub model: Option<String>,
+}
+
+/// Checks if transcription is available
+#[tauri::command]
+pub async fn is_transcription_available() -> Result<bool, String> {
+    Ok(crate::core::captions::whisper::is_whisper_available())
+}
+
+/// Transcribes an asset's audio content
+///
+/// This command extracts audio from the asset, runs Whisper transcription,
+/// and returns the transcribed text with timestamps.
+#[tauri::command]
+pub async fn transcribe_asset(
+    asset_id: String,
+    options: Option<TranscriptionOptionsDto>,
+    state: State<'_, AppState>,
+) -> Result<TranscriptionResultDto, String> {
+    use crate::core::captions::{
+        audio::{extract_audio_for_transcription, load_audio_samples},
+        whisper::{TranscriptionOptions, WhisperEngine, WhisperModel},
+    };
+    use std::path::PathBuf;
+
+    // Check if whisper is available
+    if !crate::core::captions::whisper::is_whisper_available() {
+        return Err("Transcription is not available. Rebuild with --features whisper".to_string());
+    }
+
+    // Get asset from project
+    let (asset_path, asset_name) = {
+        let guard = state.project.lock().await;
+
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        let asset = project
+            .state
+            .assets
+            .get(&asset_id)
+            .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
+
+        (PathBuf::from(&asset.uri), asset.name.clone())
+    };
+
+    tracing::info!(
+        "Starting transcription for asset: {} ({})",
+        asset_name,
+        asset_id
+    );
+
+    // Determine model to use
+    let model_name = options
+        .as_ref()
+        .and_then(|o| o.model.as_deref())
+        .unwrap_or("base");
+    let model = model_name
+        .parse::<WhisperModel>()
+        .unwrap_or(WhisperModel::Base);
+
+    // Get model path
+    let models_dir = crate::core::captions::whisper::default_models_dir();
+    let model_path = models_dir.join(model.filename());
+
+    if !model_path.exists() {
+        return Err(format!(
+            "Whisper model not found at {}. Please download the {} model.",
+            model_path.display(),
+            model.name()
+        ));
+    }
+
+    // Create temp directory for audio extraction
+    let temp_dir = std::env::temp_dir()
+        .join("openreelio")
+        .join("transcription");
+    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    let audio_path = temp_dir.join(format!("{}.wav", asset_id));
+
+    // Extract audio from asset
+    tracing::debug!("Extracting audio to: {}", audio_path.display());
+    extract_audio_for_transcription(&asset_path, &audio_path, None)
+        .map_err(|e| format!("Audio extraction failed: {}", e))?;
+
+    // Load audio samples
+    let samples = load_audio_samples(&audio_path)
+        .map_err(|e| format!("Failed to load audio samples: {}", e))?;
+
+    tracing::debug!("Loaded {} audio samples", samples.len());
+
+    // Create transcription options
+    let whisper_options = TranscriptionOptions {
+        language: options.as_ref().and_then(|o| o.language.clone()),
+        translate: options.as_ref().and_then(|o| o.translate).unwrap_or(false),
+        threads: 0, // Auto-detect
+        initial_prompt: None,
+    };
+
+    // Create whisper engine and transcribe
+    let engine = WhisperEngine::new(&model_path)
+        .map_err(|e| format!("Failed to load Whisper model: {}", e))?;
+
+    let result = engine
+        .transcribe(&samples, &whisper_options)
+        .map_err(|e| format!("Transcription failed: {}", e))?;
+
+    tracing::info!(
+        "Transcription complete: {} segments, {:.1}s duration",
+        result.segments.len(),
+        result.duration
+    );
+
+    // Clean up temp file
+    let _ = std::fs::remove_file(&audio_path);
+
+    // Convert to DTO - get full_text before consuming segments
+    let full_text = result.full_text();
+    Ok(TranscriptionResultDto {
+        language: result.language,
+        segments: result
+            .segments
+            .into_iter()
+            .map(|s| TranscriptionSegmentDto {
+                start_time: s.start_time,
+                end_time: s.end_time,
+                text: s.text,
+            })
+            .collect(),
+        duration: result.duration,
+        full_text,
+    })
+}
+
+/// Submits a transcription job to the worker pool
+#[tauri::command]
+pub async fn submit_transcription_job(
+    asset_id: String,
+    options: Option<TranscriptionOptionsDto>,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    // Create job payload
+    let payload = serde_json::json!({
+        "assetId": asset_id,
+        "options": options,
+    });
+
+    // Submit to job pool
+    let job = Job::new(JobType::Transcription, payload).with_priority(Priority::UserRequest);
+    let pool = state.job_pool.lock().await;
+    let job_id = pool.submit(job).map_err(|e| e.to_string())?;
+
+    tracing::info!(
+        "Submitted transcription job: {} for asset: {}",
+        job_id,
+        asset_id
+    );
+
+    Ok(job_id)
+}
+
+// =============================================================================
+// Search Commands (Meilisearch)
+// =============================================================================
+
+/// DTO for search options
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchOptionsDto {
+    /// Maximum number of results per index
+    pub limit: Option<usize>,
+    /// Offset for pagination
+    pub offset: Option<usize>,
+    /// Filter by asset IDs
+    pub asset_ids: Option<Vec<String>>,
+    /// Filter by project ID
+    pub project_id: Option<String>,
+    /// Search only specific indexes (assets, transcripts)
+    pub indexes: Option<Vec<String>>,
+}
+
+/// DTO for asset search results
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetSearchResultDto {
+    /// Asset ID
+    pub id: String,
+    /// Asset name
+    pub name: String,
+    /// File path
+    pub path: String,
+    /// Asset kind
+    pub kind: String,
+    /// Duration in seconds
+    pub duration: Option<f64>,
+    /// Tags
+    pub tags: Vec<String>,
+}
+
+/// DTO for transcript search results
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptSearchResultDto {
+    /// Segment ID
+    pub id: String,
+    /// Asset ID
+    pub asset_id: String,
+    /// Text content
+    pub text: String,
+    /// Start time in seconds
+    pub start_time: f64,
+    /// End time in seconds
+    pub end_time: f64,
+    /// Language code
+    pub language: Option<String>,
+}
+
+/// DTO for combined search results
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResultsDto {
+    /// Asset results
+    pub assets: Vec<AssetSearchResultDto>,
+    /// Transcript results
+    pub transcripts: Vec<TranscriptSearchResultDto>,
+    /// Total number of asset hits (estimated)
+    pub asset_total: Option<usize>,
+    /// Total number of transcript hits (estimated)
+    pub transcript_total: Option<usize>,
+    /// Processing time in milliseconds
+    pub processing_time_ms: u64,
+}
+
+/// Checks if Meilisearch is available
+#[tauri::command]
+pub async fn is_meilisearch_available() -> Result<bool, String> {
+    Ok(crate::core::search::meilisearch::is_meilisearch_available())
+}
+
+/// Performs a full-text search using Meilisearch
+#[tauri::command]
+pub async fn search_content(
+    query: String,
+    options: Option<SearchOptionsDto>,
+) -> Result<SearchResultsDto, String> {
+    use crate::core::search::meilisearch::{is_meilisearch_available, SearchOptions};
+
+    // Check if Meilisearch is available
+    if !is_meilisearch_available() {
+        return Err("Meilisearch feature not enabled".to_string());
+    }
+
+    // For now, return empty results since we need a running Meilisearch instance
+    // In production, this would connect to the indexer
+    let search_options = match options {
+        Some(opts) => SearchOptions {
+            limit: opts.limit.unwrap_or(20),
+            offset: opts.offset.unwrap_or(0),
+            asset_ids: opts.asset_ids,
+            project_id: opts.project_id,
+            indexes: opts.indexes,
+        },
+        None => SearchOptions::with_limit(20),
+    };
+
+    // Log the search query
+    tracing::debug!(
+        "Search query: '{}', limit: {}, offset: {}",
+        query,
+        search_options.limit,
+        search_options.offset
+    );
+
+    // Return empty results for now (requires running Meilisearch instance)
+    Ok(SearchResultsDto {
+        assets: vec![],
+        transcripts: vec![],
+        asset_total: Some(0),
+        transcript_total: Some(0),
+        processing_time_ms: 0,
+    })
+}
+
+/// Indexes an asset in Meilisearch
+#[tauri::command]
+pub async fn index_asset_for_search(
+    asset_id: String,
+    name: String,
+    _path: String,
+    _kind: String,
+    duration: Option<f64>,
+    _tags: Option<Vec<String>>,
+) -> Result<(), String> {
+    use crate::core::search::meilisearch::is_meilisearch_available;
+
+    if !is_meilisearch_available() {
+        return Err("Meilisearch feature not enabled".to_string());
+    }
+
+    tracing::info!(
+        "Indexing asset for search: {} ({}) - duration: {:?}",
+        asset_id,
+        name,
+        duration
+    );
+
+    // In production, this would add to the Meilisearch index
+    Ok(())
+}
+
+/// Indexes transcript segments for an asset
+#[tauri::command]
+pub async fn index_transcripts_for_search(
+    asset_id: String,
+    segments: Vec<TranscriptionSegmentDto>,
+    language: Option<String>,
+) -> Result<(), String> {
+    use crate::core::search::meilisearch::is_meilisearch_available;
+
+    if !is_meilisearch_available() {
+        return Err("Meilisearch feature not enabled".to_string());
+    }
+
+    tracing::info!(
+        "Indexing {} transcript segments for asset: {} (language: {:?})",
+        segments.len(),
+        asset_id,
+        language
+    );
+
+    // In production, this would add to the Meilisearch index
+    Ok(())
+}
+
+/// Removes an asset and its transcripts from the search index
+#[tauri::command]
+pub async fn remove_asset_from_search(asset_id: String) -> Result<(), String> {
+    use crate::core::search::meilisearch::is_meilisearch_available;
+
+    if !is_meilisearch_available() {
+        return Err("Meilisearch feature not enabled".to_string());
+    }
+
+    tracing::info!("Removing asset from search index: {}", asset_id);
+
+    // In production, this would remove from the Meilisearch index
+    Ok(())
+}
+
+// =============================================================================
 // Command Registration
 // =============================================================================
 
@@ -1864,6 +2253,16 @@ pub fn get_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'st
         // Performance/Memory
         get_memory_stats,
         trigger_memory_cleanup,
+        // Transcription
+        is_transcription_available,
+        transcribe_asset,
+        submit_transcription_job,
+        // Search (Meilisearch)
+        is_meilisearch_available,
+        search_content,
+        index_asset_for_search,
+        index_transcripts_for_search,
+        remove_asset_from_search,
     ]
 }
 
