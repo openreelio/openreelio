@@ -241,6 +241,7 @@ macro_rules! collect_commands {
             $crate::ipc::transcribe_asset,
             $crate::ipc::submit_transcription_job,
             // Search commands
+            $crate::ipc::search_assets,
             $crate::ipc::is_meilisearch_available,
             $crate::ipc::search_content,
             $crate::ipc::index_asset_for_search,
@@ -350,6 +351,7 @@ pub fn run() {
             ipc::transcribe_asset,
             ipc::submit_transcription_job,
             // Search commands
+            ipc::search_assets,
             ipc::is_meilisearch_available,
             ipc::search_content,
             ipc::index_asset_for_search,
