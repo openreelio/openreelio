@@ -184,15 +184,31 @@ pub fn load_audio_samples(wav_path: &Path) -> AudioResult<Vec<f32>> {
             let raw_samples: Vec<i16> = reader
                 .into_samples::<i16>()
                 .collect::<Result<Vec<i16>, _>>()
-                .map_err(|e| AudioExtractionError::FFmpegFailed(format!("Failed to read audio samples: {}", e)))?;
-            raw_samples.into_iter().map(|s| s as f32 / 32768.0).collect()
+                .map_err(|e| {
+                    AudioExtractionError::FFmpegFailed(format!(
+                        "Failed to read audio samples: {}",
+                        e
+                    ))
+                })?;
+            raw_samples
+                .into_iter()
+                .map(|s| s as f32 / 32768.0)
+                .collect()
         }
         32 => {
             let raw_samples: Vec<i32> = reader
                 .into_samples::<i32>()
                 .collect::<Result<Vec<i32>, _>>()
-                .map_err(|e| AudioExtractionError::FFmpegFailed(format!("Failed to read audio samples: {}", e)))?;
-            raw_samples.into_iter().map(|s| s as f32 / 2147483648.0).collect()
+                .map_err(|e| {
+                    AudioExtractionError::FFmpegFailed(format!(
+                        "Failed to read audio samples: {}",
+                        e
+                    ))
+                })?;
+            raw_samples
+                .into_iter()
+                .map(|s| s as f32 / 2147483648.0)
+                .collect()
         }
         bits => {
             return Err(AudioExtractionError::FFmpegFailed(format!(
