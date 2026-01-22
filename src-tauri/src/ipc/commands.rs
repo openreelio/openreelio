@@ -119,18 +119,8 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<ProjectStat
             description: project.state.meta.description.clone(),
             author: project.state.meta.author.clone(),
         },
-        assets: project
-            .state
-            .assets
-            .values()
-            .map(|a| serde_json::to_value(a).unwrap_or_default())
-            .collect(),
-        sequences: project
-            .state
-            .sequences
-            .values()
-            .map(|s| serde_json::to_value(s).unwrap_or_default())
-            .collect(),
+        assets: project.state.assets.values().cloned().collect(),
+        sequences: project.state.sequences.values().cloned().collect(),
         active_sequence_id: project.state.active_sequence_id.clone(),
         is_dirty: project.state.is_dirty,
     })
@@ -150,6 +140,33 @@ pub async fn import_asset(
     state: State<'_, AppState>,
 ) -> Result<AssetImportResult, String> {
     use crate::core::assets::{requires_proxy, ProxyStatus};
+    use std::path::PathBuf;
+
+    fn validate_local_file_path(uri: &str) -> Result<PathBuf, String> {
+        let trimmed = uri.trim();
+        if trimmed.is_empty() {
+            return Err("Asset path is empty".to_string());
+        }
+
+        // Prevent accidental remote/URL imports from crossing into ffprobe/ffmpeg calls.
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("http://") || lower.starts_with("https://") {
+            return Err("Only local file paths are supported for asset import".to_string());
+        }
+
+        let path = PathBuf::from(trimmed);
+        if !path.is_absolute() {
+            return Err(format!("Asset path must be absolute: {}", path.display()));
+        }
+
+        let metadata = std::fs::metadata(&path)
+            .map_err(|_| format!("Asset file not found: {}", path.display()))?;
+        if !metadata.is_file() {
+            return Err(format!("Asset path is not a file: {}", path.display()));
+        }
+
+        Ok(path)
+    }
 
     // Phase 1: Import asset (holds project lock)
     let (asset_id, name, op_id, needs_proxy) = {
@@ -159,7 +176,7 @@ pub async fn import_asset(
             .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
         // Create import command
-        let path = std::path::Path::new(&uri);
+        let path = validate_local_file_path(&uri)?;
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -397,7 +414,17 @@ pub async fn generate_proxy_for_asset(
     let asset_id_clone = asset_id.clone();
     let app_handle_clone = app_handle.clone();
 
-    // Spawn progress forwarding task
+    // Emit canonical proxy-start event (frontend listens to `asset:proxy-*`).
+    // This command is a legacy/manual path (not the job-worker proxy pipeline).
+    let _ = app_handle.emit(
+        "asset:proxy-generating",
+        serde_json::json!({
+            "assetId": asset_id.clone(),
+            "jobId": "manual-ffmpeg"
+        }),
+    );
+
+    // Spawn legacy progress forwarding task
     tokio::spawn(async move {
         while let Some(progress) = progress_rx.recv().await {
             let _ = app_handle_clone.emit(
@@ -441,11 +468,21 @@ pub async fn generate_proxy_for_asset(
 
             tracing::info!("Generated proxy for asset {}: {:?}", asset_id, proxy_path);
 
-            // Emit completion event
+            // Emit canonical completion event
+            let _ = app_handle.emit(
+                "asset:proxy-ready",
+                serde_json::json!({
+                    "assetId": asset_id.clone(),
+                    "proxyPath": proxy_path.display().to_string(),
+                    "proxyUrl": proxy_url,
+                }),
+            );
+
+            // Emit legacy completion event
             let _ = app_handle.emit(
                 "proxy-complete",
                 serde_json::json!({
-                    "assetId": asset_id,
+                    "assetId": asset_id.clone(),
                     "proxyUrl": proxy_url,
                 }),
             );
@@ -455,11 +492,20 @@ pub async fn generate_proxy_for_asset(
         Err(e) => {
             tracing::warn!("Failed to generate proxy for {}: {}", asset_id, e);
 
-            // Emit error event
+            // Emit canonical error event
+            let _ = app_handle.emit(
+                "asset:proxy-failed",
+                serde_json::json!({
+                    "assetId": asset_id.clone(),
+                    "error": e.to_string(),
+                }),
+            );
+
+            // Emit legacy error event
             let _ = app_handle.emit(
                 "proxy-error",
                 serde_json::json!({
-                    "assetId": asset_id,
+                    "assetId": asset_id.clone(),
                     "error": e.to_string(),
                 }),
             );
@@ -776,80 +822,52 @@ pub async fn execute_command(
 
     // Map strict CommandPayload to the internal Command trait objects
     let command: Box<dyn crate::core::commands::Command> = match typed_command {
-        CommandPayload::InsertClip {
-            sequence_id,
-            track_id,
-            asset_id,
-            timeline_start,
-        } => Box::new(InsertClipCommand::new(
-            &sequence_id,
-            &track_id,
-            &asset_id,
-            timeline_start.unwrap_or(0.0),
+        CommandPayload::InsertClip(p) => Box::new(InsertClipCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            &p.asset_id,
+            p.timeline_start,
         )),
-        CommandPayload::RemoveClip {
-            sequence_id,
-            track_id,
-            clip_id,
-        } => Box::new(RemoveClipCommand::new(&sequence_id, &track_id, &clip_id)),
-        CommandPayload::MoveClip {
-            sequence_id,
-            track_id,
-            clip_id,
-            new_timeline_in,
-            new_track_id,
-        } => Box::new(MoveClipCommand::new(
-            &sequence_id,
-            &track_id,
-            &clip_id,
-            new_timeline_in,
-            new_track_id,
+        CommandPayload::RemoveClip(p) => Box::new(RemoveClipCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            &p.clip_id,
         )),
-        CommandPayload::TrimClip {
-            sequence_id,
-            track_id,
-            clip_id,
-            new_source_in,
-            new_source_out,
-            new_timeline_in,
-        } => Box::new(TrimClipCommand::new(
-            &sequence_id,
-            &track_id,
-            &clip_id,
-            new_source_in,
-            new_source_out,
-            new_timeline_in,
+        CommandPayload::MoveClip(p) => Box::new(MoveClipCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            &p.clip_id,
+            p.new_timeline_in,
+            p.new_track_id,
         )),
-        CommandPayload::ImportAsset { name, uri } => Box::new(ImportAssetCommand::new(&name, &uri)),
-        CommandPayload::RemoveAsset { asset_id } => Box::new(RemoveAssetCommand::new(&asset_id)),
-        CommandPayload::CreateSequence { name, format } => Box::new(CreateSequenceCommand::new(
-            &name,
-            &format.unwrap_or_else(|| "1080p".to_string()),
+        CommandPayload::TrimClip(p) => Box::new(TrimClipCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            &p.clip_id,
+            p.new_source_in,
+            p.new_source_out,
+            p.new_timeline_in,
         )),
-        CommandPayload::SplitClip {
-            sequence_id,
-            track_id,
-            clip_id,
-            split_time,
-        } => Box::new(SplitClipCommand::new(
-            &sequence_id,
-            &track_id,
-            &clip_id,
-            split_time,
+        CommandPayload::ImportAsset(p) => Box::new(ImportAssetCommand::new(&p.name, &p.uri)),
+        CommandPayload::RemoveAsset(p) => Box::new(RemoveAssetCommand::new(&p.asset_id)),
+        CommandPayload::CreateSequence(p) => Box::new(CreateSequenceCommand::new(
+            &p.name,
+            &p.format.unwrap_or_else(|| "1080p".to_string()),
         )),
-        CommandPayload::UpdateCaption {
-            sequence_id,
-            track_id,
-            caption_id,
-            text,
-            start_sec,
-            end_sec,
-            style: _,
-            position: _,
-        } => Box::new(
-            crate::core::commands::UpdateCaptionCommand::new(&sequence_id, &track_id, &caption_id)
-                .with_text(text)
-                .with_time_range(start_sec, end_sec),
+        CommandPayload::SplitClip(p) => Box::new(SplitClipCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            &p.clip_id,
+            p.split_time,
+        )),
+        CommandPayload::UpdateCaption(p) => Box::new(
+            crate::core::commands::UpdateCaptionCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.caption_id,
+            )
+            .with_text(p.text)
+            .with_time_range(p.start_sec, p.end_sec),
         ),
     };
 
@@ -1365,6 +1383,7 @@ pub async fn analyze_intent(
                 kind: format!("{:?}", r.kind).to_lowercase(),
                 query: r.query,
                 provider: r.provider,
+                params: r.params,
             })
             .collect(),
         qc_rules: script.qc_rules,
@@ -1373,6 +1392,17 @@ pub async fn analyze_intent(
             nsfw: format!("{:?}", script.risk.nsfw).to_lowercase(),
         },
         explanation: script.explanation,
+        preview_plan: script.preview_plan.map(|p| PreviewPlanDto {
+            ranges: p
+                .ranges
+                .into_iter()
+                .map(|r| PreviewRangeDto {
+                    start_sec: r.start_sec,
+                    end_sec: r.end_sec,
+                })
+                .collect(),
+            full_render: p.full_render,
+        }),
     })
 }
 
@@ -1433,121 +1463,171 @@ pub async fn apply_edit_script(
 
     // Execute each command in order
     for cmd in &edit_script.commands {
-        // Build payload with sequence_id injected
+        let validate_time_sec = |field: &str, value: f64| -> Result<(), String> {
+            if value.is_finite() && value >= 0.0 {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Invalid {field}: must be a finite, non-negative number"
+                ))
+            }
+        };
+
         let mut payload = cmd.params.clone();
-        if payload.get("sequenceId").is_none() {
-            payload["sequenceId"] = serde_json::json!(sequence_id);
+        let Some(obj) = payload.as_object_mut() else {
+            errors.push(format!(
+                "Invalid params for {}: expected JSON object",
+                cmd.command_type
+            ));
+            continue;
+        };
+
+        let needs_sequence_id = matches!(
+            cmd.command_type.as_str(),
+            "InsertClip"
+                | "SplitClip"
+                | "DeleteClip"
+                | "RemoveClip"
+                | "TrimClip"
+                | "MoveClip"
+                | "UpdateCaption"
+        );
+        if needs_sequence_id && !obj.contains_key("sequenceId") {
+            obj.insert(
+                "sequenceId".to_string(),
+                serde_json::json!(sequence_id.clone()),
+            );
         }
 
-        // Create command
-        let command: Result<Box<dyn crate::core::commands::Command>, String> =
-            match cmd.command_type.as_str() {
-                "InsertClip" => {
-                    let track_id = payload["trackId"]
-                        .as_str()
-                        .ok_or("Missing trackId")?
-                        .to_string();
-                    let asset_id = payload["assetId"]
-                        .as_str()
-                        .ok_or("Missing assetId")?
-                        .to_string();
-                    let timeline_in = payload["timelineStart"]
-                        .as_f64()
-                        .or_else(|| payload["timelineIn"].as_f64())
-                        .unwrap_or(0.0);
+        let sequence_id_for_cmd = obj
+            .get("sequenceId")
+            .and_then(|v| v.as_str())
+            .unwrap_or(sequence_id.as_str())
+            .to_string();
 
-                    Ok(Box::new(InsertClipCommand::new(
-                        &sequence_id,
-                        &track_id,
-                        &asset_id,
-                        timeline_in,
-                    )))
-                }
-                "SplitClip" => {
-                    let clip_id = payload["clipId"]
-                        .as_str()
-                        .ok_or("Missing clipId")?
-                        .to_string();
-                    let at_sec = payload["atTimelineSec"]
-                        .as_f64()
-                        .or_else(|| payload["splitTime"].as_f64())
-                        .ok_or("Missing split time")?;
+        // Some AI scripts omit trackId (they identify clips only). Inject it from current state.
+        let needs_track_id = matches!(
+            cmd.command_type.as_str(),
+            "SplitClip" | "DeleteClip" | "RemoveClip" | "TrimClip" | "MoveClip" | "UpdateCaption"
+        );
+        if needs_track_id && !obj.contains_key("trackId") {
+            if let Some(clip_id) = obj.get("clipId").and_then(|v| v.as_str()) {
+                let track_id = match find_track_for_clip(project, &sequence_id_for_cmd, clip_id) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        errors.push(e);
+                        continue;
+                    }
+                };
+                obj.insert("trackId".to_string(), serde_json::json!(track_id));
+            }
+        }
 
-                    // Find the track containing this clip
-                    let track_id = find_track_for_clip(project, &sequence_id, &clip_id)?;
-
-                    Ok(Box::new(SplitClipCommand::new(
-                        &sequence_id,
-                        &track_id,
-                        &clip_id,
-                        at_sec,
-                    )))
-                }
-                "DeleteClip" => {
-                    let clip_id = payload["clipId"]
-                        .as_str()
-                        .ok_or("Missing clipId")?
-                        .to_string();
-
-                    let track_id = find_track_for_clip(project, &sequence_id, &clip_id)?;
-
-                    Ok(Box::new(RemoveClipCommand::new(
-                        &sequence_id,
-                        &track_id,
-                        &clip_id,
-                    )))
-                }
-                "TrimClip" => {
-                    let clip_id = payload["clipId"]
-                        .as_str()
-                        .ok_or("Missing clipId")?
-                        .to_string();
-                    let new_start = payload["newStart"].as_f64();
-                    let new_end = payload["newEnd"].as_f64();
-
-                    let track_id = find_track_for_clip(project, &sequence_id, &clip_id)?;
-
-                    Ok(Box::new(TrimClipCommand::new(
-                        &sequence_id,
-                        &track_id,
-                        &clip_id,
-                        new_start,
-                        new_end,
-                        None,
-                    )))
-                }
-                "MoveClip" => {
-                    let clip_id = payload["clipId"]
-                        .as_str()
-                        .ok_or("Missing clipId")?
-                        .to_string();
-                    let new_start = payload["newStart"].as_f64().ok_or("Missing newStart")?;
-                    let new_track_id = payload["newTrackId"].as_str().map(|s| s.to_string());
-
-                    let track_id = find_track_for_clip(project, &sequence_id, &clip_id)?;
-
-                    Ok(Box::new(MoveClipCommand::new(
-                        &sequence_id,
-                        &track_id,
-                        &clip_id,
-                        new_start,
-                        new_track_id,
-                    )))
-                }
-                _ => Err(format!("Unknown command type: {}", cmd.command_type)),
-            };
-
-        match command {
-            Ok(cmd) => match project.executor.execute(cmd, &mut project.state) {
-                Ok(result) => {
-                    applied_op_ids.push(result.op_id);
-                }
-                Err(e) => {
-                    errors.push(format!("Command execution failed: {}", e));
-                }
-            },
+        let typed_command = match CommandPayload::parse(cmd.command_type.clone(), payload) {
+            Ok(c) => c,
             Err(e) => {
-                errors.push(e);
+                errors.push(format!(
+                    "Command parse failed ({}): {}",
+                    cmd.command_type, e
+                ));
+                continue;
+            }
+        };
+
+        let command: Box<dyn crate::core::commands::Command> = match typed_command {
+            CommandPayload::InsertClip(p) => {
+                if let Err(e) = validate_time_sec("timelineStart", p.timeline_start) {
+                    errors.push(format!("Command validation failed (InsertClip): {e}"));
+                    continue;
+                }
+                Box::new(InsertClipCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.asset_id,
+                    p.timeline_start,
+                ))
+            }
+            CommandPayload::RemoveClip(p) => Box::new(RemoveClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+            )),
+            CommandPayload::MoveClip(p) => {
+                if let Err(e) = validate_time_sec("newTimelineIn", p.new_timeline_in) {
+                    errors.push(format!("Command validation failed (MoveClip): {e}"));
+                    continue;
+                }
+                Box::new(MoveClipCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.new_timeline_in,
+                    p.new_track_id,
+                ))
+            }
+            CommandPayload::TrimClip(p) => {
+                if let Some(t) = p.new_source_in {
+                    if let Err(e) = validate_time_sec("newSourceIn", t) {
+                        errors.push(format!("Command validation failed (TrimClip): {e}"));
+                        continue;
+                    }
+                }
+                if let Some(t) = p.new_source_out {
+                    if let Err(e) = validate_time_sec("newSourceOut", t) {
+                        errors.push(format!("Command validation failed (TrimClip): {e}"));
+                        continue;
+                    }
+                }
+                if let Some(t) = p.new_timeline_in {
+                    if let Err(e) = validate_time_sec("newTimelineIn", t) {
+                        errors.push(format!("Command validation failed (TrimClip): {e}"));
+                        continue;
+                    }
+                }
+                Box::new(TrimClipCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.new_source_in,
+                    p.new_source_out,
+                    p.new_timeline_in,
+                ))
+            }
+            CommandPayload::SplitClip(p) => {
+                if let Err(e) = validate_time_sec("splitTime", p.split_time) {
+                    errors.push(format!("Command validation failed (SplitClip): {e}"));
+                    continue;
+                }
+                Box::new(SplitClipCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.split_time,
+                ))
+            }
+            CommandPayload::ImportAsset(p) => Box::new(ImportAssetCommand::new(&p.name, &p.uri)),
+            CommandPayload::RemoveAsset(p) => Box::new(RemoveAssetCommand::new(&p.asset_id)),
+            CommandPayload::CreateSequence(p) => Box::new(CreateSequenceCommand::new(
+                &p.name,
+                &p.format.unwrap_or_else(|| "1080p".to_string()),
+            )),
+            CommandPayload::UpdateCaption(p) => Box::new(
+                crate::core::commands::UpdateCaptionCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.caption_id,
+                )
+                .with_text(p.text)
+                .with_time_range(p.start_sec, p.end_sec),
+            ),
+        };
+
+        match project.executor.execute(command, &mut project.state) {
+            Ok(result) => {
+                applied_op_ids.push(result.op_id);
+            }
+            Err(e) => {
+                errors.push(format!("Command execution failed: {}", e));
             }
         }
     }
@@ -1840,9 +1920,9 @@ pub struct ProjectStateDto {
     /// Project metadata
     pub meta: ProjectMetaDto,
     /// All assets in the project
-    pub assets: Vec<serde_json::Value>,
+    pub assets: Vec<crate::core::assets::Asset>,
     /// All sequences in the project
-    pub sequences: Vec<serde_json::Value>,
+    pub sequences: Vec<crate::core::timeline::Sequence>,
     /// Currently active sequence ID
     pub active_sequence_id: Option<String>,
     /// Whether project has unsaved changes
@@ -1915,6 +1995,14 @@ pub struct AIContextDto {
     pub selected_tracks: Vec<String>,
     /// Nearby transcript text for context
     pub transcript_context: Option<String>,
+    /// Timeline duration in seconds
+    pub timeline_duration: Option<f64>,
+    /// Available asset IDs
+    #[serde(default)]
+    pub asset_ids: Vec<String>,
+    /// Available track IDs
+    #[serde(default)]
+    pub track_ids: Vec<String>,
 }
 
 /// AI-generated edit script containing commands to execute.
@@ -1933,6 +2021,28 @@ pub struct EditScriptDto {
     pub risk: RiskAssessmentDto,
     /// Human-readable explanation of the edit
     pub explanation: String,
+    /// Preview plan for the edit
+    pub preview_plan: Option<PreviewPlanDto>,
+}
+
+/// Preview plan for an EditScript.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewPlanDto {
+    /// Time ranges to preview
+    pub ranges: Vec<PreviewRangeDto>,
+    /// Whether full render is needed
+    pub full_render: bool,
+}
+
+/// A time range for preview.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRangeDto {
+    /// Start time in seconds
+    pub start_sec: f64,
+    /// End time in seconds
+    pub end_sec: f64,
 }
 
 /// A single edit command within an EditScript.
@@ -1957,6 +2067,8 @@ pub struct RequirementDto {
     pub query: Option<String>,
     /// Provider to use (e.g., "unsplash", "pexels")
     pub provider: Option<String>,
+    /// Additional parameters
+    pub params: Option<serde_json::Value>,
 }
 
 /// Risk assessment for an AI-generated edit.
@@ -2400,9 +2512,28 @@ pub async fn submit_transcription_job(
     options: Option<TranscriptionOptionsDto>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    // Resolve asset path at submission time so the job remains runnable even if
+    // the project is closed later.
+    let input_path = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        let asset = project
+            .state
+            .assets
+            .get(&asset_id)
+            .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
+        asset.uri.clone()
+    };
+
     // Create job payload
     let payload = serde_json::json!({
         "assetId": asset_id,
+        "inputPath": input_path,
+        "model": options.as_ref().and_then(|o| o.model.clone()),
+        "language": options.as_ref().and_then(|o| o.language.clone()),
+        "translate": options.as_ref().and_then(|o| o.translate),
         "options": options,
     });
 
@@ -2507,10 +2638,12 @@ pub struct SearchQueryDto {
     /// Duration filter: [min, max] in seconds
     pub duration_range: Option<(f64, f64)>,
     /// Filter by specific asset IDs
+    #[serde(alias = "filterAssetIds")]
     pub asset_ids: Option<Vec<String>>,
     /// Minimum quality score (0.0 - 1.0)
     pub min_quality: Option<f64>,
     /// Maximum number of results
+    #[serde(alias = "resultLimit")]
     pub limit: Option<usize>,
 }
 
@@ -2638,10 +2771,27 @@ pub async fn search_assets(
 // Meilisearch Commands (Feature-Gated)
 // =============================================================================
 
-/// Checks if Meilisearch is available
+/// Checks if Meilisearch is available and ready.
+///
+/// This is a best-effort check that may attempt lazy sidecar startup.
 #[tauri::command]
-pub async fn is_meilisearch_available() -> Result<bool, String> {
-    Ok(crate::core::search::meilisearch::is_meilisearch_available())
+pub async fn is_meilisearch_available(state: State<'_, AppState>) -> Result<bool, String> {
+    if !crate::core::search::meilisearch::is_meilisearch_available() {
+        return Ok(false);
+    }
+
+    let service = match get_search_service(&state).await {
+        Ok(s) => s,
+        Err(_) => return Ok(false),
+    };
+
+    match service.ensure_ready().await {
+        Ok(()) => Ok(true),
+        Err(e) => {
+            tracing::debug!("Meilisearch not ready: {}", e);
+            Ok(false)
+        }
+    }
 }
 
 /// Performs a full-text search using Meilisearch
@@ -2649,16 +2799,16 @@ pub async fn is_meilisearch_available() -> Result<bool, String> {
 pub async fn search_content(
     query: String,
     options: Option<SearchOptionsDto>,
+    state: State<'_, AppState>,
 ) -> Result<SearchResultsDto, String> {
-    use crate::core::search::meilisearch::{is_meilisearch_available, SearchOptions};
+    use crate::core::search::meilisearch::SearchOptions;
 
-    // Check if Meilisearch is available
-    if !is_meilisearch_available() {
-        return Err("Meilisearch feature not enabled".to_string());
+    if !crate::core::search::meilisearch::is_meilisearch_available() {
+        return Err(
+            "Meilisearch feature not enabled. Rebuild with --features meilisearch".to_string(),
+        );
     }
 
-    // For now, return empty results since we need a running Meilisearch instance
-    // In production, this would connect to the indexer
     let search_options = match options {
         Some(opts) => SearchOptions {
             limit: opts.limit.unwrap_or(20),
@@ -2670,21 +2820,47 @@ pub async fn search_content(
         None => SearchOptions::with_limit(20),
     };
 
-    // Log the search query
+    let service = get_search_service(&state).await?;
+
     tracing::debug!(
-        "Search query: '{}', limit: {}, offset: {}",
+        "Meilisearch query: '{}' (limit {}, offset {})",
         query,
         search_options.limit,
         search_options.offset
     );
 
-    // Return empty results for now (requires running Meilisearch instance)
+    let results = service.search(&query, &search_options).await?;
+
     Ok(SearchResultsDto {
-        assets: vec![],
-        transcripts: vec![],
-        asset_total: Some(0),
-        transcript_total: Some(0),
-        processing_time_ms: 0,
+        assets: results
+            .assets
+            .hits
+            .into_iter()
+            .map(|a| AssetSearchResultDto {
+                id: a.id,
+                name: a.name,
+                path: a.path,
+                kind: a.kind,
+                duration: a.duration,
+                tags: a.tags,
+            })
+            .collect(),
+        transcripts: results
+            .transcripts
+            .hits
+            .into_iter()
+            .map(|t| TranscriptSearchResultDto {
+                id: t.id,
+                asset_id: t.asset_id,
+                text: t.text,
+                start_time: t.start_time,
+                end_time: t.end_time,
+                language: t.language,
+            })
+            .collect(),
+        asset_total: results.assets.estimated_total_hits,
+        transcript_total: results.transcripts.estimated_total_hits,
+        processing_time_ms: results.total_processing_time_ms,
     })
 }
 
@@ -2693,25 +2869,46 @@ pub async fn search_content(
 pub async fn index_asset_for_search(
     asset_id: String,
     name: String,
-    _path: String,
-    _kind: String,
+    path: String,
+    kind: String,
     duration: Option<f64>,
-    _tags: Option<Vec<String>>,
+    tags: Option<Vec<String>>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    use crate::core::search::meilisearch::is_meilisearch_available;
+    use crate::core::search::meilisearch::AssetDocument;
 
-    if !is_meilisearch_available() {
-        return Err("Meilisearch feature not enabled".to_string());
+    if !crate::core::search::meilisearch::is_meilisearch_available() {
+        return Err(
+            "Meilisearch feature not enabled. Rebuild with --features meilisearch".to_string(),
+        );
     }
 
+    let mut doc = AssetDocument::new(&asset_id, &name, &path, &kind);
+    if let Some(dur) = duration {
+        doc = doc.with_duration(dur);
+    }
+    if let Some(tags) = tags {
+        doc = doc.with_tags(tags);
+    }
+    // If a project is open, attach its ID for filtering.
+    if let Some(project_id) = {
+        let guard = state.project.lock().await;
+        guard.as_ref().map(|p| p.state.meta.id.clone())
+    } {
+        doc = doc.with_project_id(&project_id);
+    }
+
+    let service = get_search_service(&state).await?;
+    service.index_asset(&doc).await?;
+
     tracing::info!(
-        "Indexing asset for search: {} ({}) - duration: {:?}",
+        "Indexed asset for search: {} ({}) kind={} duration={:?}",
         asset_id,
         name,
+        kind,
         duration
     );
 
-    // In production, this would add to the Meilisearch index
     Ok(())
 }
 
@@ -2721,37 +2918,421 @@ pub async fn index_transcripts_for_search(
     asset_id: String,
     segments: Vec<TranscriptionSegmentDto>,
     language: Option<String>,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
-    use crate::core::search::meilisearch::is_meilisearch_available;
+    use crate::core::search::meilisearch::TranscriptDocument;
 
-    if !is_meilisearch_available() {
-        return Err("Meilisearch feature not enabled".to_string());
+    if !crate::core::search::meilisearch::is_meilisearch_available() {
+        return Err(
+            "Meilisearch feature not enabled. Rebuild with --features meilisearch".to_string(),
+        );
     }
 
+    let service = get_search_service(&state).await?;
+
+    let mut docs = Vec::with_capacity(segments.len());
+    let mut skipped = 0usize;
+
+    for (i, seg) in segments.into_iter().enumerate() {
+        if seg.end_time < seg.start_time {
+            skipped += 1;
+            tracing::warn!(
+                "Skipping invalid transcript segment (end < start) asset={} start={} end={}",
+                asset_id,
+                seg.start_time,
+                seg.end_time
+            );
+            continue;
+        }
+
+        let mut doc = TranscriptDocument::new(
+            &format!("{}_{}", asset_id, i),
+            &asset_id,
+            &seg.text,
+            seg.start_time,
+            seg.end_time,
+        );
+        if let Some(lang) = language.as_deref() {
+            doc = doc.with_language(lang);
+        }
+        docs.push(doc);
+    }
+
+    if docs.is_empty() {
+        tracing::info!(
+            "No valid transcript segments to index for asset {} (skipped {})",
+            asset_id,
+            skipped
+        );
+        return Ok(());
+    }
+
+    service.index_transcripts(&asset_id, &docs).await?;
+
     tracing::info!(
-        "Indexing {} transcript segments for asset: {} (language: {:?})",
-        segments.len(),
+        "Indexed {} transcript segments for asset {} (skipped {})",
+        docs.len(),
         asset_id,
-        language
+        skipped
     );
 
-    // In production, this would add to the Meilisearch index
     Ok(())
 }
 
 /// Removes an asset and its transcripts from the search index
 #[tauri::command]
-pub async fn remove_asset_from_search(asset_id: String) -> Result<(), String> {
-    use crate::core::search::meilisearch::is_meilisearch_available;
-
-    if !is_meilisearch_available() {
-        return Err("Meilisearch feature not enabled".to_string());
+pub async fn remove_asset_from_search(
+    asset_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if !crate::core::search::meilisearch::is_meilisearch_available() {
+        return Err(
+            "Meilisearch feature not enabled. Rebuild with --features meilisearch".to_string(),
+        );
     }
 
-    tracing::info!("Removing asset from search index: {}", asset_id);
+    let service = get_search_service(&state).await?;
+    service.delete_asset(&asset_id).await?;
 
-    // In production, this would remove from the Meilisearch index
+    tracing::info!("Removed asset {} from search index", asset_id);
     Ok(())
+}
+
+async fn get_search_service(
+    state: &State<'_, AppState>,
+) -> Result<std::sync::Arc<crate::core::search::meilisearch::SearchService>, String> {
+    let mut guard = state.search_service.lock().await;
+
+    if let Some(service) = guard.as_ref() {
+        return Ok(std::sync::Arc::clone(service));
+    }
+
+    if !crate::core::search::meilisearch::is_meilisearch_available() {
+        return Err(
+            "Meilisearch feature not enabled. Rebuild with --features meilisearch".to_string(),
+        );
+    }
+
+    let service = std::sync::Arc::new(crate::core::search::meilisearch::SearchService::new(
+        crate::core::search::meilisearch::SidecarConfig::default(),
+    ));
+    *guard = Some(std::sync::Arc::clone(&service));
+    Ok(service)
+}
+
+// =============================================================================
+// AI Provider Commands
+// =============================================================================
+
+/// AI provider status DTO
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderStatusDto {
+    /// Provider type (openai, anthropic, local)
+    pub provider_type: Option<String>,
+    /// Whether a provider is configured
+    pub is_configured: bool,
+    /// Whether the provider is available
+    pub is_available: bool,
+    /// Current model being used
+    pub current_model: Option<String>,
+    /// Available models for this provider
+    pub available_models: Vec<String>,
+    /// Error message if any
+    pub error_message: Option<String>,
+}
+
+/// AI provider configuration DTO
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConfigDto {
+    /// Provider type: "openai", "anthropic", or "local"
+    pub provider_type: String,
+    /// API key (for cloud providers)
+    pub api_key: Option<String>,
+    /// Base URL (for custom endpoints or local models)
+    pub base_url: Option<String>,
+    /// Model to use
+    pub model: Option<String>,
+}
+
+/// Configures an AI provider
+#[tauri::command]
+pub async fn configure_ai_provider(
+    config: ProviderConfigDto,
+    state: State<'_, AppState>,
+) -> Result<ProviderStatusDto, String> {
+    use crate::core::ai::{create_provider, ProviderConfig, ProviderRuntimeStatus, ProviderType};
+
+    fn validate_base_url(url: &str, allow_http: bool) -> Result<(), String> {
+        let url = url.trim();
+        if url.is_empty() {
+            return Err("Base URL cannot be empty".to_string());
+        }
+
+        if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err("Base URL contains invalid whitespace/control characters".to_string());
+        }
+
+        let is_http = url.starts_with("http://");
+        let is_https = url.starts_with("https://");
+        if !is_http && !is_https {
+            return Err("Base URL must start with http:// or https://".to_string());
+        }
+        if is_http && !allow_http {
+            return Err("Base URL must use https:// for cloud providers".to_string());
+        }
+
+        Ok(())
+    }
+
+    let provider_type: ProviderType = config.provider_type.parse().map_err(|e: String| e)?;
+
+    let provider_config = match provider_type {
+        ProviderType::OpenAI => {
+            let api_key = config
+                .api_key
+                .ok_or_else(|| "API key is required for OpenAI".to_string())?;
+            let mut cfg = ProviderConfig::openai(&api_key);
+            if let Some(model) = &config.model {
+                cfg = cfg.with_model(model);
+            }
+            if let Some(url) = &config.base_url {
+                validate_base_url(url, false)?;
+                cfg = cfg.with_base_url(url);
+            }
+            cfg
+        }
+        ProviderType::Anthropic => {
+            let api_key = config
+                .api_key
+                .ok_or_else(|| "API key is required for Anthropic".to_string())?;
+            let mut cfg = ProviderConfig::anthropic(&api_key);
+            if let Some(model) = &config.model {
+                cfg = cfg.with_model(model);
+            }
+            if let Some(url) = &config.base_url {
+                validate_base_url(url, false)?;
+                cfg = cfg.with_base_url(url);
+            }
+            cfg
+        }
+        ProviderType::Local => {
+            let mut cfg = ProviderConfig::local(config.base_url.as_deref());
+            if let Some(url) = &config.base_url {
+                validate_base_url(url, true)?;
+            }
+            if let Some(model) = &config.model {
+                cfg = cfg.with_model(model);
+            }
+            cfg
+        }
+    };
+
+    // Create the provider
+    let provider = create_provider(provider_config).map_err(|e| e.to_ipc_error())?;
+
+    // Run a real connectivity/auth check.
+    let provider_name = provider.name().to_string();
+    let is_configured = provider.is_available();
+    let (is_available, error_message) = match provider.health_check().await {
+        Ok(()) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    };
+
+    // Get available models based on provider type
+    let available_models = match provider_type {
+        ProviderType::OpenAI => crate::core::ai::OpenAIProvider::available_models(),
+        ProviderType::Anthropic => crate::core::ai::AnthropicProvider::available_models(),
+        ProviderType::Local => crate::core::ai::LocalProvider::common_models(),
+    };
+
+    // Set the provider on the gateway with cached status
+    let gateway = state.ai_gateway.lock().await;
+    gateway
+        .set_provider_boxed_with_status(
+            provider,
+            ProviderRuntimeStatus {
+                provider_type: Some(provider_type.to_string()),
+                is_configured,
+                is_available,
+                current_model: config.model.clone(),
+                available_models: available_models.clone(),
+                error_message: error_message.clone(),
+            },
+        )
+        .await;
+
+    tracing::info!(
+        "Configured AI provider: {} (configured: {}, available: {})",
+        provider_name,
+        is_configured,
+        is_available
+    );
+
+    Ok(ProviderStatusDto {
+        provider_type: Some(provider_type.to_string()),
+        is_configured,
+        is_available,
+        current_model: config.model,
+        available_models,
+        error_message,
+    })
+}
+
+/// Gets the current AI provider status
+#[tauri::command]
+pub async fn get_ai_provider_status(
+    state: State<'_, AppState>,
+) -> Result<ProviderStatusDto, String> {
+    let gateway = state.ai_gateway.lock().await;
+    let status = gateway.provider_status().await;
+
+    Ok(ProviderStatusDto {
+        provider_type: status.provider_type,
+        is_configured: status.is_configured,
+        is_available: status.is_available,
+        current_model: status.current_model,
+        available_models: status.available_models,
+        error_message: status.error_message,
+    })
+}
+
+/// Clears the current AI provider
+#[tauri::command]
+pub async fn clear_ai_provider(state: State<'_, AppState>) -> Result<(), String> {
+    let gateway = state.ai_gateway.lock().await;
+    gateway.clear_provider().await;
+
+    tracing::info!("Cleared AI provider");
+    Ok(())
+}
+
+/// Tests the AI connection by making a simple request
+#[tauri::command]
+pub async fn test_ai_connection(state: State<'_, AppState>) -> Result<String, String> {
+    let gateway = state.ai_gateway.lock().await;
+
+    if !gateway.is_configured().await {
+        return Err("No AI provider configured".to_string());
+    }
+
+    let provider_name = gateway.provider_name().await.unwrap_or_default();
+
+    match gateway.health_check().await {
+        Ok(()) => {
+            gateway.update_provider_status(true, None).await;
+            tracing::info!("AI provider health check succeeded: {}", provider_name);
+            Ok(format!("AI provider '{}' is reachable", provider_name))
+        }
+        Err(e) => {
+            gateway
+                .update_provider_status(false, Some(e.to_string()))
+                .await;
+            tracing::warn!("AI provider health check failed: {} ({})", provider_name, e);
+            Err(format!(
+                "AI provider '{}' is not reachable: {}",
+                provider_name, e
+            ))
+        }
+    }
+}
+
+/// Generates an EditScript from natural language using the AI provider
+#[tauri::command]
+pub async fn generate_edit_script_with_ai(
+    intent: String,
+    context: AIContextDto,
+    state: State<'_, AppState>,
+) -> Result<EditScriptDto, String> {
+    use crate::core::ai::EditContext;
+
+    let gateway = state.ai_gateway.lock().await;
+
+    if !gateway.is_configured().await {
+        return Err("No AI provider configured. Configure an AI provider in Settings.".to_string());
+    }
+    if !gateway.has_provider().await {
+        return Err(
+            "AI provider not reachable. Use 'Test connection' in Settings to verify connectivity."
+                .to_string(),
+        );
+    }
+
+    // Build the edit context
+    let mut edit_context = EditContext::new()
+        .with_duration(context.timeline_duration.unwrap_or(0.0))
+        .with_assets(context.asset_ids.clone())
+        .with_tracks(context.track_ids.clone())
+        .with_selection(context.selected_clips.clone())
+        .with_playhead(context.playhead_position);
+
+    if let Some(ref transcript) = context.transcript_context {
+        edit_context = edit_context.with_transcript(transcript);
+    }
+
+    // Generate edit script using the AI gateway
+    let edit_script = gateway
+        .generate_edit_script(&intent, &edit_context)
+        .await
+        .map_err(|e| e.to_ipc_error())?;
+
+    // Convert to DTO
+    Ok(EditScriptDto {
+        intent: edit_script.intent,
+        commands: edit_script
+            .commands
+            .into_iter()
+            .map(|cmd| EditCommandDto {
+                command_type: cmd.command_type,
+                params: cmd.params,
+                description: cmd.description,
+            })
+            .collect(),
+        requires: edit_script
+            .requires
+            .into_iter()
+            .map(|req| RequirementDto {
+                kind: format!("{:?}", req.kind).to_lowercase(),
+                query: req.query,
+                provider: req.provider,
+                params: req.params,
+            })
+            .collect(),
+        qc_rules: edit_script.qc_rules,
+        risk: RiskAssessmentDto {
+            copyright: format!("{:?}", edit_script.risk.copyright).to_lowercase(),
+            nsfw: format!("{:?}", edit_script.risk.nsfw).to_lowercase(),
+        },
+        explanation: edit_script.explanation,
+        preview_plan: edit_script.preview_plan.map(|p| PreviewPlanDto {
+            ranges: p
+                .ranges
+                .into_iter()
+                .map(|r| PreviewRangeDto {
+                    start_sec: r.start_sec,
+                    end_sec: r.end_sec,
+                })
+                .collect(),
+            full_render: p.full_render,
+        }),
+    })
+}
+
+/// Gets available AI models for a provider type
+#[tauri::command]
+pub async fn get_available_ai_models(provider_type: String) -> Result<Vec<String>, String> {
+    use crate::core::ai::ProviderType;
+
+    let ptype: ProviderType = provider_type.parse().map_err(|e: String| e)?;
+
+    let models = match ptype {
+        ProviderType::OpenAI => crate::core::ai::OpenAIProvider::available_models(),
+        ProviderType::Anthropic => crate::core::ai::AnthropicProvider::available_models(),
+        ProviderType::Local => crate::core::ai::LocalProvider::common_models(),
+    };
+
+    Ok(models)
 }
 
 // =============================================================================
@@ -2802,6 +3383,13 @@ pub fn get_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'st
         create_proposal,
         apply_edit_script,
         validate_edit_script,
+        // AI Provider
+        configure_ai_provider,
+        get_ai_provider_status,
+        clear_ai_provider,
+        test_ai_connection,
+        generate_edit_script_with_ai,
+        get_available_ai_models,
         // Performance/Memory
         get_memory_stats,
         trigger_memory_cleanup,

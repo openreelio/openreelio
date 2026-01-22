@@ -19,11 +19,13 @@ use tauri::Manager;
 use tokio::sync::{Mutex, Notify};
 
 use crate::core::{
+    ai::AIGateway,
     commands::CommandExecutor,
     ffmpeg::create_ffmpeg_state,
     jobs::WorkerPool,
     performance::memory::{CacheManager, MemoryPool},
     project::{OpsLog, ProjectMeta, ProjectState, Snapshot},
+    search::meilisearch::SearchService,
 };
 
 // =============================================================================
@@ -161,6 +163,10 @@ pub struct AppState {
     pub memory_pool: Mutex<MemoryPool>,
     /// Cache manager for asset and render caching
     pub cache_manager: Mutex<CacheManager>,
+    /// AI Gateway for LLM integration
+    pub ai_gateway: Mutex<AIGateway>,
+    /// Meilisearch service (sidecar + indexer), when enabled
+    pub search_service: Mutex<Option<std::sync::Arc<SearchService>>>,
 }
 
 impl AppState {
@@ -171,6 +177,8 @@ impl AppState {
             job_pool: Mutex::new(WorkerPool::with_defaults()),
             memory_pool: Mutex::new(MemoryPool::new()),
             cache_manager: Mutex::new(CacheManager::new()),
+            ai_gateway: Mutex::new(AIGateway::with_defaults()),
+            search_service: Mutex::new(None),
         }
     }
 
@@ -240,6 +248,13 @@ macro_rules! collect_commands {
             $crate::ipc::create_proposal,
             $crate::ipc::apply_edit_script,
             $crate::ipc::validate_edit_script,
+            // AI Provider commands
+            $crate::ipc::configure_ai_provider,
+            $crate::ipc::get_ai_provider_status,
+            $crate::ipc::clear_ai_provider,
+            $crate::ipc::test_ai_connection,
+            $crate::ipc::generate_edit_script_with_ai,
+            $crate::ipc::get_available_ai_models,
             // FFmpeg commands
             $crate::core::ffmpeg::check_ffmpeg,
             $crate::core::ffmpeg::extract_frame,
@@ -362,6 +377,31 @@ pub fn run() {
                 );
             });
 
+            // Initialize Meilisearch service (optional)
+            #[cfg(feature = "meilisearch")]
+            {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let service = std::sync::Arc::new(SearchService::new(
+                        crate::core::search::meilisearch::SidecarConfig::default(),
+                    ));
+
+                    // Best-effort warm-up so first query is fast.
+                    if let Err(e) = service.ensure_ready().await {
+                        tracing::warn!(
+                            "Meilisearch not ready at startup: {}. Search will attempt lazy startup.",
+                            e
+                        );
+                    } else {
+                        tracing::info!("Meilisearch initialized and ready");
+                    }
+
+                    let state = app_handle.state::<AppState>();
+                    let mut guard = state.search_service.lock().await;
+                    *guard = Some(service);
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -402,6 +442,13 @@ pub fn run() {
             ipc::create_proposal,
             ipc::apply_edit_script,
             ipc::validate_edit_script,
+            // AI Provider commands
+            ipc::configure_ai_provider,
+            ipc::get_ai_provider_status,
+            ipc::clear_ai_provider,
+            ipc::test_ai_connection,
+            ipc::generate_edit_script_with_ai,
+            ipc::get_available_ai_models,
             // FFmpeg commands
             crate::core::ffmpeg::check_ffmpeg,
             crate::core::ffmpeg::extract_frame,
