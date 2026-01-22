@@ -42,6 +42,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check version sync
+        run: npm run version:check
+
       - name: Run linter
         run: npm run lint --if-present
 
