@@ -246,6 +246,56 @@ impl ProjectState {
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect();
             }
+
+            // Update license if provided
+            if !op.payload["license"].is_null() {
+                if let Ok(license) = serde_json::from_value(op.payload["license"].clone()) {
+                    asset.license = license;
+                }
+            }
+
+            // Thumbnail URL (optional key; null clears)
+            if let Some(thumbnail_value) = op.payload.get("thumbnailUrl") {
+                asset.thumbnail_url = thumbnail_value.as_str().map(|s| s.to_string());
+            }
+
+            // Proxy status (optional key)
+            if let Some(proxy_status_value) = op.payload.get("proxyStatus") {
+                if let Ok(status) = serde_json::from_value::<crate::core::assets::ProxyStatus>(
+                    proxy_status_value.clone(),
+                ) {
+                    asset.proxy_status = status;
+                }
+            }
+
+            // Proxy URL (optional key; null clears)
+            if let Some(proxy_url_value) = op.payload.get("proxyUrl") {
+                asset.proxy_url = proxy_url_value.as_str().map(|s| s.to_string());
+            }
+        }
+        Ok(())
+    }
+
+    fn sort_track_clips(track: &mut Track) {
+        track.clips.sort_by(|a, b| {
+            a.place
+                .timeline_in_sec
+                .total_cmp(&b.place.timeline_in_sec)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+    }
+
+    fn validate_track_no_overlap(track: &Track) -> CoreResult<()> {
+        // Assumes clips are sorted by timeline_in_sec.
+        for i in 1..track.clips.len() {
+            let prev = &track.clips[i - 1];
+            let curr = &track.clips[i];
+            if prev.place.overlaps(&curr.place) {
+                return Err(CoreError::InvalidCommand(format!(
+                    "Clip overlap detected during replay on track {}: {} overlaps {}",
+                    track.id, prev.id, curr.id
+                )));
+            }
         }
         Ok(())
     }
@@ -306,7 +356,16 @@ impl ProjectState {
             .map_err(|e| CoreError::InvalidCommand(format!("Invalid track data: {}", e)))?;
 
         if let Some(sequence) = self.sequences.get_mut(seq_id) {
-            sequence.add_track(track);
+            if let Some(pos) = op.payload["position"].as_u64() {
+                let pos = pos as usize;
+                if pos <= sequence.tracks.len() {
+                    sequence.tracks.insert(pos, track);
+                } else {
+                    sequence.tracks.push(track);
+                }
+            } else {
+                sequence.add_track(track);
+            }
         }
         Ok(())
     }
@@ -367,6 +426,8 @@ impl ProjectState {
         if let Some(sequence) = self.sequences.get_mut(seq_id) {
             if let Some(track) = sequence.get_track_mut(track_id) {
                 track.add_clip(clip);
+                Self::sort_track_clips(track);
+                Self::validate_track_no_overlap(track)?;
             }
         }
         Ok(())
@@ -399,15 +460,58 @@ impl ProjectState {
             .as_str()
             .ok_or_else(|| CoreError::InvalidCommand("Missing clipId".to_string()))?;
 
+        let dest_track_id = op.payload["trackId"].as_str();
+
         if let Some(sequence) = self.sequences.get_mut(seq_id) {
-            // Find and update clip position
-            for track in &mut sequence.tracks {
-                if let Some(clip) = track.get_clip_mut(clip_id) {
-                    if let Some(timeline_in) = op.payload["timelineIn"].as_f64() {
-                        clip.place.timeline_in_sec = timeline_in;
-                    }
+            // Find the current track containing the clip.
+            let mut src_track_idx = None;
+            let mut src_clip_idx = None;
+            for (t_idx, track) in sequence.tracks.iter().enumerate() {
+                if let Some(c_idx) = track.clips.iter().position(|c| c.id == clip_id) {
+                    src_track_idx = Some(t_idx);
+                    src_clip_idx = Some(c_idx);
                     break;
                 }
+            }
+
+            let (src_track_idx, src_clip_idx) = match (src_track_idx, src_clip_idx) {
+                (Some(t), Some(c)) => (t, c),
+                _ => return Ok(()),
+            };
+
+            // Update placement.
+            let new_timeline_in = op.payload["timelineIn"].as_f64();
+
+            // Cross-track move if trackId is provided.
+            if let Some(dest_track_id) = dest_track_id {
+                let current_track_id = sequence.tracks[src_track_idx].id.clone();
+                if current_track_id != dest_track_id {
+                    let mut clip = sequence.tracks[src_track_idx].clips.remove(src_clip_idx);
+                    if let Some(timeline_in) = new_timeline_in {
+                        clip.place.timeline_in_sec = timeline_in;
+                    }
+
+                    if let Some(dest_idx) =
+                        sequence.tracks.iter().position(|t| t.id == dest_track_id)
+                    {
+                        sequence.tracks[dest_idx].clips.push(clip);
+                        Self::sort_track_clips(&mut sequence.tracks[dest_idx]);
+                        Self::validate_track_no_overlap(&sequence.tracks[dest_idx])?;
+                    }
+
+                    Self::sort_track_clips(&mut sequence.tracks[src_track_idx]);
+                    Self::validate_track_no_overlap(&sequence.tracks[src_track_idx])?;
+                    return Ok(());
+                }
+            }
+
+            // Same-track move.
+            if let Some(clip) = sequence.tracks[src_track_idx].get_clip_mut(clip_id) {
+                if let Some(timeline_in) = new_timeline_in {
+                    clip.place.timeline_in_sec = timeline_in;
+                }
+                Self::sort_track_clips(&mut sequence.tracks[src_track_idx]);
+                Self::validate_track_no_overlap(&sequence.tracks[src_track_idx])?;
             }
         }
         Ok(())
@@ -436,6 +540,9 @@ impl ProjectState {
                     if let Some(duration) = op.payload["duration"].as_f64() {
                         clip.place.duration_sec = duration;
                     }
+
+                    Self::sort_track_clips(track);
+                    Self::validate_track_no_overlap(track)?;
                     break;
                 }
             }
@@ -468,6 +575,9 @@ impl ProjectState {
                 {
                     track.add_clip(new_clip);
                 }
+
+                Self::sort_track_clips(track);
+                Self::validate_track_no_overlap(track)?;
             }
         }
         Ok(())

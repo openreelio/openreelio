@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::core::{CoreResult, OpId};
@@ -155,6 +156,15 @@ pub struct OpsLog {
     path: PathBuf,
 }
 
+struct OpsLogLock(File);
+
+impl Drop for OpsLogLock {
+    fn drop(&mut self) {
+        // Keep the handle alive for the lifetime of the guard. Locks are released on drop.
+        let _ = &self.0;
+    }
+}
+
 impl OpsLog {
     /// Creates a new OpsLog instance for the given path
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
@@ -173,6 +183,33 @@ impl OpsLog {
         self.path.exists()
     }
 
+    fn lock_path(&self) -> PathBuf {
+        let mut lock_path = self.path.clone();
+        let file_name = self
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "ops.jsonl".to_string());
+        lock_path.set_file_name(format!("{file_name}.lock"));
+        lock_path
+    }
+
+    fn lock_exclusive(&self) -> CoreResult<OpsLogLock> {
+        let lock_path = self.lock_path();
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)?;
+        file.lock_exclusive()?;
+        Ok(OpsLogLock(file))
+    }
+
     /// Creates the ops log file if it doesn't exist
     pub fn create_if_not_exists(&self) -> CoreResult<()> {
         if !self.exists() {
@@ -187,6 +224,7 @@ impl OpsLog {
 
     /// Appends a single operation to the log
     pub fn append(&self, op: &Operation) -> CoreResult<()> {
+        let _lock = self.lock_exclusive()?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -202,6 +240,7 @@ impl OpsLog {
 
     /// Appends multiple operations to the log atomically
     pub fn append_batch(&self, ops: &[Operation]) -> CoreResult<()> {
+        let _lock = self.lock_exclusive()?;
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -315,6 +354,7 @@ impl OpsLog {
     /// Compacts the log by rewriting only valid operations
     /// Returns the number of removed (corrupted) lines
     pub fn compact(&self) -> CoreResult<usize> {
+        let _lock = self.lock_exclusive()?;
         let read_result = self.read_all()?;
         let error_count = read_result.errors.len();
 
@@ -349,6 +389,7 @@ impl OpsLog {
     /// # Returns
     /// The number of operations archived
     pub fn compact_after_snapshot(&self, snapshot_op_id: &str) -> CoreResult<usize> {
+        let _lock = self.lock_exclusive()?;
         let read_result = self.read_all()?;
 
         // Find the index of the snapshot operation
