@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use specta::Type;
-use tauri::State;
+use tauri::{Manager, State};
 
 use crate::core::{
     commands::{
@@ -17,6 +17,7 @@ use crate::core::{
     ffmpeg::FFmpegProgress,
     jobs::{Job, JobStatus, JobType, Priority},
     performance::memory::{CacheStats, PoolStats},
+    settings::{AppSettings, SettingsManager},
     CoreError,
 };
 use crate::{ActiveProject, AppState};
@@ -3337,6 +3338,451 @@ pub async fn get_available_ai_models(provider_type: String) -> Result<Vec<String
 }
 
 // =============================================================================
+// Settings Commands
+// =============================================================================
+
+/// DTO for app settings (mirrors Rust AppSettings)
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AppSettingsDto {
+    pub version: u32,
+    pub general: GeneralSettingsDto,
+    pub editor: EditorSettingsDto,
+    pub playback: PlaybackSettingsDto,
+    pub export: ExportSettingsDto,
+    pub appearance: AppearanceSettingsDto,
+    pub shortcuts: ShortcutSettingsDto,
+    pub auto_save: AutoSaveSettingsDto,
+    pub performance: PerformanceSettingsDto,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct GeneralSettingsDto {
+    pub language: String,
+    pub show_welcome_on_startup: bool,
+    pub recent_projects_limit: u32,
+    pub check_updates_on_startup: bool,
+    pub default_project_location: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorSettingsDto {
+    pub default_timeline_zoom: f64,
+    pub snap_to_grid: bool,
+    pub snap_tolerance: u32,
+    pub show_clip_thumbnails: bool,
+    pub show_audio_waveforms: bool,
+    pub ripple_edit_default: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaybackSettingsDto {
+    pub default_volume: f64,
+    pub loop_playback: bool,
+    pub preview_quality: String,
+    pub audio_scrubbing: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportSettingsDto {
+    pub default_format: String,
+    pub default_video_codec: String,
+    pub default_audio_codec: String,
+    pub default_export_location: Option<String>,
+    pub open_folder_after_export: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AppearanceSettingsDto {
+    pub theme: String,
+    pub accent_color: String,
+    pub ui_scale: f64,
+    pub show_status_bar: bool,
+    pub compact_mode: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ShortcutSettingsDto {
+    pub custom_shortcuts: std::collections::HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AutoSaveSettingsDto {
+    pub enabled: bool,
+    pub interval_seconds: u32,
+    pub backup_count: u32,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceSettingsDto {
+    pub hardware_acceleration: bool,
+    pub proxy_generation: bool,
+    pub proxy_resolution: String,
+    pub max_concurrent_jobs: u32,
+    pub memory_limit_mb: u32,
+    pub cache_size_mb: u32,
+}
+
+impl From<AppSettings> for AppSettingsDto {
+    fn from(s: AppSettings) -> Self {
+        Self {
+            version: s.version,
+            general: GeneralSettingsDto {
+                language: s.general.language,
+                show_welcome_on_startup: s.general.show_welcome_on_startup,
+                recent_projects_limit: s.general.recent_projects_limit,
+                check_updates_on_startup: s.general.check_updates_on_startup,
+                default_project_location: s.general.default_project_location,
+            },
+            editor: EditorSettingsDto {
+                default_timeline_zoom: s.editor.default_timeline_zoom,
+                snap_to_grid: s.editor.snap_to_grid,
+                snap_tolerance: s.editor.snap_tolerance,
+                show_clip_thumbnails: s.editor.show_clip_thumbnails,
+                show_audio_waveforms: s.editor.show_audio_waveforms,
+                ripple_edit_default: s.editor.ripple_edit_default,
+            },
+            playback: PlaybackSettingsDto {
+                default_volume: s.playback.default_volume,
+                loop_playback: s.playback.loop_playback,
+                preview_quality: s.playback.preview_quality,
+                audio_scrubbing: s.playback.audio_scrubbing,
+            },
+            export: ExportSettingsDto {
+                default_format: s.export.default_format,
+                default_video_codec: s.export.default_video_codec,
+                default_audio_codec: s.export.default_audio_codec,
+                default_export_location: s.export.default_export_location,
+                open_folder_after_export: s.export.open_folder_after_export,
+            },
+            appearance: AppearanceSettingsDto {
+                theme: s.appearance.theme,
+                accent_color: s.appearance.accent_color,
+                ui_scale: s.appearance.ui_scale,
+                show_status_bar: s.appearance.show_status_bar,
+                compact_mode: s.appearance.compact_mode,
+            },
+            shortcuts: ShortcutSettingsDto {
+                custom_shortcuts: s.shortcuts.custom_shortcuts,
+            },
+            auto_save: AutoSaveSettingsDto {
+                enabled: s.auto_save.enabled,
+                interval_seconds: s.auto_save.interval_seconds,
+                backup_count: s.auto_save.backup_count,
+            },
+            performance: PerformanceSettingsDto {
+                hardware_acceleration: s.performance.hardware_acceleration,
+                proxy_generation: s.performance.proxy_generation,
+                proxy_resolution: s.performance.proxy_resolution,
+                max_concurrent_jobs: s.performance.max_concurrent_jobs,
+                memory_limit_mb: s.performance.memory_limit_mb,
+                cache_size_mb: s.performance.cache_size_mb,
+            },
+        }
+    }
+}
+
+impl From<AppSettingsDto> for AppSettings {
+    fn from(dto: AppSettingsDto) -> Self {
+        use crate::core::settings::*;
+        Self {
+            version: dto.version,
+            general: GeneralSettings {
+                language: dto.general.language,
+                show_welcome_on_startup: dto.general.show_welcome_on_startup,
+                recent_projects_limit: dto.general.recent_projects_limit,
+                check_updates_on_startup: dto.general.check_updates_on_startup,
+                default_project_location: dto.general.default_project_location,
+            },
+            editor: EditorSettings {
+                default_timeline_zoom: dto.editor.default_timeline_zoom,
+                snap_to_grid: dto.editor.snap_to_grid,
+                snap_tolerance: dto.editor.snap_tolerance,
+                show_clip_thumbnails: dto.editor.show_clip_thumbnails,
+                show_audio_waveforms: dto.editor.show_audio_waveforms,
+                ripple_edit_default: dto.editor.ripple_edit_default,
+            },
+            playback: PlaybackSettings {
+                default_volume: dto.playback.default_volume,
+                loop_playback: dto.playback.loop_playback,
+                preview_quality: dto.playback.preview_quality,
+                audio_scrubbing: dto.playback.audio_scrubbing,
+            },
+            export: ExportSettings {
+                default_format: dto.export.default_format,
+                default_video_codec: dto.export.default_video_codec,
+                default_audio_codec: dto.export.default_audio_codec,
+                default_export_location: dto.export.default_export_location,
+                open_folder_after_export: dto.export.open_folder_after_export,
+            },
+            appearance: AppearanceSettings {
+                theme: dto.appearance.theme,
+                accent_color: dto.appearance.accent_color,
+                ui_scale: dto.appearance.ui_scale,
+                show_status_bar: dto.appearance.show_status_bar,
+                compact_mode: dto.appearance.compact_mode,
+            },
+            shortcuts: ShortcutSettings {
+                custom_shortcuts: dto.shortcuts.custom_shortcuts,
+            },
+            auto_save: AutoSaveSettings {
+                enabled: dto.auto_save.enabled,
+                interval_seconds: dto.auto_save.interval_seconds,
+                backup_count: dto.auto_save.backup_count,
+            },
+            performance: PerformanceSettings {
+                hardware_acceleration: dto.performance.hardware_acceleration,
+                proxy_generation: dto.performance.proxy_generation,
+                proxy_resolution: dto.performance.proxy_resolution,
+                max_concurrent_jobs: dto.performance.max_concurrent_jobs,
+                memory_limit_mb: dto.performance.memory_limit_mb,
+                cache_size_mb: dto.performance.cache_size_mb,
+            },
+        }
+    }
+}
+
+/// Gets the app data directory for settings storage
+fn get_app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to get app data directory: {}", e))
+}
+
+/// Gets application settings
+#[tauri::command]
+pub async fn get_settings(app: tauri::AppHandle) -> Result<AppSettingsDto, String> {
+    let app_data_dir = get_app_data_dir(&app)?;
+    let manager = SettingsManager::new(app_data_dir);
+    let settings = manager.load();
+    Ok(settings.into())
+}
+
+/// Saves application settings
+#[tauri::command]
+pub async fn set_settings(app: tauri::AppHandle, settings: AppSettingsDto) -> Result<(), String> {
+    let app_data_dir = get_app_data_dir(&app)?;
+    let manager = SettingsManager::new(app_data_dir);
+    let app_settings: AppSettings = settings.into();
+    manager.save(&app_settings).map(|_| ())
+}
+
+/// Updates a partial section of settings (merge with existing)
+#[tauri::command]
+pub async fn update_settings(
+    app: tauri::AppHandle,
+    partial: serde_json::Value,
+) -> Result<AppSettingsDto, String> {
+    let app_data_dir = get_app_data_dir(&app)?;
+    let manager = SettingsManager::new(app_data_dir);
+
+    // Load current settings
+    let current = manager.load();
+    let mut current_json = serde_json::to_value(&current)
+        .map_err(|e| format!("Failed to serialize current settings: {}", e))?;
+
+    // Deep merge the partial update
+    merge_json(&mut current_json, partial);
+
+    // Deserialize back to AppSettings
+    let updated: AppSettings = serde_json::from_value(current_json)
+        .map_err(|e| format!("Failed to apply settings update: {}", e))?;
+
+    // Save and return
+    let saved = manager.save(&updated)?;
+    Ok(saved.into())
+}
+
+/// Resets settings to defaults
+#[tauri::command]
+pub async fn reset_settings(app: tauri::AppHandle) -> Result<AppSettingsDto, String> {
+    let app_data_dir = get_app_data_dir(&app)?;
+    let manager = SettingsManager::new(app_data_dir);
+    let settings = manager.reset()?;
+    Ok(settings.into())
+}
+
+/// Deep merge JSON objects (used for partial settings updates)
+fn merge_json(base: &mut serde_json::Value, patch: serde_json::Value) {
+    use serde_json::Value;
+    match (base, patch) {
+        (Value::Object(base_map), Value::Object(patch_map)) => {
+            for (key, patch_value) in patch_map {
+                let base_value = base_map.entry(key).or_insert(Value::Null);
+                merge_json(base_value, patch_value);
+            }
+        }
+        (base, patch) => {
+            *base = patch;
+        }
+    }
+}
+
+// =============================================================================
+// Update Commands
+// =============================================================================
+
+use crate::core::update::{UpdateCheckResult, UpdateStatus};
+
+/// DTO for update status
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateStatusDto {
+    pub update_available: bool,
+    pub current_version: String,
+    pub latest_version: Option<String>,
+    pub release_notes: Option<String>,
+    pub download_url: Option<String>,
+    pub release_date: Option<String>,
+}
+
+impl From<UpdateStatus> for UpdateStatusDto {
+    fn from(s: UpdateStatus) -> Self {
+        Self {
+            update_available: s.update_available,
+            current_version: s.current_version,
+            latest_version: s.latest_version,
+            release_notes: s.release_notes,
+            download_url: s.download_url,
+            release_date: s.release_date,
+        }
+    }
+}
+
+/// DTO for update check result
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateCheckResultDto {
+    pub status: String,
+    pub version: Option<String>,
+    pub notes: Option<String>,
+    pub date: Option<String>,
+    pub message: Option<String>,
+}
+
+impl From<UpdateCheckResult> for UpdateCheckResultDto {
+    fn from(r: UpdateCheckResult) -> Self {
+        match r {
+            UpdateCheckResult::Available {
+                version,
+                notes,
+                date,
+            } => Self {
+                status: "available".to_string(),
+                version: Some(version),
+                notes,
+                date,
+                message: None,
+            },
+            UpdateCheckResult::UpToDate { version } => Self {
+                status: "upToDate".to_string(),
+                version: Some(version),
+                notes: None,
+                date: None,
+                message: None,
+            },
+            UpdateCheckResult::Error { message } => Self {
+                status: "error".to_string(),
+                version: None,
+                notes: None,
+                date: None,
+                message: Some(message),
+            },
+        }
+    }
+}
+
+/// Checks for available updates
+#[tauri::command]
+pub async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateCheckResultDto, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = app
+        .updater()
+        .map_err(|e| format!("Updater not available: {}", e))?;
+
+    match updater.check().await {
+        Ok(Some(update)) => Ok(UpdateCheckResult::Available {
+            version: update.version.clone(),
+            notes: update.body.clone(),
+            date: update.date.map(|d| d.to_string()),
+        }
+        .into()),
+        Ok(None) => Ok(UpdateCheckResult::UpToDate {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+        .into()),
+        Err(e) => Ok(UpdateCheckResult::Error {
+            message: e.to_string(),
+        }
+        .into()),
+    }
+}
+
+/// Gets current app version
+#[tauri::command]
+pub fn get_current_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Relaunches the application.
+///
+/// This is intentionally implemented on the Rust side to avoid depending on a
+/// separate process plugin on the frontend.
+#[tauri::command]
+pub fn relaunch_app(app: tauri::AppHandle) {
+    app.restart();
+}
+
+/// Downloads and installs an update
+/// Returns true if restart is needed
+#[tauri::command]
+pub async fn download_and_install_update(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    let updater = app
+        .updater()
+        .map_err(|e| format!("Updater not available: {}", e))?;
+
+    let update = updater
+        .check()
+        .await
+        .map_err(|e| format!("Failed to check for updates: {}", e))?
+        .ok_or_else(|| "No update available".to_string())?;
+
+    // Download the update
+    let mut downloaded = 0u64;
+    let bytes = update
+        .download(
+            |chunk_len, content_length| {
+                downloaded += chunk_len as u64;
+                tracing::debug!("Downloaded {} of {:?} bytes", downloaded, content_length);
+            },
+            || {
+                tracing::info!("Download complete, verifying...");
+            },
+        )
+        .await
+        .map_err(|e| format!("Failed to download update: {}", e))?;
+
+    // Install the update
+    update
+        .install(bytes)
+        .map_err(|e| format!("Failed to install update: {}", e))?;
+
+    tracing::info!("Update installed successfully, restart required");
+    Ok(true)
+}
+
+// =============================================================================
 // Command Registration
 // =============================================================================
 
@@ -3405,6 +3851,16 @@ pub fn get_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'st
         index_asset_for_search,
         index_transcripts_for_search,
         remove_asset_from_search,
+        // Settings
+        get_settings,
+        set_settings,
+        update_settings,
+        reset_settings,
+        // Updates
+        check_for_updates,
+        get_current_version,
+        relaunch_app,
+        download_and_install_update,
     ]
 }
 
