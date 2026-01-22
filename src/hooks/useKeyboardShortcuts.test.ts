@@ -82,6 +82,9 @@ const createContentEditableElement = (): HTMLElement => {
 describe('useKeyboardShortcuts', () => {
   const mockTogglePlayback = vi.fn();
   const mockSetCurrentTime = vi.fn();
+  const mockSetPlaybackRate = vi.fn();
+  const mockPlay = vi.fn();
+  const mockPause = vi.fn();
   const mockZoomIn = vi.fn();
   const mockZoomOut = vi.fn();
   const mockClearClipSelection = vi.fn();
@@ -94,6 +97,10 @@ describe('useKeyboardShortcuts', () => {
     setCurrentTime: mockSetCurrentTime,
     currentTime: 5,
     duration: 60,
+    setPlaybackRate: mockSetPlaybackRate,
+    play: mockPlay,
+    pause: mockPause,
+    isPlaying: false,
   };
 
   const defaultTimelineStore = {
@@ -625,8 +632,20 @@ describe('useKeyboardShortcuts', () => {
       expect(KEYBOARD_SHORTCUTS.length).toBeGreaterThan(0);
     });
 
-    it('should have key and description for each shortcut', () => {
-      KEYBOARD_SHORTCUTS.forEach((shortcut) => {
+    it('should be grouped by category with shortcuts', () => {
+      KEYBOARD_SHORTCUTS.forEach((group) => {
+        expect(group).toHaveProperty('category');
+        expect(group).toHaveProperty('shortcuts');
+        expect(typeof group.category).toBe('string');
+        expect(Array.isArray(group.shortcuts)).toBe(true);
+        expect(group.shortcuts.length).toBeGreaterThan(0);
+      });
+    });
+
+    it('should have key and description for each shortcut item', () => {
+      const allShortcuts = KEYBOARD_SHORTCUTS.flatMap((group) => group.shortcuts);
+
+      allShortcuts.forEach((shortcut) => {
         expect(shortcut).toHaveProperty('key');
         expect(shortcut).toHaveProperty('description');
         expect(typeof shortcut.key).toBe('string');
@@ -635,13 +654,15 @@ describe('useKeyboardShortcuts', () => {
     });
 
     it('should include Space for Play/Pause', () => {
-      const spaceShortcut = KEYBOARD_SHORTCUTS.find((s) => s.key === 'Space');
+      const allShortcuts = KEYBOARD_SHORTCUTS.flatMap((group) => group.shortcuts);
+      const spaceShortcut = allShortcuts.find((s) => s.key === 'Space');
       expect(spaceShortcut).toBeDefined();
       expect(spaceShortcut?.description).toContain('Play');
     });
 
-    it('should include Ctrl + Z for Undo', () => {
-      const undoShortcut = KEYBOARD_SHORTCUTS.find((s) => s.key.includes('Ctrl + Z'));
+    it('should include Ctrl+Z for Undo', () => {
+      const allShortcuts = KEYBOARD_SHORTCUTS.flatMap((group) => group.shortcuts);
+      const undoShortcut = allShortcuts.find((s) => s.key === 'Ctrl+Z');
       expect(undoShortcut).toBeDefined();
       expect(undoShortcut?.description).toContain('Undo');
     });

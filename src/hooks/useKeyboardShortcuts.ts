@@ -2,9 +2,10 @@
  * useKeyboardShortcuts Hook
  *
  * Global keyboard shortcut handler for the application.
+ * Implements J/K/L Shuttle control and standard NLE shortcuts.
  */
 
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useRef } from 'react';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores/projectStore';
@@ -23,19 +24,12 @@ export interface KeyboardShortcut {
 }
 
 export interface UseKeyboardShortcutsOptions {
-  /** Callback for undo action */
   onUndo?: () => void;
-  /** Callback for redo action */
   onRedo?: () => void;
-  /** Callback for save action */
   onSave?: () => void;
-  /** Callback for delete selected clips */
   onDeleteClips?: () => void;
-  /** Callback for split at playhead */
   onSplitAtPlayhead?: () => void;
-  /** Callback for export dialog */
   onExport?: () => void;
-  /** Whether shortcuts are enabled */
   enabled?: boolean;
 }
 
@@ -56,8 +50,13 @@ function isInputElement(target: EventTarget | null): boolean {
 }
 
 // =============================================================================
-// Hook
+// Constants
 // =============================================================================
+
+// Shuttle speed levels (Industry Standard - Avid/Premiere)
+// Index 4 is 0 (stop)
+const SHUTTLE_SPEEDS = [-8, -4, -2, -1, 0, 1, 2, 4, 8];
+const STOP_INDEX = 4;
 
 export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}): void {
   const {
@@ -70,41 +69,114 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
     enabled = true,
   } = options;
 
-  // Get store actions
-  const { togglePlayback, setCurrentTime, currentTime, duration } = usePlaybackStore();
+  // Use refs for state that updates frequently but shouldn't cause re-renders of the hook
+  // This prevents the "stale closure" problem with the shuttle index
+  const shuttleIndexRef = useRef(STOP_INDEX);
+
+  // Store actions
+  const {
+    togglePlayback,
+    setCurrentTime,
+    currentTime,
+    duration,
+    setPlaybackRate,
+    play,
+    pause,
+    isPlaying, // This triggers re-runs if we use it in dependency array
+  } = usePlaybackStore();
+
   const { zoomIn, zoomOut, selectedClipIds, clearClipSelection } = useTimelineStore();
   const { undo, redo, saveProject, isLoaded } = useProjectStore();
 
-  // Handle keydown
+  // Reset shuttle index when playback state changes externally (e.g. hitting stop button in UI)
+  useEffect(() => {
+    if (!isPlaying) {
+      shuttleIndexRef.current = STOP_INDEX;
+    }
+  }, [isPlaying]);
+
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      // Don't handle if disabled or in input element
+      // 1. Safety Checks
       if (!enabled || isInputElement(e.target)) return;
+      if (e.repeat) return; // Prevent holding key down from triggering logic repeatedly (optional)
 
       const { key, ctrlKey, metaKey, shiftKey } = e;
       const ctrl = ctrlKey || metaKey;
 
-      // Playback shortcuts
-      if (key === ' ' && !ctrl && !shiftKey) {
+      // -----------------------------------------------------------------------
+      // Transport Controls (J/K/L)
+      // -----------------------------------------------------------------------
+
+      // J - Reverse
+      if (key.toLowerCase() === 'j' && !ctrl && !shiftKey) {
         e.preventDefault();
-        togglePlayback();
+        if (shuttleIndexRef.current > 0) {
+          shuttleIndexRef.current--;
+          const speed = SHUTTLE_SPEEDS[shuttleIndexRef.current];
+          if (speed === 0) {
+            pause();
+            setPlaybackRate(1);
+          } else {
+            play();
+            setPlaybackRate(speed);
+          }
+        }
         return;
       }
 
-      // Frame step with arrow keys
+      // K - Stop
+      if (key.toLowerCase() === 'k' && !ctrl && !shiftKey) {
+        e.preventDefault();
+        shuttleIndexRef.current = STOP_INDEX;
+        pause();
+        setPlaybackRate(1);
+        return;
+      }
+
+      // L - Forward
+      if (key.toLowerCase() === 'l' && !ctrl && !shiftKey) {
+        e.preventDefault();
+        if (shuttleIndexRef.current < SHUTTLE_SPEEDS.length - 1) {
+          shuttleIndexRef.current++;
+          const speed = SHUTTLE_SPEEDS[shuttleIndexRef.current];
+          if (speed === 0) {
+            pause();
+            setPlaybackRate(1);
+          } else {
+            play();
+            setPlaybackRate(speed);
+          }
+        }
+        return;
+      }
+
+      // Space - Toggle
+      if (key === ' ' && !ctrl && !shiftKey) {
+        e.preventDefault();
+        togglePlayback();
+        shuttleIndexRef.current = STOP_INDEX; // Reset shuttle on manual toggle
+        setPlaybackRate(1);
+        return;
+      }
+
+      // -----------------------------------------------------------------------
+      // Navigation
+      // -----------------------------------------------------------------------
+
       if (key === 'ArrowLeft' && !ctrl && !shiftKey) {
         e.preventDefault();
-        setCurrentTime(Math.max(0, currentTime - 1 / 30)); // Step back one frame (30fps)
+        // Exact frame calculation: 1/30 (assuming 30fps base, should ideally use project fps)
+        setCurrentTime(Math.max(0, currentTime - 0.033333));
         return;
       }
 
       if (key === 'ArrowRight' && !ctrl && !shiftKey) {
         e.preventDefault();
-        setCurrentTime(Math.min(duration, currentTime + 1 / 30)); // Step forward one frame
+        setCurrentTime(Math.min(duration, currentTime + 0.033333));
         return;
       }
 
-      // Jump to start/end
       if (key === 'Home') {
         e.preventDefault();
         setCurrentTime(0);
@@ -117,7 +189,10 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
         return;
       }
 
-      // Zoom shortcuts
+      // -----------------------------------------------------------------------
+      // View Controls
+      // -----------------------------------------------------------------------
+
       if ((key === '=' || key === '+') && ctrl) {
         e.preventDefault();
         zoomIn();
@@ -130,35 +205,31 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
         return;
       }
 
-      // Undo/Redo
-      if (key === 'z' && ctrl && !shiftKey) {
+      // -----------------------------------------------------------------------
+      // Edit Actions
+      // -----------------------------------------------------------------------
+
+      // Undo
+      if (key.toLowerCase() === 'z' && ctrl && !shiftKey) {
         e.preventDefault();
-        if (onUndo) {
-          onUndo();
-        } else if (isLoaded) {
-          void undo();
-        }
+        if (onUndo) onUndo();
+        else if (isLoaded) void undo();
         return;
       }
 
-      if ((key === 'z' && ctrl && shiftKey) || (key === 'y' && ctrl)) {
+      // Redo
+      if ((key.toLowerCase() === 'z' && ctrl && shiftKey) || (key.toLowerCase() === 'y' && ctrl)) {
         e.preventDefault();
-        if (onRedo) {
-          onRedo();
-        } else if (isLoaded) {
-          void redo();
-        }
+        if (onRedo) onRedo();
+        else if (isLoaded) void redo();
         return;
       }
 
       // Save
-      if (key === 's' && ctrl && !shiftKey) {
+      if (key.toLowerCase() === 's' && ctrl && !shiftKey) {
         e.preventDefault();
-        if (onSave) {
-          onSave();
-        } else if (isLoaded) {
-          void saveProject();
-        }
+        if (onSave) onSave();
+        else if (isLoaded) void saveProject();
         return;
       }
 
@@ -166,15 +237,13 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       if ((key === 'Delete' || key === 'Backspace') && !ctrl) {
         if (selectedClipIds.length > 0) {
           e.preventDefault();
-          if (onDeleteClips) {
-            onDeleteClips();
-          }
+          if (onDeleteClips) onDeleteClips();
         }
         return;
       }
 
-      // Split at playhead
-      if (key === 's' && !ctrl && !shiftKey) {
+      // Split (Blade)
+      if (key.toLowerCase() === 's' && !ctrl && !shiftKey) {
         if (selectedClipIds.length > 0 && onSplitAtPlayhead) {
           e.preventDefault();
           onSplitAtPlayhead();
@@ -182,7 +251,7 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
         return;
       }
 
-      // Escape to deselect
+      // Deselect
       if (key === 'Escape') {
         e.preventDefault();
         clearClipSelection();
@@ -190,11 +259,9 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       }
 
       // Export
-      if (key === 'e' && ctrl && shiftKey) {
+      if (key.toLowerCase() === 'e' && ctrl && shiftKey) {
         e.preventDefault();
-        if (onExport) {
-          onExport();
-        }
+        if (onExport) onExport();
         return;
       }
     },
@@ -204,6 +271,9 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       setCurrentTime,
       currentTime,
       duration,
+      setPlaybackRate,
+      play,
+      pause,
       zoomIn,
       zoomOut,
       selectedClipIds,
@@ -218,10 +288,9 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       redo,
       saveProject,
       isLoaded,
-    ]
+    ],
   );
 
-  // Register global listener
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
     return () => {
@@ -230,23 +299,26 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
   }, [handleKeyDown]);
 }
 
-// =============================================================================
-// Shortcut List (for documentation/help)
-// =============================================================================
-
-export const KEYBOARD_SHORTCUTS: { key: string; description: string }[] = [
-  { key: 'Space', description: 'Play/Pause' },
-  { key: 'Left Arrow', description: 'Step back one frame' },
-  { key: 'Right Arrow', description: 'Step forward one frame' },
-  { key: 'Home', description: 'Jump to start' },
-  { key: 'End', description: 'Jump to end' },
-  { key: 'Ctrl + Z', description: 'Undo' },
-  { key: 'Ctrl + Shift + Z', description: 'Redo' },
-  { key: 'Ctrl + S', description: 'Save project' },
-  { key: 'Ctrl + +', description: 'Zoom in' },
-  { key: 'Ctrl + -', description: 'Zoom out' },
-  { key: 'Delete', description: 'Delete selected clips' },
-  { key: 'S', description: 'Split clip at playhead' },
-  { key: 'Escape', description: 'Deselect all' },
-  { key: 'Ctrl + Shift + E', description: 'Export video' },
+export const KEYBOARD_SHORTCUTS = [
+  {
+    category: 'Transport',
+    shortcuts: [
+      { key: 'Space', description: 'Play/Pause' },
+      { key: 'J', description: 'Shuttle Reverse (Speed -1x, -2x, -4x...)' },
+      { key: 'K', description: 'Stop' },
+      { key: 'L', description: 'Shuttle Forward (Speed 1x, 2x, 4x...)' },
+      { key: 'Left', description: 'Previous Frame' },
+      { key: 'Right', description: 'Next Frame' },
+    ],
+  },
+  {
+    category: 'Editing',
+    shortcuts: [
+      { key: 'Ctrl+Z', description: 'Undo' },
+      { key: 'Ctrl+Shift+Z', description: 'Redo' },
+      { key: 'S', description: 'Split Clip' },
+      { key: 'Delete', description: 'Delete Selected' },
+      { key: 'Esc', description: 'Deselect All' },
+    ],
+  },
 ];

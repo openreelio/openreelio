@@ -16,6 +16,7 @@ import { useTimelineKeyboard } from '@/hooks/useTimelineKeyboard';
 import { useTimelineClipOperations } from '@/hooks/useTimelineClipOperations';
 import { useTimelineNavigation } from '@/hooks/useTimelineNavigation';
 import { useSelectionBox } from '@/hooks/useSelectionBox';
+import { useCaption } from '@/hooks/useCaption';
 import { TimeRuler } from './TimeRuler';
 import { Track } from './Track';
 import { CaptionTrack } from './CaptionTrack';
@@ -24,6 +25,7 @@ import { TimelineToolbar } from './TimelineToolbar';
 import { DragPreviewLayer } from './DragPreviewLayer';
 import { SnapIndicator, type SnapPoint } from './SnapIndicator';
 import { SelectionBox } from './SelectionBox';
+import { CaptionEditor } from '@/components/features/captions';
 import type { ClipWaveformConfig } from './Clip';
 import type { TimelineProps } from './types';
 import type { CaptionTrack as CaptionTrackType, Caption } from '@/types';
@@ -124,6 +126,17 @@ export function Timeline({
   const tracksAreaRef = useRef<HTMLDivElement>(null);
   const [activeSnapPoint, setActiveSnapPoint] = useState<SnapPoint | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
+
+  // Caption editing state
+  const [editingCaption, setEditingCaption] = useState<{
+    caption: Caption;
+    trackId: string;
+  } | null>(null);
+
+  // ===========================================================================
+  // Caption Hook
+  // ===========================================================================
+  const { updateCaption, deleteCaption } = useCaption();
 
   // ===========================================================================
   // Viewport Width Measurement (for clip virtualization)
@@ -353,6 +366,81 @@ export function Timeline({
   );
 
   // ===========================================================================
+  // Caption Editing Handlers
+  // ===========================================================================
+
+  /**
+   * Handler for caption double-click to open the editor
+   */
+  const handleCaptionDoubleClick = useCallback(
+    (captionId: string, trackId: string) => {
+      // Find the caption in the track
+      const track = sequence?.tracks.find((t) => t.id === trackId);
+      if (!track || track.kind !== 'caption') return;
+
+      const clip = track.clips.find((c) => c.id === captionId);
+      if (!clip) return;
+
+      // Convert clip to Caption format
+      const caption: Caption = {
+        id: clip.id,
+        startSec: clip.place.timelineInSec,
+        endSec:
+          clip.place.timelineInSec +
+          (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed,
+        text: clip.label || '',
+        speaker: undefined,
+      };
+
+      setEditingCaption({ caption, trackId });
+    },
+    [sequence],
+  );
+
+  /**
+   * Handler for saving caption edits
+   */
+  const handleCaptionSave = useCallback(
+    async (updatedCaption: Caption) => {
+      if (!editingCaption) return;
+
+      await updateCaption(editingCaption.trackId, updatedCaption);
+      setEditingCaption(null);
+    },
+    [editingCaption, updateCaption],
+  );
+
+  /**
+   * Handler for cancelling caption edit
+   */
+  const handleCaptionEditCancel = useCallback(() => {
+    setEditingCaption(null);
+  }, []);
+
+  /**
+   * Handler for deleting a caption
+   */
+  const handleCaptionDelete = useCallback(
+    async (captionId: string) => {
+      if (!editingCaption) return;
+
+      await deleteCaption(editingCaption.trackId, captionId);
+      setEditingCaption(null);
+    },
+    [editingCaption, deleteCaption],
+  );
+
+  /**
+   * Create a caption double-click handler for a specific track
+   */
+  const createCaptionDoubleClickHandler = useCallback(
+    (trackId: string) => (captionId: string) => {
+      handleCaptionDoubleClick(captionId, trackId);
+    },
+    [handleCaptionDoubleClick],
+  );
+
+  // ===========================================================================
   // Render
   // ===========================================================================
   if (!sequence) {
@@ -410,7 +498,7 @@ export function Timeline({
                   onLockToggle={createTrackHandler(onTrackLockToggle)}
                   onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
                   onCaptionClick={handleClipClick} // Use same handler as clips
-                  // onCaptionDoubleClick={...} // Could add double click handler to focus inspector
+                  onCaptionDoubleClick={createCaptionDoubleClickHandler(track.id)}
                 />
               );
             }
@@ -466,6 +554,17 @@ export function Timeline({
         )}
         <SelectionBox rect={selectionRect} isActive={isSelecting} />
       </div>
+
+      {/* Caption Editor Modal */}
+      {editingCaption && (
+        <CaptionEditor
+          caption={editingCaption.caption}
+          isOpen={true}
+          onSave={handleCaptionSave}
+          onCancel={handleCaptionEditCancel}
+          onDelete={handleCaptionDelete}
+        />
+      )}
     </div>
   );
 }
