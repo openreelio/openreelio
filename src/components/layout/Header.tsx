@@ -67,9 +67,13 @@ export function Header({
   // Keyboard shortcuts (Ctrl/Cmd + K for search, Ctrl/Cmd + , for settings, ? for shortcuts)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      // Skip if in input element
+      // Skip all shortcuts if in input element to avoid disrupting user input
       const target = e.target as HTMLElement;
       const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+
+      if (isInput) {
+        return;
+      }
 
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
         e.preventDefault();
@@ -80,7 +84,7 @@ export function Header({
         setShowSettings(true);
       }
       // "?" key for shortcuts (Shift + /)
-      if (e.key === '?' && !isInput) {
+      if (e.key === '?') {
         e.preventDefault();
         setShowShortcuts(true);
       }

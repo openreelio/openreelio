@@ -319,7 +319,7 @@ impl JobProcessor {
         Ok(())
     }
 
-    fn validate_input_file_path(&self, path: &str, label: &str) -> Result<PathBuf, String> {
+    async fn validate_input_file_path(&self, path: &str, label: &str) -> Result<PathBuf, String> {
         let trimmed = path.trim();
         if trimmed.is_empty() {
             return Err(format!("{label} is empty"));
@@ -335,7 +335,9 @@ impl JobProcessor {
             return Err(format!("{label} must be an absolute path: {}", pb.display()));
         }
 
-        let meta = std::fs::metadata(&pb)
+        // Use async metadata to avoid blocking the async runtime
+        let meta = tokio::fs::metadata(&pb)
+            .await
             .map_err(|_| format!("{label} file not found: {}", pb.display()))?;
         if !meta.is_file() {
             return Err(format!("{label} is not a file: {}", pb.display()));
@@ -411,7 +413,7 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing inputPath in payload")?;
 
-        let input_path = self.validate_input_file_path(input_path, "inputPath")?;
+        let input_path = self.validate_input_file_path(input_path, "inputPath").await?;
 
         let width = job
             .payload
@@ -474,7 +476,7 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing inputPath in payload")?;
 
-        let input_path = self.validate_input_file_path(input_path, "inputPath")?;
+        let input_path = self.validate_input_file_path(input_path, "inputPath").await?;
 
         // Emit generating event
         let _ = self.app_handle.emit(
@@ -597,7 +599,7 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing inputPath in payload")?;
 
-        let input_path = self.validate_input_file_path(input_path, "inputPath")?;
+        let input_path = self.validate_input_file_path(input_path, "inputPath").await?;
 
         let samples_per_second = job
             .payload
@@ -696,7 +698,7 @@ impl JobProcessor {
         let options = job.payload.get("options");
 
         let input_path = if let Some(path) = job.payload.get("inputPath").and_then(|v| v.as_str()) {
-            self.validate_input_file_path(path, "inputPath")?
+            self.validate_input_file_path(path, "inputPath").await?
                 .to_string_lossy()
                 .to_string()
         } else {

@@ -83,15 +83,11 @@ export function ProjectExplorer() {
         }
 
         // Convert thumbnail path to Tauri asset protocol URL
+        // Backend now returns raw file paths for local assets
         let thumbnail: string | undefined;
         if (asset.thumbnailUrl) {
-          // Handle various URL formats
           if (asset.thumbnailUrl.startsWith('http://') || asset.thumbnailUrl.startsWith('https://')) {
             thumbnail = asset.thumbnailUrl;
-          } else if (asset.thumbnailUrl.startsWith('asset://')) {
-            // Already in asset protocol format - extract path and re-convert
-            const pathMatch = asset.thumbnailUrl.match(/^asset:\/\/localhost\/(.+)$/);
-            thumbnail = pathMatch ? convertFileSrc(pathMatch[1]) : asset.thumbnailUrl;
           } else {
             // Raw file path - convert to Tauri asset protocol
             thumbnail = convertFileSrc(asset.thumbnailUrl);
