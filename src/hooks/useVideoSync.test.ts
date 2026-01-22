@@ -69,6 +69,7 @@ const createMockAsset = (overrides: Partial<Asset> = {}): Asset => ({
     allowedUse: [],
   },
   tags: [],
+  proxyStatus: 'notNeeded',
   ...overrides,
 });
 

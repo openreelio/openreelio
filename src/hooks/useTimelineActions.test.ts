@@ -107,6 +107,7 @@ function createMockAsset(overrides: Partial<Asset> = {}): Asset {
     durationSec: 60,
     thumbnailUrl: undefined,
     proxyUrl: undefined,
+    proxyStatus: 'notNeeded',
     license: {
       source: 'user',
       licenseType: 'unknown',
