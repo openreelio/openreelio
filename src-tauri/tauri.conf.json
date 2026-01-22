@@ -36,7 +36,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob:; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline';",
+      "csp": "default-src 'self' data: blob:; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';",
       "assetProtocol": {
         "enable": true,
         "scope": ["**"]
