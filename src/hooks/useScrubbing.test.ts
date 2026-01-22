@@ -77,7 +77,55 @@ describe('useScrubbing', () => {
   });
 
   describe('handleScrubStart', () => {
-    it('should not start scrubbing when clicking on non-track elements', () => {
+    it('should not start scrubbing when clicking on clips', () => {
+      const options = createDefaultOptions();
+      const { result } = renderHook(() => useScrubbing(options));
+
+      // Create a clip element
+      const clip = document.createElement('div');
+      clip.setAttribute('data-testid', 'clip-123');
+      const event = createMockMouseEvent(clip);
+
+      act(() => {
+        result.current.handleScrubStart(event);
+      });
+
+      expect(result.current.isScrubbing).toBe(false);
+      expect(options.seek).not.toHaveBeenCalled();
+    });
+
+    it('should not start scrubbing when clicking on buttons', () => {
+      const options = createDefaultOptions();
+      const { result } = renderHook(() => useScrubbing(options));
+
+      const button = document.createElement('button');
+      const event = createMockMouseEvent(button);
+
+      act(() => {
+        result.current.handleScrubStart(event);
+      });
+
+      expect(result.current.isScrubbing).toBe(false);
+      expect(options.seek).not.toHaveBeenCalled();
+    });
+
+    it('should not start scrubbing when clicking on track-header', () => {
+      const options = createDefaultOptions();
+      const { result } = renderHook(() => useScrubbing(options));
+
+      const trackHeader = document.createElement('div');
+      trackHeader.setAttribute('data-testid', 'track-header');
+      const event = createMockMouseEvent(trackHeader);
+
+      act(() => {
+        result.current.handleScrubStart(event);
+      });
+
+      expect(result.current.isScrubbing).toBe(false);
+      expect(options.seek).not.toHaveBeenCalled();
+    });
+
+    it('should start scrubbing when clicking on non-interactive elements', () => {
       const options = createDefaultOptions();
       const { result } = renderHook(() => useScrubbing(options));
 
@@ -89,8 +137,8 @@ describe('useScrubbing', () => {
         result.current.handleScrubStart(event);
       });
 
-      expect(result.current.isScrubbing).toBe(false);
-      expect(options.seek).not.toHaveBeenCalled();
+      expect(result.current.isScrubbing).toBe(true);
+      expect(options.seek).toHaveBeenCalledWith(5);
     });
 
     it('should start scrubbing when clicking on timeline-tracks-area', () => {
