@@ -140,23 +140,32 @@ export function ProxyPreviewPlayer({
 
     if (!url) return null;
 
+    // Already a valid HTTP/HTTPS URL
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+
+    // Already converted to Tauri asset protocol (starts with asset://)
+    // Note: This should rarely happen as backend now sends raw paths
+    if (url.startsWith('asset://')) {
+      // Try to extract the path and re-convert properly
+      // Format might be: asset://localhost/C:/path/to/file
+      const pathMatch = url.match(/^asset:\/\/localhost\/(.+)$/);
+      if (pathMatch) {
+        return convertFileSrc(pathMatch[1]);
+      }
+      return url;
+    }
+
     // Convert file:// URL to Tauri asset protocol
     if (url.startsWith('file://')) {
       const path = url.replace('file://', '');
       return convertFileSrc(path);
     }
 
-    // Handle asset:// protocol (already converted)
-    if (url.startsWith('asset://')) {
-      return url;
-    }
-
-    // Handle regular paths
-    if (url.startsWith('/') || url.match(/^[A-Za-z]:\\/)) {
-      return convertFileSrc(url);
-    }
-
-    return url;
+    // Handle all other paths (Windows: C:\path, Unix: /path)
+    // convertFileSrc handles both formats correctly
+    return convertFileSrc(url);
   }, []);
 
   // Sync video elements to timeline position
