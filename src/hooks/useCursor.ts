@@ -56,10 +56,10 @@ export interface UseCursorReturn {
 
 export function useCursor(): UseCursorReturn {
   const setCursor = useCallback((type: CursorType) => {
-    // Remove all cursor classes
-    document.body.className = document.body.className
-      .replace(/cursor-[\w-]+/g, '')
-      .trim();
+    // Remove only cursor classes managed by this hook
+    Object.values(cursorMap).forEach((cls) => {
+      document.body.classList.remove(cls);
+    });
 
     // Add new cursor class
     document.body.classList.add(cursorMap[type]);

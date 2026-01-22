@@ -85,6 +85,8 @@ describe('useKeyboardShortcuts', () => {
   const mockSetPlaybackRate = vi.fn();
   const mockPlay = vi.fn();
   const mockPause = vi.fn();
+  const mockStepForward = vi.fn();
+  const mockStepBackward = vi.fn();
   const mockZoomIn = vi.fn();
   const mockZoomOut = vi.fn();
   const mockClearClipSelection = vi.fn();
@@ -101,6 +103,8 @@ describe('useKeyboardShortcuts', () => {
     play: mockPlay,
     pause: mockPause,
     isPlaying: false,
+    stepForward: mockStepForward,
+    stepBackward: mockStepBackward,
   };
 
   const defaultTimelineStore = {
@@ -150,10 +154,8 @@ describe('useKeyboardShortcuts', () => {
         window.dispatchEvent(createKeyboardEvent('ArrowLeft'));
       });
 
-      // Should step back 1/30 second (one frame at 30fps)
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(
-        expect.closeTo(5 - 1 / 30, 5)
-      );
+      // Should call stepBackward with target FPS (30)
+      expect(mockStepBackward).toHaveBeenCalledWith(30);
     });
 
     it('should step forward one frame on Right Arrow', () => {
@@ -163,43 +165,32 @@ describe('useKeyboardShortcuts', () => {
         window.dispatchEvent(createKeyboardEvent('ArrowRight'));
       });
 
-      // Should step forward 1/30 second (one frame at 30fps)
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(
-        expect.closeTo(5 + 1 / 30, 5)
-      );
+      // Should call stepForward with target FPS (30)
+      expect(mockStepForward).toHaveBeenCalledWith(30);
     });
 
     it('should not go below 0 when stepping back', () => {
-      vi.mocked(usePlaybackStore).mockReturnValue({
-        ...defaultPlaybackStore,
-        currentTime: 0,
-      });
-
+      // stepBackward handles boundary checks internally
       renderHook(() => useKeyboardShortcuts());
 
       act(() => {
         window.dispatchEvent(createKeyboardEvent('ArrowLeft'));
       });
 
-      // Max(0, 0 - 1/30)
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(0);
+      // stepBackward is called regardless - it handles the 0 boundary internally
+      expect(mockStepBackward).toHaveBeenCalledWith(30);
     });
 
     it('should not exceed duration when stepping forward', () => {
-      vi.mocked(usePlaybackStore).mockReturnValue({
-        ...defaultPlaybackStore,
-        currentTime: 60,
-        duration: 60,
-      });
-
+      // stepForward handles boundary checks internally
       renderHook(() => useKeyboardShortcuts());
 
       act(() => {
         window.dispatchEvent(createKeyboardEvent('ArrowRight'));
       });
 
-      // Min(60, 60 + 1/30)
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(60);
+      // stepForward is called regardless - it handles the duration boundary internally
+      expect(mockStepForward).toHaveBeenCalledWith(30);
     });
 
     it('should jump to start on Home key', () => {

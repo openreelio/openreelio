@@ -1461,18 +1461,19 @@ pub async fn apply_edit_script(
         .clone()
         .ok_or_else(|| "No active sequence".to_string())?;
 
+    // Helper for time validation (defined once, used in loop)
+    let validate_time_sec = |field: &str, value: f64| -> Result<(), String> {
+        if value.is_finite() && value >= 0.0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "Invalid {field}: must be a finite, non-negative number"
+            ))
+        }
+    };
+
     // Execute each command in order
     for cmd in &edit_script.commands {
-        let validate_time_sec = |field: &str, value: f64| -> Result<(), String> {
-            if value.is_finite() && value >= 0.0 {
-                Ok(())
-            } else {
-                Err(format!(
-                    "Invalid {field}: must be a finite, non-negative number"
-                ))
-            }
-        };
-
         let mut payload = cmd.params.clone();
         let Some(obj) = payload.as_object_mut() else {
             errors.push(format!(

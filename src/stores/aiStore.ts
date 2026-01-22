@@ -332,10 +332,11 @@ export const useAIStore = create<AIState>()(
             const primaryErrorMessage = error instanceof Error ? error.message : String(error);
             const fallbackErrorMessage =
               fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+            const combinedErrorMessage = `AI generation failed: ${primaryErrorMessage}; fallback failed: ${fallbackErrorMessage}`;
 
             set((state) => {
               state.isGenerating = false;
-              state.error = `AI generation failed: ${primaryErrorMessage}; fallback failed: ${fallbackErrorMessage}`;
+              state.error = combinedErrorMessage;
             });
 
             logger.error('AI generation and fallback both failed', {
@@ -345,10 +346,10 @@ export const useAIStore = create<AIState>()(
 
             get().addChatMessage(
               'assistant',
-              `I encountered an error: ${primaryErrorMessage}`
+              `I encountered an error: ${combinedErrorMessage}`
             );
 
-            throw error;
+            throw new Error(combinedErrorMessage);
           }
         }
       },

@@ -9,6 +9,7 @@ import { useEffect, useCallback, useRef } from 'react';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores/projectStore';
+import { PLAYBACK } from '@/constants/preview';
 
 // =============================================================================
 // Types
@@ -77,12 +78,13 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
   const {
     togglePlayback,
     setCurrentTime,
-    currentTime,
     duration,
     setPlaybackRate,
     play,
     pause,
     isPlaying, // This triggers re-runs if we use it in dependency array
+    stepForward,
+    stepBackward,
   } = usePlaybackStore();
 
   const { zoomIn, zoomOut, selectedClipIds, clearClipSelection } = useTimelineStore();
@@ -166,14 +168,13 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
 
       if (key === 'ArrowLeft' && !ctrl && !shiftKey) {
         e.preventDefault();
-        // Exact frame calculation: 1/30 (assuming 30fps base, should ideally use project fps)
-        setCurrentTime(Math.max(0, currentTime - 0.033333));
+        stepBackward(PLAYBACK.TARGET_FPS);
         return;
       }
 
       if (key === 'ArrowRight' && !ctrl && !shiftKey) {
         e.preventDefault();
-        setCurrentTime(Math.min(duration, currentTime + 0.033333));
+        stepForward(PLAYBACK.TARGET_FPS);
         return;
       }
 
@@ -269,11 +270,12 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       enabled,
       togglePlayback,
       setCurrentTime,
-      currentTime,
       duration,
       setPlaybackRate,
       play,
       pause,
+      stepForward,
+      stepBackward,
       zoomIn,
       zoomOut,
       selectedClipIds,
