@@ -221,3 +221,32 @@ export type {
   PreviewModeResult,
   UsePreviewModeOptions,
 } from './usePreviewMode';
+
+export { useAISettings } from './useAISettings';
+export type {
+  AISettingsState,
+} from './useAISettings';
+
+export { useTranscriptionWithIndexing } from './useTranscriptionWithIndexing';
+export type {
+  UseTranscriptionWithIndexingOptions,
+  UseTranscriptionWithIndexingReturn,
+} from './useTranscriptionWithIndexing';
+
+export { useCaption } from './useCaption';
+export type {
+  CreateCaptionParams,
+  UseCaptionResult,
+} from './useCaption';
+
+export { useCursor, getClipCursor, getTimelineCursor } from './useCursor';
+export type {
+  CursorType,
+  UseCursorReturn,
+} from './useCursor';
+
+export { useContextMenu, handleContextMenuEvent } from './useContextMenu';
+export type {
+  ContextMenuState,
+  UseContextMenuReturn,
+} from './useContextMenu';

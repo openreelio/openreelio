@@ -18,3 +18,24 @@ export type {
   WaveformCacheState,
   WaveformCacheActions,
 } from './waveformCacheStore';
+
+export {
+  useAIStore,
+  setupAIEventListeners,
+  cleanupAIEventListeners,
+  selectIsAIReady,
+  selectProviderType,
+  selectHasPendingProposal,
+} from './aiStore';
+export type {
+  ProviderType,
+  ProviderStatus,
+  ProviderConfig,
+  EditCommand,
+  RiskAssessment,
+  EditScript,
+  ProposalStatus,
+  AIProposal,
+  ChatMessage,
+  AIContext,
+} from './aiStore';
