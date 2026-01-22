@@ -12,6 +12,7 @@ use crate::core::{
     commands::{
         CreateSequenceCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand,
         RemoveAssetCommand, RemoveClipCommand, SplitClipCommand, TrimClipCommand,
+        UpdateAssetCommand,
     },
     ffmpeg::FFmpegProgress,
     jobs::{Job, JobStatus, JobType, Priority},
@@ -140,38 +141,112 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<ProjectStat
 // =============================================================================
 
 /// Imports an asset into the project
+///
+/// Automatically queues proxy generation job for video assets > 720p.
+/// Returns the job_id if a proxy job was queued.
 #[tauri::command]
 pub async fn import_asset(
     uri: String,
     state: State<'_, AppState>,
 ) -> Result<AssetImportResult, String> {
-    let mut guard = state.project.lock().await;
+    use crate::core::assets::{requires_proxy, ProxyStatus};
 
-    let project = guard
-        .as_mut()
-        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+    // Phase 1: Import asset (holds project lock)
+    let (asset_id, name, op_id, needs_proxy) = {
+        let mut guard = state.project.lock().await;
+        let project = guard
+            .as_mut()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    // Create import command
-    let path = std::path::Path::new(&uri);
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "Unknown".to_string());
+        // Create import command
+        let path = std::path::Path::new(&uri);
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Unknown".to_string());
 
-    let command = ImportAssetCommand::new(&name, &uri);
-    let asset_id = command.asset_id().to_string();
+        let command = ImportAssetCommand::new(&name, &uri);
+        let asset_id = command.asset_id().to_string();
 
-    // Execute command
-    let result = project
-        .executor
-        .execute(Box::new(command), &mut project.state)
-        .map_err(|e| e.to_ipc_error())?;
+        // Execute command
+        let result = project
+            .executor
+            .execute(Box::new(command), &mut project.state)
+            .map_err(|e| e.to_ipc_error())?;
+
+        // Check if proxy generation is needed
+        let needs_proxy = project
+            .state
+            .assets
+            .get(&asset_id)
+            .map(|asset| requires_proxy(&asset.kind, asset.video.as_ref()))
+            .unwrap_or(false);
+
+        (asset_id, name, result.op_id, needs_proxy)
+    }; // project lock released here
+
+    // Phase 2: Queue proxy job if needed (separate lock scope)
+    let job_id = if needs_proxy {
+        let proxy_job = Job::new(
+            JobType::ProxyGeneration,
+            serde_json::json!({
+                "assetId": asset_id,
+                "inputPath": uri,
+            }),
+        )
+        .with_priority(Priority::Normal);
+
+        let submitted_job_id = proxy_job.id.clone();
+
+        // Submit to worker pool (holds job_pool lock briefly)
+        let submit_result = {
+            let pool = state.job_pool.lock().await;
+            pool.submit(proxy_job)
+        };
+
+        match submit_result {
+            Ok(_) => {
+                tracing::info!(
+                    "Queued proxy generation job for asset {} ({})",
+                    asset_id,
+                    name
+                );
+
+                // Phase 3: Update asset status (re-acquire project lock briefly)
+                {
+                    let mut guard = state.project.lock().await;
+                    if let Some(project) = guard.as_mut() {
+                        let cmd = UpdateAssetCommand::new(&asset_id)
+                            .with_proxy_status(ProxyStatus::Pending);
+                        if let Err(e) = project
+                            .executor
+                            .execute_without_history(Box::new(cmd), &mut project.state)
+                        {
+                            tracing::warn!(
+                                "Failed to persist asset {} proxy status update: {}",
+                                asset_id,
+                                e
+                            );
+                        }
+                    }
+                }
+
+                Some(submitted_job_id)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to queue proxy job for asset {}: {}", asset_id, e);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     Ok(AssetImportResult {
         asset_id,
         name,
-        op_id: result.op_id,
-        job_id: None, // TODO: Add job for proxy generation
+        op_id,
+        job_id,
     })
 }
 
@@ -246,8 +321,17 @@ pub async fn generate_asset_thumbnail(
                 let mut guard = state.project.lock().await;
 
                 if let Some(project) = guard.as_mut() {
-                    if let Some(asset) = project.state.assets.get_mut(&asset_id) {
-                        asset.set_thumbnail_url(Some(url.to_string()));
+                    let cmd = UpdateAssetCommand::new(&asset_id)
+                        .with_thumbnail_url(Some(url.to_string()));
+                    if let Err(e) = project
+                        .executor
+                        .execute_without_history(Box::new(cmd), &mut project.state)
+                    {
+                        tracing::warn!(
+                            "Failed to persist thumbnail URL for asset {}: {}",
+                            asset_id,
+                            e
+                        );
                     }
                 }
             }
@@ -343,8 +427,14 @@ pub async fn generate_proxy_for_asset(
                 let mut guard = state.project.lock().await;
 
                 if let Some(project) = guard.as_mut() {
-                    if let Some(asset) = project.state.assets.get_mut(&asset_id) {
-                        asset.set_proxy_url(Some(proxy_url.clone()));
+                    let cmd = UpdateAssetCommand::new(&asset_id)
+                        .with_proxy_status(crate::core::assets::ProxyStatus::Ready)
+                        .with_proxy_url(Some(proxy_url.clone()));
+                    if let Err(e) = project
+                        .executor
+                        .execute_without_history(Box::new(cmd), &mut project.state)
+                    {
+                        tracing::warn!("Failed to persist proxy URL for asset {}: {}", asset_id, e);
                     }
                 }
             }
@@ -375,6 +465,195 @@ pub async fn generate_proxy_for_asset(
             );
 
             Err(format!("Proxy generation failed: {}", e))
+        }
+    }
+}
+
+/// Updates the proxy status and URL for an asset
+///
+/// Called by the frontend when receiving `asset:proxy-ready` or `asset:proxy-failed` events.
+#[tauri::command]
+pub async fn update_asset_proxy(
+    asset_id: String,
+    proxy_url: Option<String>,
+    proxy_status: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    use crate::core::assets::ProxyStatus;
+
+    let mut guard = state.project.lock().await;
+
+    let project = guard
+        .as_mut()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    // Parse the proxy status string
+    let status = match proxy_status.as_str() {
+        "notNeeded" => ProxyStatus::NotNeeded,
+        "pending" => ProxyStatus::Pending,
+        "generating" => ProxyStatus::Generating,
+        "ready" => ProxyStatus::Ready,
+        "failed" => ProxyStatus::Failed,
+        _ => return Err(format!("Invalid proxy status: {}", proxy_status)),
+    };
+
+    let mut cmd = UpdateAssetCommand::new(&asset_id).with_proxy_status(status);
+    if let Some(url) = proxy_url {
+        cmd = cmd.with_proxy_url(Some(url));
+    }
+
+    project
+        .executor
+        .execute_without_history(Box::new(cmd), &mut project.state)
+        .map_err(|e| e.to_ipc_error())?;
+
+    tracing::info!(
+        "Updated asset {} proxy status to {}",
+        asset_id,
+        proxy_status
+    );
+
+    Ok(())
+}
+
+/// Gets waveform peak data for an asset.
+///
+/// Returns normalized peak values (0.0 - 1.0) for audio visualization.
+/// Returns None if waveform has not been generated yet.
+#[tauri::command]
+pub async fn get_waveform_data(
+    asset_id: String,
+    state: State<'_, AppState>,
+) -> Result<Option<crate::core::ffmpeg::WaveformData>, String> {
+    // Get project path
+    let project_path = {
+        let guard = state.project.lock().await;
+
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        project.path.clone()
+    };
+
+    // Check cache directory for waveform JSON
+    let waveform_path = project_path
+        .join(".openreelio")
+        .join("cache")
+        .join("waveforms")
+        .join(format!("{}.json", asset_id));
+
+    if !waveform_path.exists() {
+        return Ok(None);
+    }
+
+    // Read and parse waveform JSON
+    let json = tokio::fs::read_to_string(&waveform_path)
+        .await
+        .map_err(|e| format!("Failed to read waveform file: {}", e))?;
+
+    let waveform: crate::core::ffmpeg::WaveformData =
+        serde_json::from_str(&json).map_err(|e| format!("Failed to parse waveform JSON: {}", e))?;
+
+    Ok(Some(waveform))
+}
+
+/// Generates waveform peak data for an asset.
+///
+/// Extracts audio peaks from the asset and saves as JSON.
+/// Emits `waveform-complete` event on success, `waveform-error` on failure.
+#[tauri::command]
+pub async fn generate_waveform_for_asset(
+    asset_id: String,
+    samples_per_second: Option<u32>,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+    app_handle: tauri::AppHandle,
+) -> Result<Option<crate::core::ffmpeg::WaveformData>, String> {
+    use tauri::Emitter;
+
+    // Get asset info from state
+    let (asset_path, project_path) = {
+        let guard = state.project.lock().await;
+
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        let asset = project
+            .state
+            .assets
+            .get(&asset_id)
+            .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
+
+        (asset.uri.clone(), project.path.clone())
+    };
+
+    // Get FFmpeg runner
+    let ffmpeg_guard = ffmpeg_state.read().await;
+    let ffmpeg = ffmpeg_guard
+        .runner()
+        .ok_or_else(|| "FFmpeg not initialized".to_string())?;
+
+    // Create waveform cache directory
+    let cache_dir = project_path
+        .join(".openreelio")
+        .join("cache")
+        .join("waveforms");
+    std::fs::create_dir_all(&cache_dir)
+        .map_err(|e| format!("Failed to create waveform cache directory: {}", e))?;
+
+    // Output path for waveform JSON
+    let waveform_path = cache_dir.join(format!("{}.json", asset_id));
+    let input_path = std::path::Path::new(&asset_path);
+    let sps = samples_per_second.unwrap_or(100);
+
+    // Emit generating event
+    let _ = app_handle.emit(
+        "waveform-generating",
+        serde_json::json!({
+            "assetId": asset_id,
+        }),
+    );
+
+    // Generate waveform
+    match ffmpeg
+        .generate_waveform_json(input_path, &waveform_path, sps)
+        .await
+    {
+        Ok(waveform) => {
+            tracing::info!(
+                "Generated waveform for asset {}: {:?}",
+                asset_id,
+                waveform_path
+            );
+
+            // Emit completion event
+            let _ = app_handle.emit(
+                "waveform-complete",
+                serde_json::json!({
+                    "assetId": asset_id,
+                    "samplesPerSecond": waveform.samples_per_second,
+                    "peakCount": waveform.peaks.len(),
+                    "durationSec": waveform.duration_sec,
+                }),
+            );
+
+            Ok(Some(waveform))
+        }
+        Err(e) => {
+            tracing::warn!("Failed to generate waveform for {}: {}", asset_id, e);
+
+            // Emit error event
+            let _ = app_handle.emit(
+                "waveform-error",
+                serde_json::json!({
+                    "assetId": asset_id,
+                    "error": e.to_string(),
+                }),
+            );
+
+            Err(format!("Waveform generation failed: {}", e))
         }
     }
 }
@@ -2494,6 +2773,9 @@ pub fn get_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'st
         remove_asset,
         generate_asset_thumbnail,
         generate_proxy_for_asset,
+        update_asset_proxy,
+        get_waveform_data,
+        generate_waveform_for_asset,
         // Timeline
         get_sequences,
         create_sequence,

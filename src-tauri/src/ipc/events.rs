@@ -26,6 +26,8 @@ pub mod event_names {
     pub const PROJECT_SAVED: &str = "project:saved";
     /// Asset added event
     pub const ASSET_ADDED: &str = "asset:added";
+    /// Asset modified event
+    pub const ASSET_MODIFIED: &str = "asset:modified";
     /// Asset removed event
     pub const ASSET_REMOVED: &str = "asset:removed";
     /// Clip created event
@@ -330,6 +332,13 @@ impl EventEmitter {
                     };
                     app.emit(event_names::ASSET_ADDED, &event)
                         .map_err(|e| format!("Failed to emit asset added event: {}", e))?;
+                }
+                StateChange::AssetModified { asset_id } => {
+                    let event = AssetEvent {
+                        asset_id: asset_id.clone(),
+                    };
+                    app.emit(event_names::ASSET_MODIFIED, &event)
+                        .map_err(|e| format!("Failed to emit asset modified event: {}", e))?;
                 }
                 StateChange::AssetRemoved { asset_id } => {
                     let event = AssetEvent {

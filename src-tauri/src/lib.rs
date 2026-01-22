@@ -13,7 +13,10 @@ pub mod core;
 pub mod ipc;
 
 use std::path::PathBuf;
-use tokio::sync::Mutex;
+use std::sync::Arc;
+
+use tauri::Manager;
+use tokio::sync::{Mutex, Notify};
 
 use crate::core::{
     commands::CommandExecutor,
@@ -104,7 +107,16 @@ impl ActiveProject {
         // Load state from snapshot + replay ops, or from ops log alone
         let ops_log = OpsLog::new(&ops_path);
         let state = if Snapshot::exists(&snapshot_path) {
-            Snapshot::load_with_replay(&snapshot_path, &ops_log)?
+            match Snapshot::load_with_replay(&snapshot_path, &ops_log) {
+                Ok(state) => state,
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to load snapshot ({}). Rebuilding state from ops log.",
+                        e
+                    );
+                    ProjectState::from_ops_log(&ops_log, meta.clone())?
+                }
+            }
         } else {
             ProjectState::from_ops_log(&ops_log, meta)?
         };
@@ -204,6 +216,7 @@ macro_rules! collect_commands {
             $crate::ipc::remove_asset,
             $crate::ipc::generate_asset_thumbnail,
             $crate::ipc::generate_proxy_for_asset,
+            $crate::ipc::update_asset_proxy,
             // Timeline commands
             $crate::ipc::get_sequences,
             $crate::ipc::create_sequence,
@@ -298,6 +311,57 @@ pub fn run() {
                 }
             });
 
+            // Start background worker pool
+            let ffmpeg_for_workers = ffmpeg_state.clone();
+            let app_handle_for_workers = app.handle().clone();
+            let shutdown = Arc::new(Notify::new());
+
+            // Get cache directory for job outputs
+            let cache_dir = app
+                .path()
+                .app_cache_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from(".cache"));
+
+            // Start workers after FFmpeg initialization
+            // We need to access the WorkerPool's Arc references before spawning
+            let app_state: tauri::State<'_, AppState> = app.state();
+            let job_queue = {
+                // Use blocking to get the Arc references from WorkerPool
+                // This is safe during setup since we're not in an async context yet
+                let pool_guard =
+                    tauri::async_runtime::block_on(async { app_state.job_pool.lock().await });
+                (
+                    Arc::clone(&pool_guard.queue),
+                    Arc::clone(&pool_guard.active_jobs),
+                    pool_guard.num_workers(),
+                )
+            };
+
+            let (queue_arc, active_jobs_arc, num_workers) = job_queue;
+            let shutdown_clone = Arc::clone(&shutdown);
+
+            // Spawn workers using the cloned Arc references
+            tauri::async_runtime::spawn(async move {
+                // Wait for FFmpeg to initialize
+                tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+
+                // Start worker tasks that consume from the queue
+                crate::core::jobs::start_workers_with_arcs(
+                    queue_arc,
+                    active_jobs_arc,
+                    num_workers,
+                    ffmpeg_for_workers,
+                    app_handle_for_workers,
+                    cache_dir,
+                    shutdown_clone,
+                );
+
+                tracing::info!(
+                    "Started {} background workers for job processing",
+                    num_workers
+                );
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -314,6 +378,7 @@ pub fn run() {
             ipc::remove_asset,
             ipc::generate_asset_thumbnail,
             ipc::generate_proxy_for_asset,
+            ipc::update_asset_proxy,
             // Timeline commands
             ipc::get_sequences,
             ipc::create_sequence,
@@ -402,6 +467,23 @@ mod tests {
         drop(project);
 
         // Open the project
+        let opened = ActiveProject::open(project_path).unwrap();
+        assert_eq!(opened.state.meta.name, "Test Project");
+    }
+
+    #[test]
+    fn test_active_project_open_falls_back_when_snapshot_is_corrupted() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("test_project");
+
+        // Create project first
+        let project = ActiveProject::create("Test Project", project_path.clone()).unwrap();
+        drop(project);
+
+        // Corrupt the snapshot file
+        std::fs::write(project_path.join("snapshot.json"), "{not valid json").unwrap();
+
+        // Open should still succeed by replaying ops.jsonl
         let opened = ActiveProject::open(project_path).unwrap();
         assert_eq!(opened.state.meta.name, "Test Project");
     }
