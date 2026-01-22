@@ -1,0 +1,8 @@
+# Check version sync before commit
+npm run version:check
+
+# Run type checking
+npm run type-check
+
+# Run linter
+npm run lint
