@@ -9,6 +9,7 @@ use specta::Type;
 use tauri::{Manager, State};
 
 use crate::core::{
+    assets::{Asset, ProxyStatus},
     commands::{
         CreateSequenceCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand,
         RemoveAssetCommand, RemoveClipCommand, SplitClipCommand, TrimClipCommand,
@@ -18,9 +19,20 @@ use crate::core::{
     jobs::{Job, JobStatus, JobType, Priority},
     performance::memory::{CacheStats, PoolStats},
     settings::{AppSettings, SettingsManager},
+    timeline::Sequence,
     CoreError,
 };
 use crate::{ActiveProject, AppState};
+
+fn validate_path_id_component(id: &str, label: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err(format!("{label} is empty"));
+    }
+    if id.contains("..") || id.contains('/') || id.contains('\\') || id.contains(':') {
+        return Err(format!("Invalid {label}: contains path traversal characters"));
+    }
+    Ok(())
+}
 
 // =============================================================================
 // Project Commands
@@ -28,12 +40,47 @@ use crate::{ActiveProject, AppState};
 
 /// Creates a new project
 #[tauri::command]
+#[tracing::instrument(skip(state), fields(project_name = %name, project_path = %path))]
 pub async fn create_project(
     name: String,
     path: String,
     state: State<'_, AppState>,
 ) -> Result<ProjectInfo, String> {
-    let project_path = PathBuf::from(&path);
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Project path is empty".to_string());
+    }
+
+    let path = trimmed.to_string();
+
+    let project_path = PathBuf::from(trimmed);
+    if !project_path.is_absolute() {
+        return Err(format!(
+            "Project path must be absolute: {}",
+            project_path.display()
+        ));
+    }
+
+    if project_path.exists() {
+        if !project_path.is_dir() {
+            return Err(format!(
+                "Project path must be a directory: {}",
+                project_path.display()
+            ));
+        }
+
+        // Avoid accidentally creating a project into a non-empty directory.
+        let has_any_entry = std::fs::read_dir(&project_path)
+            .map_err(|e| format!("Failed to read project directory: {e}"))?
+            .next()
+            .is_some();
+        if has_any_entry {
+            return Err(format!(
+                "Project directory is not empty: {}",
+                project_path.display()
+            ));
+        }
+    }
 
     let project =
         ActiveProject::create(&name, project_path.clone()).map_err(|e| e.to_ipc_error())?;
@@ -54,11 +101,35 @@ pub async fn create_project(
 
 /// Opens an existing project
 #[tauri::command]
+#[tracing::instrument(skip(state), fields(project_path = %path))]
 pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<ProjectInfo, String> {
-    let project_path = PathBuf::from(&path);
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Project path is empty".to_string());
+    }
+
+    let path = trimmed.to_string();
+
+    let project_path = PathBuf::from(trimmed);
 
     if !project_path.exists() {
-        return Err(CoreError::ProjectNotFound(path).to_ipc_error());
+        return Err(CoreError::ProjectNotFound(path.clone()).to_ipc_error());
+    }
+    if !project_path.is_dir() {
+        return Err(format!(
+            "Project path must be a directory: {}",
+            project_path.display()
+        ));
+    }
+
+    // Require basic project shape to avoid opening an arbitrary directory.
+    let has_project_json = project_path.join("project.json").exists();
+    let has_ops_log = project_path.join("ops.jsonl").exists();
+    if !has_project_json && !has_ops_log {
+        return Err(format!(
+            "Not a valid OpenReelio project directory: {}",
+            project_path.display()
+        ));
     }
 
     let project = ActiveProject::open(project_path).map_err(|e| e.to_ipc_error())?;
@@ -136,6 +207,7 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<ProjectStat
 /// Automatically queues proxy generation job for video assets > 720p.
 /// Returns the job_id if a proxy job was queued.
 #[tauri::command]
+#[tracing::instrument(skip(state), fields(uri = %uri))]
 pub async fn import_asset(
     uri: String,
     state: State<'_, AppState>,
@@ -270,19 +342,14 @@ pub async fn import_asset(
 
 /// Gets all assets in the project
 #[tauri::command]
-pub async fn get_assets(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+pub async fn get_assets(state: State<'_, AppState>) -> Result<Vec<Asset>, String> {
     let guard = state.project.lock().await;
 
     let project = guard
         .as_ref()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    Ok(project
-        .state
-        .assets
-        .values()
-        .filter_map(|a| serde_json::to_value(a).ok())
-        .collect())
+    Ok(project.state.assets.values().cloned().collect())
 }
 
 /// Generates thumbnail for an asset and updates the asset's thumbnail URL
@@ -294,6 +361,8 @@ pub async fn generate_asset_thumbnail(
 ) -> Result<Option<String>, String> {
     use crate::core::assets::thumbnail::{asset_kind_from_path, ThumbnailService};
     use std::path::Path;
+
+    validate_path_id_component(&asset_id, "assetId")?;
 
     // Get asset info from state
     let (asset_path, asset_kind, project_path) = {
@@ -378,6 +447,8 @@ pub async fn generate_proxy_for_asset(
 ) -> Result<Option<String>, String> {
     use tauri::Emitter;
 
+    validate_path_id_component(&asset_id, "assetId")?;
+
     // Get asset info from state
     let (asset_path, project_path) = {
         let guard = state.project.lock().await;
@@ -448,7 +519,8 @@ pub async fn generate_proxy_for_asset(
         .await
     {
         Ok(()) => {
-            let proxy_url = format!("file://{}", proxy_path.display());
+            // Return raw file path; frontend converts to asset protocol via convertFileSrc().
+            let proxy_url = proxy_path.to_string_lossy().to_string();
 
             // Update asset's proxy URL in state
             {
@@ -475,7 +547,7 @@ pub async fn generate_proxy_for_asset(
                 serde_json::json!({
                     "assetId": asset_id.clone(),
                     "proxyPath": proxy_path.display().to_string(),
-                    "proxyUrl": proxy_url,
+                    "proxyUrl": proxy_url.clone(),
                 }),
             );
 
@@ -484,7 +556,7 @@ pub async fn generate_proxy_for_asset(
                 "proxy-complete",
                 serde_json::json!({
                     "assetId": asset_id.clone(),
-                    "proxyUrl": proxy_url,
+                    "proxyUrl": proxy_url.clone(),
                 }),
             );
 
@@ -523,10 +595,10 @@ pub async fn generate_proxy_for_asset(
 pub async fn update_asset_proxy(
     asset_id: String,
     proxy_url: Option<String>,
-    proxy_status: String,
+    proxy_status: ProxyStatus,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    use crate::core::assets::ProxyStatus;
+    validate_path_id_component(&asset_id, "assetId")?;
 
     let mut guard = state.project.lock().await;
 
@@ -534,17 +606,7 @@ pub async fn update_asset_proxy(
         .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    // Parse the proxy status string
-    let status = match proxy_status.as_str() {
-        "notNeeded" => ProxyStatus::NotNeeded,
-        "pending" => ProxyStatus::Pending,
-        "generating" => ProxyStatus::Generating,
-        "ready" => ProxyStatus::Ready,
-        "failed" => ProxyStatus::Failed,
-        _ => return Err(format!("Invalid proxy status: {}", proxy_status)),
-    };
-
-    let mut cmd = UpdateAssetCommand::new(&asset_id).with_proxy_status(status);
+    let mut cmd = UpdateAssetCommand::new(&asset_id).with_proxy_status(proxy_status.clone());
     if let Some(url) = proxy_url {
         cmd = cmd.with_proxy_url(Some(url));
     }
@@ -555,7 +617,7 @@ pub async fn update_asset_proxy(
         .map_err(|e| e.to_ipc_error())?;
 
     tracing::info!(
-        "Updated asset {} proxy status to {}",
+        "Updated asset {} proxy status to {:?}",
         asset_id,
         proxy_status
     );
@@ -572,13 +634,19 @@ pub async fn get_waveform_data(
     asset_id: String,
     state: State<'_, AppState>,
 ) -> Result<Option<crate::core::ffmpeg::WaveformData>, String> {
-    // Get project path
+    validate_path_id_component(&asset_id, "assetId")?;
+
+    // Get project path and verify asset exists.
     let project_path = {
         let guard = state.project.lock().await;
 
         let project = guard
             .as_ref()
             .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        if !project.state.assets.contains_key(&asset_id) {
+            return Ok(None);
+        }
 
         project.path.clone()
     };
@@ -618,6 +686,8 @@ pub async fn generate_waveform_for_asset(
     app_handle: tauri::AppHandle,
 ) -> Result<Option<crate::core::ffmpeg::WaveformData>, String> {
     use tauri::Emitter;
+
+    validate_path_id_component(&asset_id, "assetId")?;
 
     // Get asset info from state
     let (asset_path, project_path) = {
@@ -729,19 +799,14 @@ pub async fn remove_asset(asset_id: String, state: State<'_, AppState>) -> Resul
 
 /// Gets all sequences in the project
 #[tauri::command]
-pub async fn get_sequences(state: State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+pub async fn get_sequences(state: State<'_, AppState>) -> Result<Vec<Sequence>, String> {
     let guard = state.project.lock().await;
 
     let project = guard
         .as_ref()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    Ok(project
-        .state
-        .sequences
-        .values()
-        .filter_map(|s| serde_json::to_value(s).ok())
-        .collect())
+    Ok(project.state.sequences.values().cloned().collect())
 }
 
 /// Creates a new sequence
@@ -750,7 +815,7 @@ pub async fn create_sequence(
     name: String,
     format: String,
     state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<Sequence, String> {
     let mut guard = state.project.lock().await;
 
     let project = guard
@@ -773,7 +838,7 @@ pub async fn create_sequence(
         .get(seq_id)
         .ok_or("Sequence not found after creation")?;
 
-    serde_json::to_value(sequence).map_err(|e| e.to_string())
+    Ok(sequence.clone())
 }
 
 /// Gets a specific sequence by ID
@@ -781,7 +846,7 @@ pub async fn create_sequence(
 pub async fn get_sequence(
     sequence_id: String,
     state: State<'_, AppState>,
-) -> Result<serde_json::Value, String> {
+) -> Result<Sequence, String> {
     let guard = state.project.lock().await;
 
     let project = guard
@@ -794,7 +859,7 @@ pub async fn get_sequence(
         .get(&sequence_id)
         .ok_or_else(|| CoreError::SequenceNotFound(sequence_id).to_ipc_error())?;
 
-    serde_json::to_value(sequence).map_err(|e| e.to_string())
+    Ok(sequence.clone())
 }
 
 // =============================================================================
@@ -805,6 +870,7 @@ use crate::ipc::payloads::CommandPayload;
 
 /// Executes an edit command
 #[tauri::command]
+#[tracing::instrument(skip(state, payload), fields(command_type = %command_type))]
 pub async fn execute_command(
     command_type: String,
     payload: serde_json::Value,
@@ -1070,6 +1136,7 @@ pub async fn get_jobs(state: State<'_, AppState>) -> Result<Vec<JobInfoDto>, Str
 
 /// Submits a new job to the worker pool
 #[tauri::command]
+#[tracing::instrument(skip(state, payload), fields(job_type = %job_type))]
 pub async fn submit_job(
     job_type: String,
     priority: Option<String>,
@@ -1160,6 +1227,7 @@ pub async fn get_job_stats(state: State<'_, AppState>) -> Result<serde_json::Val
 /// This command validates the export settings before starting the render,
 /// and reports real-time progress via Tauri events.
 #[tauri::command]
+#[tracing::instrument(skip(state, ffmpeg_state, app_handle), fields(sequence_id = %sequence_id, preset = %preset, output_path = %output_path))]
 pub async fn start_render(
     sequence_id: String,
     output_path: String,
