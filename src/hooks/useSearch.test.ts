@@ -363,7 +363,7 @@ describe('useSearch', () => {
           '/path/to/video.mp4',
           'video',
           120.5,
-          ['interview']
+          ['interview'],
         );
       });
 
@@ -383,12 +383,7 @@ describe('useSearch', () => {
       const { result } = renderHook(() => useSearch());
 
       await act(async () => {
-        await result.current.indexAsset(
-          'asset_001',
-          'Image.png',
-          '/path/to/image.png',
-          'image'
-        );
+        await result.current.indexAsset('asset_001', 'Image.png', '/path/to/image.png', 'image');
       });
 
       expect(mockInvoke).toHaveBeenCalledWith('index_asset_for_search', {
@@ -408,13 +403,8 @@ describe('useSearch', () => {
 
       await expect(
         act(async () => {
-          await result.current.indexAsset(
-            'asset_001',
-            'Video.mp4',
-            '/path/to/video.mp4',
-            'video'
-          );
-        })
+          await result.current.indexAsset('asset_001', 'Video.mp4', '/path/to/video.mp4', 'video');
+        }),
       ).rejects.toThrow('Index failed');
     });
   });
@@ -471,7 +461,7 @@ describe('useSearch', () => {
       await expect(
         act(async () => {
           await result.current.indexTranscripts('asset_001', []);
-        })
+        }),
       ).rejects.toThrow('Transcript index failed');
     });
   });
@@ -503,7 +493,7 @@ describe('useSearch', () => {
       await expect(
         act(async () => {
           await result.current.removeAssetFromSearch('asset_001');
-        })
+        }),
       ).rejects.toThrow('Removal failed');
     });
   });
@@ -555,9 +545,9 @@ describe('useSearch', () => {
       expect(mockInvoke).toHaveBeenCalledWith('search_assets', {
         query: {
           text: 'hello world',
-          resultLimit: 20,
+          limit: 20,
           modality: null,
-          filterAssetIds: null,
+          assetIds: null,
         },
       });
     });
@@ -578,9 +568,9 @@ describe('useSearch', () => {
       expect(mockInvoke).toHaveBeenCalledWith('search_assets', {
         query: {
           text: 'test query',
-          resultLimit: 50,
+          limit: 50,
           modality: 'visual',
-          filterAssetIds: ['asset_001', 'asset_002'],
+          assetIds: ['asset_001', 'asset_002'],
         },
       });
     });
@@ -664,9 +654,9 @@ describe('useSearch', () => {
       expect(mockInvoke).toHaveBeenCalledWith('search_assets', {
         query: {
           text: 'test',
-          resultLimit: 100,
+          limit: 100,
           modality: null,
-          filterAssetIds: null,
+          assetIds: null,
         },
       });
     });
@@ -698,7 +688,7 @@ describe('useSearch', () => {
         await result.current.searchAssets('test', { modality: 'transcript' });
       });
       expect(mockInvoke).toHaveBeenLastCalledWith('search_assets', {
-        query: expect.objectContaining({ modality: 'transcript' }),
+        query: expect.objectContaining({ modality: 'text' }),
       });
     });
   });
