@@ -8,6 +8,9 @@
 import { useState, useCallback, useRef, type DragEvent } from 'react';
 import type { Sequence } from '@/types';
 import type { AssetDropData } from '@/components/timeline/types';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('useAssetDrop');
 
 // Re-export for convenience
 export type { AssetDropData } from '@/components/timeline/types';
@@ -117,7 +120,19 @@ export function useAssetDrop({
       dragCounterRef.current = 0;
       setIsDraggingOver(false);
 
-      if (!sequence || !onAssetDrop) {
+      logger.debug('Drop event received', {
+        hasSequence: !!sequence,
+        hasCallback: !!onAssetDrop,
+        dataTypes: Array.from(e.dataTransfer.types),
+      });
+
+      if (!sequence) {
+        logger.warn('Drop ignored: no sequence loaded');
+        return;
+      }
+
+      if (!onAssetDrop) {
+        logger.warn('Drop ignored: no onAssetDrop callback');
         return;
       }
 
@@ -125,44 +140,84 @@ export function useAssetDrop({
       let jsonData = e.dataTransfer.getData('application/json');
       const textData = e.dataTransfer.getData('text/plain');
 
+      logger.debug('Drop data', { jsonData, textData });
+
       if (!jsonData && textData) {
         // If only text/plain available (asset ID), construct minimal object
         jsonData = JSON.stringify({ id: textData });
       }
 
       if (!jsonData) {
+        logger.warn('Drop ignored: no valid data in dataTransfer');
         return;
       }
 
       try {
         const assetData = JSON.parse(jsonData);
-        if (!assetData.id) return;
+        if (!assetData.id) {
+          logger.warn('Drop ignored: parsed data has no id', { assetData });
+          return;
+        }
 
         // Calculate timeline position from X coordinate
         const target = e.currentTarget as HTMLElement;
         const rect = target.getBoundingClientRect();
-        if (!rect || rect.width === 0) return;
+        if (!rect || rect.width === 0) {
+          logger.warn('Drop ignored: invalid target rect', { rect });
+          return;
+        }
 
         const relativeX = e.clientX - rect.left - trackHeaderWidth + scrollX;
         const timelinePosition = Math.max(0, relativeX / zoom);
 
         // Calculate which track based on Y coordinate
+        // Note: scrollY is subtracted because when scrolled down, the visual
+        // position is higher than the actual track position
         const relativeY = e.clientY - rect.top + scrollY;
         const trackIndex = Math.floor(relativeY / trackHeight);
+
+        logger.debug('Drop position calculated', {
+          clientX: e.clientX,
+          clientY: e.clientY,
+          relativeX,
+          relativeY,
+          timelinePosition,
+          trackIndex,
+          scrollX,
+          scrollY,
+          trackCount: sequence.tracks.length,
+        });
+
+        // Validate track index bounds
+        if (trackIndex < 0 || trackIndex >= sequence.tracks.length) {
+          logger.warn('Drop ignored: track index out of bounds', {
+            trackIndex,
+            trackCount: sequence.tracks.length,
+          });
+          return;
+        }
+
         const track = sequence.tracks[trackIndex];
 
         // Don't allow drop on locked tracks
-        if (!track || track.locked) {
+        if (track.locked) {
+          logger.warn('Drop ignored: track is locked', { trackId: track.id });
           return;
         }
+
+        logger.info('Asset drop accepted', {
+          assetId: assetData.id,
+          trackId: track.id,
+          timelinePosition,
+        });
 
         onAssetDrop({
           assetId: assetData.id,
           trackId: track.id,
           timelinePosition,
         });
-      } catch {
-        // Invalid JSON data - silently ignore
+      } catch (error) {
+        logger.error('Drop failed: JSON parse error', { error, jsonData });
       }
     },
     [sequence, onAssetDrop, scrollX, scrollY, zoom, trackHeaderWidth, trackHeight]
