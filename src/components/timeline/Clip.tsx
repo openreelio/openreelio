@@ -7,8 +7,10 @@
 
 import { useMemo, type MouseEvent } from 'react';
 import { useClipDrag, type DragPreviewPosition, type ClipDragData } from '@/hooks/useClipDrag';
+import { useWaveformPeaks } from '@/hooks/useWaveformPeaks';
 import type { Clip as ClipType } from '@/types';
 import { AudioClipWaveform } from './AudioClipWaveform';
+import { WaveformPeaksDisplay } from './WaveformPeaksDisplay';
 
 // =============================================================================
 // Types
@@ -34,6 +36,10 @@ export interface ClipWaveformConfig {
   totalDurationSec: number;
   /** Whether to show waveform (for audio clips) */
   enabled: boolean;
+  /** Use JSON-based peak data rendering (default: false = use image-based) */
+  useJsonPeaks?: boolean;
+  /** Waveform display color */
+  color?: string;
 }
 
 interface ClipProps {
@@ -188,17 +194,11 @@ export function Clip({
     >
       {/* Audio Waveform (background layer) */}
       {waveformConfig?.enabled && displayPosition.width > 0 && (
-        <AudioClipWaveform
-          assetId={waveformConfig.assetId}
-          inputPath={waveformConfig.inputPath}
+        <ClipWaveformRenderer
+          config={waveformConfig}
+          clipRange={clip.range}
           width={displayPosition.width}
-          height={64} // Track height h-16 = 64px
-          sourceInSec={clip.range.sourceInSec}
-          sourceOutSec={clip.range.sourceOutSec}
-          totalDurationSec={waveformConfig.totalDurationSec}
-          opacity={0.6}
-          className="absolute inset-0"
-          showLoadingIndicator={false}
+          height={64}
         />
       )}
 
@@ -250,5 +250,68 @@ export function Clip({
         onMouseDown={handleRightTrimMouseDown}
       />
     </div>
+  );
+}
+
+// =============================================================================
+// Sub-components
+// =============================================================================
+
+interface ClipWaveformRendererProps {
+  config: ClipWaveformConfig;
+  clipRange: ClipType['range'];
+  width: number;
+  height: number;
+}
+
+/**
+ * Renders waveform for a clip using either image-based or JSON peak-based approach.
+ */
+function ClipWaveformRenderer({
+  config,
+  clipRange,
+  width,
+  height,
+}: ClipWaveformRendererProps) {
+  // Use JSON peaks if configured
+  const { data: peaksData } = useWaveformPeaks(config.assetId, {
+    enabled: config.useJsonPeaks === true,
+    inputPath: config.inputPath,
+  });
+
+  // JSON-based rendering (WaveformPeaksDisplay)
+  if (config.useJsonPeaks && peaksData) {
+    return (
+      <WaveformPeaksDisplay
+        peaks={peaksData.peaks}
+        width={width}
+        height={height}
+        samplesPerSecond={peaksData.samplesPerSecond}
+        sourceInSec={clipRange.sourceInSec}
+        sourceOutSec={clipRange.sourceOutSec}
+        color={config.color || '#3b82f6'}
+        opacity={0.6}
+        mode="fill"
+        mirrored={true}
+        className="absolute inset-0 pointer-events-none"
+      />
+    );
+  }
+
+  // Fallback to image-based rendering (AudioClipWaveform)
+  return (
+    <AudioClipWaveform
+      assetId={config.assetId}
+      inputPath={config.inputPath}
+      width={width}
+      height={height}
+      sourceInSec={clipRange.sourceInSec}
+      sourceOutSec={clipRange.sourceOutSec}
+      totalDurationSec={config.totalDurationSec}
+      color={config.color}
+      opacity={0.6}
+      className="absolute inset-0"
+      showLoadingIndicator={false}
+    />
   );
 }

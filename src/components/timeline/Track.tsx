@@ -21,6 +21,7 @@ import {
 import type { Track as TrackType, Clip as ClipType, TrackKind } from '@/types';
 import { useVirtualizedClips } from '@/hooks/useVirtualizedClips';
 import { Clip, type ClipDragData, type DragPreviewPosition, type ClickModifiers, type ClipWaveformConfig } from './Clip';
+import type { DropValidity } from '@/utils/dropValidity';
 
 // =============================================================================
 // Types
@@ -43,6 +44,10 @@ interface TrackProps {
   selectedClipIds?: string[];
   /** Function to get waveform config for a clip */
   getClipWaveformConfig?: (clipId: string, assetId: string) => ClipWaveformConfig | undefined;
+  /** Whether this track is currently a drop target */
+  isDropTarget?: boolean;
+  /** Drop validity result when track is a drop target */
+  dropValidity?: DropValidity;
   /** Mute toggle handler */
   onMuteToggle?: (trackId: string) => void;
   /** Lock toggle handler */
@@ -95,6 +100,8 @@ export function Track({
   viewportWidth,
   selectedClipIds = [],
   getClipWaveformConfig,
+  isDropTarget = false,
+  dropValidity,
   onMuteToggle,
   onLockToggle,
   onVisibilityToggle,
@@ -192,7 +199,15 @@ export function Track({
       <div
         ref={contentRef}
         data-testid="track-content"
-        className={`flex-1 h-16 bg-editor-bg relative overflow-hidden ${!track.visible ? 'opacity-50' : ''}`}
+        data-drop-target={isDropTarget}
+        data-drop-valid={dropValidity?.isValid}
+        className={`
+          flex-1 h-16 bg-editor-bg relative overflow-hidden transition-colors duration-100
+          ${!track.visible ? 'opacity-50' : ''}
+          ${isDropTarget && dropValidity?.isValid ? 'bg-blue-500/10 ring-1 ring-blue-500/50 ring-inset' : ''}
+          ${isDropTarget && dropValidity && !dropValidity.isValid ? 'bg-red-500/10 ring-1 ring-red-500/50 ring-inset' : ''}
+          ${track.locked ? 'cursor-not-allowed' : ''}
+        `}
       >
         {/* Scrollable clips container */}
         <div
@@ -219,6 +234,18 @@ export function Track({
             />
           ))}
         </div>
+
+        {/* Drop validity message overlay */}
+        {isDropTarget && dropValidity && !dropValidity.isValid && (
+          <div
+            data-testid="drop-invalid-overlay"
+            className="absolute inset-0 flex items-center justify-center pointer-events-none z-30"
+          >
+            <span className="px-3 py-1 bg-red-500/90 text-white text-sm rounded shadow-lg">
+              {dropValidity.message}
+            </span>
+          </div>
+        )}
       </div>
     </div>
   );
