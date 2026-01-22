@@ -28,10 +28,10 @@ thiserror = "2.0"
 [dependencies]
 # Tauri
 tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-shell = "2"
-tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2.2"
+tauri-plugin-dialog = "2.6"
 tauri-plugin-fs = "2"
-tauri-plugin-updater = "2"
+tauri-plugin-updater = "2.9"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -53,6 +53,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 
 # Utilities
 num_cpus = "1.16"
