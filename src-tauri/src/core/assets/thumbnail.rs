@@ -179,15 +179,13 @@ impl ThumbnailService {
         Ok(())
     }
 
-    /// Get the Tauri asset URL for a thumbnail
+    /// Get the file path for a thumbnail
+    /// Note: Frontend should use convertFileSrc() to convert to proper URL
     pub fn thumbnail_url(&self, asset_id: &str) -> Option<String> {
         if self.thumbnail_exists(asset_id) {
             let path = self.thumbnail_path(asset_id);
-            // Convert to Tauri asset protocol URL
-            Some(format!(
-                "asset://localhost/{}",
-                path.to_string_lossy().replace('\\', "/")
-            ))
+            // Return raw file path - frontend handles URL conversion
+            Some(path.to_string_lossy().to_string())
         } else {
             None
         }

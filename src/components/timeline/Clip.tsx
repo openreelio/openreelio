@@ -8,7 +8,7 @@
 import { useMemo, type MouseEvent } from 'react';
 import { useClipDrag, type DragPreviewPosition, type ClipDragData } from '@/hooks/useClipDrag';
 import { useWaveformPeaks } from '@/hooks/useWaveformPeaks';
-import type { Clip as ClipType } from '@/types';
+import type { Clip as ClipType, SnapPoint } from '@/types';
 import { AudioClipWaveform } from './AudioClipWaveform';
 import { WaveformPeaksDisplay } from './WaveformPeaksDisplay';
 
@@ -57,6 +57,10 @@ interface ClipProps {
   maxSourceDuration?: number;
   /** Waveform configuration for audio clips */
   waveformConfig?: ClipWaveformConfig;
+  /** Snap points for intelligent snapping (clip edges, playhead, etc.) */
+  snapPoints?: SnapPoint[];
+  /** Snap threshold in seconds (distance within which snapping occurs) */
+  snapThreshold?: number;
   /** Click handler with modifier keys */
   onClick?: (clipId: string, modifiers: ClickModifiers) => void;
   /** Double-click handler */
@@ -81,6 +85,8 @@ export function Clip({
   gridInterval = 0,
   maxSourceDuration,
   waveformConfig,
+  snapPoints = [],
+  snapThreshold = 0,
   onClick,
   onDoubleClick,
   onDragStart,
@@ -98,6 +104,8 @@ export function Clip({
     gridInterval,
     speed: clip.speed,
     maxSourceDuration,
+    snapPoints,
+    snapThreshold,
     onDragStart,
     onDrag,
     onDragEnd,

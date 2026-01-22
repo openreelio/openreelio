@@ -14,9 +14,48 @@ pub mod ipc;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use tauri::Manager;
 use tokio::sync::{Mutex, Notify};
+
+static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
+
+fn init_logging(app: &tauri::AppHandle) {
+    // Configure a log file in the platform app log dir (best effort).
+    // Log to file for production debugging; stdout remains available in dev.
+    let log_dir = app
+        .path()
+        .app_log_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from(".logs"));
+
+    let _ = std::fs::create_dir_all(&log_dir);
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "openreelio.log");
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let _ = LOG_GUARD.set(guard);
+
+    use tracing_subscriber::prelude::*;
+
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive(tracing::Level::INFO.into());
+
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_writer(std::io::stdout)
+        .with_ansi(cfg!(debug_assertions));
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        .with_ansi(false);
+
+    let subscriber = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stdout_layer)
+        .with(file_layer);
+
+    // Avoid panics if already initialized (tests, plugin reloads).
+    let _ = tracing::subscriber::set_global_default(subscriber);
+}
 
 use crate::core::{
     ai::AIGateway,
@@ -81,8 +120,7 @@ impl ActiveProject {
 
         // Save project.json metadata
         let meta_path = path.join("project.json");
-        let meta_file = std::fs::File::create(&meta_path)?;
-        serde_json::to_writer_pretty(meta_file, &state.meta)?;
+        crate::core::fs::atomic_write_json_pretty(&meta_path, &state.meta)?;
 
         Ok(Self {
             path,
@@ -146,8 +184,7 @@ impl ActiveProject {
 
         // Save project.json metadata
         let meta_path = self.path.join("project.json");
-        let meta_file = std::fs::File::create(&meta_path)?;
-        serde_json::to_writer_pretty(meta_file, &self.state.meta)?;
+        crate::core::fs::atomic_write_json_pretty(&meta_path, &self.state.meta)?;
 
         Ok(())
     }
@@ -303,13 +340,8 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
-            // Initialize logging
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::from_default_env()
-                        .add_directive(tracing::Level::INFO.into()),
-                )
-                .init();
+            // Initialize logging (safe to call multiple times).
+            init_logging(app.handle());
 
             tracing::info!("OpenReelio starting...");
 

@@ -250,3 +250,17 @@ export type {
   ContextMenuState,
   UseContextMenuReturn,
 } from './useContextMenu';
+
+export { useSettings } from './useSettings';
+export type {
+  UseSettingsOptions,
+  UseSettingsReturn,
+} from './useSettings';
+
+export { useUpdate } from './useUpdate';
+export type {
+  UseUpdateState,
+  UseUpdateActions,
+  UseUpdateReturn,
+  UseUpdateOptions,
+} from './useUpdate';

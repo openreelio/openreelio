@@ -195,7 +195,7 @@ export function Timeline({
   // ===========================================================================
   // Coordinate System
   // ===========================================================================
-  const { calculateTimeFromMouseEvent } = useTimelineCoordinates({
+  const { calculateTimeFromMouseEvent, snapPoints, snapThreshold } = useTimelineCoordinates({
     tracksAreaRef,
     sequence,
     zoom,
@@ -514,6 +514,8 @@ export function Timeline({
                 viewportWidth={viewportWidth}
                 selectedClipIds={selectedClipIds}
                 getClipWaveformConfig={getClipWaveformConfig}
+                snapPoints={snapEnabled ? snapPoints : []}
+                snapThreshold={snapEnabled ? snapThreshold : 0}
                 onClipClick={handleClipClick}
                 onClipDragStart={handleClipDragStart}
                 onClipDrag={handleClipDrag}

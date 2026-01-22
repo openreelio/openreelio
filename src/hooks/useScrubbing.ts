@@ -99,13 +99,21 @@ export function useScrubbing({
 
   const handleScrubStart = useCallback(
     (e: MouseEvent) => {
-      // Only start scrubbing if clicking on the tracks area background (not on clips)
+      // Don't start scrubbing if clicking on clips, buttons, or interactive elements
       const target = e.target as HTMLElement;
-      if (
-        target.getAttribute('data-testid') !== 'timeline-tracks-area' &&
-        target.getAttribute('data-testid') !== 'track-content' &&
-        !target.closest('[data-testid="track-content"]')
-      ) {
+
+      // Skip if clicking on a clip
+      if (target.closest('[data-testid^="clip-"]')) {
+        return;
+      }
+
+      // Skip if clicking on buttons or interactive controls
+      if (target.tagName === 'BUTTON' || target.closest('button')) {
+        return;
+      }
+
+      // Skip if clicking on track header (left side controls)
+      if (target.closest('[data-testid="track-header"]')) {
         return;
       }
 

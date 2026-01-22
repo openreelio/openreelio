@@ -309,6 +309,48 @@ impl JobProcessor {
         }
     }
 
+    fn validate_path_id_component(&self, id: &str, label: &str) -> Result<(), String> {
+        if id.is_empty() {
+            return Err(format!("{label} is empty"));
+        }
+        if id.contains("..") || id.contains('/') || id.contains('\\') || id.contains(':') {
+            return Err(format!(
+                "Invalid {label}: contains path traversal characters"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn validate_input_file_path(&self, path: &str, label: &str) -> Result<PathBuf, String> {
+        let trimmed = path.trim();
+        if trimmed.is_empty() {
+            return Err(format!("{label} is empty"));
+        }
+
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("http://") || lower.starts_with("https://") {
+            return Err(format!("{label} must be a local file path"));
+        }
+
+        let pb = PathBuf::from(trimmed);
+        if !pb.is_absolute() {
+            return Err(format!(
+                "{label} must be an absolute path: {}",
+                pb.display()
+            ));
+        }
+
+        // Use async metadata to avoid blocking the async runtime
+        let meta = tokio::fs::metadata(&pb)
+            .await
+            .map_err(|_| format!("{label} file not found: {}", pb.display()))?;
+        if !meta.is_file() {
+            return Err(format!("{label} is not a file: {}", pb.display()));
+        }
+
+        Ok(pb)
+    }
+
     /// Process a single job
     pub async fn process(&self, job: &mut Job) -> Result<serde_json::Value, String> {
         tracing::info!("Processing job {}: {:?}", job.id, job.job_type);
@@ -368,11 +410,17 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing assetId in payload")?;
 
+        self.validate_path_id_component(asset_id, "assetId")?;
+
         let input_path = job
             .payload
             .get("inputPath")
             .and_then(|v| v.as_str())
             .ok_or("Missing inputPath in payload")?;
+
+        let input_path = self
+            .validate_input_file_path(input_path, "inputPath")
+            .await?;
 
         let width = job
             .payload
@@ -404,7 +452,7 @@ impl JobProcessor {
         };
 
         runner
-            .generate_thumbnail(&PathBuf::from(input_path), &output_path, size)
+            .generate_thumbnail(&input_path, &output_path, size)
             .await
             .map_err(|e| format!("Thumbnail generation failed: {}", e))?;
 
@@ -427,11 +475,17 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing assetId in payload")?;
 
+        self.validate_path_id_component(asset_id, "assetId")?;
+
         let input_path = job
             .payload
             .get("inputPath")
             .and_then(|v| v.as_str())
             .ok_or("Missing inputPath in payload")?;
+
+        let input_path = self
+            .validate_input_file_path(input_path, "inputPath")
+            .await?;
 
         // Emit generating event
         let _ = self.app_handle.emit(
@@ -478,7 +532,7 @@ impl JobProcessor {
 
         // Generate proxy with progress
         let result = runner
-            .generate_proxy(&PathBuf::from(input_path), &output_path, Some(progress_tx))
+            .generate_proxy(&input_path, &output_path, Some(progress_tx))
             .await;
 
         // Wait for progress reporter to finish
@@ -486,19 +540,18 @@ impl JobProcessor {
 
         match result {
             Ok(()) => {
-                // Create Tauri asset protocol URL for the proxy file
-                let proxy_url = format!(
-                    "asset://localhost/{}",
-                    output_path.to_string_lossy().replace('\\', "/")
-                );
+                // Return the raw file path - frontend will use convertFileSrc() to
+                // convert it to a proper Tauri asset protocol URL
+                let proxy_path_str = output_path.to_string_lossy().to_string();
 
                 // Emit proxy ready event for frontend to update state
+                // Note: proxyUrl is the raw file path, frontend handles conversion
                 let _ = self.app_handle.emit(
                     "asset:proxy-ready",
                     serde_json::json!({
                         "assetId": asset_id,
-                        "proxyPath": output_path.to_string_lossy(),
-                        "proxyUrl": proxy_url,
+                        "proxyPath": proxy_path_str,
+                        "proxyUrl": proxy_path_str,
                     }),
                 );
 
@@ -510,8 +563,8 @@ impl JobProcessor {
 
                 Ok(serde_json::json!({
                     "assetId": asset_id,
-                    "proxyPath": output_path.to_string_lossy(),
-                    "proxyUrl": proxy_url,
+                    "proxyPath": proxy_path_str,
+                    "proxyUrl": proxy_path_str,
                 }))
             }
             Err(e) => {
@@ -547,11 +600,17 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing assetId in payload")?;
 
+        self.validate_path_id_component(asset_id, "assetId")?;
+
         let input_path = job
             .payload
             .get("inputPath")
             .and_then(|v| v.as_str())
             .ok_or("Missing inputPath in payload")?;
+
+        let input_path = self
+            .validate_input_file_path(input_path, "inputPath")
+            .await?;
 
         let samples_per_second = job
             .payload
@@ -581,7 +640,7 @@ impl JobProcessor {
 
         // Generate waveform as JSON
         match runner
-            .generate_waveform_json(&PathBuf::from(input_path), &output_path, samples_per_second)
+            .generate_waveform_json(&input_path, &output_path, samples_per_second)
             .await
         {
             Ok(waveform) => {
@@ -644,11 +703,16 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing assetId in payload")?;
 
+        self.validate_path_id_component(asset_id, "assetId")?;
+
         // Options may arrive either flattened or nested under `options`.
         let options = job.payload.get("options");
 
         let input_path = if let Some(path) = job.payload.get("inputPath").and_then(|v| v.as_str()) {
-            path.to_string()
+            self.validate_input_file_path(path, "inputPath")
+                .await?
+                .to_string_lossy()
+                .to_string()
         } else {
             // Fallback: resolve from currently open project
             let app_state = self.app_handle.state::<crate::AppState>();

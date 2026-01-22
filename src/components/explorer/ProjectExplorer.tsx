@@ -17,6 +17,7 @@ import {
   AlertCircle,
   Upload,
 } from 'lucide-react';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { useProjectStore } from '@/stores';
 import { useAssetImport, useTranscriptionWithIndexing } from '@/hooks';
 import { AssetList, type Asset, type ViewMode } from './AssetList';
@@ -81,12 +82,24 @@ export function ProjectExplorer() {
           return null;
         }
 
+        // Convert thumbnail path to Tauri asset protocol URL
+        // Backend now returns raw file paths for local assets
+        let thumbnail: string | undefined;
+        if (asset.thumbnailUrl) {
+          if (asset.thumbnailUrl.startsWith('http://') || asset.thumbnailUrl.startsWith('https://')) {
+            thumbnail = asset.thumbnailUrl;
+          } else {
+            // Raw file path - convert to Tauri asset protocol
+            thumbnail = convertFileSrc(asset.thumbnailUrl);
+          }
+        }
+
         return {
           id: asset.id,
           name: asset.name,
           kind: asset.kind,
           ...(asset.durationSec != null ? { duration: asset.durationSec } : {}),
-          ...(asset.thumbnailUrl != null ? { thumbnail: asset.thumbnailUrl } : {}),
+          ...(thumbnail != null ? { thumbnail } : {}),
           ...(asset.video != null ? { resolution: { width: asset.video.width, height: asset.video.height } } : {}),
           ...(asset.fileSize != null ? { fileSize: asset.fileSize } : {}),
         };
