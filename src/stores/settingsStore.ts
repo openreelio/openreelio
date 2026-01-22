@@ -315,7 +315,10 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         },
 
         updateSettings: async (section, values) => {
-          // Update local state immediately for responsive UI.
+          // Save previous value for rollback on failure
+          const previousSectionValue = { ...get().settings[section] };
+
+          // Update local state immediately for responsive UI (optimistic update)
           set((state) => {
             state.settings[section] = {
               ...state.settings[section],
@@ -337,7 +340,9 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               logger.error('Failed to update settings', { error: message });
+              // Rollback to previous value on failure
               set((state) => {
+                state.settings[section] = previousSectionValue as AppSettings[typeof section];
                 state.error = message;
               });
               throw error;

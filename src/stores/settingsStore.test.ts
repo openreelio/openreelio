@@ -227,6 +227,27 @@ describe('settingsStore', () => {
       expect(result.current.settings.general.language).toBe('en');
       expect(result.current.settings.general.showWelcomeOnStartup).toBe(false);
     });
+
+    it('should rollback to previous value on error', async () => {
+      mockInvoke.mockRejectedValueOnce(new Error('Update failed'));
+
+      const { result } = renderHook(() => useSettingsStore());
+
+      // Verify initial state
+      expect(result.current.settings.general.language).toBe('en');
+
+      await act(async () => {
+        try {
+          await result.current.updateSettings('general', { language: 'ko' });
+        } catch {
+          // Expected to throw
+        }
+      });
+
+      // Should rollback to original value
+      expect(result.current.settings.general.language).toBe('en');
+      expect(result.current.error).toBe('Update failed');
+    });
   });
 
   describe('resetSettings', () => {

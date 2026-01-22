@@ -85,6 +85,7 @@ describe('useUpdate', () => {
       expect(result.current.isInstalling).toBe(false);
       expect(result.current.error).toBeNull();
       expect(result.current.updateAvailable).toBe(false);
+      expect(result.current.needsRestart).toBe(false);
     });
   });
 
@@ -143,6 +144,32 @@ describe('useUpdate', () => {
       expect(mockUpdateService.downloadAndInstallUpdate).toHaveBeenCalled();
     });
 
+    it('should set needsRestart to true when update requires restart', async () => {
+      mockUpdateService.downloadAndInstallUpdate.mockResolvedValue(true);
+
+      const { result } = renderHook(() => useUpdate({ checkOnMount: false }));
+
+      await act(async () => {
+        await result.current.installUpdate();
+      });
+
+      expect(result.current.needsRestart).toBe(true);
+      expect(result.current.isInstalling).toBe(false);
+    });
+
+    it('should set needsRestart to false when update does not require restart', async () => {
+      mockUpdateService.downloadAndInstallUpdate.mockResolvedValue(false);
+
+      const { result } = renderHook(() => useUpdate({ checkOnMount: false }));
+
+      await act(async () => {
+        await result.current.installUpdate();
+      });
+
+      expect(result.current.needsRestart).toBe(false);
+      expect(result.current.isInstalling).toBe(false);
+    });
+
     it('should handle install error', async () => {
       mockUpdateService.downloadAndInstallUpdate.mockRejectedValue(
         new Error('Install failed')
@@ -160,6 +187,7 @@ describe('useUpdate', () => {
 
       expect(result.current.error).toBe('Install failed');
       expect(result.current.isInstalling).toBe(false);
+      expect(result.current.needsRestart).toBe(false);
     });
   });
 

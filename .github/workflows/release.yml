@@ -163,6 +163,25 @@ jobs:
             const notes = release.data.body || '';
             const pub_date = release.data.published_at || new Date().toISOString();
 
+            // Helper function to fetch signature with proper error handling
+            async function fetchSignature(sigAsset, assetName) {
+              if (!sigAsset) {
+                console.log(`No signature file found for ${assetName}`);
+                return '';
+              }
+              try {
+                const response = await fetch(sigAsset.browser_download_url);
+                if (!response.ok) {
+                  console.warn(`Warning: Failed to download signature for ${assetName}: ${response.statusText}`);
+                  return '';
+                }
+                return await response.text();
+              } catch (error) {
+                console.warn(`Warning: Error fetching signature for ${assetName}: ${error.message}`);
+                return '';
+              }
+            }
+
             // Find platform-specific assets
             const platforms = {};
 
@@ -173,34 +192,30 @@ jobs:
               // Windows NSIS installer
               if (name.endsWith('.nsis.zip')) {
                 const sigAsset = assets.find(a => a.name === asset.name + '.sig');
-                platforms['windows-x86_64'] = {
-                  signature: sigAsset ? await fetch(sigAsset.browser_download_url).then(r => r.text()).catch(() => '') : '',
-                  url: url
-                };
+                const signature = await fetchSignature(sigAsset, asset.name);
+                platforms['windows-x86_64'] = { signature, url };
+                if (!signature) console.warn(`Warning: windows-x86_64 will not support auto-update (missing signature)`);
               }
               // macOS Intel
               else if (name.includes('x64') && name.endsWith('.app.tar.gz')) {
                 const sigAsset = assets.find(a => a.name === asset.name + '.sig');
-                platforms['darwin-x86_64'] = {
-                  signature: sigAsset ? await fetch(sigAsset.browser_download_url).then(r => r.text()).catch(() => '') : '',
-                  url: url
-                };
+                const signature = await fetchSignature(sigAsset, asset.name);
+                platforms['darwin-x86_64'] = { signature, url };
+                if (!signature) console.warn(`Warning: darwin-x86_64 will not support auto-update (missing signature)`);
               }
               // macOS ARM
               else if (name.includes('aarch64') && name.endsWith('.app.tar.gz')) {
                 const sigAsset = assets.find(a => a.name === asset.name + '.sig');
-                platforms['darwin-aarch64'] = {
-                  signature: sigAsset ? await fetch(sigAsset.browser_download_url).then(r => r.text()).catch(() => '') : '',
-                  url: url
-                };
+                const signature = await fetchSignature(sigAsset, asset.name);
+                platforms['darwin-aarch64'] = { signature, url };
+                if (!signature) console.warn(`Warning: darwin-aarch64 will not support auto-update (missing signature)`);
               }
               // Linux AppImage
               else if (name.endsWith('.appimage.tar.gz')) {
                 const sigAsset = assets.find(a => a.name === asset.name + '.sig');
-                platforms['linux-x86_64'] = {
-                  signature: sigAsset ? await fetch(sigAsset.browser_download_url).then(r => r.text()).catch(() => '') : '',
-                  url: url
-                };
+                const signature = await fetchSignature(sigAsset, asset.name);
+                platforms['linux-x86_64'] = { signature, url };
+                if (!signature) console.warn(`Warning: linux-x86_64 will not support auto-update (missing signature)`);
               }
             }
 

@@ -23,6 +23,8 @@ export interface UseUpdateState {
   error: string | null;
   /** Whether an update is available */
   updateAvailable: boolean;
+  /** Whether a restart is needed after installation */
+  needsRestart: boolean;
 }
 
 export interface UseUpdateActions {
@@ -58,6 +60,7 @@ export function useUpdate(options: UseUpdateOptions = {}): UseUpdateReturn {
     isInstalling: false,
     error: null,
     updateAvailable: false,
+    needsRestart: false,
   });
 
   // Check for updates
@@ -86,16 +89,20 @@ export function useUpdate(options: UseUpdateOptions = {}): UseUpdateReturn {
 
   // Install update
   const installUpdate = useCallback(async (): Promise<void> => {
-    setState((prev) => ({ ...prev, isInstalling: true, error: null }));
+    setState((prev) => ({ ...prev, isInstalling: true, error: null, needsRestart: false }));
 
     try {
-      await updateService.downloadAndInstallUpdate();
-      setState((prev) => ({ ...prev, isInstalling: false }));
+      const needsRestart = await updateService.downloadAndInstallUpdate();
+      setState((prev) => ({ ...prev, isInstalling: false, needsRestart }));
+      if (needsRestart) {
+        logger.info('Update installed, restart required');
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setState((prev) => ({
         ...prev,
         isInstalling: false,
+        needsRestart: false,
         error: message,
       }));
       throw error;
