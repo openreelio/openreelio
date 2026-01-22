@@ -96,24 +96,50 @@ impl CommandExecutor {
     /// Executes a command and adds it to history
     pub fn execute(
         &mut self,
-        mut command: Box<dyn Command>,
+        command: Box<dyn Command>,
         state: &mut ProjectState,
     ) -> CoreResult<CommandResult> {
-        // Get type name and json before executing (for logging)
+        self.execute_internal(command, state, true, true)
+    }
+
+    /// Executes a command and persists it to the ops log, but does not add it to undo/redo history.
+    ///
+    /// This is intended for background/system updates that must be event-sourced and replayable,
+    /// but should not affect the user's undo/redo stack (e.g., proxy/thumbnail metadata updates).
+    pub fn execute_without_history(
+        &mut self,
+        command: Box<dyn Command>,
+        state: &mut ProjectState,
+    ) -> CoreResult<CommandResult> {
+        self.execute_internal(command, state, false, false)
+    }
+
+    fn execute_internal(
+        &mut self,
+        mut command: Box<dyn Command>,
+        state: &mut ProjectState,
+        record_history: bool,
+        clear_redo: bool,
+    ) -> CoreResult<CommandResult> {
+        // Capture command metadata for persistence.
+        // NOTE: ops.jsonl must contain replayable operations, not just the input command payload.
         let type_name = command.type_name().to_string();
-        let json_data = command.to_json();
+        let command_json = command.to_json();
         let prev_op_id = state.last_op_id.clone();
 
         // Execute the command (needs &mut self)
         let result = command.execute(state)?;
 
+        // Build replayable operation payload AFTER executing.
+        // Many commands generate IDs at runtime (clips/tracks/sequences), so the operation
+        // payload must include the realized entities/fields.
+        let op_kind = Self::type_name_to_op_kind(&type_name);
+        let op_payload =
+            Self::build_operation_payload(op_kind.clone(), command_json, &result, state)?;
+
         // Log the operation if persistence is enabled
         let op_timestamp = if let Some(ops_log) = &self.ops_log {
-            let mut operation = Operation::with_id(
-                &result.op_id,
-                Self::type_name_to_op_kind(&type_name),
-                json_data,
-            );
+            let mut operation = Operation::with_id(&result.op_id, op_kind, op_payload);
             if let Some(prev_op_id) = prev_op_id.as_deref() {
                 operation = operation.with_prev_op(prev_op_id);
             }
@@ -123,16 +149,20 @@ impl CommandExecutor {
             chrono::Utc::now().to_rfc3339()
         };
 
-        // Clear redo stack when a new command is executed
-        self.redo_stack.clear();
+        if clear_redo {
+            // Clear redo stack when a new user-facing command is executed.
+            self.redo_stack.clear();
+        }
 
-        // Add to undo stack
-        let entry = HistoryEntry::new(command, result.clone());
-        self.undo_stack.push_back(entry);
+        if record_history {
+            // Add to undo stack
+            let entry = HistoryEntry::new(command, result.clone());
+            self.undo_stack.push_back(entry);
 
-        // Trim history if needed
-        while self.undo_stack.len() > self.max_history_size {
-            self.undo_stack.pop_front();
+            // Trim history if needed
+            while self.undo_stack.len() > self.max_history_size {
+                self.undo_stack.pop_front();
+            }
         }
 
         // Mark state as dirty
@@ -142,6 +172,263 @@ impl CommandExecutor {
         state.is_dirty = true;
 
         Ok(result)
+    }
+
+    fn build_operation_payload(
+        op_kind: OpKind,
+        command_json: serde_json::Value,
+        result: &CommandResult,
+        state: &ProjectState,
+    ) -> CoreResult<serde_json::Value> {
+        fn get_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+            value.get(key).and_then(|v| v.as_str())
+        }
+
+        fn get_usize(value: &serde_json::Value, key: &str) -> Option<usize> {
+            value.get(key).and_then(|v| v.as_u64()).map(|v| v as usize)
+        }
+
+        fn to_value<T: serde::Serialize>(value: &T) -> CoreResult<serde_json::Value> {
+            serde_json::to_value(value).map_err(|e| {
+                CoreError::Internal(format!("Failed to serialize operation payload: {e}"))
+            })
+        }
+
+        match op_kind {
+            // Asset ops are already replayable.
+            OpKind::AssetImport | OpKind::AssetRemove => Ok(command_json),
+
+            OpKind::AssetUpdate => {
+                let asset_id = get_str(&command_json, "assetId").ok_or_else(|| {
+                    CoreError::Internal("AssetUpdate payload missing assetId".to_string())
+                })?;
+                let asset = state.assets.get(asset_id).ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "AssetUpdate could not find asset in state: {asset_id}"
+                    ))
+                })?;
+
+                // Use a canonical payload that ProjectState::apply_asset_update can replay.
+                Ok(serde_json::json!({
+                    "assetId": asset_id,
+                    "name": asset.name.clone(),
+                    "tags": asset.tags.clone(),
+                    "license": asset.license.clone(),
+                    "thumbnailUrl": asset.thumbnail_url.clone(),
+                    "proxyStatus": asset.proxy_status,
+                    "proxyUrl": asset.proxy_url.clone(),
+                }))
+            }
+
+            OpKind::SequenceCreate => {
+                let seq_id = result.created_ids.first().ok_or_else(|| {
+                    CoreError::Internal("SequenceCreate missing createdId".to_string())
+                })?;
+                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "SequenceCreate could not find sequence in state: {seq_id}"
+                    ))
+                })?;
+                to_value(sequence)
+            }
+
+            OpKind::SequenceUpdate | OpKind::SequenceRemove => {
+                // Keep shape consistent with ProjectState::apply_sequence_update/remove.
+                Ok(command_json)
+            }
+
+            OpKind::TrackAdd => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("TrackAdd payload missing sequenceId".to_string())
+                })?;
+                let track_id = result
+                    .created_ids
+                    .first()
+                    .ok_or_else(|| CoreError::Internal("TrackAdd missing createdId".to_string()))?;
+                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                    CoreError::Internal(format!("TrackAdd could not find sequence: {seq_id}"))
+                })?;
+                let track = sequence
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == *track_id)
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!("TrackAdd could not find track: {track_id}"))
+                    })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "track": to_value(track)?,
+                    "position": get_usize(&command_json, "position"),
+                }))
+            }
+
+            OpKind::TrackRemove => Ok(command_json),
+
+            OpKind::TrackReorder => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("TrackReorder payload missing sequenceId".to_string())
+                })?;
+                let order = command_json
+                    .get("newOrder")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::Value::Array(vec![]));
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "order": order,
+                }))
+            }
+
+            OpKind::ClipAdd => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("ClipAdd payload missing sequenceId".to_string())
+                })?;
+                let track_id = get_str(&command_json, "trackId").ok_or_else(|| {
+                    CoreError::Internal("ClipAdd payload missing trackId".to_string())
+                })?;
+                let clip_id = result
+                    .created_ids
+                    .first()
+                    .ok_or_else(|| CoreError::Internal("ClipAdd missing createdId".to_string()))?;
+
+                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                    CoreError::Internal(format!("ClipAdd could not find sequence: {seq_id}"))
+                })?;
+                let track = sequence
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == track_id)
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!("ClipAdd could not find track: {track_id}"))
+                    })?;
+                let clip = track
+                    .clips
+                    .iter()
+                    .find(|c| c.id == *clip_id)
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!("ClipAdd could not find clip: {clip_id}"))
+                    })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": to_value(clip)?,
+                }))
+            }
+
+            OpKind::ClipRemove => Ok(command_json),
+
+            OpKind::ClipMove => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("ClipMove payload missing sequenceId".to_string())
+                })?;
+                let clip_id = get_str(&command_json, "clipId").ok_or_else(|| {
+                    CoreError::Internal("ClipMove payload missing clipId".to_string())
+                })?;
+
+                // Locate the clip to persist its realized destination and position.
+                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                    CoreError::Internal(format!("ClipMove could not find sequence: {seq_id}"))
+                })?;
+                let (track_id, clip) = sequence
+                    .tracks
+                    .iter()
+                    .find_map(|t| t.get_clip(clip_id).map(|c| (t.id.clone(), c)))
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!("ClipMove could not find clip: {clip_id}"))
+                    })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": clip_id,
+                    "trackId": track_id,
+                    "timelineIn": clip.place.timeline_in_sec,
+                }))
+            }
+
+            OpKind::ClipTrim => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("ClipTrim payload missing sequenceId".to_string())
+                })?;
+                let clip_id = get_str(&command_json, "clipId").ok_or_else(|| {
+                    CoreError::Internal("ClipTrim payload missing clipId".to_string())
+                })?;
+
+                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                    CoreError::Internal(format!("ClipTrim could not find sequence: {seq_id}"))
+                })?;
+                let clip = sequence
+                    .tracks
+                    .iter()
+                    .find_map(|t| t.get_clip(clip_id))
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!("ClipTrim could not find clip: {clip_id}"))
+                    })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": clip_id,
+                    "sourceIn": clip.range.source_in_sec,
+                    "sourceOut": clip.range.source_out_sec,
+                    "timelineIn": clip.place.timeline_in_sec,
+                    "duration": clip.place.duration_sec,
+                }))
+            }
+
+            OpKind::ClipSplit => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("ClipSplit payload missing sequenceId".to_string())
+                })?;
+                let track_id = get_str(&command_json, "trackId").ok_or_else(|| {
+                    CoreError::Internal("ClipSplit payload missing trackId".to_string())
+                })?;
+                let original_clip_id = get_str(&command_json, "clipId").ok_or_else(|| {
+                    CoreError::Internal("ClipSplit payload missing clipId".to_string())
+                })?;
+                let new_clip_id = result.created_ids.first().ok_or_else(|| {
+                    CoreError::Internal("ClipSplit missing createdId".to_string())
+                })?;
+
+                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                    CoreError::Internal(format!("ClipSplit could not find sequence: {seq_id}"))
+                })?;
+                let track = sequence
+                    .tracks
+                    .iter()
+                    .find(|t| t.id == track_id)
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!("ClipSplit could not find track: {track_id}"))
+                    })?;
+                let original = track
+                    .clips
+                    .iter()
+                    .find(|c| c.id == original_clip_id)
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "ClipSplit could not find original clip: {original_clip_id}"
+                        ))
+                    })?;
+                let new_clip = track
+                    .clips
+                    .iter()
+                    .find(|c| c.id == *new_clip_id)
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "ClipSplit could not find new clip: {new_clip_id}"
+                        ))
+                    })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "originalClip": to_value(original)?,
+                    "newClip": to_value(new_clip)?,
+                }))
+            }
+
+            // For everything else, fall back to the command JSON.
+            _ => Ok(command_json),
+        }
     }
 
     /// Undoes the last command
@@ -260,7 +547,7 @@ impl CommandExecutor {
             "DeleteCaption" => OpKind::CaptionRemove,
             "CreateSequence" => OpKind::SequenceCreate,
             "UpdateSequence" => OpKind::SequenceUpdate,
-            "RemoveSequence" => OpKind::SequenceRemove,
+            "RemoveSequence" | "DeleteSequence" => OpKind::SequenceRemove,
             "CreateProject" => OpKind::ProjectCreate,
             "UpdateProjectSettings" => OpKind::ProjectSettings,
             _ => OpKind::Batch, // Default to batch for unknown types
@@ -282,8 +569,11 @@ impl Default for CommandExecutor {
 mod tests {
     use super::*;
     use crate::core::assets::{Asset, VideoInfo};
-    use crate::core::commands::StateChange;
-    use crate::core::project::OpsLog;
+    use crate::core::commands::{
+        CreateSequenceCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand,
+        SplitClipCommand, StateChange, TrimClipCommand,
+    };
+    use crate::core::project::{OpsLog, ProjectMeta, ProjectState};
     use tempfile::TempDir;
 
     // Test command implementation
@@ -481,6 +771,32 @@ mod tests {
     }
 
     #[test]
+    fn test_executor_execute_without_history_does_not_affect_undo_redo() {
+        let mut executor = CommandExecutor::new();
+        let mut state = ProjectState::new("Test");
+
+        let asset1 = Asset::new_video("a.mp4", "/a.mp4", VideoInfo::default());
+        let asset2 = Asset::new_video("b.mp4", "/b.mp4", VideoInfo::default());
+
+        executor
+            .execute(Box::new(TestAddAssetCommand { asset: asset1 }), &mut state)
+            .unwrap();
+        executor.undo(&mut state).unwrap();
+        assert_eq!(executor.undo_count(), 0);
+        assert_eq!(executor.redo_count(), 1);
+
+        // Background/system update should not clear redo, and should not add to undo history.
+        executor
+            .execute_without_history(Box::new(TestAddAssetCommand { asset: asset2 }), &mut state)
+            .unwrap();
+
+        assert_eq!(executor.undo_count(), 0);
+        assert_eq!(executor.redo_count(), 1);
+        assert!(executor.can_redo());
+        assert_eq!(state.assets.len(), 1);
+    }
+
+    #[test]
     fn test_executor_can_undo_redo() {
         let mut executor = CommandExecutor::new();
         let mut state = ProjectState::new("Test");
@@ -663,6 +979,107 @@ mod tests {
         let result = ops_log.read_all().unwrap();
         assert_eq!(result.operations.len(), 1);
         assert_eq!(result.operations[0].kind, OpKind::AssetImport);
+    }
+
+    #[test]
+    fn test_executor_ops_log_replay_roundtrip_for_basic_timeline_ops() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test");
+
+        // Create a sequence with default tracks.
+        executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Main", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        // Import an asset with a known duration.
+        let import_cmd = ImportAssetCommand::new("test.mp4", "/test.mp4").with_duration(30.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+        let asset_id = import_cmd.asset_id().to_string();
+
+        // Insert a short clip so we can move/trim/split without overlap.
+        let insert =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 5.0);
+        let insert_result = executor.execute(Box::new(insert), &mut state).unwrap();
+        let clip_id = insert_result.created_ids[0].clone();
+
+        // Move the clip.
+        executor
+            .execute(
+                Box::new(MoveClipCommand::new_simple(&seq_id, &clip_id, 10.0)),
+                &mut state,
+            )
+            .unwrap();
+
+        // Trim and ripple on timeline.
+        executor
+            .execute(
+                Box::new(
+                    TrimClipCommand::new_simple(&seq_id, &clip_id)
+                        .with_source_in(1.0)
+                        .with_source_out(4.0)
+                        .with_timeline_in(12.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+
+        // Split inside the trimmed clip range: [12, 15).
+        let split_result = executor
+            .execute(
+                Box::new(SplitClipCommand::new(&seq_id, &track_id, &clip_id, 13.0)),
+                &mut state,
+            )
+            .unwrap();
+        let new_clip_id = split_result.created_ids[0].clone();
+
+        // Replay.
+        let ops_log = OpsLog::new(&ops_path);
+        let replayed = ProjectState::from_ops_log(&ops_log, ProjectMeta::new("Test")).unwrap();
+
+        // Ensure operations are present in the log (sanity).
+        let ops = ops_log.read_all().unwrap().operations;
+        assert_eq!(ops.len(), 6);
+        assert_eq!(ops[0].kind, OpKind::SequenceCreate);
+        assert_eq!(ops[1].kind, OpKind::AssetImport);
+        assert_eq!(ops[2].kind, OpKind::ClipAdd);
+        assert_eq!(ops[3].kind, OpKind::ClipMove);
+        assert_eq!(ops[4].kind, OpKind::ClipTrim);
+        assert_eq!(ops[5].kind, OpKind::ClipSplit);
+
+        // Verify clip state matches after replay.
+        let replayed_track = replayed
+            .sequences
+            .get(&seq_id)
+            .and_then(|s| s.get_track(&track_id))
+            .unwrap();
+
+        let first = replayed_track.get_clip(&clip_id).unwrap();
+        let second = replayed_track.get_clip(&new_clip_id).unwrap();
+
+        assert_eq!(first.place.timeline_in_sec, 12.0);
+        assert_eq!(first.place.duration_sec, 1.0);
+        assert_eq!(first.range.source_in_sec, 1.0);
+        assert_eq!(first.range.source_out_sec, 2.0);
+
+        assert_eq!(second.place.timeline_in_sec, 13.0);
+        assert_eq!(second.place.duration_sec, 2.0);
+        assert_eq!(second.range.source_in_sec, 2.0);
+        assert_eq!(second.range.source_out_sec, 4.0);
+
+        // Ensure deterministic ordering after replay.
+        let ordered: Vec<_> = replayed_track.clips.iter().map(|c| c.id.clone()).collect();
+        assert_eq!(ordered, vec![clip_id, new_clip_id]);
     }
 
     #[test]

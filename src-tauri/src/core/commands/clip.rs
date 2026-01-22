@@ -7,9 +7,71 @@ use serde::{Deserialize, Serialize};
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
     project::ProjectState,
-    timeline::{Clip, ClipPlace, ClipRange},
+    timeline::{Clip, ClipPlace, ClipRange, Track},
     AssetId, ClipId, CoreError, CoreResult, SequenceId, TimeSec, TrackId,
 };
+
+fn is_valid_time_sec(value: TimeSec) -> bool {
+    value.is_finite() && value >= 0.0
+}
+
+fn sort_track_clips(track: &mut Track) {
+    track.clips.sort_by(|a, b| {
+        a.place
+            .timeline_in_sec
+            .total_cmp(&b.place.timeline_in_sec)
+            .then_with(|| {
+                // Ensure deterministic ordering when two clips share the same start time.
+                a.id.cmp(&b.id)
+            })
+    });
+}
+
+fn find_overlap<'a>(
+    track: &'a Track,
+    candidate: &ClipPlace,
+    ignore_clip_id: Option<&str>,
+) -> Option<&'a Clip> {
+    track.clips.iter().find(|existing| {
+        if ignore_clip_id.is_some_and(|id| id == existing.id) {
+            return false;
+        }
+        existing.place.overlaps(candidate)
+    })
+}
+
+fn validate_no_overlap(
+    track: &Track,
+    candidate: &ClipPlace,
+    ignore_clip_id: Option<&str>,
+) -> CoreResult<()> {
+    if let Some(conflict) = find_overlap(track, candidate, ignore_clip_id) {
+        return Err(CoreError::ClipOverlap {
+            track_id: track.id.clone(),
+            existing_clip_id: conflict.id.clone(),
+            new_start: candidate.timeline_in_sec,
+            new_end: candidate.timeline_out_sec(),
+        });
+    }
+    Ok(())
+}
+
+fn insert_clip_sorted(track: &mut Track, clip: Clip) {
+    // Keep clips ordered by timeline start.
+    let idx = track
+        .clips
+        .binary_search_by(|existing| {
+            existing
+                .place
+                .timeline_in_sec
+                .total_cmp(&clip.place.timeline_in_sec)
+        })
+        .unwrap_or_else(|i| i);
+    track.clips.insert(idx, clip);
+    // Defensive: binary_search_by doesn't guarantee stable ordering when keys are equal.
+    // We never allow overlaps, but keep ordering deterministic.
+    sort_track_clips(track);
+}
 
 // =============================================================================
 // InsertClipCommand
@@ -60,6 +122,12 @@ impl InsertClipCommand {
 
 impl Command for InsertClipCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !is_valid_time_sec(self.timeline_start) {
+            return Err(CoreError::ValidationError(
+                "timelineStart must be finite and non-negative".to_string(),
+            ));
+        }
+
         // Validate asset exists
         let asset = state
             .assets
@@ -72,6 +140,15 @@ impl Command for InsertClipCommand {
         let source_end = self.source_end.unwrap_or(asset_duration);
 
         // Validate source range
+        if !source_start.is_finite()
+            || !source_end.is_finite()
+            || source_start < 0.0
+            || source_end < 0.0
+        {
+            return Err(CoreError::ValidationError(
+                "Source range must be finite and non-negative".to_string(),
+            ));
+        }
         if source_start >= source_end {
             return Err(CoreError::InvalidTimeRange(source_start, source_end));
         }
@@ -90,6 +167,11 @@ impl Command for InsertClipCommand {
 
         // Create the clip
         let duration = source_end - source_start;
+        if !duration.is_finite() || duration <= 0.0 {
+            return Err(CoreError::ValidationError(
+                "Clip duration must be finite and > 0".to_string(),
+            ));
+        }
         let mut clip = Clip::new(&self.asset_id);
         clip.range = ClipRange {
             source_in_sec: source_start,
@@ -105,7 +187,9 @@ impl Command for InsertClipCommand {
         // Store created clip ID for undo
         self.created_clip_id = Some(clip_id.clone());
 
-        track.clips.push(clip);
+        // Prevent overlap and keep clips sorted.
+        validate_no_overlap(track, &clip.place, None)?;
+        insert_clip_sorted(track, clip);
 
         // Generate operation ID
         let op_id = ulid::Ulid::new().to_string();
@@ -217,6 +301,9 @@ impl Command for RemoveClipCommand {
                     } else {
                         track.clips.push(clip.clone());
                     }
+
+                    // Keep deterministic ordering.
+                    sort_track_clips(track);
                 }
             }
         }
@@ -296,73 +383,90 @@ impl MoveClipCommand {
 
 impl Command for MoveClipCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !is_valid_time_sec(self.new_timeline_in) {
+            return Err(CoreError::ValidationError(
+                "newTimelineIn must be finite and non-negative".to_string(),
+            ));
+        }
+
         let sequence = state
             .sequences
             .get_mut(&self.sequence_id)
             .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
 
-        // Check if this is a cross-track move
-        if let Some(new_track_id) = &self.new_track_id {
-            // Find source track and clip
-            let mut source_track_idx = None;
-            let mut clip_idx = None;
+        // Find the source track containing this clip
+        let (src_track_idx, clip_idx) = sequence
+            .tracks
+            .iter()
+            .enumerate()
+            .find_map(|(t_idx, track)| {
+                track
+                    .clips
+                    .iter()
+                    .position(|c| c.id == self.clip_id)
+                    .map(|c_idx| (t_idx, c_idx))
+            })
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
 
-            for (t_idx, track) in sequence.tracks.iter().enumerate() {
-                if let Some(c_idx) = track.clips.iter().position(|c| c.id == self.clip_id) {
-                    source_track_idx = Some(t_idx);
-                    clip_idx = Some(c_idx);
-                    self.old_track_id = Some(track.id.clone());
-                    self.old_timeline_in = Some(track.clips[c_idx].place.timeline_in_sec);
-                    break;
-                }
-            }
+        let old_track_id = sequence.tracks[src_track_idx].id.clone();
+        let old_timeline_in = sequence.tracks[src_track_idx].clips[clip_idx]
+            .place
+            .timeline_in_sec;
 
-            let (src_idx, c_idx) = match (source_track_idx, clip_idx) {
-                (Some(s), Some(c)) => (s, c),
-                _ => return Err(CoreError::ClipNotFound(self.clip_id.clone())),
-            };
+        self.old_track_id = Some(old_track_id.clone());
+        self.old_timeline_in = Some(old_timeline_in);
 
-            // Find destination track
-            let dest_track_idx = sequence
+        // Resolve destination track
+        let dest_track_idx = if let Some(new_track_id) = &self.new_track_id {
+            sequence
                 .tracks
                 .iter()
                 .position(|t| &t.id == new_track_id)
-                .ok_or_else(|| CoreError::TrackNotFound(new_track_id.clone()))?;
+                .ok_or_else(|| CoreError::TrackNotFound(new_track_id.clone()))?
+        } else {
+            src_track_idx
+        };
 
-            // Remove from source and update position
-            let mut clip = sequence.tracks[src_idx].clips.remove(c_idx);
-            clip.place.timeline_in_sec = self.new_timeline_in;
+        // Validate overlap BEFORE mutating state.
+        let mut candidate = sequence.tracks[src_track_idx].clips[clip_idx].clone();
+        candidate.place.timeline_in_sec = self.new_timeline_in;
 
-            // Add to destination
-            sequence.tracks[dest_track_idx].clips.push(clip);
-
-            let op_id = ulid::Ulid::new().to_string();
-            return Ok(
-                CommandResult::new(&op_id).with_change(StateChange::ClipModified {
-                    clip_id: self.clip_id.clone(),
-                }),
-            );
+        if dest_track_idx == src_track_idx {
+            let track = &sequence.tracks[src_track_idx];
+            validate_no_overlap(track, &candidate.place, Some(&candidate.id))?;
+        } else {
+            let dest_track = &sequence.tracks[dest_track_idx];
+            validate_no_overlap(dest_track, &candidate.place, None)?;
         }
 
-        // Same-track move: Find the clip and store old position
-        for track in &mut sequence.tracks {
-            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                // Store old values for undo
-                self.old_timeline_in = Some(clip.place.timeline_in_sec);
-                self.old_track_id = Some(track.id.clone());
+        // Apply move.
+        let mut clip = sequence.tracks[src_track_idx].clips.remove(clip_idx);
+        clip.place.timeline_in_sec = self.new_timeline_in;
 
-                clip.place.timeline_in_sec = self.new_timeline_in;
-
-                let op_id = ulid::Ulid::new().to_string();
-                return Ok(
-                    CommandResult::new(&op_id).with_change(StateChange::ClipModified {
-                        clip_id: self.clip_id.clone(),
-                    }),
-                );
+        if dest_track_idx == src_track_idx {
+            insert_clip_sorted(&mut sequence.tracks[src_track_idx], clip);
+        } else {
+            // Borrow both tracks mutably using split_at_mut.
+            if src_track_idx < dest_track_idx {
+                let (left, right) = sequence.tracks.split_at_mut(dest_track_idx);
+                let dest_track = &mut right[0];
+                insert_clip_sorted(dest_track, clip);
+                // left[src_track_idx] already had the clip removed.
+                sort_track_clips(&mut left[src_track_idx]);
+            } else {
+                let (left, right) = sequence.tracks.split_at_mut(src_track_idx);
+                let dest_track = &mut left[dest_track_idx];
+                insert_clip_sorted(dest_track, clip);
+                sort_track_clips(&mut right[0]);
             }
         }
 
-        Err(CoreError::ClipNotFound(self.clip_id.clone()))
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
     }
 
     fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
@@ -371,41 +475,63 @@ impl Command for MoveClipCommand {
             _ => return Ok(()),
         };
 
-        if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
-            // Check if cross-track move needs to be undone
-            if self.new_track_id.is_some() {
-                // Find current track (destination) and clip
-                let mut current_track_idx = None;
-                let mut clip_idx = None;
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
 
-                for (t_idx, track) in sequence.tracks.iter().enumerate() {
-                    if let Some(c_idx) = track.clips.iter().position(|c| c.id == self.clip_id) {
-                        current_track_idx = Some(t_idx);
-                        clip_idx = Some(c_idx);
-                        break;
-                    }
-                }
+        // Find the current track containing the clip.
+        let (current_track_idx, clip_idx) = sequence
+            .tracks
+            .iter()
+            .enumerate()
+            .find_map(|(t_idx, track)| {
+                track
+                    .clips
+                    .iter()
+                    .position(|c| c.id == self.clip_id)
+                    .map(|c_idx| (t_idx, c_idx))
+            })
+            .unwrap_or((usize::MAX, usize::MAX));
 
-                if let (Some(curr_idx), Some(c_idx)) = (current_track_idx, clip_idx) {
-                    // Find original track
-                    if let Some(orig_idx) = sequence.tracks.iter().position(|t| t.id == old_track) {
-                        // Move clip back to original track
-                        let mut clip = sequence.tracks[curr_idx].clips.remove(c_idx);
-                        clip.place.timeline_in_sec = old_pos;
-                        sequence.tracks[orig_idx].clips.push(clip);
-                    }
-                }
-                return Ok(());
-            }
-
-            // Same-track undo
-            for track in &mut sequence.tracks {
-                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                    clip.place.timeline_in_sec = old_pos;
-                    return Ok(());
-                }
-            }
+        if current_track_idx == usize::MAX {
+            return Ok(());
         }
+
+        // If the original track differs (cross-track move), physically move the clip back.
+        if old_track != sequence.tracks[current_track_idx].id {
+            let Some(orig_idx) = sequence.tracks.iter().position(|t| t.id == old_track) else {
+                return Ok(());
+            };
+
+            let mut clip = sequence.tracks[current_track_idx].clips.remove(clip_idx);
+            clip.place.timeline_in_sec = old_pos;
+
+            if current_track_idx < orig_idx {
+                let (left, right) = sequence.tracks.split_at_mut(orig_idx);
+                insert_clip_sorted(&mut right[0], clip);
+                sort_track_clips(&mut left[current_track_idx]);
+            } else if orig_idx < current_track_idx {
+                let (left, right) = sequence.tracks.split_at_mut(current_track_idx);
+                insert_clip_sorted(&mut left[orig_idx], clip);
+                sort_track_clips(&mut right[0]);
+            } else {
+                // Shouldn't happen, but keep it safe.
+                insert_clip_sorted(&mut sequence.tracks[orig_idx], clip);
+            }
+
+            return Ok(());
+        }
+
+        // Same-track undo: restore timeline position and keep ordering deterministic.
+        if let Some(clip) = sequence.tracks[current_track_idx]
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.clip_id)
+        {
+            clip.place.timeline_in_sec = old_pos;
+            sort_track_clips(&mut sequence.tracks[current_track_idx]);
+        }
+
         Ok(())
     }
 
@@ -521,38 +647,91 @@ impl Command for TrimClipCommand {
             .get_mut(&self.sequence_id)
             .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
 
-        for track in &mut sequence.tracks {
-            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
-                // Store old values for undo BEFORE modification
-                self.old_source_in = Some(clip.range.source_in_sec);
-                self.old_source_out = Some(clip.range.source_out_sec);
-                self.old_timeline_in = Some(clip.place.timeline_in_sec);
-                self.old_duration_sec = Some(clip.place.duration_sec);
+        let (track_idx, clip_idx) = sequence
+            .tracks
+            .iter()
+            .enumerate()
+            .find_map(|(t_idx, track)| {
+                track
+                    .clips
+                    .iter()
+                    .position(|c| c.id == self.clip_id)
+                    .map(|c_idx| (t_idx, c_idx))
+            })
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
 
-                // Apply new values
-                if let Some(new_in) = self.new_source_in {
-                    clip.range.source_in_sec = new_in;
-                }
-                if let Some(new_out) = self.new_source_out {
-                    clip.range.source_out_sec = new_out;
-                }
-                if let Some(new_timeline_in) = self.new_timeline_in {
-                    clip.place.timeline_in_sec = new_timeline_in;
-                }
+        let original = sequence.tracks[track_idx].clips[clip_idx].clone();
 
-                // Update duration based on new source range
-                clip.place.duration_sec = clip.range.duration() / clip.speed as f64;
+        // Store old values for undo BEFORE modification
+        self.old_source_in = Some(original.range.source_in_sec);
+        self.old_source_out = Some(original.range.source_out_sec);
+        self.old_timeline_in = Some(original.place.timeline_in_sec);
+        self.old_duration_sec = Some(original.place.duration_sec);
 
-                let op_id = ulid::Ulid::new().to_string();
-                return Ok(
-                    CommandResult::new(&op_id).with_change(StateChange::ClipModified {
-                        clip_id: self.clip_id.clone(),
-                    }),
-                );
+        // Prepare candidate without mutating the state.
+        let mut candidate = original;
+
+        if let Some(new_in) = self.new_source_in {
+            if !is_valid_time_sec(new_in) {
+                return Err(CoreError::ValidationError(
+                    "newSourceIn must be finite and non-negative".to_string(),
+                ));
             }
+            candidate.range.source_in_sec = new_in;
+        }
+        if let Some(new_out) = self.new_source_out {
+            if !is_valid_time_sec(new_out) {
+                return Err(CoreError::ValidationError(
+                    "newSourceOut must be finite and non-negative".to_string(),
+                ));
+            }
+            candidate.range.source_out_sec = new_out;
+        }
+        if let Some(new_timeline_in) = self.new_timeline_in {
+            if !is_valid_time_sec(new_timeline_in) {
+                return Err(CoreError::ValidationError(
+                    "newTimelineIn must be finite and non-negative".to_string(),
+                ));
+            }
+            candidate.place.timeline_in_sec = new_timeline_in;
         }
 
-        Err(CoreError::ClipNotFound(self.clip_id.clone()))
+        if candidate.range.source_in_sec >= candidate.range.source_out_sec {
+            return Err(CoreError::InvalidTimeRange(
+                candidate.range.source_in_sec,
+                candidate.range.source_out_sec,
+            ));
+        }
+
+        if !candidate.speed.is_finite() || candidate.speed <= 0.0 {
+            return Err(CoreError::ValidationError(
+                "Clip speed must be finite and > 0".to_string(),
+            ));
+        }
+
+        candidate.place.duration_sec = candidate.range.duration() / candidate.speed as f64;
+        if !candidate.place.duration_sec.is_finite() || candidate.place.duration_sec <= 0.0 {
+            return Err(CoreError::ValidationError(
+                "Clip duration must be finite and > 0 after trim".to_string(),
+            ));
+        }
+
+        // Validate overlap BEFORE mutating state.
+        {
+            let track = &sequence.tracks[track_idx];
+            validate_no_overlap(track, &candidate.place, Some(&candidate.id))?;
+        }
+
+        // Apply change and keep ordering deterministic.
+        sequence.tracks[track_idx].clips[clip_idx] = candidate;
+        sort_track_clips(&mut sequence.tracks[track_idx]);
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
     }
 
     fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
@@ -573,6 +752,8 @@ impl Command for TrimClipCommand {
                     if let Some(old_duration) = self.old_duration_sec {
                         clip.place.duration_sec = old_duration;
                     }
+
+                    sort_track_clips(track);
                     return Ok(());
                 }
             }
@@ -649,11 +830,11 @@ impl Command for SplitClipCommand {
         // Store original clip for undo BEFORE any modification
         self.original_clip = Some(track.clips[clip_idx].clone());
 
-        let clip = &track.clips[clip_idx];
+        let original = track.clips[clip_idx].clone();
 
         // Validate split point is within clip bounds
-        let clip_start = clip.place.timeline_in_sec;
-        let clip_end = clip_start + clip.duration();
+        let clip_start = original.place.timeline_in_sec;
+        let clip_end = clip_start + original.duration();
 
         if self.split_at <= clip_start || self.split_at >= clip_end {
             return Err(CoreError::InvalidSplitPoint(self.split_at));
@@ -663,42 +844,58 @@ impl Command for SplitClipCommand {
         let relative_split = self.split_at - clip_start;
         // When speed is applied, the source time advances at a different rate
         // relative_split is in timeline seconds, multiply by speed to get source seconds
-        let source_split = clip.range.source_in_sec + (relative_split * clip.speed as f64);
+        let source_split = original.range.source_in_sec + (relative_split * original.speed as f64);
 
         // Create second clip (after split) with ALL properties copied
-        let second_source_duration = clip.range.source_out_sec - source_split;
-        let second_timeline_duration = second_source_duration / clip.speed as f64;
+        let second_source_duration = original.range.source_out_sec - source_split;
+        let second_timeline_duration = second_source_duration / original.speed as f64;
 
-        let mut second_clip = Clip::new(&clip.asset_id);
+        let mut second_clip = Clip::new(&original.asset_id);
         second_clip.range = ClipRange {
             source_in_sec: source_split,
-            source_out_sec: clip.range.source_out_sec,
+            source_out_sec: original.range.source_out_sec,
         };
         second_clip.place = ClipPlace {
             timeline_in_sec: self.split_at,
             duration_sec: second_timeline_duration,
         };
         // Copy all properties from original clip
-        second_clip.transform = clip.transform.clone();
-        second_clip.audio = clip.audio.clone();
-        second_clip.speed = clip.speed;
-        second_clip.opacity = clip.opacity;
-        second_clip.effects = clip.effects.clone();
-        second_clip.label = clip.label.clone();
-        second_clip.color = clip.color.clone();
+        second_clip.transform = original.transform.clone();
+        second_clip.audio = original.audio.clone();
+        second_clip.speed = original.speed;
+        second_clip.opacity = original.opacity;
+        second_clip.effects = original.effects.clone();
+        second_clip.label = original.label.clone();
+        second_clip.color = original.color.clone();
 
         let second_clip_id = second_clip.id.clone();
 
         // Store created clip ID for undo
         self.created_clip_id = Some(second_clip_id.clone());
 
-        // Modify first clip (before split)
-        let first_clip = &mut track.clips[clip_idx];
+        // Prepare modified first clip without mutating track until validations pass.
+        let mut first_clip = original.clone();
         first_clip.range.source_out_sec = source_split;
         first_clip.place.duration_sec = relative_split;
 
-        // Add second clip
-        track.clips.push(second_clip);
+        if !first_clip.place.duration_sec.is_finite() || first_clip.place.duration_sec <= 0.0 {
+            return Err(CoreError::ValidationError(
+                "Split produced an invalid first clip duration".to_string(),
+            ));
+        }
+        if !second_clip.place.duration_sec.is_finite() || second_clip.place.duration_sec <= 0.0 {
+            return Err(CoreError::ValidationError(
+                "Split produced an invalid second clip duration".to_string(),
+            ));
+        }
+
+        // Validate overlap with the rest of the track BEFORE mutating.
+        validate_no_overlap(track, &first_clip.place, Some(&first_clip.id))?;
+        validate_no_overlap(track, &second_clip.place, Some(&first_clip.id))?;
+
+        // Apply: replace original clip and insert the new clip in timeline order.
+        track.clips[clip_idx] = first_clip;
+        insert_clip_sorted(track, second_clip);
 
         let op_id = ulid::Ulid::new().to_string();
 
@@ -723,6 +920,8 @@ impl Command for SplitClipCommand {
                     if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
                         *clip = original.clone();
                     }
+
+                    sort_track_clips(track);
                 }
             }
         }
@@ -1216,7 +1415,10 @@ mod tests {
 
         // Insert 3 clips
         for i in 0..3 {
-            let mut cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, (i * 10) as f64);
+            // Use short, non-overlapping durations to satisfy the timeline invariant
+            // that clips on the same track cannot overlap.
+            let mut cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, (i * 10) as f64)
+                .with_source_range(0.0, 5.0);
             cmd.execute(&mut state).unwrap();
         }
 
