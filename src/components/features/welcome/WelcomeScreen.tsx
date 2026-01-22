@@ -34,6 +34,12 @@ export interface WelcomeScreenProps {
   recentProjects?: RecentProject[];
   /** Whether an operation is in progress */
   isLoading?: boolean;
+  /** App version to display */
+  version?: string;
+  /** Whether to show "Don't show again" checkbox */
+  showDontShowOption?: boolean;
+  /** Callback when user toggles "Don't show again" */
+  onDontShowAgain?: (dontShow: boolean) => void;
 }
 
 // =============================================================================
@@ -45,6 +51,9 @@ export function WelcomeScreen({
   onOpenProject,
   recentProjects = [],
   isLoading = false,
+  version = '0.1.0',
+  showDontShowOption = false,
+  onDontShowAgain,
 }: WelcomeScreenProps): JSX.Element {
   // ===========================================================================
   // Handlers
@@ -171,9 +180,23 @@ export function WelcomeScreen({
         </div>
       )}
 
+      {/* Don't Show Again Option */}
+      {showDontShowOption && (
+        <label className="mt-8 flex items-center gap-2 cursor-pointer">
+          <input
+            type="checkbox"
+            onChange={(e) => onDontShowAgain?.(e.target.checked)}
+            className="w-4 h-4 rounded border-editor-border bg-editor-bg text-primary-500 focus:ring-primary-500/50 focus:ring-offset-0"
+          />
+          <span className="text-sm text-editor-text-muted">
+            Don&apos;t show this on startup
+          </span>
+        </label>
+      )}
+
       {/* Version Info */}
-      <p className="mt-12 text-xs text-editor-text-muted">
-        Version 0.1.0 (MVP)
+      <p className="mt-8 text-xs text-editor-text-muted">
+        Version {version} (MVP)
       </p>
     </div>
   );

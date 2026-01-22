@@ -31,7 +31,9 @@ import {
   useKeyboardShortcuts,
   useAudioPlayback,
   useToast,
+  useSettings,
 } from './hooks';
+import { UpdateBanner } from './components/features/update';
 import { createLogger, initializeLogger } from './services/logger';
 import {
   loadRecentProjects,
@@ -40,6 +42,7 @@ import {
   validateProjectName,
   type RecentProject,
 } from './utils';
+import { updateService } from './services/updateService';
 
 // Initialize logger on module load
 initializeLogger();
@@ -344,6 +347,9 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
 function App(): JSX.Element {
   const { isLoaded, isLoading, createProject, loadProject, getActiveSequence } = useProjectStore();
 
+  // Settings for welcome screen behavior
+  const { general, updateGeneral, isLoaded: settingsLoaded } = useSettings();
+
   // FFmpeg status check
   const { isAvailable: isFFmpegAvailable, isLoading: isFFmpegLoading } = useFFmpegStatus();
   const [showFFmpegWarning, setShowFFmpegWarning] = useState(false);
@@ -374,10 +380,22 @@ function App(): JSX.Element {
   // Recent projects - load from localStorage on mount
   const [recentProjects, setRecentProjects] = useState<RecentProject[]>([]);
 
-  // Load recent projects on mount
+  // App version (fetched from backend)
+  const [appVersion, setAppVersion] = useState('0.1.0');
+
+  // Load recent projects and version on mount
   useEffect(() => {
     const projects = loadRecentProjects();
     setRecentProjects(projects);
+
+    // Fetch actual version from backend
+    updateService.getCurrentVersion().then((version) => {
+      if (version && version !== 'unknown') {
+        setAppVersion(version);
+      }
+    }).catch((error) => {
+      logger.warn('Failed to fetch app version', { error });
+    });
   }, []);
 
   // Auto-save functionality (30 second delay after changes)
@@ -411,6 +429,14 @@ function App(): JSX.Element {
     setShowFFmpegWarning(false);
     setFFmpegWarningDismissed(true);
   }, []);
+
+  // Handle "Don't show again" toggle on welcome screen
+  const handleDontShowWelcome = useCallback(
+    (dontShow: boolean) => {
+      void updateGeneral({ showWelcomeOnStartup: !dontShow });
+    },
+    [updateGeneral]
+  );
 
   // Open the project creation dialog
   const handleNewProject = useCallback(() => {
@@ -516,11 +542,15 @@ function App(): JSX.Element {
   if (!isLoaded) {
     return (
       <>
+        <UpdateBanner checkOnMount={settingsLoaded && general.checkUpdatesOnStartup} />
         <WelcomeScreen
           onNewProject={handleNewProject}
           onOpenProject={(path) => void handleOpenProject(path)}
           recentProjects={recentProjects}
           isLoading={isLoading || isCreatingProject}
+          version={appVersion}
+          showDontShowOption={settingsLoaded}
+          onDontShowAgain={handleDontShowWelcome}
         />
         <ProjectCreationDialog
           isOpen={showCreateDialog}
@@ -543,6 +573,7 @@ function App(): JSX.Element {
 
   return (
     <>
+      <UpdateBanner checkOnMount={settingsLoaded && general.checkUpdatesOnStartup} />
       <ErrorBoundary
         onError={handleEditorError}
         showDetails={import.meta.env.DEV}

@@ -4,12 +4,15 @@
  * Application header with branding, project info, menu bar, and toolbar.
  */
 
-import { X, Save, FolderOpen, Download, Search } from 'lucide-react';
+import { X, Save, FolderOpen, Download, Search, Settings } from 'lucide-react';
 import { UndoRedoButtons } from '@/components/ui';
 import { SearchPanel } from '@/components/features/search';
+import { SettingsDialog } from '@/components/features/settings';
+import { ShortcutsDialog } from '@/components/features/help';
 import { useProjectStore } from '@/stores';
 import { useCallback, useState, useEffect } from 'react';
 import { createLogger } from '@/services/logger';
+import { updateService } from '@/services/updateService';
 import type { AssetSearchResultItem } from '@/hooks/useSearch';
 
 const logger = createLogger('Header');
@@ -46,13 +49,40 @@ export function Header({
   const [isSaving, setIsSaving] = useState(false);
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [displayVersion, setDisplayVersion] = useState(version);
 
-  // Keyboard shortcut for search (Ctrl/Cmd + K)
+  // Fetch actual version from backend on mount
+  useEffect(() => {
+    updateService.getCurrentVersion().then((v) => {
+      if (v && v !== 'unknown') {
+        setDisplayVersion(v);
+      }
+    }).catch((error) => {
+      logger.warn('Failed to fetch app version', { error });
+    });
+  }, []);
+
+  // Keyboard shortcuts (Ctrl/Cmd + K for search, Ctrl/Cmd + , for settings, ? for shortcuts)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Skip if in input element
+      const target = e.target as HTMLElement;
+      const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+
       if ((e.ctrlKey || e.metaKey) && e.key === 'k') {
         e.preventDefault();
         setShowSearch(true);
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+        e.preventDefault();
+        setShowSettings(true);
+      }
+      // "?" key for shortcuts (Shift + /)
+      if (e.key === '?' && !isInput) {
+        e.preventDefault();
+        setShowShortcuts(true);
       }
     };
 
@@ -122,7 +152,7 @@ export function Header({
     <div className="h-10 bg-editor-sidebar border-b border-editor-border flex items-center px-4">
       {/* Branding */}
       <h1 className="text-sm font-semibold text-primary-400">{title}</h1>
-      <span className="ml-2 text-xs text-editor-text-muted">v{version}</span>
+      <span className="ml-2 text-xs text-editor-text-muted">v{displayVersion}</span>
 
       {/* Separator */}
       {meta && (
@@ -190,6 +220,15 @@ export function Header({
 
           {/* Separator */}
           <div className="mx-1 h-4 w-px bg-editor-border" />
+
+          {/* Settings Button */}
+          <button
+            onClick={() => setShowSettings(true)}
+            className="p-1.5 rounded hover:bg-editor-bg transition-colors text-editor-text-muted hover:text-editor-text"
+            title="Settings (Ctrl+,)"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
 
           {/* Close Project Button */}
           <button
@@ -264,6 +303,18 @@ export function Header({
         onResultSelect={handleSearchResultSelect}
         showBackdrop
         className="fixed top-1/4 left-1/2 -translate-x-1/2 w-full max-w-2xl"
+      />
+
+      {/* Settings Dialog */}
+      <SettingsDialog
+        isOpen={showSettings}
+        onClose={() => setShowSettings(false)}
+      />
+
+      {/* Shortcuts Dialog */}
+      <ShortcutsDialog
+        isOpen={showShortcuts}
+        onClose={() => setShowShortcuts(false)}
       />
     </div>
   );
