@@ -5,7 +5,7 @@
  * Checks for overlaps, track type compatibility, locked tracks, and bounds.
  */
 
-import type { Track, Clip, AssetKind, TrackKind } from '@/types';
+import type { Track, Clip, Asset, AssetKind, TrackKind } from '@/types';
 
 // =============================================================================
 // Types
@@ -41,6 +41,8 @@ export interface DropValidationContext {
   sourceClip?: Clip | null;
   /** Type of asset being dropped */
   assetKind?: AssetKind;
+  /** Assets map for looking up asset kind from clip (optional for backwards compatibility) */
+  assets?: Map<string, Asset>;
 }
 
 // =============================================================================
@@ -143,7 +145,7 @@ export function validateDrop(
   clipDuration: number,
   context: DropValidationContext
 ): DropValidity {
-  const { track, clips, sourceClip, assetKind } = context;
+  const { track, clips, sourceClip, assetKind, assets } = context;
 
   // Check: Track is locked
   if (track.locked) {
@@ -165,7 +167,7 @@ export function validateDrop(
   // }
 
   // Check: Track type compatibility
-  const effectiveAssetKind = assetKind ?? getAssetKindFromClip(sourceClip);
+  const effectiveAssetKind = assetKind ?? getAssetKindFromClip(sourceClip, assets);
   if (effectiveAssetKind && !isAssetCompatibleWithTrack(effectiveAssetKind, track.kind)) {
     return {
       isValid: false,
@@ -206,15 +208,16 @@ export function validateDrop(
 }
 
 /**
- * Try to infer asset kind from a clip's properties
+ * Get asset kind from a clip by looking up the asset in the assets map
  */
-function getAssetKindFromClip(clip?: Clip | null): AssetKind | undefined {
-  if (!clip) return undefined;
+function getAssetKindFromClip(
+  clip: Clip | null | undefined,
+  assets: Map<string, Asset> | undefined
+): AssetKind | undefined {
+  if (!clip || !assets) return undefined;
 
-  // This is a simplified heuristic - in a real implementation,
-  // you'd look up the asset by clip.assetId to get the actual kind
-  // For now, we return undefined to skip the track type check
-  return undefined;
+  const asset = assets.get(clip.assetId);
+  return asset?.kind;
 }
 
 // =============================================================================

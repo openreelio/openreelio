@@ -247,6 +247,34 @@ export function ProxyPreviewPlayer({
     });
   }, [activeClips]);
 
+  // Clear error state when clips change or proxy becomes ready
+  useEffect(() => {
+    const activeClipIds = new Set(activeClips.map(c => c.clip.id));
+
+    setVideoErrors(prev => {
+      let changed = false;
+      const next = new Map(prev);
+
+      // Clear errors for clips that are no longer active
+      next.forEach((_, clipId) => {
+        if (!activeClipIds.has(clipId)) {
+          next.delete(clipId);
+          changed = true;
+        }
+      });
+
+      // Clear errors for clips whose proxy is now ready
+      activeClips.forEach(({ clip, asset }) => {
+        if (next.has(clip.id) && asset.proxyStatus === 'ready') {
+          next.delete(clip.id);
+          changed = true;
+        }
+      });
+
+      return changed ? next : prev;
+    });
+  }, [activeClips]);
+
   // Handle video element ref
   const setVideoRef = useCallback((clipId: string, el: HTMLVideoElement | null) => {
     if (el) {

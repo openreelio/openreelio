@@ -506,17 +506,21 @@ impl Command for MoveClipCommand {
             let mut clip = sequence.tracks[current_track_idx].clips.remove(clip_idx);
             clip.place.timeline_in_sec = old_pos;
 
-            if current_track_idx < orig_idx {
-                let (left, right) = sequence.tracks.split_at_mut(orig_idx);
-                insert_clip_sorted(&mut right[0], clip);
-                sort_track_clips(&mut left[current_track_idx]);
-            } else if orig_idx < current_track_idx {
-                let (left, right) = sequence.tracks.split_at_mut(current_track_idx);
-                insert_clip_sorted(&mut left[orig_idx], clip);
-                sort_track_clips(&mut right[0]);
-            } else {
-                // Shouldn't happen, but keep it safe.
-                insert_clip_sorted(&mut sequence.tracks[orig_idx], clip);
+            match current_track_idx.cmp(&orig_idx) {
+                std::cmp::Ordering::Less => {
+                    let (left, right) = sequence.tracks.split_at_mut(orig_idx);
+                    insert_clip_sorted(&mut right[0], clip);
+                    sort_track_clips(&mut left[current_track_idx]);
+                }
+                std::cmp::Ordering::Greater => {
+                    let (left, right) = sequence.tracks.split_at_mut(current_track_idx);
+                    insert_clip_sorted(&mut left[orig_idx], clip);
+                    sort_track_clips(&mut right[0]);
+                }
+                std::cmp::Ordering::Equal => {
+                    // Shouldn't happen, but keep it safe.
+                    insert_clip_sorted(&mut sequence.tracks[orig_idx], clip);
+                }
             }
 
             return Ok(());

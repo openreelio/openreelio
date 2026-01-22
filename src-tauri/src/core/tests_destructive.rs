@@ -137,7 +137,6 @@ fn test_prevent_clip_overlap() {
 
     let result = cmd2.execute(&mut state);
 
-    // NOTE: This assertion WILL FAIL until we implement collision detection
     assert!(result.is_err(), "Should detect collision during insert");
 }
 
@@ -162,7 +161,6 @@ fn test_ensure_sorted_clips() {
 
     let track = &state.sequences[&seq_id].tracks[0];
 
-    // NOTE: This assertion WILL FAIL until we implement sorting
     assert_eq!(
         track.clips[0].place.timeline_in_sec, 0.0,
         "First clip in vector should be the earliest one"

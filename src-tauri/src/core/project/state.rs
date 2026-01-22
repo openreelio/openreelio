@@ -291,10 +291,12 @@ impl ProjectState {
             let prev = &track.clips[i - 1];
             let curr = &track.clips[i];
             if prev.place.overlaps(&curr.place) {
-                return Err(CoreError::InvalidCommand(format!(
-                    "Clip overlap detected during replay on track {}: {} overlaps {}",
-                    track.id, prev.id, curr.id
-                )));
+                return Err(CoreError::ClipOverlap {
+                    track_id: track.id.clone(),
+                    existing_clip_id: prev.id.clone(),
+                    new_start: curr.place.timeline_in_sec,
+                    new_end: curr.place.timeline_in_sec + curr.place.duration_sec,
+                });
             }
         }
         Ok(())
