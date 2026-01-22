@@ -1,14 +1,19 @@
 //! Worker Pool Module
 //!
 //! Manages background workers for job execution.
+//! Workers consume jobs from a channel and process them asynchronously,
+//! emitting events via Tauri for progress updates.
 
 use std::collections::BinaryHeap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::{mpsc, oneshot};
+use tauri::Emitter;
+use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::core::{
-    jobs::{Job, JobStatus},
+    ffmpeg::{FFmpegProgress, SharedFFmpegState},
+    jobs::{Job, JobStatus, JobType},
     CoreResult, JobId,
 };
 
@@ -50,8 +55,8 @@ impl JobHandle {
 
 /// Entry in the priority queue
 #[derive(Debug, Clone)]
-struct QueueEntry {
-    job: Job,
+pub(crate) struct QueueEntry {
+    pub(crate) job: Job,
 }
 
 impl PartialEq for QueueEntry {
@@ -119,10 +124,10 @@ pub enum JobEvent {
 pub struct WorkerPool {
     /// Configuration
     config: WorkerPoolConfig,
-    /// Job queue
-    queue: Arc<Mutex<BinaryHeap<QueueEntry>>>,
-    /// Active jobs
-    active_jobs: Arc<Mutex<std::collections::HashMap<JobId, Job>>>,
+    /// Job queue (pub(crate) for worker access)
+    pub(crate) queue: Arc<Mutex<BinaryHeap<QueueEntry>>>,
+    /// Active jobs (pub(crate) for worker access)
+    pub(crate) active_jobs: Arc<Mutex<std::collections::HashMap<JobId, Job>>>,
     /// Event sender
     event_tx: mpsc::UnboundedSender<JobEvent>,
     /// Event receiver
@@ -244,12 +249,708 @@ impl WorkerPool {
     pub fn num_workers(&self) -> usize {
         self.config.num_workers
     }
+
+    /// Spawns background workers to process jobs.
+    ///
+    /// This method starts async tasks that consume jobs from the queue.
+    /// Workers will run until the shutdown signal is triggered.
+    ///
+    /// # Arguments
+    /// * `ffmpeg_state` - Shared FFmpeg state for video operations
+    /// * `app_handle` - Tauri app handle for emitting events
+    /// * `cache_dir` - Directory for cached files (thumbnails, proxies, etc.)
+    /// * `shutdown` - Notify signal to stop workers gracefully
+    ///
+    /// # Returns
+    /// Vector of task handles for the spawned workers.
+    pub fn spawn_workers(
+        &self,
+        ffmpeg_state: SharedFFmpegState,
+        app_handle: tauri::AppHandle,
+        cache_dir: std::path::PathBuf,
+        shutdown: Arc<Notify>,
+    ) -> Vec<tokio::task::JoinHandle<()>> {
+        start_workers(self, ffmpeg_state, app_handle, cache_dir, shutdown)
+    }
 }
 
 impl Default for WorkerPool {
     fn default() -> Self {
         Self::with_defaults()
     }
+}
+
+// =============================================================================
+// Job Processor
+// =============================================================================
+
+/// Job processor handles the actual execution of jobs.
+/// It holds references to FFmpeg and emits events via Tauri.
+pub struct JobProcessor {
+    /// FFmpeg state for video operations
+    ffmpeg_state: SharedFFmpegState,
+    /// Tauri app handle for emitting events
+    app_handle: tauri::AppHandle,
+    /// Cache directory for generated files
+    cache_dir: PathBuf,
+}
+
+impl JobProcessor {
+    /// Creates a new job processor
+    pub fn new(
+        ffmpeg_state: SharedFFmpegState,
+        app_handle: tauri::AppHandle,
+        cache_dir: PathBuf,
+    ) -> Self {
+        Self {
+            ffmpeg_state,
+            app_handle,
+            cache_dir,
+        }
+    }
+
+    /// Process a single job
+    pub async fn process(&self, job: &mut Job) -> Result<serde_json::Value, String> {
+        tracing::info!("Processing job {}: {:?}", job.id, job.job_type);
+
+        match &job.job_type {
+            JobType::ThumbnailGeneration => self.process_thumbnail(job).await,
+            JobType::ProxyGeneration => self.process_proxy(job).await,
+            JobType::WaveformGeneration => self.process_waveform(job).await,
+            JobType::Transcription => self.process_transcription(job).await,
+            JobType::Indexing => self.process_indexing(job).await,
+            JobType::PreviewRender => self.process_preview_render(job).await,
+            JobType::FinalRender => self.process_final_render(job).await,
+            JobType::AICompletion => self.process_ai_completion(job).await,
+        }
+    }
+
+    /// Emit job progress event
+    #[allow(dead_code)]
+    fn emit_progress(&self, job_id: &str, progress: f32, message: Option<&str>) {
+        let _ = self.app_handle.emit(
+            "job:progress",
+            serde_json::json!({
+                "jobId": job_id,
+                "progress": progress,
+                "message": message,
+            }),
+        );
+    }
+
+    /// Emit job completion event
+    fn emit_completed(&self, job_id: &str, result: &serde_json::Value) {
+        let _ = self.app_handle.emit(
+            "job:completed",
+            serde_json::json!({
+                "jobId": job_id,
+                "result": result,
+            }),
+        );
+    }
+
+    /// Emit job failure event
+    fn emit_failed(&self, job_id: &str, error: &str) {
+        let _ = self.app_handle.emit(
+            "job:failed",
+            serde_json::json!({
+                "jobId": job_id,
+                "error": error,
+            }),
+        );
+    }
+
+    /// Process thumbnail generation job
+    async fn process_thumbnail(&self, job: &Job) -> Result<serde_json::Value, String> {
+        let asset_id = job
+            .payload
+            .get("assetId")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing assetId in payload")?;
+
+        let input_path = job
+            .payload
+            .get("inputPath")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing inputPath in payload")?;
+
+        let width = job
+            .payload
+            .get("width")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        let height = job
+            .payload
+            .get("height")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        // Create output path
+        let output_dir = self.cache_dir.join("thumbnails");
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| format!("Failed to create thumbnail directory: {}", e))?;
+
+        let output_path = output_dir.join(format!("{}.jpg", asset_id));
+
+        // Get FFmpeg runner
+        let state = self.ffmpeg_state.read().await;
+        let runner = state.runner().ok_or("FFmpeg not available")?;
+
+        // Generate thumbnail
+        let size = match (width, height) {
+            (Some(w), Some(h)) => Some((w, h)),
+            _ => Some((320, 180)), // Default thumbnail size
+        };
+
+        runner
+            .generate_thumbnail(&PathBuf::from(input_path), &output_path, size)
+            .await
+            .map_err(|e| format!("Thumbnail generation failed: {}", e))?;
+
+        Ok(serde_json::json!({
+            "assetId": asset_id,
+            "thumbnailPath": output_path.to_string_lossy(),
+        }))
+    }
+
+    /// Process proxy video generation job
+    ///
+    /// Emits events:
+    /// - `asset:proxy-generating` when starting
+    /// - `asset:proxy-ready` on success with { assetId, proxyPath, proxyUrl }
+    /// - `asset:proxy-failed` on failure with { assetId, error }
+    async fn process_proxy(&self, job: &Job) -> Result<serde_json::Value, String> {
+        let asset_id = job
+            .payload
+            .get("assetId")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing assetId in payload")?;
+
+        let input_path = job
+            .payload
+            .get("inputPath")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing inputPath in payload")?;
+
+        // Emit generating event
+        let _ = self.app_handle.emit(
+            "asset:proxy-generating",
+            serde_json::json!({
+                "assetId": asset_id,
+                "jobId": job.id,
+            }),
+        );
+
+        // Create output path
+        let output_dir = self.cache_dir.join("proxies");
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| format!("Failed to create proxy directory: {}", e))?;
+
+        let output_path = output_dir.join(format!("{}.mp4", asset_id));
+
+        // Get FFmpeg runner
+        let state = self.ffmpeg_state.read().await;
+        let runner = state.runner().ok_or("FFmpeg not available")?;
+
+        // Create progress channel for FFmpeg progress updates
+        let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<FFmpegProgress>(32);
+        let app_handle = self.app_handle.clone();
+        let job_id = job.id.clone();
+        let asset_id_for_progress = asset_id.to_string();
+
+        // Spawn progress reporter
+        let progress_task = tokio::spawn(async move {
+            while let Some(progress) = progress_rx.recv().await {
+                let _ = app_handle.emit(
+                    "job:progress",
+                    serde_json::json!({
+                        "jobId": job_id,
+                        "assetId": asset_id_for_progress,
+                        "progress": progress.percent / 100.0,
+                        "message": format!("Encoding: {:.1}%", progress.percent),
+                        "fps": progress.fps,
+                        "etaSeconds": progress.eta_seconds,
+                    }),
+                );
+            }
+        });
+
+        // Generate proxy with progress
+        let result = runner
+            .generate_proxy(&PathBuf::from(input_path), &output_path, Some(progress_tx))
+            .await;
+
+        // Wait for progress reporter to finish
+        let _ = progress_task.await;
+
+        match result {
+            Ok(()) => {
+                // Create Tauri asset protocol URL for the proxy file
+                let proxy_url = format!(
+                    "asset://localhost/{}",
+                    output_path.to_string_lossy().replace('\\', "/")
+                );
+
+                // Emit proxy ready event for frontend to update state
+                let _ = self.app_handle.emit(
+                    "asset:proxy-ready",
+                    serde_json::json!({
+                        "assetId": asset_id,
+                        "proxyPath": output_path.to_string_lossy(),
+                        "proxyUrl": proxy_url,
+                    }),
+                );
+
+                tracing::info!(
+                    "Proxy generation completed for asset {}: {}",
+                    asset_id,
+                    output_path.display()
+                );
+
+                Ok(serde_json::json!({
+                    "assetId": asset_id,
+                    "proxyPath": output_path.to_string_lossy(),
+                    "proxyUrl": proxy_url,
+                }))
+            }
+            Err(e) => {
+                let error_msg = format!("Proxy generation failed: {}", e);
+
+                // Emit proxy failed event
+                let _ = self.app_handle.emit(
+                    "asset:proxy-failed",
+                    serde_json::json!({
+                        "assetId": asset_id,
+                        "error": error_msg,
+                    }),
+                );
+
+                Err(error_msg)
+            }
+        }
+    }
+
+    /// Process waveform generation job
+    ///
+    /// Generates audio waveform peak data as JSON for timeline visualization.
+    /// Emits events:
+    /// - `waveform-generating` when starting
+    /// - `waveform-complete` on success with { assetId, samplesPerSecond, peakCount, durationSec }
+    /// - `waveform-error` on failure with { assetId, error }
+    async fn process_waveform(&self, job: &Job) -> Result<serde_json::Value, String> {
+        use tauri::Emitter;
+
+        let asset_id = job
+            .payload
+            .get("assetId")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing assetId in payload")?;
+
+        let input_path = job
+            .payload
+            .get("inputPath")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing inputPath in payload")?;
+
+        let samples_per_second = job
+            .payload
+            .get("samplesPerSecond")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100) as u32;
+
+        // Emit generating event
+        let _ = self.app_handle.emit(
+            "waveform-generating",
+            serde_json::json!({
+                "assetId": asset_id,
+                "jobId": job.id,
+            }),
+        );
+
+        // Create output path for JSON waveform
+        let output_dir = self.cache_dir.join("waveforms");
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| format!("Failed to create waveform directory: {}", e))?;
+
+        let output_path = output_dir.join(format!("{}.json", asset_id));
+
+        // Get FFmpeg runner
+        let state = self.ffmpeg_state.read().await;
+        let runner = state.runner().ok_or("FFmpeg not available")?;
+
+        // Generate waveform as JSON
+        match runner
+            .generate_waveform_json(&PathBuf::from(input_path), &output_path, samples_per_second)
+            .await
+        {
+            Ok(waveform) => {
+                // Emit completion event
+                let _ = self.app_handle.emit(
+                    "waveform-complete",
+                    serde_json::json!({
+                        "assetId": asset_id,
+                        "samplesPerSecond": waveform.samples_per_second,
+                        "peakCount": waveform.peaks.len(),
+                        "durationSec": waveform.duration_sec,
+                        "waveformPath": output_path.to_string_lossy(),
+                    }),
+                );
+
+                tracing::info!(
+                    "Waveform generation completed for asset {}: {} peaks",
+                    asset_id,
+                    waveform.peaks.len()
+                );
+
+                Ok(serde_json::json!({
+                    "assetId": asset_id,
+                    "waveformPath": output_path.to_string_lossy(),
+                    "samplesPerSecond": waveform.samples_per_second,
+                    "peakCount": waveform.peaks.len(),
+                    "durationSec": waveform.duration_sec,
+                }))
+            }
+            Err(e) => {
+                let error_msg = format!("Waveform generation failed: {}", e);
+
+                // Emit error event
+                let _ = self.app_handle.emit(
+                    "waveform-error",
+                    serde_json::json!({
+                        "assetId": asset_id,
+                        "error": error_msg,
+                    }),
+                );
+
+                Err(error_msg)
+            }
+        }
+    }
+
+    /// Process transcription job (placeholder - requires whisper integration)
+    async fn process_transcription(&self, job: &Job) -> Result<serde_json::Value, String> {
+        let asset_id = job
+            .payload
+            .get("assetId")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing assetId in payload")?;
+
+        // TODO: Implement whisper.cpp integration (TASK-007)
+        tracing::warn!("Transcription not yet implemented for asset {}", asset_id);
+
+        Err("Transcription not yet implemented. Whisper integration pending (TASK-007)".to_string())
+    }
+
+    /// Process indexing job (placeholder - requires search indexer)
+    async fn process_indexing(&self, job: &Job) -> Result<serde_json::Value, String> {
+        let asset_id = job
+            .payload
+            .get("assetId")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing assetId in payload")?;
+
+        // TODO: Implement Meilisearch indexing (TASK-009)
+        tracing::warn!("Indexing not yet implemented for asset {}", asset_id);
+
+        Ok(serde_json::json!({
+            "assetId": asset_id,
+            "indexed": false,
+            "message": "Indexing not yet implemented",
+        }))
+    }
+
+    /// Process preview render job (placeholder)
+    async fn process_preview_render(&self, job: &Job) -> Result<serde_json::Value, String> {
+        let sequence_id = job
+            .payload
+            .get("sequenceId")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing sequenceId in payload")?;
+
+        // TODO: Implement preview rendering
+        tracing::warn!(
+            "Preview render not yet implemented for sequence {}",
+            sequence_id
+        );
+
+        Err("Preview render not yet implemented".to_string())
+    }
+
+    /// Process final render job (placeholder - see start_render IPC)
+    async fn process_final_render(&self, job: &Job) -> Result<serde_json::Value, String> {
+        let sequence_id = job
+            .payload
+            .get("sequenceId")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing sequenceId in payload")?;
+
+        // Final render is handled by the start_render IPC command directly
+        // This job type is for queuing renders in the background
+        tracing::warn!(
+            "Final render via job queue not yet implemented for sequence {}",
+            sequence_id
+        );
+
+        Err("Use start_render IPC command for final render".to_string())
+    }
+
+    /// Process AI completion job (placeholder)
+    async fn process_ai_completion(&self, job: &Job) -> Result<serde_json::Value, String> {
+        let prompt = job
+            .payload
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing prompt in payload")?;
+
+        // TODO: Implement AI gateway integration (TASK-011)
+        tracing::warn!("AI completion not yet implemented for prompt: {}", prompt);
+
+        Err(
+            "AI completion not yet implemented. AI gateway integration pending (TASK-011)"
+                .to_string(),
+        )
+    }
+}
+
+// =============================================================================
+// Worker Runner
+// =============================================================================
+
+/// Starts the worker pool with actual job processing using Arc references.
+///
+/// This variant accepts the Arc references directly, useful when you need to
+/// clone them before spawning async tasks (e.g., in Tauri setup).
+///
+/// # Arguments
+/// * `queue` - Arc to the job queue
+/// * `active_jobs` - Arc to active jobs map
+/// * `num_workers` - Number of worker tasks to spawn
+/// * `ffmpeg_state` - Shared FFmpeg state for video operations
+/// * `app_handle` - Tauri app handle for emitting events
+/// * `cache_dir` - Directory for cached files (thumbnails, proxies, etc.)
+/// * `shutdown` - Notify signal to stop workers gracefully
+pub(crate) fn start_workers_with_arcs(
+    queue: Arc<Mutex<BinaryHeap<QueueEntry>>>,
+    active_jobs: Arc<Mutex<std::collections::HashMap<JobId, Job>>>,
+    num_workers: usize,
+    ffmpeg_state: SharedFFmpegState,
+    app_handle: tauri::AppHandle,
+    cache_dir: PathBuf,
+    shutdown: Arc<Notify>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(num_workers);
+
+    for worker_id in 0..num_workers {
+        let queue_clone = Arc::clone(&queue);
+        let active_clone = Arc::clone(&active_jobs);
+        let ffmpeg_clone = Arc::clone(&ffmpeg_state);
+        let app_clone = app_handle.clone();
+        let cache_clone = cache_dir.clone();
+        let shutdown_clone = Arc::clone(&shutdown);
+
+        let handle = tokio::spawn(async move {
+            let processor = JobProcessor::new(ffmpeg_clone, app_clone.clone(), cache_clone);
+
+            tracing::info!("Worker {} started", worker_id);
+
+            loop {
+                // Check for shutdown
+                tokio::select! {
+                    _ = shutdown_clone.notified() => {
+                        tracing::info!("Worker {} shutting down", worker_id);
+                        break;
+                    }
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                        // Try to get a job from the queue
+                        let job_opt = {
+                            let mut queue_guard = queue_clone.lock().unwrap();
+                            queue_guard.pop().map(|entry| entry.job)
+                        };
+
+                        if let Some(mut job) = job_opt {
+                            // Update status to running
+                            job.status = JobStatus::Running {
+                                progress: 0.0,
+                                message: Some("Starting...".to_string()),
+                            };
+
+                            // Move to active jobs
+                            {
+                                let mut active_guard = active_clone.lock().unwrap();
+                                active_guard.insert(job.id.clone(), job.clone());
+                            }
+
+                            // Emit started event
+                            let _ = app_clone.emit("job:started", serde_json::json!({
+                                "jobId": &job.id,
+                                "jobType": format!("{:?}", &job.job_type),
+                            }));
+
+                            tracing::info!(
+                                "Worker {} processing job {}: {:?}",
+                                worker_id,
+                                job.id,
+                                job.job_type
+                            );
+
+                            // Process the job
+                            let result = processor.process(&mut job).await;
+
+                            // Update job status based on result
+                            match result {
+                                Ok(result_value) => {
+                                    job.status = JobStatus::Completed { result: result_value.clone() };
+                                    job.completed_at = Some(chrono::Utc::now().to_rfc3339());
+
+                                    processor.emit_completed(&job.id, &result_value);
+
+                                    tracing::info!("Job {} completed successfully", job.id);
+                                }
+                                Err(error) => {
+                                    job.status = JobStatus::Failed { error: error.clone() };
+                                    job.completed_at = Some(chrono::Utc::now().to_rfc3339());
+
+                                    processor.emit_failed(&job.id, &error);
+
+                                    tracing::error!("Job {} failed: {}", job.id, error);
+                                }
+                            }
+
+                            // Update job in active jobs
+                            {
+                                let mut active_guard = active_clone.lock().unwrap();
+                                active_guard.insert(job.id.clone(), job);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    handles
+}
+
+/// Starts the worker pool with actual job processing.
+///
+/// This function spawns `num_workers` async tasks that consume jobs from the
+/// worker pool's queue and process them using the provided processor.
+///
+/// # Arguments
+/// * `pool` - The worker pool containing the job queue
+/// * `ffmpeg_state` - Shared FFmpeg state for video operations
+/// * `app_handle` - Tauri app handle for emitting events
+/// * `cache_dir` - Directory for cached files (thumbnails, proxies, etc.)
+/// * `shutdown` - Notify signal to stop workers gracefully
+pub fn start_workers(
+    pool: &WorkerPool,
+    ffmpeg_state: SharedFFmpegState,
+    app_handle: tauri::AppHandle,
+    cache_dir: PathBuf,
+    shutdown: Arc<Notify>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let num_workers = pool.num_workers();
+
+    // Clone the Arc references to queue and active_jobs for workers
+    let queue = Arc::clone(&pool.queue);
+    let active_jobs = Arc::clone(&pool.active_jobs);
+
+    let mut handles = Vec::with_capacity(num_workers);
+
+    for worker_id in 0..num_workers {
+        let queue_clone = Arc::clone(&queue);
+        let active_clone = Arc::clone(&active_jobs);
+        let ffmpeg_clone = Arc::clone(&ffmpeg_state);
+        let app_clone = app_handle.clone();
+        let cache_clone = cache_dir.clone();
+        let shutdown_clone = Arc::clone(&shutdown);
+
+        let handle = tokio::spawn(async move {
+            let processor = JobProcessor::new(ffmpeg_clone, app_clone.clone(), cache_clone);
+
+            tracing::info!("Worker {} started", worker_id);
+
+            loop {
+                // Check for shutdown
+                tokio::select! {
+                    _ = shutdown_clone.notified() => {
+                        tracing::info!("Worker {} shutting down", worker_id);
+                        break;
+                    }
+                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                        // Try to get a job from the queue
+                        let job_opt = {
+                            let mut queue_guard = queue_clone.lock().unwrap();
+                            queue_guard.pop().map(|entry| entry.job)
+                        };
+
+                        if let Some(mut job) = job_opt {
+                            // Update status to running
+                            job.status = JobStatus::Running {
+                                progress: 0.0,
+                                message: Some("Starting...".to_string()),
+                            };
+
+                            // Move to active jobs
+                            {
+                                let mut active_guard = active_clone.lock().unwrap();
+                                active_guard.insert(job.id.clone(), job.clone());
+                            }
+
+                            // Emit started event
+                            let _ = app_clone.emit("job:started", serde_json::json!({
+                                "jobId": &job.id,
+                                "jobType": format!("{:?}", &job.job_type),
+                            }));
+
+                            tracing::info!(
+                                "Worker {} processing job {}: {:?}",
+                                worker_id,
+                                job.id,
+                                job.job_type
+                            );
+
+                            // Process the job
+                            let result = processor.process(&mut job).await;
+
+                            // Update job status based on result
+                            match result {
+                                Ok(result_value) => {
+                                    job.status = JobStatus::Completed { result: result_value.clone() };
+                                    job.completed_at = Some(chrono::Utc::now().to_rfc3339());
+
+                                    processor.emit_completed(&job.id, &result_value);
+
+                                    tracing::info!("Job {} completed successfully", job.id);
+                                }
+                                Err(error) => {
+                                    job.status = JobStatus::Failed { error: error.clone() };
+                                    job.completed_at = Some(chrono::Utc::now().to_rfc3339());
+
+                                    processor.emit_failed(&job.id, &error);
+
+                                    tracing::error!("Job {} failed: {}", job.id, error);
+                                }
+                            }
+
+                            // Update job in active jobs
+                            {
+                                let mut active_guard = active_clone.lock().unwrap();
+                                active_guard.insert(job.id.clone(), job);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        handles.push(handle);
+    }
+
+    handles
 }
 
 #[cfg(test)]
