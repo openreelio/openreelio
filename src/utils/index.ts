@@ -87,3 +87,15 @@ export {
   isValidProjectName,
   type ProjectNameValidationResult,
 } from './projectPath';
+
+export {
+  validateDrop,
+  checkClipOverlap,
+  isAssetCompatibleWithTrack,
+  getTrackTypeMismatchMessage,
+  validDrop,
+  invalidDrop,
+  type DropInvalidReason,
+  type DropValidity,
+  type DropValidationContext,
+} from './dropValidity';
