@@ -4,7 +4,9 @@
 //! edge cases, and potential security boundary violations in data structures.
 
 use crate::core::assets::{Asset, VideoInfo};
-use crate::core::timeline::{Clip, ClipPlace, SequenceFormat};
+use crate::core::commands::{Command, InsertClipCommand};
+use crate::core::project::ProjectState;
+use crate::core::timeline::{Clip, ClipPlace, Sequence, SequenceFormat, Track, TrackKind};
 use crate::core::{Color, Ratio, TimeRange};
 
 #[test]
@@ -95,4 +97,78 @@ fn test_clamped_color_values() {
     assert_eq!(c.g, 0.0);
     assert_eq!(c.b, 0.5);
     assert_eq!(c.a, Some(1.0));
+}
+
+// Helper for command tests
+fn create_test_state() -> ProjectState {
+    let mut state = ProjectState::new("Destructive Test Project");
+
+    // Add asset
+    let asset =
+        Asset::new_video("video.mp4", "/video.mp4", VideoInfo::default()).with_duration(100.0);
+    state.assets.insert(asset.id.clone(), asset.clone());
+
+    // Add sequence with track
+    let mut sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
+    let track = Track::new("Video 1", TrackKind::Video);
+    sequence.tracks.push(track);
+    state.active_sequence_id = Some(sequence.id.clone());
+    state.sequences.insert(sequence.id.clone(), sequence);
+
+    state
+}
+
+#[test]
+fn test_prevent_clip_overlap() {
+    let mut state = create_test_state();
+    let seq_id = state.active_sequence_id.clone().unwrap();
+    let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+    let asset_id = state.assets.keys().next().unwrap().clone();
+
+    // 1. Insert Clip A at 0.0s (Duration 10s)
+    let mut cmd1 =
+        InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+    cmd1.execute(&mut state).expect("Cmd1 failed");
+
+    // 2. Insert Clip B at 5.0s (Overlapping Clip A)
+    // EXPECTED BEHAVIOR: Should fail in a robust system
+    let mut cmd2 =
+        InsertClipCommand::new(&seq_id, &track_id, &asset_id, 5.0).with_source_range(0.0, 10.0);
+
+    let result = cmd2.execute(&mut state);
+
+    // NOTE: This assertion WILL FAIL until we implement collision detection
+    assert!(result.is_err(), "Should detect collision during insert");
+}
+
+#[test]
+fn test_ensure_sorted_clips() {
+    let mut state = create_test_state();
+    let seq_id = state.active_sequence_id.clone().unwrap();
+    let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+    let asset_id = state.assets.keys().next().unwrap().clone();
+
+    // Clip A at 20.0 (Duration 10)
+    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 20.0)
+        .with_source_range(0.0, 10.0)
+        .execute(&mut state)
+        .unwrap();
+
+    // Clip B at 0.0 (Duration 10)
+    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)
+        .with_source_range(0.0, 10.0)
+        .execute(&mut state)
+        .unwrap();
+
+    let track = &state.sequences[&seq_id].tracks[0];
+
+    // NOTE: This assertion WILL FAIL until we implement sorting
+    assert_eq!(
+        track.clips[0].place.timeline_in_sec, 0.0,
+        "First clip in vector should be the earliest one"
+    );
+    assert_eq!(
+        track.clips[1].place.timeline_in_sec, 20.0,
+        "Second clip in vector should be the later one"
+    );
 }
