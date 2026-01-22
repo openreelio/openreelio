@@ -57,6 +57,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 num_cpus = "1.16"
 regex = "1"
 dirs = "5.0"
+fs2 = "0.4"
 
 # Type export for TypeScript bindings (Code-as-Documentation)
 specta = { version = "2.0.0-rc.20", features = ["derive", "serde_json"] }

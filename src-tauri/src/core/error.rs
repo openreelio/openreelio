@@ -66,6 +66,16 @@ pub enum CoreError {
     #[error("Clip conflict: another clip exists at this position")]
     ClipConflict,
 
+    #[error(
+        "Clip overlap on track {track_id}: {new_start:.3}~{new_end:.3}s conflicts with clip {existing_clip_id}"
+    )]
+    ClipOverlap {
+        track_id: TrackId,
+        existing_clip_id: ClipId,
+        new_start: TimeSec,
+        new_end: TimeSec,
+    },
+
     // =========================================================================
     // Effect Errors
     // =========================================================================
