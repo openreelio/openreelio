@@ -548,6 +548,41 @@ mod tests {
     }
 
     #[test]
+    fn test_ops_log_concurrent_append_is_consistent() {
+        let (ops_log, _temp_dir) = create_test_ops_log();
+        let path = ops_log.path().to_path_buf();
+
+        let threads = 8;
+        let per_thread = 25;
+        let mut handles = Vec::new();
+
+        for t in 0..threads {
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let log = OpsLog::new(&path);
+                for i in 0..per_thread {
+                    let op = Operation::new(
+                        OpKind::AssetImport,
+                        serde_json::json!({
+                            "thread": t,
+                            "i": i
+                        }),
+                    );
+                    log.append(&op).expect("append should succeed");
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let result = ops_log.read_all().unwrap();
+        assert!(result.errors.is_empty(), "expected no parse errors");
+        assert_eq!(result.operations.len(), threads * per_thread);
+    }
+
+    #[test]
     fn test_ops_log_append_and_read() {
         let (ops_log, _temp_dir) = create_test_ops_log();
 
