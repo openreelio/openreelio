@@ -22,6 +22,45 @@ pub enum AssetKind {
     MemePack,
 }
 
+/// Proxy video generation status
+///
+/// Tracks the lifecycle of proxy video generation for preview playback.
+/// Videos larger than 720p automatically trigger proxy generation on import.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum ProxyStatus {
+    /// No proxy needed (video <= 720p or non-video asset)
+    #[default]
+    NotNeeded,
+    /// Proxy generation is queued/pending
+    Pending,
+    /// Proxy is currently being generated
+    Generating,
+    /// Proxy generation completed successfully
+    Ready,
+    /// Proxy generation failed
+    Failed,
+}
+
+/// Minimum video height that requires proxy generation
+pub const PROXY_THRESHOLD_HEIGHT: u32 = 720;
+
+/// Check if an asset requires proxy generation
+///
+/// Returns true if the asset is a video with height > 720p
+pub fn requires_proxy(kind: &AssetKind, video_info: Option<&VideoInfo>) -> bool {
+    match kind {
+        AssetKind::Video => {
+            if let Some(info) = video_info {
+                info.height > PROXY_THRESHOLD_HEIGHT
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
 /// Video-specific metadata
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -171,6 +210,9 @@ pub struct Asset {
     /// Thumbnail URL (via Tauri asset protocol)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thumbnail_url: Option<String>,
+    /// Proxy video generation status
+    #[serde(default)]
+    pub proxy_status: ProxyStatus,
     /// Proxy video URL for preview playback (via Tauri asset protocol)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
@@ -178,6 +220,10 @@ pub struct Asset {
 
 impl Asset {
     /// Creates a new video asset with generated ULID
+    ///
+    /// Automatically determines proxy_status based on video dimensions:
+    /// - Videos > 720p height: ProxyStatus::NotNeeded (will be set to Pending when job is queued)
+    /// - Videos <= 720p height: ProxyStatus::NotNeeded
     pub fn new_video(name: &str, uri: &str, mut video_info: VideoInfo) -> Self {
         // Validate video info
         if video_info.width == 0 || video_info.height == 0 {
@@ -211,6 +257,7 @@ impl Asset {
             license: LicenseInfo::default(),
             tags: vec![],
             thumbnail_url: None,
+            proxy_status: ProxyStatus::NotNeeded,
             proxy_url: None,
         }
     }
@@ -231,6 +278,7 @@ impl Asset {
             license: LicenseInfo::default(),
             tags: vec![],
             thumbnail_url: None,
+            proxy_status: ProxyStatus::NotNeeded,
             proxy_url: None,
         }
     }
@@ -267,6 +315,7 @@ impl Asset {
             license: LicenseInfo::default(),
             tags: vec![],
             thumbnail_url: None,
+            proxy_status: ProxyStatus::NotNeeded,
             proxy_url: None,
         }
     }
@@ -322,11 +371,225 @@ impl Asset {
     pub fn set_proxy_url(&mut self, url: Option<String>) {
         self.proxy_url = url;
     }
+
+    /// Sets the proxy generation status
+    pub fn set_proxy_status(&mut self, status: ProxyStatus) {
+        self.proxy_status = status;
+    }
+
+    /// Checks if this asset requires proxy generation
+    ///
+    /// Returns true for video assets with height > 720p
+    pub fn needs_proxy(&self) -> bool {
+        requires_proxy(&self.kind, self.video.as_ref())
+    }
+
+    /// Marks the asset as pending proxy generation
+    pub fn mark_proxy_pending(&mut self) {
+        if self.needs_proxy() {
+            self.proxy_status = ProxyStatus::Pending;
+        }
+    }
+
+    /// Marks the asset as currently generating proxy
+    pub fn mark_proxy_generating(&mut self) {
+        self.proxy_status = ProxyStatus::Generating;
+    }
+
+    /// Marks the proxy as ready with the given URL
+    pub fn mark_proxy_ready(&mut self, proxy_url: String) {
+        self.proxy_status = ProxyStatus::Ready;
+        self.proxy_url = Some(proxy_url);
+    }
+
+    /// Marks the proxy generation as failed
+    pub fn mark_proxy_failed(&mut self) {
+        self.proxy_status = ProxyStatus::Failed;
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ==========================================================================
+    // ProxyStatus Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_proxy_status_default_is_not_needed() {
+        let status = ProxyStatus::default();
+        assert_eq!(status, ProxyStatus::NotNeeded);
+    }
+
+    #[test]
+    fn test_proxy_status_serialization() {
+        // Verify camelCase serialization for TypeScript
+        let cases = vec![
+            (ProxyStatus::NotNeeded, "\"notNeeded\""),
+            (ProxyStatus::Pending, "\"pending\""),
+            (ProxyStatus::Generating, "\"generating\""),
+            (ProxyStatus::Ready, "\"ready\""),
+            (ProxyStatus::Failed, "\"failed\""),
+        ];
+
+        for (status, expected) in cases {
+            let json = serde_json::to_string(&status).unwrap();
+            assert_eq!(json, expected, "ProxyStatus::{:?} serialization", status);
+        }
+    }
+
+    #[test]
+    fn test_proxy_status_deserialization() {
+        let ready: ProxyStatus = serde_json::from_str("\"ready\"").unwrap();
+        assert_eq!(ready, ProxyStatus::Ready);
+
+        let pending: ProxyStatus = serde_json::from_str("\"pending\"").unwrap();
+        assert_eq!(pending, ProxyStatus::Pending);
+    }
+
+    // ==========================================================================
+    // requires_proxy Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_video_above_720p_requires_proxy() {
+        let video_info = VideoInfo {
+            width: 1920,
+            height: 1080, // > 720
+            ..Default::default()
+        };
+        assert!(requires_proxy(&AssetKind::Video, Some(&video_info)));
+    }
+
+    #[test]
+    fn test_video_4k_requires_proxy() {
+        let video_info = VideoInfo {
+            width: 3840,
+            height: 2160, // 4K
+            ..Default::default()
+        };
+        assert!(requires_proxy(&AssetKind::Video, Some(&video_info)));
+    }
+
+    #[test]
+    fn test_video_720p_does_not_require_proxy() {
+        let video_info = VideoInfo {
+            width: 1280,
+            height: 720, // == 720
+            ..Default::default()
+        };
+        assert!(!requires_proxy(&AssetKind::Video, Some(&video_info)));
+    }
+
+    #[test]
+    fn test_video_below_720p_does_not_require_proxy() {
+        let video_info = VideoInfo {
+            width: 854,
+            height: 480, // 480p
+            ..Default::default()
+        };
+        assert!(!requires_proxy(&AssetKind::Video, Some(&video_info)));
+    }
+
+    #[test]
+    fn test_audio_asset_does_not_require_proxy() {
+        assert!(!requires_proxy(&AssetKind::Audio, None));
+    }
+
+    #[test]
+    fn test_image_asset_does_not_require_proxy() {
+        let video_info = VideoInfo {
+            width: 3840,
+            height: 2160, // 4K but image
+            ..Default::default()
+        };
+        assert!(!requires_proxy(&AssetKind::Image, Some(&video_info)));
+    }
+
+    // ==========================================================================
+    // Asset Proxy Methods Tests
+    // ==========================================================================
+
+    #[test]
+    fn test_new_video_asset_has_not_needed_proxy_status() {
+        let asset = Asset::new_video("test.mp4", "/test.mp4", VideoInfo::default());
+        assert_eq!(asset.proxy_status, ProxyStatus::NotNeeded);
+    }
+
+    #[test]
+    fn test_asset_needs_proxy_1080p() {
+        let video_info = VideoInfo {
+            width: 1920,
+            height: 1080,
+            ..Default::default()
+        };
+        let asset = Asset::new_video("test.mp4", "/test.mp4", video_info);
+        assert!(asset.needs_proxy());
+    }
+
+    #[test]
+    fn test_asset_needs_proxy_720p() {
+        let video_info = VideoInfo {
+            width: 1280,
+            height: 720,
+            ..Default::default()
+        };
+        let asset = Asset::new_video("test.mp4", "/test.mp4", video_info);
+        assert!(!asset.needs_proxy());
+    }
+
+    #[test]
+    fn test_asset_set_proxy_status() {
+        let mut asset = Asset::new_video("test.mp4", "/test.mp4", VideoInfo::default());
+        asset.set_proxy_status(ProxyStatus::Generating);
+        assert_eq!(asset.proxy_status, ProxyStatus::Generating);
+    }
+
+    #[test]
+    fn test_asset_mark_proxy_pending() {
+        let video_info = VideoInfo {
+            width: 1920,
+            height: 1080,
+            ..Default::default()
+        };
+        let mut asset = Asset::new_video("test.mp4", "/test.mp4", video_info);
+        asset.mark_proxy_pending();
+        assert_eq!(asset.proxy_status, ProxyStatus::Pending);
+    }
+
+    #[test]
+    fn test_asset_mark_proxy_pending_skipped_for_720p() {
+        let video_info = VideoInfo {
+            width: 1280,
+            height: 720,
+            ..Default::default()
+        };
+        let mut asset = Asset::new_video("test.mp4", "/test.mp4", video_info);
+        asset.mark_proxy_pending();
+        // Should remain NotNeeded since 720p doesn't need proxy
+        assert_eq!(asset.proxy_status, ProxyStatus::NotNeeded);
+    }
+
+    #[test]
+    fn test_asset_mark_proxy_ready() {
+        let mut asset = Asset::new_video("test.mp4", "/test.mp4", VideoInfo::default());
+        asset.mark_proxy_ready("asset://cache/proxy.mp4".to_string());
+
+        assert_eq!(asset.proxy_status, ProxyStatus::Ready);
+        assert_eq!(asset.proxy_url, Some("asset://cache/proxy.mp4".to_string()));
+    }
+
+    #[test]
+    fn test_asset_mark_proxy_failed() {
+        let mut asset = Asset::new_video("test.mp4", "/test.mp4", VideoInfo::default());
+        asset.mark_proxy_failed();
+        assert_eq!(asset.proxy_status, ProxyStatus::Failed);
+    }
+
+    // ==========================================================================
+    // Asset Creation Tests
+    // ==========================================================================
 
     #[test]
     fn test_asset_creation_video() {
@@ -337,6 +600,7 @@ mod tests {
         assert_eq!(asset.name, "test.mp4");
         assert!(asset.video.is_some());
         assert!(asset.audio.is_none());
+        assert_eq!(asset.proxy_status, ProxyStatus::NotNeeded);
     }
 
     #[test]
@@ -347,6 +611,7 @@ mod tests {
         assert_eq!(asset.kind, AssetKind::Audio);
         assert!(asset.video.is_none());
         assert!(asset.audio.is_some());
+        assert_eq!(asset.proxy_status, ProxyStatus::NotNeeded);
     }
 
     #[test]
@@ -358,6 +623,7 @@ mod tests {
         let video = asset.video.as_ref().unwrap();
         assert_eq!(video.width, 1920);
         assert_eq!(video.height, 1080);
+        assert_eq!(asset.proxy_status, ProxyStatus::NotNeeded);
     }
 
     #[test]
@@ -375,8 +641,10 @@ mod tests {
     }
 
     #[test]
-    fn test_asset_serialization() {
-        let asset = Asset::new_video("test.mp4", "/path/test.mp4", VideoInfo::default());
+    fn test_asset_serialization_with_proxy_status() {
+        let mut asset = Asset::new_video("test.mp4", "/path/test.mp4", VideoInfo::default());
+        asset.proxy_status = ProxyStatus::Ready;
+        asset.proxy_url = Some("asset://proxy.mp4".to_string());
 
         let json = serde_json::to_string(&asset).unwrap();
         let parsed: Asset = serde_json::from_str(&json).unwrap();
@@ -384,6 +652,8 @@ mod tests {
         assert_eq!(asset.id, parsed.id);
         assert_eq!(asset.kind, parsed.kind);
         assert_eq!(asset.name, parsed.name);
+        assert_eq!(parsed.proxy_status, ProxyStatus::Ready);
+        assert_eq!(parsed.proxy_url, Some("asset://proxy.mp4".to_string()));
     }
 
     #[test]
