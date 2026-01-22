@@ -123,13 +123,129 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Updater signing key (required for auto-update)
+          # Generate with: npx tauri signer generate -w ~/.tauri/openreelio.key
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }}
+          # Generate updater JSON artifacts
+          updaterJsonPreferNsis: true
+
+  generate-update-manifest:
+    name: Generate Update Manifest
+    needs: [create-release, build-tauri]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download release artifacts info
+        uses: actions/github-script@v7
+        id: get-release
+        with:
+          script: |
+            const release = await github.rest.repos.getRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: ${{ needs.create-release.outputs.release_id }}
+            });
+
+            const assets = release.data.assets;
+            const version = release.data.tag_name.replace(/^v/, '');
+            const notes = release.data.body || '';
+            const pub_date = release.data.published_at || new Date().toISOString();
+
+            // Helper function to fetch signature with proper error handling
+            async function fetchSignature(sigAsset, assetName) {
+              if (!sigAsset) {
+                console.log(`No signature file found for ${assetName}`);
+                return '';
+              }
+              try {
+                const response = await fetch(sigAsset.browser_download_url);
+                if (!response.ok) {
+                  console.warn(`Warning: Failed to download signature for ${assetName}: ${response.statusText}`);
+                  return '';
+                }
+                return await response.text();
+              } catch (error) {
+                console.warn(`Warning: Error fetching signature for ${assetName}: ${error.message}`);
+                return '';
+              }
+            }
+
+            // Find platform-specific assets
+            const platforms = {};
+
+            for (const asset of assets) {
+              const name = asset.name.toLowerCase();
+              const url = asset.browser_download_url;
+
+              // Windows NSIS installer
+              if (name.endsWith('.nsis.zip')) {
+                const sigAsset = assets.find(a => a.name === asset.name + '.sig');
+                const signature = await fetchSignature(sigAsset, asset.name);
+                platforms['windows-x86_64'] = { signature, url };
+                if (!signature) console.warn(`Warning: windows-x86_64 will not support auto-update (missing signature)`);
+              }
+              // macOS Intel
+              else if (name.includes('x64') && name.endsWith('.app.tar.gz')) {
+                const sigAsset = assets.find(a => a.name === asset.name + '.sig');
+                const signature = await fetchSignature(sigAsset, asset.name);
+                platforms['darwin-x86_64'] = { signature, url };
+                if (!signature) console.warn(`Warning: darwin-x86_64 will not support auto-update (missing signature)`);
+              }
+              // macOS ARM
+              else if (name.includes('aarch64') && name.endsWith('.app.tar.gz')) {
+                const sigAsset = assets.find(a => a.name === asset.name + '.sig');
+                const signature = await fetchSignature(sigAsset, asset.name);
+                platforms['darwin-aarch64'] = { signature, url };
+                if (!signature) console.warn(`Warning: darwin-aarch64 will not support auto-update (missing signature)`);
+              }
+              // Linux AppImage
+              else if (name.endsWith('.appimage.tar.gz')) {
+                const sigAsset = assets.find(a => a.name === asset.name + '.sig');
+                const signature = await fetchSignature(sigAsset, asset.name);
+                platforms['linux-x86_64'] = { signature, url };
+                if (!signature) console.warn(`Warning: linux-x86_64 will not support auto-update (missing signature)`);
+              }
+            }
+
+            const manifest = {
+              version,
+              notes,
+              pub_date,
+              platforms
+            };
+
+            return JSON.stringify(manifest, null, 2);
+
+      - name: Create latest.json
+        run: |
+          echo '${{ steps.get-release.outputs.result }}' > latest.json
+          cat latest.json
+
+      - name: Upload latest.json to release
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ needs.create-release.outputs.upload_url }}
+          asset_path: ./latest.json
+          asset_name: latest.json
+          asset_content_type: application/json
 
   publish-release:
     name: Publish Release
-    needs: [create-release, build-tauri]
+    needs: [create-release, build-tauri, generate-update-manifest]
     runs-on: ubuntu-latest
 
     steps:

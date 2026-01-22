@@ -275,6 +275,16 @@ macro_rules! collect_commands {
             $crate::ipc::index_asset_for_search,
             $crate::ipc::index_transcripts_for_search,
             $crate::ipc::remove_asset_from_search,
+            // Settings
+            $crate::ipc::get_settings,
+            $crate::ipc::set_settings,
+            $crate::ipc::update_settings,
+            $crate::ipc::reset_settings,
+            // Updates
+            $crate::ipc::check_for_updates,
+            $crate::ipc::get_current_version,
+            $crate::ipc::relaunch_app,
+            $crate::ipc::download_and_install_update,
         ]
     };
 }
@@ -291,6 +301,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(move |app| {
             // Initialize logging
             tracing_subscriber::fmt()
@@ -469,6 +480,16 @@ pub fn run() {
             ipc::index_asset_for_search,
             ipc::index_transcripts_for_search,
             ipc::remove_asset_from_search,
+            // Settings
+            ipc::get_settings,
+            ipc::set_settings,
+            ipc::update_settings,
+            ipc::reset_settings,
+            // Updates
+            ipc::check_for_updates,
+            ipc::get_current_version,
+            ipc::relaunch_app,
+            ipc::download_and_install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

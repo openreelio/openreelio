@@ -18,8 +18,10 @@ pub mod project;
 pub mod qc;
 pub mod render;
 pub mod search;
+pub mod settings;
 pub mod template;
 pub mod timeline;
+pub mod update;
 
 // Re-export common types
 mod types;

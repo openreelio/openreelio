@@ -2,7 +2,8 @@
 
 > **Last Updated**: 2026-01-22
 > **Version**: v0.1.0 → v1.0.0 Planning
-> **Status**: MVP v0.1.0 at 87% completion
+> **Status**: MVP v0.1.0 at 85% completion (features 98%, distribution 0%)
+> **Critical Blocker**: Distribution Infrastructure must be completed before release
 
 This document outlines the complete development roadmap for OpenReelio, from MVP to production-ready release.
 
@@ -31,20 +32,36 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 │  v0.1.0 MVP          v0.2.0 AI           v0.3.0 Effects      v1.0.0        │
 │  ───────────────────→───────────────────→────────────────────→──────────   │
 │  Core Editor         Whisper + Search    Transitions         Production    │
-│  Timeline            Meilisearch         Keyframes           Optimization  │
-│  Preview             Shot Detection      Audio Effects       Cross-platform│
-│  Export                                                                     │
+│  + DISTRIBUTION      Meilisearch         Keyframes           Optimization  │
+│  + Auto-Update       Shot Detection      Audio Effects       Cross-platform│
+│  + Code Signing                                                             │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Milestone | Focus | Key Deliverables | Status |
 |-----------|-------|------------------|--------|
-| **v0.1.0** | Core Editor | Timeline, Preview, Export | 🔄 In Progress (85%) |
+| **v0.1.0** | Core Editor + Distribution | Timeline, Preview, Export, Auto-Update, Code Signing | 🔄 In Progress (85%) |
 | **v0.2.0** | AI Integration | Whisper, Meilisearch, Shot Detection | 📋 Planned |
 | **v0.3.0** | Effects & Animation | Transitions, Keyframes, Audio FX | 📋 Planned |
 | **v0.4.0** | Plugin Ecosystem | WASM Host, Marketplace | 📋 Planned |
 | **v1.0.0** | Production | Performance, Stability, Docs | 📋 Planned |
+
+### CRITICAL: Distribution Infrastructure (BLOCKER)
+
+Before v0.1.0 can be released, the following must be completed:
+
+| Component | Priority | Status |
+|-----------|----------|--------|
+| Auto-Update System (tauri-plugin-updater) | BLOCKER | Not Started |
+| Settings Persistence | BLOCKER | Not Started |
+| Version Sync Script | BLOCKER | Not Started |
+| Windows Code Signing (Authenticode) | HIGH | Not Started |
+| macOS Notarization | HIGH | Not Started |
+| Update Manifest Generation | HIGH | Not Started |
+| Installer Customization | MEDIUM | Not Started |
+| First-Run Setup Wizard | MEDIUM | Not Started |
+| Crash Reporting | MEDIUM | Not Started |
 
 ---
 
