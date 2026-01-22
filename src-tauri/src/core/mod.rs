@@ -9,6 +9,7 @@ pub mod captions;
 pub mod commands;
 pub mod effects;
 pub mod ffmpeg;
+pub mod fs;
 pub mod generative;
 pub mod indexing;
 pub mod jobs;
