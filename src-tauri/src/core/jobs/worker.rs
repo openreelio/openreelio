@@ -314,7 +314,9 @@ impl JobProcessor {
             return Err(format!("{label} is empty"));
         }
         if id.contains("..") || id.contains('/') || id.contains('\\') || id.contains(':') {
-            return Err(format!("Invalid {label}: contains path traversal characters"));
+            return Err(format!(
+                "Invalid {label}: contains path traversal characters"
+            ));
         }
         Ok(())
     }
@@ -332,7 +334,10 @@ impl JobProcessor {
 
         let pb = PathBuf::from(trimmed);
         if !pb.is_absolute() {
-            return Err(format!("{label} must be an absolute path: {}", pb.display()));
+            return Err(format!(
+                "{label} must be an absolute path: {}",
+                pb.display()
+            ));
         }
 
         // Use async metadata to avoid blocking the async runtime
@@ -413,7 +418,9 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing inputPath in payload")?;
 
-        let input_path = self.validate_input_file_path(input_path, "inputPath").await?;
+        let input_path = self
+            .validate_input_file_path(input_path, "inputPath")
+            .await?;
 
         let width = job
             .payload
@@ -476,7 +483,9 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing inputPath in payload")?;
 
-        let input_path = self.validate_input_file_path(input_path, "inputPath").await?;
+        let input_path = self
+            .validate_input_file_path(input_path, "inputPath")
+            .await?;
 
         // Emit generating event
         let _ = self.app_handle.emit(
@@ -599,7 +608,9 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing inputPath in payload")?;
 
-        let input_path = self.validate_input_file_path(input_path, "inputPath").await?;
+        let input_path = self
+            .validate_input_file_path(input_path, "inputPath")
+            .await?;
 
         let samples_per_second = job
             .payload
@@ -698,7 +709,8 @@ impl JobProcessor {
         let options = job.payload.get("options");
 
         let input_path = if let Some(path) = job.payload.get("inputPath").and_then(|v| v.as_str()) {
-            self.validate_input_file_path(path, "inputPath").await?
+            self.validate_input_file_path(path, "inputPath")
+                .await?
                 .to_string_lossy()
                 .to_string()
         } else {

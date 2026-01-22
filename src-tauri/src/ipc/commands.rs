@@ -29,7 +29,9 @@ fn validate_path_id_component(id: &str, label: &str) -> Result<(), String> {
         return Err(format!("{label} is empty"));
     }
     if id.contains("..") || id.contains('/') || id.contains('\\') || id.contains(':') {
-        return Err(format!("Invalid {label}: contains path traversal characters"));
+        return Err(format!(
+            "Invalid {label}: contains path traversal characters"
+        ));
     }
     Ok(())
 }

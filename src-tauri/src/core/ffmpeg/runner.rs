@@ -500,8 +500,7 @@ impl FFmpegRunner {
 
                             let eta = if current_fps > 0.0 && duration > 0.0 {
                                 let remaining_time = duration - current_time;
-                                let remaining_frames =
-                                    (remaining_time * current_fps as f64) as u64;
+                                let remaining_frames = (remaining_time * current_fps as f64) as u64;
                                 Some((remaining_frames as f32 / current_fps) as u64)
                             } else {
                                 None
@@ -713,10 +712,9 @@ impl FFmpegRunner {
         .stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(FFmpegError::ProcessError)?;
-        let stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| FFmpegError::ExecutionFailed("Failed to capture FFmpeg stderr".to_string()))?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            FFmpegError::ExecutionFailed("Failed to capture FFmpeg stderr".to_string())
+        })?;
 
         let mut collector = WaveformLogCollector::new(total_samples);
         let mut tail = LineTail::new(80);
