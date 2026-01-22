@@ -14,6 +14,23 @@ import { createLogger } from '@/services/logger';
 
 const logger = createLogger('SettingsStore');
 
+function isTauriRuntime(): boolean {
+  // Unit tests mock `invoke()` and expect backend calls to be issued even
+  // though the jsdom environment does not define `__TAURI_INTERNALS__`.
+  // Playwright E2E runs the Vite web build (no Tauri backend), where calling
+  // `invoke()` would throw.
+  const isVitest =
+    typeof process !== 'undefined' &&
+    typeof process.env !== 'undefined' &&
+    typeof process.env.VITEST !== 'undefined';
+
+  if (isVitest) return true;
+
+  return (
+    typeof (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined'
+  );
+}
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -274,6 +291,17 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         // Actions
         loadSettings: async () => {
           try {
+            // Playwright E2E runs the Vite web build without a Tauri backend.
+            // In that environment, `invoke()` will throw; treat settings as in-memory defaults.
+            if (!isTauriRuntime()) {
+              set((state) => {
+                state.settings = DEFAULT_SETTINGS;
+                state.isLoaded = true;
+                state.error = null;
+              });
+              return;
+            }
+
             logger.info('Loading settings from backend...');
             const raw = await invoke<unknown>('get_settings');
             const settings = coerceAppSettings(raw);
@@ -294,6 +322,14 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         },
 
         saveSettings: async () => {
+          if (!isTauriRuntime()) {
+            // Web build: nothing to persist.
+            set((state) => {
+              state.error = null;
+            });
+            return;
+          }
+
           return enqueueWrite(async () => {
             const { settings } = get();
             try {
@@ -329,6 +365,11 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           // Persist via backend partial update (serialized + validated in Rust).
           const partial = { [section]: stripUndefined(values as Record<string, unknown>) };
 
+          if (!isTauriRuntime()) {
+            // Web build: keep the optimistic update only.
+            return;
+          }
+
           await enqueueWrite(async () => {
             try {
               const raw = await invoke<unknown>('update_settings', { partial });
@@ -351,6 +392,14 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         },
 
         resetSettings: async () => {
+          if (!isTauriRuntime()) {
+            set((state) => {
+              state.settings = DEFAULT_SETTINGS;
+              state.error = null;
+            });
+            return;
+          }
+
           await enqueueWrite(async () => {
             try {
               logger.info('Resetting settings to defaults...');

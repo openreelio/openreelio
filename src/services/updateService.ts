@@ -10,6 +10,23 @@ import { createLogger } from './logger';
 
 const logger = createLogger('UpdateService');
 
+function isTauriRuntime(): boolean {
+  // Unit tests mock `invoke()` and expect us to call it even though the
+  // jsdom environment does not define `__TAURI_INTERNALS__`.
+  // Playwright E2E runs the Vite web build (no Tauri backend), where calling
+  // `invoke()` would throw.
+  const isVitest =
+    typeof process !== 'undefined' &&
+    typeof process.env !== 'undefined' &&
+    typeof process.env.VITEST !== 'undefined';
+
+  if (isVitest) return true;
+
+  return (
+    typeof (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined'
+  );
+}
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -43,6 +60,10 @@ export interface UpdateInfo {
  * Gets the current application version
  */
 export async function getCurrentVersion(): Promise<string> {
+  if (!isTauriRuntime()) {
+    return 'web';
+  }
+
   try {
     return await invoke<string>('get_current_version');
   } catch (error) {
@@ -55,6 +76,13 @@ export async function getCurrentVersion(): Promise<string> {
  * Checks for available updates
  */
 export async function checkForUpdates(): Promise<UpdateInfo> {
+  if (!isTauriRuntime()) {
+    return {
+      available: false,
+      currentVersion: await getCurrentVersion(),
+    };
+  }
+
   try {
     logger.info('Checking for updates...');
     const result = await invoke<UpdateCheckResult>('check_for_updates');
@@ -99,6 +127,10 @@ export async function checkForUpdates(): Promise<UpdateInfo> {
  * Returns true if a restart is needed
  */
 export async function downloadAndInstallUpdate(): Promise<boolean> {
+  if (!isTauriRuntime()) {
+    return false;
+  }
+
   try {
     logger.info('Downloading and installing update...');
     const needsRestart = await invoke<boolean>('download_and_install_update');
@@ -114,6 +146,10 @@ export async function downloadAndInstallUpdate(): Promise<boolean> {
  * Relaunches the application after an update
  */
 export async function relaunchApp(): Promise<void> {
+  if (!isTauriRuntime()) {
+    return;
+  }
+
   try {
     logger.info('Relaunching application...');
     await invoke('relaunch_app');
