@@ -13,6 +13,21 @@ use super::{
 use crate::core::{CoreError, CoreResult};
 
 // =============================================================================
+// Provider Runtime Status
+// =============================================================================
+
+/// Cached provider runtime status used for IPC/UI.
+#[derive(Clone, Debug, Default)]
+pub struct ProviderRuntimeStatus {
+    pub provider_type: Option<String>,
+    pub is_configured: bool,
+    pub is_available: bool,
+    pub current_model: Option<String>,
+    pub available_models: Vec<String>,
+    pub error_message: Option<String>,
+}
+
+// =============================================================================
 // AI Gateway Configuration
 // =============================================================================
 
@@ -96,6 +111,12 @@ impl EditContext {
         self
     }
 
+    /// Sets playhead position
+    pub fn with_playhead(mut self, playhead_sec: f64) -> Self {
+        self.playhead_position = playhead_sec;
+        self
+    }
+
     /// Sets transcript context
     pub fn with_transcript(mut self, transcript: &str) -> Self {
         self.transcript_context = Some(transcript.to_string());
@@ -113,6 +134,8 @@ pub struct AIGateway {
     provider: Arc<RwLock<Option<Arc<dyn AIProvider>>>>,
     /// Configuration
     config: AIGatewayConfig,
+    /// Cached provider status
+    status: Arc<RwLock<ProviderRuntimeStatus>>,
 }
 
 impl AIGateway {
@@ -121,6 +144,7 @@ impl AIGateway {
         Self {
             provider: Arc::new(RwLock::new(None)),
             config,
+            status: Arc::new(RwLock::new(ProviderRuntimeStatus::default())),
         }
     }
 
@@ -132,25 +156,78 @@ impl AIGateway {
     /// Sets the AI provider
     pub async fn set_provider(&self, provider: impl AIProvider + 'static) {
         let mut guard = self.provider.write().await;
-        *guard = Some(Arc::new(provider));
+        let arc: Arc<dyn AIProvider> = Arc::new(provider);
+        *guard = Some(Arc::clone(&arc));
+
+        let mut status = self.status.write().await;
+        status.provider_type = Some(arc.name().to_string());
+        status.is_configured = arc.is_available();
+        // Connectivity must be confirmed via health_check.
+        status.is_available = false;
+        status.error_message = None;
+    }
+
+    /// Sets the AI provider from a boxed trait object
+    pub async fn set_provider_boxed(&self, provider: Box<dyn AIProvider>) {
+        let mut guard = self.provider.write().await;
+        let arc: Arc<dyn AIProvider> = Arc::from(provider);
+        *guard = Some(Arc::clone(&arc));
+
+        let mut status = self.status.write().await;
+        status.provider_type = Some(arc.name().to_string());
+        status.is_configured = arc.is_available();
+        status.is_available = false;
+        status.error_message = None;
+    }
+
+    /// Sets provider and status in one operation (used by IPC configuration).
+    pub async fn set_provider_boxed_with_status(
+        &self,
+        provider: Box<dyn AIProvider>,
+        status: ProviderRuntimeStatus,
+    ) {
+        let mut guard = self.provider.write().await;
+        *guard = Some(Arc::from(provider));
+
+        let mut status_guard = self.status.write().await;
+        *status_guard = status;
     }
 
     /// Clears the current provider
     pub async fn clear_provider(&self) {
         let mut guard = self.provider.write().await;
         *guard = None;
+
+        let mut status = self.status.write().await;
+        *status = ProviderRuntimeStatus::default();
     }
 
     /// Checks if a provider is available
     pub async fn has_provider(&self) -> bool {
-        let guard = self.provider.read().await;
-        guard.as_ref().map(|p| p.is_available()).unwrap_or(false)
+        let status = self.status.read().await;
+        status.is_available
+    }
+
+    /// Returns whether a provider is configured (even if not currently reachable).
+    pub async fn is_configured(&self) -> bool {
+        let status = self.status.read().await;
+        status.is_configured
     }
 
     /// Gets the provider name
     pub async fn provider_name(&self) -> Option<String> {
         let guard = self.provider.read().await;
         guard.as_ref().map(|p| p.name().to_string())
+    }
+
+    pub async fn provider_status(&self) -> ProviderRuntimeStatus {
+        self.status.read().await.clone()
+    }
+
+    pub async fn update_provider_status(&self, is_available: bool, error_message: Option<String>) {
+        let mut status = self.status.write().await;
+        status.is_available = is_available;
+        status.error_message = error_message;
     }
 
     // =========================================================================
@@ -239,6 +316,16 @@ Return JSON array of edit scripts."#;
                     }
                     if cmd.params.get("assetId").is_none() {
                         issues.push(format!("InsertClip command {} missing assetId", i));
+                    }
+                    match cmd.params.get("timelineStart") {
+                        None => issues.push(format!("InsertClip command {} missing timelineStart", i)),
+                        Some(v) => match v.as_f64() {
+                            Some(t) if t.is_finite() && t >= 0.0 => {}
+                            _ => issues.push(format!(
+                                "InsertClip command {} invalid timelineStart (must be finite, non-negative number)",
+                                i
+                            )),
+                        },
                     }
                 }
                 "SplitClip" | "DeleteClip" | "TrimClip" | "MoveClip" => {
@@ -330,12 +417,15 @@ Return JSON array of edit scripts."#;
     async fn get_provider(&self) -> CoreResult<Arc<dyn AIProvider>> {
         let guard = self.provider.read().await;
         match guard.as_ref() {
-            Some(p) if p.is_available() => Ok(Arc::clone(p)),
-            Some(_) => Err(CoreError::Internal(
-                "AI provider is not available".to_string(),
-            )),
+            Some(p) => Ok(Arc::clone(p)),
             None => Err(CoreError::Internal("No AI provider configured".to_string())),
         }
+    }
+
+    /// Performs a lightweight health check for the configured provider.
+    pub async fn health_check(&self) -> CoreResult<()> {
+        let provider = self.get_provider().await?;
+        provider.health_check().await
     }
 
     /// Completes a request with retry logic
@@ -389,6 +479,10 @@ Return a valid EditScript JSON object with intent, commands, requires, qcRules, 
             context.asset_ids.len(),
             context.track_ids.len()
         ));
+
+        if context.playhead_position > 0.0 {
+            prompt.push_str(&format!("- Playhead: {:.2}s\n", context.playhead_position));
+        }
 
         if !context.selected_clips.is_empty() {
             prompt.push_str(&format!(
@@ -585,6 +679,11 @@ mod tests {
         let provider = MockAIProvider::new("test-provider");
         gateway.set_provider(provider).await;
 
+        assert!(gateway.is_configured().await);
+        assert!(!gateway.has_provider().await);
+
+        // Mark as available (simulates a successful health check)
+        gateway.update_provider_status(true, None).await;
         assert!(gateway.has_provider().await);
         assert_eq!(
             gateway.provider_name().await,
@@ -594,6 +693,7 @@ mod tests {
         // Clear provider
         gateway.clear_provider().await;
         assert!(!gateway.has_provider().await);
+        assert!(!gateway.is_configured().await);
     }
 
     #[tokio::test]
@@ -603,6 +703,7 @@ mod tests {
         let provider = MockAIProvider::new("test").with_available(false);
         gateway.set_provider(provider).await;
 
+        assert!(!gateway.is_configured().await);
         assert!(!gateway.has_provider().await);
     }
 
@@ -646,6 +747,7 @@ mod tests {
         assert!(!result.is_valid);
         assert!(result.issues.iter().any(|i| i.contains("trackId")));
         assert!(result.issues.iter().any(|i| i.contains("assetId")));
+        assert!(result.issues.iter().any(|i| i.contains("timelineStart")));
     }
 
     #[tokio::test]
