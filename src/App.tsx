@@ -16,7 +16,7 @@ import { Inspector, type SelectedCaption } from './components/features/inspector
 import { ProjectExplorer } from './components/explorer';
 import { UnifiedPreviewPlayer } from './components/preview';
 import { Timeline } from './components/timeline';
-import { FFmpegWarning, ToastContainer, type ToastData } from './components/ui';
+import { FFmpegWarning, ToastContainer, type ToastVariant } from './components/ui';
 import {
   useProjectStore,
   usePlaybackStore,
@@ -30,6 +30,7 @@ import {
   useAutoSave,
   useKeyboardShortcuts,
   useAudioPlayback,
+  useToast,
 } from './hooks';
 import { createLogger, initializeLogger } from './services/logger';
 import {
@@ -352,19 +353,14 @@ function App(): JSX.Element {
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
 
-  // Toast notifications state
-  const [toasts, setToasts] = useState<ToastData[]>([]);
+  // Toast notifications
+  const { toasts, toast, dismissToast } = useToast();
 
-  // Helper to add toast notification
-  const addToast = useCallback((message: string, variant: ToastData['variant'] = 'error') => {
-    const id = `toast-${Date.now()}`;
-    setToasts((prev) => [...prev, { id, message, variant }]);
-  }, []);
-
-  // Helper to remove toast notification
-  const removeToast = useCallback((id: string) => {
-    setToasts((prev) => prev.filter((t) => t.id !== id));
-  }, []);
+  // Backward-compatible helper for existing call sites in this component
+  const addToast = useCallback(
+    (message: string, variant: ToastVariant = 'error') => toast({ message, variant }),
+    [toast],
+  );
 
   // Show FFmpeg warning when check completes and FFmpeg is not available
   // Only show once per session (until dismissed)
@@ -537,7 +533,7 @@ function App(): JSX.Element {
           onDismiss={handleDismissFFmpegWarning}
           allowDismiss={true}
         />
-        <ToastContainer toasts={toasts} onClose={removeToast} />
+        <ToastContainer toasts={toasts} onClose={dismissToast} />
       </>
     );
   }
@@ -585,7 +581,7 @@ function App(): JSX.Element {
         onDismiss={handleDismissFFmpegWarning}
         allowDismiss={true}
       />
-      <ToastContainer toasts={toasts} onClose={removeToast} />
+      <ToastContainer toasts={toasts} onClose={dismissToast} />
     </>
   );
 }
