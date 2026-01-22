@@ -7,6 +7,8 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+use uuid::Uuid;
+
 #[cfg(feature = "meilisearch")]
 use std::time::Duration;
 #[cfg(feature = "meilisearch")]
@@ -70,11 +72,12 @@ pub struct SidecarConfig {
 
 impl Default for SidecarConfig {
     fn default() -> Self {
+        let data_dir = default_data_dir();
         Self {
             binary_path: PathBuf::from("meilisearch"),
-            data_dir: default_data_dir(),
+            master_key: load_or_create_master_key(&data_dir),
+            data_dir,
             http_addr: "127.0.0.1:7700".to_string(),
-            master_key: "openreelio-search-key".to_string(),
             max_db_size: Some(1024 * 1024 * 1024), // 1GB default
             analytics: false,
         }
@@ -122,6 +125,40 @@ pub fn default_data_dir() -> PathBuf {
         .join("search")
 }
 
+fn load_or_create_master_key(data_dir: &PathBuf) -> String {
+    // A stable secret key is required so the sidecar and indexer can reconnect.
+    // We store it in the data directory. This is local-only (127.0.0.1) but
+    // still should not be a hardcoded constant.
+    let key_path = data_dir.join("master.key");
+
+    if let Ok(key) = std::fs::read_to_string(&key_path) {
+        let trimmed = key.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+
+    let key = format!("openreelio-{}", Uuid::new_v4());
+    if let Err(e) = std::fs::create_dir_all(data_dir) {
+        tracing::warn!(
+            "Failed to create search data dir {}: {}",
+            data_dir.display(),
+            e
+        );
+        return key;
+    }
+
+    if let Err(e) = std::fs::write(&key_path, &key) {
+        tracing::warn!(
+            "Failed to persist Meilisearch master key to {}: {}",
+            key_path.display(),
+            e
+        );
+    }
+
+    key
+}
+
 // =============================================================================
 // Sidecar Manager - Feature-gated Implementation
 // =============================================================================
@@ -152,6 +189,7 @@ mod manager_impl {
                 // Try to find bundled binary
                 let bundled_path = find_bundled_binary();
                 if let Some(path) = bundled_path {
+                    self.config.binary_path = path.clone();
                     tracing::info!("Using bundled Meilisearch at: {}", path.display());
                 } else {
                     return Err(SidecarError::BinaryNotFound(
@@ -163,11 +201,18 @@ mod manager_impl {
             // Ensure data directory exists
             std::fs::create_dir_all(&self.config.data_dir)?;
 
+            let db_path = self.config.data_dir.to_str().ok_or_else(|| {
+                SidecarError::StartFailed(format!(
+                    "Meilisearch data_dir must be valid UTF-8: {}",
+                    self.config.data_dir.display()
+                ))
+            })?;
+
             // Build command arguments
             let mut cmd = Command::new(&self.config.binary_path);
             cmd.args([
                 "--db-path",
-                self.config.data_dir.to_str().unwrap_or_default(),
+                db_path,
                 "--http-addr",
                 &self.config.http_addr,
                 "--master-key",
@@ -353,7 +398,7 @@ mod tests {
         let config = SidecarConfig::default();
 
         assert_eq!(config.http_addr, "127.0.0.1:7700");
-        assert_eq!(config.master_key, "openreelio-search-key");
+        assert!(!config.master_key.trim().is_empty());
         assert!(!config.analytics);
         assert!(config.max_db_size.is_some());
     }
