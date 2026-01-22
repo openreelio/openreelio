@@ -72,6 +72,8 @@ pub enum StateChange {
     TrackDeleted { track_id: String },
     /// A new asset was imported
     AssetAdded { asset_id: String },
+    /// An existing asset was modified
+    AssetModified { asset_id: String },
     /// An asset was removed from the project
     AssetRemoved { asset_id: String },
     /// A new caption was created

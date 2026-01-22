@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::core::{
-    assets::{Asset, AudioInfo, LicenseInfo, VideoInfo},
+    assets::{Asset, AudioInfo, LicenseInfo, ProxyStatus, VideoInfo},
     commands::{Command, CommandResult, StateChange},
     project::ProjectState,
     AssetId, CoreError, CoreResult,
@@ -224,6 +224,12 @@ pub struct UpdateAssetCommand {
     pub new_tags: Option<Vec<String>>,
     /// New license info (optional)
     pub new_license: Option<LicenseInfo>,
+    /// New thumbnail URL (optional). `Some(None)` clears the thumbnail.
+    pub thumbnail_url: Option<Option<String>>,
+    /// New proxy status (optional)
+    pub proxy_status: Option<ProxyStatus>,
+    /// New proxy URL (optional). `Some(None)` clears the proxy URL.
+    pub proxy_url: Option<Option<String>>,
     /// Original values (for undo)
     #[serde(skip)]
     original_name: Option<String>,
@@ -231,6 +237,12 @@ pub struct UpdateAssetCommand {
     original_tags: Option<Vec<String>>,
     #[serde(skip)]
     original_license: Option<LicenseInfo>,
+    #[serde(skip)]
+    original_thumbnail_url: Option<Option<String>>,
+    #[serde(skip)]
+    original_proxy_status: Option<ProxyStatus>,
+    #[serde(skip)]
+    original_proxy_url: Option<Option<String>>,
 }
 
 impl UpdateAssetCommand {
@@ -241,9 +253,15 @@ impl UpdateAssetCommand {
             new_name: None,
             new_tags: None,
             new_license: None,
+            thumbnail_url: None,
+            proxy_status: None,
+            proxy_url: None,
             original_name: None,
             original_tags: None,
             original_license: None,
+            original_thumbnail_url: None,
+            original_proxy_status: None,
+            original_proxy_url: None,
         }
     }
 
@@ -264,6 +282,24 @@ impl UpdateAssetCommand {
         self.new_license = Some(license);
         self
     }
+
+    /// Sets the thumbnail URL. Use `None` to clear.
+    pub fn with_thumbnail_url(mut self, url: Option<String>) -> Self {
+        self.thumbnail_url = Some(url);
+        self
+    }
+
+    /// Sets the proxy status.
+    pub fn with_proxy_status(mut self, status: ProxyStatus) -> Self {
+        self.proxy_status = Some(status);
+        self
+    }
+
+    /// Sets the proxy URL. Use `None` to clear.
+    pub fn with_proxy_url(mut self, url: Option<String>) -> Self {
+        self.proxy_url = Some(url);
+        self
+    }
 }
 
 impl Command for UpdateAssetCommand {
@@ -277,6 +313,9 @@ impl Command for UpdateAssetCommand {
         self.original_name = Some(asset.name.clone());
         self.original_tags = Some(asset.tags.clone());
         self.original_license = Some(asset.license.clone());
+        self.original_thumbnail_url = Some(asset.thumbnail_url.clone());
+        self.original_proxy_status = Some(asset.proxy_status.clone());
+        self.original_proxy_url = Some(asset.proxy_url.clone());
 
         // Apply new values
         if let Some(name) = &self.new_name {
@@ -288,12 +327,20 @@ impl Command for UpdateAssetCommand {
         if let Some(license) = &self.new_license {
             asset.license = license.clone();
         }
+        if let Some(thumbnail_url) = &self.thumbnail_url {
+            asset.thumbnail_url = thumbnail_url.clone();
+        }
+        if let Some(proxy_status) = &self.proxy_status {
+            asset.proxy_status = proxy_status.clone();
+        }
+        if let Some(proxy_url) = &self.proxy_url {
+            asset.proxy_url = proxy_url.clone();
+        }
 
         let op_id = ulid::Ulid::new().to_string();
 
-        // Note: Should be AssetModified but using AssetAdded as fallback since AssetModified doesn't exist in StateChange
         Ok(
-            CommandResult::new(&op_id).with_change(StateChange::AssetAdded {
+            CommandResult::new(&op_id).with_change(StateChange::AssetModified {
                 asset_id: self.asset_id.clone(),
             }),
         )
@@ -309,6 +356,15 @@ impl Command for UpdateAssetCommand {
             }
             if let Some(license) = &self.original_license {
                 asset.license = license.clone();
+            }
+            if let Some(thumbnail_url) = &self.original_thumbnail_url {
+                asset.thumbnail_url = thumbnail_url.clone();
+            }
+            if let Some(proxy_status) = &self.original_proxy_status {
+                asset.proxy_status = proxy_status.clone();
+            }
+            if let Some(proxy_url) = &self.original_proxy_url {
+                asset.proxy_url = proxy_url.clone();
             }
         }
         Ok(())
@@ -448,6 +504,36 @@ mod tests {
         assert_eq!(asset.name, "new_name.mp4");
         assert_eq!(asset.tags.len(), 2);
         assert!(asset.tags.contains(&"interview".to_string()));
+    }
+
+    #[test]
+    fn test_update_asset_proxy_and_thumbnail_fields_and_undo() {
+        let mut state = create_test_state();
+
+        // Import asset
+        let mut import_cmd =
+            ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default());
+        let result = import_cmd.execute(&mut state).unwrap();
+        let asset_id = &result.created_ids[0];
+
+        let mut update_cmd = UpdateAssetCommand::new(asset_id)
+            .with_proxy_status(ProxyStatus::Pending)
+            .with_proxy_url(Some("file://proxy.mp4".to_string()))
+            .with_thumbnail_url(Some("file://thumb.jpg".to_string()));
+
+        update_cmd.execute(&mut state).unwrap();
+
+        let asset = state.assets.get(asset_id).unwrap();
+        assert_eq!(asset.proxy_status, ProxyStatus::Pending);
+        assert_eq!(asset.proxy_url.as_deref(), Some("file://proxy.mp4"));
+        assert_eq!(asset.thumbnail_url.as_deref(), Some("file://thumb.jpg"));
+
+        update_cmd.undo(&mut state).unwrap();
+
+        let asset = state.assets.get(asset_id).unwrap();
+        assert_eq!(asset.proxy_status, ProxyStatus::NotNeeded);
+        assert_eq!(asset.proxy_url, None);
+        assert_eq!(asset.thumbnail_url, None);
     }
 
     #[test]

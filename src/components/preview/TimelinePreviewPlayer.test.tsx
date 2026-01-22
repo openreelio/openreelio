@@ -55,6 +55,7 @@ describe('TimelinePreviewPlayer', () => {
       allowedUse: [],
     },
     tags: [],
+    proxyStatus: 'notNeeded',
   };
 
   const mockClip: Clip = {

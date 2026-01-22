@@ -73,6 +73,7 @@ export function ProxyPreviewPlayer({
   // Local state
   const [buffered, setBuffered] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [videoErrors, setVideoErrors] = useState<Map<string, string>>(new Map());
 
   // Calculate sequence duration
   const sequenceDuration = useMemo(() => {
@@ -131,15 +132,23 @@ export function ProxyPreviewPlayer({
   }, [sequence, currentTime, assets]);
 
   // Get video source URL for an asset
+  // Prioritizes proxy URL when proxy is ready, falls back to original
   const getVideoSrc = useCallback((asset: Asset): string | null => {
-    // Prefer proxy URL, fall back to original
-    const url = asset.proxyUrl || asset.uri;
+    // Use proxy URL only when proxy generation is complete
+    const useProxy = asset.proxyStatus === 'ready' && asset.proxyUrl;
+    const url = useProxy ? asset.proxyUrl : asset.uri;
+
     if (!url) return null;
 
     // Convert file:// URL to Tauri asset protocol
     if (url.startsWith('file://')) {
       const path = url.replace('file://', '');
       return convertFileSrc(path);
+    }
+
+    // Handle asset:// protocol (already converted)
+    if (url.startsWith('asset://')) {
+      return url;
     }
 
     // Handle regular paths
@@ -238,6 +247,34 @@ export function ProxyPreviewPlayer({
     });
   }, [activeClips]);
 
+  // Clear error state when clips change or proxy becomes ready
+  useEffect(() => {
+    const activeClipIds = new Set(activeClips.map(c => c.clip.id));
+
+    setVideoErrors(prev => {
+      let changed = false;
+      const next = new Map(prev);
+
+      // Clear errors for clips that are no longer active
+      next.forEach((_, clipId) => {
+        if (!activeClipIds.has(clipId)) {
+          next.delete(clipId);
+          changed = true;
+        }
+      });
+
+      // Clear errors for clips whose proxy is now ready
+      activeClips.forEach(({ clip, asset }) => {
+        if (next.has(clip.id) && asset.proxyStatus === 'ready') {
+          next.delete(clip.id);
+          changed = true;
+        }
+      });
+
+      return changed ? next : prev;
+    });
+  }, [activeClips]);
+
   // Handle video element ref
   const setVideoRef = useCallback((clipId: string, el: HTMLVideoElement | null) => {
     if (el) {
@@ -256,7 +293,22 @@ export function ProxyPreviewPlayer({
         const bufferedEnd = video.buffered.end(video.buffered.length - 1);
         setBuffered(bufferedEnd);
       }
+      // Clear any previous error for this clip
+      setVideoErrors(prev => {
+        const next = new Map(prev);
+        next.delete(clipId);
+        return next;
+      });
     }
+  }, []);
+
+  // Handle video load error
+  const handleVideoError = useCallback((clipId: string, error: string) => {
+    setVideoErrors(prev => {
+      const next = new Map(prev);
+      next.set(clipId, error);
+      return next;
+    });
   }, []);
 
   // Control handlers
@@ -383,7 +435,39 @@ export function ProxyPreviewPlayer({
         ) : (
           activeClips.map(({ clip, asset, trackIndex }) => {
             const src = getVideoSrc(asset);
+            const error = videoErrors.get(clip.id);
+
             if (!src) return null;
+
+            // Show error state if video failed to load
+            if (error) {
+              return (
+                <div
+                  key={clip.id}
+                  data-testid={`proxy-video-error-${clip.id}`}
+                  className="absolute inset-0 flex items-center justify-center bg-gray-900"
+                  style={{ zIndex: trackIndex * 10 }}
+                >
+                  <div className="text-center text-red-400">
+                    <svg
+                      className="w-12 h-12 mx-auto mb-2"
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={1.5}
+                        d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                      />
+                    </svg>
+                    <p className="text-sm">Failed to load video</p>
+                    <p className="text-xs text-gray-500 mt-1">{asset.name}</p>
+                  </div>
+                </div>
+              );
+            }
 
             return (
               <video
@@ -399,6 +483,7 @@ export function ProxyPreviewPlayer({
                 playsInline
                 muted={isMuted || clip.audio?.muted}
                 onLoadedData={() => handleVideoLoaded(clip.id)}
+                onError={(e) => handleVideoError(clip.id, e.currentTarget.error?.message || 'Unknown error')}
               />
             );
           })

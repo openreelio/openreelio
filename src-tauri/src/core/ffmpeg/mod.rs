@@ -27,7 +27,10 @@ pub use bundler::{
 };
 pub use commands::*;
 pub use detection::*;
-pub use runner::*;
+pub use runner::{
+    AudioStreamInfo, FFmpegProgress, FFmpegRunner, MediaInfo, RenderSettings, VideoStreamInfo,
+    WaveformData,
+};
 
 /// FFmpeg-related error types
 #[derive(Debug, thiserror::Error)]

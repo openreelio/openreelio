@@ -102,6 +102,17 @@ export type AssetKind =
   | 'effectPreset'
   | 'memePack';
 
+/** Proxy video generation status */
+export type ProxyStatus =
+  | 'notNeeded'
+  | 'pending'
+  | 'generating'
+  | 'ready'
+  | 'failed';
+
+/** Minimum video height that requires proxy generation */
+export const PROXY_THRESHOLD_HEIGHT = 720;
+
 export interface VideoInfo {
   width: number;
   height: number;
@@ -116,6 +127,21 @@ export interface AudioInfo {
   channels: number;
   codec: string;
   bitrate?: number;
+}
+
+/**
+ * Audio waveform peak data for visualization.
+ * Matches the Rust WaveformData struct from FFmpegRunner.
+ */
+export interface WaveformData {
+  /** Number of peak samples per second of audio */
+  samplesPerSecond: number;
+  /** Normalized peak values (0.0 - 1.0) */
+  peaks: number[];
+  /** Total audio duration in seconds */
+  durationSec: number;
+  /** Number of audio channels (1=mono, 2=stereo) */
+  channels: number;
 }
 
 export interface LicenseInfo {
@@ -142,8 +168,17 @@ export interface Asset {
   tags: string[];
   /** Thumbnail URL generated via Tauri asset protocol */
   thumbnailUrl?: string;
+  /** Proxy video generation status */
+  proxyStatus: ProxyStatus;
   /** Proxy video URL for preview playback */
   proxyUrl?: string;
+}
+
+/** Check if an asset requires proxy generation based on video dimensions */
+export function assetNeedsProxy(asset: Asset): boolean {
+  return asset.kind === 'video' &&
+         asset.video !== undefined &&
+         asset.video.height > PROXY_THRESHOLD_HEIGHT;
 }
 
 // =============================================================================

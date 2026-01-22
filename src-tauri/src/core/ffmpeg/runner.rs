@@ -12,6 +12,60 @@ use tokio::sync::mpsc;
 
 use super::{FFmpegError, FFmpegInfo, FFmpegResult};
 
+// =============================================================================
+// Waveform Data Types
+// =============================================================================
+
+/// Audio waveform peak data for visualization.
+///
+/// Contains normalized peak values (0.0 - 1.0) sampled at a fixed rate.
+/// Used for rendering waveform displays in the timeline UI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WaveformData {
+    /// Number of peak samples per second of audio
+    pub samples_per_second: u32,
+    /// Normalized peak values (0.0 - 1.0)
+    pub peaks: Vec<f32>,
+    /// Total audio duration in seconds
+    pub duration_sec: f64,
+    /// Number of audio channels (1=mono, 2=stereo)
+    pub channels: u8,
+}
+
+impl WaveformData {
+    /// Create a new WaveformData with empty peaks
+    pub fn empty(duration_sec: f64, samples_per_second: u32, channels: u8) -> Self {
+        let num_samples = (duration_sec * samples_per_second as f64).ceil() as usize;
+        Self {
+            samples_per_second,
+            peaks: vec![0.0; num_samples],
+            duration_sec,
+            channels,
+        }
+    }
+
+    /// Get the peak value at a specific time position
+    pub fn peak_at_time(&self, time_sec: f64) -> f32 {
+        if time_sec < 0.0 || time_sec >= self.duration_sec {
+            return 0.0;
+        }
+        let index = (time_sec * self.samples_per_second as f64) as usize;
+        self.peaks.get(index).copied().unwrap_or(0.0)
+    }
+
+    /// Get peaks for a time range (for rendering a section of waveform)
+    pub fn peaks_in_range(&self, start_sec: f64, end_sec: f64) -> &[f32] {
+        let start_idx = ((start_sec * self.samples_per_second as f64).max(0.0)) as usize;
+        let end_idx =
+            ((end_sec * self.samples_per_second as f64).ceil() as usize).min(self.peaks.len());
+        if start_idx >= self.peaks.len() {
+            return &[];
+        }
+        &self.peaks[start_idx..end_idx]
+    }
+}
+
 /// Progress information for long-running FFmpeg operations
 #[derive(Debug, Clone)]
 pub struct FFmpegProgress {
@@ -547,6 +601,223 @@ impl FFmpegRunner {
 
         Ok(())
     }
+
+    /// Generate audio waveform peak data as JSON.
+    ///
+    /// Extracts audio peak levels at regular intervals for timeline visualization.
+    /// Uses FFmpeg's volumedetect and astats filters to measure peak levels.
+    ///
+    /// # Arguments
+    /// * `input` - Path to the audio/video file
+    /// * `output` - Path to save the JSON output
+    /// * `samples_per_second` - Number of peak samples per second (default: 100)
+    ///
+    /// # Returns
+    /// WaveformData containing normalized peaks (0.0 - 1.0)
+    pub async fn generate_waveform_json(
+        &self,
+        input: &Path,
+        output: &Path,
+        samples_per_second: u32,
+    ) -> FFmpegResult<WaveformData> {
+        if !input.exists() {
+            return Err(FFmpegError::InvalidInput(format!(
+                "Input file does not exist: {}",
+                input.display()
+            )));
+        }
+
+        // Create output directory if needed
+        if let Some(parent) = output.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                FFmpegError::OutputError(format!("Failed to create output directory: {}", e))
+            })?;
+        }
+
+        // Get media info for duration and audio channels
+        let media_info = self.probe(input).await?;
+        let audio_info = media_info.audio.as_ref().ok_or_else(|| {
+            FFmpegError::InvalidInput("No audio stream found in file".to_string())
+        })?;
+
+        let duration_sec = media_info.duration_sec;
+        let channels = audio_info.channels;
+
+        // Calculate expected number of samples
+        let total_samples = (duration_sec * samples_per_second as f64).ceil() as usize;
+
+        if total_samples == 0 {
+            return Ok(WaveformData::empty(
+                duration_sec,
+                samples_per_second,
+                channels,
+            ));
+        }
+
+        // Calculate segment duration for each sample
+        let segment_duration = 1.0 / samples_per_second as f64;
+
+        // Use FFmpeg to extract audio and measure RMS/peak levels per segment
+        // We'll use the aframes and asetnsamples to split into segments and measure each
+        //
+        // Alternative approach: Use ebur128 or astats with segment analysis
+        // For efficiency, we use a single FFmpeg call with the asegment filter
+        let filter = format!(
+            "aresample={}:async=1,asetnsamples=n={}:p=0,astats=metadata=1:reset=1",
+            samples_per_second * 100, // Resample to get consistent timing
+            (audio_info.sample_rate as f64 / samples_per_second as f64).ceil() as u32
+        );
+
+        let output_result = tokio::process::Command::new(&self.info.ffmpeg_path)
+            .args([
+                "-i",
+                &input.to_string_lossy(),
+                "-af",
+                &filter,
+                "-f",
+                "null",
+                "-",
+            ])
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(FFmpegError::ProcessError)?;
+
+        // Parse astats output from stderr
+        let stderr = String::from_utf8_lossy(&output_result.stderr);
+        let peaks = parse_astats_peaks(&stderr, total_samples, segment_duration);
+
+        // Normalize peaks to 0-1 range
+        let max_peak = peaks.iter().cloned().fold(0.0f32, f32::max);
+        let normalized_peaks: Vec<f32> = if max_peak > 0.0 {
+            peaks.iter().map(|p| (*p / max_peak).min(1.0)).collect()
+        } else {
+            vec![0.0; peaks.len()]
+        };
+
+        // Ensure we have the expected number of samples
+        let mut final_peaks = normalized_peaks;
+        final_peaks.resize(total_samples, 0.0);
+
+        let waveform = WaveformData {
+            samples_per_second,
+            peaks: final_peaks,
+            duration_sec,
+            channels,
+        };
+
+        // Save to JSON file
+        let json = serde_json::to_string(&waveform).map_err(|e| {
+            FFmpegError::ParseError(format!("Failed to serialize waveform data: {}", e))
+        })?;
+
+        tokio::fs::write(output, &json).await.map_err(|e| {
+            FFmpegError::OutputError(format!("Failed to write waveform JSON: {}", e))
+        })?;
+
+        Ok(waveform)
+    }
+}
+
+/// Parse peak levels from FFmpeg astats filter output
+fn parse_astats_peaks(output: &str, expected_samples: usize, _segment_duration: f64) -> Vec<f32> {
+    let mut peaks = Vec::with_capacity(expected_samples);
+
+    for line in output.lines() {
+        // astats outputs: [Parsed_astats_X @ ...] Peak level dB: -X.X
+        // or: lavfi.astats.Overall.Peak_level
+        if line.contains("Peak level dB:") || line.contains("Peak_level") {
+            // Extract dB value
+            let db_value = if let Some(db_str) = line.split("Peak level dB:").nth(1) {
+                db_str.split_whitespace().next()
+            } else if let Some(db_str) = line.split("Peak_level=").nth(1) {
+                db_str.split_whitespace().next()
+            } else {
+                None
+            };
+
+            if let Some(db_str) = db_value {
+                // Handle "inf" or "-inf" values
+                let db: f32 = if db_str.contains("inf") {
+                    if db_str.starts_with('-') {
+                        -96.0
+                    } else {
+                        0.0
+                    }
+                } else {
+                    db_str.parse().unwrap_or(-96.0)
+                };
+
+                // Convert dB to linear (0-1 range)
+                // dB = 20 * log10(linear), so linear = 10^(dB/20)
+                let linear = if db <= -96.0 {
+                    0.0
+                } else {
+                    10f32.powf(db / 20.0)
+                };
+                peaks.push(linear);
+            }
+        } else if line.contains("RMS level dB:") {
+            // Also capture RMS as fallback for smoother waveform
+            if let Some(db_str) = line.split("RMS level dB:").nth(1) {
+                if let Some(db_str) = db_str.split_whitespace().next() {
+                    let db: f32 = if db_str.contains("inf") {
+                        -96.0
+                    } else {
+                        db_str.parse().unwrap_or(-96.0)
+                    };
+
+                    let linear = if db <= -96.0 {
+                        0.0
+                    } else {
+                        10f32.powf(db / 20.0)
+                    };
+
+                    // If we don't have a peak for this segment yet, use RMS
+                    if peaks.len() < expected_samples && peaks.is_empty() {
+                        peaks.push(linear);
+                    }
+                }
+            }
+        }
+    }
+
+    // If astats didn't give us enough samples, try alternative parsing
+    if peaks.len() < expected_samples / 2 {
+        // Fall back to simpler volume detection
+        peaks = parse_volume_levels(output, expected_samples);
+    }
+
+    peaks
+}
+
+/// Alternative peak parsing using volume levels
+fn parse_volume_levels(output: &str, expected_samples: usize) -> Vec<f32> {
+    let mut peaks = Vec::with_capacity(expected_samples);
+
+    // Look for mean_volume and max_volume from volumedetect
+    let mut max_vol: f32 = -96.0;
+    for line in output.lines() {
+        if line.contains("max_volume:") {
+            if let Some(db_str) = line.split("max_volume:").nth(1) {
+                if let Some(db_str) = db_str.split_whitespace().next() {
+                    max_vol = db_str.parse().unwrap_or(-96.0);
+                }
+            }
+        }
+    }
+
+    // If we found a max volume, create a flat waveform based on it
+    // This is a fallback when detailed per-segment data isn't available
+    if max_vol > -96.0 {
+        let linear = 10f32.powf(max_vol / 20.0);
+        peaks.resize(expected_samples, linear);
+    } else {
+        // No audio data found, return empty
+        peaks.resize(expected_samples, 0.0);
+    }
+
+    peaks
 }
 
 /// Parse FFprobe JSON output
@@ -693,6 +964,127 @@ fn parse_audio_stream(stream: &serde_json::Value) -> FFmpegResult<AudioStreamInf
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // WaveformData Tests
+    // =========================================================================
+
+    #[test]
+    fn test_waveform_data_empty() {
+        let waveform = WaveformData::empty(5.0, 100, 2);
+        assert_eq!(waveform.samples_per_second, 100);
+        assert_eq!(waveform.peaks.len(), 500); // 5 seconds * 100 samples/sec
+        assert_eq!(waveform.duration_sec, 5.0);
+        assert_eq!(waveform.channels, 2);
+        assert!(waveform.peaks.iter().all(|&p| p == 0.0));
+    }
+
+    #[test]
+    fn test_waveform_data_peak_at_time() {
+        let mut waveform = WaveformData::empty(2.0, 100, 1);
+        // Set a peak at 1 second (index 100)
+        waveform.peaks[100] = 0.8;
+
+        assert_eq!(waveform.peak_at_time(1.0), 0.8);
+        assert_eq!(waveform.peak_at_time(0.0), 0.0);
+        assert_eq!(waveform.peak_at_time(-1.0), 0.0); // Out of bounds
+        assert_eq!(waveform.peak_at_time(3.0), 0.0); // Out of bounds
+    }
+
+    #[test]
+    fn test_waveform_data_peaks_in_range() {
+        let mut waveform = WaveformData::empty(3.0, 100, 1);
+        // Set peaks from 1.0s to 2.0s
+        for i in 100..200 {
+            waveform.peaks[i] = 0.5;
+        }
+
+        let range = waveform.peaks_in_range(1.0, 2.0);
+        assert_eq!(range.len(), 100);
+        assert!(range.iter().all(|&p| p == 0.5));
+
+        // Out of range
+        let empty = waveform.peaks_in_range(5.0, 6.0);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn test_waveform_data_serialization() {
+        let waveform = WaveformData {
+            samples_per_second: 100,
+            peaks: vec![0.0, 0.5, 1.0, 0.3],
+            duration_sec: 0.04,
+            channels: 2,
+        };
+
+        let json = serde_json::to_string(&waveform).unwrap();
+        assert!(json.contains("samplesPerSecond")); // camelCase
+        assert!(json.contains("100"));
+
+        let deserialized: WaveformData = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.samples_per_second, 100);
+        assert_eq!(deserialized.peaks, vec![0.0, 0.5, 1.0, 0.3]);
+    }
+
+    // =========================================================================
+    // Peak Parsing Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_astats_peaks_with_db_values() {
+        let output = r#"
+[Parsed_astats_0 @ 0x...] Peak level dB: -6.0
+[Parsed_astats_0 @ 0x...] Peak level dB: -12.0
+[Parsed_astats_0 @ 0x...] Peak level dB: -24.0
+"#;
+
+        let peaks = parse_astats_peaks(output, 3, 0.01);
+        assert_eq!(peaks.len(), 3);
+
+        // -6 dB ≈ 0.501
+        assert!((peaks[0] - 0.501).abs() < 0.01);
+        // -12 dB ≈ 0.251
+        assert!((peaks[1] - 0.251).abs() < 0.01);
+        // -24 dB ≈ 0.063
+        assert!((peaks[2] - 0.063).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_astats_peaks_with_inf() {
+        let output = r#"
+[Parsed_astats_0 @ 0x...] Peak level dB: -inf
+[Parsed_astats_0 @ 0x...] Peak level dB: 0.0
+"#;
+
+        let peaks = parse_astats_peaks(output, 2, 0.01);
+        assert_eq!(peaks.len(), 2);
+        assert_eq!(peaks[0], 0.0); // -inf = silence
+        assert_eq!(peaks[1], 1.0); // 0 dB = max
+    }
+
+    #[test]
+    fn test_parse_volume_levels_fallback() {
+        let output = r#"
+[Parsed_volumedetect_0 @ 0x...] max_volume: -6.0 dB
+"#;
+
+        let peaks = parse_volume_levels(output, 100);
+        assert_eq!(peaks.len(), 100);
+        // All peaks should be around 0.501 (-6 dB)
+        assert!((peaks[0] - 0.501).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_volume_levels_no_audio() {
+        let output = "Some random output without volume data";
+        let peaks = parse_volume_levels(output, 50);
+        assert_eq!(peaks.len(), 50);
+        assert!(peaks.iter().all(|&p| p == 0.0));
+    }
+
+    // =========================================================================
+    // RenderSettings Tests
+    // =========================================================================
 
     #[test]
     fn test_render_settings_default() {

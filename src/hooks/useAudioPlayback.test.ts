@@ -132,6 +132,7 @@ const createMockAsset = (overrides: Partial<Asset> = {}): Asset => ({
     allowedUse: [],
   },
   tags: [],
+  proxyStatus: 'notNeeded',
   audio: {
     sampleRate: 48000,
     channels: 2,

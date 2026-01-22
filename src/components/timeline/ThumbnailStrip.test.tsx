@@ -39,6 +39,7 @@ describe('ThumbnailStrip', () => {
       allowedUse: ['commercial'],
     },
     tags: [],
+    proxyStatus: 'notNeeded',
     video: {
       width: 1920,
       height: 1080,

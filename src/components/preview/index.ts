@@ -33,3 +33,6 @@ export type { FullscreenPreviewProps } from './FullscreenPreview';
 
 export { TimelinePreviewPlayer } from './TimelinePreviewPlayer';
 export type { TimelinePreviewPlayerProps } from './TimelinePreviewPlayer';
+
+export { UnifiedPreviewPlayer } from './UnifiedPreviewPlayer';
+export type { UnifiedPreviewPlayerProps } from './UnifiedPreviewPlayer';

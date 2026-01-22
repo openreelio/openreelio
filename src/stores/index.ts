@@ -4,7 +4,7 @@
  * Central export point for all Zustand stores.
  */
 
-export { useProjectStore } from './projectStore';
+export { useProjectStore, setupProxyEventListeners, cleanupProxyEventListeners } from './projectStore';
 export { useTimelineStore } from './timelineStore';
 export { useJobsStore } from './jobsStore';
 export { usePlaybackStore } from './playbackStore';

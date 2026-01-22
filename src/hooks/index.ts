@@ -68,6 +68,12 @@ export type {
   UseAudioWaveformReturn,
 } from './useAudioWaveform';
 
+export { useWaveformPeaks } from './useWaveformPeaks';
+export type {
+  UseWaveformPeaksOptions,
+  UseWaveformPeaksReturn,
+} from './useWaveformPeaks';
+
 export { useFFmpegStatus } from './useFFmpegStatus';
 export type {
   FFmpegStatus,
@@ -208,3 +214,10 @@ export type {
   AssetSearchResultItem,
   AssetSearchResponse,
 } from './useSearch';
+
+export { usePreviewMode } from './usePreviewMode';
+export type {
+  PreviewMode,
+  PreviewModeResult,
+  UsePreviewModeOptions,
+} from './usePreviewMode';

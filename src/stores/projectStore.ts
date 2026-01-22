@@ -9,10 +9,31 @@ import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
 import { invoke } from '@tauri-apps/api/core';
-import type { Asset, Sequence, Command, CommandResult, UndoRedoResult } from '@/types';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import type { Asset, Sequence, Command, CommandResult, UndoRedoResult, ProxyStatus } from '@/types';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('ProjectStore');
+
+// =============================================================================
+// Proxy Event Types
+// =============================================================================
+
+interface ProxyGeneratingEvent {
+  assetId: string;
+  jobId: string;
+}
+
+interface ProxyReadyEvent {
+  assetId: string;
+  proxyPath: string;
+  proxyUrl: string;
+}
+
+interface ProxyFailedEvent {
+  assetId: string;
+  error: string;
+}
 
 // Enable Immer's MapSet plugin for Map/Set support
 enableMapSet();
@@ -52,6 +73,7 @@ interface ProjectState {
   removeAsset: (assetId: string) => Promise<void>;
   getAsset: (assetId: string) => Asset | undefined;
   selectAsset: (assetId: string | null) => void;
+  updateAssetProxyStatus: (assetId: string, status: ProxyStatus, proxyUrl?: string) => void;
 
   // Sequence actions
   createSequence: (name: string, format: string) => Promise<string>;
@@ -304,6 +326,29 @@ export const useProjectStore = create<ProjectState>()(
       });
     },
 
+    // Update asset proxy status (called by event listeners)
+    updateAssetProxyStatus: (assetId: string, status: ProxyStatus, proxyUrl?: string) => {
+      set((state) => {
+        const asset = state.assets.get(assetId);
+        if (asset) {
+          asset.proxyStatus = status;
+          if (proxyUrl) {
+            asset.proxyUrl = proxyUrl;
+          }
+          logger.info('Asset proxy status updated', { assetId, status, proxyUrl });
+        }
+      });
+
+      // Persist to backend
+      invoke('update_asset_proxy', {
+        assetId,
+        proxyUrl: proxyUrl ?? null,
+        proxyStatus: status,
+      }).catch((err) => {
+        logger.error('Failed to persist asset proxy status', { error: err });
+      });
+    },
+
     // Create sequence
     createSequence: async (name: string, format: string) => {
       try {
@@ -482,3 +527,84 @@ export const useProjectStore = create<ProjectState>()(
     },
   }))
 );
+
+// =============================================================================
+// Proxy Event Listeners
+// =============================================================================
+
+let proxyEventUnlisteners: UnlistenFn[] = [];
+
+function isTauriRuntime(): boolean {
+  return typeof (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined';
+}
+
+/**
+ * Setup event listeners for proxy generation events.
+ *
+ * Should be called once when the app initializes.
+ * Events:
+ * - asset:proxy-generating: Proxy generation started
+ * - asset:proxy-ready: Proxy generation completed successfully
+ * - asset:proxy-failed: Proxy generation failed
+ */
+export async function setupProxyEventListeners(): Promise<void> {
+  // Clean up any existing listeners
+  await cleanupProxyEventListeners();
+
+  // The Vite web build (used by Playwright E2E) does not have a Tauri backend.
+  // In that environment, `listen()` will throw. This is not a fatal condition.
+  if (!isTauriRuntime()) {
+    return;
+  }
+
+  const { updateAssetProxyStatus } = useProjectStore.getState();
+
+  // Listen for proxy generating event
+  const unlistenGenerating = await listen<ProxyGeneratingEvent>(
+    'asset:proxy-generating',
+    (event) => {
+      logger.info('Proxy generation started', { assetId: event.payload.assetId });
+      updateAssetProxyStatus(event.payload.assetId, 'generating');
+    }
+  );
+  proxyEventUnlisteners.push(unlistenGenerating);
+
+  // Listen for proxy ready event
+  const unlistenReady = await listen<ProxyReadyEvent>(
+    'asset:proxy-ready',
+    (event) => {
+      logger.info('Proxy generation completed', {
+        assetId: event.payload.assetId,
+        proxyUrl: event.payload.proxyUrl,
+      });
+      updateAssetProxyStatus(event.payload.assetId, 'ready', event.payload.proxyUrl);
+    }
+  );
+  proxyEventUnlisteners.push(unlistenReady);
+
+  // Listen for proxy failed event
+  const unlistenFailed = await listen<ProxyFailedEvent>(
+    'asset:proxy-failed',
+    (event) => {
+      logger.error('Proxy generation failed', {
+        assetId: event.payload.assetId,
+        error: event.payload.error,
+      });
+      updateAssetProxyStatus(event.payload.assetId, 'failed');
+    }
+  );
+  proxyEventUnlisteners.push(unlistenFailed);
+
+  logger.info('Proxy event listeners initialized');
+}
+
+/**
+ * Cleanup proxy event listeners.
+ * Should be called when the app is closing.
+ */
+export async function cleanupProxyEventListeners(): Promise<void> {
+  for (const unlisten of proxyEventUnlisteners) {
+    unlisten();
+  }
+  proxyEventUnlisteners = [];
+}

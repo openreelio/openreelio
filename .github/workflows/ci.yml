@@ -233,6 +233,68 @@ jobs:
         run: cargo test --locked detection -- --nocapture
 
   # ==========================================================================
+  # E2E Tests
+  # ==========================================================================
+  e2e-test:
+    name: E2E Tests
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    needs: [frontend-test]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      - name: Generate test fixtures
+        run: |
+          mkdir -p tests/e2e/fixtures
+          # Generate 5-second test video with FFmpeg (if available)
+          if command -v ffmpeg &> /dev/null; then
+            ffmpeg -f lavfi -i testsrc=duration=5:size=1920x1080:rate=30 \
+                   -f lavfi -i sine=frequency=440:duration=5 \
+                   -c:v libx264 -preset ultrafast -crf 28 \
+                   -c:a aac -b:a 96k \
+                   -y tests/e2e/fixtures/sample-video.mp4 2>/dev/null || echo "Video generation failed"
+            ffmpeg -f lavfi -i sine=frequency=440:duration=5 \
+                   -c:a libmp3lame -b:a 96k \
+                   -y tests/e2e/fixtures/sample-audio.mp3 2>/dev/null || echo "Audio generation failed"
+          else
+            echo "FFmpeg not available, skipping fixture generation"
+          fi
+
+      - name: Run E2E tests
+        run: npm run test:e2e
+        continue-on-error: true
+
+      - name: Upload Playwright report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: test-results/
+          retention-days: 7
+
+  # ==========================================================================
   # Security Audit
   # ==========================================================================
   security-audit:

@@ -105,6 +105,7 @@ const createMockAsset = (overrides: Partial<Asset> = {}): Asset => ({
     allowedUse: [],
   },
   tags: [],
+  proxyStatus: 'notNeeded',
   proxyUrl: '/path/to/proxy/test.mp4',
   ...overrides,
 });

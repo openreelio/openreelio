@@ -42,6 +42,8 @@ export { LazyThumbnailStrip } from './LazyThumbnailStrip';
 export type { LazyThumbnailStripProps } from './LazyThumbnailStrip';
 export { AudioClipWaveform } from './AudioClipWaveform';
 export type { AudioClipWaveformProps } from './AudioClipWaveform';
+export { WaveformPeaksDisplay } from './WaveformPeaksDisplay';
+export type { WaveformPeaksDisplayProps, WaveformDisplayMode } from './WaveformPeaksDisplay';
 export { VirtualizedTrack } from './VirtualizedTrack';
 export type { VirtualizedTrackProps } from './VirtualizedTrack';
 
@@ -58,3 +60,5 @@ export { DragPreviewLayer } from './DragPreviewLayer';
 export type { DragPreviewState } from './DragPreviewLayer';
 export { SnapIndicator } from './SnapIndicator';
 export type { SnapPoint } from './SnapIndicator';
+export { DropIndicator } from './DropIndicator';
+export type { DropIndicatorProps } from './DropIndicator';

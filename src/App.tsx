@@ -14,10 +14,16 @@ import { ProjectCreationDialog, type ProjectCreateData } from './components/feat
 import { ExportDialog } from './components/features/export';
 import { Inspector, type SelectedCaption } from './components/features/inspector';
 import { ProjectExplorer } from './components/explorer';
-import { TimelinePreviewPlayer } from './components/preview';
+import { UnifiedPreviewPlayer } from './components/preview';
 import { Timeline } from './components/timeline';
 import { FFmpegWarning, ToastContainer, type ToastData } from './components/ui';
-import { useProjectStore, usePlaybackStore, useTimelineStore } from './stores';
+import {
+  useProjectStore,
+  usePlaybackStore,
+  useTimelineStore,
+  setupProxyEventListeners,
+  cleanupProxyEventListeners,
+} from './stores';
 import {
   useTimelineActions,
   useFFmpegStatus,
@@ -285,10 +291,10 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
         <div className="flex flex-col h-full">
           <div className="flex-1 border-b border-editor-border">
             <ErrorBoundary
-              onError={(error) => logger.error('TimelinePreviewPlayer error', { error })}
+              onError={(error) => logger.error('UnifiedPreviewPlayer error', { error })}
               showDetails={import.meta.env.DEV}
             >
-              <TimelinePreviewPlayer
+              <UnifiedPreviewPlayer
                 className="h-full w-full"
                 showControls
                 showTimecode
@@ -387,6 +393,19 @@ function App(): JSX.Element {
       logger.error('Auto-save failed', { error });
     },
   });
+
+  // Setup proxy event listeners on app mount
+  useEffect(() => {
+    setupProxyEventListeners().catch((error) => {
+      logger.error('Failed to setup proxy event listeners', { error });
+    });
+
+    return () => {
+      cleanupProxyEventListeners().catch((error) => {
+        logger.error('Failed to cleanup proxy event listeners', { error });
+      });
+    };
+  }, []);
 
   // ===========================================================================
   // Handlers

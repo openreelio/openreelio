@@ -64,11 +64,29 @@ impl Snapshot {
         }
 
         let data = Self::create_snapshot_data(state, last_op_id);
-        let file = File::create(path)?;
+
+        // Write to a temporary file first to avoid corrupting an existing snapshot on crash.
+        let tmp_path = {
+            let mut tmp = path.to_path_buf();
+            let file_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "snapshot.json".to_string());
+            tmp.set_file_name(format!("{file_name}.tmp"));
+            tmp
+        };
+
+        let file = File::create(&tmp_path)?;
         let mut writer = BufWriter::new(file);
 
         serde_json::to_writer_pretty(&mut writer, &data)?;
         writer.flush()?;
+
+        // Replace existing snapshot (best-effort atomic on most platforms).
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        std::fs::rename(&tmp_path, path)?;
 
         Ok(())
     }
