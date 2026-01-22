@@ -8,7 +8,7 @@ use std::collections::BinaryHeap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::core::{
@@ -628,35 +628,378 @@ impl JobProcessor {
         }
     }
 
-    /// Process transcription job (placeholder - requires whisper integration)
+    /// Process transcription job using Whisper
     async fn process_transcription(&self, job: &Job) -> Result<serde_json::Value, String> {
+        use crate::core::captions::{
+            audio::extract_audio_for_transcription_async,
+            whisper::{
+                default_models_dir, is_whisper_available, TranscriptionOptions, WhisperEngine,
+                WhisperModel,
+            },
+        };
+
         let asset_id = job
             .payload
             .get("assetId")
             .and_then(|v| v.as_str())
             .ok_or("Missing assetId in payload")?;
 
-        // TODO: Implement whisper.cpp integration (TASK-007)
-        tracing::warn!("Transcription not yet implemented for asset {}", asset_id);
+        // Options may arrive either flattened or nested under `options`.
+        let options = job.payload.get("options");
 
-        Err("Transcription not yet implemented. Whisper integration pending (TASK-007)".to_string())
-    }
+        let input_path = if let Some(path) = job.payload.get("inputPath").and_then(|v| v.as_str()) {
+            path.to_string()
+        } else {
+            // Fallback: resolve from currently open project
+            let app_state = self.app_handle.state::<crate::AppState>();
+            let guard = app_state.project.lock().await;
+            let project = guard.as_ref().ok_or_else(|| {
+                "No project open; cannot resolve transcription input path".to_string()
+            })?;
+            let asset = project
+                .state
+                .assets
+                .get(asset_id)
+                .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
+            asset.uri.clone()
+        };
 
-    /// Process indexing job (placeholder - requires search indexer)
-    async fn process_indexing(&self, job: &Job) -> Result<serde_json::Value, String> {
-        let asset_id = job
+        let model_name = job
             .payload
-            .get("assetId")
+            .get("model")
             .and_then(|v| v.as_str())
-            .ok_or("Missing assetId in payload")?;
+            .or_else(|| options.and_then(|o| o.get("model").and_then(|v| v.as_str())))
+            .unwrap_or("base");
 
-        // TODO: Implement Meilisearch indexing (TASK-009)
-        tracing::warn!("Indexing not yet implemented for asset {}", asset_id);
+        let language = job
+            .payload
+            .get("language")
+            .and_then(|v| v.as_str())
+            .or_else(|| options.and_then(|o| o.get("language").and_then(|v| v.as_str())))
+            .map(|s| s.to_string());
+
+        let translate = job
+            .payload
+            .get("translate")
+            .and_then(|v| v.as_bool())
+            .or_else(|| options.and_then(|o| o.get("translate").and_then(|v| v.as_bool())))
+            .unwrap_or(false);
+
+        // Check if whisper is available
+        if !is_whisper_available() {
+            return Err("Whisper feature not enabled. Rebuild with --features whisper".to_string());
+        }
+
+        tracing::info!(
+            "Starting transcription for asset {} using {} model",
+            asset_id,
+            model_name
+        );
+
+        // Emit initial progress
+        let _ = self.app_handle.emit(
+            "job-progress",
+            serde_json::json!({
+                "jobId": job.id,
+                "progress": 0.1,
+                "message": "Extracting audio...",
+            }),
+        );
+
+        // Get FFmpeg path from runner
+        let ffmpeg_path: Option<String> = {
+            let guard = self.ffmpeg_state.read().await;
+            guard
+                .info()
+                .and_then(|i| i.ffmpeg_path.to_str().map(|s| s.to_string()))
+        };
+
+        // Create temp directory for audio
+        let temp_dir = std::env::temp_dir().join("openreelio_transcription");
+        std::fs::create_dir_all(&temp_dir)
+            .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+
+        let audio_path = temp_dir.join(format!("{}_{}.wav", asset_id, uuid::Uuid::new_v4()));
+        struct TempFileGuard(std::path::PathBuf);
+        impl Drop for TempFileGuard {
+            fn drop(&mut self) {
+                if self.0.exists() {
+                    let _ = std::fs::remove_file(&self.0);
+                }
+            }
+        }
+        let _temp_guard = TempFileGuard(audio_path.clone());
+
+        let input = std::path::Path::new(&input_path);
+
+        // Extract audio for transcription
+        extract_audio_for_transcription_async(input, &audio_path, ffmpeg_path.as_deref())
+            .await
+            .map_err(|e| format!("Failed to extract audio: {}", e))?;
+
+        // Emit progress after audio extraction
+        let _ = self.app_handle.emit(
+            "job-progress",
+            serde_json::json!({
+                "jobId": job.id,
+                "progress": 0.3,
+                "message": "Loading Whisper model...",
+            }),
+        );
+
+        // Parse model size
+        let model_size: WhisperModel = model_name
+            .parse()
+            .map_err(|_| format!("Unknown model size: {}", model_name))?;
+
+        // Get model path
+        let models_dir = default_models_dir();
+        let model_path = models_dir.join(model_size.filename());
+
+        if !model_path.exists() {
+            return Err(format!(
+                "Whisper model not found at {}. Please download the model first.",
+                model_path.display()
+            ));
+        }
+
+        // Load whisper engine (this is CPU-intensive, so we'll use spawn_blocking)
+        let model_path_clone = model_path.clone();
+        let engine = tokio::task::spawn_blocking(move || WhisperEngine::new(&model_path_clone))
+            .await
+            .map_err(|e| format!("Task join error: {}", e))?
+            .map_err(|e| format!("Failed to load Whisper model: {}", e))?;
+
+        // Emit progress after model loading
+        let _ = self.app_handle.emit(
+            "job-progress",
+            serde_json::json!({
+                "jobId": job.id,
+                "progress": 0.5,
+                "message": "Transcribing audio...",
+            }),
+        );
+
+        // Configure transcription options
+        let options = TranscriptionOptions {
+            language,
+            translate,
+            threads: 0, // Auto-detect
+            initial_prompt: None,
+        };
+
+        // Run transcription (CPU-intensive)
+        let audio_path_clone = audio_path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            engine.transcribe_file(&audio_path_clone, &options)
+        })
+        .await
+        .map_err(|e| format!("Task join error: {}", e))?
+        .map_err(|e| format!("Transcription failed: {}", e))?;
+
+        // Emit progress after transcription
+        let _ = self.app_handle.emit(
+            "job-progress",
+            serde_json::json!({
+                "jobId": job.id,
+                "progress": 0.9,
+                "message": "Processing results...",
+            }),
+        );
+
+        // Convert segments to JSON
+        let segments: Vec<serde_json::Value> = result
+            .segments
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "startTime": s.start_time,
+                    "endTime": s.end_time,
+                    "text": s.text,
+                })
+            })
+            .collect();
+
+        tracing::info!(
+            "Transcription completed for asset {}: {} segments, {:.1}s duration",
+            asset_id,
+            result.segments.len(),
+            result.duration
+        );
+
+        // Emit completion event
+        let _ = self.app_handle.emit(
+            "transcription-complete",
+            serde_json::json!({
+                "jobId": job.id,
+                "assetId": asset_id,
+                "segmentCount": result.segments.len(),
+                "duration": result.duration,
+                "language": result.language,
+            }),
+        );
 
         Ok(serde_json::json!({
             "assetId": asset_id,
-            "indexed": false,
-            "message": "Indexing not yet implemented",
+            "language": result.language,
+            "duration": result.duration,
+            "segmentCount": result.segments.len(),
+            "segments": segments,
+            "fullText": result.full_text(),
+        }))
+    }
+
+    /// Process indexing job using Meilisearch
+    async fn process_indexing(&self, job: &Job) -> Result<serde_json::Value, String> {
+        use crate::core::search::meilisearch::{
+            indexer::{AssetDocument, TranscriptDocument},
+            is_meilisearch_available,
+        };
+
+        let asset_id = job
+            .payload
+            .get("assetId")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing assetId in payload")?;
+
+        // Check if Meilisearch is available
+        if !is_meilisearch_available() {
+            tracing::warn!(
+                "Meilisearch feature not enabled, skipping indexing for asset {}",
+                asset_id
+            );
+            return Ok(serde_json::json!({
+                "assetId": asset_id,
+                "indexed": false,
+                "message": "Meilisearch feature not enabled",
+            }));
+        }
+
+        // Get asset metadata from payload
+        let asset_name = job
+            .payload
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown");
+
+        let asset_path = job
+            .payload
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let asset_kind = job
+            .payload
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+
+        let duration = job.payload.get("duration").and_then(|v| v.as_f64());
+
+        let project_id = job.payload.get("projectId").and_then(|v| v.as_str());
+
+        // Check for transcript segments to index
+        let transcript_segments: Vec<serde_json::Value> = job
+            .payload
+            .get("transcriptSegments")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        tracing::info!(
+            "Indexing asset {} with {} transcript segments",
+            asset_id,
+            transcript_segments.len()
+        );
+
+        // Emit progress
+        let _ = self.app_handle.emit(
+            "job-progress",
+            serde_json::json!({
+                "jobId": job.id,
+                "progress": 0.3,
+                "message": "Building index documents...",
+            }),
+        );
+
+        // Build asset document
+        let mut asset_doc = AssetDocument::new(asset_id, asset_name, asset_path, asset_kind);
+        if let Some(dur) = duration {
+            asset_doc = asset_doc.with_duration(dur);
+        }
+        if let Some(proj_id) = project_id {
+            asset_doc = asset_doc.with_project_id(proj_id);
+        }
+
+        // Build transcript documents
+        let transcript_docs: Vec<TranscriptDocument> = transcript_segments
+            .iter()
+            .enumerate()
+            .filter_map(|(i, seg)| {
+                let text = seg.get("text")?.as_str()?;
+                let start = seg.get("startTime").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let end = seg.get("endTime").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let language = seg.get("language").and_then(|v| v.as_str());
+
+                let segment_id = format!("{}_{}", asset_id, i);
+                let mut doc = TranscriptDocument::new(&segment_id, asset_id, text, start, end);
+                if let Some(lang) = language {
+                    doc = doc.with_language(lang);
+                }
+                Some(doc)
+            })
+            .collect();
+
+        // Perform actual indexing via the shared Meilisearch service
+        let app_state = self.app_handle.state::<crate::AppState>();
+        let service = {
+            let guard = app_state.search_service.lock().await;
+            guard.clone().ok_or_else(|| {
+                "Search service not initialized. Ensure Meilisearch is enabled and started"
+                    .to_string()
+            })?
+        };
+
+        // Ensure sidecar + indexer are ready (lazy startup)
+        service.ensure_ready().await?;
+
+        // Index documents
+        service.index_asset(&asset_doc).await?;
+        service
+            .index_transcripts(asset_id, &transcript_docs)
+            .await?;
+
+        let _ = self.app_handle.emit(
+            "job-progress",
+            serde_json::json!({
+                "jobId": job.id,
+                "progress": 0.9,
+                "message": "Finalizing index...",
+            }),
+        );
+
+        tracing::info!(
+            "Indexed asset {} and {} transcript segments",
+            asset_id,
+            transcript_docs.len()
+        );
+
+        // Emit completion event
+        let _ = self.app_handle.emit(
+            "indexing-complete",
+            serde_json::json!({
+                "jobId": job.id,
+                "assetId": asset_id,
+                "transcriptCount": transcript_docs.len(),
+            }),
+        );
+
+        Ok(serde_json::json!({
+            "assetId": asset_id,
+            "indexed": true,
+            "assetDocument": serde_json::to_value(&asset_doc).unwrap_or_default(),
+            "transcriptCount": transcript_docs.len(),
+            "message": "Indexed in Meilisearch",
         }))
     }
 

@@ -35,6 +35,7 @@
 //! ```
 
 pub mod indexer;
+pub mod service;
 pub mod sidecar;
 
 // Re-export commonly used types
@@ -42,6 +43,7 @@ pub use indexer::{
     AssetDocument, CombinedSearchResults, IndexerError, IndexerResult, MeilisearchResults,
     SearchIndexer, SearchOptions, TranscriptDocument,
 };
+pub use service::{SearchService, SharedSearchService};
 pub use sidecar::{
     default_data_dir, is_meilisearch_available, MeilisearchSidecar, SidecarConfig, SidecarError,
     SidecarResult,

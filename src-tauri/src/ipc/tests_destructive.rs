@@ -8,7 +8,7 @@ fn test_destructive_invalid_payload_injection() {
     let payload = json!({
         "sequenceId": "seq_1",
         "trackId": "track_1",
-        "clipId": "clip_1",
+        "assetId": "asset_1",
         "timelineIn": "NOT_A_NUMBER"
     });
 
@@ -46,6 +46,27 @@ fn test_destructive_missing_field() {
 }
 
 #[test]
+fn test_destructive_missing_timeline_start_is_rejected() {
+    // Missing both timelineStart and legacy timelineIn
+    let payload = json!({
+        "sequenceId": "seq_1",
+        "trackId": "track_1",
+        "assetId": "asset_1"
+    });
+
+    let result = CommandPayload::parse("InsertClip".to_string(), payload);
+
+    assert!(
+        result.is_err(),
+        "Should have rejected missing timelineStart"
+    );
+    assert!(
+        result.unwrap_err().contains("missing field"),
+        "Error should mention missing field"
+    );
+}
+
+#[test]
 fn test_happy_path_parsing() {
     let payload = json!({
         "sequenceId": "seq_1",
@@ -55,12 +76,9 @@ fn test_happy_path_parsing() {
     });
 
     let result = CommandPayload::parse("InsertClip".to_string(), payload);
-    if result.is_err() {
-        println!("Parse error: {}", result.clone().unwrap_err());
-    }
     assert!(result.is_ok());
-    if let Ok(CommandPayload::InsertClip { timeline_start, .. }) = result {
-        assert_eq!(timeline_start, Some(10.0));
+    if let Ok(CommandPayload::InsertClip(p)) = result {
+        assert_eq!(p.timeline_start, 10.0);
     } else {
         panic!("Wrong variant parsed");
     }

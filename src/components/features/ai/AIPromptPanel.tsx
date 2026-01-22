@@ -8,6 +8,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useAIAgent, type AIContext } from '@/hooks/useAIAgent';
 import { useTimelineStore } from '@/stores';
+import { useAIStore, selectIsAIReady } from '@/stores/aiStore';
 import { ProposalDialog } from './ProposalDialog';
 import { createLogger } from '@/services/logger';
 
@@ -22,6 +23,8 @@ export interface AIPromptPanelProps {
   onEditApplied?: (opIds: string[]) => void;
   /** Optional callback when error occurs */
   onError?: (error: string) => void;
+  /** Optional transcript context to include with AI requests */
+  transcriptContext?: string | null;
 }
 
 // =============================================================================
@@ -31,6 +34,7 @@ export interface AIPromptPanelProps {
 export const AIPromptPanel: React.FC<AIPromptPanelProps> = ({
   onEditApplied,
   onError,
+  transcriptContext = null,
 }) => {
   const [inputValue, setInputValue] = useState('');
   const [history, setHistory] = useState<string[]>([]);
@@ -52,15 +56,19 @@ export const AIPromptPanel: React.FC<AIPromptPanelProps> = ({
   const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
   const selectedTrackIds = useTimelineStore((state) => state.selectedTrackIds);
 
+  // Get AI provider status
+  const isAIReady = useAIStore(selectIsAIReady);
+  const providerStatus = useAIStore((state) => state.providerStatus);
+
   // Build AI context
   const buildContext = useCallback((): AIContext => {
     return {
       playheadPosition: playhead,
       selectedClips: selectedClipIds,
       selectedTracks: selectedTrackIds,
-      transcriptContext: null, // TODO: Add transcript support
+      transcriptContext: transcriptContext,
     };
-  }, [playhead, selectedClipIds, selectedTrackIds]);
+  }, [playhead, selectedClipIds, selectedTrackIds, transcriptContext]);
 
   // Handle submit
   const handleSubmit = useCallback(
@@ -160,6 +168,23 @@ export const AIPromptPanel: React.FC<AIPromptPanelProps> = ({
           <div className="flex items-center gap-2">
             <span className="text-lg">🤖</span>
             <h3 className="text-sm font-medium text-white">AI Assistant</h3>
+            {/* Provider Status Indicator */}
+            {isAIReady ? (
+              <span className="flex items-center gap-1 text-xs text-green-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                {providerStatus.providerType}
+              </span>
+            ) : providerStatus.isConfigured ? (
+              <span className="flex items-center gap-1 text-xs text-yellow-400">
+                <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
+                Not connected
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-xs text-neutral-500">
+                <span className="w-1.5 h-1.5 rounded-full bg-neutral-500" />
+                Not configured
+              </span>
+            )}
           </div>
           {error && (
             <button
@@ -170,6 +195,16 @@ export const AIPromptPanel: React.FC<AIPromptPanelProps> = ({
             </button>
           )}
         </div>
+
+        {/* Configuration Prompt */}
+        {!providerStatus.isConfigured && (
+          <div className="mb-3 p-3 rounded bg-blue-900/30 border border-blue-700 text-sm text-blue-300">
+            <p className="mb-1">AI assistant is not configured.</p>
+            <p className="text-xs text-blue-400">
+              Configure an AI provider in Settings to enable AI-powered editing commands.
+            </p>
+          </div>
+        )}
 
         {/* Error Display */}
         {error && (
@@ -235,6 +270,11 @@ export const AIPromptPanel: React.FC<AIPromptPanelProps> = ({
           <span>
             🎬 Selected: {selectedClipIds.length} clip{selectedClipIds.length !== 1 ? 's' : ''}
           </span>
+          {transcriptContext && (
+            <span className="text-green-400">
+              📝 Transcript available
+            </span>
+          )}
         </div>
       </div>
 

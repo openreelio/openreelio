@@ -168,7 +168,10 @@ export interface UseSearchReturn {
   /** Search for content (debounced with caching) - Meilisearch */
   search: (query: string, options?: SearchOptions) => Promise<SearchResults | null>;
   /** Search assets using SQLite backend (always available) */
-  searchAssets: (query: string, options?: AssetSearchOptions) => Promise<AssetSearchResponse | null>;
+  searchAssets: (
+    query: string,
+    options?: AssetSearchOptions,
+  ) => Promise<AssetSearchResponse | null>;
   /** Clear search results */
   clearResults: () => void;
   /** Clear the search cache */
@@ -182,13 +185,13 @@ export interface UseSearchReturn {
     path: string,
     kind: string,
     duration?: number,
-    tags?: string[]
+    tags?: string[],
   ) => Promise<void>;
   /** Index transcript segments for search */
   indexTranscripts: (
     assetId: string,
     segments: Array<{ startTime: number; endTime: number; text: string }>,
-    language?: string
+    language?: string,
   ) => Promise<void>;
   /** Remove an asset from search index */
   removeAssetFromSearch: (assetId: string) => Promise<void>;
@@ -222,12 +225,7 @@ export interface UseSearchReturn {
  * ```
  */
 export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
-  const {
-    debounceMs = 300,
-    defaultLimit = 20,
-    cacheResults = true,
-    maxCacheSize = 100,
-  } = options;
+  const { debounceMs = 300, defaultLimit = 20, cacheResults = true, maxCacheSize = 100 } = options;
 
   // State
   const [state, setState] = useState<SearchState>({
@@ -263,7 +261,7 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
         : `{"limit":${defaultLimit}}`;
       return `${normalizedQuery}:${optionsStr}`;
     },
-    [defaultLimit]
+    [defaultLimit],
   );
 
   /**
@@ -290,7 +288,7 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
 
       cache.set(cacheKey, results);
     },
-    [cacheResults, maxCacheSize]
+    [cacheResults, maxCacheSize],
   );
 
   /**
@@ -312,7 +310,7 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
 
       return null;
     },
-    [cacheResults]
+    [cacheResults],
   );
 
   /**
@@ -332,10 +330,7 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
    * Perform a search with debouncing and caching
    */
   const search = useCallback(
-    (
-      query: string,
-      searchOptions?: SearchOptions
-    ): Promise<SearchResults | null> => {
+    (query: string, searchOptions?: SearchOptions): Promise<SearchResults | null> => {
       // Clear any pending debounce
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
@@ -436,8 +431,7 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
               return;
             }
 
-            const errorMessage =
-              error instanceof Error ? error.message : String(error);
+            const errorMessage = error instanceof Error ? error.message : String(error);
             logger.error('Search failed', { query, error: errorMessage });
 
             setState((prev) => ({
@@ -452,7 +446,7 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
         }, debounceMs);
       });
     },
-    [defaultLimit, debounceMs, getCacheKey, getFromCache, addToCache]
+    [defaultLimit, debounceMs, getCacheKey, getFromCache, addToCache],
   );
 
   /**
@@ -493,7 +487,7 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
       path: string,
       kind: string,
       duration?: number,
-      tags?: string[]
+      tags?: string[],
     ): Promise<void> => {
       try {
         await invoke('index_asset_for_search', {
@@ -506,13 +500,12 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
         });
         logger.debug('Asset indexed for search', { assetId, name });
       } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
         logger.error('Failed to index asset', { assetId, error: errorMessage });
         throw new Error(errorMessage);
       }
     },
-    []
+    [],
   );
 
   /**
@@ -522,7 +515,7 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
     async (
       assetId: string,
       segments: Array<{ startTime: number; endTime: number; text: string }>,
-      language?: string
+      language?: string,
     ): Promise<void> => {
       try {
         await invoke('index_transcripts_for_search', {
@@ -535,8 +528,7 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
           segmentCount: segments.length,
         });
       } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
         logger.error('Failed to index transcripts', {
           assetId,
           error: errorMessage,
@@ -544,29 +536,25 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
         throw new Error(errorMessage);
       }
     },
-    []
+    [],
   );
 
   /**
    * Remove an asset from search index
    */
-  const removeAssetFromSearch = useCallback(
-    async (assetId: string): Promise<void> => {
-      try {
-        await invoke('remove_asset_from_search', { assetId });
-        logger.debug('Asset removed from search index', { assetId });
-      } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
-        logger.error('Failed to remove asset from search', {
-          assetId,
-          error: errorMessage,
-        });
-        throw new Error(errorMessage);
-      }
-    },
-    []
-  );
+  const removeAssetFromSearch = useCallback(async (assetId: string): Promise<void> => {
+    try {
+      await invoke('remove_asset_from_search', { assetId });
+      logger.debug('Asset removed from search index', { assetId });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      logger.error('Failed to remove asset from search', {
+        assetId,
+        error: errorMessage,
+      });
+      throw new Error(errorMessage);
+    }
+  }, []);
 
   /**
    * Search assets using SQLite backend (always available)
@@ -577,7 +565,7 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
   const searchAssets = useCallback(
     async (
       query: string,
-      searchOptions?: AssetSearchOptions
+      searchOptions?: AssetSearchOptions,
     ): Promise<AssetSearchResponse | null> => {
       // Skip empty queries
       if (!query.trim()) {
@@ -592,12 +580,21 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
       }));
 
       try {
+        const modality =
+          searchOptions?.modality === 'visual'
+            ? 'visual'
+            : searchOptions?.modality === 'audio'
+              ? 'audio'
+              : searchOptions?.modality === 'transcript'
+                ? 'text'
+                : null;
+
         const response = await invoke<AssetSearchResponse>('search_assets', {
           query: {
             text: query.trim(),
-            resultLimit: searchOptions?.limit ?? defaultLimit,
-            modality: searchOptions?.modality ?? null,
-            filterAssetIds: searchOptions?.assetIds ?? null,
+            limit: searchOptions?.limit ?? defaultLimit,
+            modality,
+            assetIds: searchOptions?.assetIds ?? null,
           },
         });
 
@@ -615,8 +612,7 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
 
         return response;
       } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
         logger.error('SQLite search failed', { query, error: errorMessage });
 
         setState((prev) => ({
@@ -628,7 +624,7 @@ export function useSearch(options: UseSearchOptions = {}): UseSearchReturn {
         return null;
       }
     },
-    [defaultLimit]
+    [defaultLimit],
   );
 
   return {

@@ -23,6 +23,14 @@ pub trait AIProvider: Send + Sync {
     /// Generates embeddings for text
     async fn embed(&self, texts: Vec<String>) -> CoreResult<Vec<Vec<f32>>>;
 
+    /// Performs a lightweight connectivity/auth check.
+    ///
+    /// This should be cheap (no expensive completions) and should not leak
+    /// secrets in error messages.
+    async fn health_check(&self) -> CoreResult<()> {
+        Ok(())
+    }
+
     /// Checks if the provider is available
     fn is_available(&self) -> bool;
 }
@@ -229,6 +237,13 @@ impl AIProvider for MockAIProvider {
 
         // Return dummy embeddings
         Ok(texts.iter().map(|_| vec![0.0; 384]).collect())
+    }
+
+    async fn health_check(&self) -> CoreResult<()> {
+        if !self.available {
+            return Err(CoreError::Internal("Provider not available".to_string()));
+        }
+        Ok(())
     }
 
     fn is_available(&self) -> bool {

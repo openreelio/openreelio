@@ -12,3 +12,18 @@ export type { SearchResultsProps } from './SearchResults';
 
 export { SearchPanel } from './SearchPanel';
 export type { SearchPanelProps } from './SearchPanel';
+
+export { SearchFilters } from './SearchFilters';
+export type {
+  SearchFiltersProps,
+  SearchFilterValues,
+  AssetTypeFilter,
+  SourceFilter,
+} from './SearchFilters';
+
+export { GroupedSearchResults } from './GroupedSearchResults';
+export type {
+  GroupedSearchResultsProps,
+  GroupByOption,
+  SortGroupsOption,
+} from './GroupedSearchResults';

@@ -7,7 +7,7 @@ use crate::core::assets::{Asset, VideoInfo};
 use crate::core::commands::{Command, InsertClipCommand};
 use crate::core::project::ProjectState;
 use crate::core::timeline::{Clip, ClipPlace, Sequence, SequenceFormat, Track, TrackKind};
-use crate::core::{Color, Ratio, TimeRange};
+use crate::core::{Color, CoreError, Ratio, TimeRange};
 
 #[test]
 fn test_destructive_color_parsing() {
@@ -168,5 +168,29 @@ fn test_ensure_sorted_clips() {
     assert_eq!(
         track.clips[1].place.timeline_in_sec, 20.0,
         "Second clip in vector should be the later one"
+    );
+}
+
+#[test]
+fn test_insert_clip_rejects_invalid_timeline_start() {
+    let mut state = create_test_state();
+    let seq_id = state.active_sequence_id.clone().unwrap();
+    let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+    let asset_id = state.assets.keys().next().unwrap().clone();
+
+    // Negative start time should be rejected (no silent clamping).
+    let mut negative = InsertClipCommand::new(&seq_id, &track_id, &asset_id, -1.0);
+    let result = negative.execute(&mut state);
+    assert!(
+        matches!(result, Err(CoreError::ValidationError(_))),
+        "expected validation error for negative timelineStart, got: {result:?}"
+    );
+
+    // Non-finite start time should also be rejected.
+    let mut non_finite = InsertClipCommand::new(&seq_id, &track_id, &asset_id, f64::NAN);
+    let result = non_finite.execute(&mut state);
+    assert!(
+        matches!(result, Err(CoreError::ValidationError(_))),
+        "expected validation error for NaN timelineStart, got: {result:?}"
     );
 }

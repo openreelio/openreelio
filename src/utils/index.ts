@@ -99,3 +99,14 @@ export {
   type DropValidity,
   type DropValidationContext,
 } from './dropValidity';
+
+export {
+  transitions,
+  durations,
+  easings,
+  springConfig,
+  getTransition,
+  createTransition,
+  prefersReducedMotion,
+  getSafeDuration,
+} from './animations';
