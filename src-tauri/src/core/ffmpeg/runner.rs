@@ -417,9 +417,12 @@ impl FFmpegRunner {
             None
         };
 
-        // Build FFmpeg command
+        // Build FFmpeg command.
+        // Important: only enable `-progress pipe:1` when we are actually draining stdout,
+        // otherwise the child can deadlock once the stdout pipe fills.
         let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
         cmd.args([
+            "-hide_banner",
             "-i",
             &input.to_string_lossy(),
             "-vf",
@@ -434,18 +437,36 @@ impl FFmpegRunner {
             &settings.audio_codec,
             "-b:a",
             &settings.audio_bitrate,
-            "-progress",
-            "pipe:1", // Output progress to stdout
-            "-y",
-            &output.to_string_lossy(),
         ]);
 
-        cmd.stdout(Stdio::piped());
+        if progress_tx.is_some() {
+            cmd.args(["-progress", "pipe:1"]);
+            cmd.stdout(Stdio::piped());
+        } else {
+            cmd.stdout(Stdio::null());
+        }
         cmd.stderr(Stdio::piped());
+        cmd.args(["-y", &output.to_string_lossy()]);
 
         let mut child = cmd.spawn().map_err(FFmpegError::ProcessError)?;
 
-        // Handle progress if channel provided
+        // Capture stderr tail for debugging.
+        let stderr = child.stderr.take();
+        let (stderr_tail_tx, stderr_tail_rx) = tokio::sync::oneshot::channel::<String>();
+        let stderr_task = tokio::spawn(async move {
+            let mut tail = LineTail::new(80);
+            if let Some(stderr) = stderr {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tail.push(&line);
+                }
+            }
+            let _ = stderr_tail_tx.send(tail.joined());
+        });
+
+        // Handle progress if channel provided.
         if let Some(tx) = progress_tx {
             if let Some(stdout) = child.stdout.take() {
                 let total = total_frames;
@@ -461,7 +482,6 @@ impl FFmpegRunner {
                     let mut current_fps = 0.0f32;
 
                     while let Ok(Some(line)) = lines.next_line().await {
-                        // Parse FFmpeg progress output
                         if let Some(value) = line.strip_prefix("frame=") {
                             current_frame = value.trim().parse().unwrap_or(0);
                         } else if let Some(value) = line.strip_prefix("fps=") {
@@ -470,7 +490,6 @@ impl FFmpegRunner {
                             let ms: u64 = value.trim().parse().unwrap_or(0);
                             current_time = ms as f64 / 1_000_000.0;
                         } else if line.starts_with("progress=") {
-                            // Send progress update
                             let percent = if duration > 0.0 {
                                 (current_time / duration * 100.0) as f32
                             } else if let Some(t) = total {
@@ -481,7 +500,8 @@ impl FFmpegRunner {
 
                             let eta = if current_fps > 0.0 && duration > 0.0 {
                                 let remaining_time = duration - current_time;
-                                let remaining_frames = (remaining_time * current_fps as f64) as u64;
+                                let remaining_frames =
+                                    (remaining_time * current_fps as f64) as u64;
                                 Some((remaining_frames as f32 / current_fps) as u64)
                             } else {
                                 None
@@ -507,11 +527,14 @@ impl FFmpegRunner {
         }
 
         let status = child.wait().await.map_err(FFmpegError::ProcessError)?;
+        let tail = stderr_tail_rx.await.unwrap_or_default();
+        let _ = stderr_task.await;
 
         if !status.success() {
-            return Err(FFmpegError::ExecutionFailed(
-                "Proxy generation failed".to_string(),
-            ));
+            return Err(FFmpegError::ExecutionFailed(format!(
+                "Proxy generation failed. Stderr tail:\n{}",
+                tail
+            )));
         }
 
         Ok(())
@@ -620,6 +643,12 @@ impl FFmpegRunner {
         output: &Path,
         samples_per_second: u32,
     ) -> FFmpegResult<WaveformData> {
+        if samples_per_second == 0 {
+            return Err(FFmpegError::InvalidInput(
+                "samples_per_second must be > 0".to_string(),
+            ));
+        }
+
         if !input.exists() {
             return Err(FFmpegError::InvalidInput(format!(
                 "Input file does not exist: {}",
@@ -654,9 +683,6 @@ impl FFmpegRunner {
             ));
         }
 
-        // Calculate segment duration for each sample
-        let segment_duration = 1.0 / samples_per_second as f64;
-
         // Use FFmpeg to extract audio and measure RMS/peak levels per segment
         // We'll use the aframes and asetnsamples to split into segments and measure each
         //
@@ -668,24 +694,52 @@ impl FFmpegRunner {
             (audio_info.sample_rate as f64 / samples_per_second as f64).ceil() as u32
         );
 
-        let output_result = tokio::process::Command::new(&self.info.ffmpeg_path)
-            .args([
-                "-i",
-                &input.to_string_lossy(),
-                "-af",
-                &filter,
-                "-f",
-                "null",
-                "-",
-            ])
-            .stderr(Stdio::piped())
-            .output()
-            .await
-            .map_err(FFmpegError::ProcessError)?;
+        // Run FFmpeg and stream stderr instead of capturing entire output.
+        // On long files astats output can be massive and blow up memory.
+        let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
+        cmd.args([
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            &input.to_string_lossy(),
+            "-af",
+            &filter,
+            "-f",
+            "null",
+            "-",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
 
-        // Parse astats output from stderr
-        let stderr = String::from_utf8_lossy(&output_result.stderr);
-        let peaks = parse_astats_peaks(&stderr, total_samples, segment_duration);
+        let mut child = cmd.spawn().map_err(FFmpegError::ProcessError)?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| FFmpegError::ExecutionFailed("Failed to capture FFmpeg stderr".to_string()))?;
+
+        let mut collector = WaveformLogCollector::new(total_samples);
+        let mut tail = LineTail::new(80);
+
+        {
+            use tokio::io::{AsyncBufReadExt, BufReader};
+            let reader = BufReader::new(stderr);
+            let mut lines = reader.lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                tail.push(&line);
+                collector.ingest(&line);
+            }
+        }
+
+        let status = child.wait().await.map_err(FFmpegError::ProcessError)?;
+        if !status.success() {
+            return Err(FFmpegError::ExecutionFailed(format!(
+                "Waveform analysis failed. Stderr tail:\n{}",
+                tail.joined()
+            )));
+        }
+
+        let peaks = collector.finalize();
 
         // Normalize peaks to 0-1 range
         let max_peak = peaks.iter().cloned().fold(0.0f32, f32::max);
@@ -720,77 +774,95 @@ impl FFmpegRunner {
 }
 
 /// Parse peak levels from FFmpeg astats filter output
-fn parse_astats_peaks(output: &str, expected_samples: usize, _segment_duration: f64) -> Vec<f32> {
-    let mut peaks = Vec::with_capacity(expected_samples);
+struct LineTail {
+    max: usize,
+    lines: std::collections::VecDeque<String>,
+}
 
-    for line in output.lines() {
-        // astats outputs: [Parsed_astats_X @ ...] Peak level dB: -X.X
-        // or: lavfi.astats.Overall.Peak_level
-        if line.contains("Peak level dB:") || line.contains("Peak_level") {
-            // Extract dB value
-            let db_value = if let Some(db_str) = line.split("Peak level dB:").nth(1) {
-                db_str.split_whitespace().next()
-            } else if let Some(db_str) = line.split("Peak_level=").nth(1) {
-                db_str.split_whitespace().next()
-            } else {
-                None
-            };
+impl LineTail {
+    fn new(max: usize) -> Self {
+        Self {
+            max,
+            lines: std::collections::VecDeque::new(),
+        }
+    }
 
-            if let Some(db_str) = db_value {
-                // Handle "inf" or "-inf" values
-                let db: f32 = if db_str.contains("inf") {
-                    if db_str.starts_with('-') {
-                        -96.0
-                    } else {
-                        0.0
-                    }
-                } else {
-                    db_str.parse().unwrap_or(-96.0)
-                };
+    fn push(&mut self, line: &str) {
+        if self.max == 0 {
+            return;
+        }
 
-                // Convert dB to linear (0-1 range)
-                // dB = 20 * log10(linear), so linear = 10^(dB/20)
-                let linear = if db <= -96.0 {
-                    0.0
-                } else {
-                    10f32.powf(db / 20.0)
-                };
-                peaks.push(linear);
+        if self.lines.len() == self.max {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(line.to_string());
+    }
+
+    fn joined(&self) -> String {
+        self.lines
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+struct WaveformLogCollector {
+    expected_samples: usize,
+    peaks: Vec<f32>,
+    max_volume_db: Option<f32>,
+}
+
+impl WaveformLogCollector {
+    fn new(expected_samples: usize) -> Self {
+        Self {
+            expected_samples,
+            peaks: Vec::with_capacity(expected_samples.min(1024)),
+            max_volume_db: None,
+        }
+    }
+
+    fn ingest(&mut self, line: &str) {
+        if self.peaks.len() < self.expected_samples {
+            if let Some(db_str) = extract_db_value(line) {
+                self.peaks.push(db_to_linear(db_str));
             }
-        } else if line.contains("RMS level dB:") {
-            // Also capture RMS as fallback for smoother waveform
-            if let Some(db_str) = line.split("RMS level dB:").nth(1) {
-                if let Some(db_str) = db_str.split_whitespace().next() {
-                    let db: f32 = if db_str.contains("inf") {
-                        -96.0
-                    } else {
-                        db_str.parse().unwrap_or(-96.0)
-                    };
+        }
 
-                    let linear = if db <= -96.0 {
-                        0.0
-                    } else {
-                        10f32.powf(db / 20.0)
-                    };
-
-                    // If we don't have a peak for this segment yet, use RMS
-                    if peaks.len() < expected_samples && peaks.is_empty() {
-                        peaks.push(linear);
-                    }
-                }
+        if self.max_volume_db.is_none() {
+            if let Some(db_str) = extract_max_volume_db(line) {
+                self.max_volume_db = db_str.parse::<f32>().ok();
             }
         }
     }
 
-    // If astats didn't give us enough samples, try alternative parsing
-    if peaks.len() < expected_samples / 2 {
-        // Fall back to simpler volume detection
-        peaks = parse_volume_levels(output, expected_samples);
-    }
+    fn finalize(mut self) -> Vec<f32> {
+        // If astats didn't give us enough samples, fall back to max_volume.
+        if self.peaks.len() < self.expected_samples / 2 {
+            if let Some(db) = self.max_volume_db {
+                let linear = db_to_linear(&db.to_string());
+                self.peaks.clear();
+                self.peaks.resize(self.expected_samples, linear);
+                return self.peaks;
+            }
+        }
 
-    peaks
+        // Ensure length is bounded.
+        self.peaks.truncate(self.expected_samples);
+        self.peaks
+    }
 }
 
+#[cfg(test)]
+fn parse_astats_peaks(output: &str, expected_samples: usize, _segment_duration: f64) -> Vec<f32> {
+    let mut collector = WaveformLogCollector::new(expected_samples);
+    for line in output.lines() {
+        collector.ingest(line);
+    }
+    collector.finalize()
+}
+
+#[cfg(test)]
 /// Alternative peak parsing using volume levels
 fn parse_volume_levels(output: &str, expected_samples: usize) -> Vec<f32> {
     let mut peaks = Vec::with_capacity(expected_samples);
@@ -818,6 +890,55 @@ fn parse_volume_levels(output: &str, expected_samples: usize) -> Vec<f32> {
     }
 
     peaks
+}
+
+fn extract_db_value(line: &str) -> Option<&str> {
+    // astats outputs:
+    // - "Peak level dB: -X.X"
+    // - "lavfi.astats.Overall.Peak_level=-X.X"
+    if line.contains("Peak level dB:") {
+        return line
+            .split("Peak level dB:")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next());
+    }
+
+    if line.contains("Peak_level=") {
+        return line
+            .split("Peak_level=")
+            .nth(1)
+            .and_then(|s| s.split_whitespace().next());
+    }
+
+    None
+}
+
+fn extract_max_volume_db(line: &str) -> Option<&str> {
+    if !line.contains("max_volume:") {
+        return None;
+    }
+    line.split("max_volume:")
+        .nth(1)
+        .and_then(|s| s.split_whitespace().next())
+}
+
+fn db_to_linear(db_str: &str) -> f32 {
+    // Handle "inf" and "-inf".
+    let db: f32 = if db_str.contains("inf") {
+        if db_str.starts_with('-') {
+            -96.0
+        } else {
+            0.0
+        }
+    } else {
+        db_str.parse().unwrap_or(-96.0)
+    };
+
+    if db <= -96.0 {
+        0.0
+    } else {
+        10f32.powf(db / 20.0)
+    }
 }
 
 /// Parse FFprobe JSON output
@@ -1080,6 +1201,27 @@ mod tests {
         let peaks = parse_volume_levels(output, 50);
         assert_eq!(peaks.len(), 50);
         assert!(peaks.iter().all(|&p| p == 0.0));
+    }
+
+    #[test]
+    fn test_parse_astats_peaks_does_not_over_collect() {
+        let mut output = String::new();
+        for _ in 0..10_000 {
+            output.push_str("[Parsed_astats_0 @ 0x...] Peak level dB: -6.0\n");
+        }
+
+        let peaks = parse_astats_peaks(&output, 3, 0.01);
+        assert_eq!(peaks.len(), 3);
+        assert!((peaks[0] - 0.501).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_astats_peaks_falls_back_to_max_volume() {
+        let output = "[Parsed_volumedetect_0 @ 0x...] max_volume: -6.0 dB\n";
+        let peaks = parse_astats_peaks(output, 10, 0.01);
+        assert_eq!(peaks.len(), 10);
+        assert!((peaks[0] - 0.501).abs() < 0.01);
+        assert!(peaks.iter().all(|p| (*p - peaks[0]).abs() < 1e-6));
     }
 
     // =========================================================================
