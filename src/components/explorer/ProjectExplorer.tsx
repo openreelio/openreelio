@@ -4,7 +4,7 @@
  * Project explorer panel with asset management.
  */
 
-import { useState, useCallback, useRef, useMemo, type KeyboardEvent, type ChangeEvent } from 'react';
+import { useState, useCallback, useRef, useMemo, type KeyboardEvent, type ChangeEvent, type MouseEvent } from 'react';
 import {
   Plus,
   Search,
@@ -18,11 +18,12 @@ import {
   Upload,
 } from 'lucide-react';
 import { useProjectStore } from '@/stores';
-import { useAssetImport } from '@/hooks';
+import { useAssetImport, useTranscriptionWithIndexing } from '@/hooks';
 import { AssetList, type Asset, type ViewMode } from './AssetList';
-import type { AssetKind } from './AssetItem';
+import type { AssetKind, AssetData } from './AssetItem';
 import type { Asset as ProjectAsset } from '@/types';
 import { ConfirmDialog } from '@/components/ui';
+import { AssetContextMenu, TranscriptionDialog, type TranscriptionOptions } from '@/components/features/transcription';
 
 // =============================================================================
 // Types
@@ -56,6 +57,22 @@ export function ProjectExplorer() {
 
   // Delete confirmation state
   const [assetToDelete, setAssetToDelete] = useState<string | null>(null);
+
+  // Context menu state
+  const [contextMenu, setContextMenu] = useState<{
+    asset: AssetData;
+    position: { x: number; y: number };
+  } | null>(null);
+
+  // Transcription dialog state
+  const [transcriptionAsset, setTranscriptionAsset] = useState<AssetData | null>(null);
+
+  // Transcription hook
+  const { transcribeAndIndex, transcriptionState } = useTranscriptionWithIndexing();
+  const isTranscribing = transcriptionState.isTranscribing;
+
+  // Track which assets are being transcribed
+  const [transcribingAssets, setTranscribingAssets] = useState<Set<string>>(new Set());
 
   const assetList = useMemo<Asset[]>(() => {
     return Array.from(assets.values())
@@ -135,6 +152,63 @@ export function ProjectExplorer() {
 
   const handleCancelDelete = useCallback(() => {
     setAssetToDelete(null);
+  }, []);
+
+  // ===========================================================================
+  // Context Menu Handlers
+  // ===========================================================================
+
+  const handleAssetContextMenu = useCallback((event: MouseEvent, asset: AssetData) => {
+    event.preventDefault();
+    setContextMenu({
+      asset,
+      position: { x: event.clientX, y: event.clientY },
+    });
+  }, []);
+
+  const handleCloseContextMenu = useCallback(() => {
+    setContextMenu(null);
+  }, []);
+
+  const handleContextTranscribe = useCallback((asset: AssetData) => {
+    setTranscriptionAsset(asset);
+  }, []);
+
+  const handleContextDelete = useCallback((asset: AssetData) => {
+    setAssetToDelete(asset.id);
+  }, []);
+
+  // ===========================================================================
+  // Transcription Handlers
+  // ===========================================================================
+
+  const handleTranscriptionConfirm = useCallback(
+    async (options: TranscriptionOptions) => {
+      if (!transcriptionAsset) return;
+
+      const assetId = transcriptionAsset.id;
+      setTranscriptionAsset(null);
+
+      // Track transcribing asset
+      setTranscribingAssets((prev) => new Set(prev).add(assetId));
+
+      try {
+        await transcribeAndIndex(assetId, {
+          language: options.language === 'auto' ? undefined : options.language,
+        });
+      } finally {
+        setTranscribingAssets((prev) => {
+          const next = new Set(prev);
+          next.delete(assetId);
+          return next;
+        });
+      }
+    },
+    [transcriptionAsset, transcribeAndIndex]
+  );
+
+  const handleTranscriptionCancel = useCallback(() => {
+    setTranscriptionAsset(null);
   }, []);
 
   // ===========================================================================
@@ -363,6 +437,7 @@ export function ProjectExplorer() {
             searchQuery={searchQuery}
             viewMode={viewMode}
             onSelect={handleAssetSelect}
+            onContextMenu={handleAssetContextMenu}
           />
         )}
       </div>
@@ -378,6 +453,30 @@ export function ProjectExplorer() {
         onConfirm={handleConfirmDelete}
         onCancel={handleCancelDelete}
       />
+
+      {/* Asset Context Menu */}
+      {contextMenu && (
+        <AssetContextMenu
+          asset={contextMenu.asset}
+          isOpen={true}
+          position={contextMenu.position}
+          onTranscribe={handleContextTranscribe}
+          onDelete={handleContextDelete}
+          onClose={handleCloseContextMenu}
+          isTranscribing={transcribingAssets.has(contextMenu.asset.id)}
+        />
+      )}
+
+      {/* Transcription Dialog */}
+      {transcriptionAsset && (
+        <TranscriptionDialog
+          asset={transcriptionAsset}
+          isOpen={true}
+          onConfirm={handleTranscriptionConfirm}
+          onCancel={handleTranscriptionCancel}
+          isProcessing={isTranscribing}
+        />
+      )}
     </div>
   );
 }

@@ -22,6 +22,15 @@ vi.mock('@/stores', () => ({
 
 vi.mock('@/hooks', () => ({
   useAssetImport: () => mockUseAssetImport(),
+  useTranscriptionWithIndexing: () => ({
+    transcribeAndIndex: vi.fn(),
+    transcriptionState: {
+      isTranscribing: false,
+      progress: 0,
+      error: null,
+      result: null,
+    },
+  }),
 }));
 
 const mockAssetsArray: Asset[] = [
@@ -35,7 +44,7 @@ const mockAssets = new Map(
   mockAssetsArray.map((asset) => [
     asset.id,
     { ...asset, uri: `/path/to/${asset.name}`, durationSec: asset.duration },
-  ])
+  ]),
 );
 
 // =============================================================================
@@ -109,7 +118,7 @@ describe('ProjectExplorer', () => {
   describe('loading state', () => {
     it('should show loading state', () => {
       mockUseProjectStore.mockReturnValue({
-        assets: [],
+        assets: new Map(),
         isLoading: true,
         selectedAssetId: null,
         selectAsset: vi.fn(),
