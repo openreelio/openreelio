@@ -18,7 +18,7 @@ import {
   VolumeX,
   type LucideIcon,
 } from 'lucide-react';
-import type { Track as TrackType, Clip as ClipType, TrackKind } from '@/types';
+import type { Track as TrackType, Clip as ClipType, TrackKind, SnapPoint } from '@/types';
 import { useVirtualizedClips } from '@/hooks/useVirtualizedClips';
 import { Clip, type ClipDragData, type DragPreviewPosition, type ClickModifiers, type ClipWaveformConfig } from './Clip';
 import type { DropValidity } from '@/utils/dropValidity';
@@ -44,6 +44,10 @@ interface TrackProps {
   selectedClipIds?: string[];
   /** Function to get waveform config for a clip */
   getClipWaveformConfig?: (clipId: string, assetId: string) => ClipWaveformConfig | undefined;
+  /** Snap points for intelligent snapping (clip edges, playhead, etc.) */
+  snapPoints?: SnapPoint[];
+  /** Snap threshold in seconds (distance within which snapping occurs) */
+  snapThreshold?: number;
   /** Whether this track is currently a drop target */
   isDropTarget?: boolean;
   /** Drop validity result when track is a drop target */
@@ -100,6 +104,8 @@ export function Track({
   viewportWidth,
   selectedClipIds = [],
   getClipWaveformConfig,
+  snapPoints = [],
+  snapThreshold = 0,
   isDropTarget = false,
   dropValidity,
   onMuteToggle,
@@ -226,6 +232,8 @@ export function Track({
               selected={selectedClipIds.includes(clip.id)}
               disabled={track.locked}
               waveformConfig={getClipWaveformConfig?.(clip.id, clip.assetId)}
+              snapPoints={snapPoints}
+              snapThreshold={snapThreshold}
               onClick={onClipClick}
               onDoubleClick={onClipDoubleClick}
               onDragStart={(data) => onClipDragStart?.(track.id, data)}
