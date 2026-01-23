@@ -42,7 +42,11 @@ pub fn validate_path_id_component(id: &str, label: &str) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err(format!("{label} is empty or contains only whitespace"));
     }
-    if trimmed.contains("..") || trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains(':') {
+    if trimmed.contains("..")
+        || trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains(':')
+    {
         return Err(format!(
             "Invalid {label}: contains path traversal characters"
         ));
