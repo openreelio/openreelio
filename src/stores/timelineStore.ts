@@ -146,12 +146,13 @@ export const useTimelineStore = create<TimelineState>()(
       });
     },
 
-    // Selection actions
+    // Selection actions - consistently use array reassignment pattern
     selectClip: (clipId: string, addToSelection = false) => {
       set((state) => {
         if (addToSelection) {
+          // Use spread + filter for consistent immutable-style pattern
           if (!state.selectedClipIds.includes(clipId)) {
-            state.selectedClipIds.push(clipId);
+            state.selectedClipIds = [...state.selectedClipIds, clipId];
           }
         } else {
           state.selectedClipIds = [clipId];
@@ -161,7 +162,7 @@ export const useTimelineStore = create<TimelineState>()(
 
     selectClips: (clipIds: string[]) => {
       set((state) => {
-        state.selectedClipIds = clipIds;
+        state.selectedClipIds = [...clipIds];
       });
     },
 
@@ -179,8 +180,9 @@ export const useTimelineStore = create<TimelineState>()(
 
     selectTrack: (trackId: string) => {
       set((state) => {
+        // Use spread + filter for consistent immutable-style pattern
         if (!state.selectedTrackIds.includes(trackId)) {
-          state.selectedTrackIds.push(trackId);
+          state.selectedTrackIds = [...state.selectedTrackIds, trackId];
         }
       });
     },

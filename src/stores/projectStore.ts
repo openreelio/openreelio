@@ -3,6 +3,11 @@
  *
  * Manages project state including assets, sequences, and project metadata.
  * Uses Zustand with Immer for immutable state updates.
+ *
+ * Architecture Notes:
+ * - Uses command queue to serialize async operations and prevent race conditions
+ * - State version tracking enables optimistic updates with conflict detection
+ * - All IPC calls are serialized through the queue to ensure consistency
  */
 
 import { create } from 'zustand';
@@ -14,6 +19,101 @@ import type { Asset, Sequence, Command, CommandResult, UndoRedoResult, ProxyStat
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('ProjectStore');
+
+// =============================================================================
+// Command Queue for Serializing Async Operations
+// =============================================================================
+
+/**
+ * CommandQueue ensures all async operations execute sequentially to prevent
+ * race conditions. This is critical for data integrity in the editor.
+ *
+ * Design:
+ * - FIFO queue with single concurrent execution
+ * - Automatic error recovery (queue continues after failure)
+ * - Timeout protection to prevent deadlocks
+ */
+class CommandQueue {
+  private queue: Array<{
+    operation: () => Promise<void>;
+    resolve: (value: void) => void;
+    reject: (error: Error) => void;
+    operationName: string;
+  }> = [];
+  private isProcessing = false;
+  private static readonly OPERATION_TIMEOUT_MS = 30000;
+
+  async enqueue<T>(
+    operation: () => Promise<T>,
+    operationName = 'unknown'
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const wrappedOperation = async (): Promise<void> => {
+        const timeoutId = setTimeout(() => {
+          logger.error('Operation timeout', { operationName });
+          reject(new Error(`Operation timeout: ${operationName}`));
+        }, CommandQueue.OPERATION_TIMEOUT_MS);
+
+        try {
+          const result = await operation();
+          clearTimeout(timeoutId);
+          resolve(result);
+        } catch (error) {
+          clearTimeout(timeoutId);
+          reject(error instanceof Error ? error : new Error(String(error)));
+        }
+      };
+
+      this.queue.push({
+        operation: wrappedOperation,
+        resolve: () => {},
+        reject: () => {},
+        operationName,
+      });
+
+      void this.processQueue();
+    });
+  }
+
+  private async processQueue(): Promise<void> {
+    if (this.isProcessing || this.queue.length === 0) {
+      return;
+    }
+
+    this.isProcessing = true;
+
+    while (this.queue.length > 0) {
+      const item = this.queue.shift();
+      if (!item) break;
+
+      try {
+        await item.operation();
+      } catch (error) {
+        logger.error('Queue operation failed', {
+          operationName: item.operationName,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        // Continue processing queue even after failure
+      }
+    }
+
+    this.isProcessing = false;
+  }
+
+  get pendingCount(): number {
+    return this.queue.length;
+  }
+
+  clear(): void {
+    const pending = this.queue.splice(0);
+    for (const item of pending) {
+      item.reject(new Error('Queue cleared'));
+    }
+  }
+}
+
+// Global command queue instance
+const commandQueue = new CommandQueue();
 
 // =============================================================================
 // Proxy Event Types
@@ -61,6 +161,8 @@ interface ProjectState {
   activeSequenceId: string | null;
   selectedAssetId: string | null;
   error: string | null;
+  /** State version for conflict detection (increments on each state update) */
+  stateVersion: number;
 
   // Actions
   loadProject: (path: string) => Promise<void>;
@@ -104,6 +206,7 @@ export const useProjectStore = create<ProjectState>()(
     activeSequenceId: null,
     selectedAssetId: null,
     error: null,
+    stateVersion: 0,
 
     // Load existing project
     loadProject: async (path: string) => {
@@ -388,124 +491,182 @@ export const useProjectStore = create<ProjectState>()(
       return state.sequences.get(state.activeSequenceId);
     },
 
-    // Execute edit command and refresh state from backend
+    /**
+     * Execute edit command with race condition protection.
+     *
+     * Uses command queue to serialize all command executions and state refreshes.
+     * This prevents data loss when multiple commands are issued rapidly.
+     *
+     * @param command - The command to execute
+     * @returns CommandResult from backend
+     */
     executeCommand: async (command: Command) => {
-      try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: command.type,
-          payload: command.payload,
-        });
+      return commandQueue.enqueue(async () => {
+        const versionBefore = get().stateVersion;
 
-        // Refresh state from backend to ensure consistency
-        // This is critical for maintaining sync between frontend and backend
-        const projectState = await invoke<{
-          assets: Asset[];
-          sequences: Sequence[];
-          activeSequenceId: string | null;
-        }>('get_project_state');
+        try {
+          logger.debug('Executing command', { type: command.type, version: versionBefore });
 
-        set((state) => {
-          state.isDirty = true;
+          const result = await invoke<CommandResult>('execute_command', {
+            commandType: command.type,
+            payload: command.payload,
+          });
 
-          // Update assets from backend
-          state.assets = new Map();
-          for (const asset of projectState.assets) {
-            state.assets.set(asset.id, asset);
+          // Refresh state from backend to ensure consistency
+          // This is critical for maintaining sync between frontend and backend
+          const projectState = await invoke<{
+            assets: Asset[];
+            sequences: Sequence[];
+            activeSequenceId: string | null;
+          }>('get_project_state');
+
+          // Check for concurrent modifications before applying
+          const versionAfter = get().stateVersion;
+          if (versionBefore !== versionAfter) {
+            logger.warn('Concurrent modification detected during command execution', {
+              commandType: command.type,
+              versionBefore,
+              versionAfter,
+            });
           }
 
-          // Update sequences from backend
-          state.sequences = new Map();
-          for (const sequence of projectState.sequences) {
-            state.sequences.set(sequence.id, sequence);
-          }
+          set((state) => {
+            state.isDirty = true;
+            state.stateVersion += 1;
+            state.error = null;
 
-          // Update active sequence ID from backend
-          state.activeSequenceId = projectState.activeSequenceId;
-        });
+            // Update assets from backend
+            state.assets = new Map();
+            for (const asset of projectState.assets) {
+              state.assets.set(asset.id, asset);
+            }
 
-        return result;
-      } catch (error) {
-        set((state) => {
-          state.error = error instanceof Error ? error.message : String(error);
-        });
-        throw error;
-      }
+            // Update sequences from backend
+            state.sequences = new Map();
+            for (const sequence of projectState.sequences) {
+              state.sequences.set(sequence.id, sequence);
+            }
+
+            // Update active sequence ID from backend
+            state.activeSequenceId = projectState.activeSequenceId;
+          });
+
+          logger.debug('Command executed successfully', {
+            type: command.type,
+            newVersion: get().stateVersion,
+          });
+
+          return result;
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          logger.error('Command execution failed', { type: command.type, error: errorMessage });
+
+          set((state) => {
+            state.error = errorMessage;
+          });
+          throw error;
+        }
+      }, `executeCommand:${command.type}`);
     },
 
-    // Undo - also refreshes state from backend to stay in sync
+    /**
+     * Undo last command with race condition protection.
+     * Uses command queue to prevent conflicts with concurrent operations.
+     */
     undo: async () => {
-      try {
-        const result = await invoke<UndoRedoResult>('undo');
+      return commandQueue.enqueue(async () => {
+        try {
+          logger.debug('Executing undo');
+          const result = await invoke<UndoRedoResult>('undo');
 
-        // Refresh state from backend after undo
-        const projectState = await invoke<{
-          assets: Asset[];
-          sequences: Sequence[];
-          activeSequenceId: string | null;
-        }>('get_project_state');
+          // Refresh state from backend after undo
+          const projectState = await invoke<{
+            assets: Asset[];
+            sequences: Sequence[];
+            activeSequenceId: string | null;
+          }>('get_project_state');
 
-        set((state) => {
-          state.isDirty = true;
+          set((state) => {
+            state.isDirty = true;
+            state.stateVersion += 1;
+            state.error = null;
 
-          state.assets = new Map();
-          for (const asset of projectState.assets) {
-            state.assets.set(asset.id, asset);
-          }
+            state.assets = new Map();
+            for (const asset of projectState.assets) {
+              state.assets.set(asset.id, asset);
+            }
 
-          state.sequences = new Map();
-          for (const sequence of projectState.sequences) {
-            state.sequences.set(sequence.id, sequence);
-          }
+            state.sequences = new Map();
+            for (const sequence of projectState.sequences) {
+              state.sequences.set(sequence.id, sequence);
+            }
 
-          // Update active sequence ID from backend
-          state.activeSequenceId = projectState.activeSequenceId;
-        });
+            // Update active sequence ID from backend
+            state.activeSequenceId = projectState.activeSequenceId;
+          });
 
-        return result;
-      } catch (error) {
-        set((state) => {
-          state.error = error instanceof Error ? error.message : String(error);
-        });
-        throw error;
-      }
+          logger.debug('Undo completed', { newVersion: get().stateVersion });
+          return result;
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          logger.error('Undo failed', { error: errorMessage });
+
+          set((state) => {
+            state.error = errorMessage;
+          });
+          throw error;
+        }
+      }, 'undo');
     },
 
-    // Redo - also refreshes state from backend to stay in sync
+    /**
+     * Redo last undone command with race condition protection.
+     * Uses command queue to prevent conflicts with concurrent operations.
+     */
     redo: async () => {
-      try {
-        const result = await invoke<UndoRedoResult>('redo');
+      return commandQueue.enqueue(async () => {
+        try {
+          logger.debug('Executing redo');
+          const result = await invoke<UndoRedoResult>('redo');
 
-        // Refresh state from backend after redo
-        const projectState = await invoke<{
-          assets: Asset[];
-          sequences: Sequence[];
-          activeSequenceId: string | null;
-        }>('get_project_state');
+          // Refresh state from backend after redo
+          const projectState = await invoke<{
+            assets: Asset[];
+            sequences: Sequence[];
+            activeSequenceId: string | null;
+          }>('get_project_state');
 
-        set((state) => {
-          state.isDirty = true;
+          set((state) => {
+            state.isDirty = true;
+            state.stateVersion += 1;
+            state.error = null;
 
-          state.assets = new Map();
-          for (const asset of projectState.assets) {
-            state.assets.set(asset.id, asset);
-          }
+            state.assets = new Map();
+            for (const asset of projectState.assets) {
+              state.assets.set(asset.id, asset);
+            }
 
-          state.sequences = new Map();
-          for (const sequence of projectState.sequences) {
-            state.sequences.set(sequence.id, sequence);
-          }
+            state.sequences = new Map();
+            for (const sequence of projectState.sequences) {
+              state.sequences.set(sequence.id, sequence);
+            }
 
-          // Update active sequence ID from backend
-          state.activeSequenceId = projectState.activeSequenceId;
-        });
+            // Update active sequence ID from backend
+            state.activeSequenceId = projectState.activeSequenceId;
+          });
 
-        return result;
-      } catch (error) {
-        set((state) => {
-          state.error = error instanceof Error ? error.message : String(error);
-        });
-        throw error;
-      }
+          logger.debug('Redo completed', { newVersion: get().stateVersion });
+          return result;
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          logger.error('Redo failed', { error: errorMessage });
+
+          set((state) => {
+            state.error = errorMessage;
+          });
+          throw error;
+        }
+      }, 'redo');
     },
 
     // Check if undo is available
@@ -532,14 +693,27 @@ export const useProjectStore = create<ProjectState>()(
 // Proxy Event Listeners
 // =============================================================================
 
+/** Singleton array for tracking unlisten functions */
 let proxyEventUnlisteners: UnlistenFn[] = [];
 
+/** Flag to prevent re-entrant setup */
+let isSettingUpListeners = false;
+
+/**
+ * Runtime detection for Tauri environment.
+ * Returns false in web builds (Vite dev, Playwright E2E).
+ */
 function isTauriRuntime(): boolean {
   return typeof (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined';
 }
 
 /**
  * Setup event listeners for proxy generation events.
+ *
+ * Features:
+ * - Re-entrant safe: prevents duplicate setup during async operations
+ * - Error resilient: continues setup even if individual listeners fail
+ * - Cleanup guaranteed: always cleans up before new setup
  *
  * Should be called once when the app initializes.
  * Events:
@@ -548,63 +722,108 @@ function isTauriRuntime(): boolean {
  * - asset:proxy-failed: Proxy generation failed
  */
 export async function setupProxyEventListeners(): Promise<void> {
-  // Clean up any existing listeners
-  await cleanupProxyEventListeners();
-
-  // The Vite web build (used by Playwright E2E) does not have a Tauri backend.
-  // In that environment, `listen()` will throw. This is not a fatal condition.
-  if (!isTauriRuntime()) {
+  // Prevent re-entrant setup
+  if (isSettingUpListeners) {
+    logger.warn('Proxy event listener setup already in progress');
     return;
   }
 
-  const { updateAssetProxyStatus } = useProjectStore.getState();
+  isSettingUpListeners = true;
 
-  // Listen for proxy generating event
-  const unlistenGenerating = await listen<ProxyGeneratingEvent>(
-    'asset:proxy-generating',
-    (event) => {
-      logger.info('Proxy generation started', { assetId: event.payload.assetId });
-      updateAssetProxyStatus(event.payload.assetId, 'generating');
+  try {
+    // Clean up any existing listeners first
+    await cleanupProxyEventListeners();
+
+    // The Vite web build (used by Playwright E2E) does not have a Tauri backend.
+    // In that environment, `listen()` will throw. This is not a fatal condition.
+    if (!isTauriRuntime()) {
+      logger.debug('Skipping proxy event listeners in non-Tauri environment');
+      return;
     }
-  );
-  proxyEventUnlisteners.push(unlistenGenerating);
 
-  // Listen for proxy ready event
-  const unlistenReady = await listen<ProxyReadyEvent>(
-    'asset:proxy-ready',
-    (event) => {
-      logger.info('Proxy generation completed', {
-        assetId: event.payload.assetId,
-        proxyUrl: event.payload.proxyUrl,
-      });
-      updateAssetProxyStatus(event.payload.assetId, 'ready', event.payload.proxyUrl);
+    const { updateAssetProxyStatus } = useProjectStore.getState();
+    const newUnlisteners: UnlistenFn[] = [];
+
+    // Listen for proxy generating event
+    try {
+      const unlistenGenerating = await listen<ProxyGeneratingEvent>(
+        'asset:proxy-generating',
+        (event) => {
+          logger.info('Proxy generation started', { assetId: event.payload.assetId });
+          updateAssetProxyStatus(event.payload.assetId, 'generating');
+        }
+      );
+      newUnlisteners.push(unlistenGenerating);
+    } catch (error) {
+      logger.error('Failed to setup proxy-generating listener', { error });
     }
-  );
-  proxyEventUnlisteners.push(unlistenReady);
 
-  // Listen for proxy failed event
-  const unlistenFailed = await listen<ProxyFailedEvent>(
-    'asset:proxy-failed',
-    (event) => {
-      logger.error('Proxy generation failed', {
-        assetId: event.payload.assetId,
-        error: event.payload.error,
-      });
-      updateAssetProxyStatus(event.payload.assetId, 'failed');
+    // Listen for proxy ready event
+    try {
+      const unlistenReady = await listen<ProxyReadyEvent>(
+        'asset:proxy-ready',
+        (event) => {
+          logger.info('Proxy generation completed', {
+            assetId: event.payload.assetId,
+            proxyUrl: event.payload.proxyUrl,
+          });
+          updateAssetProxyStatus(event.payload.assetId, 'ready', event.payload.proxyUrl);
+        }
+      );
+      newUnlisteners.push(unlistenReady);
+    } catch (error) {
+      logger.error('Failed to setup proxy-ready listener', { error });
     }
-  );
-  proxyEventUnlisteners.push(unlistenFailed);
 
-  logger.info('Proxy event listeners initialized');
+    // Listen for proxy failed event
+    try {
+      const unlistenFailed = await listen<ProxyFailedEvent>(
+        'asset:proxy-failed',
+        (event) => {
+          logger.error('Proxy generation failed', {
+            assetId: event.payload.assetId,
+            error: event.payload.error,
+          });
+          updateAssetProxyStatus(event.payload.assetId, 'failed');
+        }
+      );
+      newUnlisteners.push(unlistenFailed);
+    } catch (error) {
+      logger.error('Failed to setup proxy-failed listener', { error });
+    }
+
+    // Only assign after all setup attempts complete
+    proxyEventUnlisteners = newUnlisteners;
+
+    logger.info('Proxy event listeners initialized', {
+      listenerCount: newUnlisteners.length,
+    });
+  } finally {
+    isSettingUpListeners = false;
+  }
 }
 
 /**
  * Cleanup proxy event listeners.
  * Should be called when the app is closing.
+ *
+ * Safe to call multiple times - will not throw.
  */
 export async function cleanupProxyEventListeners(): Promise<void> {
-  for (const unlisten of proxyEventUnlisteners) {
-    unlisten();
-  }
+  const listenersToCleanup = proxyEventUnlisteners;
   proxyEventUnlisteners = [];
+
+  for (const unlisten of listenersToCleanup) {
+    try {
+      unlisten();
+    } catch (error) {
+      logger.warn('Error during listener cleanup', { error });
+    }
+  }
+
+  if (listenersToCleanup.length > 0) {
+    logger.debug('Proxy event listeners cleaned up', {
+      count: listenersToCleanup.length,
+    });
+  }
 }

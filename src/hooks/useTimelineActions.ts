@@ -1,16 +1,19 @@
 /**
  * useTimelineActions Hook
  *
- * Provides callbacks for Timeline component that execute Tauri IPC commands
- * and refresh project state.
+ * Provides callbacks for Timeline component that execute Tauri IPC commands.
+ * All commands are executed through the project store's executeCommand,
+ * which automatically handles state synchronization with the backend.
+ *
+ * Architecture Notes:
+ * - No manual state refresh needed: executeCommand handles this atomically
+ * - All operations are serialized through the command queue to prevent races
+ * - Error handling is centralized in the command executor
  */
 
 import { useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { useProjectStore } from '@/stores';
 import { createLogger } from '@/services/logger';
-
-const logger = createLogger('TimelineActions');
 import type {
   AssetDropData,
   ClipMoveData,
@@ -19,7 +22,9 @@ import type {
   TrackControlData,
   CaptionUpdateData,
 } from '@/components/timeline/Timeline';
-import type { Sequence, Asset } from '@/types';
+import type { Sequence } from '@/types';
+
+const logger = createLogger('TimelineActions');
 
 // =============================================================================
 // Types
@@ -42,66 +47,30 @@ interface TimelineActions {
 }
 
 // =============================================================================
-// Helper Functions
-// =============================================================================
-
-/**
- * Refreshes the project state from the backend
- */
-async function refreshProjectState(
-  setAssets: (assets: Map<string, Asset>) => void,
-  setSequences: (sequences: Map<string, Sequence>) => void,
-): Promise<void> {
-  try {
-    const projectState = await invoke<{
-      assets: Asset[];
-      sequences: Sequence[];
-      activeSequenceId: string | null;
-    }>('get_project_state');
-
-    // Update assets
-    const assetsMap = new Map<string, Asset>();
-    for (const asset of projectState.assets) {
-      assetsMap.set(asset.id, asset);
-    }
-    setAssets(assetsMap);
-
-    // Update sequences
-    const sequencesMap = new Map<string, Sequence>();
-    for (const sequence of projectState.sequences) {
-      sequencesMap.set(sequence.id, sequence);
-    }
-    setSequences(sequencesMap);
-  } catch (error) {
-    logger.error('Failed to refresh project state', { error });
-    throw error;
-  }
-}
-
-// =============================================================================
 // Hook
 // =============================================================================
 
 /**
- * Custom hook that provides Timeline action callbacks connected to Tauri IPC
+ * Custom hook that provides Timeline action callbacks connected to Tauri IPC.
+ *
+ * All handlers execute commands through the project store, which:
+ * 1. Serializes operations via command queue to prevent race conditions
+ * 2. Automatically refreshes state from backend after each command
+ * 3. Handles errors and updates error state
  */
 export function useTimelineActions({ sequence }: UseTimelineActionsOptions): TimelineActions {
   const executeCommand = useProjectStore((state) => state.executeCommand);
 
-  // Access store setter via getState for refresh
-  const refreshState = useCallback(async () => {
-    await refreshProjectState(
-      (assets) => useProjectStore.setState({ assets }),
-      (sequences) => useProjectStore.setState({ sequences }),
-    );
-  }, []);
-
   /**
-   * Handle clip move operation
+   * Handle clip move operation.
+   * State refresh is automatic via executeCommand.
    */
   const handleClipMove = useCallback(
     async (data: ClipMoveData): Promise<void> => {
-      if (!sequence) return;
+      if (!sequence) {
+        logger.warn('Cannot move clip: no sequence');
+        return;
+      }
 
       try {
         await executeCommand({
@@ -114,20 +83,23 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             newTrackId: data.newTrackId,
           },
         });
-        await refreshState();
       } catch (error) {
-        logger.error('Failed to move clip', { error });
+        logger.error('Failed to move clip', { error, clipId: data.clipId });
       }
     },
-    [sequence, executeCommand, refreshState],
+    [sequence, executeCommand],
   );
 
   /**
-   * Handle clip trim operation
+   * Handle clip trim operation.
+   * State refresh is automatic via executeCommand.
    */
   const handleClipTrim = useCallback(
     async (data: ClipTrimData): Promise<void> => {
-      if (!sequence) return;
+      if (!sequence) {
+        logger.warn('Cannot trim clip: no sequence');
+        return;
+      }
 
       try {
         await executeCommand({
@@ -141,20 +113,23 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             newTimelineIn: data.newTimelineIn,
           },
         });
-        await refreshState();
       } catch (error) {
-        logger.error('Failed to trim clip', { error });
+        logger.error('Failed to trim clip', { error, clipId: data.clipId });
       }
     },
-    [sequence, executeCommand, refreshState],
+    [sequence, executeCommand],
   );
 
   /**
-   * Handle clip split operation
+   * Handle clip split operation.
+   * State refresh is automatic via executeCommand.
    */
   const handleClipSplit = useCallback(
     async (data: ClipSplitData): Promise<void> => {
-      if (!sequence) return;
+      if (!sequence) {
+        logger.warn('Cannot split clip: no sequence');
+        return;
+      }
 
       try {
         await executeCommand({
@@ -166,20 +141,23 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             splitTime: data.splitTime,
           },
         });
-        await refreshState();
       } catch (error) {
-        logger.error('Failed to split clip', { error });
+        logger.error('Failed to split clip', { error, clipId: data.clipId });
       }
     },
-    [sequence, executeCommand, refreshState],
+    [sequence, executeCommand],
   );
 
   /**
-   * Handle asset drop onto timeline
+   * Handle asset drop onto timeline.
+   * State refresh is automatic via executeCommand.
    */
   const handleAssetDrop = useCallback(
     async (data: AssetDropData): Promise<void> => {
-      if (!sequence) return;
+      if (!sequence) {
+        logger.warn('Cannot drop asset: no sequence');
+        return;
+      }
 
       try {
         await executeCommand({
@@ -191,59 +169,73 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             timelineIn: data.timelinePosition,
           },
         });
-        await refreshState();
       } catch (error) {
-        logger.error('Failed to insert clip', { error });
+        logger.error('Failed to insert clip', { error, assetId: data.assetId });
       }
     },
-    [sequence, executeCommand, refreshState],
+    [sequence, executeCommand],
   );
 
   /**
-   * Handle delete clips operation
+   * Handle delete clips operation.
+   *
+   * Note: Clips are deleted sequentially through the command queue.
+   * Each command automatically refreshes state, so the sequence reference
+   * might become stale between deletions. We capture the track IDs upfront.
    */
   const handleDeleteClips = useCallback(
     async (clipIds: string[]): Promise<void> => {
-      if (!sequence || clipIds.length === 0) return;
+      if (!sequence || clipIds.length === 0) {
+        logger.warn('Cannot delete clips: no sequence or empty selection');
+        return;
+      }
 
-      try {
-        // Find track for each clip and delete
-        for (const clipId of clipIds) {
-          // Find which track contains this clip
-          let trackId: string | null = null;
-          for (const track of sequence.tracks) {
-            const clip = track.clips.find((c) => c.id === clipId);
-            if (clip) {
-              trackId = track.id;
-              break;
-            }
-          }
-
-          if (trackId) {
-            await executeCommand({
-              type: 'DeleteClip',
-              payload: {
-                sequenceId: sequence.id,
-                trackId,
-                clipId,
-              },
-            });
+      // Build deletion map upfront to avoid stale sequence references
+      const deletionMap: Array<{ clipId: string; trackId: string }> = [];
+      for (const clipId of clipIds) {
+        for (const track of sequence.tracks) {
+          const clip = track.clips.find((c) => c.id === clipId);
+          if (clip) {
+            deletionMap.push({ clipId, trackId: track.id });
+            break;
           }
         }
-        await refreshState();
+      }
+
+      if (deletionMap.length === 0) {
+        logger.warn('No clips found to delete', { clipIds });
+        return;
+      }
+
+      try {
+        // Delete clips sequentially - command queue ensures ordering
+        for (const { clipId, trackId } of deletionMap) {
+          await executeCommand({
+            type: 'DeleteClip',
+            payload: {
+              sequenceId: sequence.id,
+              trackId,
+              clipId,
+            },
+          });
+        }
       } catch (error) {
-        logger.error('Failed to delete clips', { error });
+        logger.error('Failed to delete clips', { error, clipIds });
       }
     },
-    [sequence, executeCommand, refreshState],
+    [sequence, executeCommand],
   );
 
   /**
-   * Handle track mute toggle
+   * Handle track mute toggle.
+   * State refresh is automatic via executeCommand.
    */
   const handleTrackMuteToggle = useCallback(
     async (data: TrackControlData): Promise<void> => {
-      if (!sequence) return;
+      if (!sequence) {
+        logger.warn('Cannot toggle track mute: no sequence');
+        return;
+      }
 
       try {
         await executeCommand({
@@ -253,20 +245,23 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             trackId: data.trackId,
           },
         });
-        await refreshState();
       } catch (error) {
-        logger.error('Failed to toggle track mute', { error });
+        logger.error('Failed to toggle track mute', { error, trackId: data.trackId });
       }
     },
-    [sequence, executeCommand, refreshState],
+    [sequence, executeCommand],
   );
 
   /**
-   * Handle track lock toggle
+   * Handle track lock toggle.
+   * State refresh is automatic via executeCommand.
    */
   const handleTrackLockToggle = useCallback(
     async (data: TrackControlData): Promise<void> => {
-      if (!sequence) return;
+      if (!sequence) {
+        logger.warn('Cannot toggle track lock: no sequence');
+        return;
+      }
 
       try {
         await executeCommand({
@@ -276,20 +271,23 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             trackId: data.trackId,
           },
         });
-        await refreshState();
       } catch (error) {
-        logger.error('Failed to toggle track lock', { error });
+        logger.error('Failed to toggle track lock', { error, trackId: data.trackId });
       }
     },
-    [sequence, executeCommand, refreshState],
+    [sequence, executeCommand],
   );
 
   /**
-   * Handle track visibility toggle
+   * Handle track visibility toggle.
+   * State refresh is automatic via executeCommand.
    */
   const handleTrackVisibilityToggle = useCallback(
     async (data: TrackControlData): Promise<void> => {
-      if (!sequence) return;
+      if (!sequence) {
+        logger.warn('Cannot toggle track visibility: no sequence');
+        return;
+      }
 
       try {
         await executeCommand({
@@ -299,20 +297,23 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             trackId: data.trackId,
           },
         });
-        await refreshState();
       } catch (error) {
-        logger.error('Failed to toggle track visibility', { error });
+        logger.error('Failed to toggle track visibility', { error, trackId: data.trackId });
       }
     },
-    [sequence, executeCommand, refreshState],
+    [sequence, executeCommand],
   );
 
   /**
-   * Handle caption update
+   * Handle caption update.
+   * State refresh is automatic via executeCommand.
    */
   const handleUpdateCaption = useCallback(
     async (data: CaptionUpdateData): Promise<void> => {
-      if (!sequence) return;
+      if (!sequence) {
+        logger.warn('Cannot update caption: no sequence');
+        return;
+      }
 
       try {
         await executeCommand({
@@ -327,12 +328,11 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             style: data.style,
           },
         });
-        await refreshState();
       } catch (error) {
-        logger.error('Failed to update caption', { error });
+        logger.error('Failed to update caption', { error, captionId: data.captionId });
       }
     },
-    [sequence, executeCommand, refreshState],
+    [sequence, executeCommand],
   );
 
   return {
