@@ -246,9 +246,11 @@ mod path_validation_tests {
     fn test_empty_and_whitespace() {
         assert!(validate_path_id_component("", "id").is_err());
 
-        // Valid: only contains spaces (may want to reconsider this)
-        // For now, spaces are allowed in identifiers
-        assert!(validate_path_id_component("   ", "id").is_ok());
+        // Whitespace-only identifiers are now rejected for security
+        // They could bypass validation if trimmed later in the pipeline
+        assert!(validate_path_id_component("   ", "id").is_err());
+        assert!(validate_path_id_component("\t\t", "id").is_err());
+        assert!(validate_path_id_component(" \n ", "id").is_err());
     }
 
     #[test]
