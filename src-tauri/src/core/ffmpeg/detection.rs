@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::{FFmpegError, FFmpegResult};
+use crate::core::process::configure_std_command;
 
 /// Information about detected FFmpeg installation
 #[derive(Debug, Clone)]
@@ -230,7 +231,9 @@ fn which_ffmpeg() -> FFmpegResult<PathBuf> {
     // Fall back to PATH search using `where` (Windows) or `which` (Unix)
     #[cfg(target_os = "windows")]
     {
-        let output = Command::new("where")
+        let mut cmd = Command::new("where");
+        configure_std_command(&mut cmd);
+        let output = cmd
             .arg("ffmpeg")
             .output()
             .map_err(|_| FFmpegError::NotFound)?;
@@ -245,7 +248,9 @@ fn which_ffmpeg() -> FFmpegResult<PathBuf> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let output = Command::new("which")
+        let mut cmd = Command::new("which");
+        configure_std_command(&mut cmd);
+        let output = cmd
             .arg("ffmpeg")
             .output()
             .map_err(|_| FFmpegError::NotFound)?;
@@ -279,7 +284,9 @@ fn which_ffprobe() -> FFmpegResult<PathBuf> {
     // Fall back to PATH search
     #[cfg(target_os = "windows")]
     {
-        let output = Command::new("where")
+        let mut cmd = Command::new("where");
+        configure_std_command(&mut cmd);
+        let output = cmd
             .arg("ffprobe")
             .output()
             .map_err(|_| FFmpegError::NotFound)?;
@@ -294,7 +301,9 @@ fn which_ffprobe() -> FFmpegResult<PathBuf> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let output = Command::new("which")
+        let mut cmd = Command::new("which");
+        configure_std_command(&mut cmd);
+        let output = cmd
             .arg("ffprobe")
             .output()
             .map_err(|_| FFmpegError::NotFound)?;
@@ -350,7 +359,9 @@ fn get_common_ffmpeg_paths() -> Vec<PathBuf> {
 
 /// Get FFmpeg version string
 fn get_ffmpeg_version(ffmpeg_path: &PathBuf) -> FFmpegResult<String> {
-    let output = Command::new(ffmpeg_path)
+    let mut cmd = Command::new(ffmpeg_path);
+    configure_std_command(&mut cmd);
+    let output = cmd
         .arg("-version")
         .output()
         .map_err(FFmpegError::ProcessError)?;
@@ -382,7 +393,9 @@ fn get_ffmpeg_version(ffmpeg_path: &PathBuf) -> FFmpegResult<String> {
 /// Validate that FFmpeg binaries are functional
 pub fn validate_ffmpeg(info: &FFmpegInfo) -> FFmpegResult<()> {
     // Test ffmpeg
-    let output = Command::new(&info.ffmpeg_path)
+    let mut ffmpeg_cmd = Command::new(&info.ffmpeg_path);
+    configure_std_command(&mut ffmpeg_cmd);
+    let output = ffmpeg_cmd
         .arg("-version")
         .output()
         .map_err(FFmpegError::ProcessError)?;
@@ -394,7 +407,9 @@ pub fn validate_ffmpeg(info: &FFmpegInfo) -> FFmpegResult<()> {
     }
 
     // Test ffprobe
-    let output = Command::new(&info.ffprobe_path)
+    let mut ffprobe_cmd = Command::new(&info.ffprobe_path);
+    configure_std_command(&mut ffprobe_cmd);
+    let output = ffprobe_cmd
         .arg("-version")
         .output()
         .map_err(FFmpegError::ProcessError)?;
