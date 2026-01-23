@@ -14,6 +14,8 @@ pub fn configure_std_command(cmd: &mut std::process::Command) {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    #[cfg(not(target_os = "windows"))]
+    let _ = cmd;
 }
 
 /// Apply platform-specific flags to a tokio process command.
@@ -22,6 +24,8 @@ pub fn configure_tokio_command(cmd: &mut tokio::process::Command) {
     {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    #[cfg(not(target_os = "windows"))]
+    let _ = cmd;
 }
 
 #[cfg(test)]
