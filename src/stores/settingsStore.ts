@@ -14,6 +14,15 @@ import { createLogger } from '@/services/logger';
 
 const logger = createLogger('SettingsStore');
 
+/** Debounce delay in milliseconds for batching rapid settings updates */
+const DEBOUNCE_DELAY_MS = 500;
+
+/** Maximum number of pending resolvers to prevent memory leaks */
+const MAX_PENDING_RESOLVERS = 100;
+
+/** Maximum number of pending sections to batch */
+const MAX_PENDING_SECTIONS = 20;
+
 function isTauriRuntime(): boolean {
   // Unit tests mock `invoke()` and expect backend calls to be issued even
   // though the jsdom environment does not define `__TAURI_INTERNALS__`.
@@ -149,6 +158,10 @@ interface SettingsActions {
   ) => void;
   /** Clear error */
   clearError: () => void;
+  /** Flush any pending debounced updates immediately */
+  flushPendingUpdates: () => Promise<void>;
+  /** Clean up store resources (call before app exit) */
+  destroy: () => void;
 }
 
 // =============================================================================
@@ -161,7 +174,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     language: 'en',
     showWelcomeOnStartup: true,
     recentProjectsLimit: 10,
-    checkUpdatesOnStartup: true,
+    checkUpdatesOnStartup: false,
     defaultProjectLocation: null,
   },
   editor: {
@@ -245,6 +258,42 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
       let saveTail: Promise<void> = Promise.resolve();
       let pendingCount = 0;
 
+      // Debounce state for batching rapid updates
+      let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+      let pendingPartials: Record<string, Record<string, unknown>> = {};
+      let debounceResolvers: Array<{
+        resolve: () => void;
+        reject: (error: unknown) => void;
+        timestamp: number;
+      }> = [];
+
+      // Track if store is being destroyed to prevent operations after cleanup
+      let isDestroyed = false;
+
+      /**
+       * Clean up pending debounce state.
+       * Safe to call multiple times.
+       */
+      const cleanupDebounce = (error?: Error): void => {
+        if (debounceTimer !== null) {
+          clearTimeout(debounceTimer);
+          debounceTimer = null;
+        }
+
+        const resolversToClean = debounceResolvers;
+        debounceResolvers = [];
+        pendingPartials = {};
+
+        // Reject all pending promises if error provided, otherwise resolve with void
+        for (const resolver of resolversToClean) {
+          if (error) {
+            resolver.reject(error);
+          } else {
+            resolver.resolve();
+          }
+        }
+      };
+
       const enqueueWrite = (op: () => Promise<void>): Promise<void> => {
         pendingCount += 1;
         set((state) => {
@@ -279,6 +328,97 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           if (value !== undefined) out[key] = value;
         }
         return out;
+      };
+
+      /**
+       * Flushes all pending debounced updates to the backend.
+       * Merges all accumulated partial updates into a single backend call.
+       *
+       * Thread-safe: captures state before async operations.
+       * Error-resilient: properly resolves/rejects all pending promises.
+       */
+      const flushDebouncedUpdates = async (): Promise<void> => {
+        // Check if destroyed before proceeding
+        if (isDestroyed) {
+          logger.debug('Flush skipped - store is destroyed');
+          return;
+        }
+
+        // Atomically capture and reset state
+        const partials = pendingPartials;
+        const resolvers = debounceResolvers;
+
+        pendingPartials = {};
+        debounceResolvers = [];
+        debounceTimer = null;
+
+        if (Object.keys(partials).length === 0) {
+          // No partials but resolve any waiting promises
+          for (const { resolve } of resolvers) {
+            try {
+              resolve();
+            } catch {
+              // Ignore resolve errors
+            }
+          }
+          return;
+        }
+
+        await enqueueWrite(async () => {
+          try {
+            logger.info('Flushing debounced settings updates', {
+              sections: Object.keys(partials),
+              resolverCount: resolvers.length,
+            });
+
+            const raw = await invoke<unknown>('update_settings', { partial: partials });
+            const updated = coerceAppSettings(raw);
+
+            // Only update state if not destroyed
+            if (!isDestroyed) {
+              set((state) => {
+                state.settings = updated;
+                state.error = null;
+              });
+            }
+
+            // Resolve all pending promises
+            for (const { resolve } of resolvers) {
+              try {
+                resolve();
+              } catch (e) {
+                logger.warn('Error resolving settings update promise', { error: e });
+              }
+            }
+
+            logger.info('Debounced settings update completed', {
+              sections: Object.keys(partials),
+            });
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error('Failed to flush debounced settings', {
+              error: message,
+              sections: Object.keys(partials),
+            });
+
+            // Only update state if not destroyed
+            if (!isDestroyed) {
+              set((state) => {
+                state.error = message;
+              });
+            }
+
+            // Reject all pending promises with the error
+            for (const { reject } of resolvers) {
+              try {
+                reject(error);
+              } catch (e) {
+                logger.warn('Error rejecting settings update promise', { error: e });
+              }
+            }
+            // Don't re-throw; error is propagated via rejected promises
+          }
+        });
       };
 
       return {
@@ -351,8 +491,11 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
         },
 
         updateSettings: async (section, values) => {
-          // Save previous value for rollback on failure
-          const previousSectionValue = { ...get().settings[section] };
+          // Check if store is destroyed
+          if (isDestroyed) {
+            logger.warn('updateSettings called on destroyed store', { section });
+            return;
+          }
 
           // Update local state immediately for responsive UI (optimistic update)
           set((state) => {
@@ -362,32 +505,66 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
             } as AppSettings[typeof section];
           });
 
-          // Persist via backend partial update (serialized + validated in Rust).
-          const partial = { [section]: stripUndefined(values as Record<string, unknown>) };
-
           if (!isTauriRuntime()) {
             // Web build: keep the optimistic update only.
             return;
           }
 
-          await enqueueWrite(async () => {
-            try {
-              const raw = await invoke<unknown>('update_settings', { partial });
-              const updated = coerceAppSettings(raw);
-              set((state) => {
-                state.settings = updated;
-                state.error = null;
-              });
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              logger.error('Failed to update settings', { error: message });
-              // Rollback to previous value on failure
-              set((state) => {
-                state.settings[section] = previousSectionValue as AppSettings[typeof section];
-                state.error = message;
-              });
-              throw error;
+          // Accumulate partial updates for debounced batch save
+          const strippedValues = stripUndefined(values as Record<string, unknown>);
+
+          // Check for pending sections limit to prevent memory issues
+          if (
+            Object.keys(pendingPartials).length >= MAX_PENDING_SECTIONS &&
+            !(section in pendingPartials)
+          ) {
+            logger.warn('Too many pending sections, forcing flush', {
+              pendingSections: Object.keys(pendingPartials).length,
+            });
+            // Force immediate flush
+            if (debounceTimer !== null) {
+              clearTimeout(debounceTimer);
+              debounceTimer = null;
             }
+            await flushDebouncedUpdates();
+          }
+
+          pendingPartials[section] = {
+            ...(pendingPartials[section] || {}),
+            ...strippedValues,
+          };
+
+          // Check for pending resolvers limit to prevent memory leaks
+          if (debounceResolvers.length >= MAX_PENDING_RESOLVERS) {
+            logger.warn('Too many pending resolvers, forcing flush', {
+              pendingResolvers: debounceResolvers.length,
+            });
+            // Force immediate flush
+            if (debounceTimer !== null) {
+              clearTimeout(debounceTimer);
+              debounceTimer = null;
+            }
+            await flushDebouncedUpdates();
+          }
+
+          // Create a promise for this update that will resolve when the batch is flushed
+          return new Promise<void>((resolve, reject) => {
+            debounceResolvers.push({
+              resolve,
+              reject,
+              timestamp: Date.now(),
+            });
+
+            // Clear existing timer and set a new one
+            if (debounceTimer !== null) {
+              clearTimeout(debounceTimer);
+            }
+
+            debounceTimer = setTimeout(() => {
+              flushDebouncedUpdates().catch((error) => {
+                logger.error('Unexpected error in debounced flush', { error });
+              });
+            }, DEBOUNCE_DELAY_MS);
           });
         },
 
@@ -434,6 +611,42 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           set((state) => {
             state.error = null;
           });
+        },
+
+        flushPendingUpdates: async () => {
+          if (debounceTimer !== null) {
+            clearTimeout(debounceTimer);
+            debounceTimer = null;
+          }
+          await flushDebouncedUpdates();
+        },
+
+        destroy: () => {
+          logger.info('Destroying settings store');
+          isDestroyed = true;
+          cleanupDebounce(new Error('Store destroyed'));
+        },
+
+        /** Reset store internal state (for testing purposes) */
+        _resetInternalState: () => {
+          isDestroyed = false;
+          pendingCount = 0;
+          saveTail = Promise.resolve();
+          // Clear debounce state without rejecting (just resolve pending promises)
+          if (debounceTimer !== null) {
+            clearTimeout(debounceTimer);
+            debounceTimer = null;
+          }
+          // Resolve all pending promises to avoid unhandled rejections
+          for (const { resolve } of debounceResolvers) {
+            try {
+              resolve();
+            } catch {
+              // Ignore
+            }
+          }
+          debounceResolvers = [];
+          pendingPartials = {};
         },
       };
     }),
