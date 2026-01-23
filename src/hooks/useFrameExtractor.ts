@@ -13,6 +13,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { extractFrame, probeMedia } from '@/utils/ffmpeg';
 import { frameCache, type CacheStats } from '@/services/frameCache';
+import { buildFrameOutputPath } from '@/services/framePaths';
 import { FRAME_EXTRACTION, createFrameCacheKey } from '@/constants/preview';
 import type { MediaInfo } from '@/types';
 import { createLogger } from '@/services/logger';
@@ -88,7 +89,8 @@ interface FrameCacheEntry {
 // =============================================================================
 
 const DEFAULT_MAX_CACHE_SIZE = 100;
-const DEFAULT_CACHE_DIR = '.openreelio/frames';
+// Resolved per-runtime in `buildFrameOutputPath()`.
+const DEFAULT_CACHE_DIR = '';
 const MAX_CONCURRENT_EXTRACTIONS = FRAME_EXTRACTION.MAX_CONCURRENT_EXTRACTIONS;
 const DEBOUNCE_MS = FRAME_EXTRACTION.DEBOUNCE_MS;
 
@@ -96,9 +98,7 @@ const DEBOUNCE_MS = FRAME_EXTRACTION.DEBOUNCE_MS;
 // Hook
 // =============================================================================
 
-export function useFrameExtractor(
-  options: UseFrameExtractorOptions = {}
-): UseFrameExtractorReturn {
+export function useFrameExtractor(options: UseFrameExtractorOptions = {}): UseFrameExtractorReturn {
   const { maxCacheSize = DEFAULT_MAX_CACHE_SIZE, cacheDir = DEFAULT_CACHE_DIR } = options;
 
   const [error, setError] = useState<string | null>(null);
@@ -131,15 +131,18 @@ export function useFrameExtractor(
    * Generate output path for extracted frame
    */
   const getOutputPath = useCallback(
-    (inputPath: string, timeSec: number): string => {
-      // Create a unique filename based on input path and time
-      const safeInputName = inputPath
-        .replace(/[^a-zA-Z0-9]/g, '_')
-        .substring(0, 50);
+    async (inputPath: string, timeSec: number): Promise<string> => {
+      const safeInputName = inputPath.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
       const timeMs = Math.floor(timeSec * 1000);
-      return `${cacheDir}/${safeInputName}_${timeMs}.png`;
+
+      // Explicit override (primarily for tests / power-users).
+      if (cacheDir && cacheDir.trim().length > 0) {
+        return `${cacheDir}/${safeInputName}_${timeMs}.png`;
+      }
+
+      return buildFrameOutputPath(safeInputName, timeMs, 'png');
     },
-    [cacheDir]
+    [cacheDir],
   );
 
   /**
@@ -150,9 +153,7 @@ export function useFrameExtractor(
     if (cache.size <= maxCacheSize) return;
 
     // Sort entries by timestamp and remove oldest
-    const entries = Array.from(cache.entries()).sort(
-      (a, b) => a[1].timestamp - b[1].timestamp
-    );
+    const entries = Array.from(cache.entries()).sort((a, b) => a[1].timestamp - b[1].timestamp);
 
     const toRemove = entries.slice(0, cache.size - maxCacheSize);
     for (const [key] of toRemove) {
@@ -188,7 +189,7 @@ export function useFrameExtractor(
         setError(null);
 
         try {
-          const outputPath = getOutputPath(inputPath, timeSec);
+          const outputPath = await getOutputPath(inputPath, timeSec);
 
           await extractFrame({
             inputPath,
@@ -227,33 +228,30 @@ export function useFrameExtractor(
       pendingExtractions.current.set(cacheKey, extractionPromise);
       return extractionPromise;
     },
-    [getCacheKey, getOutputPath, evictOldestEntries]
+    [getCacheKey, getOutputPath, evictOldestEntries],
   );
 
   /**
    * Get media information for a file
    */
-  const getMediaInfo = useCallback(
-    async (inputPath: string): Promise<MediaInfo | null> => {
-      // Check cache first
-      const cached = mediaInfoCache.current.get(inputPath);
-      if (cached) {
-        return cached;
-      }
+  const getMediaInfo = useCallback(async (inputPath: string): Promise<MediaInfo | null> => {
+    // Check cache first
+    const cached = mediaInfoCache.current.get(inputPath);
+    if (cached) {
+      return cached;
+    }
 
-      try {
-        const info = await probeMedia(inputPath);
-        mediaInfoCache.current.set(inputPath, info);
-        return info;
-      } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'Media probe failed';
-        setError(errorMessage);
-        logger.error('Media probe error', { error: err });
-        return null;
-      }
-    },
-    []
-  );
+    try {
+      const info = await probeMedia(inputPath);
+      mediaInfoCache.current.set(inputPath, info);
+      return info;
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : 'Media probe failed';
+      setError(errorMessage);
+      logger.error('Media probe error', { error: err });
+      return null;
+    }
+  }, []);
 
   /**
    * Clear all cached frames
@@ -291,32 +289,146 @@ export function useFrameExtractor(
 
 /**
  * Semaphore for limiting concurrent extractions
+ *
+ * Features:
+ * - Bounded waiting queue to prevent memory leaks
+ * - Timeout support for acquire operations
+ * - Cancellation via AbortSignal
+ * - Thread-safe permit tracking
  */
 class Semaphore {
   private permits: number;
-  private waiting: Array<() => void> = [];
+  private readonly maxPermits: number;
+  private waiting: Array<{
+    resolve: () => void;
+    reject: (error: Error) => void;
+    timeoutId?: ReturnType<typeof setTimeout>;
+  }> = [];
+
+  /** Maximum number of waiting requests to prevent unbounded memory growth */
+  private static readonly MAX_WAITING_QUEUE = 1000;
+
+  /** Default timeout for acquire operations (30 seconds) */
+  private static readonly DEFAULT_TIMEOUT_MS = 30000;
 
   constructor(permits: number) {
     this.permits = permits;
+    this.maxPermits = permits;
   }
 
-  async acquire(): Promise<void> {
+  /**
+   * Acquire a permit, optionally with timeout and abort signal.
+   *
+   * @param options - Optional timeout and abort signal
+   * @returns Promise that resolves when permit is acquired
+   * @throws Error if timeout, aborted, or queue is full
+   */
+  async acquire(options?: {
+    timeoutMs?: number;
+    signal?: AbortSignal;
+  }): Promise<void> {
+    const { timeoutMs = Semaphore.DEFAULT_TIMEOUT_MS, signal } = options || {};
+
+    // Check if already aborted
+    if (signal?.aborted) {
+      throw new Error('Semaphore acquire aborted');
+    }
+
+    // Fast path: permit available
     if (this.permits > 0) {
       this.permits--;
       return;
     }
 
-    return new Promise<void>((resolve) => {
-      this.waiting.push(resolve);
+    // Check queue size limit to prevent memory leak
+    if (this.waiting.length >= Semaphore.MAX_WAITING_QUEUE) {
+      throw new Error('Semaphore queue full - too many pending requests');
+    }
+
+    return new Promise<void>((resolve, reject) => {
+      const entry: {
+        resolve: () => void;
+        reject: (error: Error) => void;
+        timeoutId?: ReturnType<typeof setTimeout>;
+      } = { resolve, reject };
+
+      // Set up timeout
+      if (timeoutMs > 0) {
+        entry.timeoutId = setTimeout(() => {
+          const index = this.waiting.indexOf(entry);
+          if (index !== -1) {
+            this.waiting.splice(index, 1);
+            reject(new Error(`Semaphore acquire timeout after ${timeoutMs}ms`));
+          }
+        }, timeoutMs);
+      }
+
+      // Set up abort signal listener
+      const abortHandler = () => {
+        const index = this.waiting.indexOf(entry);
+        if (index !== -1) {
+          this.waiting.splice(index, 1);
+          if (entry.timeoutId) {
+            clearTimeout(entry.timeoutId);
+          }
+          reject(new Error('Semaphore acquire aborted'));
+        }
+      };
+
+      if (signal) {
+        signal.addEventListener('abort', abortHandler, { once: true });
+      }
+
+      // Add to waiting queue
+      this.waiting.push(entry);
     });
   }
 
+  /**
+   * Release a permit back to the semaphore.
+   * Safe to call multiple times (will not exceed maxPermits).
+   */
   release(): void {
     const next = this.waiting.shift();
     if (next) {
-      next();
-    } else {
+      // Clear timeout if set
+      if (next.timeoutId) {
+        clearTimeout(next.timeoutId);
+      }
+      // Give permit to next waiter
+      next.resolve();
+    } else if (this.permits < this.maxPermits) {
+      // Only increment if below max to prevent over-release
       this.permits++;
+    }
+  }
+
+  /**
+   * Get current number of available permits.
+   */
+  get availablePermits(): number {
+    return this.permits;
+  }
+
+  /**
+   * Get number of waiting requests.
+   */
+  get queueLength(): number {
+    return this.waiting.length;
+  }
+
+  /**
+   * Clear all waiting requests with an error.
+   * Useful for cleanup/shutdown scenarios.
+   */
+  clearWaiting(): void {
+    const error = new Error('Semaphore cleared');
+    while (this.waiting.length > 0) {
+      const entry = this.waiting.shift()!;
+      if (entry.timeoutId) {
+        clearTimeout(entry.timeoutId);
+      }
+      entry.reject(error);
     }
   }
 }
@@ -346,7 +458,7 @@ const extractionSemaphore = new Semaphore(MAX_CONCURRENT_EXTRACTIONS);
  * ```
  */
 export function useAssetFrameExtractor(
-  options: UseAssetFrameExtractorOptions
+  options: UseAssetFrameExtractorOptions,
 ): UseAssetFrameExtractorReturn {
   const {
     assetId,
@@ -385,16 +497,29 @@ export function useAssetFrameExtractor(
    * Generate output path for extracted frame
    */
   const getOutputPath = useCallback(
-    (timestamp: number): string => {
+    (timestamp: number): Promise<string> => {
       const safeAssetId = assetId.replace(/[^a-zA-Z0-9-_]/g, '_').substring(0, 50);
       const timeMs = Math.floor(timestamp * 1000);
-      return `.openreelio/frames/${safeAssetId}_${timeMs}.${FRAME_EXTRACTION.OUTPUT_FORMAT}`;
+      // Use the same per-user cache dir as the legacy extractor.
+      return buildFrameOutputPath(safeAssetId, timeMs, FRAME_EXTRACTION.OUTPUT_FORMAT);
     },
-    [assetId]
+    [assetId],
   );
+
+  // Track if component is mounted (will be set in useEffect)
+  const isMountedRef = useRef(true);
+
+  // AbortController for cancelling in-flight extractions on unmount
+  const extractionAbortRef = useRef<AbortController | null>(null);
 
   /**
    * Extract a frame at the given timestamp
+   *
+   * Features:
+   * - Deduplicates concurrent requests for the same frame
+   * - Uses semaphore to limit concurrent FFmpeg processes
+   * - Safely handles component unmount during extraction
+   * - Proper error handling and logging
    */
   const extractFrameAtTime = useCallback(
     async (timestamp: number): Promise<string | null> => {
@@ -416,17 +541,39 @@ export function useAssetFrameExtractor(
         return pending;
       }
 
+      // Create abort controller for this extraction
+      const abortController = new AbortController();
+      extractionAbortRef.current = abortController;
+
       // Create extraction promise
       const extractionPromise = (async (): Promise<string | null> => {
-        // Acquire semaphore permit
-        await extractionSemaphore.acquire();
-
-        activeCount.current++;
-        setIsLoading(true);
-        setError(null);
+        let semaphoreAcquired = false;
 
         try {
-          const outputPath = getOutputPath(timestamp);
+          // Acquire semaphore permit with timeout and abort signal
+          await extractionSemaphore.acquire({
+            timeoutMs: 30000,
+            signal: abortController.signal,
+          });
+          semaphoreAcquired = true;
+
+          // Check if still mounted after acquiring semaphore
+          if (!isMountedRef.current || abortController.signal.aborted) {
+            return null;
+          }
+
+          activeCount.current++;
+          if (isMountedRef.current) {
+            setIsLoading(true);
+            setError(null);
+          }
+
+          const outputPath = await getOutputPath(timestamp);
+
+          // Check again before expensive operation
+          if (!isMountedRef.current || abortController.signal.aborted) {
+            return null;
+          }
 
           await extractFrame({
             inputPath,
@@ -440,18 +587,40 @@ export function useAssetFrameExtractor(
           // Store in shared cache (estimate 100KB per frame)
           frameCache.set(cacheKey, frameUrl, 100 * 1024);
 
+          logger.debug('Frame extracted successfully', { assetId, timestamp, outputPath });
+
           return frameUrl;
         } catch (err) {
+          // Don't log abort errors as they're expected during cleanup
+          if (err instanceof Error && err.message.includes('aborted')) {
+            return null;
+          }
+
           const extractionError = err instanceof Error ? err : new Error('Frame extraction failed');
-          setError(extractionError);
-          logger.error('Frame extraction error', { assetId, timestamp, error: err });
+
+          // Only update error state if still mounted
+          if (isMountedRef.current) {
+            setError(extractionError);
+          }
+
+          logger.error('Frame extraction error', {
+            assetId,
+            timestamp,
+            error: err instanceof Error ? err.message : String(err),
+          });
+
           return null;
         } finally {
-          extractionSemaphore.release();
-          activeCount.current--;
+          // Always release semaphore if acquired
+          if (semaphoreAcquired) {
+            extractionSemaphore.release();
+          }
+
+          activeCount.current = Math.max(0, activeCount.current - 1);
           pendingExtractions.current.delete(cacheKey);
 
-          if (activeCount.current === 0) {
+          // Only update loading state if still mounted
+          if (isMountedRef.current && activeCount.current === 0) {
             setIsLoading(false);
           }
         }
@@ -460,46 +629,76 @@ export function useAssetFrameExtractor(
       pendingExtractions.current.set(cacheKey, extractionPromise);
       return extractionPromise;
     },
-    [enabled, assetId, inputPath, getOutputPath]
+    [enabled, assetId, inputPath, getOutputPath],
   );
 
   /**
-   * Debounced frame extraction
+   * Debounced frame extraction with improved race condition handling.
+   *
+   * Design notes:
+   * - Cache hits bypass debounce entirely for instant response
+   * - Superseded requests are resolved with null immediately (not hanging)
+   * - Uses a unique request ID to handle timestamp precision issues
+   * - Properly cleans up on component unmount
    */
+  const requestIdRef = useRef(0);
+
   const debouncedExtractFrame = useCallback(
     async (timestamp: number): Promise<string | null> => {
+      // Generate unique request ID to handle floating-point precision issues
+      const requestId = ++requestIdRef.current;
       lastRequestedTimestampRef.current = timestamp;
 
       // Check cache immediately (no debounce for cache hits)
       const cacheKey = createFrameCacheKey(assetId, timestamp);
       const cached = frameCache.get(cacheKey);
       if (cached) {
+        logger.debug('Frame cache hit', { assetId, timestamp, cacheKey });
         return cached;
       }
 
-      // Clear existing debounce timer and resolve pending promise
+      // Clear existing debounce timer
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
-        // Resolve any pending promise with null to avoid hanging
-        pendingResolveRef.current?.(null);
+        debounceTimerRef.current = null;
+      }
+
+      // Resolve any pending promise with null to avoid hanging
+      if (pendingResolveRef.current) {
+        pendingResolveRef.current(null);
         pendingResolveRef.current = null;
       }
 
       // Return promise that resolves after debounce
       return new Promise((resolve) => {
         pendingResolveRef.current = resolve;
+
         debounceTimerRef.current = setTimeout(async () => {
-          // Only extract if this is still the latest request
-          if (lastRequestedTimestampRef.current === timestamp) {
-            const result = await extractFrameAtTime(timestamp);
-            resolve(result);
+          // Check if this request is still the latest (using request ID, not timestamp)
+          if (requestIdRef.current !== requestId) {
+            // Request was superseded; do not resolve (already resolved by next request)
+            return;
           }
-          // Superseded requests are resolved with null by the next timer setup
-          pendingResolveRef.current = null;
+
+          try {
+            const result = await extractFrameAtTime(timestamp);
+            // Double-check we're still the latest request before resolving
+            if (requestIdRef.current === requestId && pendingResolveRef.current === resolve) {
+              resolve(result);
+              pendingResolveRef.current = null;
+            }
+          } catch (error) {
+            // Log but don't throw - just resolve with null
+            logger.error('Debounced extraction failed', { assetId, timestamp, error });
+            if (requestIdRef.current === requestId && pendingResolveRef.current === resolve) {
+              resolve(null);
+              pendingResolveRef.current = null;
+            }
+          }
         }, DEBOUNCE_MS);
       });
     },
-    [assetId, extractFrameAtTime]
+    [assetId, extractFrameAtTime],
   );
 
   /**
@@ -548,7 +747,7 @@ export function useAssetFrameExtractor(
         }
       })();
     },
-    [enabled, assetId, prefetchAhead, prefetchInterval, extractFrameAtTime]
+    [enabled, assetId, prefetchAhead, prefetchInterval, extractFrameAtTime],
   );
 
   /**
@@ -560,20 +759,41 @@ export function useAssetFrameExtractor(
 
   // Cleanup on unmount
   useEffect(() => {
-    const pending = pendingExtractions.current;
-    const abort = prefetchAbortRef.current;
-    const timer = debounceTimerRef.current;
+    isMountedRef.current = true;
 
     return () => {
-      pending.clear();
-      if (abort) {
-        abort.abort();
+      isMountedRef.current = false;
+
+      // Abort any in-flight extractions
+      if (extractionAbortRef.current) {
+        extractionAbortRef.current.abort();
+        extractionAbortRef.current = null;
       }
-      if (timer) {
-        clearTimeout(timer);
+
+      // Clear pending extractions
+      pendingExtractions.current.clear();
+
+      // Abort any in-flight prefetch
+      if (prefetchAbortRef.current) {
+        prefetchAbortRef.current.abort();
+        prefetchAbortRef.current = null;
       }
+
+      // Clear debounce timer
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+
+      // Resolve any pending debounce promise to prevent hanging
+      if (pendingResolveRef.current) {
+        pendingResolveRef.current(null);
+        pendingResolveRef.current = null;
+      }
+
+      logger.debug('useAssetFrameExtractor cleanup completed', { assetId });
     };
-  }, []);
+  }, [assetId]);
 
   return {
     extractFrame: debouncedExtractFrame,
