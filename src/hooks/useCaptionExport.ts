@@ -64,6 +64,12 @@ function getExtension(format: CaptionExportFormat): string {
   return format === 'srt' ? '.srt' : '.vtt';
 }
 
+/** Sanitizes filename by replacing invalid characters with underscores */
+function sanitizeFilename(name: string): string {
+  // Replace characters invalid on Windows/macOS/Linux filesystems
+  return name.replace(/[/\\?%*:|"<>]/g, '_').trim() || 'captions';
+}
+
 // =============================================================================
 // Hook Implementation
 // =============================================================================
@@ -102,9 +108,12 @@ export function useCaptionExport(): UseCaptionExportReturn {
       setState({ isExporting: true, error: null });
 
       try {
+        // Sanitize filename to prevent invalid characters
+        const safeName = sanitizeFilename(defaultName);
+
         // Show save dialog
         const filePath = await save({
-          defaultPath: `${defaultName}${getExtension(format)}`,
+          defaultPath: `${safeName}${getExtension(format)}`,
           filters: [
             {
               name: format === 'srt' ? 'SubRip Subtitle' : 'WebVTT',
