@@ -8,9 +8,16 @@
 import { useCallback, useState, useEffect, useMemo } from 'react';
 import { open } from '@tauri-apps/plugin-dialog';
 import { MainLayout, Header, Sidebar, BottomPanel, Panel } from './components/layout';
-import { ErrorBoundary } from './components/shared';
+import {
+  ErrorBoundary,
+  TimelineErrorBoundary,
+  PreviewErrorBoundary,
+  ExplorerErrorBoundary,
+  InspectorErrorBoundary,
+} from './components/shared';
 import { WelcomeScreen } from './components/features/welcome';
 import { ProjectCreationDialog, type ProjectCreateData } from './components/features/project';
+import { SetupWizard } from './components/features/setup';
 import { ExportDialog } from './components/features/export';
 import { Inspector, type SelectedCaption } from './components/features/inspector';
 import { ProjectExplorer } from './components/explorer';
@@ -263,26 +270,24 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
         header={<Header onExport={handleOpenExport} />}
         leftSidebar={
           <Sidebar title="Project Explorer" position="left">
-            <ErrorBoundary
+            <ExplorerErrorBoundary
               onError={(error) => logger.error('ProjectExplorer error', { error })}
-              showDetails={import.meta.env.DEV}
             >
               <ProjectExplorer />
-            </ErrorBoundary>
+            </ExplorerErrorBoundary>
           </Sidebar>
         }
         rightSidebar={
           <Sidebar title="Inspector" position="right" width={288}>
-            <ErrorBoundary
+            <InspectorErrorBoundary
               onError={(error) => logger.error('Inspector error', { error })}
-              showDetails={import.meta.env.DEV}
             >
               <Inspector
                 selectedAsset={inspectorAsset}
                 selectedCaption={selectedCaption}
                 onCaptionChange={onCaptionChange}
               />
-            </ErrorBoundary>
+            </InspectorErrorBoundary>
           </Sidebar>
         }
         footer={
@@ -294,9 +299,8 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
         {/* Center content split between preview and timeline */}
         <div className="flex flex-col h-full">
           <div className="flex-1 border-b border-editor-border">
-            <ErrorBoundary
+            <PreviewErrorBoundary
               onError={(error) => logger.error('UnifiedPreviewPlayer error', { error })}
-              showDetails={import.meta.env.DEV}
             >
               <UnifiedPreviewPlayer
                 className="h-full w-full"
@@ -304,13 +308,12 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
                 showTimecode
                 showStats={import.meta.env.DEV}
               />
-            </ErrorBoundary>
+            </PreviewErrorBoundary>
           </div>
           <div className="flex-1 overflow-hidden">
             <Panel title="Timeline" variant="default" className="h-full" noPadding>
-              <ErrorBoundary
+              <TimelineErrorBoundary
                 onError={(error) => logger.error('Timeline error', { error })}
-                showDetails={import.meta.env.DEV}
               >
                 <Timeline
                   sequence={sequence}
@@ -323,7 +326,7 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
                   onTrackLockToggle={handleTrackLockToggle}
                   onTrackVisibilityToggle={handleTrackVisibilityToggle}
                 />
-              </ErrorBoundary>
+              </TimelineErrorBoundary>
             </Panel>
           </div>
         </div>
@@ -537,6 +540,25 @@ function App(): JSX.Element {
   // ===========================================================================
   // Render
   // ===========================================================================
+
+  // Show Setup Wizard on first run (before any project is loaded)
+  if (settingsLoaded && !general.hasCompletedSetup) {
+    return (
+      <>
+        <SetupWizard
+          onComplete={() => {
+            // After setup, refresh to show welcome screen
+            logger.info('Setup wizard completed');
+          }}
+          onSkip={() => {
+            logger.info('Setup wizard skipped');
+          }}
+          version={appVersion}
+        />
+        <ToastContainer toasts={toasts} onClose={dismissToast} />
+      </>
+    );
+  }
 
   // Show Welcome Screen when no project is loaded
   if (!isLoaded) {

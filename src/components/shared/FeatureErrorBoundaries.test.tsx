@@ -15,6 +15,9 @@ import {
   PreviewErrorBoundary,
   ExplorerErrorBoundary,
   InspectorErrorBoundary,
+  AIErrorBoundary,
+  SearchErrorBoundary,
+  ExportErrorBoundary,
 } from './FeatureErrorBoundaries';
 
 // Suppress console.error for expected errors in tests
@@ -241,6 +244,147 @@ describe('InspectorErrorBoundary', () => {
 });
 
 // =============================================================================
+// AIErrorBoundary Tests
+// =============================================================================
+
+describe('AIErrorBoundary', () => {
+  it('should render children when no error occurs', () => {
+    render(
+      <AIErrorBoundary>
+        <div>AI content</div>
+      </AIErrorBoundary>,
+    );
+
+    expect(screen.getByText('AI content')).toBeInTheDocument();
+  });
+
+  it('should display AI-specific fallback on error', () => {
+    render(
+      <AIErrorBoundary>
+        <ThrowingComponent />
+      </AIErrorBoundary>,
+    );
+
+    expect(screen.getByText(/ai assistant error/i)).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+  });
+
+  it('should show retry button', () => {
+    render(
+      <AIErrorBoundary>
+        <ThrowingComponent />
+      </AIErrorBoundary>,
+    );
+
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it('should display AI icon in fallback', () => {
+    render(
+      <AIErrorBoundary>
+        <ThrowingComponent />
+      </AIErrorBoundary>,
+    );
+
+    expect(screen.getByTestId('ai-error-icon')).toBeInTheDocument();
+  });
+});
+
+// =============================================================================
+// SearchErrorBoundary Tests
+// =============================================================================
+
+describe('SearchErrorBoundary', () => {
+  it('should render children when no error occurs', () => {
+    render(
+      <SearchErrorBoundary>
+        <div>Search content</div>
+      </SearchErrorBoundary>,
+    );
+
+    expect(screen.getByText('Search content')).toBeInTheDocument();
+  });
+
+  it('should display search-specific fallback on error', () => {
+    render(
+      <SearchErrorBoundary>
+        <ThrowingComponent />
+      </SearchErrorBoundary>,
+    );
+
+    expect(screen.getByText(/search error/i)).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+  });
+
+  it('should show retry button', () => {
+    render(
+      <SearchErrorBoundary>
+        <ThrowingComponent />
+      </SearchErrorBoundary>,
+    );
+
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it('should display search icon in fallback', () => {
+    render(
+      <SearchErrorBoundary>
+        <ThrowingComponent />
+      </SearchErrorBoundary>,
+    );
+
+    expect(screen.getByTestId('search-error-icon')).toBeInTheDocument();
+  });
+});
+
+// =============================================================================
+// ExportErrorBoundary Tests
+// =============================================================================
+
+describe('ExportErrorBoundary', () => {
+  it('should render children when no error occurs', () => {
+    render(
+      <ExportErrorBoundary>
+        <div>Export content</div>
+      </ExportErrorBoundary>,
+    );
+
+    expect(screen.getByText('Export content')).toBeInTheDocument();
+  });
+
+  it('should display export-specific fallback on error', () => {
+    render(
+      <ExportErrorBoundary>
+        <ThrowingComponent />
+      </ExportErrorBoundary>,
+    );
+
+    expect(screen.getByText(/export error/i)).toBeInTheDocument();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+  });
+
+  it('should show retry button', () => {
+    render(
+      <ExportErrorBoundary>
+        <ThrowingComponent />
+      </ExportErrorBoundary>,
+    );
+
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+  });
+
+  it('should display export icon in fallback', () => {
+    render(
+      <ExportErrorBoundary>
+        <ThrowingComponent />
+      </ExportErrorBoundary>,
+    );
+
+    expect(screen.getByTestId('export-error-icon')).toBeInTheDocument();
+  });
+});
+
+// =============================================================================
 // Common Behavior Tests
 // =============================================================================
 
@@ -250,6 +394,9 @@ describe('common error boundary behavior', () => {
     { name: 'PreviewErrorBoundary', Component: PreviewErrorBoundary },
     { name: 'ExplorerErrorBoundary', Component: ExplorerErrorBoundary },
     { name: 'InspectorErrorBoundary', Component: InspectorErrorBoundary },
+    { name: 'AIErrorBoundary', Component: AIErrorBoundary },
+    { name: 'SearchErrorBoundary', Component: SearchErrorBoundary },
+    { name: 'ExportErrorBoundary', Component: ExportErrorBoundary },
   ];
 
   boundaries.forEach(({ name, Component }) => {

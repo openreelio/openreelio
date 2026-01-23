@@ -17,4 +17,7 @@ export {
   PreviewErrorBoundary,
   ExplorerErrorBoundary,
   InspectorErrorBoundary,
+  AIErrorBoundary,
+  SearchErrorBoundary,
+  ExportErrorBoundary,
 } from './FeatureErrorBoundaries';
