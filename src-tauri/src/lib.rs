@@ -258,11 +258,6 @@ impl Default for AppState {
 // =============================================================================
 // Tauri Application Entry Point
 // =============================================================================
-// NOTE: We intentionally do not compile the Tauri runtime entry point for unit
-// tests. The test harness is a different binary, and pulling in the full Tauri
-// windowing stack can cause Windows-only startup failures (e.g. missing
-// comctl32 symbols when no manifest is embedded).
-#[cfg(not(test))]
 mod tauri_app {
     use super::*;
     use crate::core::ffmpeg::create_ffmpeg_state;
@@ -295,7 +290,9 @@ mod tauri_app {
             .with_writer(std::io::stdout)
             .with_ansi(cfg!(debug_assertions));
 
-        let file_layer = tracing_subscriber::fmt::layer().with_writer(non_blocking).with_ansi(false);
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking)
+            .with_ansi(false);
 
         let subscriber = tracing_subscriber::registry()
             .with(env_filter)
@@ -400,24 +397,24 @@ mod tauri_app {
     /// Initialize and run the Tauri application
     #[cfg_attr(mobile, tauri::mobile_entry_point)]
     pub fn run() {
-    // Create shared FFmpeg state
-    let ffmpeg_state = create_ffmpeg_state();
+        // Create shared FFmpeg state
+        let ffmpeg_state = create_ffmpeg_state();
 
-    let builder = tauri::Builder::default()
-        .manage(AppState::new())
-        .manage(ffmpeg_state.clone())
-        .plugin(tauri_plugin_dialog::init());
+        let builder = tauri::Builder::default()
+            .manage(AppState::new())
+            .manage(ffmpeg_state.clone())
+            .plugin(tauri_plugin_dialog::init());
 
-    // The updater requires valid signing keys and a release manifest endpoint.
-    // In local MSI distribution mode we disable it by default to avoid noisy
-    // startup errors and confusing UX.
-    let builder = if std::env::var("OPENREELIO_ENABLE_UPDATER").ok().as_deref() == Some("1") {
-        builder.plugin(tauri_plugin_updater::Builder::new().build())
-    } else {
-        builder
-    };
+        // The updater requires valid signing keys and a release manifest endpoint.
+        // In local MSI distribution mode we disable it by default to avoid noisy
+        // startup errors and confusing UX.
+        let builder = if std::env::var("OPENREELIO_ENABLE_UPDATER").ok().as_deref() == Some("1") {
+            builder.plugin(tauri_plugin_updater::Builder::new().build())
+        } else {
+            builder
+        };
 
-    builder.setup(move |app| {
+        builder.setup(move |app| {
             // Initialize logging (safe to call multiple times).
             init_logging(app.handle());
 
@@ -629,7 +626,6 @@ mod tauri_app {
     }
 }
 
-#[cfg(not(test))]
 pub use tauri_app::run;
 
 // =============================================================================
