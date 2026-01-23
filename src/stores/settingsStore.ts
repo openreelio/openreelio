@@ -48,6 +48,7 @@ function isTauriRuntime(): boolean {
 export interface GeneralSettings {
   language: string;
   showWelcomeOnStartup: boolean;
+  hasCompletedSetup: boolean;
   recentProjectsLimit: number;
   checkUpdatesOnStartup: boolean;
   defaultProjectLocation: string | null;
@@ -173,6 +174,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   general: {
     language: 'en',
     showWelcomeOnStartup: true,
+    hasCompletedSetup: false,
     recentProjectsLimit: 10,
     checkUpdatesOnStartup: false,
     defaultProjectLocation: null,
