@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use super::models::AssetKind;
 use crate::core::ffmpeg::FFmpegRunner;
+use crate::core::process::configure_tokio_command;
 
 /// Default thumbnail size
 pub const DEFAULT_THUMBNAIL_WIDTH: u32 = 320;
@@ -89,6 +90,14 @@ impl ThumbnailService {
     ) -> Result<PathBuf, ThumbnailError> {
         let thumb_path = self.thumbnail_path(asset_id);
 
+        if thumb_path.exists() {
+            if let Ok(meta) = std::fs::metadata(&thumb_path) {
+                if meta.is_file() && meta.len() > 0 {
+                    return Ok(thumb_path);
+                }
+            }
+        }
+
         // Create thumbnails directory if needed
         if let Some(parent) = thumb_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -97,8 +106,14 @@ impl ThumbnailService {
         }
 
         // Use FFmpeg to resize the image
-        let output = tokio::process::Command::new(self.ffmpeg.info().ffmpeg_path.as_path())
+        let mut cmd = tokio::process::Command::new(self.ffmpeg.info().ffmpeg_path.as_path());
+        configure_tokio_command(&mut cmd);
+        let output = cmd
             .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
                 "-i",
                 &image_path.to_string_lossy(),
                 "-vf",
