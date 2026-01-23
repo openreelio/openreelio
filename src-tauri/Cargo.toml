@@ -28,9 +28,7 @@ thiserror = "2.0"
 [dependencies]
 # Tauri
 tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-shell = "2.2"
 tauri-plugin-dialog = "2.6"
-tauri-plugin-fs = "2"
 tauri-plugin-updater = "2.9"
 
 # Serialization

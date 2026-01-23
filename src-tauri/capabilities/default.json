@@ -13,22 +13,10 @@
     "core:path:default",
     "core:app:default",
     "core:resources:default",
-    "shell:allow-open",
     "dialog:allow-open",
     "dialog:allow-save",
     "dialog:allow-message",
     "dialog:allow-ask",
-    "dialog:allow-confirm",
-    "fs:allow-read",
-    "fs:allow-write",
-    "fs:allow-exists",
-    "fs:allow-mkdir",
-    "fs:allow-remove",
-    "fs:allow-rename",
-    "fs:allow-copy-file",
-    "fs:allow-read-dir",
-    "fs:allow-create",
-    "fs:allow-read-text-file",
-    "fs:allow-write-text-file"
+    "dialog:allow-confirm"
   ]
 }
