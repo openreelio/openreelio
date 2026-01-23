@@ -1229,28 +1229,9 @@ impl JobProcessor {
         // Generate edit script using the AI gateway
         match gateway.generate_edit_script(prompt, &edit_context).await {
             Ok(edit_script) => {
-                // Convert EditScript to JSON
-                let script_json = serde_json::json!({
-                    "intent": edit_script.intent,
-                    "commands": edit_script.commands.iter().map(|cmd| {
-                        serde_json::json!({
-                            "commandType": cmd.command_type,
-                            "params": cmd.params,
-                            "description": cmd.description,
-                        })
-                    }).collect::<Vec<_>>(),
-                    "requires": edit_script.requires.iter().map(|req| {
-                        serde_json::json!({
-                            "kind": format!("{:?}", req.kind).to_lowercase(),
-                            "query": req.query,
-                            "provider": req.provider,
-                            "params": req.params,
-                        })
-                    }).collect::<Vec<_>>(),
-                    "qcRules": edit_script.qc_rules,
-                    "risk": edit_script.risk,
-                    "explanation": edit_script.explanation,
-                });
+                // Convert EditScript to JSON using derived Serialize
+                let script_json = serde_json::to_value(&edit_script)
+                    .map_err(|e| format!("Failed to serialize EditScript: {}", e))?;
 
                 // Emit completion event
                 let _ = self.app_handle.emit(
