@@ -33,6 +33,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   general: {
     language: 'en',
     showWelcomeOnStartup: true,
+    hasCompletedSetup: false,
     recentProjectsLimit: 10,
     checkUpdatesOnStartup: false,
     defaultProjectLocation: null,

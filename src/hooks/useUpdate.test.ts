@@ -50,6 +50,7 @@ describe('useUpdate', () => {
       general: {
         language: 'en',
         showWelcomeOnStartup: true,
+        hasCompletedSetup: false,
         recentProjectsLimit: 10,
         checkUpdatesOnStartup: false, // Default to false to prevent auto-check
         defaultProjectLocation: null,
@@ -239,6 +240,7 @@ describe('useUpdate', () => {
         general: {
           language: 'en',
           showWelcomeOnStartup: true,
+          hasCompletedSetup: false,
           recentProjectsLimit: 10,
           checkUpdatesOnStartup: true,
           defaultProjectLocation: null,
@@ -264,6 +266,7 @@ describe('useUpdate', () => {
         general: {
           language: 'en',
           showWelcomeOnStartup: true,
+          hasCompletedSetup: false,
           recentProjectsLimit: 10,
           checkUpdatesOnStartup: false,
           defaultProjectLocation: null,
