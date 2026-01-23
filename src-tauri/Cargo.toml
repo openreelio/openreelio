@@ -13,6 +13,14 @@ rust-version = "1.85"
 name = "openreelio_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[[bin]]
+name = "openreelio"
+path = "src/main.rs"
+# The application binary doesn't contain unit tests, and enabling `cargo test`
+# for the bin target can cause Windows-only manifest/resource conflicts.
+test = false
+bench = false
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 # FFmpeg bundler build dependencies
@@ -28,9 +36,7 @@ thiserror = "2.0"
 [dependencies]
 # Tauri
 tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-shell = "2.2"
 tauri-plugin-dialog = "2.6"
-tauri-plugin-fs = "2"
 tauri-plugin-updater = "2.9"
 
 # Serialization

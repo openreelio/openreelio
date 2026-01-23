@@ -3,10 +3,18 @@
  *
  * Provides automatic project saving with debouncing.
  * Saves the project when isDirty changes to true after a delay.
+ *
+ * Architecture Notes:
+ * - Uses ref-based guard for save-in-progress to avoid dependency cycle
+ * - Countdown timer provides user feedback on next save
+ * - Manual save cancels any pending auto-save
  */
 
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { useProjectStore } from '@/stores';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('AutoSave');
 
 // =============================================================================
 // Types
@@ -60,7 +68,7 @@ export function useAutoSave(options: UseAutoSaveOptions = {}): UseAutoSaveReturn
   // Get store state and actions
   const { isDirty, isLoaded, saveProject } = useProjectStore();
 
-  // Local state
+  // Local state for UI feedback
   const [isSaving, setIsSaving] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
   const [lastError, setLastError] = useState<Error | null>(null);
@@ -71,28 +79,49 @@ export function useAutoSave(options: UseAutoSaveOptions = {}): UseAutoSaveReturn
   const countdownIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const scheduledSaveTimeRef = useRef<number | null>(null);
 
-  // Save function
-  const performSave = useCallback(async () => {
-    if (isSaving) return;
+  /**
+   * Ref-based guard for save-in-progress.
+   *
+   * Using a ref instead of state avoids the dependency cycle where:
+   * - performSave depends on isSaving state
+   * - performSave sets isSaving
+   * - This causes performSave to recreate on every save
+   *
+   * The ref provides an atomic check without triggering re-renders.
+   */
+  const isSavingRef = useRef(false);
 
+  // Save function with ref-based guard
+  const performSave = useCallback(async () => {
+    // Atomic check using ref - prevents concurrent saves
+    if (isSavingRef.current) {
+      logger.debug('Save already in progress, skipping');
+      return;
+    }
+
+    isSavingRef.current = true;
     setIsSaving(true);
     setLastError(null);
     onSaveStart?.();
 
     try {
+      logger.debug('Auto-save starting');
       await saveProject();
       setLastSavedAt(new Date());
       onSaveComplete?.();
+      logger.debug('Auto-save completed successfully');
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
       setLastError(err);
       onSaveError?.(err);
+      logger.error('Auto-save failed', { error: err.message });
     } finally {
+      isSavingRef.current = false;
       setIsSaving(false);
       setTimeUntilSave(null);
       scheduledSaveTimeRef.current = null;
     }
-  }, [isSaving, saveProject, onSaveStart, onSaveComplete, onSaveError]);
+  }, [saveProject, onSaveStart, onSaveComplete, onSaveError]);
 
   // Manual save function
   const saveNow = useCallback(async () => {
@@ -122,7 +151,9 @@ export function useAutoSave(options: UseAutoSaveOptions = {}): UseAutoSaveReturn
     }
 
     // Only schedule if enabled, project is loaded, and dirty
-    if (!enabled || !isLoaded || !isDirty || isSaving) {
+    // Note: We check isSavingRef.current here instead of isSaving state
+    // to avoid the dependency cycle
+    if (!enabled || !isLoaded || !isDirty || isSavingRef.current) {
       setTimeUntilSave(null);
       scheduledSaveTimeRef.current = null;
       return;
@@ -131,6 +162,8 @@ export function useAutoSave(options: UseAutoSaveOptions = {}): UseAutoSaveReturn
     // Schedule save
     const saveTime = Date.now() + delay;
     scheduledSaveTimeRef.current = saveTime;
+
+    logger.debug('Scheduling auto-save', { delayMs: delay });
 
     saveTimeoutRef.current = setTimeout(() => {
       void performSave();
@@ -160,7 +193,7 @@ export function useAutoSave(options: UseAutoSaveOptions = {}): UseAutoSaveReturn
         countdownIntervalRef.current = null;
       }
     };
-  }, [enabled, isLoaded, isDirty, isSaving, delay, performSave]);
+  }, [enabled, isLoaded, isDirty, delay, performSave]);
 
   // Cleanup on unmount
   useEffect(() => {

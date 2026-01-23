@@ -90,7 +90,9 @@ impl AppSettings {
     ///
     /// This is intentionally tolerant: it corrects bad values instead of failing,
     /// so corrupted/old configs don't brick the app.
-    fn normalize(&mut self) {
+    ///
+    /// This method is public for testing purposes.
+    pub fn normalize(&mut self) {
         self.version = SETTINGS_VERSION;
 
         self.general.recent_projects_limit = self.general.recent_projects_limit.clamp(1, 50);
@@ -183,6 +185,10 @@ pub struct GeneralSettings {
     #[serde(default = "default_true")]
     pub show_welcome_on_startup: bool,
 
+    /// Whether the user has completed the first-run setup wizard
+    #[serde(default = "default_false")]
+    pub has_completed_setup: bool,
+
     /// Recent projects limit
     #[serde(default = "default_recent_limit")]
     pub recent_projects_limit: u32,
@@ -201,6 +207,7 @@ impl Default for GeneralSettings {
         Self {
             language: default_language(),
             show_welcome_on_startup: true,
+            has_completed_setup: false,
             recent_projects_limit: default_recent_limit(),
             check_updates_on_startup: false,
             default_project_location: None,

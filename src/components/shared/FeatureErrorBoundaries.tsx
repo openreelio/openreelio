@@ -7,7 +7,7 @@
  */
 
 import { type ReactNode, type ErrorInfo, memo } from 'react';
-import { Film, Play, FolderOpen, Settings, RefreshCw } from 'lucide-react';
+import { Film, Play, FolderOpen, Settings, RefreshCw, Sparkles, Search, Download } from 'lucide-react';
 import { ErrorBoundary, type FallbackProps } from './ErrorBoundary';
 import { createLogger } from '@/services/logger';
 
@@ -223,6 +223,114 @@ export function InspectorErrorBoundary({
           title="Inspector Error"
           icon={<Settings className="w-8 h-8" />}
           testId="inspector-error-icon"
+        />
+      )}
+      onError={handleError}
+      onReset={onReset}
+    >
+      {children}
+    </ErrorBoundary>
+  );
+}
+
+// =============================================================================
+// AI Error Boundary
+// =============================================================================
+
+/**
+ * Error boundary for AI-related components (AI Prompt Panel, Proposals).
+ * Shows an AI-specific fallback with retry option.
+ */
+export function AIErrorBoundary({
+  children,
+  onError,
+  onReset,
+}: FeatureErrorBoundaryProps): JSX.Element {
+  const handleError = (error: Error, errorInfo: ErrorInfo) => {
+    logger.error('AI error', { error });
+    onError?.(error, errorInfo);
+  };
+
+  return (
+    <ErrorBoundary
+      fallbackRender={(props) => (
+        <FeatureErrorFallback
+          {...props}
+          title="AI Assistant Error"
+          icon={<Sparkles className="w-8 h-8" />}
+          testId="ai-error-icon"
+        />
+      )}
+      onError={handleError}
+      onReset={onReset}
+    >
+      {children}
+    </ErrorBoundary>
+  );
+}
+
+// =============================================================================
+// Search Error Boundary
+// =============================================================================
+
+/**
+ * Error boundary for Search-related components.
+ * Shows a search-specific fallback with retry option.
+ */
+export function SearchErrorBoundary({
+  children,
+  onError,
+  onReset,
+}: FeatureErrorBoundaryProps): JSX.Element {
+  const handleError = (error: Error, errorInfo: ErrorInfo) => {
+    logger.error('Search error', { error });
+    onError?.(error, errorInfo);
+  };
+
+  return (
+    <ErrorBoundary
+      fallbackRender={(props) => (
+        <FeatureErrorFallback
+          {...props}
+          title="Search Error"
+          icon={<Search className="w-8 h-8" />}
+          testId="search-error-icon"
+        />
+      )}
+      onError={handleError}
+      onReset={onReset}
+    >
+      {children}
+    </ErrorBoundary>
+  );
+}
+
+// =============================================================================
+// Export Error Boundary
+// =============================================================================
+
+/**
+ * Error boundary for Export-related components.
+ * Shows an export-specific fallback with retry option.
+ */
+export function ExportErrorBoundary({
+  children,
+  onError,
+  onReset,
+}: FeatureErrorBoundaryProps): JSX.Element {
+  const handleError = (error: Error, errorInfo: ErrorInfo) => {
+    logger.error('Export error', { error });
+    onError?.(error, errorInfo);
+  };
+
+  return (
+    <ErrorBoundary
+      fallbackRender={(props) => (
+        <FeatureErrorFallback
+          {...props}
+          title="Export Error"
+          icon={<Download className="w-8 h-8" />}
+          testId="export-error-icon"
         />
       )}
       onError={handleError}

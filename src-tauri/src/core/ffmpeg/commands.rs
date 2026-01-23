@@ -8,8 +8,36 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use specta::Type;
+use tauri::Manager;
+use tauri::State;
 
 use super::{detect_system_ffmpeg, FFmpegError, FFmpegInfo, FFmpegRunner, MediaInfo};
+use crate::core::fs::{validate_local_input_path, validate_scoped_output_path};
+use crate::AppState;
+
+async fn build_allowed_output_roots(
+    state: &State<'_, AppState>,
+    app: &tauri::AppHandle,
+) -> Result<Vec<PathBuf>, String> {
+    let cache_dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| format!("Failed to resolve app cache dir: {e}"))?;
+    let _ = std::fs::create_dir_all(&cache_dir);
+
+    let project_openreelio_dir = {
+        let guard = state.project.lock().await;
+        guard.as_ref().map(|p| p.path.join(".openreelio"))
+    };
+
+    let mut roots = vec![cache_dir];
+    if let Some(dir) = project_openreelio_dir {
+        let _ = std::fs::create_dir_all(&dir);
+        roots.push(dir);
+    }
+
+    Ok(roots)
+}
 
 /// Global FFmpeg runner state
 /// This is initialized once on app startup and reused for all operations
@@ -123,7 +151,16 @@ pub async fn extract_frame(
     time_sec: f64,
     output_path: String,
     ffmpeg_state: tauri::State<'_, SharedFFmpegState>,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
+    let input_path = validate_local_input_path(&input_path, "inputPath")?;
+
+    let allowed_roots = build_allowed_output_roots(&state, &app).await?;
+    let allowed_root_refs: Vec<&std::path::Path> =
+        allowed_roots.iter().map(|p| p.as_path()).collect();
+    let output_path = validate_scoped_output_path(&output_path, "outputPath", &allowed_root_refs)?;
+
     let state = ffmpeg_state.read().await;
 
     let runner = state
@@ -131,11 +168,7 @@ pub async fn extract_frame(
         .ok_or_else(|| "FFmpeg not available".to_string())?;
 
     runner
-        .extract_frame(
-            &PathBuf::from(&input_path),
-            time_sec,
-            &PathBuf::from(&output_path),
-        )
+        .extract_frame(&input_path, time_sec, &output_path)
         .await
         .map_err(|e| e.to_string())
 }
@@ -148,7 +181,16 @@ pub async fn generate_thumbnail(
     width: Option<u32>,
     height: Option<u32>,
     ffmpeg_state: tauri::State<'_, SharedFFmpegState>,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
+    let input_path = validate_local_input_path(&input_path, "inputPath")?;
+
+    let allowed_roots = build_allowed_output_roots(&state, &app).await?;
+    let allowed_root_refs: Vec<&std::path::Path> =
+        allowed_roots.iter().map(|p| p.as_path()).collect();
+    let output_path = validate_scoped_output_path(&output_path, "outputPath", &allowed_root_refs)?;
+
     let state = ffmpeg_state.read().await;
 
     let runner = state
@@ -161,11 +203,7 @@ pub async fn generate_thumbnail(
     };
 
     runner
-        .generate_thumbnail(
-            &PathBuf::from(&input_path),
-            &PathBuf::from(&output_path),
-            size,
-        )
+        .generate_thumbnail(&input_path, &output_path, size)
         .await
         .map_err(|e| e.to_string())
 }
@@ -176,16 +214,14 @@ pub async fn probe_media(
     input_path: String,
     ffmpeg_state: tauri::State<'_, SharedFFmpegState>,
 ) -> Result<MediaInfo, String> {
+    let input_path = validate_local_input_path(&input_path, "inputPath")?;
     let state = ffmpeg_state.read().await;
 
     let runner = state
         .runner()
         .ok_or_else(|| "FFmpeg not available".to_string())?;
 
-    runner
-        .probe(&PathBuf::from(&input_path))
-        .await
-        .map_err(|e| e.to_string())
+    runner.probe(&input_path).await.map_err(|e| e.to_string())
 }
 
 /// Generate audio waveform image
@@ -196,7 +232,16 @@ pub async fn generate_waveform(
     width: u32,
     height: u32,
     ffmpeg_state: tauri::State<'_, SharedFFmpegState>,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
 ) -> Result<(), String> {
+    let input_path = validate_local_input_path(&input_path, "inputPath")?;
+
+    let allowed_roots = build_allowed_output_roots(&state, &app).await?;
+    let allowed_root_refs: Vec<&std::path::Path> =
+        allowed_roots.iter().map(|p| p.as_path()).collect();
+    let output_path = validate_scoped_output_path(&output_path, "outputPath", &allowed_root_refs)?;
+
     let state = ffmpeg_state.read().await;
 
     let runner = state
@@ -204,12 +249,7 @@ pub async fn generate_waveform(
         .ok_or_else(|| "FFmpeg not available".to_string())?;
 
     runner
-        .generate_waveform(
-            &PathBuf::from(&input_path),
-            &PathBuf::from(&output_path),
-            width,
-            height,
-        )
+        .generate_waveform(&input_path, &output_path, width, height)
         .await
         .map_err(|e| e.to_string())
 }

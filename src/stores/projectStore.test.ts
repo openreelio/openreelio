@@ -671,4 +671,203 @@ describe('projectStore', () => {
       expect(result).toBe(false);
     });
   });
+
+  // ===========================================================================
+  // Command Queue and Race Condition Tests
+  // ===========================================================================
+
+  describe('command queue serialization', () => {
+    it('should serialize concurrent executeCommand calls', async () => {
+      const executionOrder: string[] = [];
+
+      const mockedInvoke = getMockedInvoke();
+      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+        // Track execution order
+        if (cmd === 'execute_command') {
+          const payload = (args as { payload?: { order?: string } })?.payload;
+          const order = payload?.order ?? 'unknown';
+          executionOrder.push(`start:${order}`);
+          // Add small delay to simulate async operation
+          await new Promise((resolve) => setTimeout(resolve, 10));
+          executionOrder.push(`end:${order}`);
+          return { opId: `op_${order}`, changes: [], createdIds: [], deletedIds: [] };
+        }
+        if (cmd === 'get_project_state') {
+          return { assets: [], sequences: [], activeSequenceId: null };
+        }
+        return null;
+      });
+
+      const { executeCommand } = useProjectStore.getState();
+
+      // Fire multiple commands concurrently (using valid CommandType)
+      const promises = [
+        executeCommand({ type: 'InsertClip', payload: { order: '1' } }),
+        executeCommand({ type: 'MoveClip', payload: { order: '2' } }),
+        executeCommand({ type: 'DeleteClip', payload: { order: '3' } }),
+      ];
+
+      await Promise.all(promises);
+
+      // Commands should execute sequentially (no interleaving)
+      expect(executionOrder).toEqual([
+        'start:1', 'end:1',
+        'start:2', 'end:2',
+        'start:3', 'end:3',
+      ]);
+    });
+
+    it('should continue queue processing after command failure', async () => {
+      const executionOrder: string[] = [];
+
+      const mockedInvoke = getMockedInvoke();
+      mockedInvoke.mockImplementation(async (cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          const payload = (args as { payload?: { order?: string } })?.payload;
+          const order = payload?.order ?? 'unknown';
+          executionOrder.push(order);
+
+          if (order === '2') {
+            throw new Error('Command 2 failed');
+          }
+          return { opId: `op_${order}`, changes: [], createdIds: [], deletedIds: [] };
+        }
+        if (cmd === 'get_project_state') {
+          return { assets: [], sequences: [], activeSequenceId: null };
+        }
+        return null;
+      });
+
+      const { executeCommand } = useProjectStore.getState();
+
+      const results = await Promise.allSettled([
+        executeCommand({ type: 'InsertClip', payload: { order: '1' } }),
+        executeCommand({ type: 'MoveClip', payload: { order: '2' } }),
+        executeCommand({ type: 'DeleteClip', payload: { order: '3' } }),
+      ]);
+
+      // All commands should have been attempted
+      expect(executionOrder).toEqual(['1', '2', '3']);
+
+      // First and third should succeed, second should fail
+      expect(results[0].status).toBe('fulfilled');
+      expect(results[1].status).toBe('rejected');
+      expect(results[2].status).toBe('fulfilled');
+    });
+
+    it('should track state version on each command execution', async () => {
+      mockTauriCommands({
+        execute_command: { opId: 'op_1', changes: [], createdIds: [], deletedIds: [] },
+        get_project_state: { assets: [], sequences: [], activeSequenceId: null },
+      });
+
+      const initialVersion = useProjectStore.getState().stateVersion;
+
+      const { executeCommand } = useProjectStore.getState();
+      await executeCommand({ type: 'InsertClip', payload: {} });
+
+      const newVersion = useProjectStore.getState().stateVersion;
+      expect(newVersion).toBe(initialVersion + 1);
+    });
+
+    it('should serialize undo/redo with executeCommand', async () => {
+      const executionOrder: string[] = [];
+
+      const mockedInvoke = getMockedInvoke();
+      mockedInvoke.mockImplementation(async (cmd: string) => {
+        executionOrder.push(cmd);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+
+        if (cmd === 'execute_command') {
+          return { opId: 'op_1', changes: [], createdIds: [], deletedIds: [] };
+        }
+        if (cmd === 'undo' || cmd === 'redo') {
+          return { success: true, canUndo: true, canRedo: true };
+        }
+        if (cmd === 'get_project_state') {
+          return { assets: [], sequences: [], activeSequenceId: null };
+        }
+        return null;
+      });
+
+      const { executeCommand, undo, redo } = useProjectStore.getState();
+
+      // Fire commands in specific order - they should serialize
+      const promises = [
+        executeCommand({ type: 'InsertClip', payload: {} }),
+        undo(),
+        redo(),
+      ];
+
+      await Promise.all(promises);
+
+      // Each operation calls its command then get_project_state
+      // Should be strictly sequential
+      expect(executionOrder[0]).toBe('execute_command');
+      expect(executionOrder[1]).toBe('get_project_state');
+      expect(executionOrder[2]).toBe('undo');
+      expect(executionOrder[3]).toBe('get_project_state');
+      expect(executionOrder[4]).toBe('redo');
+      expect(executionOrder[5]).toBe('get_project_state');
+    });
+  });
+
+  // ===========================================================================
+  // State Version Tracking Tests
+  // ===========================================================================
+
+  describe('state version tracking', () => {
+    it('should increment version on successful command', async () => {
+      mockTauriCommands({
+        execute_command: { opId: 'op_1', changes: [], createdIds: [], deletedIds: [] },
+        get_project_state: { assets: [], sequences: [], activeSequenceId: null },
+      });
+
+      const { executeCommand } = useProjectStore.getState();
+      const versionBefore = useProjectStore.getState().stateVersion;
+
+      await executeCommand({ type: 'InsertClip', payload: {} });
+
+      expect(useProjectStore.getState().stateVersion).toBe(versionBefore + 1);
+    });
+
+    it('should increment version on undo', async () => {
+      mockTauriCommands({
+        undo: { success: true, canUndo: true, canRedo: true },
+        get_project_state: { assets: [], sequences: [], activeSequenceId: null },
+      });
+
+      const { undo } = useProjectStore.getState();
+      const versionBefore = useProjectStore.getState().stateVersion;
+
+      await undo();
+
+      expect(useProjectStore.getState().stateVersion).toBe(versionBefore + 1);
+    });
+
+    it('should increment version on redo', async () => {
+      mockTauriCommands({
+        redo: { success: true, canUndo: true, canRedo: true },
+        get_project_state: { assets: [], sequences: [], activeSequenceId: null },
+      });
+
+      const { redo } = useProjectStore.getState();
+      const versionBefore = useProjectStore.getState().stateVersion;
+
+      await redo();
+
+      expect(useProjectStore.getState().stateVersion).toBe(versionBefore + 1);
+    });
+
+    it('should not increment version on failed command', async () => {
+      mockTauriCommandError('execute_command', 'Command failed');
+
+      const { executeCommand } = useProjectStore.getState();
+      const versionBefore = useProjectStore.getState().stateVersion;
+
+      await expect(executeCommand({ type: 'InsertClip', payload: {} })).rejects.toThrow();
+
+      expect(useProjectStore.getState().stateVersion).toBe(versionBefore);
+    });
+  });
 });

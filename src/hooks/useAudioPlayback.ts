@@ -3,6 +3,12 @@
  *
  * Manages audio playback using Web Audio API for timeline sequence clips.
  * Handles loading, scheduling, and synchronization of audio clips.
+ *
+ * Features:
+ * - Automatic retry with exponential backoff for failed audio loads
+ * - Audio buffer caching to prevent redundant fetches
+ * - Clip-level volume and mute controls
+ * - Seamless seek handling with source rescheduling
  */
 
 import { useRef, useCallback, useEffect } from 'react';
@@ -31,6 +37,10 @@ export interface UseAudioPlaybackReturn {
   initAudio: () => Promise<void>;
   /** Whether audio context is initialized */
   isAudioReady: boolean;
+  /** Retry loading a failed asset */
+  retryLoad: (assetId: string) => Promise<boolean>;
+  /** Get list of assets that failed to load */
+  failedAssets: string[];
 }
 
 interface ScheduledSource {
@@ -40,12 +50,28 @@ interface ScheduledSource {
   startTime: number;
 }
 
+interface FailedLoadInfo {
+  assetId: string;
+  lastAttempt: number;
+  attemptCount: number;
+  error: string;
+}
+
 // =============================================================================
 // Constants
 // =============================================================================
 
 const SCHEDULE_AHEAD_TIME = 0.5; // Schedule audio 500ms ahead
 const RESCHEDULE_INTERVAL = 0.25; // Check for rescheduling every 250ms
+
+/** Maximum retry attempts for failed audio loads */
+const MAX_RETRY_ATTEMPTS = 3;
+
+/** Base delay for exponential backoff (ms) */
+const RETRY_BASE_DELAY_MS = 1000;
+
+/** Maximum delay between retries (ms) */
+const RETRY_MAX_DELAY_MS = 10000;
 
 // =============================================================================
 // Hook
@@ -62,6 +88,17 @@ export function useAudioPlayback({
   const masterGainRef = useRef<GainNode | null>(null);
   const isAudioReadyRef = useRef(false);
   const lastScheduleTimeRef = useRef(0);
+
+  /**
+   * Track failed audio loads for retry mechanism.
+   * Key: assetId, Value: failure info with attempt count
+   */
+  const failedLoadsRef = useRef<Map<string, FailedLoadInfo>>(new Map());
+
+  /**
+   * Pending retry timeouts to cancel on unmount.
+   */
+  const retryTimeoutsRef = useRef<Map<string, NodeJS.Timeout>>(new Map());
 
   // Playback state from store
   const { currentTime, isPlaying, volume, isMuted, playbackRate } = usePlaybackStore();
@@ -95,38 +132,141 @@ export function useAudioPlayback({
   }, []);
 
   /**
-   * Load audio buffer for an asset
+   * Calculate retry delay with exponential backoff.
    */
-  const loadAudioBuffer = useCallback(async (assetId: string, assetUri: string): Promise<AudioBuffer | null> => {
-    // Check cache first
-    const cached = audioBuffersRef.current.get(assetId);
-    if (cached) return cached;
+  const getRetryDelay = useCallback((attemptCount: number): number => {
+    const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attemptCount - 1);
+    return Math.min(delay, RETRY_MAX_DELAY_MS);
+  }, []);
 
-    if (!audioContextRef.current) return null;
-
-    try {
-      // Convert to Tauri asset URL
-      let url = assetUri;
-      if (url.startsWith('file://')) {
-        url = convertFileSrc(url.replace('file://', ''));
-      } else if (url.startsWith('/') || url.match(/^[A-Za-z]:\\/)) {
-        url = convertFileSrc(url);
+  /**
+   * Load audio buffer for an asset with automatic retry on failure.
+   *
+   * Features:
+   * - Cached buffer lookup
+   * - Exponential backoff retry
+   * - Failed load tracking for UI feedback
+   */
+  const loadAudioBuffer = useCallback(
+    async (assetId: string, assetUri: string, isRetry = false): Promise<AudioBuffer | null> => {
+      // Check cache first
+      const cached = audioBuffersRef.current.get(assetId);
+      if (cached) {
+        // Clear any failed state if we have a cached buffer
+        failedLoadsRef.current.delete(assetId);
+        return cached;
       }
 
-      // Fetch and decode audio
-      const response = await fetch(url);
-      const arrayBuffer = await response.arrayBuffer();
-      const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
+      if (!audioContextRef.current) return null;
 
-      // Cache the buffer
-      audioBuffersRef.current.set(assetId, audioBuffer);
+      // Check if we've exceeded retry attempts
+      const failedInfo = failedLoadsRef.current.get(assetId);
+      if (failedInfo && failedInfo.attemptCount >= MAX_RETRY_ATTEMPTS && !isRetry) {
+        logger.debug('Skipping load - max retry attempts reached', { assetId });
+        return null;
+      }
 
-      return audioBuffer;
-    } catch (error) {
-      logger.error('Failed to load audio for asset', { assetId, error });
-      return null;
-    }
-  }, []);
+      try {
+        // Convert to Tauri asset URL
+        let url = assetUri;
+        if (url.startsWith('file://')) {
+          url = convertFileSrc(url.replace('file://', ''));
+        } else if (url.startsWith('/') || url.match(/^[A-Za-z]:\\/)) {
+          url = convertFileSrc(url);
+        }
+
+        logger.debug('Loading audio buffer', { assetId, isRetry });
+
+        // Fetch and decode audio
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const arrayBuffer = await response.arrayBuffer();
+        const audioBuffer = await audioContextRef.current.decodeAudioData(arrayBuffer);
+
+        // Cache the buffer and clear failed state
+        audioBuffersRef.current.set(assetId, audioBuffer);
+        failedLoadsRef.current.delete(assetId);
+
+        logger.debug('Audio buffer loaded successfully', { assetId });
+
+        return audioBuffer;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const currentAttempt = (failedInfo?.attemptCount ?? 0) + 1;
+
+        // Track the failure
+        failedLoadsRef.current.set(assetId, {
+          assetId,
+          lastAttempt: Date.now(),
+          attemptCount: currentAttempt,
+          error: errorMessage,
+        });
+
+        logger.error('Failed to load audio for asset', {
+          assetId,
+          error: errorMessage,
+          attempt: currentAttempt,
+          maxAttempts: MAX_RETRY_ATTEMPTS,
+        });
+
+        // Schedule automatic retry if under the limit
+        if (currentAttempt < MAX_RETRY_ATTEMPTS) {
+          const retryDelay = getRetryDelay(currentAttempt);
+          logger.debug('Scheduling audio load retry', { assetId, retryDelay, attempt: currentAttempt });
+
+          // Clear any existing retry timeout
+          const existingTimeout = retryTimeoutsRef.current.get(assetId);
+          if (existingTimeout) {
+            clearTimeout(existingTimeout);
+          }
+
+          // Schedule retry
+          const timeoutId = setTimeout(() => {
+            retryTimeoutsRef.current.delete(assetId);
+            void loadAudioBuffer(assetId, assetUri, true);
+          }, retryDelay);
+
+          retryTimeoutsRef.current.set(assetId, timeoutId);
+        }
+
+        return null;
+      }
+    },
+    [getRetryDelay]
+  );
+
+  /**
+   * Manually retry loading a failed asset.
+   * Resets the attempt counter and immediately attempts to load.
+   */
+  const retryLoad = useCallback(
+    async (assetId: string): Promise<boolean> => {
+      const asset = assets.get(assetId);
+      if (!asset) {
+        logger.warn('Cannot retry load: asset not found', { assetId });
+        return false;
+      }
+
+      // Reset failure tracking
+      failedLoadsRef.current.delete(assetId);
+
+      // Clear any pending retry
+      const existingTimeout = retryTimeoutsRef.current.get(assetId);
+      if (existingTimeout) {
+        clearTimeout(existingTimeout);
+        retryTimeoutsRef.current.delete(assetId);
+      }
+
+      const audioUrl = asset.proxyUrl || asset.uri;
+      const buffer = await loadAudioBuffer(assetId, audioUrl, true);
+
+      return buffer !== null;
+    },
+    [assets, loadAudioBuffer]
+  );
 
   /**
    * Get all audio clips from sequence
@@ -359,14 +499,23 @@ export function useAudioPlayback({
   // Cleanup on unmount
   useEffect(() => {
     const audioBuffers = audioBuffersRef.current;
+    const retryTimeouts = retryTimeoutsRef.current;
 
     return () => {
       stopAllSources();
+
+      // Clear all pending retry timeouts
+      for (const timeoutId of retryTimeouts.values()) {
+        clearTimeout(timeoutId);
+      }
+      retryTimeouts.clear();
+
       if (audioContextRef.current) {
         audioContextRef.current.close();
         audioContextRef.current = null;
       }
       audioBuffers.clear();
+      failedLoadsRef.current.clear();
       isAudioReadyRef.current = false;
     };
   }, [stopAllSources]);
@@ -374,5 +523,7 @@ export function useAudioPlayback({
   return {
     initAudio,
     isAudioReady: isAudioReadyRef.current,
+    retryLoad,
+    failedAssets: Array.from(failedLoadsRef.current.keys()),
   };
 }

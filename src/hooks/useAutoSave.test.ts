@@ -291,4 +291,93 @@ describe('useAutoSave', () => {
     // Restore fake timers for other tests
     vi.useFakeTimers();
   });
+
+  // ===========================================================================
+  // Concurrent Save Protection Tests
+  // ===========================================================================
+
+  it('prevents concurrent saves via ref-based guard', async () => {
+    // Use real timers for this test
+    vi.useRealTimers();
+
+    let resolveSave: () => void = () => {};
+    let saveCallCount = 0;
+
+    const mockSave = vi.fn().mockImplementation(() => {
+      saveCallCount++;
+      return new Promise<void>((resolve) => {
+        resolveSave = resolve;
+      });
+    });
+
+    mockUseProjectStore.mockReturnValue({
+      isDirty: false,
+      isLoaded: true,
+      saveProject: mockSave,
+    } as ReturnType<typeof useProjectStore>);
+
+    const { result } = renderHook(() => useAutoSave());
+
+    // Start first save
+    act(() => {
+      void result.current.saveNow();
+    });
+
+    expect(saveCallCount).toBe(1);
+
+    // Try to start second save while first is in progress
+    act(() => {
+      void result.current.saveNow();
+    });
+
+    // Should not have started another save
+    expect(saveCallCount).toBe(1);
+
+    // Complete the first save
+    await act(async () => {
+      resolveSave();
+      // Small delay to allow state updates
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    // Now another save should be possible
+    act(() => {
+      void result.current.saveNow();
+    });
+
+    expect(saveCallCount).toBe(2);
+
+    // Complete this save too
+    await act(async () => {
+      resolveSave();
+      await new Promise((r) => setTimeout(r, 10));
+    });
+
+    // Restore fake timers
+    vi.useFakeTimers();
+  });
+
+  it('does not create dependency cycle with isSaving state', async () => {
+    const mockSave = vi.fn().mockResolvedValue(undefined);
+
+    mockUseProjectStore.mockReturnValue({
+      isDirty: true,
+      isLoaded: true,
+      saveProject: mockSave,
+    } as ReturnType<typeof useProjectStore>);
+
+    // This test verifies that the hook doesn't cause infinite re-renders
+    // due to isSaving being in the performSave dependency array
+    const { result } = renderHook(() => useAutoSave({ delay: 1000 }));
+
+    // Advance time to trigger auto-save
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+      await Promise.resolve();
+    });
+
+    // Save should complete without issues
+    expect(mockSave).toHaveBeenCalledTimes(1);
+    expect(result.current.isSaving).toBe(false);
+  });
 });

@@ -10,9 +10,9 @@
 //!
 //! ## Bundling FFmpeg
 //!
-//! To bundle FFmpeg with the application, set `DOWNLOAD_FFMPEG=1` during build:
+//! To bundle FFmpeg with the application, set `OPENREELIO_DOWNLOAD_FFMPEG=1` during build:
 //! ```bash
-//! DOWNLOAD_FFMPEG=1 cargo build --release
+//! OPENREELIO_DOWNLOAD_FFMPEG=1 cargo build --release
 //! ```
 //!
 //! This will download platform-specific FFmpeg binaries and include them in the app bundle.

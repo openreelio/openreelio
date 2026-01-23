@@ -264,3 +264,14 @@ export type {
   UseUpdateReturn,
   UseUpdateOptions,
 } from './useUpdate';
+
+export { useCaptionExport } from './useCaptionExport';
+export type { CaptionExportFormat } from './useCaptionExport';
+
+export { useShotDetection } from './useShotDetection';
+export type {
+  ShotDetectionConfig,
+  Shot,
+  ShotDetectionResult,
+  UseShotDetectionReturn,
+} from './useShotDetection';

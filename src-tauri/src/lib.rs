@@ -13,54 +13,13 @@ pub mod core;
 pub mod ipc;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::OnceLock;
-
 use tauri::Manager;
-use tokio::sync::{Mutex, Notify};
-
-static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
-
-fn init_logging(app: &tauri::AppHandle) {
-    // Configure a log file in the platform app log dir (best effort).
-    // Log to file for production debugging; stdout remains available in dev.
-    let log_dir = app
-        .path()
-        .app_log_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from(".logs"));
-
-    let _ = std::fs::create_dir_all(&log_dir);
-
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "openreelio.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-    let _ = LOG_GUARD.set(guard);
-
-    use tracing_subscriber::prelude::*;
-
-    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive(tracing::Level::INFO.into());
-
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stdout)
-        .with_ansi(cfg!(debug_assertions));
-
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_writer(non_blocking)
-        .with_ansi(false);
-
-    let subscriber = tracing_subscriber::registry()
-        .with(env_filter)
-        .with(stdout_layer)
-        .with(file_layer);
-
-    // Avoid panics if already initialized (tests, plugin reloads).
-    let _ = tracing::subscriber::set_global_default(subscriber);
-}
+use tokio::sync::Mutex;
 
 use crate::core::{
     ai::AIGateway,
     commands::CommandExecutor,
-    ffmpeg::create_ffmpeg_state,
     jobs::WorkerPool,
     performance::memory::{CacheManager, MemoryPool},
     project::{OpsLog, ProjectMeta, ProjectState, Snapshot},
@@ -93,6 +52,9 @@ impl ActiveProject {
 
         // Create project directory if it doesn't exist
         std::fs::create_dir_all(&path)?;
+        // Ensure app-managed workspace exists (proxy/frames/cache, etc.).
+        // This also makes it safe to allowlist the directory for the asset protocol.
+        std::fs::create_dir_all(path.join(".openreelio"))?;
 
         let ops_path = path.join("ops.jsonl");
 
@@ -132,6 +94,9 @@ impl ActiveProject {
 
     /// Opens an existing project
     pub fn open(path: PathBuf) -> crate::core::CoreResult<Self> {
+        // Best-effort ensure app-managed workspace exists for older projects.
+        let _ = std::fs::create_dir_all(path.join(".openreelio"));
+
         let ops_path = path.join("ops.jsonl");
         let snapshot_path = Snapshot::default_path(&path);
         let meta_path = path.join("project.json");
@@ -204,6 +169,8 @@ pub struct AppState {
     pub ai_gateway: Mutex<AIGateway>,
     /// Meilisearch service (sidecar + indexer), when enabled
     pub search_service: Mutex<Option<std::sync::Arc<SearchService>>>,
+    /// AppHandle captured at startup for scope configuration helpers.
+    pub app_handle: OnceLock<tauri::AppHandle>,
 }
 
 impl AppState {
@@ -216,6 +183,63 @@ impl AppState {
             cache_manager: Mutex::new(CacheManager::new()),
             ai_gateway: Mutex::new(AIGateway::with_defaults()),
             search_service: Mutex::new(None),
+            app_handle: OnceLock::new(),
+        }
+    }
+
+    /// Stores the app handle for later use (best-effort, idempotent).
+    pub fn set_app_handle(&self, handle: tauri::AppHandle) {
+        let _ = self.app_handle.set(handle);
+    }
+
+    /// Allowlist a directory for the asset protocol (best-effort).
+    pub fn allow_asset_protocol_directory(&self, path: &std::path::Path, recursive: bool) {
+        let Some(handle) = self.app_handle.get() else {
+            return;
+        };
+
+        if let Err(e) = handle
+            .asset_protocol_scope()
+            .allow_directory(path, recursive)
+        {
+            tracing::warn!(
+                "Failed to allow asset protocol directory {}: {}",
+                path.display(),
+                e
+            );
+        }
+    }
+
+    /// Allowlist a file for the asset protocol (best-effort).
+    pub fn allow_asset_protocol_file(&self, path: &std::path::Path) {
+        let Some(handle) = self.app_handle.get() else {
+            return;
+        };
+
+        if let Err(e) = handle.asset_protocol_scope().allow_file(path) {
+            tracing::warn!(
+                "Failed to allow asset protocol file {}: {}",
+                path.display(),
+                e
+            );
+        }
+    }
+
+    /// Forbid a directory for the asset protocol (best-effort).
+    pub fn forbid_asset_protocol_directory(&self, path: &std::path::Path, recursive: bool) {
+        let Some(handle) = self.app_handle.get() else {
+            return;
+        };
+
+        if let Err(e) = handle
+            .asset_protocol_scope()
+            .forbid_directory(path, recursive)
+        {
+            tracing::warn!(
+                "Failed to forbid asset protocol directory {}: {}",
+                path.display(),
+                e
+            );
         }
     }
 
@@ -234,125 +258,186 @@ impl Default for AppState {
 // =============================================================================
 // Tauri Application Entry Point
 // =============================================================================
+mod tauri_app {
+    use super::*;
+    use crate::core::ffmpeg::create_ffmpeg_state;
+    use std::sync::Arc;
+    use tauri::Manager;
+    use tokio::sync::Notify;
 
-/// Tauri command: Greet (placeholder for testing)
-#[tauri::command]
-#[specta::specta]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! Welcome to OpenReelio.", name)
-}
+    static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
-/// Collects all commands for tauri-specta type export.
-/// This is used by the bindings generator.
-#[macro_export]
-macro_rules! collect_commands {
-    () => {
-        tauri_specta::collect_commands![
-            greet,
-            // Project commands
-            $crate::ipc::create_project,
-            $crate::ipc::open_project,
-            $crate::ipc::save_project,
-            $crate::ipc::get_project_info,
-            $crate::ipc::get_project_state,
-            // Asset commands
-            $crate::ipc::import_asset,
-            $crate::ipc::get_assets,
-            $crate::ipc::remove_asset,
-            $crate::ipc::generate_asset_thumbnail,
-            $crate::ipc::generate_proxy_for_asset,
-            $crate::ipc::update_asset_proxy,
-            // Timeline commands
-            $crate::ipc::get_sequences,
-            $crate::ipc::create_sequence,
-            $crate::ipc::get_sequence,
-            // Edit commands
-            $crate::ipc::execute_command,
-            $crate::ipc::undo,
-            $crate::ipc::redo,
-            $crate::ipc::can_undo,
-            $crate::ipc::can_redo,
-            // Job commands
-            $crate::ipc::get_jobs,
-            $crate::ipc::submit_job,
-            $crate::ipc::get_job,
-            $crate::ipc::cancel_job,
-            $crate::ipc::get_job_stats,
-            // Render commands
-            $crate::ipc::start_render,
-            // AI commands
-            $crate::ipc::analyze_intent,
-            $crate::ipc::create_proposal,
-            $crate::ipc::apply_edit_script,
-            $crate::ipc::validate_edit_script,
-            // AI Provider commands
-            $crate::ipc::configure_ai_provider,
-            $crate::ipc::get_ai_provider_status,
-            $crate::ipc::clear_ai_provider,
-            $crate::ipc::test_ai_connection,
-            $crate::ipc::generate_edit_script_with_ai,
-            $crate::ipc::get_available_ai_models,
-            // FFmpeg commands
-            $crate::core::ffmpeg::check_ffmpeg,
-            $crate::core::ffmpeg::extract_frame,
-            $crate::core::ffmpeg::generate_thumbnail,
-            $crate::core::ffmpeg::probe_media,
-            $crate::core::ffmpeg::generate_waveform,
-            // Performance/Memory commands
-            $crate::ipc::get_memory_stats,
-            $crate::ipc::trigger_memory_cleanup,
-            // Transcription commands
-            $crate::ipc::is_transcription_available,
-            $crate::ipc::transcribe_asset,
-            $crate::ipc::submit_transcription_job,
-            // Search commands
-            $crate::ipc::search_assets,
-            $crate::ipc::is_meilisearch_available,
-            $crate::ipc::search_content,
-            $crate::ipc::index_asset_for_search,
-            $crate::ipc::index_transcripts_for_search,
-            $crate::ipc::remove_asset_from_search,
-            // Settings
-            $crate::ipc::get_settings,
-            $crate::ipc::set_settings,
-            $crate::ipc::update_settings,
-            $crate::ipc::reset_settings,
-            // Updates
-            $crate::ipc::check_for_updates,
-            $crate::ipc::get_current_version,
-            $crate::ipc::relaunch_app,
-            $crate::ipc::download_and_install_update,
-        ]
-    };
-}
+    fn init_logging(app: &tauri::AppHandle) {
+        // Configure a log file in the platform app log dir (best effort).
+        // Log to file for production debugging; stdout remains available in dev.
+        let log_dir = app
+            .path()
+            .app_log_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from(".logs"));
 
-/// Initialize and run the Tauri application
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    // Create shared FFmpeg state
-    let ffmpeg_state = create_ffmpeg_state();
+        let _ = std::fs::create_dir_all(&log_dir);
 
-    let builder = tauri::Builder::default()
-        .manage(AppState::new())
-        .manage(ffmpeg_state.clone())
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init());
+        let file_appender = tracing_appender::rolling::daily(&log_dir, "openreelio.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        let _ = LOG_GUARD.set(guard);
 
-    // The updater requires valid signing keys and a release manifest endpoint.
-    // In local MSI distribution mode we disable it by default to avoid noisy
-    // startup errors and confusing UX.
-    let builder = if std::env::var("OPENREELIO_ENABLE_UPDATER").ok().as_deref() == Some("1") {
-        builder.plugin(tauri_plugin_updater::Builder::new().build())
-    } else {
-        builder
-    };
+        use tracing_subscriber::prelude::*;
 
-    builder.setup(move |app| {
+        let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive(tracing::Level::INFO.into());
+
+        let stdout_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stdout)
+            .with_ansi(cfg!(debug_assertions));
+
+        let file_layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking)
+            .with_ansi(false);
+
+        let subscriber = tracing_subscriber::registry()
+            .with(env_filter)
+            .with(stdout_layer)
+            .with(file_layer);
+
+        // Avoid panics if already initialized (tests, plugin reloads).
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    }
+
+    /// Tauri command: Greet (placeholder for testing)
+    #[tauri::command]
+    #[specta::specta]
+    fn greet(name: &str) -> String {
+        format!("Hello, {}! Welcome to OpenReelio.", name)
+    }
+
+    /// Collects all commands for tauri-specta type export.
+    /// This is used by the bindings generator.
+    #[macro_export]
+    macro_rules! collect_commands {
+        () => {
+            tauri_specta::collect_commands![
+                greet,
+                // Project commands
+                $crate::ipc::create_project,
+                $crate::ipc::open_project,
+                $crate::ipc::save_project,
+                $crate::ipc::get_project_info,
+                $crate::ipc::get_project_state,
+                // Asset commands
+                $crate::ipc::import_asset,
+                $crate::ipc::get_assets,
+                $crate::ipc::remove_asset,
+                $crate::ipc::generate_asset_thumbnail,
+                $crate::ipc::generate_proxy_for_asset,
+                $crate::ipc::update_asset_proxy,
+                // Timeline commands
+                $crate::ipc::get_sequences,
+                $crate::ipc::create_sequence,
+                $crate::ipc::get_sequence,
+                // Edit commands
+                $crate::ipc::execute_command,
+                $crate::ipc::undo,
+                $crate::ipc::redo,
+                $crate::ipc::can_undo,
+                $crate::ipc::can_redo,
+                // Job commands
+                $crate::ipc::get_jobs,
+                $crate::ipc::submit_job,
+                $crate::ipc::get_job,
+                $crate::ipc::cancel_job,
+                $crate::ipc::get_job_stats,
+                // Render commands
+                $crate::ipc::start_render,
+                // AI commands
+                $crate::ipc::analyze_intent,
+                $crate::ipc::create_proposal,
+                $crate::ipc::apply_edit_script,
+                $crate::ipc::validate_edit_script,
+                // AI Provider commands
+                $crate::ipc::configure_ai_provider,
+                $crate::ipc::get_ai_provider_status,
+                $crate::ipc::clear_ai_provider,
+                $crate::ipc::test_ai_connection,
+                $crate::ipc::generate_edit_script_with_ai,
+                $crate::ipc::get_available_ai_models,
+                // FFmpeg commands
+                $crate::core::ffmpeg::check_ffmpeg,
+                $crate::core::ffmpeg::extract_frame,
+                $crate::core::ffmpeg::generate_thumbnail,
+                $crate::core::ffmpeg::probe_media,
+                $crate::core::ffmpeg::generate_waveform,
+                // Performance/Memory commands
+                $crate::ipc::get_memory_stats,
+                $crate::ipc::trigger_memory_cleanup,
+                // Transcription commands
+                $crate::ipc::is_transcription_available,
+                $crate::ipc::transcribe_asset,
+                $crate::ipc::submit_transcription_job,
+                // Search commands
+                $crate::ipc::search_assets,
+                $crate::ipc::is_meilisearch_available,
+                $crate::ipc::search_content,
+                $crate::ipc::index_asset_for_search,
+                $crate::ipc::index_transcripts_for_search,
+                $crate::ipc::remove_asset_from_search,
+                // Settings
+                $crate::ipc::get_settings,
+                $crate::ipc::set_settings,
+                $crate::ipc::update_settings,
+                $crate::ipc::reset_settings,
+                // Updates
+                $crate::ipc::check_for_updates,
+                $crate::ipc::get_current_version,
+                $crate::ipc::relaunch_app,
+                $crate::ipc::download_and_install_update,
+            ]
+        };
+    }
+
+    /// Initialize and run the Tauri application
+    #[cfg_attr(mobile, tauri::mobile_entry_point)]
+    pub fn run() {
+        // Create shared FFmpeg state
+        let ffmpeg_state = create_ffmpeg_state();
+
+        let builder = tauri::Builder::default()
+            .manage(AppState::new())
+            .manage(ffmpeg_state.clone())
+            .plugin(tauri_plugin_dialog::init());
+
+        // The updater requires valid signing keys and a release manifest endpoint.
+        // In local MSI distribution mode we disable it by default to avoid noisy
+        // startup errors and confusing UX.
+        let builder = if std::env::var("OPENREELIO_ENABLE_UPDATER").ok().as_deref() == Some("1") {
+            builder.plugin(tauri_plugin_updater::Builder::new().build())
+        } else {
+            builder
+        };
+
+        builder.setup(move |app| {
             // Initialize logging (safe to call multiple times).
             init_logging(app.handle());
 
             tracing::info!("OpenReelio starting...");
+
+            // Capture AppHandle for commands and configure base asset protocol scope.
+            // The static scope in `tauri.conf.json` is deliberately minimal; we extend it at runtime
+            // only for opened projects and imported assets.
+            let app_state: tauri::State<'_, AppState> = app.state();
+            app_state.set_app_handle(app.handle().clone());
+
+            // Defense-in-depth: explicitly forbid access to the webview data directory.
+            if let Ok(local_data) = app.path().app_local_data_dir() {
+                app_state.forbid_asset_protocol_directory(&local_data, true);
+            }
+
+            // Allow app-managed cache/data directories.
+            if let Ok(cache_dir) = app.path().app_cache_dir() {
+                app_state.allow_asset_protocol_directory(&cache_dir, true);
+            }
+            if let Ok(data_dir) = app.path().app_data_dir() {
+                app_state.allow_asset_protocol_directory(&data_dir, true);
+            }
 
             // Initialize FFmpeg
             let ffmpeg = ffmpeg_state.clone();
@@ -391,7 +476,6 @@ pub fn run() {
 
             // Start workers after FFmpeg initialization
             // We need to access the WorkerPool's Arc references before spawning
-            let app_state: tauri::State<'_, AppState> = app.state();
             let job_queue = {
                 // Use blocking to get the Arc references from WorkerPool
                 // This is safe during setup since we're not in an async context yet
@@ -521,6 +605,11 @@ pub fn run() {
             ipc::index_asset_for_search,
             ipc::index_transcripts_for_search,
             ipc::remove_asset_from_search,
+            // Shot Detection
+            ipc::detect_shots,
+            ipc::get_asset_shots,
+            ipc::delete_asset_shots,
+            ipc::is_shot_detection_available,
             // Settings
             ipc::get_settings,
             ipc::set_settings,
@@ -534,7 +623,10 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+    }
 }
+
+pub use tauri_app::run;
 
 // =============================================================================
 // Tests
