@@ -10,6 +10,20 @@ env:
   # Keep this in sync with `src-tauri/Cargo.toml` (`rust-version`).
   RUST_VERSION: '1.85.0'
 
+# Code Signing Environment Variables (set via GitHub Secrets):
+# Windows Authenticode:
+#   WINDOWS_CERTIFICATE - Base64-encoded PFX certificate file
+#   WINDOWS_CERTIFICATE_PASSWORD - PFX password
+#   WINDOWS_CERTIFICATE_NAME - Certificate subject name (e.g., "OpenReelio")
+#
+# macOS Notarization:
+#   APPLE_CERTIFICATE - Base64-encoded P12 certificate file
+#   APPLE_CERTIFICATE_PASSWORD - P12 password
+#   APPLE_ID - Apple ID email
+#   APPLE_ID_PASSWORD - App-specific password (generate at appleid.apple.com)
+#   APPLE_TEAM_ID - Apple Developer Team ID
+#   APPLE_SIGNING_IDENTITY - Certificate identity (e.g., "Developer ID Application: OpenReelio")
+
 jobs:
   create-release:
     name: Create Release
@@ -101,8 +115,71 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
 
+      # ==========================================================================
+      # Windows Code Signing Setup
+      # ==========================================================================
+      - name: Import Windows Code Signing Certificate
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE != ''
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          # Decode the certificate from base64
+          $certBytes = [System.Convert]::FromBase64String($env:WINDOWS_CERTIFICATE)
+          $certPath = "$env:RUNNER_TEMP\certificate.pfx"
+          [IO.File]::WriteAllBytes($certPath, $certBytes)
+
+          # Import the certificate to the Windows certificate store
+          $securePassword = ConvertTo-SecureString -String $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword
+
+          # Clean up the certificate file
+          Remove-Item $certPath -Force
+
+          Write-Host "Windows code signing certificate imported successfully"
+        shell: pwsh
+
+      # ==========================================================================
+      # macOS Code Signing Setup
+      # ==========================================================================
+      - name: Import macOS Code Signing Certificate
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          # Create a temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 32)
+
+          # Create keychain and set as default
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security default-keychain -s $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Set keychain timeout to prevent re-locking
+          security set-keychain-settings -t 3600 -u $KEYCHAIN_PATH
+
+          # Decode and import certificate
+          echo "$APPLE_CERTIFICATE" | base64 --decode > $RUNNER_TEMP/certificate.p12
+          security import $RUNNER_TEMP/certificate.p12 -k $KEYCHAIN_PATH -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+
+          # Allow codesign to access the keychain
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Add keychain to search list
+          security list-keychains -d user -s $KEYCHAIN_PATH
+
+          # Clean up certificate file
+          rm -f $RUNNER_TEMP/certificate.p12
+
+          echo "macOS code signing certificate imported successfully"
+        shell: bash
+
       - name: Download FFmpeg binaries
         working-directory: src-tauri
+        env:
+          OPENREELIO_DOWNLOAD_FFMPEG: "1"
         run: cargo build --release
         timeout-minutes: 15
 
@@ -123,15 +200,106 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENREELIO_ENABLE_UPDATER: "1"
           # Updater signing key (required for auto-update)
           # Generate with: npx tauri signer generate -w ~/.tauri/openreelio.key
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Windows Code Signing (Authenticode)
+          # signtool will automatically find the certificate in the store
+          WINDOWS_CERTIFICATE_NAME: ${{ secrets.WINDOWS_CERTIFICATE_NAME }}
+          # macOS Code Signing
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
           args: --target ${{ matrix.target }}
           # Generate updater JSON artifacts
           updaterJsonPreferNsis: true
+
+      # ==========================================================================
+      # Windows Authenticode Signing (Post-Build)
+      # ==========================================================================
+      - name: Sign Windows Executables
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_NAME != ''
+        env:
+          WINDOWS_CERTIFICATE_NAME: ${{ secrets.WINDOWS_CERTIFICATE_NAME }}
+        run: |
+          # Find all unsigned executables and installers
+          $buildDir = "src-tauri/target/${{ matrix.target }}/release/bundle"
+
+          if (Test-Path $buildDir) {
+            # Sign MSI installer
+            $msiFiles = Get-ChildItem -Path $buildDir -Filter "*.msi" -Recurse
+            foreach ($msi in $msiFiles) {
+              Write-Host "Signing $($msi.FullName)..."
+              & signtool sign /n "$env:WINDOWS_CERTIFICATE_NAME" /t http://timestamp.digicert.com /fd sha256 "$($msi.FullName)"
+              if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Failed to sign $($msi.FullName)"
+              }
+            }
+
+            # Sign NSIS installer (exe)
+            $exeFiles = Get-ChildItem -Path $buildDir -Filter "*-setup.exe" -Recurse
+            foreach ($exe in $exeFiles) {
+              Write-Host "Signing $($exe.FullName)..."
+              & signtool sign /n "$env:WINDOWS_CERTIFICATE_NAME" /t http://timestamp.digicert.com /fd sha256 "$($exe.FullName)"
+              if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Failed to sign $($exe.FullName)"
+              }
+            }
+          } else {
+            Write-Host "Build directory not found: $buildDir"
+          }
+        shell: pwsh
+
+      # ==========================================================================
+      # macOS Notarization (Post-Build)
+      # ==========================================================================
+      - name: Notarize macOS Application
+        if: runner.os == 'macOS' && env.APPLE_ID != ''
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Find the DMG file
+          DMG_PATH=$(find src-tauri/target -name "*.dmg" -type f | head -n 1)
+
+          if [ -z "$DMG_PATH" ]; then
+            echo "No DMG file found, skipping notarization"
+            exit 0
+          fi
+
+          echo "Notarizing: $DMG_PATH"
+
+          # Submit for notarization
+          xcrun notarytool submit "$DMG_PATH" \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_ID_PASSWORD" \
+            --team-id "$APPLE_TEAM_ID" \
+            --wait
+
+          if [ $? -eq 0 ]; then
+            echo "Notarization successful, stapling ticket..."
+            xcrun stapler staple "$DMG_PATH"
+            echo "Notarization complete!"
+          else
+            echo "Notarization failed"
+            exit 1
+          fi
+        shell: bash
+
+      # ==========================================================================
+      # Cleanup Keychain (macOS)
+      # ==========================================================================
+      - name: Cleanup macOS Keychain
+        if: runner.os == 'macOS' && always()
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain $KEYCHAIN_PATH || true
+          fi
+        shell: bash
 
   generate-update-manifest:
     name: Generate Update Manifest
