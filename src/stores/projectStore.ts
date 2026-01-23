@@ -31,13 +31,11 @@ const logger = createLogger('ProjectStore');
  * Design:
  * - FIFO queue with single concurrent execution
  * - Automatic error recovery (queue continues after failure)
- * - Timeout protection to prevent deadlocks
+ * - Timeout protection using Promise.race to prevent deadlocks
  */
 class CommandQueue {
   private queue: Array<{
     operation: () => Promise<void>;
-    resolve: (value: void) => void;
-    reject: (error: Error) => void;
     operationName: string;
   }> = [];
   private isProcessing = false;
@@ -49,25 +47,24 @@ class CommandQueue {
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const wrappedOperation = async (): Promise<void> => {
-        const timeoutId = setTimeout(() => {
-          logger.error('Operation timeout', { operationName });
-          reject(new Error(`Operation timeout: ${operationName}`));
-        }, CommandQueue.OPERATION_TIMEOUT_MS);
+        // Use Promise.race to ensure timeout actually unblocks the queue
+        const timeoutPromise = new Promise<never>((_, timeoutReject) => {
+          setTimeout(() => {
+            logger.error('Operation timeout', { operationName });
+            timeoutReject(new Error(`Operation timeout: ${operationName}`));
+          }, CommandQueue.OPERATION_TIMEOUT_MS);
+        });
 
         try {
-          const result = await operation();
-          clearTimeout(timeoutId);
+          const result = await Promise.race([operation(), timeoutPromise]);
           resolve(result);
         } catch (error) {
-          clearTimeout(timeoutId);
           reject(error instanceof Error ? error : new Error(String(error)));
         }
       };
 
       this.queue.push({
         operation: wrappedOperation,
-        resolve: () => {},
-        reject: () => {},
         operationName,
       });
 
@@ -105,10 +102,9 @@ class CommandQueue {
   }
 
   clear(): void {
-    const pending = this.queue.splice(0);
-    for (const item of pending) {
-      item.reject(new Error('Queue cleared'));
-    }
+    // Clear all pending operations from the queue
+    // Note: Operations already being awaited will complete normally
+    this.queue.splice(0);
   }
 }
 
