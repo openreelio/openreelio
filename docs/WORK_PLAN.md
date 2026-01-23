@@ -1,9 +1,9 @@
 # OpenReelio Work Plan
 
-> **Last Updated**: 2026-01-21
-> **Current Phase**: MVP v0.1.0 **COMPLETE** - Moving to v0.2.0 AI Integration
-> **Target**: v0.2.0 AI-driven editing features
-> **Active Sprint**: v0.2.0 AI Integration Planning
+> **Last Updated**: 2026-01-23
+> **Current Phase**: v0.2.0 AI Integration - 60% Complete
+> **Target**: Complete whisper-rs transcription + shot detection
+> **Active Sprint**: whisper-rs Integration & Caption Export
 
 This document provides actionable task breakdowns for immediate development work.
 
@@ -46,20 +46,28 @@ This document provides actionable task breakdowns for immediate development work
 
 ---
 
-## Next Phase: v0.2.0 AI Integration
+## Current Phase: v0.2.0 AI Integration (60% Complete)
 
 ### Priority Tasks
 
 | Task | Status | Description |
 |------|--------|-------------|
-| whisper.cpp integration | ⏳ PENDING | Offline speech-to-text for auto-captioning |
-| Meilisearch setup | ⏳ PENDING | Full-text search engine for smart asset discovery |
-| AI prompt panel | ⏳ PENDING | EditScript generation from natural language |
-| Shot detection | ⏳ PENDING | Automatic scene boundary detection |
+| AI Provider Architecture | ✅ COMPLETE | OpenAI, Anthropic, Local providers implemented |
+| AI Gateway & Executor | ✅ COMPLETE | EditScript execution from AI responses |
+| AI Settings Panel | ✅ COMPLETE | Full UI for configuring AI providers |
+| AI Prompt Panel | ✅ COMPLETE | Natural language editing interface |
+| Meilisearch Sidecar | ✅ COMPLETE | Search engine sidecar management |
+| Search Service | ✅ COMPLETE | Asset/transcript indexing pipeline |
+| Search UI | ✅ COMPLETE | SearchBar, SearchPanel, Filters, Results |
+| Caption Editor | ✅ COMPLETE | Full caption CRUD UI |
+| Transcription Dialog | ✅ COMPLETE | Model selection and progress tracking UI |
+| **whisper.cpp integration** | ⏳ PENDING | Actual whisper-rs inference (UI ready) |
+| **Shot detection** | ⏳ PENDING | candle-based scene detection |
+| **Caption Export** | ⏳ PENDING | SRT/VTT export formats |
 
 ---
 
-## Current Sprint: MVP Completion
+## Current Sprint: v0.2.0 Completion
 
 ### Priority Matrix
 
@@ -68,16 +76,34 @@ This document provides actionable task breakdowns for immediate development work
               HIGH           LOW
          ┌─────────────┬─────────────┐
     HIGH │  DO FIRST   │  SCHEDULE   │
-URGENCY  │  Phase 2-3  │  Phase 5    │
+URGENCY  │  whisper-rs │  SRT Export │
          ├─────────────┼─────────────┤
-    LOW  │  DELEGATE   │   DEFER     │
-         │  v0.2.0     │   v0.3.0+   │
+    LOW  │  Shot Det.  │   DEFER     │
+         │  candle     │   v0.3.0+   │
          └─────────────┴─────────────┘
 ```
 
+### Immediate Action Items
+
+1. **whisper-rs Integration** (HIGH/HIGH)
+   - Add `whisper-rs = "0.13"` to Cargo.toml
+   - Implement `TranscriptionEngine` in `core/captions/whisper.rs`
+   - Connect to existing `TranscriptionDialog.tsx` UI
+   - Wire IPC command `transcribe_asset`
+
+2. **Caption Export** (HIGH/LOW)
+   - Implement SRT format writer
+   - Implement VTT format writer
+   - Add export button to CaptionEditor
+
+3. **Shot Detection** (LOW/HIGH)
+   - Add candle dependencies
+   - Implement scene boundary detection
+   - Create shot markers UI
+
 ---
 
-## Week 1-2: Timeline Core Completion (Phase 2)
+## Archive: Week 1-2 Timeline Core Completion (Phase 2) - COMPLETE
 
 ### Task 1.1: Clip Drag & Drop Enhancement
 
@@ -737,11 +763,12 @@ export function useToast() {
 
 ---
 
-## Post-MVP: v0.2.0 AI Integration
+## ACTIVE: v0.2.0 AI Integration Implementation
 
-### Phase A: whisper.cpp Integration
+### Phase A: whisper.cpp Integration (CURRENT PRIORITY)
 
-**Timeline**: 1 week
+**Status**: UI Complete, Backend Integration Pending
+**Blocking**: Actual transcription functionality
 
 **Step 1: Add Dependencies**
 ```toml
