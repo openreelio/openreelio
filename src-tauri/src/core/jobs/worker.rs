@@ -1102,21 +1102,193 @@ impl JobProcessor {
         Err("Use start_render IPC command for final render".to_string())
     }
 
-    /// Process AI completion job (placeholder)
+    /// Process AI completion job
+    ///
+    /// Connects to the AI Gateway to generate an EditScript from a user prompt.
+    /// Emits events:
+    /// - `ai:generating` when starting
+    /// - `ai:completed` on success with the generated edit script
+    /// - `ai:failed` on failure with error message
     async fn process_ai_completion(&self, job: &Job) -> Result<serde_json::Value, String> {
+        use crate::core::ai::EditContext;
+
         let prompt = job
             .payload
             .get("prompt")
             .and_then(|v| v.as_str())
             .ok_or("Missing prompt in payload")?;
 
-        // TODO: Implement AI gateway integration (TASK-011)
-        tracing::warn!("AI completion not yet implemented for prompt: {}", prompt);
+        // Emit generating event
+        let _ = self.app_handle.emit(
+            "ai:generating",
+            serde_json::json!({
+                "jobId": job.id,
+                "prompt": prompt,
+            }),
+        );
 
-        Err(
-            "AI completion not yet implemented. AI gateway integration pending (TASK-011)"
-                .to_string(),
-        )
+        // Get the AppState to access AI Gateway
+        let app_state = self.app_handle.state::<crate::AppState>();
+        let gateway = app_state.ai_gateway.lock().await;
+
+        // Check if AI provider is configured
+        if !gateway.is_configured().await {
+            let error = "No AI provider configured. Configure an AI provider in Settings.";
+            let _ = self.app_handle.emit(
+                "ai:failed",
+                serde_json::json!({
+                    "jobId": job.id,
+                    "error": error,
+                }),
+            );
+            return Err(error.to_string());
+        }
+
+        // Check if provider is available
+        if !gateway.has_provider().await {
+            let error = "AI provider not reachable. Use 'Test connection' in Settings to verify connectivity.";
+            let _ = self.app_handle.emit(
+                "ai:failed",
+                serde_json::json!({
+                    "jobId": job.id,
+                    "error": error,
+                }),
+            );
+            return Err(error.to_string());
+        }
+
+        // Build EditContext from job payload
+        let timeline_duration = job
+            .payload
+            .get("timelineDuration")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        let asset_ids: Vec<String> = job
+            .payload
+            .get("assetIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let track_ids: Vec<String> = job
+            .payload
+            .get("trackIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let selected_clips: Vec<String> = job
+            .payload
+            .get("selectedClips")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let playhead_position = job
+            .payload
+            .get("playheadPosition")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+
+        let transcript_context = job
+            .payload
+            .get("transcriptContext")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let mut edit_context = EditContext::new()
+            .with_duration(timeline_duration)
+            .with_assets(asset_ids)
+            .with_tracks(track_ids)
+            .with_selection(selected_clips)
+            .with_playhead(playhead_position);
+
+        if let Some(ref transcript) = transcript_context {
+            edit_context = edit_context.with_transcript(transcript);
+        }
+
+        tracing::info!(
+            "Processing AI completion job {} with prompt: {}",
+            job.id,
+            prompt
+        );
+
+        // Generate edit script using the AI gateway
+        match gateway.generate_edit_script(prompt, &edit_context).await {
+            Ok(edit_script) => {
+                // Convert EditScript to JSON
+                let script_json = serde_json::json!({
+                    "intent": edit_script.intent,
+                    "commands": edit_script.commands.iter().map(|cmd| {
+                        serde_json::json!({
+                            "commandType": cmd.command_type,
+                            "params": cmd.params,
+                            "description": cmd.description,
+                        })
+                    }).collect::<Vec<_>>(),
+                    "requires": edit_script.requires.iter().map(|req| {
+                        serde_json::json!({
+                            "kind": format!("{:?}", req.kind).to_lowercase(),
+                            "query": req.query,
+                            "provider": req.provider,
+                            "params": req.params,
+                        })
+                    }).collect::<Vec<_>>(),
+                    "qcRules": edit_script.qc_rules,
+                    "risk": edit_script.risk,
+                    "explanation": edit_script.explanation,
+                });
+
+                // Emit completion event
+                let _ = self.app_handle.emit(
+                    "ai:completed",
+                    serde_json::json!({
+                        "jobId": job.id,
+                        "editScript": script_json,
+                    }),
+                );
+
+                tracing::info!(
+                    "AI completion job {} succeeded with {} commands",
+                    job.id,
+                    edit_script.commands.len()
+                );
+
+                Ok(serde_json::json!({
+                    "prompt": prompt,
+                    "editScript": script_json,
+                    "commandCount": edit_script.commands.len(),
+                }))
+            }
+            Err(e) => {
+                let error_msg = format!("AI generation failed: {}", e);
+
+                // Emit failure event
+                let _ = self.app_handle.emit(
+                    "ai:failed",
+                    serde_json::json!({
+                        "jobId": job.id,
+                        "error": error_msg,
+                    }),
+                );
+
+                tracing::error!("AI completion job {} failed: {}", job.id, error_msg);
+                Err(error_msg)
+            }
+        }
     }
 }
 
