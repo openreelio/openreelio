@@ -11,6 +11,7 @@ use crate::core::{
     assets::Asset,
     effects::{Effect, FilterGraph},
     ffmpeg::FFmpegRunner,
+    process::configure_tokio_command,
     timeline::{Clip, Sequence, Track, TrackKind},
 };
 
@@ -731,6 +732,7 @@ impl ExportEngine {
 
         // Spawn FFmpeg process with piped stdout for progress
         let mut cmd = tokio::process::Command::new(self.ffmpeg.info().ffmpeg_path.as_path());
+        configure_tokio_command(&mut cmd);
         cmd.args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -872,6 +874,7 @@ impl ExportEngine {
 
         // Spawn FFmpeg process with piped stdout for progress
         let mut cmd = tokio::process::Command::new(self.ffmpeg.info().ffmpeg_path.as_path());
+        configure_tokio_command(&mut cmd);
         cmd.args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
