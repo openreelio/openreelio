@@ -37,16 +37,18 @@ use crate::core::{CoreError, CoreResult};
 /// This function is critical for preventing path traversal attacks. Any identifier
 /// that will be used as part of a file path MUST be validated through this function.
 pub fn validate_path_id_component(id: &str, label: &str) -> Result<(), String> {
-    if id.is_empty() {
-        return Err(format!("{label} is empty"));
+    // Check for empty or whitespace-only identifiers
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} is empty or contains only whitespace"));
     }
-    if id.contains("..") || id.contains('/') || id.contains('\\') || id.contains(':') {
+    if trimmed.contains("..") || trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains(':') {
         return Err(format!(
             "Invalid {label}: contains path traversal characters"
         ));
     }
     // Additional validation: reject control characters and null bytes
-    if id.chars().any(|c| c.is_control()) {
+    if trimmed.chars().any(|c| c.is_control()) {
         return Err(format!("Invalid {label}: contains control characters"));
     }
     Ok(())
