@@ -7,5 +7,5 @@ pub mod shots;
 pub mod transcripts;
 
 pub use db::IndexDb;
-pub use shots::{Shot, ShotDetector};
+pub use shots::{Shot, ShotDetector, ShotDetectorConfig};
 pub use transcripts::{Transcript, TranscriptSegment};
