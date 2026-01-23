@@ -13,54 +13,13 @@ pub mod core;
 pub mod ipc;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::OnceLock;
-
 use tauri::Manager;
-use tokio::sync::{Mutex, Notify};
-
-static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
-
-fn init_logging(app: &tauri::AppHandle) {
-    // Configure a log file in the platform app log dir (best effort).
-    // Log to file for production debugging; stdout remains available in dev.
-    let log_dir = app
-        .path()
-        .app_log_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from(".logs"));
-
-    let _ = std::fs::create_dir_all(&log_dir);
-
-    let file_appender = tracing_appender::rolling::daily(&log_dir, "openreelio.log");
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
-    let _ = LOG_GUARD.set(guard);
-
-    use tracing_subscriber::prelude::*;
-
-    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
-        .add_directive(tracing::Level::INFO.into());
-
-    let stdout_layer = tracing_subscriber::fmt::layer()
-        .with_writer(std::io::stdout)
-        .with_ansi(cfg!(debug_assertions));
-
-    let file_layer = tracing_subscriber::fmt::layer()
-        .with_writer(non_blocking)
-        .with_ansi(false);
-
-    let subscriber = tracing_subscriber::registry()
-        .with(env_filter)
-        .with(stdout_layer)
-        .with(file_layer);
-
-    // Avoid panics if already initialized (tests, plugin reloads).
-    let _ = tracing::subscriber::set_global_default(subscriber);
-}
+use tokio::sync::Mutex;
 
 use crate::core::{
     ai::AIGateway,
     commands::CommandExecutor,
-    ffmpeg::create_ffmpeg_state,
     jobs::WorkerPool,
     performance::memory::{CacheManager, MemoryPool},
     project::{OpsLog, ProjectMeta, ProjectState, Snapshot},
@@ -299,101 +258,148 @@ impl Default for AppState {
 // =============================================================================
 // Tauri Application Entry Point
 // =============================================================================
+// NOTE: We intentionally do not compile the Tauri runtime entry point for unit
+// tests. The test harness is a different binary, and pulling in the full Tauri
+// windowing stack can cause Windows-only startup failures (e.g. missing
+// comctl32 symbols when no manifest is embedded).
+#[cfg(not(test))]
+mod tauri_app {
+    use super::*;
+    use crate::core::ffmpeg::create_ffmpeg_state;
+    use std::sync::Arc;
+    use tauri::Manager;
+    use tokio::sync::Notify;
 
-/// Tauri command: Greet (placeholder for testing)
-#[tauri::command]
-#[specta::specta]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! Welcome to OpenReelio.", name)
-}
+    static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
-/// Collects all commands for tauri-specta type export.
-/// This is used by the bindings generator.
-#[macro_export]
-macro_rules! collect_commands {
-    () => {
-        tauri_specta::collect_commands![
-            greet,
-            // Project commands
-            $crate::ipc::create_project,
-            $crate::ipc::open_project,
-            $crate::ipc::save_project,
-            $crate::ipc::get_project_info,
-            $crate::ipc::get_project_state,
-            // Asset commands
-            $crate::ipc::import_asset,
-            $crate::ipc::get_assets,
-            $crate::ipc::remove_asset,
-            $crate::ipc::generate_asset_thumbnail,
-            $crate::ipc::generate_proxy_for_asset,
-            $crate::ipc::update_asset_proxy,
-            // Timeline commands
-            $crate::ipc::get_sequences,
-            $crate::ipc::create_sequence,
-            $crate::ipc::get_sequence,
-            // Edit commands
-            $crate::ipc::execute_command,
-            $crate::ipc::undo,
-            $crate::ipc::redo,
-            $crate::ipc::can_undo,
-            $crate::ipc::can_redo,
-            // Job commands
-            $crate::ipc::get_jobs,
-            $crate::ipc::submit_job,
-            $crate::ipc::get_job,
-            $crate::ipc::cancel_job,
-            $crate::ipc::get_job_stats,
-            // Render commands
-            $crate::ipc::start_render,
-            // AI commands
-            $crate::ipc::analyze_intent,
-            $crate::ipc::create_proposal,
-            $crate::ipc::apply_edit_script,
-            $crate::ipc::validate_edit_script,
-            // AI Provider commands
-            $crate::ipc::configure_ai_provider,
-            $crate::ipc::get_ai_provider_status,
-            $crate::ipc::clear_ai_provider,
-            $crate::ipc::test_ai_connection,
-            $crate::ipc::generate_edit_script_with_ai,
-            $crate::ipc::get_available_ai_models,
-            // FFmpeg commands
-            $crate::core::ffmpeg::check_ffmpeg,
-            $crate::core::ffmpeg::extract_frame,
-            $crate::core::ffmpeg::generate_thumbnail,
-            $crate::core::ffmpeg::probe_media,
-            $crate::core::ffmpeg::generate_waveform,
-            // Performance/Memory commands
-            $crate::ipc::get_memory_stats,
-            $crate::ipc::trigger_memory_cleanup,
-            // Transcription commands
-            $crate::ipc::is_transcription_available,
-            $crate::ipc::transcribe_asset,
-            $crate::ipc::submit_transcription_job,
-            // Search commands
-            $crate::ipc::search_assets,
-            $crate::ipc::is_meilisearch_available,
-            $crate::ipc::search_content,
-            $crate::ipc::index_asset_for_search,
-            $crate::ipc::index_transcripts_for_search,
-            $crate::ipc::remove_asset_from_search,
-            // Settings
-            $crate::ipc::get_settings,
-            $crate::ipc::set_settings,
-            $crate::ipc::update_settings,
-            $crate::ipc::reset_settings,
-            // Updates
-            $crate::ipc::check_for_updates,
-            $crate::ipc::get_current_version,
-            $crate::ipc::relaunch_app,
-            $crate::ipc::download_and_install_update,
-        ]
-    };
-}
+    fn init_logging(app: &tauri::AppHandle) {
+        // Configure a log file in the platform app log dir (best effort).
+        // Log to file for production debugging; stdout remains available in dev.
+        let log_dir = app
+            .path()
+            .app_log_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from(".logs"));
 
-/// Initialize and run the Tauri application
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
+        let _ = std::fs::create_dir_all(&log_dir);
+
+        let file_appender = tracing_appender::rolling::daily(&log_dir, "openreelio.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        let _ = LOG_GUARD.set(guard);
+
+        use tracing_subscriber::prelude::*;
+
+        let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive(tracing::Level::INFO.into());
+
+        let stdout_layer = tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stdout)
+            .with_ansi(cfg!(debug_assertions));
+
+        let file_layer = tracing_subscriber::fmt::layer().with_writer(non_blocking).with_ansi(false);
+
+        let subscriber = tracing_subscriber::registry()
+            .with(env_filter)
+            .with(stdout_layer)
+            .with(file_layer);
+
+        // Avoid panics if already initialized (tests, plugin reloads).
+        let _ = tracing::subscriber::set_global_default(subscriber);
+    }
+
+    /// Tauri command: Greet (placeholder for testing)
+    #[tauri::command]
+    #[specta::specta]
+    fn greet(name: &str) -> String {
+        format!("Hello, {}! Welcome to OpenReelio.", name)
+    }
+
+    /// Collects all commands for tauri-specta type export.
+    /// This is used by the bindings generator.
+    #[macro_export]
+    macro_rules! collect_commands {
+        () => {
+            tauri_specta::collect_commands![
+                greet,
+                // Project commands
+                $crate::ipc::create_project,
+                $crate::ipc::open_project,
+                $crate::ipc::save_project,
+                $crate::ipc::get_project_info,
+                $crate::ipc::get_project_state,
+                // Asset commands
+                $crate::ipc::import_asset,
+                $crate::ipc::get_assets,
+                $crate::ipc::remove_asset,
+                $crate::ipc::generate_asset_thumbnail,
+                $crate::ipc::generate_proxy_for_asset,
+                $crate::ipc::update_asset_proxy,
+                // Timeline commands
+                $crate::ipc::get_sequences,
+                $crate::ipc::create_sequence,
+                $crate::ipc::get_sequence,
+                // Edit commands
+                $crate::ipc::execute_command,
+                $crate::ipc::undo,
+                $crate::ipc::redo,
+                $crate::ipc::can_undo,
+                $crate::ipc::can_redo,
+                // Job commands
+                $crate::ipc::get_jobs,
+                $crate::ipc::submit_job,
+                $crate::ipc::get_job,
+                $crate::ipc::cancel_job,
+                $crate::ipc::get_job_stats,
+                // Render commands
+                $crate::ipc::start_render,
+                // AI commands
+                $crate::ipc::analyze_intent,
+                $crate::ipc::create_proposal,
+                $crate::ipc::apply_edit_script,
+                $crate::ipc::validate_edit_script,
+                // AI Provider commands
+                $crate::ipc::configure_ai_provider,
+                $crate::ipc::get_ai_provider_status,
+                $crate::ipc::clear_ai_provider,
+                $crate::ipc::test_ai_connection,
+                $crate::ipc::generate_edit_script_with_ai,
+                $crate::ipc::get_available_ai_models,
+                // FFmpeg commands
+                $crate::core::ffmpeg::check_ffmpeg,
+                $crate::core::ffmpeg::extract_frame,
+                $crate::core::ffmpeg::generate_thumbnail,
+                $crate::core::ffmpeg::probe_media,
+                $crate::core::ffmpeg::generate_waveform,
+                // Performance/Memory commands
+                $crate::ipc::get_memory_stats,
+                $crate::ipc::trigger_memory_cleanup,
+                // Transcription commands
+                $crate::ipc::is_transcription_available,
+                $crate::ipc::transcribe_asset,
+                $crate::ipc::submit_transcription_job,
+                // Search commands
+                $crate::ipc::search_assets,
+                $crate::ipc::is_meilisearch_available,
+                $crate::ipc::search_content,
+                $crate::ipc::index_asset_for_search,
+                $crate::ipc::index_transcripts_for_search,
+                $crate::ipc::remove_asset_from_search,
+                // Settings
+                $crate::ipc::get_settings,
+                $crate::ipc::set_settings,
+                $crate::ipc::update_settings,
+                $crate::ipc::reset_settings,
+                // Updates
+                $crate::ipc::check_for_updates,
+                $crate::ipc::get_current_version,
+                $crate::ipc::relaunch_app,
+                $crate::ipc::download_and_install_update,
+            ]
+        };
+    }
+
+    /// Initialize and run the Tauri application
+    #[cfg_attr(mobile, tauri::mobile_entry_point)]
+    pub fn run() {
     // Create shared FFmpeg state
     let ffmpeg_state = create_ffmpeg_state();
 
@@ -620,7 +626,11 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+    }
 }
+
+#[cfg(not(test))]
+pub use tauri_app::run;
 
 // =============================================================================
 // Tests

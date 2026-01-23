@@ -14,6 +14,20 @@ fn main() {
     // Standard Tauri build
     tauri_build::build();
 
+    // ------------------------------------------------------------------------
+    // Windows CI: unit test manifest
+    // ------------------------------------------------------------------------
+    // On Windows, the Rust unit test executables are separate binaries and do
+    // not always get the same embedded manifest/resources as the main Tauri app
+    // binary. Some transitive UI dependencies import Common Controls v6-only
+    // symbols (e.g. `TaskDialogIndirect`), which will fail to resolve unless the
+    // Common Controls v6 assembly is activated via an app manifest.
+    //
+    // We only enable this when explicitly requested (CI) to avoid any risk of
+    // manifest/resource duplication for normal builds.
+    #[cfg(target_os = "windows")]
+    emit_windows_test_manifest_if_requested();
+
     // Download FFmpeg binaries if needed
     if should_download_ffmpeg() {
         println!("cargo:warning=FFmpeg binaries not found, downloading...");
@@ -34,6 +48,46 @@ fn main() {
             }
         }
     }
+}
+
+#[cfg(target_os = "windows")]
+fn emit_windows_test_manifest_if_requested() {
+    if env::var("OPENREELIO_WINDOWS_TEST_MANIFEST").ok().as_deref() != Some("1") {
+        return;
+    }
+
+    const COMMON_CONTROLS_V6_MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly manifestVersion="1.0" xmlns="urn:schemas-microsoft-com:asm.v1">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*" />
+    </dependentAssembly>
+  </dependency>
+</assembly>
+"#;
+
+    let Ok(out_dir) = env::var("OUT_DIR") else {
+        return;
+    };
+
+    let manifest_path = PathBuf::from(out_dir).join("openreelio.common-controls-v6.manifest");
+    if std::fs::write(&manifest_path, COMMON_CONTROLS_V6_MANIFEST).is_err() {
+        return;
+    }
+
+    // Merge and embed the manifest into every linked artifact in this build.
+    // In CI this is used specifically for `cargo test` on Windows.
+    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+    println!(
+        "cargo:rustc-link-arg=/MANIFESTINPUT:{}",
+        manifest_path.display()
+    );
 }
 
 /// Determine if FFmpeg should be downloaded during build

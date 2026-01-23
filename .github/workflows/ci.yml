@@ -227,6 +227,10 @@ jobs:
       - name: Create dist directory for Tauri
         run: mkdir -p dist
 
+      - name: Configure Windows test manifest
+        if: runner.os == 'Windows'
+        run: echo "OPENREELIO_WINDOWS_TEST_MANIFEST=1" >> $env:GITHUB_ENV
+
       - name: Run bundler unit tests
         working-directory: src-tauri
         run: cargo test --locked bundler --features bundled-ffmpeg -- --nocapture
