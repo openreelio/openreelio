@@ -188,7 +188,7 @@ pub struct GeneralSettings {
     pub recent_projects_limit: u32,
 
     /// Check for updates on startup
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub check_updates_on_startup: bool,
 
     /// Default project location
@@ -202,7 +202,7 @@ impl Default for GeneralSettings {
             language: default_language(),
             show_welcome_on_startup: true,
             recent_projects_limit: default_recent_limit(),
-            check_updates_on_startup: true,
+            check_updates_on_startup: false,
             default_project_location: None,
         }
     }
@@ -218,6 +218,10 @@ fn default_recent_limit() -> u32 {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_false() -> bool {
+    false
 }
 
 /// Editor settings
@@ -835,5 +839,228 @@ mod tests {
         assert_eq!(loaded.appearance.accent_color, default_accent_color());
         assert_eq!(loaded.editor.default_timeline_zoom, 0.1);
         assert_eq!(loaded.performance.cache_size_mb, 128);
+    }
+
+    #[test]
+    fn test_normalization_handles_nan_values() {
+        let mut settings = AppSettings::default();
+        settings.playback.default_volume = f64::NAN;
+        settings.editor.default_timeline_zoom = f64::NAN;
+        settings.appearance.ui_scale = f64::NAN;
+
+        settings.normalize();
+
+        // NaN should be clamped to minimum value
+        assert!(!settings.playback.default_volume.is_nan());
+        assert!(!settings.editor.default_timeline_zoom.is_nan());
+        assert!(!settings.appearance.ui_scale.is_nan());
+    }
+
+    #[test]
+    fn test_normalization_handles_infinity() {
+        let mut settings = AppSettings::default();
+        settings.playback.default_volume = f64::INFINITY;
+        settings.editor.default_timeline_zoom = f64::NEG_INFINITY;
+
+        settings.normalize();
+
+        assert!(settings.playback.default_volume.is_finite());
+        assert!(settings.editor.default_timeline_zoom.is_finite());
+    }
+
+    #[test]
+    fn test_hex_color_validation() {
+        assert!(is_hex_color("#3b82f6"));
+        assert!(is_hex_color("#FFFFFF"));
+        assert!(is_hex_color("#000000"));
+        assert!(is_hex_color("#aAbBcC"));
+
+        assert!(!is_hex_color("3b82f6")); // Missing #
+        assert!(!is_hex_color("#3b82f")); // Too short
+        assert!(!is_hex_color("#3b82f6f")); // Too long
+        assert!(!is_hex_color("#gggggg")); // Invalid hex chars
+        assert!(!is_hex_color("")); // Empty
+        assert!(!is_hex_color("not-a-color")); // Not a color
+    }
+
+    #[test]
+    fn test_normalize_enum_case_insensitive() {
+        assert_eq!(
+            normalize_enum("AUTO", &["auto", "full", "half"], "auto".to_string()),
+            "auto"
+        );
+        assert_eq!(
+            normalize_enum("Full", &["auto", "full", "half"], "auto".to_string()),
+            "full"
+        );
+        assert_eq!(
+            normalize_enum("INVALID", &["auto", "full", "half"], "auto".to_string()),
+            "auto"
+        );
+    }
+
+    #[test]
+    fn test_memory_limit_zero_is_auto() {
+        let mut settings = AppSettings::default();
+        settings.performance.memory_limit_mb = 0;
+
+        settings.normalize();
+
+        // Zero should remain zero (means "auto")
+        assert_eq!(settings.performance.memory_limit_mb, 0);
+    }
+
+    #[test]
+    fn test_memory_limit_non_zero_is_clamped() {
+        let mut settings = AppSettings::default();
+        settings.performance.memory_limit_mb = 100; // Below minimum
+
+        settings.normalize();
+
+        assert_eq!(settings.performance.memory_limit_mb, 256); // Clamped to minimum
+    }
+
+    #[test]
+    fn test_concurrent_read_write() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let temp_dir = TempDir::new().unwrap();
+        let manager = Arc::new(SettingsManager::new(temp_dir.path().to_path_buf()));
+
+        // Create initial settings
+        let initial_settings = AppSettings::default();
+        manager.save(&initial_settings).unwrap();
+
+        let mut handles = vec![];
+
+        // Spawn multiple reader threads
+        for _ in 0..5 {
+            let manager_clone = Arc::clone(&manager);
+            handles.push(thread::spawn(move || {
+                for _ in 0..10 {
+                    let _ = manager_clone.load();
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }));
+        }
+
+        // Spawn multiple writer threads
+        for i in 0..3 {
+            let manager_clone = Arc::clone(&manager);
+            handles.push(thread::spawn(move || {
+                for j in 0..5 {
+                    let mut settings = AppSettings::default();
+                    settings.general.recent_projects_limit = (i * 10 + j) as u32;
+                    let _ = manager_clone.save(&settings);
+                    thread::sleep(std::time::Duration::from_millis(2));
+                }
+            }));
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().expect("Thread should not panic");
+        }
+
+        // Verify file is still valid
+        let final_settings = manager.load();
+        assert!(final_settings.general.recent_projects_limit >= 1);
+        assert!(final_settings.general.recent_projects_limit <= 50);
+    }
+
+    #[test]
+    fn test_reset_clears_pending_changes() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = SettingsManager::new(temp_dir.path().to_path_buf());
+
+        let mut settings = AppSettings::default();
+        settings.general.language = "ko".to_string();
+        manager.save(&settings).unwrap();
+
+        let reset_settings = manager.reset().unwrap();
+        assert_eq!(reset_settings.general.language, "en");
+        assert!(!manager.settings_path().exists());
+    }
+
+    #[test]
+    fn test_save_creates_parent_directories() {
+        let temp_dir = TempDir::new().unwrap();
+        let nested_path = temp_dir.path().join("nested").join("dir").join("path");
+        let manager = SettingsManager::new(nested_path);
+
+        let settings = AppSettings::default();
+        let result = manager.save(&settings);
+
+        assert!(result.is_ok());
+        assert!(manager.settings_path().exists());
+    }
+
+    #[test]
+    fn test_clamp_f64_handles_edge_cases() {
+        // Normal values
+        assert_eq!(clamp_f64(0.5, 0.0, 1.0), 0.5);
+        assert_eq!(clamp_f64(0.0, 0.0, 1.0), 0.0);
+        assert_eq!(clamp_f64(1.0, 0.0, 1.0), 1.0);
+
+        // Out of range
+        assert_eq!(clamp_f64(-1.0, 0.0, 1.0), 0.0);
+        assert_eq!(clamp_f64(2.0, 0.0, 1.0), 1.0);
+
+        // Special values
+        assert_eq!(clamp_f64(f64::NAN, 0.0, 1.0), 0.0);
+        assert_eq!(clamp_f64(f64::INFINITY, 0.0, 1.0), 0.0);
+        assert_eq!(clamp_f64(f64::NEG_INFINITY, 0.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn test_partial_json_with_unknown_fields_is_ignored() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(SETTINGS_FILE);
+        fs::write(
+            &settings_path,
+            r#"{
+                "version": 1,
+                "general": {"language": "ja"},
+                "unknown_section": {"foo": "bar"},
+                "editor": {"unknown_field": 123}
+            }"#,
+        )
+        .unwrap();
+
+        let manager = SettingsManager::new(temp_dir.path().to_path_buf());
+        let settings = manager.load();
+
+        // Known fields should work
+        assert_eq!(settings.general.language, "ja");
+        // Unknown fields should not crash
+        assert_eq!(settings.version, SETTINGS_VERSION);
+    }
+
+    #[test]
+    fn test_settings_version_is_always_current() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(SETTINGS_FILE);
+        fs::write(
+            &settings_path,
+            r#"{"version": 0, "general": {"language": "ja"}}"#,
+        )
+        .unwrap();
+
+        let manager = SettingsManager::new(temp_dir.path().to_path_buf());
+        let settings = manager.load();
+
+        // Version should be migrated to current
+        assert_eq!(settings.version, SETTINGS_VERSION);
+    }
+
+    #[test]
+    fn test_lock_path_with_root_directory() {
+        // Edge case: settings path in root directory
+        let manager = SettingsManager::new(std::path::PathBuf::from("/"));
+        let lock_path = manager.lock_path();
+
+        // Should not panic and should return a valid path
+        assert!(!lock_path.as_os_str().is_empty());
     }
 }
