@@ -6,16 +6,55 @@
 
 use std::collections::BinaryHeap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use tauri::{Emitter, Manager};
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::core::{
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
+    fs::{validate_local_input_path_async, validate_path_id_component},
     jobs::{Job, JobStatus, JobType},
     CoreResult, JobId,
 };
+
+// =============================================================================
+// Mutex Helpers
+// =============================================================================
+
+/// Acquires a mutex lock, recovering from poisoning if necessary.
+///
+/// In a video editing application, we prefer to continue operating with potentially
+/// stale state rather than panicking. If a thread panics while holding the lock,
+/// we log the event and recover the data.
+///
+/// This is safe because:
+/// 1. The job queue is transient (jobs can be resubmitted)
+/// 2. Individual job failures don't corrupt the overall system
+/// 3. User experience is better with graceful degradation
+fn acquire_lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                "Mutex was poisoned (likely due to a panic in another thread). \
+                 Recovering data - some jobs may need to be resubmitted."
+            );
+            poisoned.into_inner()
+        }
+    }
+}
+
+/// Attempts to acquire a mutex lock, returning an error string if poisoned.
+///
+/// Use this variant when you want to propagate the error rather than recover.
+#[allow(dead_code)]
+fn try_acquire_lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, String> {
+    mutex.lock().map_err(|e: PoisonError<_>| {
+        tracing::error!("Mutex poisoned: {:?}", e);
+        "Internal error: mutex poisoned".to_string()
+    })
+}
 
 // =============================================================================
 // Job Handle
@@ -158,7 +197,7 @@ impl WorkerPool {
         let job_id = job.id.clone();
 
         {
-            let mut queue = self.queue.lock().unwrap();
+            let mut queue = acquire_lock(&self.queue);
             if queue.len() >= self.config.max_queue_size {
                 return Err(crate::core::CoreError::Internal(
                     "Job queue is full".to_string(),
@@ -172,12 +211,12 @@ impl WorkerPool {
 
     /// Gets the current queue length
     pub fn queue_len(&self) -> usize {
-        self.queue.lock().unwrap().len()
+        acquire_lock(&self.queue).len()
     }
 
     /// Gets all active jobs
     pub fn active_jobs(&self) -> Vec<Job> {
-        self.active_jobs.lock().unwrap().values().cloned().collect()
+        acquire_lock(&self.active_jobs).values().cloned().collect()
     }
 
     /// Gets all queued jobs (waiting to be processed)
@@ -200,12 +239,12 @@ impl WorkerPool {
     /// Gets a job by ID
     pub fn get_job(&self, job_id: &str) -> Option<Job> {
         // Check active jobs
-        if let Some(job) = self.active_jobs.lock().unwrap().get(job_id) {
+        if let Some(job) = acquire_lock(&self.active_jobs).get(job_id) {
             return Some(job.clone());
         }
 
         // Check queue
-        let queue = self.queue.lock().unwrap();
+        let queue = acquire_lock(&self.queue);
         queue
             .iter()
             .find(|e| e.job.id == job_id)
@@ -216,7 +255,7 @@ impl WorkerPool {
     pub fn cancel(&self, job_id: &str) -> bool {
         // Remove from queue if present
         {
-            let mut queue = self.queue.lock().unwrap();
+            let mut queue = acquire_lock(&self.queue);
             let initial_len = queue.len();
             let entries: Vec<_> = queue.drain().filter(|e| e.job.id != job_id).collect();
             for entry in entries {
@@ -228,7 +267,7 @@ impl WorkerPool {
         }
 
         // Mark as cancelled in active jobs
-        if let Some(job) = self.active_jobs.lock().unwrap().get_mut(job_id) {
+        if let Some(job) = acquire_lock(&self.active_jobs).get_mut(job_id) {
             job.status = JobStatus::Cancelled;
             let _ = self.event_tx.send(JobEvent::StatusChanged {
                 job_id: job_id.to_string(),
@@ -309,48 +348,6 @@ impl JobProcessor {
         }
     }
 
-    fn validate_path_id_component(&self, id: &str, label: &str) -> Result<(), String> {
-        if id.is_empty() {
-            return Err(format!("{label} is empty"));
-        }
-        if id.contains("..") || id.contains('/') || id.contains('\\') || id.contains(':') {
-            return Err(format!(
-                "Invalid {label}: contains path traversal characters"
-            ));
-        }
-        Ok(())
-    }
-
-    async fn validate_input_file_path(&self, path: &str, label: &str) -> Result<PathBuf, String> {
-        let trimmed = path.trim();
-        if trimmed.is_empty() {
-            return Err(format!("{label} is empty"));
-        }
-
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("http://") || lower.starts_with("https://") {
-            return Err(format!("{label} must be a local file path"));
-        }
-
-        let pb = PathBuf::from(trimmed);
-        if !pb.is_absolute() {
-            return Err(format!(
-                "{label} must be an absolute path: {}",
-                pb.display()
-            ));
-        }
-
-        // Use async metadata to avoid blocking the async runtime
-        let meta = tokio::fs::metadata(&pb)
-            .await
-            .map_err(|_| format!("{label} file not found: {}", pb.display()))?;
-        if !meta.is_file() {
-            return Err(format!("{label} is not a file: {}", pb.display()));
-        }
-
-        Ok(pb)
-    }
-
     /// Process a single job
     pub async fn process(&self, job: &mut Job) -> Result<serde_json::Value, String> {
         tracing::info!("Processing job {}: {:?}", job.id, job.job_type);
@@ -410,7 +407,7 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing assetId in payload")?;
 
-        self.validate_path_id_component(asset_id, "assetId")?;
+        validate_path_id_component(asset_id, "assetId")?;
 
         let input_path = job
             .payload
@@ -418,9 +415,7 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing inputPath in payload")?;
 
-        let input_path = self
-            .validate_input_file_path(input_path, "inputPath")
-            .await?;
+        let input_path = validate_local_input_path_async(input_path, "inputPath").await?;
 
         let width = job
             .payload
@@ -475,7 +470,7 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing assetId in payload")?;
 
-        self.validate_path_id_component(asset_id, "assetId")?;
+        validate_path_id_component(asset_id, "assetId")?;
 
         let input_path = job
             .payload
@@ -483,9 +478,7 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing inputPath in payload")?;
 
-        let input_path = self
-            .validate_input_file_path(input_path, "inputPath")
-            .await?;
+        let input_path = validate_local_input_path_async(input_path, "inputPath").await?;
 
         // Emit generating event
         let _ = self.app_handle.emit(
@@ -600,7 +593,7 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing assetId in payload")?;
 
-        self.validate_path_id_component(asset_id, "assetId")?;
+        validate_path_id_component(asset_id, "assetId")?;
 
         let input_path = job
             .payload
@@ -608,9 +601,7 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing inputPath in payload")?;
 
-        let input_path = self
-            .validate_input_file_path(input_path, "inputPath")
-            .await?;
+        let input_path = validate_local_input_path_async(input_path, "inputPath").await?;
 
         let samples_per_second = job
             .payload
@@ -703,13 +694,13 @@ impl JobProcessor {
             .and_then(|v| v.as_str())
             .ok_or("Missing assetId in payload")?;
 
-        self.validate_path_id_component(asset_id, "assetId")?;
+        validate_path_id_component(asset_id, "assetId")?;
 
         // Options may arrive either flattened or nested under `options`.
         let options = job.payload.get("options");
 
         let input_path = if let Some(path) = job.payload.get("inputPath").and_then(|v| v.as_str()) {
-            self.validate_input_file_path(path, "inputPath")
+            validate_local_input_path_async(path, "inputPath")
                 .await?
                 .to_string_lossy()
                 .to_string()
@@ -1067,21 +1058,216 @@ impl JobProcessor {
         }))
     }
 
-    /// Process preview render job (placeholder)
+    /// Process preview render job.
+    ///
+    /// Renders a preview segment of the timeline with optimized settings for fast playback.
+    /// This is used for timeline preview during editing, not final export.
+    ///
+    /// # Payload
+    ///
+    /// * `sequenceId` (required) - ID of the sequence to render
+    /// * `startTime` (optional) - Start time in seconds for range preview
+    /// * `endTime` (optional) - End time in seconds for range preview
+    ///
+    /// # Events
+    ///
+    /// * `preview:rendering` - Emitted when preview render starts
+    /// * `preview:progress` - Emitted with progress updates
+    /// * `preview:complete` - Emitted on successful completion
+    /// * `preview:failed` - Emitted on failure
     async fn process_preview_render(&self, job: &Job) -> Result<serde_json::Value, String> {
+        use crate::core::render::{ExportEngine, ExportSettings};
+
+        // Validate required payload fields
         let sequence_id = job
             .payload
             .get("sequenceId")
             .and_then(|v| v.as_str())
             .ok_or("Missing sequenceId in payload")?;
 
-        // TODO: Implement preview rendering
-        tracing::warn!(
-            "Preview render not yet implemented for sequence {}",
-            sequence_id
+        validate_path_id_component(sequence_id, "sequenceId")?;
+
+        // Parse optional time range
+        let start_time = job.payload.get("startTime").and_then(|v| v.as_f64());
+        let end_time = job.payload.get("endTime").and_then(|v| v.as_f64());
+
+        // Validate time range if both specified
+        if let (Some(start), Some(end)) = (start_time, end_time) {
+            if start >= end {
+                return Err(format!(
+                    "Invalid time range: start ({}) must be less than end ({})",
+                    start, end
+                ));
+            }
+            if start < 0.0 {
+                return Err("startTime cannot be negative".to_string());
+            }
+        }
+
+        tracing::info!(
+            "Starting preview render for sequence {} (range: {:?} - {:?})",
+            sequence_id,
+            start_time,
+            end_time
         );
 
-        Err("Preview render not yet implemented".to_string())
+        // Emit rendering start event
+        let _ = self.app_handle.emit(
+            "preview:rendering",
+            serde_json::json!({
+                "jobId": job.id,
+                "sequenceId": sequence_id,
+                "startTime": start_time,
+                "endTime": end_time,
+            }),
+        );
+
+        // Get project state from AppState
+        let app_state = self.app_handle.state::<crate::AppState>();
+        let guard = app_state.project.lock().await;
+        let project = guard.as_ref().ok_or("No project open")?;
+
+        // Find the sequence
+        let sequence = project
+            .state
+            .sequences
+            .get(sequence_id)
+            .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?;
+
+        // Clone required data to release the lock
+        let sequence = sequence.clone();
+        let assets = project.state.assets.clone();
+        let effects = project.state.effects.clone();
+        drop(guard);
+
+        // Check if sequence has clips
+        let total_clips: usize = sequence.tracks.iter().map(|t| t.clips.len()).sum();
+        if total_clips == 0 {
+            let error = "Sequence has no clips to render";
+            let _ = self.app_handle.emit(
+                "preview:failed",
+                serde_json::json!({
+                    "jobId": job.id,
+                    "sequenceId": sequence_id,
+                    "error": error,
+                }),
+            );
+            return Err(error.to_string());
+        }
+
+        // Create output path in cache directory
+        let output_dir = self.cache_dir.join("previews");
+        std::fs::create_dir_all(&output_dir)
+            .map_err(|e| format!("Failed to create preview directory: {}", e))?;
+
+        let output_filename = format!(
+            "{}_{}.mp4",
+            sequence_id,
+            chrono::Utc::now().timestamp_millis()
+        );
+        let output_path = output_dir.join(&output_filename);
+
+        // Create preview-optimized export settings
+        let settings = ExportSettings::preview(output_path.clone(), start_time, end_time);
+
+        // Get FFmpeg runner
+        let state = self.ffmpeg_state.read().await;
+        let runner = state.runner().ok_or("FFmpeg not available")?;
+
+        // Create export engine
+        let export_engine = ExportEngine::new(runner.clone());
+
+        // Create progress channel
+        let (progress_tx, mut progress_rx) =
+            tokio::sync::mpsc::channel::<crate::core::render::ExportProgress>(32);
+
+        let app_handle = self.app_handle.clone();
+        let job_id = job.id.clone();
+        let seq_id = sequence_id.to_string();
+
+        // Spawn progress reporter task
+        let progress_task = tokio::spawn(async move {
+            while let Some(progress) = progress_rx.recv().await {
+                let _ = app_handle.emit(
+                    "preview:progress",
+                    serde_json::json!({
+                        "jobId": job_id,
+                        "sequenceId": seq_id,
+                        "frame": progress.frame,
+                        "totalFrames": progress.total_frames,
+                        "percent": progress.percent,
+                        "fps": progress.fps,
+                        "etaSeconds": progress.eta_seconds,
+                        "message": progress.message,
+                    }),
+                );
+            }
+        });
+
+        // Execute preview render
+        let result = export_engine
+            .export_sequence_with_effects(
+                &sequence,
+                &assets,
+                &effects,
+                &settings,
+                Some(progress_tx),
+            )
+            .await;
+
+        // Wait for progress reporter to finish
+        let _ = progress_task.await;
+
+        match result {
+            Ok(export_result) => {
+                let preview_path = export_result.output_path.to_string_lossy().to_string();
+
+                // Emit completion event
+                let _ = self.app_handle.emit(
+                    "preview:complete",
+                    serde_json::json!({
+                        "jobId": job.id,
+                        "sequenceId": sequence_id,
+                        "previewPath": preview_path,
+                        "durationSec": export_result.duration_sec,
+                        "fileSizeBytes": export_result.file_size,
+                        "encodingTimeSec": export_result.encoding_time_sec,
+                    }),
+                );
+
+                tracing::info!(
+                    "Preview render completed for sequence {}: {} ({} bytes, {:.1}s encoding)",
+                    sequence_id,
+                    preview_path,
+                    export_result.file_size,
+                    export_result.encoding_time_sec
+                );
+
+                Ok(serde_json::json!({
+                    "sequenceId": sequence_id,
+                    "previewPath": preview_path,
+                    "durationSec": export_result.duration_sec,
+                    "fileSizeBytes": export_result.file_size,
+                    "encodingTimeSec": export_result.encoding_time_sec,
+                }))
+            }
+            Err(e) => {
+                let error_msg = format!("Preview render failed: {}", e);
+
+                // Emit failure event
+                let _ = self.app_handle.emit(
+                    "preview:failed",
+                    serde_json::json!({
+                        "jobId": job.id,
+                        "sequenceId": sequence_id,
+                        "error": error_msg,
+                    }),
+                );
+
+                tracing::error!("Preview render failed for sequence {}: {}", sequence_id, e);
+                Err(error_msg)
+            }
+        }
     }
 
     /// Process final render job (placeholder - see start_render IPC)
@@ -1324,7 +1510,7 @@ pub(crate) fn start_workers_with_arcs(
                     _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
                         // Try to get a job from the queue
                         let job_opt = {
-                            let mut queue_guard = queue_clone.lock().unwrap();
+                            let mut queue_guard = acquire_lock(&queue_clone);
                             queue_guard.pop().map(|entry| entry.job)
                         };
 
@@ -1337,7 +1523,7 @@ pub(crate) fn start_workers_with_arcs(
 
                             // Move to active jobs
                             {
-                                let mut active_guard = active_clone.lock().unwrap();
+                                let mut active_guard = acquire_lock(&active_clone);
                                 active_guard.insert(job.id.clone(), job.clone());
                             }
 
@@ -1379,7 +1565,7 @@ pub(crate) fn start_workers_with_arcs(
 
                             // Update job in active jobs
                             {
-                                let mut active_guard = active_clone.lock().unwrap();
+                                let mut active_guard = acquire_lock(&active_clone);
                                 active_guard.insert(job.id.clone(), job);
                             }
                         }
@@ -1443,7 +1629,7 @@ pub fn start_workers(
                     _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
                         // Try to get a job from the queue
                         let job_opt = {
-                            let mut queue_guard = queue_clone.lock().unwrap();
+                            let mut queue_guard = acquire_lock(&queue_clone);
                             queue_guard.pop().map(|entry| entry.job)
                         };
 
@@ -1456,7 +1642,7 @@ pub fn start_workers(
 
                             // Move to active jobs
                             {
-                                let mut active_guard = active_clone.lock().unwrap();
+                                let mut active_guard = acquire_lock(&active_clone);
                                 active_guard.insert(job.id.clone(), job.clone());
                             }
 
@@ -1498,7 +1684,7 @@ pub fn start_workers(
 
                             // Update job in active jobs
                             {
-                                let mut active_guard = active_clone.lock().unwrap();
+                                let mut active_guard = acquire_lock(&active_clone);
                                 active_guard.insert(job.id.clone(), job);
                             }
                         }
@@ -1561,7 +1747,7 @@ mod tests {
         pool.submit(high).unwrap();
 
         // Check that high priority job is first
-        let queue = pool.queue.lock().unwrap();
+        let queue = acquire_lock(&pool.queue);
         let first = queue.peek().unwrap();
         assert_eq!(first.job.priority, Priority::UserRequest);
     }
@@ -1582,5 +1768,143 @@ mod tests {
         assert_eq!(found.unwrap().job_type, JobType::ThumbnailGeneration);
 
         assert!(pool.get_job("nonexistent").is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // PreviewRender Job Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_preview_render_job_creation() {
+        let job = Job::new(
+            JobType::PreviewRender,
+            serde_json::json!({
+                "sequenceId": "seq_001",
+                "startTime": 0.0,
+                "endTime": 10.0,
+            }),
+        );
+
+        assert_eq!(job.job_type, JobType::PreviewRender);
+        assert!(job.payload.get("sequenceId").is_some());
+        assert_eq!(
+            job.payload.get("sequenceId").unwrap().as_str().unwrap(),
+            "seq_001"
+        );
+    }
+
+    #[test]
+    fn test_preview_render_job_with_priority() {
+        let job = Job::new(
+            JobType::PreviewRender,
+            serde_json::json!({ "sequenceId": "seq_001" }),
+        )
+        .with_priority(Priority::Preview);
+
+        assert_eq!(job.priority, Priority::Preview);
+    }
+
+    #[test]
+    fn test_preview_render_job_payload_parsing() {
+        // Test with full payload
+        let full_payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "startTime": 5.0,
+            "endTime": 15.0,
+        });
+
+        let job = Job::new(JobType::PreviewRender, full_payload.clone());
+
+        let sequence_id = job.payload.get("sequenceId").and_then(|v| v.as_str());
+        let start_time = job.payload.get("startTime").and_then(|v| v.as_f64());
+        let end_time = job.payload.get("endTime").and_then(|v| v.as_f64());
+
+        assert_eq!(sequence_id, Some("seq_001"));
+        assert_eq!(start_time, Some(5.0));
+        assert_eq!(end_time, Some(15.0));
+    }
+
+    #[test]
+    fn test_preview_render_job_payload_optional_fields() {
+        // Test with minimal payload (only required fields)
+        let minimal_payload = serde_json::json!({
+            "sequenceId": "seq_002",
+        });
+
+        let job = Job::new(JobType::PreviewRender, minimal_payload);
+
+        let sequence_id = job.payload.get("sequenceId").and_then(|v| v.as_str());
+        let start_time = job.payload.get("startTime").and_then(|v| v.as_f64());
+        let end_time = job.payload.get("endTime").and_then(|v| v.as_f64());
+
+        assert_eq!(sequence_id, Some("seq_002"));
+        assert_eq!(start_time, None); // Optional, not provided
+        assert_eq!(end_time, None); // Optional, not provided
+    }
+
+    #[test]
+    fn test_preview_render_job_submission() {
+        let pool = WorkerPool::with_defaults();
+
+        let job = Job::new(
+            JobType::PreviewRender,
+            serde_json::json!({ "sequenceId": "seq_001" }),
+        )
+        .with_priority(Priority::Preview);
+
+        let job_id = pool.submit(job).unwrap();
+        assert!(!job_id.is_empty());
+
+        let found = pool.get_job(&job_id);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().job_type, JobType::PreviewRender);
+    }
+}
+
+// =============================================================================
+// Preview Render Settings Tests (in export.rs tests, but related)
+// =============================================================================
+
+#[cfg(test)]
+mod preview_settings_tests {
+    use crate::core::render::ExportSettings;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_preview_settings_default_values() {
+        let settings = ExportSettings::preview(PathBuf::from("/tmp/preview.mp4"), None, None);
+
+        // Verify preview-optimized defaults
+        assert_eq!(settings.width, Some(1280));
+        assert_eq!(settings.height, Some(720));
+        assert_eq!(settings.video_bitrate, Some("2M".to_string()));
+        assert_eq!(settings.audio_bitrate, Some("128k".to_string()));
+        assert_eq!(settings.crf, Some(28)); // Higher CRF for faster encoding
+        assert!(!settings.two_pass); // Single pass for speed
+    }
+
+    #[test]
+    fn test_preview_settings_with_time_range() {
+        let settings =
+            ExportSettings::preview(PathBuf::from("/tmp/preview.mp4"), Some(5.0), Some(15.0));
+
+        assert_eq!(settings.start_time, Some(5.0));
+        assert_eq!(settings.end_time, Some(15.0));
+    }
+
+    #[test]
+    fn test_preview_settings_without_time_range() {
+        let settings = ExportSettings::preview(PathBuf::from("/tmp/preview.mp4"), None, None);
+
+        assert_eq!(settings.start_time, None);
+        assert_eq!(settings.end_time, None);
+    }
+
+    #[test]
+    fn test_preview_settings_output_path() {
+        let output_path = PathBuf::from("/cache/previews/seq_001_preview.mp4");
+        let settings = ExportSettings::preview(output_path.clone(), None, None);
+
+        assert_eq!(settings.output_path, output_path);
     }
 }

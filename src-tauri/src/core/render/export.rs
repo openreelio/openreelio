@@ -231,6 +231,37 @@ impl ExportSettings {
             },
         }
     }
+
+    /// Create preview render settings optimized for fast playback preview.
+    ///
+    /// Preview renders use lower quality settings for quick feedback:
+    /// - 720p resolution (downscaled from source)
+    /// - Lower bitrate for faster encoding
+    /// - Faster encoding preset
+    /// - H.264 for broad compatibility
+    ///
+    /// # Arguments
+    ///
+    /// * `output_path` - Path where the preview video will be saved
+    /// * `start_time` - Optional start time in seconds for range preview
+    /// * `end_time` - Optional end time in seconds for range preview
+    pub fn preview(output_path: PathBuf, start_time: Option<f64>, end_time: Option<f64>) -> Self {
+        Self {
+            preset: ExportPreset::Custom,
+            output_path,
+            video_codec: VideoCodec::H264,
+            audio_codec: AudioCodec::Aac,
+            width: Some(1280),
+            height: Some(720),
+            video_bitrate: Some("2M".to_string()),
+            audio_bitrate: Some("128k".to_string()),
+            fps: Some(30.0),
+            crf: Some(28), // Higher CRF = lower quality but faster
+            two_pass: false,
+            start_time,
+            end_time,
+        }
+    }
 }
 
 /// Export progress update
@@ -283,6 +314,39 @@ pub enum ExportError {
 }
 
 // =============================================================================
+// Audio Stream Detection
+// =============================================================================
+
+/// Information about whether an asset has an audio stream.
+///
+/// This is used to determine whether to include audio filters in the export
+/// filter graph. Assets without audio (like screen recordings without sound,
+/// or image sequences) should not have audio filters applied.
+#[derive(Debug, Clone, Default)]
+pub struct AssetAudioInfo {
+    /// Whether the asset has an audio stream
+    pub has_audio: bool,
+}
+
+impl AssetAudioInfo {
+    /// Create from FFprobe MediaInfo result
+    pub fn from_media_info(media_info: &crate::core::ffmpeg::MediaInfo) -> Self {
+        Self {
+            has_audio: media_info.audio.is_some(),
+        }
+    }
+
+    /// Create from Asset metadata (fallback when MediaInfo is not available)
+    ///
+    /// Uses presence of audio info as heuristic for audio presence.
+    pub fn from_asset(asset: &Asset) -> Self {
+        Self {
+            has_audio: asset.audio.is_some(),
+        }
+    }
+}
+
+// =============================================================================
 // Export Engine
 // =============================================================================
 
@@ -295,6 +359,59 @@ impl ExportEngine {
     /// Create a new export engine
     pub fn new(ffmpeg: FFmpegRunner) -> Self {
         Self { ffmpeg }
+    }
+
+    /// Probe all unique assets in a sequence to determine audio stream availability
+    ///
+    /// This method uses FFprobe to examine each unique media file referenced by
+    /// clips in the sequence, returning a map of asset ID to audio info.
+    ///
+    /// # Arguments
+    ///
+    /// * `sequence` - The sequence containing clips to probe
+    /// * `assets` - Map of asset ID to Asset
+    ///
+    /// # Returns
+    ///
+    /// A map of asset ID to `AssetAudioInfo` indicating whether each asset has audio
+    pub async fn probe_assets_for_audio(
+        &self,
+        sequence: &Sequence,
+        assets: &std::collections::HashMap<String, Asset>,
+    ) -> std::collections::HashMap<String, AssetAudioInfo> {
+        let mut audio_info_map = std::collections::HashMap::new();
+
+        // Collect unique asset IDs from all clips
+        let mut unique_asset_ids = std::collections::HashSet::new();
+        for track in &sequence.tracks {
+            for clip in &track.clips {
+                unique_asset_ids.insert(clip.asset_id.clone());
+            }
+        }
+
+        // Probe each unique asset
+        for asset_id in unique_asset_ids {
+            if let Some(asset) = assets.get(&asset_id) {
+                // Try to probe the media file
+                match self.ffmpeg.probe(Path::new(&asset.uri)).await {
+                    Ok(media_info) => {
+                        audio_info_map
+                            .insert(asset_id, AssetAudioInfo::from_media_info(&media_info));
+                    }
+                    Err(e) => {
+                        // Probe failed - fall back to asset metadata
+                        tracing::warn!(
+                            "Failed to probe asset '{}' for audio info: {}. Using asset metadata as fallback.",
+                            asset_id,
+                            e
+                        );
+                        audio_info_map.insert(asset_id, AssetAudioInfo::from_asset(asset));
+                    }
+                }
+            }
+        }
+
+        audio_info_map
     }
 
     /// Build FFmpeg arguments for simple single-clip export
@@ -386,19 +503,47 @@ impl ExportEngine {
         args
     }
 
-    /// Build FFmpeg complex filter for multi-clip export with effects support
+    /// Build FilterGraph for a clip's effects
+    fn build_clip_filter_graph(
+        &self,
+        clip: &Clip,
+        effects: &std::collections::HashMap<String, Effect>,
+    ) -> FilterGraph {
+        let mut graph = FilterGraph::new();
+
+        // Look up each effect ID and add to graph
+        for effect_id in &clip.effects {
+            if let Some(effect) = effects.get(effect_id) {
+                graph.add_effect(effect.clone());
+            }
+        }
+
+        // Sort effects by order
+        graph.sort_by_order();
+
+        graph
+    }
+
+    /// Build FFmpeg complex filter with audio stream awareness
+    ///
+    /// This method properly handles clips without audio streams by:
+    /// 1. Checking audio availability for each asset via the audio_info map
+    /// 2. Skipping audio filters for assets without audio
+    /// 3. Generating appropriate concat filters based on actual stream availability
     ///
     /// # Arguments
     ///
     /// * `sequence` - The sequence to export
     /// * `assets` - Map of asset ID to Asset
-    /// * `effects` - Map of effect ID to Effect (for looking up clip effects)
+    /// * `effects` - Map of effect ID to Effect
+    /// * `audio_info` - Map of asset ID to audio stream availability info
     /// * `settings` - Export settings
-    fn build_complex_filter_args_with_effects(
+    pub fn build_complex_filter_args_with_audio_info(
         &self,
         sequence: &Sequence,
         assets: &std::collections::HashMap<String, Asset>,
         effects: &std::collections::HashMap<String, Effect>,
+        audio_info: &std::collections::HashMap<String, AssetAudioInfo>,
         settings: &ExportSettings,
     ) -> Result<Vec<String>, ExportError> {
         let mut args = Vec::new();
@@ -430,6 +575,15 @@ impl ExportEngine {
             let asset = assets.get(&clip.asset_id).ok_or_else(|| {
                 ExportError::InvalidSettings(format!("Asset not found: {}", clip.asset_id))
             })?;
+
+            // Check if this asset has audio
+            let clip_has_audio = audio_info
+                .get(&clip.asset_id)
+                .map(|info| info.has_audio)
+                .unwrap_or_else(|| {
+                    // Fallback: check asset metadata
+                    AssetAudioInfo::from_asset(asset).has_audio
+                });
 
             // Add input
             args.push("-i".to_string());
@@ -470,72 +624,75 @@ impl ExportEngine {
 
                     video_streams.push(format!("[{}]", video_out_label));
 
-                    // Audio processing: trim -> effects -> output
-                    let audio_trim_label = format!("atrim{}", input_index);
-                    let audio_out_label = format!("a{}", input_index);
+                    // Audio processing: ONLY if this asset has audio
+                    if clip_has_audio {
+                        let audio_trim_label = format!("atrim{}", input_index);
+                        let audio_out_label = format!("a{}", input_index);
 
-                    // Audio trim filter
-                    // Note: FFmpeg will fail if the input has no audio stream.
-                    // For MVP, we assume video clips have audio. TODO: probe media first.
-                    let audio_trim = format!(
-                        "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
-                        input_index,
-                        clip.range.source_in_sec,
-                        clip.range.source_out_sec,
-                        audio_trim_label
-                    );
-                    filter_complex.push_str(&audio_trim);
-                    filter_complex.push(';');
-
-                    // Apply audio effects if any
-                    if clip_filter_graph.has_audio_effects() {
-                        let effects_filter = clip_filter_graph
-                            .to_audio_filter_complex(&audio_trim_label, &audio_out_label);
-                        filter_complex.push_str(&effects_filter);
+                        // Audio trim filter
+                        let audio_trim = format!(
+                            "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
+                            input_index,
+                            clip.range.source_in_sec,
+                            clip.range.source_out_sec,
+                            audio_trim_label
+                        );
+                        filter_complex.push_str(&audio_trim);
                         filter_complex.push(';');
-                    } else {
-                        // No effects - pass through with anull filter
-                        filter_complex.push_str(&format!(
-                            "[{}]anull[{}];",
-                            audio_trim_label, audio_out_label
-                        ));
-                    }
 
-                    audio_streams.push(format!("[{}]", audio_out_label));
+                        // Apply audio effects if any
+                        if clip_filter_graph.has_audio_effects() {
+                            let effects_filter = clip_filter_graph
+                                .to_audio_filter_complex(&audio_trim_label, &audio_out_label);
+                            filter_complex.push_str(&effects_filter);
+                            filter_complex.push(';');
+                        } else {
+                            // No effects - pass through with anull filter
+                            filter_complex.push_str(&format!(
+                                "[{}]anull[{}];",
+                                audio_trim_label, audio_out_label
+                            ));
+                        }
+
+                        audio_streams.push(format!("[{}]", audio_out_label));
+                    }
+                    // If no audio, simply skip audio filter generation for this clip
                 }
                 TrackKind::Audio => {
-                    // Audio-only track processing
-                    let audio_trim_label = format!("atrim{}", input_index);
-                    let audio_out_label = format!("a{}", input_index);
+                    // Audio-only track processing - only if has audio
+                    if clip_has_audio {
+                        let audio_trim_label = format!("atrim{}", input_index);
+                        let audio_out_label = format!("a{}", input_index);
 
-                    let audio_trim = format!(
-                        "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
-                        input_index,
-                        clip.range.source_in_sec,
-                        clip.range.source_out_sec,
-                        audio_trim_label
-                    );
-                    filter_complex.push_str(&audio_trim);
-                    filter_complex.push(';');
-
-                    // Apply audio effects if any
-                    if clip_filter_graph.has_audio_effects() {
-                        let effects_filter = clip_filter_graph
-                            .to_audio_filter_complex(&audio_trim_label, &audio_out_label);
-                        filter_complex.push_str(&effects_filter);
+                        let audio_trim = format!(
+                            "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
+                            input_index,
+                            clip.range.source_in_sec,
+                            clip.range.source_out_sec,
+                            audio_trim_label
+                        );
+                        filter_complex.push_str(&audio_trim);
                         filter_complex.push(';');
-                    } else {
-                        filter_complex.push_str(&format!(
-                            "[{}]anull[{}];",
-                            audio_trim_label, audio_out_label
-                        ));
-                    }
 
-                    audio_streams.push(format!("[{}]", audio_out_label));
+                        // Apply audio effects if any
+                        if clip_filter_graph.has_audio_effects() {
+                            let effects_filter = clip_filter_graph
+                                .to_audio_filter_complex(&audio_trim_label, &audio_out_label);
+                            filter_complex.push_str(&effects_filter);
+                            filter_complex.push(';');
+                        } else {
+                            filter_complex.push_str(&format!(
+                                "[{}]anull[{}];",
+                                audio_trim_label, audio_out_label
+                            ));
+                        }
+
+                        audio_streams.push(format!("[{}]", audio_out_label));
+                    }
+                    // Skip audio-only clips that somehow have no audio
                 }
                 _ => {
                     // Skip non-video/audio tracks (caption, overlay)
-                    // These require special handling not implemented in MVP
                 }
             }
 
@@ -548,7 +705,7 @@ impl ExportEngine {
         }
         filter_complex.push(';');
 
-        // Concat all streams
+        // Concat all video streams
         if video_streams.len() == 1 {
             // Single clip - just use the processed stream
             filter_complex.push_str(&format!("{}null[outv]", video_streams[0]));
@@ -558,6 +715,7 @@ impl ExportEngine {
             filter_complex.push_str(&format!("concat=n={}:v=1:a=0[outv]", video_streams.len()));
         }
 
+        // Concat audio streams ONLY if we have any
         if !audio_streams.is_empty() {
             filter_complex.push(';');
             if audio_streams.len() == 1 {
@@ -575,6 +733,8 @@ impl ExportEngine {
         // Map outputs
         args.push("-map".to_string());
         args.push("[outv]".to_string());
+
+        // Map audio output ONLY if we have audio streams
         if !audio_streams.is_empty() {
             args.push("-map".to_string());
             args.push("[outa]".to_string());
@@ -590,7 +750,7 @@ impl ExportEngine {
             VideoCodec::Copy => "copy".to_string(),
         });
 
-        // Audio codec
+        // Audio codec ONLY if we have audio
         if !audio_streams.is_empty() {
             args.push("-c:a".to_string());
             args.push(match settings.audio_codec {
@@ -608,6 +768,7 @@ impl ExportEngine {
             args.push(bitrate.clone());
         }
 
+        // Audio bitrate ONLY if we have audio
         if let Some(ref bitrate) = settings.audio_bitrate {
             if !audio_streams.is_empty() {
                 args.push("-b:a".to_string());
@@ -629,27 +790,6 @@ impl ExportEngine {
         args.push(settings.output_path.to_string_lossy().to_string());
 
         Ok(args)
-    }
-
-    /// Build FilterGraph for a clip's effects
-    fn build_clip_filter_graph(
-        &self,
-        clip: &Clip,
-        effects: &std::collections::HashMap<String, Effect>,
-    ) -> FilterGraph {
-        let mut graph = FilterGraph::new();
-
-        // Look up each effect ID and add to graph
-        for effect_id in &clip.effects {
-            if let Some(effect) = effects.get(effect_id) {
-                graph.add_effect(effect.clone());
-            }
-        }
-
-        // Sort effects by order
-        graph.sort_by_order();
-
-        graph
     }
 
     /// Export a sequence to a video file
@@ -698,9 +838,18 @@ impl ExportEngine {
 
         let start_time = std::time::Instant::now();
 
-        // Build FFmpeg arguments with effects
-        let mut args =
-            self.build_complex_filter_args_with_effects(sequence, assets, effects, settings)?;
+        // Probe all assets to determine audio stream availability
+        // This prevents FFmpeg from failing when clips don't have audio
+        let audio_info = self.probe_assets_for_audio(sequence, assets).await;
+
+        // Build FFmpeg arguments with effects and audio info
+        let mut args = self.build_complex_filter_args_with_audio_info(
+            sequence,
+            assets,
+            effects,
+            &audio_info,
+            settings,
+        )?;
 
         // Calculate total duration based on the last clip end time on timeline
         let total_duration: f64 = sequence.duration();
@@ -1188,6 +1337,256 @@ pub struct TimelineGap {
     pub end_sec: f64,
     /// Duration of the gap
     pub duration_sec: f64,
+}
+
+/// Build FFmpeg complex filter arguments with audio stream awareness.
+///
+/// This is a standalone function that can be used without an ExportEngine instance.
+/// It handles assets that may or may not have audio streams.
+///
+/// # Arguments
+///
+/// * `sequence` - The sequence to export
+/// * `assets` - Map of asset ID to Asset
+/// * `effects` - Map of effect ID to Effect
+/// * `audio_info` - Map of asset ID to audio availability info
+/// * `settings` - Export settings
+pub fn build_complex_filter_args_with_audio_info(
+    sequence: &Sequence,
+    assets: &std::collections::HashMap<String, Asset>,
+    effects: &std::collections::HashMap<String, Effect>,
+    audio_info: &std::collections::HashMap<String, AssetAudioInfo>,
+    settings: &ExportSettings,
+) -> Result<Vec<String>, ExportError> {
+    let mut args = Vec::new();
+    let mut input_index = 0;
+    let mut filter_complex = String::new();
+    let mut video_streams = Vec::new();
+    let mut audio_streams = Vec::new();
+
+    // Collect all clips sorted by timeline position
+    let mut all_clips: Vec<(&Clip, &Track)> = Vec::new();
+    for track in &sequence.tracks {
+        for clip in &track.clips {
+            all_clips.push((clip, track));
+        }
+    }
+    all_clips.sort_by(|a, b| {
+        a.0.place
+            .timeline_in_sec
+            .partial_cmp(&b.0.place.timeline_in_sec)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    if all_clips.is_empty() {
+        return Err(ExportError::NoClips);
+    }
+
+    // Build FilterGraph helper (inline version without engine)
+    fn build_clip_filter_graph_standalone(
+        clip: &Clip,
+        effects: &std::collections::HashMap<String, Effect>,
+    ) -> FilterGraph {
+        let mut graph = FilterGraph::new();
+        for effect_id in &clip.effects {
+            if let Some(effect) = effects.get(effect_id) {
+                graph.add_effect(effect.clone());
+            }
+        }
+        graph.sort_by_order();
+        graph
+    }
+
+    // Add inputs and build filter graph
+    for (clip, track) in &all_clips {
+        let asset = assets.get(&clip.asset_id).ok_or_else(|| {
+            ExportError::InvalidSettings(format!("Asset not found: {}", clip.asset_id))
+        })?;
+
+        // Check if this asset has audio
+        let clip_has_audio = audio_info
+            .get(&clip.asset_id)
+            .map(|info| info.has_audio)
+            .unwrap_or_else(|| AssetAudioInfo::from_asset(asset).has_audio);
+
+        // Add input
+        args.push("-i".to_string());
+        args.push(asset.uri.clone());
+
+        // Build FilterGraph for this clip's effects
+        let clip_filter_graph = build_clip_filter_graph_standalone(clip, effects);
+
+        // Build filters based on track type
+        match track.kind {
+            TrackKind::Video => {
+                // Video processing
+                let trim_label = format!("trim{}", input_index);
+                let video_out_label = format!("v{}", input_index);
+
+                let trim_filter = format!(
+                    "[{}:v]trim=start={}:end={},setpts=PTS-STARTPTS[{}]",
+                    input_index, clip.range.source_in_sec, clip.range.source_out_sec, trim_label
+                );
+                filter_complex.push_str(&trim_filter);
+                filter_complex.push(';');
+
+                if clip_filter_graph.has_video_effects() {
+                    let effects_filter =
+                        clip_filter_graph.to_video_filter_complex(&trim_label, &video_out_label);
+                    filter_complex.push_str(&effects_filter);
+                    filter_complex.push(';');
+                } else {
+                    filter_complex.push_str(&format!("[{}]null[{}];", trim_label, video_out_label));
+                }
+
+                video_streams.push(format!("[{}]", video_out_label));
+
+                // Audio processing: ONLY if this asset has audio
+                if clip_has_audio {
+                    let audio_trim_label = format!("atrim{}", input_index);
+                    let audio_out_label = format!("a{}", input_index);
+
+                    let audio_trim = format!(
+                        "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
+                        input_index,
+                        clip.range.source_in_sec,
+                        clip.range.source_out_sec,
+                        audio_trim_label
+                    );
+                    filter_complex.push_str(&audio_trim);
+                    filter_complex.push(';');
+
+                    if clip_filter_graph.has_audio_effects() {
+                        let effects_filter = clip_filter_graph
+                            .to_audio_filter_complex(&audio_trim_label, &audio_out_label);
+                        filter_complex.push_str(&effects_filter);
+                        filter_complex.push(';');
+                    } else {
+                        filter_complex.push_str(&format!(
+                            "[{}]anull[{}];",
+                            audio_trim_label, audio_out_label
+                        ));
+                    }
+
+                    audio_streams.push(format!("[{}]", audio_out_label));
+                }
+            }
+            TrackKind::Audio => {
+                if clip_has_audio {
+                    let audio_trim_label = format!("atrim{}", input_index);
+                    let audio_out_label = format!("a{}", input_index);
+
+                    let audio_trim = format!(
+                        "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
+                        input_index,
+                        clip.range.source_in_sec,
+                        clip.range.source_out_sec,
+                        audio_trim_label
+                    );
+                    filter_complex.push_str(&audio_trim);
+                    filter_complex.push(';');
+
+                    if clip_filter_graph.has_audio_effects() {
+                        let effects_filter = clip_filter_graph
+                            .to_audio_filter_complex(&audio_trim_label, &audio_out_label);
+                        filter_complex.push_str(&effects_filter);
+                        filter_complex.push(';');
+                    } else {
+                        filter_complex.push_str(&format!(
+                            "[{}]anull[{}];",
+                            audio_trim_label, audio_out_label
+                        ));
+                    }
+
+                    audio_streams.push(format!("[{}]", audio_out_label));
+                }
+            }
+            _ => {}
+        }
+
+        input_index += 1;
+    }
+
+    // Remove trailing semicolon if present
+    if filter_complex.ends_with(';') {
+        filter_complex.pop();
+    }
+    filter_complex.push(';');
+
+    // Concat video streams
+    if video_streams.len() == 1 {
+        filter_complex.push_str(&format!("{}null[outv]", video_streams[0]));
+    } else {
+        filter_complex.push_str(&video_streams.join(""));
+        filter_complex.push_str(&format!("concat=n={}:v=1:a=0[outv]", video_streams.len()));
+    }
+
+    // Concat audio streams ONLY if we have any
+    if !audio_streams.is_empty() {
+        filter_complex.push(';');
+        if audio_streams.len() == 1 {
+            filter_complex.push_str(&format!("{}anull[outa]", audio_streams[0]));
+        } else {
+            filter_complex.push_str(&audio_streams.join(""));
+            filter_complex.push_str(&format!("concat=n={}:v=0:a=1[outa]", audio_streams.len()));
+        }
+    }
+
+    // Build FFmpeg arguments
+    args.push("-filter_complex".to_string());
+    args.push(filter_complex);
+
+    args.push("-map".to_string());
+    args.push("[outv]".to_string());
+
+    if !audio_streams.is_empty() {
+        args.push("-map".to_string());
+        args.push("[outa]".to_string());
+    }
+
+    args.push("-c:v".to_string());
+    args.push(match settings.video_codec {
+        VideoCodec::H264 => "libx264".to_string(),
+        VideoCodec::H265 => "libx265".to_string(),
+        VideoCodec::Vp9 => "libvpx-vp9".to_string(),
+        VideoCodec::ProRes => "prores_ks".to_string(),
+        VideoCodec::Copy => "copy".to_string(),
+    });
+
+    if !audio_streams.is_empty() {
+        args.push("-c:a".to_string());
+        args.push(match settings.audio_codec {
+            AudioCodec::Aac => "aac".to_string(),
+            AudioCodec::Mp3 => "libmp3lame".to_string(),
+            AudioCodec::Opus => "libopus".to_string(),
+            AudioCodec::Pcm => "pcm_s16le".to_string(),
+            AudioCodec::Copy => "copy".to_string(),
+        });
+    }
+
+    if let Some(ref bitrate) = settings.video_bitrate {
+        args.push("-b:v".to_string());
+        args.push(bitrate.clone());
+    }
+
+    if let Some(ref bitrate) = settings.audio_bitrate {
+        if !audio_streams.is_empty() {
+            args.push("-b:a".to_string());
+            args.push(bitrate.clone());
+        }
+    }
+
+    if let Some(crf) = settings.crf {
+        if matches!(settings.video_codec, VideoCodec::H264 | VideoCodec::H265) {
+            args.push("-crf".to_string());
+            args.push(crf.to_string());
+        }
+    }
+
+    args.push("-y".to_string());
+    args.push(settings.output_path.to_string_lossy().to_string());
+
+    Ok(args)
 }
 
 /// Detect gaps in the timeline between clips
@@ -1729,5 +2128,291 @@ mod tests {
 
         // Disabled effects should not be added to the graph
         assert!(!graph.has_video_effects());
+    }
+
+    // -------------------------------------------------------------------------
+    // Silent Video Export Tests (Audio Stream Handling)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_asset_audio_info_from_media_info_with_audio() {
+        use crate::core::ffmpeg::{AudioStreamInfo, MediaInfo, VideoStreamInfo};
+
+        let media_info = MediaInfo {
+            duration_sec: 10.0,
+            video: Some(VideoStreamInfo {
+                width: 1920,
+                height: 1080,
+                fps: 30.0,
+                codec: "h264".to_string(),
+                pixel_format: "yuv420p".to_string(),
+                bitrate: Some(8_000_000),
+            }),
+            audio: Some(AudioStreamInfo {
+                sample_rate: 48000,
+                channels: 2,
+                codec: "aac".to_string(),
+                bitrate: Some(192_000),
+            }),
+            format: "mp4".to_string(),
+            size_bytes: 10_000_000,
+        };
+
+        let audio_info = AssetAudioInfo::from_media_info(&media_info);
+        assert!(audio_info.has_audio);
+    }
+
+    #[test]
+    fn test_asset_audio_info_from_media_info_without_audio() {
+        use crate::core::ffmpeg::{MediaInfo, VideoStreamInfo};
+
+        let media_info = MediaInfo {
+            duration_sec: 10.0,
+            video: Some(VideoStreamInfo {
+                width: 1920,
+                height: 1080,
+                fps: 30.0,
+                codec: "h264".to_string(),
+                pixel_format: "yuv420p".to_string(),
+                bitrate: Some(8_000_000),
+            }),
+            audio: None, // No audio stream
+            format: "mp4".to_string(),
+            size_bytes: 10_000_000,
+        };
+
+        let audio_info = AssetAudioInfo::from_media_info(&media_info);
+        assert!(!audio_info.has_audio);
+    }
+
+    #[test]
+    fn test_build_filter_does_not_include_audio_for_silent_clip() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // Create sequence with one video clip
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let clip = Clip::new("silent_asset")
+            .with_source_range(0.0, 10.0)
+            .place_at(0.0);
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        // Create asset WITHOUT audio (silent video)
+        let mut silent_asset = Asset::new_video(
+            "silent_video.mp4",
+            "/path/to/silent_video.mp4",
+            VideoInfo::default(),
+        )
+        .with_duration(10.0)
+        .with_file_size(10_000_000);
+        // Override the generated ID with our test ID
+        silent_asset.id = "silent_asset".to_string();
+        // Ensure no audio
+        silent_asset.audio = None;
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("silent_asset".to_string(), silent_asset);
+
+        // Create audio info map marking this asset as having NO audio
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "silent_asset".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+
+        let effects = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        // Build args with audio info
+        let result = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &settings,
+        );
+
+        assert!(result.is_ok());
+        let args = result.unwrap();
+
+        // Convert args to single string for inspection
+        let args_str = args.join(" ");
+
+        // Should NOT contain audio trim filter [X:a]
+        assert!(
+            !args_str.contains(":a]atrim"),
+            "Filter should not include audio trim for silent video. Got: {}",
+            args_str
+        );
+
+        // Should NOT map audio output
+        assert!(
+            !args_str.contains("[outa]"),
+            "Filter should not map audio output for silent video. Got: {}",
+            args_str
+        );
+
+        // Should NOT include audio codec
+        assert!(
+            !args_str.contains("-c:a"),
+            "Args should not include audio codec for silent video. Got: {}",
+            args_str
+        );
+    }
+
+    #[test]
+    fn test_build_filter_includes_audio_for_clip_with_audio() {
+        use crate::core::assets::{AudioInfo, VideoInfo};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // Create sequence with one video clip
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let clip = Clip::new("normal_asset")
+            .with_source_range(0.0, 10.0)
+            .place_at(0.0);
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        // Create asset WITH audio
+        let mut normal_asset = Asset::new_video(
+            "normal_video.mp4",
+            "/path/to/normal_video.mp4",
+            VideoInfo::default(),
+        )
+        .with_duration(10.0)
+        .with_file_size(10_000_000);
+        // Override the generated ID with our test ID
+        normal_asset.id = "normal_asset".to_string();
+        // Add audio info
+        normal_asset.audio = Some(AudioInfo::default());
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("normal_asset".to_string(), normal_asset);
+
+        // Create audio info map marking this asset as HAVING audio
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "normal_asset".to_string(),
+            AssetAudioInfo { has_audio: true },
+        );
+
+        let effects = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        // Build args with audio info
+        let result = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &settings,
+        );
+
+        assert!(result.is_ok());
+        let args = result.unwrap();
+
+        // Convert args to single string for inspection
+        let args_str = args.join(" ");
+
+        // SHOULD contain audio trim filter
+        assert!(
+            args_str.contains(":a]atrim") || args_str.contains("[outa]"),
+            "Filter should include audio processing for video with audio. Got: {}",
+            args_str
+        );
+
+        // SHOULD include audio codec
+        assert!(
+            args_str.contains("-c:a"),
+            "Args should include audio codec for video with audio. Got: {}",
+            args_str
+        );
+    }
+
+    #[test]
+    fn test_build_filter_mixed_clips_some_with_audio() {
+        use crate::core::assets::{AudioInfo, VideoInfo};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // Create sequence with two video clips
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        // First clip: has audio
+        let clip1 = Clip::new("with_audio")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        track.add_clip(clip1);
+
+        // Second clip: NO audio
+        let clip2 = Clip::new("without_audio")
+            .with_source_range(0.0, 5.0)
+            .place_at(5.0);
+        track.add_clip(clip2);
+
+        sequence.add_track(track);
+
+        // Create asset WITH audio
+        let mut with_audio_asset = Asset::new_video(
+            "with_audio.mp4",
+            "/path/to/with_audio.mp4",
+            VideoInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_file_size(5_000_000);
+        with_audio_asset.id = "with_audio".to_string();
+        with_audio_asset.audio = Some(AudioInfo::default());
+
+        // Create asset WITHOUT audio
+        let mut without_audio_asset = Asset::new_video(
+            "without_audio.mp4",
+            "/path/to/without_audio.mp4",
+            VideoInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_file_size(5_000_000);
+        without_audio_asset.id = "without_audio".to_string();
+        without_audio_asset.audio = None;
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("with_audio".to_string(), with_audio_asset);
+        assets.insert("without_audio".to_string(), without_audio_asset);
+
+        // Create audio info map
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert("with_audio".to_string(), AssetAudioInfo { has_audio: true });
+        audio_info_map.insert(
+            "without_audio".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+
+        let effects = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        // Build args with audio info
+        let result = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &settings,
+        );
+
+        assert!(result.is_ok());
+        let args = result.unwrap();
+        let args_str = args.join(" ");
+
+        // Should have at least one audio stream (from the clip with audio)
+        // The audio concat should only include clips that have audio
+        assert!(
+            args_str.contains("[outa]") || args_str.contains("-c:a"),
+            "Export should include audio from clips that have it. Got: {}",
+            args_str
+        );
     }
 }

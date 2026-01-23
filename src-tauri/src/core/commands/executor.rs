@@ -13,6 +13,15 @@ use crate::core::{
 };
 
 // =============================================================================
+// Constants
+// =============================================================================
+
+/// Default maximum number of undo/redo history entries.
+/// This balances memory usage with user convenience.
+/// At 100 entries, with average command size of ~1KB, this uses ~100KB of memory.
+pub const DEFAULT_MAX_HISTORY_SIZE: usize = 100;
+
+// =============================================================================
 // History Entry
 // =============================================================================
 
@@ -73,7 +82,7 @@ impl CommandExecutor {
             ops_log: None,
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
-            max_history_size: 100,
+            max_history_size: DEFAULT_MAX_HISTORY_SIZE,
         }
     }
 
@@ -83,7 +92,7 @@ impl CommandExecutor {
             ops_log: Some(ops_log),
             undo_stack: VecDeque::new(),
             redo_stack: VecDeque::new(),
-            max_history_size: 100,
+            max_history_size: DEFAULT_MAX_HISTORY_SIZE,
         }
     }
 
