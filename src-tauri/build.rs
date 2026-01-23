@@ -38,6 +38,15 @@ fn main() {
 
 /// Determine if FFmpeg should be downloaded during build
 fn should_download_ffmpeg() -> bool {
+    // Require explicit opt-in to avoid non-reproducible builds and supply-chain surprises.
+    // Enable by setting `OPENREELIO_DOWNLOAD_FFMPEG=1` (recommended for CI release builds),
+    // or by building with the `bundled-ffmpeg` feature.
+    let opted_in = env::var("OPENREELIO_DOWNLOAD_FFMPEG").ok().as_deref() == Some("1")
+        || env::var("CARGO_FEATURE_BUNDLED_FFMPEG").is_ok();
+    if !opted_in {
+        return false;
+    }
+
     // Skip if explicitly disabled
     if env::var("SKIP_FFMPEG_DOWNLOAD").is_ok() {
         return false;
