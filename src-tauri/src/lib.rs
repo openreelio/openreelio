@@ -93,6 +93,9 @@ impl ActiveProject {
 
         // Create project directory if it doesn't exist
         std::fs::create_dir_all(&path)?;
+        // Ensure app-managed workspace exists (proxy/frames/cache, etc.).
+        // This also makes it safe to allowlist the directory for the asset protocol.
+        std::fs::create_dir_all(path.join(".openreelio"))?;
 
         let ops_path = path.join("ops.jsonl");
 
@@ -132,6 +135,9 @@ impl ActiveProject {
 
     /// Opens an existing project
     pub fn open(path: PathBuf) -> crate::core::CoreResult<Self> {
+        // Best-effort ensure app-managed workspace exists for older projects.
+        let _ = std::fs::create_dir_all(path.join(".openreelio"));
+
         let ops_path = path.join("ops.jsonl");
         let snapshot_path = Snapshot::default_path(&path);
         let meta_path = path.join("project.json");
@@ -204,6 +210,8 @@ pub struct AppState {
     pub ai_gateway: Mutex<AIGateway>,
     /// Meilisearch service (sidecar + indexer), when enabled
     pub search_service: Mutex<Option<std::sync::Arc<SearchService>>>,
+    /// AppHandle captured at startup for scope configuration helpers.
+    pub app_handle: OnceLock<tauri::AppHandle>,
 }
 
 impl AppState {
@@ -216,6 +224,63 @@ impl AppState {
             cache_manager: Mutex::new(CacheManager::new()),
             ai_gateway: Mutex::new(AIGateway::with_defaults()),
             search_service: Mutex::new(None),
+            app_handle: OnceLock::new(),
+        }
+    }
+
+    /// Stores the app handle for later use (best-effort, idempotent).
+    pub fn set_app_handle(&self, handle: tauri::AppHandle) {
+        let _ = self.app_handle.set(handle);
+    }
+
+    /// Allowlist a directory for the asset protocol (best-effort).
+    pub fn allow_asset_protocol_directory(&self, path: &std::path::Path, recursive: bool) {
+        let Some(handle) = self.app_handle.get() else {
+            return;
+        };
+
+        if let Err(e) = handle
+            .asset_protocol_scope()
+            .allow_directory(path, recursive)
+        {
+            tracing::warn!(
+                "Failed to allow asset protocol directory {}: {}",
+                path.display(),
+                e
+            );
+        }
+    }
+
+    /// Allowlist a file for the asset protocol (best-effort).
+    pub fn allow_asset_protocol_file(&self, path: &std::path::Path) {
+        let Some(handle) = self.app_handle.get() else {
+            return;
+        };
+
+        if let Err(e) = handle.asset_protocol_scope().allow_file(path) {
+            tracing::warn!(
+                "Failed to allow asset protocol file {}: {}",
+                path.display(),
+                e
+            );
+        }
+    }
+
+    /// Forbid a directory for the asset protocol (best-effort).
+    pub fn forbid_asset_protocol_directory(&self, path: &std::path::Path, recursive: bool) {
+        let Some(handle) = self.app_handle.get() else {
+            return;
+        };
+
+        if let Err(e) = handle
+            .asset_protocol_scope()
+            .forbid_directory(path, recursive)
+        {
+            tracing::warn!(
+                "Failed to forbid asset protocol directory {}: {}",
+                path.display(),
+                e
+            );
         }
     }
 
@@ -335,9 +400,7 @@ pub fn run() {
     let builder = tauri::Builder::default()
         .manage(AppState::new())
         .manage(ffmpeg_state.clone())
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init());
+        .plugin(tauri_plugin_dialog::init());
 
     // The updater requires valid signing keys and a release manifest endpoint.
     // In local MSI distribution mode we disable it by default to avoid noisy
@@ -353,6 +416,25 @@ pub fn run() {
             init_logging(app.handle());
 
             tracing::info!("OpenReelio starting...");
+
+            // Capture AppHandle for commands and configure base asset protocol scope.
+            // The static scope in `tauri.conf.json` is deliberately minimal; we extend it at runtime
+            // only for opened projects and imported assets.
+            let app_state: tauri::State<'_, AppState> = app.state();
+            app_state.set_app_handle(app.handle().clone());
+
+            // Defense-in-depth: explicitly forbid access to the webview data directory.
+            if let Ok(local_data) = app.path().app_local_data_dir() {
+                app_state.forbid_asset_protocol_directory(&local_data, true);
+            }
+
+            // Allow app-managed cache/data directories.
+            if let Ok(cache_dir) = app.path().app_cache_dir() {
+                app_state.allow_asset_protocol_directory(&cache_dir, true);
+            }
+            if let Ok(data_dir) = app.path().app_data_dir() {
+                app_state.allow_asset_protocol_directory(&data_dir, true);
+            }
 
             // Initialize FFmpeg
             let ffmpeg = ffmpeg_state.clone();
@@ -391,7 +473,6 @@ pub fn run() {
 
             // Start workers after FFmpeg initialization
             // We need to access the WorkerPool's Arc references before spawning
-            let app_state: tauri::State<'_, AppState> = app.state();
             let job_queue = {
                 // Use blocking to get the Arc references from WorkerPool
                 // This is safe during setup since we're not in an async context yet
@@ -521,6 +602,11 @@ pub fn run() {
             ipc::index_asset_for_search,
             ipc::index_transcripts_for_search,
             ipc::remove_asset_from_search,
+            // Shot Detection
+            ipc::detect_shots,
+            ipc::get_asset_shots,
+            ipc::delete_asset_shots,
+            ipc::is_shot_detection_available,
             // Settings
             ipc::get_settings,
             ipc::set_settings,

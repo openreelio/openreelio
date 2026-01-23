@@ -16,6 +16,7 @@ use crate::core::{
         UpdateAssetCommand,
     },
     ffmpeg::FFmpegProgress,
+    fs::{validate_local_input_path, validate_output_path, validate_path_id_component},
     jobs::{Job, JobStatus, JobType, Priority},
     performance::memory::{CacheStats, PoolStats},
     settings::{AppSettings, SettingsManager},
@@ -24,16 +25,39 @@ use crate::core::{
 };
 use crate::{ActiveProject, AppState};
 
-fn validate_path_id_component(id: &str, label: &str) -> Result<(), String> {
-    if id.is_empty() {
-        return Err(format!("{label} is empty"));
+fn allow_project_asset_protocol(
+    state: &AppState,
+    project_path: &std::path::Path,
+    assets: &[Asset],
+) {
+    // Allow the project-managed runtime directory used by previews, thumbnails, waveforms, etc.
+    state.allow_asset_protocol_directory(&project_path.join(".openreelio"), true);
+
+    // Allow imported asset source files (read-only via the asset protocol).
+    // This is intentionally scoped to the files referenced by the project state, not arbitrary paths.
+    for asset in assets {
+        let uri = asset.uri.trim();
+        if uri.is_empty() {
+            continue;
+        }
+
+        let path = PathBuf::from(uri);
+        if !path.is_absolute() {
+            tracing::warn!(
+                "Skipping non-absolute asset uri for asset protocol scope: assetId={}, uri={}",
+                asset.id,
+                uri
+            );
+            continue;
+        }
+
+        // Only allow existing files to avoid pre-authorizing future paths.
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.is_file() {
+                state.allow_asset_protocol_file(&path);
+            }
+        }
     }
-    if id.contains("..") || id.contains('/') || id.contains('\\') || id.contains(':') {
-        return Err(format!(
-            "Invalid {label}: contains path traversal characters"
-        ));
-    }
-    Ok(())
 }
 
 // =============================================================================
@@ -41,6 +65,11 @@ fn validate_path_id_component(id: &str, label: &str) -> Result<(), String> {
 // =============================================================================
 
 /// Creates a new project
+///
+/// This function uses atomic operations to prevent TOCTOU race conditions:
+/// 1. Creates a lock file to prevent concurrent project creation
+/// 2. Verifies directory state while holding the lock
+/// 3. Creates project files atomically
 #[tauri::command]
 #[tracing::instrument(skip(state), fields(project_name = %name, project_path = %path))]
 pub async fn create_project(
@@ -48,6 +77,9 @@ pub async fn create_project(
     path: String,
     state: State<'_, AppState>,
 ) -> Result<ProjectInfo, String> {
+    use fs2::FileExt;
+    use std::fs::OpenOptions;
+
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("Project path is empty".to_string());
@@ -63,29 +95,88 @@ pub async fn create_project(
         ));
     }
 
-    if project_path.exists() {
-        if !project_path.is_dir() {
-            return Err(format!(
-                "Project path must be a directory: {}",
-                project_path.display()
-            ));
-        }
-
-        // Avoid accidentally creating a project into a non-empty directory.
-        let has_any_entry = std::fs::read_dir(&project_path)
-            .map_err(|e| format!("Failed to read project directory: {e}"))?
-            .next()
-            .is_some();
-        if has_any_entry {
-            return Err(format!(
-                "Project directory is not empty: {}",
-                project_path.display()
-            ));
+    // Create parent directory if needed (but not the project directory itself yet)
+    if let Some(parent) = project_path.parent() {
+        if !parent.exists() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create parent directory: {e}"))?;
         }
     }
 
-    let project =
-        ActiveProject::create(&name, project_path.clone()).map_err(|e| e.to_ipc_error())?;
+    // Create a lock file in the parent directory to serialize project creation
+    let lock_path = project_path.with_extension("lock");
+    let lock_file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| format!("Failed to create project lock file: {e}"))?;
+
+    // Acquire exclusive lock to prevent concurrent project creation
+    lock_file
+        .lock_exclusive()
+        .map_err(|e| format!("Failed to acquire project lock: {e}"))?;
+
+    // After acquiring the lock, verify the directory state
+    // This prevents TOCTOU race conditions
+    let result = (|| {
+        if project_path.exists() {
+            if !project_path.is_dir() {
+                return Err(format!(
+                    "Project path must be a directory: {}",
+                    project_path.display()
+                ));
+            }
+
+            // Check for existing project files (our own files)
+            let has_project_json = project_path.join("project.json").exists();
+            let has_ops_log = project_path.join("ops.jsonl").exists();
+            if has_project_json || has_ops_log {
+                return Err(format!(
+                    "A project already exists at: {}",
+                    project_path.display()
+                ));
+            }
+
+            // Check if directory is non-empty (excluding hidden files we might have created)
+            let has_user_files = std::fs::read_dir(&project_path)
+                .map_err(|e| format!("Failed to read project directory: {e}"))?
+                .filter_map(|e| e.ok())
+                .any(|entry| {
+                    let name = entry.file_name();
+                    let name_str = name.to_string_lossy();
+                    // Allow hidden directories that might be for caching
+                    !name_str.starts_with('.')
+                });
+
+            if has_user_files {
+                return Err(format!(
+                    "Project directory is not empty: {}",
+                    project_path.display()
+                ));
+            }
+        }
+
+        // Create project with atomic file operations
+        let project =
+            ActiveProject::create(&name, project_path.clone()).map_err(|e| e.to_ipc_error())?;
+
+        tracing::info!(
+            "Created new project '{}' at {}",
+            name,
+            project_path.display()
+        );
+
+        Ok(project)
+    })();
+
+    // Release lock and clean up lock file.
+    // Dropping the file handle releases the OS-level lock.
+    drop(lock_file);
+    let _ = std::fs::remove_file(&lock_path);
+
+    let project = result?;
 
     let info = ProjectInfo {
         id: project.state.meta.id.clone(),
@@ -97,6 +188,10 @@ pub async fn create_project(
     // Store in app state
     let mut guard = state.project.lock().await;
     *guard = Some(project);
+
+    // Allowlist the project-managed workspace for previews/thumbnails.
+    // Asset files themselves are allowlisted on import.
+    allow_project_asset_protocol(&state, &project_path, &[]);
 
     Ok(info)
 }
@@ -135,6 +230,8 @@ pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<Pr
     }
 
     let project = ActiveProject::open(project_path).map_err(|e| e.to_ipc_error())?;
+    let assets_for_scope: Vec<Asset> = project.state.assets.values().cloned().collect();
+    let project_path_for_scope = project.path.clone();
 
     let info = ProjectInfo {
         id: project.state.meta.id.clone(),
@@ -146,6 +243,9 @@ pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<Pr
     // Store in app state
     let mut guard = state.project.lock().await;
     *guard = Some(project);
+
+    // Restrict asset protocol to exactly what the opened project needs.
+    allow_project_asset_protocol(&state, &project_path_for_scope, &assets_for_scope);
 
     Ok(info)
 }
@@ -215,33 +315,6 @@ pub async fn import_asset(
     state: State<'_, AppState>,
 ) -> Result<AssetImportResult, String> {
     use crate::core::assets::{requires_proxy, ProxyStatus};
-    use std::path::PathBuf;
-
-    fn validate_local_file_path(uri: &str) -> Result<PathBuf, String> {
-        let trimmed = uri.trim();
-        if trimmed.is_empty() {
-            return Err("Asset path is empty".to_string());
-        }
-
-        // Prevent accidental remote/URL imports from crossing into ffprobe/ffmpeg calls.
-        let lower = trimmed.to_ascii_lowercase();
-        if lower.starts_with("http://") || lower.starts_with("https://") {
-            return Err("Only local file paths are supported for asset import".to_string());
-        }
-
-        let path = PathBuf::from(trimmed);
-        if !path.is_absolute() {
-            return Err(format!("Asset path must be absolute: {}", path.display()));
-        }
-
-        let metadata = std::fs::metadata(&path)
-            .map_err(|_| format!("Asset file not found: {}", path.display()))?;
-        if !metadata.is_file() {
-            return Err(format!("Asset path is not a file: {}", path.display()));
-        }
-
-        Ok(path)
-    }
 
     // Phase 1: Import asset (holds project lock)
     let (asset_id, name, op_id, needs_proxy) = {
@@ -250,8 +323,9 @@ pub async fn import_asset(
             .as_mut()
             .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-        // Create import command
-        let path = validate_local_file_path(&uri)?;
+        // Create import command - use centralized path validation
+        let path = validate_local_input_path(&uri, "Asset path")?;
+        state.allow_asset_protocol_file(&path);
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -1241,8 +1315,11 @@ pub async fn start_render(
     use crate::core::render::{
         validate_export_settings, ExportEngine, ExportPreset, ExportProgress, ExportSettings,
     };
-    use std::path::PathBuf;
     use tauri::Emitter;
+
+    // Validate output path before proceeding
+    let validated_output_path = validate_output_path(&output_path, "Output path")?;
+    tracing::debug!("Validated output path: {}", validated_output_path.display());
 
     // Get sequence and assets from project state
     let (sequence, assets) = {
@@ -1287,8 +1364,8 @@ pub async fn start_render(
         _ => ExportPreset::Youtube1080p, // Default
     };
 
-    // Create export settings
-    let settings = ExportSettings::from_preset(export_preset, PathBuf::from(&output_path));
+    // Create export settings using validated path
+    let settings = ExportSettings::from_preset(export_preset, validated_output_path.clone());
 
     // Validate export settings before starting
     let validation = validate_export_settings(&sequence, &assets, &settings);
@@ -2624,6 +2701,439 @@ pub async fn submit_transcription_job(
 }
 
 // =============================================================================
+// Caption Export Commands
+// =============================================================================
+
+/// Export format for captions
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptionExportFormat {
+    /// SubRip format (.srt)
+    Srt,
+    /// WebVTT format (.vtt)
+    Vtt,
+}
+
+/// Caption data for export
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptionForExport {
+    /// Start time in seconds
+    pub start_sec: f64,
+    /// End time in seconds
+    pub end_sec: f64,
+    /// Caption text
+    pub text: String,
+    /// Optional speaker name
+    pub speaker: Option<String>,
+}
+
+/// Exports captions to a file in the specified format
+///
+/// # Arguments
+///
+/// * `captions` - Array of captions to export
+/// * `output_path` - File path where captions will be saved
+/// * `format` - Export format (SRT or VTT)
+#[tauri::command]
+pub async fn export_captions(
+    captions: Vec<CaptionForExport>,
+    output_path: String,
+    format: CaptionExportFormat,
+) -> Result<(), String> {
+    use crate::core::captions::{export_srt, export_vtt, Caption};
+    use std::fs;
+    use std::path::Path;
+
+    // Convert to internal Caption type
+    let internal_captions: Vec<Caption> = captions
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let mut caption = Caption::new(&format!("cap_{}", i), c.start_sec, c.end_sec, &c.text);
+            caption.speaker = c.speaker;
+            caption
+        })
+        .collect();
+
+    // Export to the specified format
+    let content = match format {
+        CaptionExportFormat::Srt => export_srt(&internal_captions),
+        CaptionExportFormat::Vtt => export_vtt(&internal_captions),
+    };
+
+    // Write to file
+    let output = Path::new(&output_path);
+    if let Some(parent) = output.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create output directory: {}", e))?;
+        }
+    }
+
+    fs::write(output, content).map_err(|e| format!("Failed to write caption file: {}", e))?;
+
+    tracing::info!(
+        "Exported {} captions to {} as {:?}",
+        internal_captions.len(),
+        output_path,
+        format
+    );
+
+    Ok(())
+}
+
+/// Gets caption content as a string in the specified format (without writing to file)
+#[tauri::command]
+pub async fn get_captions_as_string(
+    captions: Vec<CaptionForExport>,
+    format: CaptionExportFormat,
+) -> Result<String, String> {
+    use crate::core::captions::{export_srt, export_vtt, Caption};
+
+    // Convert to internal Caption type
+    let internal_captions: Vec<Caption> = captions
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let mut caption = Caption::new(&format!("cap_{}", i), c.start_sec, c.end_sec, &c.text);
+            caption.speaker = c.speaker;
+            caption
+        })
+        .collect();
+
+    // Export to the specified format
+    let content = match format {
+        CaptionExportFormat::Srt => export_srt(&internal_captions),
+        CaptionExportFormat::Vtt => export_vtt(&internal_captions),
+    };
+
+    Ok(content)
+}
+
+// =============================================================================
+// Shot Detection Commands
+// =============================================================================
+
+/// Configuration options for shot detection
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ShotDetectionConfig {
+    /// Scene change detection threshold (0.0 - 1.0)
+    /// Lower values detect more scene changes
+    pub threshold: Option<f64>,
+    /// Minimum shot duration in seconds
+    pub min_shot_duration: Option<f64>,
+}
+
+impl Default for ShotDetectionConfig {
+    fn default() -> Self {
+        Self {
+            threshold: Some(0.3),
+            min_shot_duration: Some(0.5),
+        }
+    }
+}
+
+/// Detected shot data for frontend
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ShotDto {
+    /// Unique shot ID
+    pub id: String,
+    /// Asset ID this shot belongs to
+    pub asset_id: String,
+    /// Start time in seconds
+    pub start_sec: f64,
+    /// End time in seconds
+    pub end_sec: f64,
+    /// Path to keyframe thumbnail (if generated)
+    pub keyframe_path: Option<String>,
+    /// Quality score (0.0 - 1.0)
+    pub quality_score: Option<f64>,
+    /// Tags/labels for this shot
+    pub tags: Vec<String>,
+}
+
+impl From<crate::core::indexing::Shot> for ShotDto {
+    fn from(shot: crate::core::indexing::Shot) -> Self {
+        Self {
+            id: shot.id,
+            asset_id: shot.asset_id,
+            start_sec: shot.start_sec,
+            end_sec: shot.end_sec,
+            keyframe_path: shot.keyframe_path,
+            quality_score: shot.quality_score,
+            tags: shot.tags,
+        }
+    }
+}
+
+/// Result of shot detection operation
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ShotDetectionResult {
+    /// Number of shots detected
+    pub shot_count: usize,
+    /// Detected shots
+    pub shots: Vec<ShotDto>,
+    /// Total video duration in seconds
+    pub total_duration: f64,
+}
+
+/// Detects shots/scenes in a video file
+///
+/// # Arguments
+///
+/// * `asset_id` - The asset ID to detect shots for
+/// * `video_path` - Path to the video file
+/// * `config` - Optional detection configuration
+///
+/// # Returns
+///
+/// Shot detection result containing all detected shots
+#[tauri::command]
+pub async fn detect_shots(
+    asset_id: String,
+    video_path: String,
+    config: Option<ShotDetectionConfig>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+    state: State<'_, AppState>,
+) -> Result<ShotDetectionResult, String> {
+    use crate::core::indexing::{IndexDb, ShotDetector, ShotDetectorConfig};
+
+    validate_path_id_component(&asset_id, "Asset ID")?;
+
+    let video_path_ref = std::path::Path::new(&video_path);
+    let video_path_canon = std::fs::canonicalize(video_path_ref)
+        .map_err(|e| format!("Failed to resolve video path '{}': {}", video_path, e))?;
+
+    let metadata = std::fs::metadata(&video_path_canon)
+        .map_err(|e| format!("Failed to stat video file '{}': {}", video_path, e))?;
+    if !metadata.is_file() {
+        return Err(format!(
+            "Expected a file path, got a directory: {}",
+            video_path
+        ));
+    }
+
+    // Resolve FFmpeg paths from global FFmpegState (bundled or system).
+    let ffmpeg_info = {
+        let guard = ffmpeg_state.read().await;
+        guard.info().cloned()
+    };
+
+    let ffmpeg_info = match ffmpeg_info {
+        Some(info) => info,
+        None => {
+            // Best-effort initialization (system FFmpeg only) in case the command
+            // is called before app startup initialization completes.
+            let mut guard = ffmpeg_state.write().await;
+            let _ = guard.initialize(None);
+            guard
+                .info()
+                .cloned()
+                .ok_or_else(|| "FFmpeg is not available".to_string())?
+        }
+    };
+
+    // Build detector config
+    let detector_config = if let Some(cfg) = config {
+        let threshold = cfg.threshold.unwrap_or(0.3);
+        if !threshold.is_finite() || !(0.0..=1.0).contains(&threshold) {
+            return Err("threshold must be a finite number between 0.0 and 1.0".to_string());
+        }
+
+        let min_shot_duration = cfg.min_shot_duration.unwrap_or(0.5);
+        if !min_shot_duration.is_finite() || min_shot_duration < 0.0 {
+            return Err("minShotDuration must be a finite number >= 0".to_string());
+        }
+
+        ShotDetectorConfig {
+            threshold,
+            min_shot_duration,
+            generate_keyframes: false,
+            keyframe_dir: None,
+            ffmpeg_path: Some(ffmpeg_info.ffmpeg_path.clone()),
+            ffprobe_path: Some(ffmpeg_info.ffprobe_path.clone()),
+            ..ShotDetectorConfig::default()
+        }
+    } else {
+        ShotDetectorConfig {
+            ffmpeg_path: Some(ffmpeg_info.ffmpeg_path.clone()),
+            ffprobe_path: Some(ffmpeg_info.ffprobe_path.clone()),
+            ..ShotDetectorConfig::default()
+        }
+    };
+
+    let detector = ShotDetector::with_config(detector_config);
+
+    tracing::info!(
+        "Shot detection started: asset_id={}, video_path={}",
+        asset_id,
+        video_path_canon.to_string_lossy()
+    );
+
+    // Detect shots
+    let shots = detector
+        .detect(&video_path_canon, &asset_id)
+        .await
+        .map_err(|e| e.to_ipc_error())?;
+
+    // Calculate total duration from shots
+    let total_duration = shots.last().map(|s| s.end_sec).unwrap_or(0.0);
+
+    // Save to database if project is open.
+    // Do not hold the project mutex while doing SQLite I/O.
+    let index_db_path = {
+        if let Ok(guard) = state.project.try_lock() {
+            guard.as_ref().map(|project| project.path.join("index.db"))
+        } else {
+            None
+        }
+    };
+
+    if let Some(index_db_path) = index_db_path {
+        let index_db = if index_db_path.exists() {
+            IndexDb::open(&index_db_path)
+        } else {
+            IndexDb::create(&index_db_path)
+        };
+
+        if let Ok(db) = index_db {
+            // Retry a few times to mitigate transient SQLITE_BUSY (concurrent writers).
+            let mut last_err: Option<String> = None;
+            for attempt in 0..3 {
+                match detector.save_to_db(&db, &shots) {
+                    Ok(()) => {
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) => {
+                        last_err = Some(e.to_string());
+                        tokio::time::sleep(std::time::Duration::from_millis(
+                            50 * (attempt + 1) as u64,
+                        ))
+                        .await;
+                    }
+                }
+            }
+            if let Some(e) = last_err {
+                tracing::warn!("Failed to save shots to database after retries: {}", e);
+            }
+        }
+    }
+
+    let shot_count = shots.len();
+    let shot_dtos: Vec<ShotDto> = shots.into_iter().map(ShotDto::from).collect();
+
+    tracing::info!(
+        "Detected {} shots in asset {} ({:.2}s total)",
+        shot_count,
+        asset_id,
+        total_duration
+    );
+
+    Ok(ShotDetectionResult {
+        shot_count,
+        shots: shot_dtos,
+        total_duration,
+    })
+}
+
+/// Retrieves cached shots for an asset from the database
+///
+/// # Arguments
+///
+/// * `asset_id` - The asset ID to get shots for
+///
+/// # Returns
+///
+/// List of shots if found, empty list otherwise
+#[tauri::command]
+pub async fn get_asset_shots(
+    asset_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ShotDto>, String> {
+    use crate::core::indexing::{IndexDb, ShotDetector};
+
+    validate_path_id_component(&asset_id, "Asset ID")?;
+
+    let guard = state.project.lock().await;
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| "No project open".to_string())?;
+
+    // Open (or create) the project's index database
+    let index_db_path = project.path.join("index.db");
+    if !index_db_path.exists() {
+        // No database yet, return empty list
+        return Ok(Vec::new());
+    }
+
+    let index_db = IndexDb::open(&index_db_path).map_err(|e| e.to_ipc_error())?;
+
+    let shots = ShotDetector::load_from_db(&index_db, &asset_id).map_err(|e| e.to_ipc_error())?;
+
+    Ok(shots.into_iter().map(ShotDto::from).collect())
+}
+
+/// Deletes all shots for an asset from the database
+///
+/// # Arguments
+///
+/// * `asset_id` - The asset ID to delete shots for
+#[tauri::command]
+pub async fn delete_asset_shots(
+    asset_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    use crate::core::indexing::IndexDb;
+
+    validate_path_id_component(&asset_id, "Asset ID")?;
+
+    let guard = state.project.lock().await;
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| "No project open".to_string())?;
+
+    // Open the project's index database
+    let index_db_path = project.path.join("index.db");
+    if !index_db_path.exists() {
+        // No database yet, nothing to delete
+        return Ok(());
+    }
+
+    let index_db = IndexDb::open(&index_db_path).map_err(|e| e.to_ipc_error())?;
+
+    let conn = index_db.connection();
+    conn.execute("DELETE FROM shots WHERE asset_id = ?", [&asset_id])
+        .map_err(|e| format!("Failed to delete shots: {}", e))?;
+
+    tracing::info!("Deleted shots for asset {}", asset_id);
+
+    Ok(())
+}
+
+/// Checks if shot detection is available (requires FFmpeg)
+#[tauri::command]
+pub async fn is_shot_detection_available(
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+) -> Result<bool, String> {
+    // Best-effort initialization in case startup init hasn't completed yet.
+    {
+        let guard = ffmpeg_state.read().await;
+        if guard.is_available() {
+            return Ok(true);
+        }
+    }
+
+    let mut guard = ffmpeg_state.write().await;
+    let _ = guard.initialize(None);
+    Ok(guard.is_available())
+}
+
+// =============================================================================
 // Search Commands (Meilisearch)
 // =============================================================================
 
@@ -3431,6 +3941,7 @@ pub struct AppSettingsDto {
 pub struct GeneralSettingsDto {
     pub language: String,
     pub show_welcome_on_startup: bool,
+    pub has_completed_setup: bool,
     pub recent_projects_limit: u32,
     pub check_updates_on_startup: bool,
     pub default_project_location: Option<String>,
@@ -3508,6 +4019,7 @@ impl From<AppSettings> for AppSettingsDto {
             general: GeneralSettingsDto {
                 language: s.general.language,
                 show_welcome_on_startup: s.general.show_welcome_on_startup,
+                has_completed_setup: s.general.has_completed_setup,
                 recent_projects_limit: s.general.recent_projects_limit,
                 check_updates_on_startup: s.general.check_updates_on_startup,
                 default_project_location: s.general.default_project_location,
@@ -3568,6 +4080,7 @@ impl From<AppSettingsDto> for AppSettings {
             general: GeneralSettings {
                 language: dto.general.language,
                 show_welcome_on_startup: dto.general.show_welcome_on_startup,
+                has_completed_setup: dto.general.has_completed_setup,
                 recent_projects_limit: dto.general.recent_projects_limit,
                 check_updates_on_startup: dto.general.check_updates_on_startup,
                 default_project_location: dto.general.default_project_location,
@@ -3914,6 +4427,14 @@ pub fn get_handlers() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'st
         is_transcription_available,
         transcribe_asset,
         submit_transcription_job,
+        // Caption Export
+        export_captions,
+        get_captions_as_string,
+        // Shot Detection
+        detect_shots,
+        get_asset_shots,
+        delete_asset_shots,
+        is_shot_detection_available,
         // Search
         search_assets,
         is_meilisearch_available,
