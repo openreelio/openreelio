@@ -11,6 +11,13 @@ use specta::Type;
 use tokio::sync::mpsc;
 
 use super::{FFmpegError, FFmpegInfo, FFmpegResult};
+use crate::core::process::configure_tokio_command;
+
+fn is_nonempty_file(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|m| m.is_file() && m.len() > 0)
+        .unwrap_or(false)
+}
 
 // =============================================================================
 // Waveform Data Types
@@ -272,6 +279,11 @@ impl FFmpegRunner {
             )));
         }
 
+        // If already extracted, treat as success.
+        if is_nonempty_file(output) {
+            return Ok(());
+        }
+
         // Create output directory if needed
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -283,8 +295,14 @@ impl FFmpegRunner {
         // -ss before -i for fast seeking
         // -frames:v 1 to extract single frame
         // -q:v 2 for good JPEG quality
-        let output = tokio::process::Command::new(&self.info.ffmpeg_path)
+        let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
+        configure_tokio_command(&mut cmd);
+        let output = cmd
             .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
                 "-ss",
                 &format!("{:.3}", time_sec),
                 "-i",
@@ -328,6 +346,11 @@ impl FFmpegRunner {
             )));
         }
 
+        // If already generated, treat as success.
+        if is_nonempty_file(output) {
+            return Ok(());
+        }
+
         // Create output directory if needed
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -369,7 +392,10 @@ impl FFmpegRunner {
             output.to_string_lossy().to_string(),
         ]);
 
-        let output_result = tokio::process::Command::new(&self.info.ffmpeg_path)
+        let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
+        configure_tokio_command(&mut cmd);
+        let output_result = cmd
+            .args(["-hide_banner", "-loglevel", "error", "-nostdin"])
             .args(&args)
             .output()
             .await
@@ -421,8 +447,12 @@ impl FFmpegRunner {
         // Important: only enable `-progress pipe:1` when we are actually draining stdout,
         // otherwise the child can deadlock once the stdout pipe fills.
         let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
+        configure_tokio_command(&mut cmd);
         cmd.args([
             "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
             "-i",
             &input.to_string_lossy(),
             "-vf",
@@ -549,10 +579,12 @@ impl FFmpegRunner {
         }
 
         // Run ffprobe with JSON output
-        let output = tokio::process::Command::new(&self.info.ffprobe_path)
+        let mut cmd = tokio::process::Command::new(&self.info.ffprobe_path);
+        configure_tokio_command(&mut cmd);
+        let output = cmd
             .args([
                 "-v",
-                "quiet",
+                "error",
                 "-print_format",
                 "json",
                 "-show_format",
@@ -590,6 +622,11 @@ impl FFmpegRunner {
             )));
         }
 
+        // If already generated, treat as success.
+        if is_nonempty_file(output) {
+            return Ok(());
+        }
+
         // Create output directory if needed
         if let Some(parent) = output.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -598,8 +635,14 @@ impl FFmpegRunner {
         }
 
         // Use showwavespic filter to generate waveform image
-        let output_result = tokio::process::Command::new(&self.info.ffmpeg_path)
+        let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
+        configure_tokio_command(&mut cmd);
+        let output_result = cmd
             .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
                 "-i",
                 &input.to_string_lossy(),
                 "-filter_complex",
@@ -696,9 +739,13 @@ impl FFmpegRunner {
         // Run FFmpeg and stream stderr instead of capturing entire output.
         // On long files astats output can be massive and blow up memory.
         let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
+        configure_tokio_command(&mut cmd);
         cmd.args([
             "-hide_banner",
             "-nostats",
+            "-loglevel",
+            "error",
+            "-nostdin",
             "-i",
             &input.to_string_lossy(),
             "-af",

@@ -10,6 +10,8 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+use crate::core::process::configure_std_command;
+
 // ============================================================================
 // Types and Enums
 // ============================================================================
@@ -397,12 +399,11 @@ pub fn verify_binary(path: &Path) -> BundlerResult<()> {
         )));
     }
 
-    let output = std::process::Command::new(path)
-        .arg("-version")
-        .output()
-        .map_err(|e| {
-            BundlerError::VerificationFailed(format!("Failed to execute binary: {}", e))
-        })?;
+    let mut cmd = std::process::Command::new(path);
+    configure_std_command(&mut cmd);
+    let output = cmd.arg("-version").output().map_err(|e| {
+        BundlerError::VerificationFailed(format!("Failed to execute binary: {}", e))
+    })?;
 
     if output.status.success() {
         Ok(())

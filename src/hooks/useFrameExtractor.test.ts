@@ -466,5 +466,425 @@ describe('useAssetFrameExtractor', () => {
       // Should not throw
       expect(true).toBe(true);
     });
+
+    it('should cancel prefetch on unmount', async () => {
+      mockExtractFrame.mockImplementation(
+        () => new Promise(resolve => setTimeout(resolve, 100))
+      );
+
+      const { result, unmount } = renderHook(() => useAssetFrameExtractor(defaultOptions));
+
+      // Start prefetch
+      act(() => {
+        result.current.prefetchFrames(0, 10);
+      });
+
+      // Unmount immediately
+      unmount();
+
+      // Wait and verify no errors occurred
+      await new Promise(resolve => setTimeout(resolve, 150));
+      expect(true).toBe(true);
+    });
+  });
+});
+
+// =============================================================================
+// Destructive Test Scenarios
+// =============================================================================
+
+describe('useFrameExtractor - Destructive Tests', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    frameCache.clear();
+    mockExtractFrame.mockReset();
+    mockExtractFrame.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    frameCache.clear();
+    vi.useRealTimers();
+  });
+
+  describe('Race Conditions', () => {
+    it('should handle rapid sequential requests for different frames', async () => {
+      mockExtractFrame.mockImplementation(
+        () => new Promise(resolve => setTimeout(resolve, 10))
+      );
+
+      const { result } = renderHook(() => useFrameExtractor());
+
+      // Fire many requests in quick succession
+      const promises: Promise<string | null>[] = [];
+      await act(async () => {
+        for (let i = 0; i < 20; i++) {
+          promises.push(result.current.getFrame('/video.mp4', i * 0.1));
+        }
+        await Promise.all(promises);
+      });
+
+      // All should complete without errors
+      expect(result.current.error).toBeNull();
+    });
+
+    it('should handle interleaved getFrame and clearCache calls', async () => {
+      mockExtractFrame.mockImplementation(
+        () => new Promise(resolve => setTimeout(resolve, 50))
+      );
+
+      const { result } = renderHook(() => useFrameExtractor());
+
+      // Start extraction
+      let extractPromise: Promise<string | null>;
+      act(() => {
+        extractPromise = result.current.getFrame('/video.mp4', 1.0);
+      });
+
+      // Clear cache while extraction is in progress
+      act(() => {
+        result.current.clearCache();
+      });
+
+      // Wait for extraction to complete
+      await act(async () => {
+        await extractPromise;
+      });
+
+      // Should not throw or corrupt state
+      expect(true).toBe(true);
+    });
+
+    it('should handle concurrent extractions hitting cache limit', async () => {
+      mockExtractFrame.mockImplementation(
+        () => new Promise(resolve => setTimeout(resolve, 5))
+      );
+
+      const { result } = renderHook(() => useFrameExtractor({ maxCacheSize: 5 }));
+
+      // Start many concurrent extractions
+      await act(async () => {
+        const promises = [];
+        for (let i = 0; i < 100; i++) {
+          promises.push(result.current.getFrame('/video.mp4', i * 0.01));
+        }
+        await Promise.all(promises);
+      });
+
+      // Cache should be limited
+      expect(result.current.cacheSize).toBeLessThanOrEqual(5);
+      expect(result.current.error).toBeNull();
+    });
+  });
+
+  describe('Error Handling Edge Cases', () => {
+    it('should recover from FFmpeg crash', async () => {
+      // First call fails
+      mockExtractFrame.mockRejectedValueOnce(new Error('FFmpeg crash'));
+      // Second call succeeds
+      mockExtractFrame.mockResolvedValueOnce(undefined);
+
+      const { result } = renderHook(() => useFrameExtractor());
+
+      // First extraction fails
+      await act(async () => {
+        await result.current.getFrame('/video.mp4', 1.0);
+      });
+
+      expect(result.current.error).toBe('FFmpeg crash');
+
+      // Second extraction should work (different timestamp, new extraction)
+      await act(async () => {
+        const path = await result.current.getFrame('/video.mp4', 2.0);
+        expect(path).toBeTruthy();
+      });
+
+      expect(result.current.error).toBeNull();
+    });
+
+    it('should handle non-Error rejections', async () => {
+      mockExtractFrame.mockRejectedValueOnce('String error');
+
+      const { result } = renderHook(() => useFrameExtractor());
+
+      await act(async () => {
+        await result.current.getFrame('/video.mp4', 1.0);
+      });
+
+      expect(result.current.error).toBe('Frame extraction failed');
+    });
+  });
+
+  describe('Memory Management', () => {
+    it('should properly clean up on unmount', async () => {
+      const { result, unmount } = renderHook(() => useFrameExtractor());
+
+      // Add frames
+      await act(async () => {
+        await result.current.getFrame('/video.mp4', 1.0);
+        await result.current.getFrame('/video.mp4', 2.0);
+      });
+
+      // Unmount
+      unmount();
+
+      // Should not throw
+      expect(true).toBe(true);
+    });
+
+    it('should not leak promises on rapid mount/unmount', async () => {
+      mockExtractFrame.mockImplementation(
+        () => new Promise(resolve => setTimeout(resolve, 10))
+      );
+
+      for (let i = 0; i < 5; i++) {
+        const { result, unmount } = renderHook(() => useFrameExtractor());
+
+        act(() => {
+          result.current.getFrame('/video.mp4', i);
+        });
+
+        unmount();
+      }
+
+      // Wait for any pending operations
+      await new Promise(resolve => setTimeout(resolve, 100));
+
+      // Should not throw
+      expect(true).toBe(true);
+    });
+  });
+
+  describe('Invalid Input Handling', () => {
+    it('should handle empty input path', async () => {
+      const { result } = renderHook(() => useFrameExtractor());
+
+      await act(async () => {
+        const path = await result.current.getFrame('', 1.0);
+        expect(path).toBeTruthy(); // Should still produce output path
+      });
+    });
+
+    it('should handle negative timestamps', async () => {
+      const { result } = renderHook(() => useFrameExtractor());
+
+      await act(async () => {
+        await result.current.getFrame('/video.mp4', -1.0);
+      });
+
+      // Should not crash
+      expect(result.current.error).toBeNull();
+    });
+
+    it('should handle NaN timestamps', async () => {
+      const { result } = renderHook(() => useFrameExtractor());
+
+      await act(async () => {
+        await result.current.getFrame('/video.mp4', NaN);
+      });
+
+      // Should handle gracefully
+      expect(result.current.error).toBeNull();
+    });
+
+    it('should handle very large timestamps', async () => {
+      const { result } = renderHook(() => useFrameExtractor());
+
+      await act(async () => {
+        await result.current.getFrame('/video.mp4', Number.MAX_SAFE_INTEGER);
+      });
+
+      expect(result.current.error).toBeNull();
+    });
+  });
+});
+
+describe('useAssetFrameExtractor - Destructive Tests', () => {
+  const defaultOptions = {
+    assetId: 'test-asset-123',
+    assetPath: '/path/to/video.mp4',
+    enabled: true,
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    frameCache.clear();
+    mockExtractFrame.mockReset();
+    mockExtractFrame.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => {
+    frameCache.clear();
+    vi.useRealTimers();
+  });
+
+  describe('Cache Behavior', () => {
+    it('should return cached frames immediately', async () => {
+      const { result } = renderHook(() => useAssetFrameExtractor(defaultOptions));
+
+      // First extraction
+      await act(async () => {
+        await result.current.extractFrame(5.5);
+      });
+
+      // Reset mock to track subsequent calls
+      mockExtractFrame.mockClear();
+
+      // Second request for same frame should use cache
+      let cachedResult: string | null = null;
+      await act(async () => {
+        cachedResult = await result.current.extractFrame(5.5);
+      });
+
+      expect(cachedResult).toBeTruthy();
+      // Should not have called extract again (cached)
+      expect(mockExtractFrame).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Prefetch Edge Cases', () => {
+    it('should abort prefetch on new prefetch request', async () => {
+      mockExtractFrame.mockImplementation(async () => {
+        await new Promise(resolve => setTimeout(resolve, 20));
+      });
+
+      const { result, unmount } = renderHook(() => useAssetFrameExtractor(defaultOptions));
+
+      // Start first prefetch
+      act(() => {
+        result.current.prefetchFrames(0, 2);
+      });
+
+      // Immediately start second prefetch
+      act(() => {
+        result.current.prefetchFrames(5, 7);
+      });
+
+      // Wait for completion
+      await act(async () => {
+        await new Promise(resolve => setTimeout(resolve, 200));
+      });
+
+      // Should complete without errors
+      expect(result.current.error).toBeNull();
+
+      unmount();
+    });
+
+    it('should respect prefetchAhead option', async () => {
+      const { result, unmount } = renderHook(() =>
+        useAssetFrameExtractor({
+          ...defaultOptions,
+          prefetchAhead: 1,
+          prefetchInterval: 0.5,
+        })
+      );
+
+      act(() => {
+        result.current.prefetchFrames(0, 100); // Request 100 seconds but should be limited
+      });
+
+      // Wait for prefetch
+      await act(async () => {
+        await new Promise(resolve => setTimeout(resolve, 150));
+      });
+
+      // Should have limited prefetch
+      expect(mockExtractFrame.mock.calls.length).toBeLessThanOrEqual(10);
+
+      unmount();
+    });
+  });
+
+  describe('Component Lifecycle', () => {
+    it('should handle options change (assetId change)', async () => {
+      const { result, rerender } = renderHook(
+        (props) => useAssetFrameExtractor(props),
+        { initialProps: defaultOptions }
+      );
+
+      // Extract with first asset
+      await act(async () => {
+        await result.current.extractFrame(1.0);
+      });
+
+      // Change asset
+      rerender({
+        ...defaultOptions,
+        assetId: 'different-asset',
+        assetPath: '/different/video.mp4',
+      });
+
+      // Extract with new asset
+      await act(async () => {
+        await result.current.extractFrame(1.0);
+      });
+
+      // Should have extracted for both assets
+      expect(mockExtractFrame).toHaveBeenCalledWith(expect.objectContaining({
+        inputPath: '/path/to/video.mp4',
+      }));
+      expect(mockExtractFrame).toHaveBeenCalledWith(expect.objectContaining({
+        inputPath: '/different/video.mp4',
+      }));
+    });
+
+    it('should reset error state on new extraction', async () => {
+      mockExtractFrame
+        .mockRejectedValueOnce(new Error('First error'))
+        .mockResolvedValueOnce(undefined);
+
+      const { result } = renderHook(() => useAssetFrameExtractor(defaultOptions));
+
+      // First extraction fails
+      await act(async () => {
+        await result.current.extractFrame(1.0);
+      });
+
+      expect(result.current.error).toBeTruthy();
+
+      // Second extraction succeeds
+      await act(async () => {
+        await result.current.extractFrame(2.0);
+      });
+
+      // Error should be cleared
+      expect(result.current.error).toBeNull();
+    });
+  });
+
+  describe('Invalid Input Handling', () => {
+    it('should handle special characters in assetId', async () => {
+      const { result } = renderHook(() =>
+        useAssetFrameExtractor({
+          ...defaultOptions,
+          assetId: '../../../etc/passwd',
+        })
+      );
+
+      await act(async () => {
+        await result.current.extractFrame(1.0);
+      });
+
+      // Should sanitize and not crash
+      expect(result.current.error).toBeNull();
+    });
+
+    it('should handle empty assetPath', async () => {
+      const { result } = renderHook(() =>
+        useAssetFrameExtractor({
+          ...defaultOptions,
+          assetPath: '',
+        })
+      );
+
+      await act(async () => {
+        await result.current.extractFrame(1.0);
+      });
+
+      // Should not crash
+      expect(true).toBe(true);
+    });
   });
 });

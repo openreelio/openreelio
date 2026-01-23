@@ -14,6 +14,9 @@ use std::time::Duration;
 #[cfg(feature = "meilisearch")]
 use tokio::process::{Child, Command};
 
+#[cfg(feature = "meilisearch")]
+use crate::core::process::configure_tokio_command;
+
 // =============================================================================
 // Error Types
 // =============================================================================
@@ -210,6 +213,7 @@ mod manager_impl {
 
             // Build command arguments
             let mut cmd = Command::new(&self.config.binary_path);
+            configure_tokio_command(&mut cmd);
             cmd.args([
                 "--db-path",
                 db_path,

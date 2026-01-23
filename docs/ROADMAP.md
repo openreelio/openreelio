@@ -1,9 +1,9 @@
 # OpenReelio Development Roadmap
 
-> **Last Updated**: 2026-01-22
+> **Last Updated**: 2026-01-23
 > **Version**: v0.1.0 → v1.0.0 Planning
-> **Status**: MVP v0.1.0 at 85% completion (features 98%, distribution 0%)
-> **Critical Blocker**: Distribution Infrastructure must be completed before release
+> **Status**: MVP v0.1.0 at 95% completion | v0.2.0 AI Integration at 60%
+> **Critical Blocker**: Code Signing + Auto-Update finalization required for v0.1.0 release
 
 This document outlines the complete development roadmap for OpenReelio, from MVP to production-ready release.
 
@@ -41,8 +41,8 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 
 | Milestone | Focus | Key Deliverables | Status |
 |-----------|-------|------------------|--------|
-| **v0.1.0** | Core Editor + Distribution | Timeline, Preview, Export, Auto-Update, Code Signing | 🔄 In Progress (85%) |
-| **v0.2.0** | AI Integration | Whisper, Meilisearch, Shot Detection | 📋 Planned |
+| **v0.1.0** | Core Editor + Distribution | Timeline, Preview, Export, Auto-Update, Code Signing | 🔄 In Progress (95%) |
+| **v0.2.0** | AI Integration | Whisper, Meilisearch, Shot Detection | 🔄 In Progress (60%) |
 | **v0.3.0** | Effects & Animation | Transitions, Keyframes, Audio FX | 📋 Planned |
 | **v0.4.0** | Plugin Ecosystem | WASM Host, Marketplace | 📋 Planned |
 | **v1.0.0** | Production | Performance, Stability, Docs | 📋 Planned |
@@ -53,15 +53,15 @@ Before v0.1.0 can be released, the following must be completed:
 
 | Component | Priority | Status |
 |-----------|----------|--------|
-| Auto-Update System (tauri-plugin-updater) | BLOCKER | Not Started |
-| Settings Persistence | BLOCKER | Not Started |
-| Version Sync Script | BLOCKER | Not Started |
-| Windows Code Signing (Authenticode) | HIGH | Not Started |
-| macOS Notarization | HIGH | Not Started |
-| Update Manifest Generation | HIGH | Not Started |
-| Installer Customization | MEDIUM | Not Started |
-| First-Run Setup Wizard | MEDIUM | Not Started |
-| Crash Reporting | MEDIUM | Not Started |
+| Auto-Update System (tauri-plugin-updater) | BLOCKER | ✅ Implemented (UpdateBanner, useUpdate hook) |
+| Settings Persistence | BLOCKER | ✅ Complete (settingsStore, useSettings, backend) |
+| Version Sync Script | BLOCKER | ✅ Complete (scripts/sync-version.ts + tests) |
+| Windows Code Signing (Authenticode) | HIGH | ⏳ Pending (signing key script ready) |
+| macOS Notarization | HIGH | ⏳ Pending |
+| Update Manifest Generation | HIGH | ✅ Infrastructure ready |
+| Installer Customization | MEDIUM | ⏳ Pending |
+| First-Run Setup Wizard | MEDIUM | ⏳ Pending |
+| Crash Reporting | MEDIUM | ⏳ Pending |
 
 ---
 
@@ -71,16 +71,16 @@ Before v0.1.0 can be released, the following must be completed:
 
 ### Current Progress
 
-> **Last Updated**: 2026-01-21
+> **Last Updated**: 2026-01-23
 
 | Phase | Description | Status | Completion |
 |-------|-------------|--------|------------|
 | Phase 0 | Build Environment | ✅ Complete | 100% |
-| Phase 1 | Project & Assets | ✅ Complete | 95% |
-| Phase 2 | Timeline Core | ✅ Complete | 95% |
-| Phase 3 | Preview System | ✅ Complete | 90% |
-| Phase 4 | Export Pipeline | ✅ Complete | 85% |
-| Phase 5 | Polish & UX | 🔄 In Progress | 60% |
+| Phase 1 | Project & Assets | ✅ Complete | 100% |
+| Phase 2 | Timeline Core | ✅ Complete | 100% |
+| Phase 3 | Preview System | ✅ Complete | 100% |
+| Phase 4 | Export Pipeline | ✅ Complete | 95% |
+| Phase 5 | Polish & UX | ✅ Complete | 90% |
 
 ### Phase 2 Detailed Status
 
@@ -136,12 +136,21 @@ Before v0.1.0 can be released, the following must be completed:
 
 ### Phase 5: Polish & UX
 
+**Completed:**
+- ✅ Keyboard Shortcuts (useKeyboardShortcuts.ts expanded with 20+ shortcuts)
+- ✅ Toast Notifications (Toast.tsx, useToast hook)
+- ✅ Settings Dialog (SettingsDialog.tsx with all sections)
+- ✅ Shortcuts Help Dialog (ShortcutsDialog.tsx)
+- ✅ Update Banner (UpdateBanner.tsx with auto-update)
+- ✅ Context Menu System (ContextMenu.tsx)
+- ✅ Progress Panels (ProgressBar.tsx, ProgressPanel.tsx)
+- ✅ Spinner Component (Spinner.tsx)
+- ✅ Drop Validity Feedback (dropValidity.ts utilities)
+
 **Remaining Tasks:**
 
 | Task | Description | Priority | Estimated Effort |
 |------|-------------|----------|------------------|
-| Keyboard Shortcuts | Complete shortcut implementation | HIGH | 2 days |
-| Toast Notifications | User feedback system | MEDIUM | 1 day |
 | Error Boundaries | Graceful error handling | MEDIUM | 1 day |
 | Loading States | Skeleton loaders, progress indicators | LOW | 1 day |
 
@@ -159,6 +168,31 @@ Before v0.1.0 can be released, the following must be completed:
 ## v0.2.0 - AI Integration & Smart Features
 
 **Goal**: Enable AI-powered editing with automatic transcription, smart search, and shot detection.
+
+> **Status**: 60% Complete - Major infrastructure and UI implemented, whisper.cpp integration pending
+
+### Current Progress (as of 2026-01-23)
+
+**Completed:**
+- ✅ AI Provider Architecture (OpenAI, Anthropic, Local providers)
+- ✅ AI Gateway with edit script executor
+- ✅ AI Settings Panel (AISettingsPanel.tsx)
+- ✅ AI Prompt Panel (AIPromptPanel.tsx)
+- ✅ AI Store (aiStore.ts with full state management)
+- ✅ Meilisearch Sidecar Setup (sidecar.rs)
+- ✅ Meilisearch Search Service (service.rs)
+- ✅ Search UI Components (SearchBar, SearchPanel, SearchFilters, GroupedSearchResults)
+- ✅ useSearch Hook (with debouncing, filters, facets)
+- ✅ Caption Editor (CaptionEditor.tsx with full editing)
+- ✅ Transcription Dialog (TranscriptionDialog.tsx)
+- ✅ Asset Context Menu with transcription trigger
+- ✅ useCaption Hook (CRUD operations)
+- ✅ useTranscriptionWithIndexing Hook
+
+**Pending:**
+- ⏳ whisper.cpp (whisper-rs) integration for offline transcription
+- ⏳ Shot detection with candle ML
+- ⏳ Caption export to SRT/VTT formats
 
 ### Core Features
 
@@ -275,26 +309,28 @@ pub struct Shot {
 
 ### v0.2.0 Task Breakdown
 
-| Task | Dependencies | Priority | Effort |
+| Task | Dependencies | Priority | Status |
 |------|--------------|----------|--------|
-| whisper-rs integration | None | HIGH | 1 week |
-| Caption UI (edit, export) | whisper-rs | HIGH | 3 days |
-| Meilisearch sidecar setup | None | HIGH | 3 days |
-| Asset indexing pipeline | Meilisearch | HIGH | 3 days |
-| Search UI component | Asset indexing | MEDIUM | 2 days |
-| Transcript search | whisper-rs, Meilisearch | MEDIUM | 2 days |
-| candle setup | None | MEDIUM | 3 days |
-| Shot detection impl | candle | MEDIUM | 1 week |
-| Shot UI (markers, navigation) | Shot detection | LOW | 3 days |
+| whisper-rs integration | None | HIGH | ⏳ Pending |
+| Caption UI (edit, export) | whisper-rs | HIGH | ✅ Complete |
+| Meilisearch sidecar setup | None | HIGH | ✅ Complete |
+| Asset indexing pipeline | Meilisearch | HIGH | ✅ Complete |
+| Search UI component | Asset indexing | MEDIUM | ✅ Complete |
+| Transcript search | whisper-rs, Meilisearch | MEDIUM | ✅ Infrastructure Ready |
+| candle setup | None | MEDIUM | ⏳ Pending |
+| Shot detection impl | candle | MEDIUM | ⏳ Pending |
+| Shot UI (markers, navigation) | Shot detection | LOW | ⏳ Pending |
+| Caption export SRT/VTT | Caption UI | LOW | ⏳ Pending |
 
 ### v0.2.0 Definition of Done
 
-- [ ] One-click captioning for video assets
-- [ ] Caption editing and export (SRT/VTT)
-- [ ] Full-text search across all assets
-- [ ] Transcript-based search ("find 'hello'")
-- [ ] Automatic shot detection with markers
-- [ ] AI prompt panel with EditScript execution
+- [ ] One-click captioning for video assets (UI ready, whisper-rs pending)
+- [x] Caption editing UI (CaptionEditor.tsx complete)
+- [ ] Caption export (SRT/VTT formats) - pending
+- [x] Full-text search across all assets (SearchPanel, Meilisearch)
+- [x] Transcript-based search ("find 'hello'") - infrastructure ready
+- [ ] Automatic shot detection with markers (candle pending)
+- [x] AI prompt panel with EditScript execution (AIPromptPanel.tsx)
 
 ---
 

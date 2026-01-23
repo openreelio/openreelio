@@ -332,14 +332,23 @@ pub fn run() {
     // Create shared FFmpeg state
     let ffmpeg_state = create_ffmpeg_state();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .manage(AppState::new())
         .manage(ffmpeg_state.clone())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
-        .setup(move |app| {
+        .plugin(tauri_plugin_fs::init());
+
+    // The updater requires valid signing keys and a release manifest endpoint.
+    // In local MSI distribution mode we disable it by default to avoid noisy
+    // startup errors and confusing UX.
+    let builder = if std::env::var("OPENREELIO_ENABLE_UPDATER").ok().as_deref() == Some("1") {
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
+    } else {
+        builder
+    };
+
+    builder.setup(move |app| {
             // Initialize logging (safe to call multiple times).
             init_logging(app.handle());
 

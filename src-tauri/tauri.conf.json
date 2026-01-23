@@ -3,17 +3,7 @@
   "productName": "OpenReelio",
   "version": "0.1.0",
   "identifier": "dev.openreelio.app",
-  "plugins": {
-    "updater": {
-      "pubkey": "",
-      "endpoints": [
-        "https://github.com/openreelio/openreelio/releases/latest/download/latest.json"
-      ],
-      "windows": {
-        "installMode": "passive"
-      }
-    }
-  },
+  "plugins": {},
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",

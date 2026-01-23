@@ -32,7 +32,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     language: 'en',
     showWelcomeOnStartup: true,
     recentProjectsLimit: 10,
-    checkUpdatesOnStartup: true,
+    checkUpdatesOnStartup: false,
     defaultProjectLocation: null,
   },
   editor: {

@@ -15,6 +15,7 @@ pub mod indexing;
 pub mod jobs;
 pub mod performance;
 pub mod plugin;
+pub mod process;
 pub mod project;
 pub mod qc;
 pub mod render;

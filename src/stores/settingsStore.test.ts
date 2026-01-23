@@ -25,13 +25,16 @@ import { useSettingsStore, type AppSettings } from './settingsStore';
 
 const mockInvoke = vi.mocked(invoke);
 
+/** Debounce delay must match the constant in settingsStore.ts */
+const DEBOUNCE_DELAY_MS = 500;
+
 const DEFAULT_SETTINGS: AppSettings = {
   version: 1,
   general: {
     language: 'en',
     showWelcomeOnStartup: true,
     recentProjectsLimit: 10,
-    checkUpdatesOnStartup: true,
+    checkUpdatesOnStartup: false,
     defaultProjectLocation: null,
   },
   editor: {
@@ -190,22 +193,104 @@ describe('settingsStore', () => {
   });
 
   describe('updateSettings', () => {
-    it('should update a section and save', async () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('should update local state immediately for responsive UI', async () => {
+      const { result } = renderHook(() => useSettingsStore());
+
+      // Update triggers immediate local change
+      act(() => {
+        result.current.updateSettings('general', { language: 'ja' });
+      });
+
+      // Local state updates immediately (before debounce)
+      expect(result.current.settings.general.language).toBe('ja');
+      // Backend call is not yet made (debouncing)
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should debounce rapid updates and batch them', async () => {
       const updated: AppSettings = {
         ...DEFAULT_SETTINGS,
-        general: { ...DEFAULT_SETTINGS.general, language: 'ja' },
+        general: {
+          ...DEFAULT_SETTINGS.general,
+          language: 'ja',
+          showWelcomeOnStartup: false,
+        },
       };
       mockInvoke.mockResolvedValueOnce(updated);
 
       const { result } = renderHook(() => useSettingsStore());
 
-      await act(async () => {
-        await result.current.updateSettings('general', { language: 'ja' });
+      // Make multiple rapid updates
+      act(() => {
+        result.current.updateSettings('general', { language: 'ko' });
+      });
+      act(() => {
+        result.current.updateSettings('general', { language: 'ja' });
+      });
+      act(() => {
+        result.current.updateSettings('general', { showWelcomeOnStartup: false });
       });
 
-      expect(result.current.settings.general.language).toBe('ja');
+      // Before debounce fires, no backend calls
+      expect(mockInvoke).not.toHaveBeenCalled();
+
+      // Fast-forward past debounce delay
+      await act(async () => {
+        vi.advanceTimersByTime(DEBOUNCE_DELAY_MS);
+        await vi.runAllTimersAsync();
+      });
+
+      // Should be a single batched call with all changes
+      expect(mockInvoke).toHaveBeenCalledTimes(1);
       expect(mockInvoke).toHaveBeenCalledWith('update_settings', {
-        partial: { general: { language: 'ja' } },
+        partial: {
+          general: {
+            language: 'ja', // Last value wins
+            showWelcomeOnStartup: false,
+          },
+        },
+      });
+    });
+
+    it('should batch updates across different sections', async () => {
+      const updated: AppSettings = {
+        ...DEFAULT_SETTINGS,
+        general: { ...DEFAULT_SETTINGS.general, language: 'ja' },
+        appearance: { ...DEFAULT_SETTINGS.appearance, theme: 'light' },
+      };
+      mockInvoke.mockResolvedValueOnce(updated);
+
+      const { result } = renderHook(() => useSettingsStore());
+
+      // Update different sections
+      act(() => {
+        result.current.updateSettings('general', { language: 'ja' });
+      });
+      act(() => {
+        result.current.updateSettings('appearance', { theme: 'light' });
+      });
+
+      // Fast-forward past debounce delay
+      await act(async () => {
+        vi.advanceTimersByTime(DEBOUNCE_DELAY_MS);
+        await vi.runAllTimersAsync();
+      });
+
+      // Should batch all sections into one call
+      expect(mockInvoke).toHaveBeenCalledTimes(1);
+      expect(mockInvoke).toHaveBeenCalledWith('update_settings', {
+        partial: {
+          general: { language: 'ja' },
+          appearance: { theme: 'light' },
+        },
       });
     });
 
@@ -218,17 +303,24 @@ describe('settingsStore', () => {
 
       const { result } = renderHook(() => useSettingsStore());
 
-      await act(async () => {
-        await result.current.updateSettings('general', {
-          showWelcomeOnStartup: false,
-        });
+      act(() => {
+        result.current.updateSettings('general', { showWelcomeOnStartup: false });
       });
 
+      // Local state should reflect the change
       expect(result.current.settings.general.language).toBe('en');
+      expect(result.current.settings.general.showWelcomeOnStartup).toBe(false);
+
+      // Fast-forward to trigger backend save
+      await act(async () => {
+        vi.advanceTimersByTime(DEBOUNCE_DELAY_MS);
+        await vi.runAllTimersAsync();
+      });
+
       expect(result.current.settings.general.showWelcomeOnStartup).toBe(false);
     });
 
-    it('should rollback to previous value on error', async () => {
+    it('should handle backend error and set error state', async () => {
       mockInvoke.mockRejectedValueOnce(new Error('Update failed'));
 
       const { result } = renderHook(() => useSettingsStore());
@@ -236,16 +328,39 @@ describe('settingsStore', () => {
       // Verify initial state
       expect(result.current.settings.general.language).toBe('en');
 
-      await act(async () => {
-        try {
-          await result.current.updateSettings('general', { language: 'ko' });
-        } catch {
-          // Expected to throw
-        }
+      // Start update (optimistic) - capture the promise and add immediate catch
+      let caughtError: unknown = null;
+      act(() => {
+        const promise = result.current.updateSettings('general', { language: 'ko' });
+        // Immediately attach catch to prevent unhandled rejection
+        promise.catch((e) => {
+          caughtError = e;
+        });
       });
 
-      // Should rollback to original value
-      expect(result.current.settings.general.language).toBe('en');
+      // Local state updates optimistically
+      expect(result.current.settings.general.language).toBe('ko');
+
+      // Advance timers to trigger the debounced save
+      act(() => {
+        vi.advanceTimersByTime(DEBOUNCE_DELAY_MS + 100);
+      });
+
+      // Run all pending promises and timers
+      await act(async () => {
+        await vi.runAllTimersAsync();
+      });
+
+      // Wait a microtask for the rejection to be handled
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      // Verify error was caught
+      expect(caughtError).toBeInstanceOf(Error);
+      expect((caughtError as Error).message).toBe('Update failed');
+
+      // Error is captured in store state
       expect(result.current.error).toBe('Update failed');
     });
   });
@@ -299,4 +414,184 @@ describe('settingsStore', () => {
       expect(result.current.error).toBeNull();
     });
   });
+
+  describe('flushPendingUpdates', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('should immediately flush pending debounced updates', async () => {
+      mockInvoke.mockResolvedValue({
+        ...DEFAULT_SETTINGS,
+        general: { ...DEFAULT_SETTINGS.general, language: 'ja' },
+      });
+
+      const { result } = renderHook(() => useSettingsStore());
+
+      // Start an update (will be debounced)
+      act(() => {
+        result.current.updateSettings('general', { language: 'ja' });
+      });
+
+      // Before flush, no backend call
+      expect(mockInvoke).not.toHaveBeenCalled();
+
+      // Force flush
+      await act(async () => {
+        await result.current.flushPendingUpdates();
+      });
+
+      // Should have made the backend call immediately
+      expect(mockInvoke).toHaveBeenCalledWith('update_settings', {
+        partial: { general: { language: 'ja' } },
+      });
+    });
+  });
+
+});
+
+// =============================================================================
+// Destructive Test Scenarios
+// =============================================================================
+
+describe('settingsStore - Destructive Tests', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    // Reset internal state and store state
+    const store = useSettingsStore.getState();
+    if ('_resetInternalState' in store) {
+      (store as { _resetInternalState: () => void })._resetInternalState();
+    }
+    useSettingsStore.setState({
+      settings: DEFAULT_SETTINGS,
+      isLoaded: false,
+      isSaving: false,
+      error: null,
+    });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+    // Reset internal state after each test
+    const store = useSettingsStore.getState();
+    if ('_resetInternalState' in store) {
+      (store as { _resetInternalState: () => void })._resetInternalState();
+    }
+  });
+
+  describe('Optimistic Updates', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('should apply optimistic updates immediately', async () => {
+      mockInvoke.mockResolvedValue(DEFAULT_SETTINGS);
+
+      const { result } = renderHook(() => useSettingsStore());
+
+      // Update triggers optimistic local change
+      act(() => {
+        result.current.updateSettings('general', { language: 'ko' });
+      });
+
+      // Local state should update immediately before backend call
+      expect(result.current.settings.general.language).toBe('ko');
+      expect(mockInvoke).not.toHaveBeenCalled();
+
+      // Fast-forward past debounce
+      await act(async () => {
+        vi.advanceTimersByTime(DEBOUNCE_DELAY_MS + 100);
+        await vi.runAllTimersAsync();
+      });
+
+      // Backend call should have been made
+      expect(mockInvoke).toHaveBeenCalled();
+    });
+
+    it('should preserve optimistic updates across rapid changes', async () => {
+      mockInvoke.mockResolvedValue({
+        ...DEFAULT_SETTINGS,
+        general: { ...DEFAULT_SETTINGS.general, language: 'de' },
+      });
+
+      const { result } = renderHook(() => useSettingsStore());
+
+      // Rapid updates
+      act(() => {
+        result.current.updateSettings('general', { language: 'ko' });
+      });
+      expect(result.current.settings.general.language).toBe('ko');
+
+      act(() => {
+        result.current.updateSettings('general', { language: 'ja' });
+      });
+      expect(result.current.settings.general.language).toBe('ja');
+
+      act(() => {
+        result.current.updateSettings('general', { language: 'de' });
+      });
+      expect(result.current.settings.general.language).toBe('de');
+
+      // Fast-forward past debounce
+      await act(async () => {
+        vi.advanceTimersByTime(DEBOUNCE_DELAY_MS + 100);
+        await vi.runAllTimersAsync();
+      });
+
+      // Should batch into single call with final value
+      expect(mockInvoke).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Multi-Section Batching', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('should batch updates across different sections', async () => {
+      const finalSettings = {
+        ...DEFAULT_SETTINGS,
+        general: { ...DEFAULT_SETTINGS.general, language: 'ja' },
+        appearance: { ...DEFAULT_SETTINGS.appearance, theme: 'light' },
+      };
+      mockInvoke.mockResolvedValue(finalSettings);
+
+      const { result } = renderHook(() => useSettingsStore());
+
+      // Updates to different sections
+      act(() => {
+        result.current.updateSettings('general', { language: 'ja' });
+        result.current.updateSettings('appearance', { theme: 'light' });
+      });
+
+      // Fast-forward past debounce
+      await act(async () => {
+        vi.advanceTimersByTime(DEBOUNCE_DELAY_MS + 100);
+        await vi.runAllTimersAsync();
+      });
+
+      // Should batch all sections into single call
+      expect(mockInvoke).toHaveBeenCalledTimes(1);
+      expect(mockInvoke).toHaveBeenCalledWith('update_settings', {
+        partial: expect.objectContaining({
+          general: { language: 'ja' },
+          appearance: { theme: 'light' },
+        }),
+      });
+    });
+  });
+
 });
