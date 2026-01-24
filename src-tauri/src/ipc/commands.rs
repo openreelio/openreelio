@@ -16,13 +16,17 @@ use crate::core::{
         UpdateAssetCommand,
     },
     ffmpeg::FFmpegProgress,
-    fs::{validate_local_input_path, validate_output_path, validate_path_id_component},
+    fs::{
+        default_export_allowed_roots, validate_existing_project_dir, validate_local_input_path,
+        validate_path_id_component, validate_scoped_output_path,
+    },
     jobs::{Job, JobStatus, JobType, Priority},
     performance::memory::{CacheStats, PoolStats},
     settings::{AppSettings, SettingsManager},
     timeline::Sequence,
     CoreError,
 };
+use crate::ipc::serialize_to_json_string;
 use crate::{ActiveProject, AppState};
 
 fn allow_project_asset_protocol(
@@ -60,6 +64,35 @@ fn allow_project_asset_protocol(
     }
 }
 
+fn forbid_project_asset_protocol(
+    state: &AppState,
+    project_path: &std::path::Path,
+    assets: &[Asset],
+) {
+    // Forbid the project-managed runtime directory.
+    state.forbid_asset_protocol_directory(&project_path.join(".openreelio"), true);
+
+    // Forbid imported asset source files.
+    for asset in assets {
+        let uri = asset.uri.trim();
+        if uri.is_empty() {
+            continue;
+        }
+
+        let path = PathBuf::from(uri);
+        if !path.is_absolute() {
+            continue;
+        }
+
+        // Only forbid existing files; if it's gone, the scope is effectively inert.
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.is_file() {
+                state.forbid_asset_protocol_file(&path);
+            }
+        }
+    }
+}
+
 // =============================================================================
 // Project Commands
 // =============================================================================
@@ -80,12 +113,36 @@ pub async fn create_project(
     use fs2::FileExt;
     use std::fs::OpenOptions;
 
+    let name_trimmed = name.trim();
+    if name_trimmed.is_empty() {
+        return Err("Project name is empty".to_string());
+    }
+    if name_trimmed.chars().any(|c| c.is_control()) {
+        return Err("Project name contains control characters".to_string());
+    }
+    if name_trimmed.len() > 100 {
+        return Err("Project name is too long (max 100 characters)".to_string());
+    }
+
+    // If another project is open, refuse to replace it if it has unsaved changes.
+    let previous_scope = {
+        let guard = state.project.lock().await;
+        if let Some(p) = guard.as_ref() {
+            if p.state.is_dirty {
+                return Err("A project is already open with unsaved changes. Save it before creating a new project.".to_string());
+            }
+
+            let assets: Vec<Asset> = p.state.assets.values().cloned().collect();
+            Some((p.path.clone(), assets))
+        } else {
+            None
+        }
+    };
+
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("Project path is empty".to_string());
     }
-
-    let path = trimmed.to_string();
 
     let project_path = PathBuf::from(trimmed);
     if !project_path.is_absolute() {
@@ -159,8 +216,8 @@ pub async fn create_project(
         }
 
         // Create project with atomic file operations
-        let project =
-            ActiveProject::create(&name, project_path.clone()).map_err(|e| e.to_ipc_error())?;
+        let project = ActiveProject::create(name_trimmed, project_path.clone())
+            .map_err(|e| e.to_ipc_error())?;
 
         tracing::info!(
             "Created new project '{}' at {}",
@@ -178,20 +235,30 @@ pub async fn create_project(
 
     let project = result?;
 
+    // Canonicalize after creation to avoid mixed path representations.
+    let project_path_canon =
+        std::fs::canonicalize(&project.path).unwrap_or_else(|_| project.path.clone());
+
     let info = ProjectInfo {
         id: project.state.meta.id.clone(),
         name: project.state.meta.name.clone(),
-        path: path.clone(),
+        path: project_path_canon.to_string_lossy().to_string(),
         created_at: project.state.meta.created_at.clone(),
     };
 
     // Store in app state
     let mut guard = state.project.lock().await;
+
+    // Replace the existing project (if any) after forbidding its asset protocol scope.
+    if let Some((old_path, old_assets)) = previous_scope {
+        forbid_project_asset_protocol(&state, &old_path, &old_assets);
+    }
+
     *guard = Some(project);
 
     // Allowlist the project-managed workspace for previews/thumbnails.
     // Asset files themselves are allowlisted on import.
-    allow_project_asset_protocol(&state, &project_path, &[]);
+    allow_project_asset_protocol(&state, &project_path_canon, &[]);
 
     Ok(info)
 }
@@ -200,38 +267,29 @@ pub async fn create_project(
 #[tauri::command]
 #[tracing::instrument(skip(state), fields(project_path = %path))]
 pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<ProjectInfo, String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err("Project path is empty".to_string());
-    }
+    // If another project is open, refuse to replace it if it has unsaved changes.
+    let previous_scope = {
+        let guard = state.project.lock().await;
+        if let Some(p) = guard.as_ref() {
+            if p.state.is_dirty {
+                return Err("A project is already open with unsaved changes. Save it before opening another project.".to_string());
+            }
 
-    let path = trimmed.to_string();
+            let assets: Vec<Asset> = p.state.assets.values().cloned().collect();
+            Some((p.path.clone(), assets))
+        } else {
+            None
+        }
+    };
 
-    let project_path = PathBuf::from(trimmed);
-
-    if !project_path.exists() {
-        return Err(CoreError::ProjectNotFound(path.clone()).to_ipc_error());
-    }
-    if !project_path.is_dir() {
-        return Err(format!(
-            "Project path must be a directory: {}",
-            project_path.display()
-        ));
-    }
-
-    // Require basic project shape to avoid opening an arbitrary directory.
-    let has_project_json = project_path.join("project.json").exists();
-    let has_ops_log = project_path.join("ops.jsonl").exists();
-    if !has_project_json && !has_ops_log {
-        return Err(format!(
-            "Not a valid OpenReelio project directory: {}",
-            project_path.display()
-        ));
-    }
+    let project_path = validate_existing_project_dir(&path, "Project path")
+        .map_err(|e| CoreError::ValidationError(e).to_ipc_error())?;
+    let path = project_path.to_string_lossy().to_string();
 
     let project = ActiveProject::open(project_path).map_err(|e| e.to_ipc_error())?;
     let assets_for_scope: Vec<Asset> = project.state.assets.values().cloned().collect();
-    let project_path_for_scope = project.path.clone();
+    let project_path_for_scope =
+        std::fs::canonicalize(&project.path).unwrap_or_else(|_| project.path.clone());
 
     let info = ProjectInfo {
         id: project.state.meta.id.clone(),
@@ -242,12 +300,46 @@ pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<Pr
 
     // Store in app state
     let mut guard = state.project.lock().await;
+
+    // Replace the existing project (if any) after forbidding its asset protocol scope.
+    if let Some((old_path, old_assets)) = previous_scope {
+        forbid_project_asset_protocol(&state, &old_path, &old_assets);
+    }
+
     *guard = Some(project);
 
     // Restrict asset protocol to exactly what the opened project needs.
     allow_project_asset_protocol(&state, &project_path_for_scope, &assets_for_scope);
 
     Ok(info)
+}
+
+/// Closes the current project, optionally requiring it to be saved.
+#[tauri::command]
+pub async fn close_project(
+    require_saved: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let require_saved = require_saved.unwrap_or(true);
+
+    let previous_scope = {
+        let mut guard = state.project.lock().await;
+        let Some(p) = guard.take() else {
+            return Ok(false);
+        };
+
+        if require_saved && p.state.is_dirty {
+            // Restore the project back into state.
+            *guard = Some(p);
+            return Err("Project has unsaved changes. Save it before closing.".to_string());
+        }
+
+        let assets: Vec<Asset> = p.state.assets.values().cloned().collect();
+        (p.path, assets)
+    };
+
+    forbid_project_asset_protocol(&state, &previous_scope.0, &previous_scope.1);
+    Ok(true)
 }
 
 /// Saves the current project
@@ -1317,12 +1409,8 @@ pub async fn start_render(
     };
     use tauri::Emitter;
 
-    // Validate output path before proceeding
-    let validated_output_path = validate_output_path(&output_path, "Output path")?;
-    tracing::debug!("Validated output path: {}", validated_output_path.display());
-
-    // Get sequence and assets from project state
-    let (sequence, assets) = {
+    // Get sequence/assets + project path from project state
+    let (sequence, assets, project_path) = {
         let guard = state.project.lock().await;
 
         let project = guard
@@ -1343,8 +1431,23 @@ pub async fn start_render(
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        (sequence, assets)
+        (sequence, assets, project.path.clone())
     };
+
+    // Validate output path within allowed roots (defense-in-depth for compromised renderer).
+    let roots = default_export_allowed_roots(&project_path);
+    let root_refs: Vec<&std::path::Path> = roots.iter().map(|p| p.as_path()).collect();
+    let validated_output_path =
+        validate_scoped_output_path(&output_path, "Output path", &root_refs)?;
+    tracing::debug!(
+        "Validated output path: {} (allowedRoots={})",
+        validated_output_path.display(),
+        root_refs
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     // Get FFmpeg runner
     let ffmpeg_guard = ffmpeg_state.read().await;
@@ -1513,6 +1616,25 @@ pub async fn analyze_intent(
     let script =
         parse_intent_to_script(&intent, &asset_ids, &track_ids, timeline_duration, &context)?;
 
+    let requires = script
+        .requires
+        .into_iter()
+        .map(|r| {
+            Ok(RequirementDto {
+                kind: serialize_to_json_string(&r.kind)
+                    .map_err(|e| format!("Failed to serialize requirement kind: {e}"))?,
+                query: r.query,
+                provider: r.provider,
+                params: r.params,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let copyright = serialize_to_json_string(&script.risk.copyright)
+        .map_err(|e| format!("Failed to serialize risk.copyright: {e}"))?;
+    let nsfw = serialize_to_json_string(&script.risk.nsfw)
+        .map_err(|e| format!("Failed to serialize risk.nsfw: {e}"))?;
+
     Ok(EditScriptDto {
         intent: script.intent,
         commands: script
@@ -1524,21 +1646,9 @@ pub async fn analyze_intent(
                 description: cmd.description,
             })
             .collect(),
-        requires: script
-            .requires
-            .into_iter()
-            .map(|r| RequirementDto {
-                kind: format!("{:?}", r.kind).to_lowercase(),
-                query: r.query,
-                provider: r.provider,
-                params: r.params,
-            })
-            .collect(),
+        requires,
         qc_rules: script.qc_rules,
-        risk: RiskAssessmentDto {
-            copyright: format!("{:?}", script.risk.copyright).to_lowercase(),
-            nsfw: format!("{:?}", script.risk.nsfw).to_lowercase(),
-        },
+        risk: RiskAssessmentDto { copyright, nsfw },
         explanation: script.explanation,
         preview_plan: script.preview_plan.map(|p| PreviewPlanDto {
             ranges: p
@@ -1810,6 +1920,14 @@ pub async fn validate_edit_script(
 
     // Validate each command
     for (i, cmd) in edit_script.commands.iter().enumerate() {
+        if !cmd.params.is_object() {
+            issues.push(format!(
+                "{} command {} has invalid params: expected JSON object",
+                cmd.command_type, i
+            ));
+            continue;
+        }
+
         match cmd.command_type.as_str() {
             "InsertClip" => {
                 if cmd.params.get("trackId").is_none() {
@@ -1822,6 +1940,14 @@ pub async fn validate_edit_script(
                         warnings.push(format!("Asset {} not found in project", asset_id));
                     }
                 }
+                if let Some(v) = cmd.params.get("timelineStart").and_then(|v| v.as_f64()) {
+                    if !v.is_finite() || v < 0.0 {
+                        issues.push(format!(
+                            "InsertClip command {} has invalid timelineStart: must be finite and non-negative",
+                            i
+                        ));
+                    }
+                }
             }
             "SplitClip" | "DeleteClip" | "TrimClip" | "MoveClip" => {
                 if cmd.params.get("clipId").is_none() {
@@ -1829,16 +1955,25 @@ pub async fn validate_edit_script(
                 }
             }
             _ => {
-                warnings.push(format!("Unknown command type: {}", cmd.command_type));
+                issues.push(format!("Unknown command type: {}", cmd.command_type));
             }
         }
     }
 
     // Check risk levels
+    match edit_script.risk.copyright.as_str() {
+        "none" | "low" | "medium" | "high" => {}
+        other => issues.push(format!("Invalid risk.copyright value: {}", other)),
+    }
+    match edit_script.risk.nsfw.as_str() {
+        "none" | "possible" | "likely" => {}
+        other => issues.push(format!("Invalid risk.nsfw value: {}", other)),
+    }
+
     if edit_script.risk.copyright == "high" {
         warnings.push("High copyright risk detected".to_string());
     }
-    if edit_script.risk.nsfw == "likely" || edit_script.risk.nsfw == "high" {
+    if edit_script.risk.nsfw == "likely" {
         warnings.push("High NSFW risk detected".to_string());
     }
 
@@ -2226,7 +2361,7 @@ pub struct RequirementDto {
 pub struct RiskAssessmentDto {
     /// Copyright risk level ("none", "low", "medium", "high")
     pub copyright: String,
-    /// NSFW risk level ("none", "low", "medium", "high")
+    /// NSFW risk level ("none", "possible", "likely")
     pub nsfw: String,
 }
 
@@ -3699,6 +3834,20 @@ pub async fn configure_ai_provider(
             }
             cfg
         }
+        ProviderType::Gemini => {
+            let api_key = config
+                .api_key
+                .ok_or_else(|| "API key is required for Gemini".to_string())?;
+            let mut cfg = ProviderConfig::gemini(&api_key);
+            if let Some(model) = &config.model {
+                cfg = cfg.with_model(model);
+            }
+            if let Some(url) = &config.base_url {
+                validate_base_url(url, false)?;
+                cfg = cfg.with_base_url(url);
+            }
+            cfg
+        }
         ProviderType::Local => {
             let mut cfg = ProviderConfig::local(config.base_url.as_deref());
             if let Some(url) = &config.base_url {
@@ -3726,6 +3875,7 @@ pub async fn configure_ai_provider(
     let available_models = match provider_type {
         ProviderType::OpenAI => crate::core::ai::OpenAIProvider::available_models(),
         ProviderType::Anthropic => crate::core::ai::AnthropicProvider::available_models(),
+        ProviderType::Gemini => crate::core::ai::GeminiProvider::available_models(),
         ProviderType::Local => crate::core::ai::LocalProvider::common_models(),
     };
 
@@ -3860,6 +4010,25 @@ pub async fn generate_edit_script_with_ai(
         .map_err(|e| e.to_ipc_error())?;
 
     // Convert to DTO
+    let requires = edit_script
+        .requires
+        .into_iter()
+        .map(|req| {
+            Ok(RequirementDto {
+                kind: serialize_to_json_string(&req.kind)
+                    .map_err(|e| format!("Failed to serialize requirement kind: {e}"))?,
+                query: req.query,
+                provider: req.provider,
+                params: req.params,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    let copyright = serialize_to_json_string(&edit_script.risk.copyright)
+        .map_err(|e| format!("Failed to serialize risk.copyright: {e}"))?;
+    let nsfw = serialize_to_json_string(&edit_script.risk.nsfw)
+        .map_err(|e| format!("Failed to serialize risk.nsfw: {e}"))?;
+
     Ok(EditScriptDto {
         intent: edit_script.intent,
         commands: edit_script
@@ -3871,21 +4040,9 @@ pub async fn generate_edit_script_with_ai(
                 description: cmd.description,
             })
             .collect(),
-        requires: edit_script
-            .requires
-            .into_iter()
-            .map(|req| RequirementDto {
-                kind: format!("{:?}", req.kind).to_lowercase(),
-                query: req.query,
-                provider: req.provider,
-                params: req.params,
-            })
-            .collect(),
+        requires,
         qc_rules: edit_script.qc_rules,
-        risk: RiskAssessmentDto {
-            copyright: format!("{:?}", edit_script.risk.copyright).to_lowercase(),
-            nsfw: format!("{:?}", edit_script.risk.nsfw).to_lowercase(),
-        },
+        risk: RiskAssessmentDto { copyright, nsfw },
         explanation: edit_script.explanation,
         preview_plan: edit_script.preview_plan.map(|p| PreviewPlanDto {
             ranges: p
@@ -3911,6 +4068,7 @@ pub async fn get_available_ai_models(provider_type: String) -> Result<Vec<String
     let models = match ptype {
         ProviderType::OpenAI => crate::core::ai::OpenAIProvider::available_models(),
         ProviderType::Anthropic => crate::core::ai::AnthropicProvider::available_models(),
+        ProviderType::Gemini => crate::core::ai::GeminiProvider::available_models(),
         ProviderType::Local => crate::core::ai::LocalProvider::common_models(),
     };
 
