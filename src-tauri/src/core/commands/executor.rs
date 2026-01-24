@@ -1010,7 +1010,11 @@ mod tests {
         let track_id = state.sequences[&seq_id].tracks[0].id.clone();
 
         // Import an asset with a known duration.
-        let import_cmd = ImportAssetCommand::new("test.mp4", "/test.mp4").with_duration(30.0);
+        let asset_path = temp_dir.path().join("test.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+
+        let import_cmd = ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(30.0);
         executor
             .execute(Box::new(import_cmd.clone()), &mut state)
             .unwrap();

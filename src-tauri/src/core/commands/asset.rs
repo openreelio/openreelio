@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::{
     assets::{Asset, AudioInfo, LicenseInfo, ProxyStatus, VideoInfo},
     commands::{Command, CommandResult, StateChange},
+    fs::validate_local_input_path,
     project::ProjectState,
     AssetId, CoreError, CoreResult,
 };
@@ -26,6 +27,7 @@ pub struct ImportAssetCommand {
 impl ImportAssetCommand {
     /// Creates a new import asset command (infers type from extension)
     pub fn new(name: &str, uri: &str) -> Self {
+        let uri = uri.trim();
         // Infer asset type from extension
         let extension = std::path::Path::new(uri)
             .extension()
@@ -110,7 +112,21 @@ impl ImportAssetCommand {
 
 impl Command for ImportAssetCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        // This is a security boundary: UI/AI can attempt to import a URL or an invalid path.
+        // We validate at the command level so all call sites (IPC, AI, plugins) are protected.
+        let validated_path = validate_local_input_path(&self.asset.uri, "asset.uri")
+            .map_err(CoreError::ValidationError)?;
+        // Normalize to a trimmed absolute path string.
+        self.asset.uri = validated_path.to_string_lossy().to_string();
+
         let asset_id = self.asset.id.clone();
+
+        tracing::debug!(
+            asset_id = %asset_id,
+            asset_name = %self.asset.name,
+            asset_uri = %self.asset.uri,
+            "Importing asset"
+        );
 
         state.assets.insert(asset_id.clone(), self.asset.clone());
 
@@ -392,14 +408,21 @@ mod tests {
         ProjectState::new("Test Project")
     }
 
+    fn create_temp_asset_file(file_name: &str) -> (tempfile::TempDir, String) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join(file_name);
+        std::fs::write(&path, b"test").unwrap();
+        (dir, path.to_string_lossy().to_string())
+    }
+
     #[test]
     fn test_import_asset_video() {
         let mut state = create_test_state();
+        let (_dir, uri) = create_temp_asset_file("video.mp4");
 
-        let mut cmd =
-            ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default())
-                .with_duration(120.0)
-                .with_file_size(1024 * 1024);
+        let mut cmd = ImportAssetCommand::video("video.mp4", &uri, VideoInfo::default())
+            .with_duration(120.0)
+            .with_file_size(1024 * 1024);
 
         let result = cmd.execute(&mut state).unwrap();
 
@@ -414,9 +437,9 @@ mod tests {
     #[test]
     fn test_import_asset_audio() {
         let mut state = create_test_state();
+        let (_dir, uri) = create_temp_asset_file("music.mp3");
 
-        let mut cmd =
-            ImportAssetCommand::audio("music.mp3", "/path/music.mp3", AudioInfo::default());
+        let mut cmd = ImportAssetCommand::audio("music.mp3", &uri, AudioInfo::default());
         cmd.execute(&mut state).unwrap();
 
         assert_eq!(state.assets.len(), 1);
@@ -425,8 +448,9 @@ mod tests {
     #[test]
     fn test_import_asset_image() {
         let mut state = create_test_state();
+        let (_dir, uri) = create_temp_asset_file("photo.jpg");
 
-        let mut cmd = ImportAssetCommand::image("photo.jpg", "/path/photo.jpg", 1920, 1080);
+        let mut cmd = ImportAssetCommand::image("photo.jpg", &uri, 1920, 1080);
         cmd.execute(&mut state).unwrap();
 
         assert_eq!(state.assets.len(), 1);
@@ -435,10 +459,10 @@ mod tests {
     #[test]
     fn test_remove_asset() {
         let mut state = create_test_state();
+        let (_dir, uri) = create_temp_asset_file("video.mp4");
 
         // Import asset
-        let mut import_cmd =
-            ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default());
+        let mut import_cmd = ImportAssetCommand::video("video.mp4", &uri, VideoInfo::default());
         let result = import_cmd.execute(&mut state).unwrap();
         let asset_id = &result.created_ids[0];
 
@@ -452,10 +476,10 @@ mod tests {
     #[test]
     fn test_remove_asset_in_use() {
         let mut state = create_test_state();
+        let (_dir, uri) = create_temp_asset_file("video.mp4");
 
         // Import asset
-        let mut import_cmd =
-            ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default());
+        let mut import_cmd = ImportAssetCommand::video("video.mp4", &uri, VideoInfo::default());
         let result = import_cmd.execute(&mut state).unwrap();
         let asset_id = result.created_ids[0].clone();
 
@@ -486,10 +510,10 @@ mod tests {
     #[test]
     fn test_update_asset() {
         let mut state = create_test_state();
+        let (_dir, uri) = create_temp_asset_file("video.mp4");
 
         // Import asset
-        let mut import_cmd =
-            ImportAssetCommand::video("old_name.mp4", "/path/video.mp4", VideoInfo::default());
+        let mut import_cmd = ImportAssetCommand::video("old_name.mp4", &uri, VideoInfo::default());
         let result = import_cmd.execute(&mut state).unwrap();
         let asset_id = &result.created_ids[0];
 
@@ -509,10 +533,10 @@ mod tests {
     #[test]
     fn test_update_asset_proxy_and_thumbnail_fields_and_undo() {
         let mut state = create_test_state();
+        let (_dir, uri) = create_temp_asset_file("video.mp4");
 
         // Import asset
-        let mut import_cmd =
-            ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default());
+        let mut import_cmd = ImportAssetCommand::video("video.mp4", &uri, VideoInfo::default());
         let result = import_cmd.execute(&mut state).unwrap();
         let asset_id = &result.created_ids[0];
 
@@ -539,11 +563,11 @@ mod tests {
     #[test]
     fn test_import_with_tags() {
         let mut state = create_test_state();
+        let (_dir, uri) = create_temp_asset_file("video.mp4");
 
-        let mut cmd =
-            ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default())
-                .with_tag("raw")
-                .with_tag("4k");
+        let mut cmd = ImportAssetCommand::video("video.mp4", &uri, VideoInfo::default())
+            .with_tag("raw")
+            .with_tag("4k");
 
         cmd.execute(&mut state).unwrap();
 
@@ -554,9 +578,9 @@ mod tests {
     #[test]
     fn test_import_undo() {
         let mut state = create_test_state();
+        let (_dir, uri) = create_temp_asset_file("video.mp4");
 
-        let mut cmd =
-            ImportAssetCommand::video("video.mp4", "/path/video.mp4", VideoInfo::default());
+        let mut cmd = ImportAssetCommand::video("video.mp4", &uri, VideoInfo::default());
         cmd.execute(&mut state).unwrap();
 
         assert_eq!(state.assets.len(), 1);
@@ -564,5 +588,33 @@ mod tests {
         cmd.undo(&mut state).unwrap();
 
         assert!(state.assets.is_empty());
+    }
+
+    #[test]
+    fn test_import_asset_rejects_url_uri() {
+        let mut state = create_test_state();
+
+        let mut cmd = ImportAssetCommand::video(
+            "video.mp4",
+            "https://example.com/video.mp4",
+            VideoInfo::default(),
+        );
+        let err = cmd.execute(&mut state).unwrap_err();
+        assert!(matches!(err, CoreError::ValidationError(_)));
+    }
+
+    #[test]
+    fn test_import_asset_rejects_missing_file() {
+        let mut state = create_test_state();
+        let dir = tempfile::TempDir::new().unwrap();
+        let missing_path = dir.path().join("missing.mp4");
+
+        let mut cmd = ImportAssetCommand::video(
+            "missing.mp4",
+            &missing_path.to_string_lossy(),
+            VideoInfo::default(),
+        );
+        let err = cmd.execute(&mut state).unwrap_err();
+        assert!(matches!(err, CoreError::ValidationError(_)));
     }
 }
