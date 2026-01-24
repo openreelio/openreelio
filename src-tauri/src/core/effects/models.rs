@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::core::EffectId;
 
@@ -492,10 +493,22 @@ impl Effect {
     }
 
     /// Adds a keyframe for a parameter
-    pub fn add_keyframe(&mut self, param_name: &str, keyframe: Keyframe) {
+    pub fn add_keyframe(&mut self, param_name: &str, keyframe: Keyframe) -> Result<(), String> {
+        if !keyframe.time_offset.is_finite() || keyframe.time_offset < 0.0 {
+            warn!(
+                param_name = param_name,
+                time_offset = keyframe.time_offset,
+                "Rejected invalid keyframe time_offset"
+            );
+            return Err("Keyframe timeOffset must be finite and non-negative".to_string());
+        }
+
         let keyframes = self.keyframes.entry(param_name.to_string()).or_default();
         keyframes.push(keyframe);
-        keyframes.sort_by(|a, b| a.time_offset.partial_cmp(&b.time_offset).unwrap());
+        // total_cmp provides a total ordering for floats (including -0.0 and NaNs).
+        // We still validate time_offset above to reject non-finite inputs.
+        keyframes.sort_by(|a, b| a.time_offset.total_cmp(&b.time_offset));
+        Ok(())
     }
 
     /// Gets the interpolated value at a specific time
@@ -514,7 +527,28 @@ impl Effect {
     /// Interpolates between keyframes (linear for now)
     fn interpolate_keyframes(&self, keyframes: &[Keyframe], time_offset: f64) -> ParamValue {
         if keyframes.is_empty() {
+            warn!("Interpolate called with empty keyframes; defaulting to 0.0");
             return ParamValue::Float(0.0);
+        }
+
+        if !time_offset.is_finite() {
+            warn!(
+                time_offset = time_offset,
+                "Non-finite time_offset provided to interpolate; defaulting to first keyframe"
+            );
+            return keyframes[0].value.clone();
+        }
+
+        // If there are multiple keyframes at the exact same time, pick the last one.
+        // This makes updates deterministic and avoids surprising "stale" values.
+        if time_offset == keyframes[0].time_offset {
+            if let Some(kf) = keyframes
+                .iter()
+                .take_while(|kf| kf.time_offset == time_offset)
+                .last()
+            {
+                return kf.value.clone();
+            }
         }
 
         // Before first keyframe
@@ -534,7 +568,12 @@ impl Effect {
 
             if time_offset >= kf1.time_offset && time_offset <= kf2.time_offset {
                 // Linear interpolation
-                let t = (time_offset - kf1.time_offset) / (kf2.time_offset - kf1.time_offset);
+                let denom = kf2.time_offset - kf1.time_offset;
+                if denom <= 0.0 {
+                    // Duplicate keyframes or invalid ordering; treat as a step to the next value.
+                    return kf2.value.clone();
+                }
+                let t = ((time_offset - kf1.time_offset) / denom).clamp(0.0, 1.0);
 
                 match (&kf1.value, &kf2.value) {
                     (ParamValue::Float(v1), ParamValue::Float(v2)) => {
@@ -603,6 +642,61 @@ mod tests {
         assert!(EffectType::Reverb.is_audio());
         assert!(!EffectType::Brightness.is_audio());
         assert!(!EffectType::GaussianBlur.is_audio());
+    }
+
+    #[test]
+    fn keyframes_reject_non_finite_or_negative_times() {
+        let mut effect = Effect::new(EffectType::GaussianBlur);
+
+        assert!(effect
+            .add_keyframe("radius", Keyframe::new(-1.0, ParamValue::Float(1.0)))
+            .is_err());
+        assert!(effect
+            .add_keyframe("radius", Keyframe::new(f64::NAN, ParamValue::Float(1.0)))
+            .is_err());
+        assert!(effect
+            .add_keyframe(
+                "radius",
+                Keyframe::new(f64::INFINITY, ParamValue::Float(1.0))
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn keyframes_interpolation_handles_duplicate_offsets() {
+        let mut effect = Effect::new(EffectType::GaussianBlur);
+        effect
+            .add_keyframe("radius", Keyframe::new(1.0, ParamValue::Float(10.0)))
+            .unwrap();
+        effect
+            .add_keyframe("radius", Keyframe::new(1.0, ParamValue::Float(20.0)))
+            .unwrap();
+
+        // Duplicate offsets should not divide-by-zero; treat as a step.
+        let v = effect
+            .get_value_at("radius", 1.0)
+            .unwrap()
+            .as_float()
+            .unwrap();
+        assert_eq!(v, 20.0);
+    }
+
+    #[test]
+    fn keyframes_interpolation_handles_nan_time_offset() {
+        let mut effect = Effect::new(EffectType::GaussianBlur);
+        effect
+            .add_keyframe("radius", Keyframe::new(0.0, ParamValue::Float(5.0)))
+            .unwrap();
+        effect
+            .add_keyframe("radius", Keyframe::new(2.0, ParamValue::Float(15.0)))
+            .unwrap();
+
+        let v = effect
+            .get_value_at("radius", f64::NAN)
+            .unwrap()
+            .as_float()
+            .unwrap();
+        assert_eq!(v, 5.0);
     }
 
     #[test]
@@ -755,9 +849,15 @@ mod tests {
     fn test_effect_add_keyframe() {
         let mut effect = Effect::new(EffectType::GaussianBlur);
 
-        effect.add_keyframe("radius", Keyframe::new(0.0, ParamValue::Float(0.0)));
-        effect.add_keyframe("radius", Keyframe::new(2.0, ParamValue::Float(20.0)));
-        effect.add_keyframe("radius", Keyframe::new(1.0, ParamValue::Float(10.0)));
+        effect
+            .add_keyframe("radius", Keyframe::new(0.0, ParamValue::Float(0.0)))
+            .unwrap();
+        effect
+            .add_keyframe("radius", Keyframe::new(2.0, ParamValue::Float(20.0)))
+            .unwrap();
+        effect
+            .add_keyframe("radius", Keyframe::new(1.0, ParamValue::Float(10.0)))
+            .unwrap();
 
         // Should be sorted by time
         let keyframes = &effect.keyframes["radius"];
@@ -771,8 +871,12 @@ mod tests {
     fn test_effect_interpolate_keyframes() {
         let mut effect = Effect::new(EffectType::GaussianBlur);
 
-        effect.add_keyframe("radius", Keyframe::new(0.0, ParamValue::Float(0.0)));
-        effect.add_keyframe("radius", Keyframe::new(2.0, ParamValue::Float(20.0)));
+        effect
+            .add_keyframe("radius", Keyframe::new(0.0, ParamValue::Float(0.0)))
+            .unwrap();
+        effect
+            .add_keyframe("radius", Keyframe::new(2.0, ParamValue::Float(20.0)))
+            .unwrap();
 
         // At start
         assert_eq!(
@@ -835,8 +939,12 @@ mod tests {
     #[test]
     fn test_effect_with_keyframes_serialization() {
         let mut effect = Effect::new(EffectType::Brightness);
-        effect.add_keyframe("value", Keyframe::new(0.0, ParamValue::Float(0.0)));
-        effect.add_keyframe("value", Keyframe::new(1.0, ParamValue::Float(0.5)));
+        effect
+            .add_keyframe("value", Keyframe::new(0.0, ParamValue::Float(0.0)))
+            .unwrap();
+        effect
+            .add_keyframe("value", Keyframe::new(1.0, ParamValue::Float(0.5)))
+            .unwrap();
 
         let json = serde_json::to_string(&effect).unwrap();
         let parsed: Effect = serde_json::from_str(&json).unwrap();
