@@ -3,10 +3,12 @@
 //! Concrete implementations of the AIProvider trait for various AI services.
 
 mod anthropic;
+mod gemini;
 mod local;
 mod openai;
 
 pub use anthropic::AnthropicProvider;
+pub use gemini::GeminiProvider;
 pub use local::LocalProvider;
 pub use openai::OpenAIProvider;
 
@@ -25,6 +27,8 @@ pub enum ProviderType {
     OpenAI,
     /// Anthropic Claude models
     Anthropic,
+    /// Google Gemini models
+    Gemini,
     /// Local models via Ollama
     Local,
 }
@@ -34,6 +38,7 @@ impl std::fmt::Display for ProviderType {
         match self {
             ProviderType::OpenAI => write!(f, "openai"),
             ProviderType::Anthropic => write!(f, "anthropic"),
+            ProviderType::Gemini => write!(f, "gemini"),
             ProviderType::Local => write!(f, "local"),
         }
     }
@@ -46,6 +51,7 @@ impl std::str::FromStr for ProviderType {
         match s.to_lowercase().as_str() {
             "openai" => Ok(ProviderType::OpenAI),
             "anthropic" => Ok(ProviderType::Anthropic),
+            "gemini" => Ok(ProviderType::Gemini),
             "local" | "ollama" => Ok(ProviderType::Local),
             _ => Err(format!("Unknown provider type: {}", s)),
         }
@@ -93,7 +99,7 @@ impl ProviderConfig {
             provider_type: ProviderType::OpenAI,
             api_key: Some(api_key.to_string()),
             base_url: None,
-            model: Some("gpt-4o".to_string()),
+            model: Some("gpt-5.2".to_string()),
             timeout_secs: Some(60),
         }
     }
@@ -104,8 +110,19 @@ impl ProviderConfig {
             provider_type: ProviderType::Anthropic,
             api_key: Some(api_key.to_string()),
             base_url: None,
-            model: Some("claude-sonnet-4-20250514".to_string()),
+            model: Some("claude-sonnet-4-5-20251015".to_string()),
             timeout_secs: Some(60),
+        }
+    }
+
+    /// Creates a new Google Gemini provider config
+    pub fn gemini(api_key: &str) -> Self {
+        Self {
+            provider_type: ProviderType::Gemini,
+            api_key: Some(api_key.to_string()),
+            base_url: None,
+            model: Some("gemini-3-flash-preview".to_string()),
+            timeout_secs: Some(120), // Longer timeout for large context
         }
     }
 
@@ -151,6 +168,10 @@ pub fn create_provider(config: ProviderConfig) -> CoreResult<Box<dyn AIProvider>
             let provider = AnthropicProvider::new(config)?;
             Ok(Box::new(provider))
         }
+        ProviderType::Gemini => {
+            let provider = GeminiProvider::new(config)?;
+            Ok(Box::new(provider))
+        }
         ProviderType::Local => {
             let provider = LocalProvider::new(config)?;
             Ok(Box::new(provider))
@@ -184,21 +205,26 @@ mod tests {
             "ollama".parse::<ProviderType>().unwrap(),
             ProviderType::Local
         );
+        assert_eq!(
+            "gemini".parse::<ProviderType>().unwrap(),
+            ProviderType::Gemini
+        );
     }
 
     #[test]
     fn test_provider_type_display() {
         assert_eq!(ProviderType::OpenAI.to_string(), "openai");
         assert_eq!(ProviderType::Anthropic.to_string(), "anthropic");
+        assert_eq!(ProviderType::Gemini.to_string(), "gemini");
         assert_eq!(ProviderType::Local.to_string(), "local");
     }
 
     #[test]
     fn test_provider_config_openai() {
-        let config = ProviderConfig::openai("test-key").with_model("gpt-4-turbo");
+        let config = ProviderConfig::openai("test-key").with_model("gpt-4.1");
         assert_eq!(config.provider_type, ProviderType::OpenAI);
         assert_eq!(config.api_key, Some("test-key".to_string()));
-        assert_eq!(config.model, Some("gpt-4-turbo".to_string()));
+        assert_eq!(config.model, Some("gpt-4.1".to_string()));
     }
 
     #[test]

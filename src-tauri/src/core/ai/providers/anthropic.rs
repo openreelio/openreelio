@@ -40,14 +40,14 @@ impl AnthropicProvider {
     /// API version header
     pub const API_VERSION: &'static str = "2023-06-01";
 
-    /// Available Claude models
+    /// Available Claude models (2026)
+    /// Note: Claude 3.x models are deprecated/retired as of January 2026
     pub const AVAILABLE_MODELS: &'static [&'static str] = &[
+        "claude-opus-4-5-20251115",
+        "claude-sonnet-4-5-20251015",
+        "claude-haiku-4-5-20251015",
+        "claude-opus-4-1-20250805",
         "claude-sonnet-4-20250514",
-        "claude-opus-4-20250514",
-        "claude-3-5-sonnet-20241022",
-        "claude-3-5-haiku-20241022",
-        "claude-3-opus-20240229",
-        "claude-3-haiku-20240307",
     ];
 
     /// Creates a new Anthropic provider
@@ -68,7 +68,7 @@ impl AnthropicProvider {
 
         let default_model = config
             .model
-            .unwrap_or_else(|| "claude-sonnet-4-20250514".to_string());
+            .unwrap_or_else(|| "claude-sonnet-4-5-20251015".to_string());
 
         let timeout_secs = config.timeout_secs.unwrap_or(60);
 
@@ -359,17 +359,17 @@ mod tests {
 
     #[test]
     fn test_anthropic_custom_model() {
-        let config = ProviderConfig::anthropic("test-key").with_model("claude-3-opus-20240229");
+        let config = ProviderConfig::anthropic("test-key").with_model("claude-opus-4-5-20251115");
         let provider = AnthropicProvider::new(config).unwrap();
 
-        assert_eq!(provider.default_model, "claude-3-opus-20240229");
+        assert_eq!(provider.default_model, "claude-opus-4-5-20251115");
     }
 
     #[test]
     fn test_available_models() {
         let models = AnthropicProvider::available_models();
-        assert!(models.contains(&"claude-sonnet-4-20250514".to_string()));
-        assert!(models.contains(&"claude-3-opus-20240229".to_string()));
+        assert!(models.contains(&"claude-sonnet-4-5-20251015".to_string()));
+        assert!(models.contains(&"claude-opus-4-5-20251115".to_string()));
     }
 
     #[tokio::test]
