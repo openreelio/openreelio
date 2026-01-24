@@ -19,7 +19,7 @@ const logger = createLogger('AIStore');
 // =============================================================================
 
 /** Supported AI provider types */
-export type ProviderType = 'openai' | 'anthropic' | 'local';
+export type ProviderType = 'openai' | 'anthropic' | 'gemini' | 'local';
 
 /** AI provider status */
 export interface ProviderStatus {

@@ -31,12 +31,17 @@ const PROVIDER_OPTIONS: Array<{ value: ProviderType; label: string; description:
   {
     value: 'openai',
     label: 'OpenAI',
-    description: 'GPT-4o, GPT-4, o1 models',
+    description: 'GPT-5.2, GPT-4.1, o3 models',
   },
   {
     value: 'anthropic',
     label: 'Anthropic',
-    description: 'Claude 3.5 Sonnet, Claude 3 Opus',
+    description: 'Claude Opus 4.5, Claude Sonnet 4.5',
+  },
+  {
+    value: 'gemini',
+    label: 'Google Gemini',
+    description: 'Gemini 3 Pro/Flash, 2.5 Flash',
   },
   {
     value: 'local',
