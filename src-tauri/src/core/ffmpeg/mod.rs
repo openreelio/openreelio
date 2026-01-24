@@ -18,19 +18,23 @@
 //! This will download platform-specific FFmpeg binaries and include them in the app bundle.
 
 pub mod bundler;
+#[cfg(not(test))]
 mod commands;
 mod detection;
 mod runner;
+mod state;
 
 pub use bundler::{
     Arch, BundlerConfig, BundlerError, BundlerResult, DownloadSource, FFmpegPaths, Platform,
 };
+#[cfg(not(test))]
 pub use commands::*;
 pub use detection::*;
 pub use runner::{
     AudioStreamInfo, FFmpegProgress, FFmpegRunner, MediaInfo, RenderSettings, VideoStreamInfo,
     WaveformData,
 };
+pub use state::{create_ffmpeg_state, FFmpegState, SharedFFmpegState};
 
 /// FFmpeg-related error types
 #[derive(Debug, thiserror::Error)]

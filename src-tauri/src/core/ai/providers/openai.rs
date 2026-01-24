@@ -37,16 +37,17 @@ impl OpenAIProvider {
     /// Default OpenAI API base URL
     pub const DEFAULT_BASE_URL: &'static str = "https://api.openai.com/v1";
 
-    /// Available GPT models
+    /// Available GPT models (2026)
     pub const AVAILABLE_MODELS: &'static [&'static str] = &[
-        "gpt-4o",
-        "gpt-4o-mini",
-        "gpt-4-turbo",
-        "gpt-4",
-        "gpt-3.5-turbo",
-        "o1",
-        "o1-mini",
-        "o1-preview",
+        "gpt-5.2",
+        "gpt-5.1",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "o3",
+        "o3-mini",
+        "o4-mini",
     ];
 
     /// Creates a new OpenAI provider
@@ -65,7 +66,7 @@ impl OpenAIProvider {
             .base_url
             .unwrap_or_else(|| Self::DEFAULT_BASE_URL.to_string());
 
-        let default_model = config.model.unwrap_or_else(|| "gpt-4o".to_string());
+        let default_model = config.model.unwrap_or_else(|| "gpt-5.2".to_string());
         let timeout_secs = config.timeout_secs.unwrap_or(60);
 
         #[cfg(feature = "ai-providers")]
@@ -445,7 +446,7 @@ mod tests {
     #[test]
     fn test_available_models() {
         let models = OpenAIProvider::available_models();
-        assert!(models.contains(&"gpt-4o".to_string()));
-        assert!(models.contains(&"gpt-4".to_string()));
+        assert!(models.contains(&"gpt-5.2".to_string()));
+        assert!(models.contains(&"gpt-4.1".to_string()));
     }
 }

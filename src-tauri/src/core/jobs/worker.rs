@@ -8,7 +8,9 @@ use std::collections::BinaryHeap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
+#[cfg(not(test))]
+use tauri::Manager;
 use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::core::{
@@ -705,18 +707,26 @@ impl JobProcessor {
                 .to_string_lossy()
                 .to_string()
         } else {
-            // Fallback: resolve from currently open project
-            let app_state = self.app_handle.state::<crate::AppState>();
-            let guard = app_state.project.lock().await;
-            let project = guard.as_ref().ok_or_else(|| {
-                "No project open; cannot resolve transcription input path".to_string()
-            })?;
-            let asset = project
-                .state
-                .assets
-                .get(asset_id)
-                .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
-            asset.uri.clone()
+            // Fallback: resolve from currently open project (requires AppState).
+            #[cfg(test)]
+            {
+                return Err("inputPath is required in unit tests".to_string());
+            }
+
+            #[cfg(not(test))]
+            {
+                let app_state = self.app_handle.state::<crate::AppState>();
+                let guard = app_state.project.lock().await;
+                let project = guard.as_ref().ok_or_else(|| {
+                    "No project open; cannot resolve transcription input path".to_string()
+                })?;
+                let asset = project
+                    .state
+                    .assets
+                    .get(asset_id)
+                    .ok_or_else(|| format!("Asset not found: {}", asset_id))?;
+                asset.uri.clone()
+            }
         };
 
         let model_name = job
@@ -906,156 +916,165 @@ impl JobProcessor {
 
     /// Process indexing job using Meilisearch
     async fn process_indexing(&self, job: &Job) -> Result<serde_json::Value, String> {
-        use crate::core::search::meilisearch::{
-            indexer::{AssetDocument, TranscriptDocument},
-            is_meilisearch_available,
-        };
+        #[cfg(test)]
+        {
+            let _ = job;
+            Err("Search indexing requires AppState and is disabled in unit tests".to_string())
+        }
 
-        let asset_id = job
-            .payload
-            .get("assetId")
-            .and_then(|v| v.as_str())
-            .ok_or("Missing assetId in payload")?;
+        #[cfg(not(test))]
+        {
+            use crate::core::search::meilisearch::{
+                indexer::{AssetDocument, TranscriptDocument},
+                is_meilisearch_available,
+            };
 
-        // Check if Meilisearch is available
-        if !is_meilisearch_available() {
-            tracing::warn!(
-                "Meilisearch feature not enabled, skipping indexing for asset {}",
-                asset_id
+            let asset_id = job
+                .payload
+                .get("assetId")
+                .and_then(|v| v.as_str())
+                .ok_or("Missing assetId in payload")?;
+
+            // Check if Meilisearch is available
+            if !is_meilisearch_available() {
+                tracing::warn!(
+                    "Meilisearch feature not enabled, skipping indexing for asset {}",
+                    asset_id
+                );
+                return Ok(serde_json::json!({
+                    "assetId": asset_id,
+                    "indexed": false,
+                    "message": "Meilisearch feature not enabled",
+                }));
+            }
+
+            // Get asset metadata from payload
+            let asset_name = job
+                .payload
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown");
+
+            let asset_path = job
+                .payload
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let asset_kind = job
+                .payload
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+
+            let duration = job.payload.get("duration").and_then(|v| v.as_f64());
+
+            let project_id = job.payload.get("projectId").and_then(|v| v.as_str());
+
+            // Check for transcript segments to index
+            let transcript_segments: Vec<serde_json::Value> = job
+                .payload
+                .get("transcriptSegments")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            tracing::info!(
+                "Indexing asset {} with {} transcript segments",
+                asset_id,
+                transcript_segments.len()
             );
-            return Ok(serde_json::json!({
+
+            // Emit progress
+            let _ = self.app_handle.emit(
+                "job-progress",
+                serde_json::json!({
+                    "jobId": job.id,
+                    "progress": 0.3,
+                    "message": "Building index documents...",
+                }),
+            );
+
+            // Build asset document
+            let mut asset_doc = AssetDocument::new(asset_id, asset_name, asset_path, asset_kind);
+            if let Some(dur) = duration {
+                asset_doc = asset_doc.with_duration(dur);
+            }
+            if let Some(proj_id) = project_id {
+                asset_doc = asset_doc.with_project_id(proj_id);
+            }
+
+            // Build transcript documents
+            let transcript_docs: Vec<TranscriptDocument> = transcript_segments
+                .iter()
+                .enumerate()
+                .filter_map(|(i, seg)| {
+                    let text = seg.get("text")?.as_str()?;
+                    let start = seg.get("startTime").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let end = seg.get("endTime").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let language = seg.get("language").and_then(|v| v.as_str());
+
+                    let segment_id = format!("{}_{}", asset_id, i);
+                    let mut doc = TranscriptDocument::new(&segment_id, asset_id, text, start, end);
+                    if let Some(lang) = language {
+                        doc = doc.with_language(lang);
+                    }
+                    Some(doc)
+                })
+                .collect();
+
+            // Perform actual indexing via the shared Meilisearch service
+            let app_state = self.app_handle.state::<crate::AppState>();
+            let service = {
+                let guard = app_state.search_service.lock().await;
+                guard.clone().ok_or_else(|| {
+                    "Search service not initialized. Ensure Meilisearch is enabled and started"
+                        .to_string()
+                })?
+            };
+
+            // Ensure sidecar + indexer are ready (lazy startup)
+            service.ensure_ready().await?;
+
+            // Index documents
+            service.index_asset(&asset_doc).await?;
+            service
+                .index_transcripts(asset_id, &transcript_docs)
+                .await?;
+
+            let _ = self.app_handle.emit(
+                "job-progress",
+                serde_json::json!({
+                    "jobId": job.id,
+                    "progress": 0.9,
+                    "message": "Finalizing index...",
+                }),
+            );
+
+            tracing::info!(
+                "Indexed asset {} and {} transcript segments",
+                asset_id,
+                transcript_docs.len()
+            );
+
+            // Emit completion event
+            let _ = self.app_handle.emit(
+                "indexing-complete",
+                serde_json::json!({
+                    "jobId": job.id,
+                    "assetId": asset_id,
+                    "transcriptCount": transcript_docs.len(),
+                }),
+            );
+
+            Ok(serde_json::json!({
                 "assetId": asset_id,
-                "indexed": false,
-                "message": "Meilisearch feature not enabled",
-            }));
-        }
-
-        // Get asset metadata from payload
-        let asset_name = job
-            .payload
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown");
-
-        let asset_path = job
-            .payload
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        let asset_kind = job
-            .payload
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-
-        let duration = job.payload.get("duration").and_then(|v| v.as_f64());
-
-        let project_id = job.payload.get("projectId").and_then(|v| v.as_str());
-
-        // Check for transcript segments to index
-        let transcript_segments: Vec<serde_json::Value> = job
-            .payload
-            .get("transcriptSegments")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        tracing::info!(
-            "Indexing asset {} with {} transcript segments",
-            asset_id,
-            transcript_segments.len()
-        );
-
-        // Emit progress
-        let _ = self.app_handle.emit(
-            "job-progress",
-            serde_json::json!({
-                "jobId": job.id,
-                "progress": 0.3,
-                "message": "Building index documents...",
-            }),
-        );
-
-        // Build asset document
-        let mut asset_doc = AssetDocument::new(asset_id, asset_name, asset_path, asset_kind);
-        if let Some(dur) = duration {
-            asset_doc = asset_doc.with_duration(dur);
-        }
-        if let Some(proj_id) = project_id {
-            asset_doc = asset_doc.with_project_id(proj_id);
-        }
-
-        // Build transcript documents
-        let transcript_docs: Vec<TranscriptDocument> = transcript_segments
-            .iter()
-            .enumerate()
-            .filter_map(|(i, seg)| {
-                let text = seg.get("text")?.as_str()?;
-                let start = seg.get("startTime").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let end = seg.get("endTime").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let language = seg.get("language").and_then(|v| v.as_str());
-
-                let segment_id = format!("{}_{}", asset_id, i);
-                let mut doc = TranscriptDocument::new(&segment_id, asset_id, text, start, end);
-                if let Some(lang) = language {
-                    doc = doc.with_language(lang);
-                }
-                Some(doc)
-            })
-            .collect();
-
-        // Perform actual indexing via the shared Meilisearch service
-        let app_state = self.app_handle.state::<crate::AppState>();
-        let service = {
-            let guard = app_state.search_service.lock().await;
-            guard.clone().ok_or_else(|| {
-                "Search service not initialized. Ensure Meilisearch is enabled and started"
-                    .to_string()
-            })?
-        };
-
-        // Ensure sidecar + indexer are ready (lazy startup)
-        service.ensure_ready().await?;
-
-        // Index documents
-        service.index_asset(&asset_doc).await?;
-        service
-            .index_transcripts(asset_id, &transcript_docs)
-            .await?;
-
-        let _ = self.app_handle.emit(
-            "job-progress",
-            serde_json::json!({
-                "jobId": job.id,
-                "progress": 0.9,
-                "message": "Finalizing index...",
-            }),
-        );
-
-        tracing::info!(
-            "Indexed asset {} and {} transcript segments",
-            asset_id,
-            transcript_docs.len()
-        );
-
-        // Emit completion event
-        let _ = self.app_handle.emit(
-            "indexing-complete",
-            serde_json::json!({
-                "jobId": job.id,
-                "assetId": asset_id,
+                "indexed": true,
+                "assetDocument": serde_json::to_value(&asset_doc).unwrap_or_default(),
                 "transcriptCount": transcript_docs.len(),
-            }),
-        );
-
-        Ok(serde_json::json!({
-            "assetId": asset_id,
-            "indexed": true,
-            "assetDocument": serde_json::to_value(&asset_doc).unwrap_or_default(),
-            "transcriptCount": transcript_docs.len(),
-            "message": "Indexed in Meilisearch",
-        }))
+                "message": "Indexed in Meilisearch",
+            }))
+        }
     }
 
     /// Process preview render job.
@@ -1076,6 +1095,7 @@ impl JobProcessor {
     /// * `preview:complete` - Emitted on successful completion
     /// * `preview:failed` - Emitted on failure
     async fn process_preview_render(&self, job: &Job) -> Result<serde_json::Value, String> {
+        #[cfg(not(test))]
         use crate::core::render::{ExportEngine, ExportSettings};
 
         // Validate required payload fields
@@ -1122,150 +1142,160 @@ impl JobProcessor {
             }),
         );
 
-        // Get project state from AppState
-        let app_state = self.app_handle.state::<crate::AppState>();
-        let guard = app_state.project.lock().await;
-        let project = guard.as_ref().ok_or("No project open")?;
-
-        // Find the sequence
-        let sequence = project
-            .state
-            .sequences
-            .get(sequence_id)
-            .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?;
-
-        // Clone required data to release the lock
-        let sequence = sequence.clone();
-        let assets = project.state.assets.clone();
-        let effects = project.state.effects.clone();
-        drop(guard);
-
-        // Check if sequence has clips
-        let total_clips: usize = sequence.tracks.iter().map(|t| t.clips.len()).sum();
-        if total_clips == 0 {
-            let error = "Sequence has no clips to render";
-            let _ = self.app_handle.emit(
-                "preview:failed",
-                serde_json::json!({
-                    "jobId": job.id,
-                    "sequenceId": sequence_id,
-                    "error": error,
-                }),
-            );
-            return Err(error.to_string());
+        #[cfg(test)]
+        {
+            Err("Preview render requires AppState and is disabled in unit tests".to_string())
         }
 
-        // Create output path in cache directory
-        let output_dir = self.cache_dir.join("previews");
-        std::fs::create_dir_all(&output_dir)
-            .map_err(|e| format!("Failed to create preview directory: {}", e))?;
+        #[cfg(not(test))]
+        {
+            let (sequence, assets, effects) = {
+                // Get project state from AppState
+                let app_state = self.app_handle.state::<crate::AppState>();
+                let guard = app_state.project.lock().await;
+                let project = guard.as_ref().ok_or("No project open")?;
 
-        let output_filename = format!(
-            "{}_{}.mp4",
-            sequence_id,
-            chrono::Utc::now().timestamp_millis()
-        );
-        let output_path = output_dir.join(&output_filename);
+                // Find the sequence
+                let sequence = project
+                    .state
+                    .sequences
+                    .get(sequence_id)
+                    .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?;
 
-        // Create preview-optimized export settings
-        let settings = ExportSettings::preview(output_path.clone(), start_time, end_time);
+                // Clone required data to release the lock
+                let sequence = sequence.clone();
+                let assets = project.state.assets.clone();
+                let effects = project.state.effects.clone();
+                (sequence, assets, effects)
+            };
 
-        // Get FFmpeg runner
-        let state = self.ffmpeg_state.read().await;
-        let runner = state.runner().ok_or("FFmpeg not available")?;
-
-        // Create export engine
-        let export_engine = ExportEngine::new(runner.clone());
-
-        // Create progress channel
-        let (progress_tx, mut progress_rx) =
-            tokio::sync::mpsc::channel::<crate::core::render::ExportProgress>(32);
-
-        let app_handle = self.app_handle.clone();
-        let job_id = job.id.clone();
-        let seq_id = sequence_id.to_string();
-
-        // Spawn progress reporter task
-        let progress_task = tokio::spawn(async move {
-            while let Some(progress) = progress_rx.recv().await {
-                let _ = app_handle.emit(
-                    "preview:progress",
-                    serde_json::json!({
-                        "jobId": job_id,
-                        "sequenceId": seq_id,
-                        "frame": progress.frame,
-                        "totalFrames": progress.total_frames,
-                        "percent": progress.percent,
-                        "fps": progress.fps,
-                        "etaSeconds": progress.eta_seconds,
-                        "message": progress.message,
-                    }),
-                );
-            }
-        });
-
-        // Execute preview render
-        let result = export_engine
-            .export_sequence_with_effects(
-                &sequence,
-                &assets,
-                &effects,
-                &settings,
-                Some(progress_tx),
-            )
-            .await;
-
-        // Wait for progress reporter to finish
-        let _ = progress_task.await;
-
-        match result {
-            Ok(export_result) => {
-                let preview_path = export_result.output_path.to_string_lossy().to_string();
-
-                // Emit completion event
-                let _ = self.app_handle.emit(
-                    "preview:complete",
-                    serde_json::json!({
-                        "jobId": job.id,
-                        "sequenceId": sequence_id,
-                        "previewPath": preview_path,
-                        "durationSec": export_result.duration_sec,
-                        "fileSizeBytes": export_result.file_size,
-                        "encodingTimeSec": export_result.encoding_time_sec,
-                    }),
-                );
-
-                tracing::info!(
-                    "Preview render completed for sequence {}: {} ({} bytes, {:.1}s encoding)",
-                    sequence_id,
-                    preview_path,
-                    export_result.file_size,
-                    export_result.encoding_time_sec
-                );
-
-                Ok(serde_json::json!({
-                    "sequenceId": sequence_id,
-                    "previewPath": preview_path,
-                    "durationSec": export_result.duration_sec,
-                    "fileSizeBytes": export_result.file_size,
-                    "encodingTimeSec": export_result.encoding_time_sec,
-                }))
-            }
-            Err(e) => {
-                let error_msg = format!("Preview render failed: {}", e);
-
-                // Emit failure event
+            // Check if sequence has clips
+            let total_clips: usize = sequence.tracks.iter().map(|t| t.clips.len()).sum();
+            if total_clips == 0 {
+                let error = "Sequence has no clips to render";
                 let _ = self.app_handle.emit(
                     "preview:failed",
                     serde_json::json!({
                         "jobId": job.id,
                         "sequenceId": sequence_id,
-                        "error": error_msg,
+                        "error": error,
                     }),
                 );
+                return Err(error.to_string());
+            }
 
-                tracing::error!("Preview render failed for sequence {}: {}", sequence_id, e);
-                Err(error_msg)
+            // Create output path in cache directory
+            let output_dir = self.cache_dir.join("previews");
+            std::fs::create_dir_all(&output_dir)
+                .map_err(|e| format!("Failed to create preview directory: {}", e))?;
+
+            let output_filename = format!(
+                "{}_{}.mp4",
+                sequence_id,
+                chrono::Utc::now().timestamp_millis()
+            );
+            let output_path = output_dir.join(&output_filename);
+
+            // Create preview-optimized export settings
+            let settings = ExportSettings::preview(output_path.clone(), start_time, end_time);
+
+            // Get FFmpeg runner
+            let state = self.ffmpeg_state.read().await;
+            let runner = state.runner().ok_or("FFmpeg not available")?;
+
+            // Create export engine
+            let export_engine = ExportEngine::new(runner.clone());
+
+            // Create progress channel
+            let (progress_tx, mut progress_rx) =
+                tokio::sync::mpsc::channel::<crate::core::render::ExportProgress>(32);
+
+            let app_handle = self.app_handle.clone();
+            let job_id = job.id.clone();
+            let seq_id = sequence_id.to_string();
+
+            // Spawn progress reporter task
+            let progress_task = tokio::spawn(async move {
+                while let Some(progress) = progress_rx.recv().await {
+                    let _ = app_handle.emit(
+                        "preview:progress",
+                        serde_json::json!({
+                            "jobId": job_id,
+                            "sequenceId": seq_id,
+                            "frame": progress.frame,
+                            "totalFrames": progress.total_frames,
+                            "percent": progress.percent,
+                            "fps": progress.fps,
+                            "etaSeconds": progress.eta_seconds,
+                            "message": progress.message,
+                        }),
+                    );
+                }
+            });
+
+            // Execute preview render
+            let result = export_engine
+                .export_sequence_with_effects(
+                    &sequence,
+                    &assets,
+                    &effects,
+                    &settings,
+                    Some(progress_tx),
+                )
+                .await;
+
+            // Wait for progress reporter to finish
+            let _ = progress_task.await;
+
+            match result {
+                Ok(export_result) => {
+                    let preview_path = export_result.output_path.to_string_lossy().to_string();
+
+                    // Emit completion event
+                    let _ = self.app_handle.emit(
+                        "preview:complete",
+                        serde_json::json!({
+                            "jobId": job.id,
+                            "sequenceId": sequence_id,
+                            "previewPath": preview_path,
+                            "durationSec": export_result.duration_sec,
+                            "fileSizeBytes": export_result.file_size,
+                            "encodingTimeSec": export_result.encoding_time_sec,
+                        }),
+                    );
+
+                    tracing::info!(
+                        "Preview render completed for sequence {}: {} ({} bytes, {:.1}s encoding)",
+                        sequence_id,
+                        preview_path,
+                        export_result.file_size,
+                        export_result.encoding_time_sec
+                    );
+
+                    Ok(serde_json::json!({
+                        "sequenceId": sequence_id,
+                        "previewPath": preview_path,
+                        "durationSec": export_result.duration_sec,
+                        "fileSizeBytes": export_result.file_size,
+                        "encodingTimeSec": export_result.encoding_time_sec,
+                    }))
+                }
+                Err(e) => {
+                    let error_msg = format!("Preview render failed: {}", e);
+
+                    // Emit failure event
+                    let _ = self.app_handle.emit(
+                        "preview:failed",
+                        serde_json::json!({
+                            "jobId": job.id,
+                            "sequenceId": sequence_id,
+                            "error": error_msg,
+                        }),
+                    );
+
+                    tracing::error!("Preview render failed for sequence {}: {}", sequence_id, e);
+                    Err(error_msg)
+                }
             }
         }
     }
@@ -1296,6 +1326,7 @@ impl JobProcessor {
     /// - `ai:completed` on success with the generated edit script
     /// - `ai:failed` on failure with error message
     async fn process_ai_completion(&self, job: &Job) -> Result<serde_json::Value, String> {
+        #[cfg(not(test))]
         use crate::core::ai::EditContext;
 
         let prompt = job
@@ -1313,147 +1344,155 @@ impl JobProcessor {
             }),
         );
 
-        // Get the AppState to access AI Gateway
-        let app_state = self.app_handle.state::<crate::AppState>();
-        let gateway = app_state.ai_gateway.lock().await;
-
-        // Check if AI provider is configured
-        if !gateway.is_configured().await {
-            let error = "No AI provider configured. Configure an AI provider in Settings.";
-            let _ = self.app_handle.emit(
-                "ai:failed",
-                serde_json::json!({
-                    "jobId": job.id,
-                    "error": error,
-                }),
-            );
-            return Err(error.to_string());
+        #[cfg(test)]
+        {
+            Err("AI completion jobs require AppState and are disabled in unit tests".to_string())
         }
 
-        // Check if provider is available
-        if !gateway.has_provider().await {
-            let error = "AI provider not reachable. Use 'Test connection' in Settings to verify connectivity.";
-            let _ = self.app_handle.emit(
-                "ai:failed",
-                serde_json::json!({
-                    "jobId": job.id,
-                    "error": error,
-                }),
-            );
-            return Err(error.to_string());
-        }
+        #[cfg(not(test))]
+        {
+            // Get the AppState to access AI Gateway
+            let app_state = self.app_handle.state::<crate::AppState>();
+            let gateway = app_state.ai_gateway.lock().await;
 
-        // Build EditContext from job payload
-        let timeline_duration = job
-            .payload
-            .get("timelineDuration")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-
-        let asset_ids: Vec<String> = job
-            .payload
-            .get("assetIds")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let track_ids: Vec<String> = job
-            .payload
-            .get("trackIds")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let selected_clips: Vec<String> = job
-            .payload
-            .get("selectedClips")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-
-        let playhead_position = job
-            .payload
-            .get("playheadPosition")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-
-        let transcript_context = job
-            .payload
-            .get("transcriptContext")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let mut edit_context = EditContext::new()
-            .with_duration(timeline_duration)
-            .with_assets(asset_ids)
-            .with_tracks(track_ids)
-            .with_selection(selected_clips)
-            .with_playhead(playhead_position);
-
-        if let Some(ref transcript) = transcript_context {
-            edit_context = edit_context.with_transcript(transcript);
-        }
-
-        tracing::info!(
-            "Processing AI completion job {} with prompt: {}",
-            job.id,
-            prompt
-        );
-
-        // Generate edit script using the AI gateway
-        match gateway.generate_edit_script(prompt, &edit_context).await {
-            Ok(edit_script) => {
-                // Convert EditScript to JSON using derived Serialize
-                let script_json = serde_json::to_value(&edit_script)
-                    .map_err(|e| format!("Failed to serialize EditScript: {}", e))?;
-
-                // Emit completion event
-                let _ = self.app_handle.emit(
-                    "ai:completed",
-                    serde_json::json!({
-                        "jobId": job.id,
-                        "editScript": script_json,
-                    }),
-                );
-
-                tracing::info!(
-                    "AI completion job {} succeeded with {} commands",
-                    job.id,
-                    edit_script.commands.len()
-                );
-
-                Ok(serde_json::json!({
-                    "prompt": prompt,
-                    "editScript": script_json,
-                    "commandCount": edit_script.commands.len(),
-                }))
-            }
-            Err(e) => {
-                let error_msg = format!("AI generation failed: {}", e);
-
-                // Emit failure event
+            // Check if AI provider is configured
+            if !gateway.is_configured().await {
+                let error = "No AI provider configured. Configure an AI provider in Settings.";
                 let _ = self.app_handle.emit(
                     "ai:failed",
                     serde_json::json!({
                         "jobId": job.id,
-                        "error": error_msg,
+                        "error": error,
                     }),
                 );
+                return Err(error.to_string());
+            }
 
-                tracing::error!("AI completion job {} failed: {}", job.id, error_msg);
-                Err(error_msg)
+            // Check if provider is available
+            if !gateway.has_provider().await {
+                let error = "AI provider not reachable. Use 'Test connection' in Settings to verify connectivity.";
+                let _ = self.app_handle.emit(
+                    "ai:failed",
+                    serde_json::json!({
+                        "jobId": job.id,
+                        "error": error,
+                    }),
+                );
+                return Err(error.to_string());
+            }
+
+            // Build EditContext from job payload
+            let timeline_duration = job
+                .payload
+                .get("timelineDuration")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+
+            let asset_ids: Vec<String> = job
+                .payload
+                .get("assetIds")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let track_ids: Vec<String> = job
+                .payload
+                .get("trackIds")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let selected_clips: Vec<String> = job
+                .payload
+                .get("selectedClips")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let playhead_position = job
+                .payload
+                .get("playheadPosition")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+
+            let transcript_context = job
+                .payload
+                .get("transcriptContext")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let mut edit_context = EditContext::new()
+                .with_duration(timeline_duration)
+                .with_assets(asset_ids)
+                .with_tracks(track_ids)
+                .with_selection(selected_clips)
+                .with_playhead(playhead_position);
+
+            if let Some(ref transcript) = transcript_context {
+                edit_context = edit_context.with_transcript(transcript);
+            }
+
+            tracing::info!(
+                "Processing AI completion job {} with prompt: {}",
+                job.id,
+                prompt
+            );
+
+            // Generate edit script using the AI gateway
+            match gateway.generate_edit_script(prompt, &edit_context).await {
+                Ok(edit_script) => {
+                    // Convert EditScript to JSON using derived Serialize
+                    let script_json = serde_json::to_value(&edit_script)
+                        .map_err(|e| format!("Failed to serialize EditScript: {}", e))?;
+
+                    // Emit completion event
+                    let _ = self.app_handle.emit(
+                        "ai:completed",
+                        serde_json::json!({
+                            "jobId": job.id,
+                            "editScript": script_json,
+                        }),
+                    );
+
+                    tracing::info!(
+                        "AI completion job {} succeeded with {} commands",
+                        job.id,
+                        edit_script.commands.len()
+                    );
+
+                    Ok(serde_json::json!({
+                        "prompt": prompt,
+                        "editScript": script_json,
+                        "commandCount": edit_script.commands.len(),
+                    }))
+                }
+                Err(e) => {
+                    let error_msg = format!("AI generation failed: {}", e);
+
+                    // Emit failure event
+                    let _ = self.app_handle.emit(
+                        "ai:failed",
+                        serde_json::json!({
+                            "jobId": job.id,
+                            "error": error_msg,
+                        }),
+                    );
+
+                    tracing::error!("AI completion job {} failed: {}", job.id, error_msg);
+                    Err(error_msg)
+                }
             }
         }
     }
@@ -1476,6 +1515,7 @@ impl JobProcessor {
 /// * `app_handle` - Tauri app handle for emitting events
 /// * `cache_dir` - Directory for cached files (thumbnails, proxies, etc.)
 /// * `shutdown` - Notify signal to stop workers gracefully
+#[allow(dead_code)]
 pub(crate) fn start_workers_with_arcs(
     queue: Arc<Mutex<BinaryHeap<QueueEntry>>>,
     active_jobs: Arc<Mutex<std::collections::HashMap<JobId, Job>>>,

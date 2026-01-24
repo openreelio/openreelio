@@ -20,6 +20,6 @@ pub use gateway::{
 pub use proposal::{Proposal, ProposalManager, ProposalStatus};
 pub use provider::{AIProvider, CompletionRequest, CompletionResponse, FinishReason, TokenUsage};
 pub use providers::{
-    create_provider, AnthropicProvider, LocalProvider, OpenAIProvider, ProviderConfig,
-    ProviderStatus, ProviderType,
+    create_provider, AnthropicProvider, GeminiProvider, LocalProvider, OpenAIProvider,
+    ProviderConfig, ProviderStatus, ProviderType,
 };
