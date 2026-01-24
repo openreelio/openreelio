@@ -4,14 +4,12 @@
 //! All types are exported to TypeScript via tauri-specta.
 
 use std::path::PathBuf;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 use specta::Type;
 use tauri::Manager;
 use tauri::State;
 
-use super::{detect_system_ffmpeg, FFmpegError, FFmpegInfo, FFmpegRunner, MediaInfo};
+use super::{MediaInfo, SharedFFmpegState};
 use crate::core::fs::{validate_local_input_path, validate_scoped_output_path};
 use crate::AppState;
 
@@ -39,68 +37,8 @@ async fn build_allowed_output_roots(
     Ok(roots)
 }
 
-/// Global FFmpeg runner state
-/// This is initialized once on app startup and reused for all operations
-pub struct FFmpegState {
-    runner: Option<FFmpegRunner>,
-    info: Option<FFmpegInfo>,
-}
-
-impl FFmpegState {
-    pub fn new() -> Self {
-        Self {
-            runner: None,
-            info: None,
-        }
-    }
-
-    /// Initialize FFmpeg by detecting installation
-    pub fn initialize(&mut self, app_handle: Option<&tauri::AppHandle>) -> Result<(), FFmpegError> {
-        // Try bundled first (if app_handle provided)
-        if let Some(handle) = app_handle {
-            if let Ok(info) = super::detect_bundled_ffmpeg(handle) {
-                self.info = Some(info.clone());
-                self.runner = Some(FFmpegRunner::new(info));
-                return Ok(());
-            }
-        }
-
-        // Fall back to system FFmpeg
-        let info = detect_system_ffmpeg()?;
-        self.info = Some(info.clone());
-        self.runner = Some(FFmpegRunner::new(info));
-        Ok(())
-    }
-
-    /// Get the FFmpeg runner
-    pub fn runner(&self) -> Option<&FFmpegRunner> {
-        self.runner.as_ref()
-    }
-
-    /// Get FFmpeg info
-    pub fn info(&self) -> Option<&FFmpegInfo> {
-        self.info.as_ref()
-    }
-
-    /// Check if FFmpeg is available
-    pub fn is_available(&self) -> bool {
-        self.runner.is_some()
-    }
-}
-
-impl Default for FFmpegState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Shared FFmpeg state for Tauri
-pub type SharedFFmpegState = Arc<RwLock<FFmpegState>>;
-
-/// Create a new shared FFmpeg state
-pub fn create_ffmpeg_state() -> SharedFFmpegState {
-    Arc::new(RwLock::new(FFmpegState::new()))
-}
+// NOTE: FFmpegState/SharedFFmpegState live in `core::ffmpeg::state` so that core modules
+// (like the job worker) can compile and run unit tests without pulling in Tauri command macros.
 
 /// FFmpeg availability and version information.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
