@@ -112,6 +112,74 @@ pub fn validate_local_input_path(path: &str, label: &str) -> Result<PathBuf, Str
     Ok(pb)
 }
 
+/// Validates and canonicalizes a project directory path.
+///
+/// This is used by IPC entry points that open projects to ensure:
+/// - The path is non-empty
+/// - The path is absolute
+/// - The directory exists and looks like an OpenReelio project (`project.json` and/or `ops.jsonl`)
+/// - The returned path is canonicalized to reduce ambiguity and avoid scope mismatches
+pub fn validate_existing_project_dir(path: &str, label: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} is empty"));
+    }
+
+    let pb = PathBuf::from(trimmed);
+    if !pb.is_absolute() {
+        return Err(format!(
+            "{label} must be an absolute path: {}",
+            pb.display()
+        ));
+    }
+
+    if !pb.exists() {
+        return Err(format!("{label} not found: {}", pb.display()));
+    }
+    if !pb.is_dir() {
+        return Err(format!("{label} must be a directory: {}", pb.display()));
+    }
+
+    // Require basic project shape to avoid opening an arbitrary directory.
+    let has_project_json = pb.join("project.json").exists();
+    let has_ops_log = pb.join("ops.jsonl").exists();
+    if !has_project_json && !has_ops_log {
+        return Err(format!(
+            "{label} is not a valid OpenReelio project directory: {}",
+            pb.display()
+        ));
+    }
+
+    std::fs::canonicalize(&pb).map_err(|e| format!("Failed to resolve {label}: {e}"))
+}
+
+/// Returns a conservative set of directories the app is willing to write exports into.
+///
+/// Security model:
+/// - IPC is a trust boundary; the renderer process (webview) could be compromised.
+/// - For output paths coming from the frontend, we restrict writes to a small set of
+///   user-owned directories + the current project directory.
+pub fn default_export_allowed_roots(project_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    roots.push(project_dir.to_path_buf());
+
+    // "dirs" is best-effort and may return None in sandboxed environments.
+    if let Some(p) = dirs::desktop_dir() {
+        roots.push(p);
+    }
+    if let Some(p) = dirs::download_dir() {
+        roots.push(p);
+    }
+    if let Some(p) = dirs::document_dir() {
+        roots.push(p);
+    }
+    if let Some(p) = dirs::video_dir() {
+        roots.push(p);
+    }
+
+    roots
+}
+
 /// Async version of `validate_local_input_path`.
 ///
 /// Uses tokio's async filesystem operations to avoid blocking the async runtime.
