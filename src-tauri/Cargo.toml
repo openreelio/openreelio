@@ -82,7 +82,7 @@ async-trait = "0.1"
 hound = "3.5"
 
 # Whisper transcription (optional - enabled via whisper feature)
-whisper-rs = { version = "0.13", optional = true }
+whisper-rs = { version = "0.15", optional = true }
 
 # Meilisearch client (optional - enabled via meilisearch feature)
 meilisearch-sdk = { version = "0.27", optional = true }
@@ -105,7 +105,8 @@ walkdir = { version = "2", optional = true }
 tempfile = "3"
 
 [features]
-default = ["custom-protocol"]
+# ADR-033: Enable AI features by default (no more "FeatureNotEnabled" errors)
+default = ["custom-protocol", "whisper", "ai-providers"]
 custom-protocol = ["tauri/custom-protocol"]
 # Enable FFmpeg bundling (downloads FFmpeg during build)
 bundled-ffmpeg = [
