@@ -41,7 +41,7 @@ const PROVIDER_OPTIONS: Array<{ value: ProviderType; label: string; description:
   {
     value: 'gemini',
     label: 'Google Gemini',
-    description: 'Gemini 3 Pro/Flash, 2.5 Flash',
+    description: 'Gemini 3 Pro/Flash (preview), 2.5 Pro/Flash',
   },
   {
     value: 'local',

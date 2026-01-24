@@ -84,12 +84,8 @@ fn forbid_project_asset_protocol(
             continue;
         }
 
-        // Only forbid existing files; if it's gone, the scope is effectively inert.
-        if let Ok(meta) = std::fs::metadata(&path) {
-            if meta.is_file() {
-                state.forbid_asset_protocol_file(&path);
-            }
-        }
+        // Forbid the path regardless of current existence to avoid stale scope entries.
+        state.forbid_asset_protocol_file(&path);
     }
 }
 

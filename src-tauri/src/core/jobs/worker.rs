@@ -919,9 +919,7 @@ impl JobProcessor {
         #[cfg(test)]
         {
             let _ = job;
-            Err(
-                "Search indexing requires AppState and is disabled in unit tests".to_string(),
-            )
+            Err("Search indexing requires AppState and is disabled in unit tests".to_string())
         }
 
         #[cfg(not(test))]
@@ -1146,9 +1144,7 @@ impl JobProcessor {
 
         #[cfg(test)]
         {
-            Err(
-                "Preview render requires AppState and is disabled in unit tests".to_string(),
-            )
+            Err("Preview render requires AppState and is disabled in unit tests".to_string())
         }
 
         #[cfg(not(test))]
@@ -1350,9 +1346,7 @@ impl JobProcessor {
 
         #[cfg(test)]
         {
-            Err(
-                "AI completion jobs require AppState and are disabled in unit tests".to_string(),
-            )
+            Err("AI completion jobs require AppState and are disabled in unit tests".to_string())
         }
 
         #[cfg(not(test))]

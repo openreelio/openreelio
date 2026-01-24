@@ -105,8 +105,9 @@ walkdir = { version = "2", optional = true }
 tempfile = "3"
 
 [features]
-# ADR-033: Enable AI features by default (no more "FeatureNotEnabled" errors)
-default = ["custom-protocol", "whisper", "ai-providers"]
+# ADR-033: Enable remote AI providers by default.
+# Heavy local features (e.g. Whisper) stay opt-in to keep builds portable across platforms.
+default = ["custom-protocol", "ai-providers"]
 custom-protocol = ["tauri/custom-protocol"]
 # Enable FFmpeg bundling (downloads FFmpeg during build)
 bundled-ffmpeg = [

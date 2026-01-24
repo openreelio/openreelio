@@ -252,16 +252,14 @@ impl AIProvider for GeminiProvider {
             generation_config,
         };
 
-        // Build URL with API key
-        let url = format!(
-            "{}/models/{}:generateContent?key={}",
-            self.base_url, model, self.api_key
-        );
+        // Build URL (API key is passed via header to avoid leaking it in logs).
+        let url = format!("{}/models/{}:generateContent", self.base_url, model);
 
         // Send request
         let response = self
             .client
             .post(&url)
+            .header("x-goog-api-key", &self.api_key)
             .header("Content-Type", "application/json")
             .json(&api_request)
             .send()
@@ -365,14 +363,12 @@ impl AIProvider for GeminiProvider {
                 content,
             };
 
-            let url = format!(
-                "{}/models/text-embedding-004:embedContent?key={}",
-                self.base_url, self.api_key
-            );
+            let url = format!("{}/models/text-embedding-004:embedContent", self.base_url);
 
             let response = self
                 .client
                 .post(&url)
+                .header("x-goog-api-key", &self.api_key)
                 .header("Content-Type", "application/json")
                 .json(&api_request)
                 .send()
@@ -417,11 +413,12 @@ impl AIProvider for GeminiProvider {
     #[cfg(feature = "ai-providers")]
     async fn health_check(&self) -> CoreResult<()> {
         // List models to check API key validity
-        let url = format!("{}/models?key={}", self.base_url, self.api_key);
+        let url = format!("{}/models", self.base_url);
 
         let response = self
             .client
             .get(&url)
+            .header("x-goog-api-key", &self.api_key)
             .send()
             .await
             .map_err(|e| CoreError::AIRequestFailed(format!("Health check failed: {}", e)))?;

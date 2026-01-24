@@ -12,7 +12,7 @@ mod payloads;
 
 #[cfg(not(test))]
 pub use commands::*;
-#[cfg(not(test))]
+#[allow(unused_imports)]
 pub(crate) use dto::*;
 #[cfg(not(test))]
 pub use events::*;

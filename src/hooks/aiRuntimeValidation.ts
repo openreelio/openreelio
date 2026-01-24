@@ -89,11 +89,17 @@ export function parseEditScript(raw: unknown): EditScript {
   const qcRules = expectStringArray(obj.qcRules, 'EditScript.qcRules');
 
   const riskObj = expectPlainObject(obj.risk, 'EditScript.risk');
-  const copyright = expectString(
-    riskObj.copyright,
-    'EditScript.risk.copyright',
-  ) as EditScript['risk']['copyright'];
-  const nsfw = expectString(riskObj.nsfw, 'EditScript.risk.nsfw') as EditScript['risk']['nsfw'];
+  const rawCopyright = expectString(riskObj.copyright, 'EditScript.risk.copyright');
+  if (!['none', 'low', 'medium', 'high'].includes(rawCopyright)) {
+    throw new Error(`EditScript.risk.copyright has invalid value: ${rawCopyright}`);
+  }
+  const copyright = rawCopyright as EditScript['risk']['copyright'];
+
+  const rawNsfw = expectString(riskObj.nsfw, 'EditScript.risk.nsfw');
+  if (!['none', 'possible', 'likely'].includes(rawNsfw)) {
+    throw new Error(`EditScript.risk.nsfw has invalid value: ${rawNsfw}`);
+  }
+  const nsfw = rawNsfw as EditScript['risk']['nsfw'];
 
   const risk: EditScript['risk'] = { copyright, nsfw };
 

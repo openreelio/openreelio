@@ -137,6 +137,25 @@ describe('useAIAgent', () => {
       expect(result.current.error).toContain('EditScript');
     });
 
+    it('should reject invalid risk literal values', async () => {
+      mockedInvoke.mockResolvedValueOnce({
+        ...mockEditScript,
+        risk: { copyright: 'bogus', nsfw: 'none' },
+      });
+
+      const { result } = renderHook(() => useAIAgent());
+
+      await act(async () => {
+        try {
+          await result.current.analyzeIntent('Cut', mockContext);
+        } catch {
+          // Expected
+        }
+      });
+
+      expect(result.current.error).toContain('EditScript.risk.copyright has invalid value');
+    });
+
     it('should set currentProposal after successful analysis', async () => {
       mockedInvoke.mockResolvedValueOnce(mockEditScript);
 
