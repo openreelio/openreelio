@@ -7,6 +7,7 @@
 
 import { useCallback, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { parseApplyResult, parseEditScript, parseValidationResult } from './aiRuntimeValidation';
 
 // =============================================================================
 // Types
@@ -119,11 +120,12 @@ export function useAIAgent(): UseAIAgentReturn {
       setError(null);
 
       try {
-        const editScript = await invoke<EditScript>('analyze_intent', {
+        const raw = await invoke<unknown>('analyze_intent', {
           intent,
           context,
         });
 
+        const editScript = parseEditScript(raw);
         setCurrentProposal(editScript);
         return editScript;
       } catch (err) {
@@ -134,40 +136,38 @@ export function useAIAgent(): UseAIAgentReturn {
         setIsLoading(false);
       }
     },
-    []
+    [],
   );
 
   /**
    * Apply an EditScript by executing its commands.
    * Clears currentProposal on success.
    */
-  const applyEditScript = useCallback(
-    async (editScript: EditScript): Promise<ApplyResult> => {
-      setIsLoading(true);
-      setError(null);
+  const applyEditScript = useCallback(async (editScript: EditScript): Promise<ApplyResult> => {
+    setIsLoading(true);
+    setError(null);
 
-      try {
-        const result = await invoke<ApplyResult>('apply_edit_script', {
-          editScript,
-        });
+    try {
+      const raw = await invoke<unknown>('apply_edit_script', {
+        editScript,
+      });
+      const result = parseApplyResult(raw);
 
-        if (result.success) {
-          setCurrentProposal(null);
-        } else if (result.errors.length > 0) {
-          setError(result.errors.join('; '));
-        }
-
-        return result;
-      } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : String(err);
-        setError(errorMessage);
-        throw err;
-      } finally {
-        setIsLoading(false);
+      if (result.success) {
+        setCurrentProposal(null);
+      } else if (result.errors.length > 0) {
+        setError(result.errors.join('; '));
       }
-    },
-    []
-  );
+
+      return result;
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : String(err);
+      setError(errorMessage);
+      throw err;
+    } finally {
+      setIsLoading(false);
+    }
+  }, []);
 
   /**
    * Validate an EditScript without executing.
@@ -178,11 +178,11 @@ export function useAIAgent(): UseAIAgentReturn {
       setError(null);
 
       try {
-        const result = await invoke<ValidationResult>('validate_edit_script', {
+        const raw = await invoke<unknown>('validate_edit_script', {
           editScript,
         });
 
-        return result;
+        return parseValidationResult(raw);
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : String(err);
         setError(errorMessage);
@@ -191,7 +191,7 @@ export function useAIAgent(): UseAIAgentReturn {
         setIsLoading(false);
       }
     },
-    []
+    [],
   );
 
   /**

@@ -87,7 +87,7 @@ describe('useAIAgent', () => {
 
     it('should set isLoading to true while analyzing', async () => {
       mockedInvoke.mockImplementation(
-        () => new Promise((resolve) => setTimeout(() => resolve(mockEditScript), 100))
+        () => new Promise((resolve) => setTimeout(() => resolve(mockEditScript), 100)),
       );
 
       const { result } = renderHook(() => useAIAgent());
@@ -119,6 +119,22 @@ describe('useAIAgent', () => {
       });
 
       expect(result.current.error).toBe('Analysis failed');
+    });
+
+    it('should fail fast on invalid IPC response shape', async () => {
+      mockedInvoke.mockResolvedValueOnce({ not: 'an edit script' });
+
+      const { result } = renderHook(() => useAIAgent());
+
+      await act(async () => {
+        try {
+          await result.current.analyzeIntent('Cut', mockContext);
+        } catch {
+          // Expected
+        }
+      });
+
+      expect(result.current.error).toContain('EditScript');
     });
 
     it('should set currentProposal after successful analysis', async () => {
@@ -226,6 +242,22 @@ describe('useAIAgent', () => {
 
       // Proposal should still be there
       expect(result.current.currentProposal).not.toBeNull();
+    });
+
+    it('should reject invalid apply result payloads', async () => {
+      mockedInvoke.mockResolvedValueOnce({ success: true, appliedOpIds: 'nope', errors: [] });
+
+      const { result } = renderHook(() => useAIAgent());
+
+      await act(async () => {
+        try {
+          await result.current.applyEditScript(mockEditScript);
+        } catch {
+          // Expected
+        }
+      });
+
+      expect(result.current.error).toContain('ApplyResult');
     });
   });
 
