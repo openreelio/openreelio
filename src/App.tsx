@@ -28,6 +28,7 @@ import {
   useProjectStore,
   usePlaybackStore,
   useTimelineStore,
+  useSettingsStore,
   setupProxyEventListeners,
   cleanupProxyEventListeners,
 } from './stores';
@@ -45,11 +46,14 @@ import { createLogger, initializeLogger } from './services/logger';
 import {
   loadRecentProjects,
   addRecentProject,
+  removeRecentProjectByPath,
   buildProjectPath,
   validateProjectName,
+  getUserFriendlyError,
   type RecentProject,
 } from './utils';
 import { updateService } from './services/updateService';
+import { isTauriRuntime } from './services/framePaths';
 
 // Initialize logger on module load
 initializeLogger();
@@ -279,9 +283,7 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
         }
         rightSidebar={
           <Sidebar title="Inspector" position="right" width={288}>
-            <InspectorErrorBoundary
-              onError={(error) => logger.error('Inspector error', { error })}
-            >
+            <InspectorErrorBoundary onError={(error) => logger.error('Inspector error', { error })}>
               <Inspector
                 selectedAsset={inspectorAsset}
                 selectedCaption={selectedCaption}
@@ -312,9 +314,7 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
           </div>
           <div className="flex-1 overflow-hidden">
             <Panel title="Timeline" variant="default" className="h-full" noPadding>
-              <TimelineErrorBoundary
-                onError={(error) => logger.error('Timeline error', { error })}
-              >
+              <TimelineErrorBoundary onError={(error) => logger.error('Timeline error', { error })}>
                 <Timeline
                   sequence={sequence}
                   onClipMove={handleClipMove}
@@ -349,6 +349,10 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
 
 function App(): JSX.Element {
   const { isLoaded, isLoading, createProject, loadProject, getActiveSequence } = useProjectStore();
+
+  // The Setup Wizard is only meaningful inside the actual Tauri runtime.
+  // E2E tests (and Vite dev server mode) run in a normal browser environment.
+  const isTauri = useMemo(() => isTauriRuntime(), []);
 
   // Settings for welcome screen behavior
   const { general, updateGeneral, isLoaded: settingsLoaded } = useSettings();
@@ -392,13 +396,16 @@ function App(): JSX.Element {
     setRecentProjects(projects);
 
     // Fetch actual version from backend
-    updateService.getCurrentVersion().then((version) => {
-      if (version && version !== 'unknown') {
-        setAppVersion(version);
-      }
-    }).catch((error) => {
-      logger.warn('Failed to fetch app version', { error });
-    });
+    updateService
+      .getCurrentVersion()
+      .then((version) => {
+        if (version && version !== 'unknown') {
+          setAppVersion(version);
+        }
+      })
+      .catch((error) => {
+        logger.warn('Failed to fetch app version', { error });
+      });
   }, []);
 
   // Auto-save functionality (30 second delay after changes)
@@ -424,6 +431,24 @@ function App(): JSX.Element {
     };
   }, []);
 
+  // Flush pending settings updates before app unload to prevent data loss
+  useEffect(() => {
+    const handleBeforeUnload = () => {
+      // Synchronously trigger flush - the promise won't complete before unload,
+      // but starting it gives the best chance of saving
+      const { flushPendingUpdates } = useSettingsStore.getState();
+      flushPendingUpdates().catch((flushError: unknown) => {
+        logger.error('Failed to flush pending settings on unload', { error: flushError });
+      });
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, []);
+
   // ===========================================================================
   // Handlers
   // ===========================================================================
@@ -438,7 +463,7 @@ function App(): JSX.Element {
     (dontShow: boolean) => {
       void updateGeneral({ showWelcomeOnStartup: !dontShow });
     },
-    [updateGeneral]
+    [updateGeneral],
   );
 
   // Open the project creation dialog
@@ -518,11 +543,27 @@ function App(): JSX.Element {
           });
           setRecentProjects(updated);
         } catch (error) {
-          logger.error('Failed to open project', { error });
+          logger.error('Failed to open project', { error, path: projectPath });
+          const rawMessage = error instanceof Error ? error.message : String(error);
+          const friendlyMessage = getUserFriendlyError(error);
+
+          // If project not found, offer to remove from recent projects
+          if (
+            rawMessage.toLowerCase().includes('not found') ||
+            rawMessage.toLowerCase().includes('no such file') ||
+            rawMessage.toLowerCase().includes('project.json')
+          ) {
+            addToast(`${friendlyMessage} The project may have been moved or deleted.`, 'error');
+            // Remove the invalid project from recent projects
+            const updated = removeRecentProjectByPath(projectPath);
+            setRecentProjects(updated);
+          } else {
+            addToast(friendlyMessage, 'error');
+          }
         }
       }
     },
-    [loadProject],
+    [loadProject, addToast],
   );
 
   // Error handler for EditorView - shows toast and offers reload
@@ -542,7 +583,7 @@ function App(): JSX.Element {
   // ===========================================================================
 
   // Show Setup Wizard on first run (before any project is loaded)
-  if (settingsLoaded && !general.hasCompletedSetup) {
+  if (isTauri && settingsLoaded && !general.hasCompletedSetup) {
     return (
       <>
         <SetupWizard
