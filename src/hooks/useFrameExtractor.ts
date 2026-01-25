@@ -760,6 +760,8 @@ export function useAssetFrameExtractor(
   // Cleanup on unmount
   useEffect(() => {
     isMountedRef.current = true;
+    // Capture ref value at effect creation time for safe cleanup access
+    const pending = pendingExtractions.current;
 
     return () => {
       isMountedRef.current = false;
@@ -771,7 +773,7 @@ export function useAssetFrameExtractor(
       }
 
       // Clear pending extractions
-      pendingExtractions.current.clear();
+      pending.clear();
 
       // Abort any in-flight prefetch
       if (prefetchAbortRef.current) {

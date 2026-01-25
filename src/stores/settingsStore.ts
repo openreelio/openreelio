@@ -112,6 +112,47 @@ export interface PerformanceSettings {
   cacheSizeMb: number;
 }
 
+/** AI provider type */
+export type ProviderType = 'openai' | 'anthropic' | 'gemini' | 'local';
+
+/** Proposal review mode */
+export type ProposalReviewMode = 'always' | 'smart' | 'auto_apply';
+
+/** AI settings for provider configuration and behavior */
+export interface AISettings {
+  // Provider Configuration
+  primaryProvider: ProviderType;
+  primaryModel: string;
+  visionProvider: ProviderType | null;
+  visionModel: string | null;
+
+  // API Keys
+  openaiApiKey: string | null;
+  anthropicApiKey: string | null;
+  googleApiKey: string | null;
+  ollamaUrl: string | null;
+
+  // Generation Parameters
+  temperature: number;
+  maxTokens: number;
+  frameExtractionRate: number;
+
+  // Cost Controls
+  monthlyBudgetCents: number | null;
+  perRequestLimitCents: number;
+  currentMonthUsageCents: number;
+  currentUsageMonth: number | null;
+
+  // Behavior
+  autoAnalyzeOnImport: boolean;
+  autoCaptionOnImport: boolean;
+  proposalReviewMode: ProposalReviewMode;
+  cacheDurationHours: number;
+
+  // Privacy
+  localOnlyMode: boolean;
+}
+
 /** Complete application settings */
 export interface AppSettings {
   version: number;
@@ -123,6 +164,7 @@ export interface AppSettings {
   shortcuts: ShortcutSettings;
   autoSave: AutoSaveSettings;
   performance: PerformanceSettings;
+  ai: AISettings;
 }
 
 type SettingsSectionKey = Exclude<keyof AppSettings, 'version'>;
@@ -223,6 +265,28 @@ const DEFAULT_SETTINGS: AppSettings = {
     memoryLimitMb: 0,
     cacheSizeMb: 1024,
   },
+  ai: {
+    primaryProvider: 'anthropic',
+    primaryModel: 'claude-sonnet-4-5-20251015',
+    visionProvider: null,
+    visionModel: null,
+    openaiApiKey: null,
+    anthropicApiKey: null,
+    googleApiKey: null,
+    ollamaUrl: null,
+    temperature: 0.3,
+    maxTokens: 4096,
+    frameExtractionRate: 1.0,
+    monthlyBudgetCents: null,
+    perRequestLimitCents: 50,
+    currentMonthUsageCents: 0,
+    currentUsageMonth: null,
+    autoAnalyzeOnImport: false,
+    autoCaptionOnImport: false,
+    proposalReviewMode: 'always',
+    cacheDurationHours: 24,
+    localOnlyMode: false,
+  },
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -241,12 +305,44 @@ function isAppSettings(value: unknown): value is AppSettings {
     'shortcuts',
     'autoSave',
     'performance',
+    'ai',
   ];
   return requiredSections.every((key) => key in value);
 }
 
 function coerceAppSettings(value: unknown): AppSettings {
   if (isAppSettings(value)) return value;
+
+  // Handle partial settings from backend (e.g., during migration)
+  if (isRecord(value) && typeof value.version === 'number') {
+    return {
+      ...DEFAULT_SETTINGS,
+      ...(value as Partial<AppSettings>),
+      // Ensure all sections exist with defaults
+      general: { ...DEFAULT_SETTINGS.general, ...(isRecord(value.general) ? value.general : {}) },
+      editor: { ...DEFAULT_SETTINGS.editor, ...(isRecord(value.editor) ? value.editor : {}) },
+      playback: { ...DEFAULT_SETTINGS.playback, ...(isRecord(value.playback) ? value.playback : {}) },
+      export: { ...DEFAULT_SETTINGS.export, ...(isRecord(value.export) ? value.export : {}) },
+      appearance: {
+        ...DEFAULT_SETTINGS.appearance,
+        ...(isRecord(value.appearance) ? value.appearance : {}),
+      },
+      shortcuts: {
+        ...DEFAULT_SETTINGS.shortcuts,
+        ...(isRecord(value.shortcuts) ? value.shortcuts : {}),
+      },
+      autoSave: {
+        ...DEFAULT_SETTINGS.autoSave,
+        ...(isRecord(value.autoSave) ? value.autoSave : {}),
+      },
+      performance: {
+        ...DEFAULT_SETTINGS.performance,
+        ...(isRecord(value.performance) ? value.performance : {}),
+      },
+      ai: { ...DEFAULT_SETTINGS.ai, ...(isRecord(value.ai) ? value.ai : {}) },
+    } as AppSettings;
+  }
+
   return DEFAULT_SETTINGS;
 }
 
@@ -660,6 +756,28 @@ export const useSettingsStore = create<SettingsState & SettingsActions>()(
           appearance: state.settings.appearance,
         },
       }),
+      // Deep merge persisted state with defaults to prevent undefined sections
+      merge: (persistedState, currentState) => {
+        const persisted = persistedState as Partial<SettingsState> | undefined;
+        const current = currentState as SettingsState & SettingsActions;
+
+        // If no persisted state, use current (default) state
+        if (!persisted || !persisted.settings) {
+          return current;
+        }
+
+        // Deep merge: preserve all default settings and actions, override only persisted values
+        return {
+          ...current,
+          settings: {
+            ...current.settings,
+            // Only merge appearance since that's what we persist
+            appearance: persisted.settings.appearance
+              ? { ...current.settings.appearance, ...persisted.settings.appearance }
+              : current.settings.appearance,
+          },
+        };
+      },
     },
   ),
 );
@@ -691,6 +809,9 @@ export const selectAutoSaveSettings = (state: SettingsState) => state.settings.a
 
 /** Select performance settings */
 export const selectPerformanceSettings = (state: SettingsState) => state.settings.performance;
+
+/** Select AI settings */
+export const selectAISettings = (state: SettingsState) => state.settings.ai;
 
 // =============================================================================
 // Export default for convenience

@@ -16,6 +16,7 @@ import {
   selectShortcutSettings,
   selectAutoSaveSettings,
   selectPerformanceSettings,
+  selectAISettings,
   type AppSettings,
   type GeneralSettings,
   type EditorSettings,
@@ -25,6 +26,7 @@ import {
   type ShortcutSettings,
   type AutoSaveSettings,
   type PerformanceSettings,
+  type AISettings,
 } from '@/stores/settingsStore';
 
 export interface UseSettingsOptions {
@@ -48,6 +50,7 @@ export interface UseSettingsReturn {
   shortcuts: ShortcutSettings;
   autoSave: AutoSaveSettings;
   performance: PerformanceSettings;
+  ai: AISettings;
 
   // Actions
   loadSettings: () => Promise<void>;
@@ -60,6 +63,7 @@ export interface UseSettingsReturn {
   updateShortcuts: (values: Partial<ShortcutSettings>) => Promise<void>;
   updateAutoSave: (values: Partial<AutoSaveSettings>) => Promise<void>;
   updatePerformance: (values: Partial<PerformanceSettings>) => Promise<void>;
+  updateAI: (values: Partial<AISettings>) => Promise<void>;
   resetSettings: () => Promise<void>;
   clearError: () => void;
 }
@@ -85,6 +89,7 @@ export function useSettings(options: UseSettingsOptions = {}): UseSettingsReturn
   const shortcuts = useSettingsStore(selectShortcutSettings);
   const autoSaveSettings = useSettingsStore(selectAutoSaveSettings);
   const performance = useSettingsStore(selectPerformanceSettings);
+  const ai = useSettingsStore(selectAISettings);
 
   // Actions
   const loadSettings = useSettingsStore((state) => state.loadSettings);
@@ -134,6 +139,11 @@ export function useSettings(options: UseSettingsOptions = {}): UseSettingsReturn
     [updateSettings]
   );
 
+  const updateAI = useCallback(
+    (values: Partial<AISettings>) => updateSettings('ai', values),
+    [updateSettings]
+  );
+
   // Auto-load on mount
   useEffect(() => {
     if (autoLoad && !isLoaded) {
@@ -157,6 +167,7 @@ export function useSettings(options: UseSettingsOptions = {}): UseSettingsReturn
     shortcuts,
     autoSave: autoSaveSettings,
     performance,
+    ai,
 
     // Actions
     loadSettings,
@@ -169,6 +180,7 @@ export function useSettings(options: UseSettingsOptions = {}): UseSettingsReturn
     updateShortcuts,
     updateAutoSave,
     updatePerformance,
+    updateAI,
     resetSettings,
     clearError,
   };

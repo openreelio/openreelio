@@ -20,7 +20,7 @@ use specta::Type;
 // =============================================================================
 
 /// Supported AI provider types
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Type)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderType {
     /// OpenAI GPT models (GPT-4, GPT-4o, etc.)

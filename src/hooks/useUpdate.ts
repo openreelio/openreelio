@@ -126,20 +126,19 @@ export function useUpdate(options: UseUpdateOptions = {}): UseUpdateReturn {
   }, []);
 
   // Check on mount if enabled in settings
+  // Note: Use optional chaining for `general` as defense-in-depth against
+  // potential race conditions during store hydration
+  const shouldCheckOnStartup = general?.checkUpdatesOnStartup ?? false;
+
   useEffect(() => {
-    if (
-      checkOnMount &&
-      settingsLoaded &&
-      general.checkUpdatesOnStartup &&
-      !hasCheckedRef.current
-    ) {
+    if (checkOnMount && settingsLoaded && shouldCheckOnStartup && !hasCheckedRef.current) {
       hasCheckedRef.current = true;
       logger.info('Checking for updates on startup...');
       checkForUpdates().catch((e) => {
         logger.warn('Startup update check failed', { error: e });
       });
     }
-  }, [checkOnMount, settingsLoaded, general.checkUpdatesOnStartup, checkForUpdates]);
+  }, [checkOnMount, settingsLoaded, shouldCheckOnStartup, checkForUpdates]);
 
   return {
     ...state,

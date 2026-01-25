@@ -62,6 +62,7 @@ describe('useUpdate', () => {
       shortcuts: {} as any,
       autoSave: {} as any,
       performance: {} as any,
+      ai: {} as any,
       loadSettings: vi.fn(),
       saveSettings: vi.fn(),
       updateGeneral: vi.fn(),
@@ -72,6 +73,7 @@ describe('useUpdate', () => {
       updateShortcuts: vi.fn(),
       updateAutoSave: vi.fn(),
       updatePerformance: vi.fn(),
+      updateAI: vi.fn(),
       resetSettings: vi.fn(),
       clearError: vi.fn(),
     });
@@ -278,6 +280,52 @@ describe('useUpdate', () => {
       // Wait a bit to ensure no call is made
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(mockUpdateService.checkForUpdates).not.toHaveBeenCalled();
+    });
+
+    it('should handle undefined general settings gracefully', async () => {
+      // Simulate the edge case where general is undefined due to hydration race
+      mockUseSettings.mockReturnValue({
+        ...mockUseSettings(),
+        isLoaded: true,
+        general: undefined as any,
+      });
+
+      // Should not throw
+      const { result } = renderHook(() => useUpdate({ checkOnMount: true }));
+
+      // Wait a bit to ensure no crash occurs
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Should not have checked for updates when general is undefined
+      expect(mockUpdateService.checkForUpdates).not.toHaveBeenCalled();
+
+      // Hook should still be usable
+      expect(result.current.updateInfo).toBeNull();
+      expect(result.current.isChecking).toBe(false);
+    });
+
+    it('should handle null checkUpdatesOnStartup gracefully', async () => {
+      mockUseSettings.mockReturnValue({
+        ...mockUseSettings(),
+        isLoaded: true,
+        general: {
+          language: 'en',
+          showWelcomeOnStartup: true,
+          hasCompletedSetup: false,
+          recentProjectsLimit: 10,
+          checkUpdatesOnStartup: null as any,
+          defaultProjectLocation: null,
+        },
+      });
+
+      // Should not throw
+      const { result } = renderHook(() => useUpdate({ checkOnMount: true }));
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // Should not have checked (null is falsy)
+      expect(mockUpdateService.checkForUpdates).not.toHaveBeenCalled();
+      expect(result.current.isChecking).toBe(false);
     });
   });
 });

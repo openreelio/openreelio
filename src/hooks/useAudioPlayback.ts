@@ -498,8 +498,10 @@ export function useAudioPlayback({
 
   // Cleanup on unmount
   useEffect(() => {
+    // Capture ref values at effect creation time for safe cleanup access
     const audioBuffers = audioBuffersRef.current;
     const retryTimeouts = retryTimeoutsRef.current;
+    const failedLoads = failedLoadsRef.current;
 
     return () => {
       stopAllSources();
@@ -515,7 +517,7 @@ export function useAudioPlayback({
         audioContextRef.current = null;
       }
       audioBuffers.clear();
-      failedLoadsRef.current.clear();
+      failedLoads.clear();
       isAudioReadyRef.current = false;
     };
   }, [stopAllSources]);

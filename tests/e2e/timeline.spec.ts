@@ -19,7 +19,7 @@ test.describe('Timeline', () => {
       // Timeline might not be visible until a project is loaded
       // So we check if either timeline or welcome screen is visible
       const timelineOrWelcome = page.locator(
-        '[data-testid="timeline"], [data-testid="welcome-screen"]',
+        '[data-testid="timeline"], [data-testid="welcome-screen"], [data-testid="setup-wizard"]',
       );
       await expect(timelineOrWelcome.first()).toBeVisible({ timeout: 10000 });
     });
@@ -28,7 +28,9 @@ test.describe('Timeline', () => {
   test.describe('Playback Controls', () => {
     test('should have playback control buttons', async ({ page }) => {
       // Skip if on welcome screen
-      const welcomeScreen = page.locator('[data-testid="welcome-screen"]');
+      const welcomeScreen = page.locator(
+        '[data-testid="welcome-screen"], [data-testid="setup-wizard"]',
+      );
       if (await welcomeScreen.isVisible()) {
         test.skip();
         return;
@@ -48,7 +50,9 @@ test.describe('Timeline', () => {
   test.describe('Time Ruler', () => {
     test('should display time ruler when timeline is visible', async ({ page }) => {
       // Skip if on welcome screen
-      const welcomeScreen = page.locator('[data-testid="welcome-screen"]');
+      const welcomeScreen = page.locator(
+        '[data-testid="welcome-screen"], [data-testid="setup-wizard"]',
+      );
       if (await welcomeScreen.isVisible()) {
         test.skip();
         return;
@@ -65,7 +69,9 @@ test.describe('Timeline', () => {
   test.describe('Zoom Controls', () => {
     test('should have zoom controls', async ({ page }) => {
       // Skip if on welcome screen
-      const welcomeScreen = page.locator('[data-testid="welcome-screen"]');
+      const welcomeScreen = page.locator(
+        '[data-testid="welcome-screen"], [data-testid="setup-wizard"]',
+      );
       if (await welcomeScreen.isVisible()) {
         test.skip();
         return;
@@ -89,7 +95,9 @@ test.describe('Track Operations', () => {
     await page.waitForLoadState('networkidle');
 
     // Skip if on welcome screen
-    const welcomeScreen = page.locator('[data-testid="welcome-screen"]');
+    const welcomeScreen = page.locator(
+      '[data-testid="welcome-screen"], [data-testid="setup-wizard"]',
+    );
     if (await welcomeScreen.isVisible()) {
       test.skip();
     }
@@ -126,7 +134,9 @@ test.describe('Keyboard Navigation', () => {
 
   test('should respond to Space key for play/pause', async ({ page }) => {
     // Skip if on welcome screen
-    const welcomeScreen = page.locator('[data-testid="welcome-screen"]');
+    const welcomeScreen = page.locator(
+      '[data-testid="welcome-screen"], [data-testid="setup-wizard"]',
+    );
     if (await welcomeScreen.isVisible()) {
       test.skip();
       return;
@@ -141,7 +151,9 @@ test.describe('Keyboard Navigation', () => {
 
   test('should respond to arrow keys for navigation', async ({ page }) => {
     // Skip if on welcome screen
-    const welcomeScreen = page.locator('[data-testid="welcome-screen"]');
+    const welcomeScreen = page.locator(
+      '[data-testid="welcome-screen"], [data-testid="setup-wizard"]',
+    );
     if (await welcomeScreen.isVisible()) {
       test.skip();
       return;

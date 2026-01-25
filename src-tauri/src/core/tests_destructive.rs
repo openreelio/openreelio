@@ -672,4 +672,62 @@ mod worker_pool_tests {
         // Payload should be preserved exactly
         assert_eq!(job.payload, payload);
     }
+
+    #[test]
+    fn test_worker_pool_overflow_protection() {
+        // Create a pool with a small queue limit
+        let config = crate::core::jobs::WorkerPoolConfig {
+            num_workers: 1,
+            max_queue_size: 10,
+        };
+        let pool = crate::core::jobs::WorkerPool::new(config);
+
+        // Fill the queue
+        for i in 0..10 {
+            let job = Job::new(JobType::ProxyGeneration, serde_json::json!({ "id": i }));
+            assert!(pool.submit(job).is_ok(), "Should accept job {}", i);
+        }
+
+        // Try to overflow
+        let overflow_job = Job::new(
+            JobType::ProxyGeneration,
+            serde_json::json!({ "id": "overflow" }),
+        );
+        let result = pool.submit(overflow_job);
+
+        assert!(result.is_err(), "Should reject job when queue is full");
+        match result {
+            Err(crate::core::CoreError::Internal(msg)) => {
+                assert_eq!(msg, "Job queue is full");
+            }
+            _ => panic!("Unexpected error type"),
+        }
+    }
+
+    #[test]
+    fn test_job_serialization_roundtrip_stress() {
+        // Create a massive payload to test serialization limits/performance
+        let massive_array: Vec<i32> = (0..10_000).collect();
+        let payload = serde_json::json!({
+            "data": massive_array,
+            "nested": {
+                "deep": {
+                    "deeper": "value"
+                }
+            }
+        });
+
+        let job = Job::new(JobType::FinalRender, payload.clone());
+
+        // Serialize
+        let json = serde_json::to_string(&job).expect("Failed to serialize massive job");
+
+        // Deserialize
+        let parsed: Job = serde_json::from_str(&json).expect("Failed to deserialize massive job");
+
+        assert_eq!(parsed.id, job.id);
+        assert_eq!(parsed.job_type, JobType::FinalRender);
+        // Payload equality check
+        assert_eq!(parsed.payload["data"].as_array().unwrap().len(), 10_000);
+    }
 }

@@ -6,7 +6,10 @@
 
 use std::collections::BinaryHeap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex, MutexGuard, PoisonError,
+};
 
 use tauri::Emitter;
 #[cfg(not(test))]
@@ -98,6 +101,7 @@ impl JobHandle {
 #[derive(Debug, Clone)]
 pub(crate) struct QueueEntry {
     pub(crate) job: Job,
+    pub(crate) enqueue_seq: u64,
 }
 
 impl PartialEq for QueueEntry {
@@ -116,9 +120,19 @@ impl PartialOrd for QueueEntry {
 
 impl Ord for QueueEntry {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        // Higher priority first
-        self.job.priority.cmp(&other.job.priority)
+        // Higher priority first; FIFO within same priority.
+        self.job
+            .priority
+            .cmp(&other.job.priority)
+            .then_with(|| other.enqueue_seq.cmp(&self.enqueue_seq))
     }
+}
+
+fn job_type_wire_value(job_type: &JobType) -> String {
+    serde_json::to_value(job_type)
+        .ok()
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| format!("{:?}", job_type))
 }
 
 // =============================================================================
@@ -169,6 +183,8 @@ pub struct WorkerPool {
     pub(crate) queue: Arc<Mutex<BinaryHeap<QueueEntry>>>,
     /// Active jobs (pub(crate) for worker access)
     pub(crate) active_jobs: Arc<Mutex<std::collections::HashMap<JobId, Job>>>,
+    /// Monotonic sequence for FIFO ordering within a priority.
+    enqueue_seq: AtomicU64,
     /// Event sender
     event_tx: mpsc::UnboundedSender<JobEvent>,
     /// Event receiver
@@ -184,6 +200,7 @@ impl WorkerPool {
             config,
             queue: Arc::new(Mutex::new(BinaryHeap::new())),
             active_jobs: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            enqueue_seq: AtomicU64::new(0),
             event_tx,
             event_rx: Some(event_rx),
         }
@@ -197,6 +214,7 @@ impl WorkerPool {
     /// Submits a job to the queue
     pub fn submit(&self, job: Job) -> CoreResult<JobId> {
         let job_id = job.id.clone();
+        let enqueue_seq = self.enqueue_seq.fetch_add(1, Ordering::Relaxed);
 
         {
             let mut queue = acquire_lock(&self.queue);
@@ -205,7 +223,7 @@ impl WorkerPool {
                     "Job queue is full".to_string(),
                 ));
             }
-            queue.push(QueueEntry { job });
+            queue.push(QueueEntry { job, enqueue_seq });
         }
 
         Ok(job_id)
@@ -223,9 +241,7 @@ impl WorkerPool {
 
     /// Gets all queued jobs (waiting to be processed)
     pub fn queued_jobs(&self) -> Vec<Job> {
-        self.queue
-            .lock()
-            .unwrap()
+        acquire_lock(&self.queue)
             .iter()
             .map(|e| e.job.clone())
             .collect()
@@ -1300,22 +1316,211 @@ impl JobProcessor {
         }
     }
 
-    /// Process final render job (placeholder - see start_render IPC)
+    /// Process final render job.
+    ///
+    /// Executes the final export pipeline for a sequence.
+    ///
+    /// # Payload
+    ///
+    /// * `sequenceId` (required) - ID of the sequence to render
+    /// * `outputPath` (required) - Destination path
+    /// * `preset` (optional) - Export preset name (default: "youtube_1080p")
+    ///
+    /// # Events
+    ///
+    /// * `render:progress` - Emitted with detailed progress
+    /// * `render:complete` - Emitted on success
+    /// * `render:failed` - Emitted on failure
     async fn process_final_render(&self, job: &Job) -> Result<serde_json::Value, String> {
+        #[cfg(not(test))]
+        use crate::core::{
+            fs::{default_export_allowed_roots, validate_scoped_output_path},
+            render::{validate_export_settings, ExportEngine, ExportPreset, ExportSettings},
+        };
+
+        // Validate required payload fields
         let sequence_id = job
             .payload
             .get("sequenceId")
             .and_then(|v| v.as_str())
             .ok_or("Missing sequenceId in payload")?;
 
-        // Final render is handled by the start_render IPC command directly
-        // This job type is for queuing renders in the background
-        tracing::warn!(
-            "Final render via job queue not yet implemented for sequence {}",
-            sequence_id
+        validate_path_id_component(sequence_id, "sequenceId")?;
+
+        let output_path_str = job
+            .payload
+            .get("outputPath")
+            .and_then(|v| v.as_str())
+            .ok_or("Missing outputPath in payload")?;
+
+        let preset_name = job
+            .payload
+            .get("preset")
+            .and_then(|v| v.as_str())
+            .unwrap_or("youtube_1080p");
+
+        tracing::info!(
+            "Starting final render for sequence {} to {} (preset: {})",
+            sequence_id,
+            output_path_str,
+            preset_name
         );
 
-        Err("Use start_render IPC command for final render".to_string())
+        #[cfg(test)]
+        {
+            Err("Final render requires AppState and is disabled in unit tests".to_string())
+        }
+
+        #[cfg(not(test))]
+        {
+            // 1. Get project state and validate inputs
+            let (sequence, assets, effects, project_path) = {
+                let app_state = self.app_handle.state::<crate::AppState>();
+                let guard = app_state.project.lock().await;
+                let project = guard.as_ref().ok_or("No project open")?;
+
+                let sequence = project
+                    .state
+                    .sequences
+                    .get(sequence_id)
+                    .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?
+                    .clone();
+
+                // Clone needed data to release lock quickly
+                (
+                    sequence,
+                    project.state.assets.clone(),
+                    project.state.effects.clone(),
+                    project.path.clone(),
+                )
+            };
+
+            // 2. Validate output path security
+            // Use same logic as IPC command: restrict to user dirs + project dir
+            let roots = default_export_allowed_roots(&project_path);
+            let root_refs: Vec<&std::path::Path> = roots.iter().map(|p| p.as_path()).collect();
+
+            let validated_output_path =
+                validate_scoped_output_path(output_path_str, "outputPath", &root_refs)?;
+
+            // 3. Configure Export Settings
+            let export_preset = match preset_name.to_lowercase().as_str() {
+                "youtube_1080p" | "youtube1080p" => ExportPreset::Youtube1080p,
+                "youtube_4k" | "youtube4k" => ExportPreset::Youtube4k,
+                "youtube_shorts" | "youtubeshorts" => ExportPreset::YoutubeShorts,
+                "twitter" => ExportPreset::Twitter,
+                "instagram" => ExportPreset::Instagram,
+                "webm" | "webm_vp9" => ExportPreset::WebmVp9,
+                "prores" => ExportPreset::ProRes,
+                _ => ExportPreset::Youtube1080p,
+            };
+
+            let settings =
+                ExportSettings::from_preset(export_preset, validated_output_path.clone());
+
+            // 4. Validate export feasibility
+            let validation = validate_export_settings(&sequence, &assets, &settings);
+            if !validation.is_valid {
+                let error_msg = validation.errors.join("; ");
+                let _ = self.app_handle.emit(
+                    "render:failed",
+                    serde_json::json!({
+                        "jobId": job.id,
+                        "sequenceId": sequence_id,
+                        "error": error_msg,
+                    }),
+                );
+                return Err(format!("Export validation failed: {}", error_msg));
+            }
+
+            // 5. Setup Engine and Progress
+            let state = self.ffmpeg_state.read().await;
+            let runner = state.runner().ok_or("FFmpeg not available")?;
+            let export_engine = ExportEngine::new(runner.clone());
+
+            let (progress_tx, mut progress_rx) =
+                tokio::sync::mpsc::channel::<crate::core::render::ExportProgress>(32);
+
+            let app_handle = self.app_handle.clone();
+            let job_id = job.id.clone();
+            let seq_id = sequence_id.to_string();
+
+            // Spawn progress forwarder
+            let progress_task = tokio::spawn(async move {
+                while let Some(progress) = progress_rx.recv().await {
+                    let _ = app_handle.emit(
+                        "render:progress",
+                        serde_json::json!({
+                            "jobId": job_id,
+                            "sequenceId": seq_id,
+                            "frame": progress.frame,
+                            "totalFrames": progress.total_frames,
+                            "percent": progress.percent,
+                            "fps": progress.fps,
+                            "etaSeconds": progress.eta_seconds,
+                            "message": progress.message,
+                        }),
+                    );
+                }
+            });
+
+            // 6. Execute Export
+            let result = export_engine
+                .export_sequence_with_effects(
+                    &sequence,
+                    &assets,
+                    &effects,
+                    &settings,
+                    Some(progress_tx),
+                )
+                .await;
+
+            let _ = progress_task.await;
+
+            match result {
+                Ok(export_result) => {
+                    let output_str = export_result.output_path.to_string_lossy().to_string();
+
+                    let _ = self.app_handle.emit(
+                        "render:complete",
+                        serde_json::json!({
+                            "jobId": job.id,
+                            "sequenceId": sequence_id,
+                            "outputPath": output_str,
+                            "durationSec": export_result.duration_sec,
+                            "fileSizeBytes": export_result.file_size,
+                            "encodingTimeSec": export_result.encoding_time_sec,
+                        }),
+                    );
+
+                    tracing::info!(
+                        "Final render success: {} ({:.1}s)",
+                        output_str,
+                        export_result.encoding_time_sec
+                    );
+
+                    Ok(serde_json::json!({
+                        "outputPath": output_str,
+                        "durationSec": export_result.duration_sec,
+                        "fileSizeBytes": export_result.file_size,
+                        "encodingTimeSec": export_result.encoding_time_sec,
+                    }))
+                }
+                Err(e) => {
+                    let error_msg = format!("Export failed: {}", e);
+                    let _ = self.app_handle.emit(
+                        "render:failed",
+                        serde_json::json!({
+                            "jobId": job.id,
+                            "sequenceId": sequence_id,
+                            "error": error_msg,
+                        }),
+                    );
+                    tracing::error!("Final render failed: {}", error_msg);
+                    Err(error_msg)
+                }
+            }
+        }
     }
 
     /// Process AI completion job
@@ -1570,7 +1775,7 @@ pub(crate) fn start_workers_with_arcs(
                             // Emit started event
                             let _ = app_clone.emit("job:started", serde_json::json!({
                                 "jobId": &job.id,
-                                "jobType": format!("{:?}", &job.job_type),
+                                "jobType": job_type_wire_value(&job.job_type),
                             }));
 
                             tracing::info!(
@@ -1583,23 +1788,39 @@ pub(crate) fn start_workers_with_arcs(
                             // Process the job
                             let result = processor.process(&mut job).await;
 
-                            // Update job status based on result
-                            match result {
-                                Ok(result_value) => {
-                                    job.status = JobStatus::Completed { result: result_value.clone() };
-                                    job.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                            let completed_at = chrono::Utc::now().to_rfc3339();
+                            let was_cancelled = {
+                                let active_guard = acquire_lock(&active_clone);
+                                active_guard
+                                    .get(&job.id)
+                                    .is_some_and(|active| matches!(active.status, JobStatus::Cancelled))
+                            };
 
-                                    processor.emit_completed(&job.id, &result_value);
+                            // Update job status based on result (but do not override cancellation).
+                            if was_cancelled {
+                                job.status = JobStatus::Cancelled;
+                                job.completed_at = Some(completed_at);
+                                tracing::info!("Job {} was cancelled during processing", job.id);
+                            } else {
+                                match result {
+                                    Ok(result_value) => {
+                                        job.status = JobStatus::Completed {
+                                            result: result_value.clone(),
+                                        };
+                                        job.completed_at = Some(completed_at);
 
-                                    tracing::info!("Job {} completed successfully", job.id);
-                                }
-                                Err(error) => {
-                                    job.status = JobStatus::Failed { error: error.clone() };
-                                    job.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                                        processor.emit_completed(&job.id, &result_value);
 
-                                    processor.emit_failed(&job.id, &error);
+                                        tracing::info!("Job {} completed successfully", job.id);
+                                    }
+                                    Err(error) => {
+                                        job.status = JobStatus::Failed { error: error.clone() };
+                                        job.completed_at = Some(completed_at);
 
-                                    tracing::error!("Job {} failed: {}", job.id, error);
+                                        processor.emit_failed(&job.id, &error);
+
+                                        tracing::error!("Job {} failed: {}", job.id, error);
+                                    }
                                 }
                             }
 
@@ -1689,7 +1910,7 @@ pub fn start_workers(
                             // Emit started event
                             let _ = app_clone.emit("job:started", serde_json::json!({
                                 "jobId": &job.id,
-                                "jobType": format!("{:?}", &job.job_type),
+                                "jobType": job_type_wire_value(&job.job_type),
                             }));
 
                             tracing::info!(
@@ -1702,23 +1923,39 @@ pub fn start_workers(
                             // Process the job
                             let result = processor.process(&mut job).await;
 
-                            // Update job status based on result
-                            match result {
-                                Ok(result_value) => {
-                                    job.status = JobStatus::Completed { result: result_value.clone() };
-                                    job.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                            let completed_at = chrono::Utc::now().to_rfc3339();
+                            let was_cancelled = {
+                                let active_guard = acquire_lock(&active_clone);
+                                active_guard
+                                    .get(&job.id)
+                                    .is_some_and(|active| matches!(active.status, JobStatus::Cancelled))
+                            };
 
-                                    processor.emit_completed(&job.id, &result_value);
+                            // Update job status based on result (but do not override cancellation).
+                            if was_cancelled {
+                                job.status = JobStatus::Cancelled;
+                                job.completed_at = Some(completed_at);
+                                tracing::info!("Job {} was cancelled during processing", job.id);
+                            } else {
+                                match result {
+                                    Ok(result_value) => {
+                                        job.status = JobStatus::Completed {
+                                            result: result_value.clone(),
+                                        };
+                                        job.completed_at = Some(completed_at);
 
-                                    tracing::info!("Job {} completed successfully", job.id);
-                                }
-                                Err(error) => {
-                                    job.status = JobStatus::Failed { error: error.clone() };
-                                    job.completed_at = Some(chrono::Utc::now().to_rfc3339());
+                                        processor.emit_completed(&job.id, &result_value);
 
-                                    processor.emit_failed(&job.id, &error);
+                                        tracing::info!("Job {} completed successfully", job.id);
+                                    }
+                                    Err(error) => {
+                                        job.status = JobStatus::Failed { error: error.clone() };
+                                        job.completed_at = Some(completed_at);
 
-                                    tracing::error!("Job {} failed: {}", job.id, error);
+                                        processor.emit_failed(&job.id, &error);
+
+                                        tracing::error!("Job {} failed: {}", job.id, error);
+                                    }
                                 }
                             }
 

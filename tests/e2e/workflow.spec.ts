@@ -43,9 +43,9 @@ async function waitForAppReady(page: Page): Promise<void> {
   await page.goto('/');
   await page.waitForLoadState('networkidle');
 
-  // Wait for either welcome screen or main layout
+  // Wait for either setup wizard, welcome screen, or main layout
   const appReady = page.locator(
-    '[data-testid="welcome-screen"], [data-testid="main-layout"]'
+    '[data-testid="setup-wizard"], [data-testid="welcome-screen"], [data-testid="main-layout"]',
   );
   await expect(appReady.first()).toBeVisible({ timeout: LOAD_TIMEOUT });
 }
@@ -58,7 +58,7 @@ async function isOnWelcomeScreen(page: Page): Promise<boolean> {
 async function createNewProject(page: Page, projectName: string): Promise<void> {
   // Click new project button
   const newProjectButton = page.locator(
-    '[data-testid="new-project-button"], button:has-text("New Project")'
+    '[data-testid="new-project-button"], button:has-text("New Project")',
   );
   await newProjectButton.click();
 
@@ -70,7 +70,7 @@ async function createNewProject(page: Page, projectName: string): Promise<void> 
 
   // Submit
   const createButton = page.locator(
-    '[data-testid="create-project-submit"], button:has-text("Create")'
+    '[data-testid="create-project-submit"], button:has-text("Create")',
   );
   if (await createButton.isVisible()) {
     await createButton.click();
@@ -78,23 +78,21 @@ async function createNewProject(page: Page, projectName: string): Promise<void> 
 
   // Wait for timeline to be visible
   await expect(
-    page.locator('[data-testid="timeline"], [data-testid="main-layout"]')
+    page.locator(
+      '[data-testid="setup-wizard"], [data-testid="timeline"], [data-testid="main-layout"]',
+    ),
   ).toBeVisible({ timeout: LOAD_TIMEOUT });
 }
 
 async function importAsset(page: Page, filePath: string): Promise<void> {
   // Use the file input for asset import
-  const fileInput = page.locator(
-    '[data-testid="asset-import-input"], input[type="file"]'
-  );
+  const fileInput = page.locator('[data-testid="asset-import-input"], input[type="file"]');
 
   if (await fileInput.isVisible()) {
     await fileInput.setInputFiles(filePath);
   } else {
     // Try drag and drop area or button
-    const importButton = page.locator(
-      '[data-testid="import-button"], button:has-text("Import")'
-    );
+    const importButton = page.locator('[data-testid="import-button"], button:has-text("Import")');
     if (await importButton.isVisible()) {
       await importButton.click();
       // Handle file dialog - this may not work in all environments
@@ -112,7 +110,7 @@ async function importAsset(page: Page, filePath: string): Promise<void> {
 async function dragAssetToTimeline(
   page: Page,
   assetIndex: number,
-  trackSelector: string
+  trackSelector: string,
 ): Promise<void> {
   const asset = page.locator('[data-testid="asset-item"]').nth(assetIndex);
   const track = page.locator(trackSelector);
@@ -183,7 +181,7 @@ test.describe('Complete Video Editing Workflow', () => {
     // 8. Open export dialog
     await page.keyboard.press('Control+e');
     const exportDialog = page.locator(
-      '[data-testid="export-dialog"], [role="dialog"]:has-text("Export")'
+      '[data-testid="export-dialog"], [role="dialog"]:has-text("Export")',
     );
 
     if (await exportDialog.isVisible({ timeout: 2000 }).catch(() => false)) {
@@ -220,7 +218,7 @@ test.describe('Complete Video Editing Workflow', () => {
     const audioTrack = page.locator('[data-testid="track-audio"]').first();
 
     // Drag assets if tracks are visible
-    if (await videoTrack.isVisible() && await audioTrack.isVisible()) {
+    if ((await videoTrack.isVisible()) && (await audioTrack.isVisible())) {
       await dragAssetToTimeline(page, 0, '[data-testid="track-video"]');
       await dragAssetToTimeline(page, 1, '[data-testid="track-audio"]');
 
@@ -233,9 +231,7 @@ test.describe('Complete Video Editing Workflow', () => {
     await page.keyboard.press('Space');
 
     // Verify time display updated
-    const timeDisplay = page.locator(
-      '[data-testid="time-display"], [data-testid="timecode"]'
-    );
+    const timeDisplay = page.locator('[data-testid="time-display"], [data-testid="timecode"]');
     if (await timeDisplay.isVisible()) {
       const time = await timeDisplay.textContent();
       expect(time).toBeTruthy();
@@ -257,9 +253,7 @@ test.describe('Complete Video Editing Workflow', () => {
     }
 
     // Test playback shortcuts
-    const playButton = page.locator(
-      '[data-testid="play-button"], button[aria-label*="play" i]'
-    );
+    const playButton = page.locator('[data-testid="play-button"], button[aria-label*="play" i]');
 
     if (await playButton.isVisible()) {
       await page.keyboard.press('Space'); // Play
@@ -340,7 +334,7 @@ test.describe('Auto-save and Recovery', () => {
 
     // Look for save indicator
     const saveIndicator = page.locator(
-      '[data-testid="save-indicator"], [data-testid="save-status"]'
+      '[data-testid="save-indicator"], [data-testid="save-status"]',
     );
 
     if (await saveIndicator.isVisible()) {

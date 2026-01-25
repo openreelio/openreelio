@@ -80,6 +80,28 @@ const DEFAULT_SETTINGS: AppSettings = {
     memoryLimitMb: 0,
     cacheSizeMb: 1024,
   },
+  ai: {
+    primaryProvider: 'anthropic',
+    primaryModel: 'claude-sonnet-4-5-20251015',
+    visionProvider: null,
+    visionModel: null,
+    openaiApiKey: null,
+    anthropicApiKey: null,
+    googleApiKey: null,
+    ollamaUrl: null,
+    temperature: 0.3,
+    maxTokens: 4096,
+    frameExtractionRate: 1.0,
+    monthlyBudgetCents: null,
+    perRequestLimitCents: 50,
+    currentMonthUsageCents: 0,
+    currentUsageMonth: null,
+    autoAnalyzeOnImport: false,
+    autoCaptionOnImport: false,
+    proposalReviewMode: 'always',
+    cacheDurationHours: 24,
+    localOnlyMode: false,
+  },
 };
 
 describe('useSettings', () => {

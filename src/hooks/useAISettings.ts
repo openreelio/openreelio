@@ -5,7 +5,12 @@
  */
 
 import { useCallback, useState } from 'react';
-import { useAIStore, type ProviderType, type ProviderConfig } from '@/stores/aiStore';
+import {
+  useAIStore,
+  type ProviderType,
+  type ProviderConfig,
+  type ConnectionTestResult,
+} from '@/stores/aiStore';
 
 export interface AISettingsState {
   providerType: ProviderType | null;
@@ -37,7 +42,7 @@ export function useAISettings() {
   });
 
   const [availableModels, setAvailableModels] = useState<string[]>(providerStatus.availableModels);
-  const [testResult, setTestResult] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
 
   // Update provider type and fetch models
   const setProviderType = useCallback(async (providerType: ProviderType | null) => {

@@ -125,5 +125,8 @@ whisper = ["dep:whisper-rs"]
 meilisearch = ["dep:meilisearch-sdk", "dep:futures", "dep:reqwest"]
 # Enable AI providers (OpenAI, Anthropic, Ollama)
 ai-providers = ["dep:reqwest"]
-# Full AI bundle
+# Full AI bundle (for production builds with all features)
 ai-full = ["whisper", "meilisearch", "ai-providers"]
+# Development build with all features enabled (for contributors)
+# Usage: cargo build --features dev-full
+dev-full = ["ai-full", "bundled-ffmpeg"]

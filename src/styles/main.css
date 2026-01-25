@@ -23,6 +23,19 @@
   --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 }
 
+/* Ensure the root container is visible even when children use fixed positioning.
+   Playwright E2E assertions (and some layout calculations) assume #root has a
+   non-zero box size. */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+#root {
+  min-height: 100vh;
+}
+
 /* =============================================================================
    Custom Scrollbar (Dark Theme)
    ============================================================================= */
@@ -61,15 +74,21 @@
 
 /* Note: Custom cursor SVGs should be added to public/cursors/ directory */
 .cursor-trim-ripple {
-  cursor: url('/cursors/trim-ripple.svg') 12 12, e-resize;
+  cursor:
+    url('/cursors/trim-ripple.svg') 12 12,
+    e-resize;
 }
 
 .cursor-trim-roll {
-  cursor: url('/cursors/trim-roll.svg') 12 12, e-resize;
+  cursor:
+    url('/cursors/trim-roll.svg') 12 12,
+    e-resize;
 }
 
 .cursor-trim-slip {
-  cursor: url('/cursors/trim-slip.svg') 12 12, move;
+  cursor:
+    url('/cursors/trim-slip.svg') 12 12,
+    move;
 }
 
 /* =============================================================================
@@ -189,7 +208,8 @@
 }
 
 @keyframes pulse {
-  0%, 100% {
+  0%,
+  100% {
     opacity: 1;
   }
   50% {
@@ -272,7 +292,9 @@
    ============================================================================= */
 
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;

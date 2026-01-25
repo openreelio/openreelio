@@ -9,6 +9,7 @@ export { useTimelineStore } from './timelineStore';
 export { useJobsStore } from './jobsStore';
 export { usePlaybackStore } from './playbackStore';
 export { useWaveformCacheStore, createWaveformCacheKey } from './waveformCacheStore';
+export { useSettingsStore } from './settingsStore';
 export type { Job, JobStatus, JobType, JobProgress } from './jobsStore';
 export type { PlaybackState, PlaybackActions, PlaybackStore } from './playbackStore';
 export type {

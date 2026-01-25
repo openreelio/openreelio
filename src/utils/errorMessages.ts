@@ -20,7 +20,11 @@ const ERROR_PATTERNS: Array<{
   // Project Errors
   {
     pattern: /Project not found/i,
-    message: () => 'The project could not be found. Please check the file path.',
+    message: () => 'The project could not be found. It may have been moved or deleted.',
+  },
+  {
+    pattern: /project is already open with unsaved changes/i,
+    message: () => 'Please save your current project before opening another one.',
   },
   {
     pattern: /Project already open/i,
@@ -37,6 +41,14 @@ const ERROR_PATTERNS: Array<{
   {
     pattern: /No project open/i,
     message: () => 'Please open or create a project first.',
+  },
+  {
+    pattern: /Invalid project directory/i,
+    message: () => 'The selected folder is not a valid project directory.',
+  },
+  {
+    pattern: /project\.json.*not found/i,
+    message: () => 'The selected folder does not contain a valid project.',
   },
 
   // Asset Errors
