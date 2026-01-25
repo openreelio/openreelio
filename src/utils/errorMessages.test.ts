@@ -29,7 +29,12 @@ describe('getUserFriendlyError', () => {
   describe('Project Errors', () => {
     it('should handle project not found', () => {
       const result = getUserFriendlyError('Project not found: /path/to/project');
-      expect(result).toBe('The project could not be found. Please check the file path.');
+      expect(result).toBe('The project could not be found. It may have been moved or deleted.');
+    });
+
+    it('should handle project with unsaved changes blocking open', () => {
+      const result = getUserFriendlyError('A project is already open with unsaved changes. Save it before opening another project.');
+      expect(result).toBe('Please save your current project before opening another one.');
     });
 
     it('should handle project already open', () => {
@@ -45,6 +50,16 @@ describe('getUserFriendlyError', () => {
     it('should handle corrupted project', () => {
       const result = getUserFriendlyError('Project file corrupted: invalid JSON');
       expect(result).toBe('The project file appears to be corrupted. Try opening a backup.');
+    });
+
+    it('should handle invalid project directory', () => {
+      const result = getUserFriendlyError('Invalid project directory: /path/to/folder');
+      expect(result).toBe('The selected folder is not a valid project directory.');
+    });
+
+    it('should handle missing project.json', () => {
+      const result = getUserFriendlyError('project.json not found in /path/to/folder');
+      expect(result).toBe('The selected folder does not contain a valid project.');
     });
   });
 
