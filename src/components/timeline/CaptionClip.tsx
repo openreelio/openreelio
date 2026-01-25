@@ -6,7 +6,7 @@
  */
 
 import { useMemo, type MouseEvent } from 'react';
-import type { Caption, CaptionStyle, CaptionColor, ClickModifiers } from '@/types';
+import type { Caption, CaptionColor, ClickModifiers } from '@/types';
 
 // Re-export for backward compatibility
 export type { ClickModifiers } from '@/types';
@@ -24,8 +24,6 @@ interface CaptionClipProps {
   selected: boolean;
   /** Whether interaction is disabled */
   disabled?: boolean;
-  /** Default caption style from track */
-  defaultStyle?: CaptionStyle;
   /** Highlight color based on speaker */
   speakerColor?: CaptionColor;
   /** Click handler with modifier keys */

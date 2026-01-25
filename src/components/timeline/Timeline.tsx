@@ -26,6 +26,7 @@ import { DragPreviewLayer } from './DragPreviewLayer';
 import { SnapIndicator, type SnapPoint } from './SnapIndicator';
 import { SelectionBox } from './SelectionBox';
 import { CaptionEditor } from '@/components/features/captions';
+import { CaptionExportDialog } from '@/components/features/export/CaptionExportDialog';
 import type { ClipWaveformConfig } from './Clip';
 import type { TimelineProps } from './types';
 import type { CaptionTrack as CaptionTrackType, Caption } from '@/types';
@@ -131,6 +132,12 @@ export function Timeline({
   const [editingCaption, setEditingCaption] = useState<{
     caption: Caption;
     trackId: string;
+  } | null>(null);
+
+  // Caption export state
+  const [exportCaptions, setExportCaptions] = useState<{
+    captions: Caption[];
+    trackName: string;
   } | null>(null);
 
   // ===========================================================================
@@ -440,6 +447,26 @@ export function Timeline({
     [handleCaptionDoubleClick],
   );
 
+  /**
+   * Handler for caption export button click
+   */
+  const handleCaptionExportClick = useCallback(
+    (trackId: string, captions: Caption[]) => {
+      // Find the track name for the default filename
+      const track = sequence?.tracks.find((t) => t.id === trackId);
+      const trackName = track?.name || 'captions';
+      setExportCaptions({ captions, trackName });
+    },
+    [sequence],
+  );
+
+  /**
+   * Handler for closing the export dialog
+   */
+  const handleExportDialogClose = useCallback(() => {
+    setExportCaptions(null);
+  }, []);
+
   // ===========================================================================
   // Render
   // ===========================================================================
@@ -499,6 +526,7 @@ export function Timeline({
                   onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
                   onCaptionClick={handleClipClick} // Use same handler as clips
                   onCaptionDoubleClick={createCaptionDoubleClickHandler(track.id)}
+                  onExportClick={handleCaptionExportClick}
                 />
               );
             }
@@ -567,6 +595,14 @@ export function Timeline({
           onDelete={handleCaptionDelete}
         />
       )}
+
+      {/* Caption Export Dialog */}
+      <CaptionExportDialog
+        isOpen={exportCaptions !== null}
+        onClose={handleExportDialogClose}
+        captions={exportCaptions?.captions ?? []}
+        defaultName={exportCaptions?.trackName}
+      />
     </div>
   );
 }

@@ -1,9 +1,9 @@
 # OpenReelio Work Plan
 
-> **Last Updated**: 2026-01-23
-> **Current Phase**: v0.2.0 AI Integration - 60% Complete
-> **Target**: Complete whisper-rs transcription + shot detection
-> **Active Sprint**: whisper-rs Integration & Caption Export
+> **Last Updated**: 2026-01-26
+> **Current Phase**: v0.2.0 AI Integration - 90% Complete
+> **Target**: Distribution infrastructure + shot detection enhancement
+> **Active Sprint**: Distribution readiness & AI polish
 
 This document provides actionable task breakdowns for immediate development work.
 
@@ -46,7 +46,7 @@ This document provides actionable task breakdowns for immediate development work
 
 ---
 
-## Current Phase: v0.2.0 AI Integration (60% Complete)
+## Current Phase: v0.2.0 AI Integration (90% Complete)
 
 ### Priority Tasks
 
@@ -61,13 +61,14 @@ This document provides actionable task breakdowns for immediate development work
 | Search UI | ✅ COMPLETE | SearchBar, SearchPanel, Filters, Results |
 | Caption Editor | ✅ COMPLETE | Full caption CRUD UI |
 | Transcription Dialog | ✅ COMPLETE | Model selection and progress tracking UI |
-| **whisper.cpp integration** | ⏳ PENDING | Actual whisper-rs inference (UI ready) |
-| **Shot detection** | ⏳ PENDING | candle-based scene detection |
-| **Caption Export** | ⏳ PENDING | SRT/VTT export formats |
+| **whisper.cpp integration** | ✅ COMPLETE | WhisperEngine, audio extraction, job worker, IPC commands |
+| **Caption Export** | ✅ COMPLETE | SRT/VTT formats, CaptionExportDialog, timeline integration |
+| **First-Run Setup Wizard** | ✅ COMPLETE | 4-step wizard with FFmpeg check, theme, settings |
+| **Shot detection** | ⏳ PENDING | candle-based scene detection (FFmpeg scenedetect available) |
 
 ---
 
-## Current Sprint: v0.2.0 Completion
+## Current Sprint: v0.2.0 Completion & Distribution Readiness
 
 ### Priority Matrix
 
@@ -76,30 +77,48 @@ This document provides actionable task breakdowns for immediate development work
               HIGH           LOW
          ┌─────────────┬─────────────┐
     HIGH │  DO FIRST   │  SCHEDULE   │
-URGENCY  │  whisper-rs │  SRT Export │
+URGENCY  │  Code Sign  │  Crash Rep. │
          ├─────────────┼─────────────┤
     LOW  │  Shot Det.  │   DEFER     │
-         │  candle     │   v0.3.0+   │
+         │  (candle)   │   v0.3.0+   │
          └─────────────┴─────────────┘
 ```
 
-### Immediate Action Items
+### Completed in This Sprint ✅
 
-1. **whisper-rs Integration** (HIGH/HIGH)
-   - Add `whisper-rs = "0.13"` to Cargo.toml
-   - Implement `TranscriptionEngine` in `core/captions/whisper.rs`
-   - Connect to existing `TranscriptionDialog.tsx` UI
-   - Wire IPC command `transcribe_asset`
+1. **whisper-rs Integration** ✅ COMPLETE
+   - ✅ `whisper-rs = "0.15"` added as optional dependency
+   - ✅ `WhisperEngine` in `core/captions/whisper.rs` (535 lines)
+   - ✅ Audio extraction pipeline (16kHz mono WAV)
+   - ✅ IPC commands: `transcribe_asset`, `submit_transcription_job`, `is_transcription_available`
+   - ✅ Background job worker handler with progress events
+   - ✅ TranscriptionDialog UI integration
 
-2. **Caption Export** (HIGH/LOW)
-   - Implement SRT format writer
-   - Implement VTT format writer
-   - Add export button to CaptionEditor
+2. **Caption Export** ✅ COMPLETE
+   - ✅ SRT format writer with timestamp formatting
+   - ✅ VTT format writer with WebVTT header
+   - ✅ `useCaptionExport` hook with file dialog integration
+   - ✅ `CaptionExportDialog` component with format selection
+   - ✅ Export button integrated into CaptionTrack header
 
-3. **Shot Detection** (LOW/HIGH)
-   - Add candle dependencies
-   - Implement scene boundary detection
-   - Create shot markers UI
+3. **First-Run Setup Wizard** ✅ COMPLETE
+   - ✅ 4-step wizard (Welcome, FFmpeg, Settings, Complete)
+   - ✅ hasCompletedSetup flag in settings
+   - ✅ Theme and project location configuration
+   - ✅ Full test coverage (18+ tests)
+
+### Immediate Action Items (Remaining)
+
+1. **Distribution Infrastructure** (HIGH/HIGH - BLOCKER)
+   - [ ] Windows code signing (Authenticode)
+   - [ ] macOS notarization
+   - [ ] Update manifest generation
+   - [ ] CI/CD release pipeline
+
+2. **Shot Detection Enhancement** (LOW/HIGH)
+   - [ ] Add candle dependencies for ML-based detection
+   - [ ] Implement scene boundary confidence scoring
+   - [ ] Create shot markers UI on timeline
 
 ---
 
@@ -763,12 +782,12 @@ export function useToast() {
 
 ---
 
-## ACTIVE: v0.2.0 AI Integration Implementation
+## ARCHIVE: v0.2.0 AI Integration Implementation
 
-### Phase A: whisper.cpp Integration (CURRENT PRIORITY)
+### Phase A: whisper.cpp Integration ✅ COMPLETE
 
-**Status**: UI Complete, Backend Integration Pending
-**Blocking**: Actual transcription functionality
+**Status**: Fully implemented and tested
+**Files**: `src-tauri/src/core/captions/whisper.rs`, `audio.rs`, `src/hooks/useTranscription.ts`
 
 **Step 1: Add Dependencies**
 ```toml

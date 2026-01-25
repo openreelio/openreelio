@@ -13,6 +13,7 @@ import {
   Lock,
   Unlock,
   Globe,
+  Download,
 } from 'lucide-react';
 import type { Caption, CaptionTrack as CaptionTrackType, CaptionColor } from '@/types';
 import { CaptionClip, type ClickModifiers } from './CaptionClip';
@@ -46,6 +47,8 @@ interface CaptionTrackProps {
   onCaptionDoubleClick?: (captionId: string) => void;
   /** Track header click handler */
   onTrackClick?: (trackId: string) => void;
+  /** Export click handler - receives track ID and all captions */
+  onExportClick?: (trackId: string, captions: Caption[]) => void;
 }
 
 // =============================================================================
@@ -93,7 +96,14 @@ function virtualizeCaptions(
   viewportWidth: number,
   bufferPx: number
 ): Caption[] {
-  const startTime = (scrollX - bufferPx) / zoom;
+  // Guard against division by zero or invalid zoom values
+  if (zoom <= 0 || !Number.isFinite(zoom)) {
+    return captions;
+  }
+
+  // Ensure non-negative scroll position for time calculation
+  const effectiveScrollX = Math.max(0, scrollX - bufferPx);
+  const startTime = effectiveScrollX / zoom;
   const endTime = (scrollX + viewportWidth + bufferPx) / zoom;
 
   return captions.filter((caption) => {
@@ -118,6 +128,7 @@ export function CaptionTrack({
   onCaptionClick,
   onCaptionDoubleClick,
   onTrackClick,
+  onExportClick,
 }: CaptionTrackProps) {
   // Ref for measuring viewport width if not provided
   const contentRef = useRef<HTMLDivElement>(null);
@@ -167,6 +178,22 @@ export function CaptionTrack({
 
         {/* Track controls */}
         <div className="flex items-center gap-1">
+          {/* Export button */}
+          <button
+            data-testid="caption-export-button"
+            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (track.captions.length > 0) {
+                onExportClick?.(track.id, track.captions);
+              }
+            }}
+            disabled={track.captions.length === 0}
+            title="Export captions"
+          >
+            <Download className="w-3.5 h-3.5" />
+          </button>
+
           {/* Lock button */}
           <button
             data-testid="caption-lock-button"
@@ -236,7 +263,6 @@ export function CaptionTrack({
               zoom={zoom}
               selected={selectedCaptionIds.includes(caption.id)}
               disabled={track.locked}
-              defaultStyle={track.defaultStyle}
               speakerColor={
                 caption.speaker ? speakerColors?.get(caption.speaker) : undefined
               }
