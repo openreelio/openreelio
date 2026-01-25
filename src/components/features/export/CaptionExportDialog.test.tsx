@@ -96,10 +96,72 @@ describe('CaptionExportDialog', () => {
     });
   });
 
-  it('shows error message if export fails', async () => {
-    // We can't easily change the hook implementation per test with simple vi.mock hoisting
-    // But we can check if the component handles the hook's return values
-    // For this specific test setup, checking basic interaction is enough
-    // Ideally we would mock the hook return value per test context
+  it('does not close dialog on failed export', async () => {
+    mockExportToFile.mockResolvedValue(false);
+    const onClose = vi.fn();
+
+    render(<CaptionExportDialog {...defaultProps} onClose={onClose} />);
+
+    fireEvent.click(screen.getByText('Export'));
+
+    await waitFor(() => {
+      expect(mockExportToFile).toHaveBeenCalled();
+    });
+
+    // onClose should not be called when export fails
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('calls onClose when clicking backdrop', () => {
+    render(<CaptionExportDialog {...defaultProps} />);
+
+    // The backdrop is the outer div with fixed inset-0
+    const backdrop = document.querySelector('.fixed.inset-0');
+    fireEvent.click(backdrop!);
+
+    expect(defaultProps.onClose).toHaveBeenCalled();
+  });
+
+  it('does not close when clicking dialog content', () => {
+    const onClose = vi.fn();
+    render(<CaptionExportDialog {...defaultProps} onClose={onClose} />);
+
+    // Click on the dialog itself, not the backdrop
+    const dialog = screen.getByRole('dialog');
+    fireEvent.click(dialog);
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('disables export button when filename is empty', () => {
+    render(<CaptionExportDialog {...defaultProps} defaultName="" />);
+
+    const exportButton = screen.getByRole('button', { name: /export/i });
+    expect(exportButton).toBeDisabled();
+  });
+
+  it('uses default filename when not provided', () => {
+    render(<CaptionExportDialog {...defaultProps} />);
+
+    const input = screen.getByLabelText('Filename') as HTMLInputElement;
+    expect(input.value).toBe('captions');
+  });
+
+  it('uses custom default name when provided', () => {
+    render(<CaptionExportDialog {...defaultProps} defaultName="my_subtitles" />);
+
+    const input = screen.getByLabelText('Filename') as HTMLInputElement;
+    expect(input.value).toBe('my_subtitles');
+  });
+
+  it('resets state when dialog opens', () => {
+    const { rerender } = render(
+      <CaptionExportDialog {...defaultProps} isOpen={false} defaultName="original" />
+    );
+
+    rerender(<CaptionExportDialog {...defaultProps} isOpen={true} defaultName="updated" />);
+
+    const input = screen.getByLabelText('Filename') as HTMLInputElement;
+    expect(input.value).toBe('updated');
   });
 });
