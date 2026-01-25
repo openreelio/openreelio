@@ -5,11 +5,12 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { X, Settings2, Palette, Keyboard, RotateCcw } from 'lucide-react';
+import { X, Settings2, Palette, Keyboard, RotateCcw, Bot } from 'lucide-react';
 import { useSettings } from '@/hooks/useSettings';
 import { GeneralSettings } from './sections/GeneralSettings';
 import { AppearanceSettings } from './sections/AppearanceSettings';
 import { ShortcutsSettings } from './sections/ShortcutsSettings';
+import { AISettingsSection } from './sections/AISettingsSection';
 
 // =============================================================================
 // Types
@@ -20,7 +21,7 @@ export interface SettingsDialogProps {
   onClose: () => void;
 }
 
-type TabId = 'general' | 'appearance' | 'shortcuts';
+type TabId = 'general' | 'appearance' | 'shortcuts' | 'ai';
 
 interface Tab {
   id: TabId;
@@ -36,6 +37,7 @@ const TABS: Tab[] = [
   { id: 'general', label: 'General', icon: <Settings2 className="w-4 h-4" /> },
   { id: 'appearance', label: 'Appearance', icon: <Palette className="w-4 h-4" /> },
   { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard className="w-4 h-4" /> },
+  { id: 'ai', label: 'AI', icon: <Bot className="w-4 h-4" /> },
 ];
 
 // =============================================================================
@@ -49,8 +51,10 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
   const {
     general,
     appearance,
+    ai,
     updateGeneral,
     updateAppearance,
+    updateAI,
     resetSettings,
     isSaving,
     error,
@@ -99,6 +103,13 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
       void updateAppearance(values);
     },
     [updateAppearance]
+  );
+
+  const handleAIUpdate = useCallback(
+    (values: Parameters<typeof updateAI>[0]) => {
+      void updateAI(values);
+    },
+    [updateAI]
   );
 
   if (!isOpen) {
@@ -188,6 +199,14 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
             )}
 
             {activeTab === 'shortcuts' && <ShortcutsSettings />}
+
+            {activeTab === 'ai' && (
+              <AISettingsSection
+                settings={ai}
+                onUpdate={handleAIUpdate}
+                disabled={isSaving}
+              />
+            )}
           </div>
         </div>
 

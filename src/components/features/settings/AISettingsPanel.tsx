@@ -181,8 +181,17 @@ export const AISettingsPanel: React.FC<AISettingsPanelProps> = ({
     try {
       setLocalError(null);
       const result = await testConnection();
-      setSuccessMessage(`Connection test: ${result}`);
-      logger.info('Connection test successful', { result });
+      if (result.success) {
+        const latencyInfo = result.latencyMs != null ? ` (${result.latencyMs}ms)` : '';
+        setSuccessMessage(`Connection successful: ${result.provider} - ${result.model}${latencyInfo}`);
+        logger.info('Connection test successful', { result });
+      } else {
+        setLocalError(result.message);
+        logger.warn('Connection test failed', { result });
+        if (onError) {
+          onError(result.message);
+        }
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       setLocalError(message);
@@ -246,9 +255,22 @@ export const AISettingsPanel: React.FC<AISettingsPanelProps> = ({
         </div>
       )}
 
-      {testResult && !successMessage && (
-        <div className="mb-4 p-3 rounded bg-blue-900/30 border border-blue-700 text-sm text-blue-400">
-          Test Result: {testResult}
+      {testResult && !successMessage && !displayError && (
+        <div className={`mb-4 p-3 rounded text-sm ${
+          testResult.success
+            ? 'bg-green-900/30 border border-green-700 text-green-400'
+            : 'bg-yellow-900/30 border border-yellow-700 text-yellow-400'
+        }`}>
+          <div className="font-medium mb-1">
+            {testResult.success ? 'Connection Test Passed' : 'Connection Test Result'}
+          </div>
+          <div className="text-xs space-y-0.5">
+            <div>Provider: {testResult.provider}</div>
+            <div>Model: {testResult.model}</div>
+            {testResult.latencyMs != null && <div>Latency: {testResult.latencyMs}ms</div>}
+            {testResult.message && <div>Message: {testResult.message}</div>}
+            {testResult.errorCode && <div>Error Code: {testResult.errorCode}</div>}
+          </div>
         </div>
       )}
 
