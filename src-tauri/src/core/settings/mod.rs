@@ -648,6 +648,36 @@ fn default_primary_model() -> String {
     "claude-sonnet-4-5-20251015".to_string()
 }
 
+fn default_model_for_provider(provider: ProviderType) -> String {
+    match provider {
+        ProviderType::OpenAI => "gpt-5.2".to_string(),
+        ProviderType::Anthropic => "claude-sonnet-4-5-20251015".to_string(),
+        ProviderType::Gemini => "gemini-3-flash-preview".to_string(),
+        ProviderType::Local => "llama3.2".to_string(),
+    }
+}
+
+fn infer_provider_from_model_name(model: &str) -> Option<ProviderType> {
+    let lower = model.trim().to_lowercase();
+    if lower.is_empty() {
+        return None;
+    }
+
+    if lower.starts_with("claude") {
+        Some(ProviderType::Anthropic)
+    } else if lower.starts_with("gemini") {
+        Some(ProviderType::Gemini)
+    } else if lower.starts_with("gpt")
+        || matches!(lower.chars().next(), Some('o'))
+            && lower.chars().nth(1).is_some_and(|c| c.is_ascii_digit())
+    {
+        // OpenAI families commonly include "gpt-*" and "o{N}*" (e.g. "o3-mini").
+        Some(ProviderType::OpenAI)
+    } else {
+        None
+    }
+}
+
 fn default_temperature() -> f32 {
     0.3
 }
@@ -698,6 +728,40 @@ impl Default for AISettings {
 impl AISettings {
     /// Normalize and clamp AI settings values to valid ranges
     pub fn normalize(&mut self) {
+        self.primary_model = self.primary_model.trim().to_string();
+        if self.primary_model.is_empty() {
+            self.primary_model = default_model_for_provider(self.primary_provider);
+        } else if let Some(inferred) = infer_provider_from_model_name(&self.primary_model) {
+            if inferred != self.primary_provider {
+                warn!(
+                    "Invalid primary model '{}' for provider {:?}, resetting to default.",
+                    self.primary_model, self.primary_provider
+                );
+                self.primary_model = default_model_for_provider(self.primary_provider);
+            }
+        }
+
+        if let Some(vision_provider) = self.vision_provider {
+            if let Some(vision_model) = &self.vision_model {
+                let trimmed = vision_model.trim();
+                if trimmed.is_empty() {
+                    self.vision_model = None;
+                } else if let Some(inferred) = infer_provider_from_model_name(trimmed) {
+                    if inferred != vision_provider {
+                        warn!(
+                            "Invalid vision model '{}' for provider {:?}, resetting to None.",
+                            trimmed, vision_provider
+                        );
+                        self.vision_model = None;
+                    } else {
+                        self.vision_model = Some(trimmed.to_string());
+                    }
+                } else {
+                    self.vision_model = Some(trimmed.to_string());
+                }
+            }
+        }
+
         // Temperature: 0.0 - 1.0
         if !self.temperature.is_finite() {
             self.temperature = default_temperature();
@@ -1075,6 +1139,32 @@ mod tests {
         assert!(
             ai_settings.frame_extraction_rate >= 0.5 && ai_settings.frame_extraction_rate <= 2.0
         );
+    }
+
+    #[test]
+    fn test_ai_settings_normalization_resets_incompatible_model() {
+        let mut ai_settings = AISettings {
+            primary_provider: ProviderType::OpenAI,
+            primary_model: "claude-sonnet-4-5-20251015".to_string(),
+            ..Default::default()
+        };
+
+        ai_settings.normalize();
+
+        assert_eq!(ai_settings.primary_model, "gpt-5.2");
+    }
+
+    #[test]
+    fn test_ai_settings_normalization_trims_and_clears_invalid_vision_model() {
+        let mut ai_settings = AISettings {
+            vision_provider: Some(ProviderType::Gemini),
+            vision_model: Some("  gpt-4o  ".to_string()),
+            ..Default::default()
+        };
+
+        ai_settings.normalize();
+
+        assert_eq!(ai_settings.vision_model, None);
     }
 
     #[test]
