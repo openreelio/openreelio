@@ -235,6 +235,11 @@ impl OpsLog {
         writeln!(writer, "{}", json)?;
         writer.flush()?;
 
+        // Best-effort durability: ensure the operation is on disk before returning.
+        // ops.jsonl is the source of truth for event sourcing, so losing the tail
+        // of the log on power loss can make snapshots diverge from history.
+        writer.get_ref().sync_all()?;
+
         Ok(())
     }
 
@@ -252,6 +257,9 @@ impl OpsLog {
             writeln!(writer, "{}", json)?;
         }
         writer.flush()?;
+
+        // See `append` for durability rationale.
+        writer.get_ref().sync_all()?;
 
         Ok(())
     }
