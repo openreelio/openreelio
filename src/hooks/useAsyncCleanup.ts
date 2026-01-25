@@ -94,12 +94,14 @@ export function useAsyncCleanup(): AsyncCleanupResult {
   // Run all cleanups on unmount
   useEffect(() => {
     isActiveRef.current = true;
+    // Capture ref values at effect creation time for safe cleanup access
+    const cleanups = cleanupsRef.current;
 
     return () => {
       isActiveRef.current = false;
 
       // Run all registered cleanups
-      cleanupsRef.current.forEach((cleanup) => {
+      cleanups.forEach((cleanup) => {
         try {
           cleanup();
         } catch (error) {
@@ -109,7 +111,7 @@ export function useAsyncCleanup(): AsyncCleanupResult {
           });
         }
       });
-      cleanupsRef.current.clear();
+      cleanups.clear();
     };
   }, []);
 
