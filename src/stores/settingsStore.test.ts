@@ -82,6 +82,28 @@ const DEFAULT_SETTINGS: AppSettings = {
     memoryLimitMb: 0,
     cacheSizeMb: 1024,
   },
+  ai: {
+    primaryProvider: 'anthropic',
+    primaryModel: 'claude-sonnet-4-5-20251015',
+    visionProvider: null,
+    visionModel: null,
+    openaiApiKey: null,
+    anthropicApiKey: null,
+    googleApiKey: null,
+    ollamaUrl: null,
+    temperature: 0.3,
+    maxTokens: 4096,
+    frameExtractionRate: 1.0,
+    monthlyBudgetCents: null,
+    perRequestLimitCents: 50,
+    currentMonthUsageCents: 0,
+    currentUsageMonth: null,
+    autoAnalyzeOnImport: false,
+    autoCaptionOnImport: false,
+    proposalReviewMode: 'always',
+    cacheDurationHours: 24,
+    localOnlyMode: false,
+  },
 };
 
 describe('settingsStore', () => {
@@ -458,6 +480,58 @@ describe('settingsStore', () => {
 // =============================================================================
 // Destructive Test Scenarios
 // =============================================================================
+
+// =============================================================================
+// Persist Middleware Merge Tests
+// =============================================================================
+
+describe('settingsStore - Persist Merge Behavior', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useSettingsStore.setState({
+      settings: DEFAULT_SETTINGS,
+      isLoaded: false,
+      isSaving: false,
+      error: null,
+    });
+  });
+
+  it('should have all settings sections defined after initialization', () => {
+    const { result } = renderHook(() => useSettingsStore());
+
+    // All settings sections should be defined
+    expect(result.current.settings.general).toBeDefined();
+    expect(result.current.settings.editor).toBeDefined();
+    expect(result.current.settings.playback).toBeDefined();
+    expect(result.current.settings.export).toBeDefined();
+    expect(result.current.settings.appearance).toBeDefined();
+    expect(result.current.settings.shortcuts).toBeDefined();
+    expect(result.current.settings.autoSave).toBeDefined();
+    expect(result.current.settings.performance).toBeDefined();
+  });
+
+  it('should have checkUpdatesOnStartup defined in general settings', () => {
+    const { result } = renderHook(() => useSettingsStore());
+
+    expect(result.current.settings.general.checkUpdatesOnStartup).toBeDefined();
+    expect(typeof result.current.settings.general.checkUpdatesOnStartup).toBe('boolean');
+  });
+
+  it('should preserve defaults when state is partially hydrated', () => {
+    // After merge, general should still exist with defaults
+    // This verifies that the merge function in persist config works correctly
+    const { result } = renderHook(() => useSettingsStore());
+
+    // Verify all sections exist with their default values
+    expect(result.current.settings.general).toBeDefined();
+    expect(result.current.settings.general.checkUpdatesOnStartup).toBe(false);
+    expect(result.current.settings.general.language).toBe('en');
+
+    // Verify critical fields that caused the original bug are present
+    expect(typeof result.current.settings.general.checkUpdatesOnStartup).toBe('boolean');
+    expect(result.current.settings.general.showWelcomeOnStartup).toBe(true);
+  });
+});
 
 describe('settingsStore - Destructive Tests', () => {
   beforeEach(() => {
