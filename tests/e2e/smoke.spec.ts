@@ -41,7 +41,7 @@ test.describe('Application Smoke Tests', () => {
 
     // Filter out known acceptable errors (like React strict mode warnings)
     const criticalErrors = errors.filter(
-      (error) => !error.includes('React') && !error.includes('Warning')
+      (error) => !error.includes('React') && !error.includes('Warning'),
     );
 
     expect(criticalErrors).toHaveLength(0);
@@ -55,7 +55,7 @@ test.describe('Welcome Screen', () => {
 
     // Either welcome screen or main editor should be visible
     const welcomeOrEditor = page.locator(
-      '[data-testid="welcome-screen"], [data-testid="main-layout"]'
+      '[data-testid="setup-wizard"], [data-testid="welcome-screen"], [data-testid="main-layout"]',
     );
     await expect(welcomeOrEditor.first()).toBeVisible({ timeout: 10000 });
   });
@@ -81,7 +81,8 @@ test.describe('Performance Checks', () => {
     // Get performance metrics
     const metrics = await page.evaluate(() => {
       if ('memory' in performance) {
-        const memory = (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory;
+        const memory = (performance as Performance & { memory?: { usedJSHeapSize: number } })
+          .memory;
         return {
           usedJSHeapSize: memory?.usedJSHeapSize ?? 0,
         };
