@@ -152,7 +152,10 @@ impl ActiveProject {
     }
 
     /// Saves the project state
-    pub fn save(&self) -> crate::core::CoreResult<()> {
+    ///
+    /// After a successful save, the `is_dirty` flag is reset to `false`.
+    /// This ensures the project can be closed or replaced without warnings.
+    pub fn save(&mut self) -> crate::core::CoreResult<()> {
         // Save snapshot
         let snapshot_path = Snapshot::default_path(&self.path);
         Snapshot::save(
@@ -164,6 +167,10 @@ impl ActiveProject {
         // Save project.json metadata
         let meta_path = self.path.join("project.json");
         crate::core::fs::atomic_write_json_pretty(&meta_path, &self.state.meta)?;
+
+        // Reset dirty flag after successful save
+        self.state.is_dirty = false;
+        tracing::debug!("Project saved successfully, is_dirty reset to false");
 
         Ok(())
     }
@@ -727,5 +734,31 @@ mod tests {
         // Reopen and verify
         let reopened = ActiveProject::open(project_path).unwrap();
         assert_eq!(reopened.state.meta.name, "Updated Name");
+    }
+
+    #[test]
+    fn test_active_project_save_clears_dirty_flag() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("test_project");
+
+        let mut project = ActiveProject::create("Test Project", project_path.clone()).unwrap();
+
+        // Mark as dirty (simulating a command execution)
+        project.state.is_dirty = true;
+        assert!(project.state.is_dirty);
+
+        // Save should reset the dirty flag
+        project.save().unwrap();
+        assert!(
+            !project.state.is_dirty,
+            "is_dirty should be false after save"
+        );
+
+        // Reopen and verify dirty flag starts as false
+        let reopened = ActiveProject::open(project_path).unwrap();
+        assert!(
+            !reopened.state.is_dirty,
+            "is_dirty should be false after reopen"
+        );
     }
 }
