@@ -258,6 +258,20 @@ describe('CaptionTrack', () => {
       // Caption at 500 seconds should not be rendered
       expect(screen.queryByText('Caption 50')).not.toBeInTheDocument();
     });
+
+    it('handles zero zoom gracefully by showing all captions', () => {
+      const captions = [
+        createTestCaption({ id: 'c1', text: 'First' }),
+        createTestCaption({ id: 'c2', text: 'Second', startSec: 100, endSec: 105 }),
+      ];
+      const track = createTestTrack({ captions });
+
+      // Zero zoom should show all captions (fallback behavior)
+      render(<CaptionTrack track={track} zoom={0} scrollX={0} viewportWidth={500} />);
+
+      expect(screen.getByText('First')).toBeInTheDocument();
+      expect(screen.getByText('Second')).toBeInTheDocument();
+    });
   });
 
   describe('Content Width', () => {
@@ -271,6 +285,74 @@ describe('CaptionTrack', () => {
 
       // 120 seconds * 100 px/s = 12000px
       expect(scrollableContainer.style.width).toBe('12000px');
+    });
+  });
+
+  describe('Export Button', () => {
+    it('renders export button in track header', () => {
+      const track = createTestTrack();
+      render(<CaptionTrack track={track} zoom={100} />);
+
+      const exportButton = screen.getByTestId('caption-export-button');
+      expect(exportButton).toBeInTheDocument();
+    });
+
+    it('calls onExportClick when export button is clicked', () => {
+      const onExportClick = vi.fn();
+      const captions = [
+        createTestCaption({ id: 'c1', text: 'First' }),
+        createTestCaption({ id: 'c2', text: 'Second', startSec: 5, endSec: 10 }),
+      ];
+      const track = createTestTrack({ id: 'export_track', captions });
+
+      render(<CaptionTrack track={track} zoom={100} onExportClick={onExportClick} />);
+
+      const exportButton = screen.getByTestId('caption-export-button');
+      fireEvent.click(exportButton);
+
+      expect(onExportClick).toHaveBeenCalledWith('export_track', captions);
+    });
+
+    it('does not propagate click from export button to header', () => {
+      const onTrackClick = vi.fn();
+      const onExportClick = vi.fn();
+      const track = createTestTrack({ captions: [createTestCaption()] });
+
+      render(
+        <CaptionTrack
+          track={track}
+          zoom={100}
+          onTrackClick={onTrackClick}
+          onExportClick={onExportClick}
+        />
+      );
+
+      const exportButton = screen.getByTestId('caption-export-button');
+      fireEvent.click(exportButton);
+
+      expect(onExportClick).toHaveBeenCalled();
+      expect(onTrackClick).not.toHaveBeenCalled();
+    });
+
+    it('disables export button when no captions exist', () => {
+      const onExportClick = vi.fn();
+      const track = createTestTrack({ captions: [] });
+
+      render(<CaptionTrack track={track} zoom={100} onExportClick={onExportClick} />);
+
+      const exportButton = screen.getByTestId('caption-export-button');
+      expect(exportButton).toBeDisabled();
+
+      fireEvent.click(exportButton);
+      expect(onExportClick).not.toHaveBeenCalled();
+    });
+
+    it('shows export button tooltip', () => {
+      const track = createTestTrack({ captions: [createTestCaption()] });
+      render(<CaptionTrack track={track} zoom={100} />);
+
+      const exportButton = screen.getByTestId('caption-export-button');
+      expect(exportButton).toHaveAttribute('title', 'Export captions');
     });
   });
 });
