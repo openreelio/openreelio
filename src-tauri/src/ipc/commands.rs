@@ -339,12 +339,15 @@ pub async fn close_project(
 }
 
 /// Saves the current project
+///
+/// After a successful save, the project's `is_dirty` flag is reset to `false`,
+/// allowing users to close or open another project without warnings.
 #[tauri::command]
 pub async fn save_project(state: State<'_, AppState>) -> Result<(), String> {
-    let guard = state.project.lock().await;
+    let mut guard = state.project.lock().await;
 
     let project = guard
-        .as_ref()
+        .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
     project.save().map_err(|e| e.to_ipc_error())
@@ -2871,9 +2874,9 @@ pub async fn export_captions(
     captions: Vec<CaptionForExport>,
     output_path: String,
     format: CaptionExportFormat,
+    state: State<'_, AppState>,
 ) -> Result<(), String> {
     use crate::core::captions::{export_srt, export_vtt, Caption};
-    use std::fs;
     use std::path::Path;
 
     // Convert to internal Caption type
@@ -2893,21 +2896,52 @@ pub async fn export_captions(
         CaptionExportFormat::Vtt => export_vtt(&internal_captions),
     };
 
-    // Write to file
-    let output = Path::new(&output_path);
+    // Validate output path (IPC is a trust boundary) and restrict exports to safe roots.
+    let project_path = {
+        let guard = state.project.lock().await;
+        let project = guard.as_ref().ok_or("No project open")?;
+        project.path.clone()
+    };
+
+    let output_ext = match format {
+        CaptionExportFormat::Srt => ".srt",
+        CaptionExportFormat::Vtt => ".vtt",
+    };
+
+    let output_path_trimmed = output_path.trim();
+    if !output_path_trimmed
+        .to_ascii_lowercase()
+        .ends_with(output_ext)
+    {
+        return Err(format!(
+            "outputPath must end with '{}' for {:?} export",
+            output_ext, format
+        ));
+    }
+
+    let roots = default_export_allowed_roots(&project_path);
+    let root_refs: Vec<&std::path::Path> = roots.iter().map(|p| p.as_path()).collect();
+    let validated_output_path =
+        validate_scoped_output_path(output_path_trimmed, "outputPath", &root_refs)?;
+
+    // Write to file (async to avoid blocking the runtime).
+    let output = Path::new(&validated_output_path);
     if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create output directory: {}", e))?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Failed to create output directory: {e}"))?;
         }
     }
 
-    fs::write(output, content).map_err(|e| format!("Failed to write caption file: {}", e))?;
+    tokio::fs::write(output, content)
+        .await
+        .map_err(|e| format!("Failed to write caption file: {e}"))?;
 
     tracing::info!(
         "Exported {} captions to {} as {:?}",
         internal_captions.len(),
-        output_path,
+        validated_output_path.display(),
         format
     );
 
@@ -3936,31 +3970,202 @@ pub async fn clear_ai_provider(state: State<'_, AppState>) -> Result<(), String>
     Ok(())
 }
 
-/// Tests the AI connection by making a simple request
+/// Error codes for connection test failures
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionErrorCode {
+    /// No provider configured
+    NotConfigured,
+    /// Invalid API key or authentication failed
+    InvalidCredentials,
+    /// Rate limit exceeded
+    RateLimited,
+    /// Network error (timeout, DNS, connection refused)
+    NetworkError,
+    /// Provider service unavailable
+    ServiceUnavailable,
+    /// Unknown error
+    Unknown,
+}
+
+/// Result of a connection test
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectionTestResult {
+    /// Whether the connection test succeeded
+    pub success: bool,
+    /// Provider type that was tested
+    pub provider: String,
+    /// Model name that was tested
+    pub model: String,
+    /// Latency in milliseconds (only present on success)
+    pub latency_ms: Option<u64>,
+    /// Human-readable message
+    pub message: String,
+    /// Error code (only present on failure)
+    pub error_code: Option<ConnectionErrorCode>,
+    /// Detailed error message (only present on failure)
+    pub error_details: Option<String>,
+}
+
+impl ConnectionTestResult {
+    fn success(provider: String, model: String, latency_ms: u64) -> Self {
+        Self {
+            success: true,
+            provider: provider.clone(),
+            model: model.clone(),
+            latency_ms: Some(latency_ms),
+            message: format!("Successfully connected to {} ({}ms)", provider, latency_ms),
+            error_code: None,
+            error_details: None,
+        }
+    }
+
+    fn failure(
+        provider: String,
+        model: String,
+        code: ConnectionErrorCode,
+        details: String,
+    ) -> Self {
+        let message = match &code {
+            ConnectionErrorCode::NotConfigured => "No AI provider configured".to_string(),
+            ConnectionErrorCode::InvalidCredentials => {
+                "Invalid API key or authentication failed".to_string()
+            }
+            ConnectionErrorCode::RateLimited => {
+                "Rate limit exceeded, please try again later".to_string()
+            }
+            ConnectionErrorCode::NetworkError => {
+                "Network error - check your internet connection".to_string()
+            }
+            ConnectionErrorCode::ServiceUnavailable => {
+                "AI service is temporarily unavailable".to_string()
+            }
+            ConnectionErrorCode::Unknown => format!("Connection failed: {}", details),
+        };
+
+        Self {
+            success: false,
+            provider,
+            model,
+            latency_ms: None,
+            message,
+            error_code: Some(code),
+            error_details: Some(details),
+        }
+    }
+}
+
+/// Categorize error message into an error code
+fn categorize_error(error: &str) -> ConnectionErrorCode {
+    let error_lower = error.to_lowercase();
+
+    if error_lower.contains("401")
+        || error_lower.contains("unauthorized")
+        || error_lower.contains("invalid") && error_lower.contains("key")
+    {
+        ConnectionErrorCode::InvalidCredentials
+    } else if error_lower.contains("429")
+        || error_lower.contains("rate") && error_lower.contains("limit")
+    {
+        ConnectionErrorCode::RateLimited
+    } else if error_lower.contains("timeout")
+        || error_lower.contains("network")
+        || error_lower.contains("connection")
+        || error_lower.contains("dns")
+    {
+        ConnectionErrorCode::NetworkError
+    } else if error_lower.contains("503")
+        || error_lower.contains("502")
+        || error_lower.contains("unavailable")
+    {
+        ConnectionErrorCode::ServiceUnavailable
+    } else {
+        ConnectionErrorCode::Unknown
+    }
+}
+
+/// Tests the AI connection by making a simple request with detailed results
 #[tauri::command]
-pub async fn test_ai_connection(state: State<'_, AppState>) -> Result<String, String> {
+pub async fn test_ai_connection(
+    state: State<'_, AppState>,
+) -> Result<ConnectionTestResult, String> {
     let gateway = state.ai_gateway.lock().await;
 
     if !gateway.is_configured().await {
-        return Err("No AI provider configured".to_string());
+        return Ok(ConnectionTestResult::failure(
+            "none".to_string(),
+            "none".to_string(),
+            ConnectionErrorCode::NotConfigured,
+            "No AI provider is configured".to_string(),
+        ));
     }
 
-    let provider_name = gateway.provider_name().await.unwrap_or_default();
+    let status = gateway.provider_status().await;
+    let provider_name = status
+        .provider_type
+        .unwrap_or_else(|| "unknown".to_string());
+    let model_name = status
+        .current_model
+        .unwrap_or_else(|| "unknown".to_string());
 
-    match gateway.health_check().await {
-        Ok(()) => {
+    // Measure latency with timeout
+    let start = std::time::Instant::now();
+    let timeout_duration = std::time::Duration::from_secs(10);
+
+    let health_result = tokio::time::timeout(timeout_duration, gateway.health_check()).await;
+    let latency_ms = start.elapsed().as_millis() as u64;
+
+    match health_result {
+        Ok(Ok(())) => {
             gateway.update_provider_status(true, None).await;
-            tracing::info!("AI provider health check succeeded: {}", provider_name);
-            Ok(format!("AI provider '{}' is reachable", provider_name))
+            tracing::info!(
+                "AI provider health check succeeded: {} ({}) in {}ms",
+                provider_name,
+                model_name,
+                latency_ms
+            );
+            Ok(ConnectionTestResult::success(
+                provider_name,
+                model_name,
+                latency_ms,
+            ))
         }
-        Err(e) => {
+        Ok(Err(e)) => {
+            let error_str = e.to_string();
+            let error_code = categorize_error(&error_str);
             gateway
-                .update_provider_status(false, Some(e.to_string()))
+                .update_provider_status(false, Some(error_str.clone()))
                 .await;
-            tracing::warn!("AI provider health check failed: {} ({})", provider_name, e);
-            Err(format!(
-                "AI provider '{}' is not reachable: {}",
-                provider_name, e
+            tracing::warn!(
+                "AI provider health check failed: {} ({}) - {:?}: {}",
+                provider_name,
+                model_name,
+                error_code,
+                error_str
+            );
+            Ok(ConnectionTestResult::failure(
+                provider_name,
+                model_name,
+                error_code,
+                error_str,
+            ))
+        }
+        Err(_) => {
+            let error_str = "Connection timed out after 10 seconds".to_string();
+            gateway
+                .update_provider_status(false, Some(error_str.clone()))
+                .await;
+            tracing::warn!(
+                "AI provider health check timed out: {} ({})",
+                provider_name,
+                model_name
+            );
+            Ok(ConnectionTestResult::failure(
+                provider_name,
+                model_name,
+                ConnectionErrorCode::NetworkError,
+                error_str,
             ))
         }
     }
@@ -4088,6 +4293,7 @@ pub struct AppSettingsDto {
     pub shortcuts: ShortcutSettingsDto,
     pub auto_save: AutoSaveSettingsDto,
     pub performance: PerformanceSettingsDto,
+    pub ai: AISettingsDto,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
@@ -4166,6 +4372,61 @@ pub struct PerformanceSettingsDto {
     pub cache_size_mb: u32,
 }
 
+/// AI provider type for settings DTO
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderTypeDto {
+    Openai,
+    Anthropic,
+    Gemini,
+    Local,
+}
+
+/// Proposal review mode for settings DTO
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalReviewModeDto {
+    Always,
+    Smart,
+    AutoApply,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AISettingsDto {
+    // Provider Configuration
+    pub primary_provider: ProviderTypeDto,
+    pub primary_model: String,
+    pub vision_provider: Option<ProviderTypeDto>,
+    pub vision_model: Option<String>,
+
+    // API Keys
+    pub openai_api_key: Option<String>,
+    pub anthropic_api_key: Option<String>,
+    pub google_api_key: Option<String>,
+    pub ollama_url: Option<String>,
+
+    // Generation Parameters
+    pub temperature: f32,
+    pub max_tokens: u32,
+    pub frame_extraction_rate: f32,
+
+    // Cost Controls
+    pub monthly_budget_cents: Option<u32>,
+    pub per_request_limit_cents: u32,
+    pub current_month_usage_cents: u32,
+    pub current_usage_month: Option<u32>,
+
+    // Behavior
+    pub auto_analyze_on_import: bool,
+    pub auto_caption_on_import: bool,
+    pub proposal_review_mode: ProposalReviewModeDto,
+    pub cache_duration_hours: u32,
+
+    // Privacy
+    pub local_only_mode: bool,
+}
+
 impl From<AppSettings> for AppSettingsDto {
     fn from(s: AppSettings) -> Self {
         Self {
@@ -4221,6 +4482,48 @@ impl From<AppSettings> for AppSettingsDto {
                 max_concurrent_jobs: s.performance.max_concurrent_jobs,
                 memory_limit_mb: s.performance.memory_limit_mb,
                 cache_size_mb: s.performance.cache_size_mb,
+            },
+            ai: AISettingsDto {
+                primary_provider: match s.ai.primary_provider {
+                    crate::core::settings::ProviderType::OpenAI => ProviderTypeDto::Openai,
+                    crate::core::settings::ProviderType::Anthropic => ProviderTypeDto::Anthropic,
+                    crate::core::settings::ProviderType::Gemini => ProviderTypeDto::Gemini,
+                    crate::core::settings::ProviderType::Local => ProviderTypeDto::Local,
+                },
+                primary_model: s.ai.primary_model,
+                vision_provider: s.ai.vision_provider.map(|p| match p {
+                    crate::core::settings::ProviderType::OpenAI => ProviderTypeDto::Openai,
+                    crate::core::settings::ProviderType::Anthropic => ProviderTypeDto::Anthropic,
+                    crate::core::settings::ProviderType::Gemini => ProviderTypeDto::Gemini,
+                    crate::core::settings::ProviderType::Local => ProviderTypeDto::Local,
+                }),
+                vision_model: s.ai.vision_model,
+                openai_api_key: s.ai.openai_api_key,
+                anthropic_api_key: s.ai.anthropic_api_key,
+                google_api_key: s.ai.google_api_key,
+                ollama_url: s.ai.ollama_url,
+                temperature: s.ai.temperature,
+                max_tokens: s.ai.max_tokens,
+                frame_extraction_rate: s.ai.frame_extraction_rate,
+                monthly_budget_cents: s.ai.monthly_budget_cents,
+                per_request_limit_cents: s.ai.per_request_limit_cents,
+                current_month_usage_cents: s.ai.current_month_usage_cents,
+                current_usage_month: s.ai.current_usage_month,
+                auto_analyze_on_import: s.ai.auto_analyze_on_import,
+                auto_caption_on_import: s.ai.auto_caption_on_import,
+                proposal_review_mode: match s.ai.proposal_review_mode {
+                    crate::core::settings::ProposalReviewMode::Always => {
+                        ProposalReviewModeDto::Always
+                    }
+                    crate::core::settings::ProposalReviewMode::Smart => {
+                        ProposalReviewModeDto::Smart
+                    }
+                    crate::core::settings::ProposalReviewMode::AutoApply => {
+                        ProposalReviewModeDto::AutoApply
+                    }
+                },
+                cache_duration_hours: s.ai.cache_duration_hours,
+                local_only_mode: s.ai.local_only_mode,
             },
         }
     }
@@ -4282,6 +4585,42 @@ impl From<AppSettingsDto> for AppSettings {
                 max_concurrent_jobs: dto.performance.max_concurrent_jobs,
                 memory_limit_mb: dto.performance.memory_limit_mb,
                 cache_size_mb: dto.performance.cache_size_mb,
+            },
+            ai: AISettings {
+                primary_provider: match dto.ai.primary_provider {
+                    ProviderTypeDto::Openai => ProviderType::OpenAI,
+                    ProviderTypeDto::Anthropic => ProviderType::Anthropic,
+                    ProviderTypeDto::Gemini => ProviderType::Gemini,
+                    ProviderTypeDto::Local => ProviderType::Local,
+                },
+                primary_model: dto.ai.primary_model,
+                vision_provider: dto.ai.vision_provider.map(|p| match p {
+                    ProviderTypeDto::Openai => ProviderType::OpenAI,
+                    ProviderTypeDto::Anthropic => ProviderType::Anthropic,
+                    ProviderTypeDto::Gemini => ProviderType::Gemini,
+                    ProviderTypeDto::Local => ProviderType::Local,
+                }),
+                vision_model: dto.ai.vision_model,
+                openai_api_key: dto.ai.openai_api_key,
+                anthropic_api_key: dto.ai.anthropic_api_key,
+                google_api_key: dto.ai.google_api_key,
+                ollama_url: dto.ai.ollama_url,
+                temperature: dto.ai.temperature,
+                max_tokens: dto.ai.max_tokens,
+                frame_extraction_rate: dto.ai.frame_extraction_rate,
+                monthly_budget_cents: dto.ai.monthly_budget_cents,
+                per_request_limit_cents: dto.ai.per_request_limit_cents,
+                current_month_usage_cents: dto.ai.current_month_usage_cents,
+                current_usage_month: dto.ai.current_usage_month,
+                auto_analyze_on_import: dto.ai.auto_analyze_on_import,
+                auto_caption_on_import: dto.ai.auto_caption_on_import,
+                proposal_review_mode: match dto.ai.proposal_review_mode {
+                    ProposalReviewModeDto::Always => ProposalReviewMode::Always,
+                    ProposalReviewModeDto::Smart => ProposalReviewMode::Smart,
+                    ProposalReviewModeDto::AutoApply => ProposalReviewMode::AutoApply,
+                },
+                cache_duration_hours: dto.ai.cache_duration_hours,
+                local_only_mode: dto.ai.local_only_mode,
             },
         }
     }
