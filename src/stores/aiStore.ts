@@ -39,6 +39,26 @@ export interface ProviderConfig {
   model?: string;
 }
 
+/** Connection error codes */
+export type ConnectionErrorCode =
+  | 'not_configured'
+  | 'invalid_credentials'
+  | 'rate_limited'
+  | 'network_error'
+  | 'service_unavailable'
+  | 'unknown';
+
+/** Result of a connection test */
+export interface ConnectionTestResult {
+  success: boolean;
+  provider: string;
+  model: string;
+  latencyMs: number | null;
+  message: string;
+  errorCode: ConnectionErrorCode | null;
+  errorDetails: string | null;
+}
+
 /** Edit command from AI */
 export interface EditCommand {
   commandType: string;
@@ -114,7 +134,7 @@ interface AIState {
   // Actions - Provider
   configureProvider: (config: ProviderConfig) => Promise<void>;
   clearProvider: () => Promise<void>;
-  testConnection: () => Promise<string>;
+  testConnection: () => Promise<ConnectionTestResult>;
   getAvailableModels: (providerType: ProviderType) => Promise<string[]>;
   refreshProviderStatus: () => Promise<void>;
 
@@ -237,19 +257,32 @@ export const useAIStore = create<AIState>()(
         });
 
         try {
-          const result = await invoke<string>('test_ai_connection');
+          const result = await invoke<ConnectionTestResult>('test_ai_connection');
 
           set((state) => {
             state.isConnecting = false;
+            if (!result.success) {
+              state.error = result.message;
+            }
           });
 
           return result;
         } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error);
           set((state) => {
             state.isConnecting = false;
-            state.error = error instanceof Error ? error.message : String(error);
+            state.error = errorMsg;
           });
-          throw error;
+          // Return a failure result instead of throwing
+          return {
+            success: false,
+            provider: 'unknown',
+            model: 'unknown',
+            latencyMs: null,
+            message: errorMsg,
+            errorCode: 'unknown' as const,
+            errorDetails: errorMsg,
+          };
         }
       },
 
