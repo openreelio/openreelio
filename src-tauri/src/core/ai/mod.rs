@@ -2,6 +2,7 @@
 //!
 //! Provides AI integration for video editing assistance.
 
+pub mod cost_tracker;
 pub mod edit_script;
 pub mod executor;
 pub mod gateway;
@@ -9,6 +10,7 @@ pub mod proposal;
 pub mod provider;
 pub mod providers;
 
+pub use cost_tracker::{CostError, CostTracker, ModelPricing, UsageSummary};
 pub use edit_script::{EditCommand, EditScript, Requirement, RiskAssessment};
 pub use executor::{
     CommandResult, EditScriptExecutor, ExecutionContext, ExecutionResult, ValidationError,
