@@ -63,6 +63,10 @@ pub struct AppSettings {
     /// Performance settings
     #[serde(default)]
     pub performance: PerformanceSettings,
+
+    /// AI settings
+    #[serde(default)]
+    pub ai: AISettings,
 }
 
 fn default_version() -> u32 {
@@ -81,6 +85,7 @@ impl Default for AppSettings {
             shortcuts: ShortcutSettings::default(),
             auto_save: AutoSaveSettings::default(),
             performance: PerformanceSettings::default(),
+            ai: AISettings::default(),
         }
     }
 }
@@ -147,6 +152,9 @@ impl AppSettings {
             self.performance.memory_limit_mb = self.performance.memory_limit_mb.clamp(256, 65_536);
         }
         self.performance.cache_size_mb = self.performance.cache_size_mb.clamp(128, 16_384);
+
+        // Normalize AI settings
+        self.ai.normalize();
     }
 }
 
@@ -517,6 +525,249 @@ fn default_cache_size() -> u32 {
     1024 // 1GB
 }
 
+// ============================================================
+// AI Settings (TASK-A0-002)
+// ============================================================
+
+/// AI provider type
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderType {
+    OpenAI,
+    #[default]
+    Anthropic,
+    Gemini,
+    Local,
+}
+
+/// Proposal review mode for AI suggestions
+#[derive(Default, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProposalReviewMode {
+    /// Always show proposal for user review before applying
+    #[default]
+    Always,
+    /// Auto-approve low-risk edits, review deletions and risky changes
+    Smart,
+    /// Apply immediately without review (power users only)
+    AutoApply,
+}
+
+/// AI settings for provider configuration and behavior
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AISettings {
+    // === Provider Configuration ===
+    /// Primary AI provider for reasoning/editing tasks
+    #[serde(default)]
+    pub primary_provider: ProviderType,
+
+    /// Primary model name (e.g., "claude-sonnet-4-5-20251015", "gpt-4o")
+    #[serde(default = "default_primary_model")]
+    pub primary_model: String,
+
+    /// Vision provider for video understanding (if different from primary)
+    #[serde(default)]
+    pub vision_provider: Option<ProviderType>,
+
+    /// Vision model name (e.g., "gemini-2.5-pro")
+    #[serde(default)]
+    pub vision_model: Option<String>,
+
+    // === API Keys (stored in settings, consider keychain in future) ===
+    /// OpenAI API key
+    #[serde(default)]
+    pub openai_api_key: Option<String>,
+
+    /// Anthropic API key
+    #[serde(default)]
+    pub anthropic_api_key: Option<String>,
+
+    /// Google AI API key
+    #[serde(default)]
+    pub google_api_key: Option<String>,
+
+    /// Ollama URL for local models (e.g., "http://localhost:11434")
+    #[serde(default)]
+    pub ollama_url: Option<String>,
+
+    // === Generation Parameters ===
+    /// Temperature for AI generations (0.0-1.0, default 0.3)
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+
+    /// Maximum tokens for AI response (default 4096)
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+
+    /// Frame extraction rate for video analysis (0.5-2.0 fps, default 1.0)
+    #[serde(default = "default_frame_extraction_rate")]
+    pub frame_extraction_rate: f32,
+
+    // === Cost Controls ===
+    /// Monthly budget in cents (None = unlimited)
+    #[serde(default)]
+    pub monthly_budget_cents: Option<u32>,
+
+    /// Per-request limit in cents (default 50 = $0.50)
+    #[serde(default = "default_per_request_limit")]
+    pub per_request_limit_cents: u32,
+
+    /// Current month's usage in cents (tracked)
+    #[serde(default)]
+    pub current_month_usage_cents: u32,
+
+    /// Month of current usage tracking (YYYYMM format)
+    #[serde(default)]
+    pub current_usage_month: Option<u32>,
+
+    // === Behavior ===
+    /// Automatically analyze videos on import
+    #[serde(default)]
+    pub auto_analyze_on_import: bool,
+
+    /// Automatically generate captions on import
+    #[serde(default)]
+    pub auto_caption_on_import: bool,
+
+    /// How to handle AI proposals before applying
+    #[serde(default)]
+    pub proposal_review_mode: ProposalReviewMode,
+
+    /// Cache duration for AI responses in hours (default 24)
+    #[serde(default = "default_cache_duration")]
+    pub cache_duration_hours: u32,
+
+    // === Privacy ===
+    /// Use only local models (no cloud API calls)
+    #[serde(default)]
+    pub local_only_mode: bool,
+}
+
+fn default_primary_model() -> String {
+    "claude-sonnet-4-5-20251015".to_string()
+}
+
+fn default_temperature() -> f32 {
+    0.3
+}
+
+fn default_max_tokens() -> u32 {
+    4096
+}
+
+fn default_frame_extraction_rate() -> f32 {
+    1.0
+}
+
+fn default_per_request_limit() -> u32 {
+    50 // $0.50
+}
+
+fn default_cache_duration() -> u32 {
+    24 // hours
+}
+
+impl Default for AISettings {
+    fn default() -> Self {
+        Self {
+            primary_provider: ProviderType::default(),
+            primary_model: default_primary_model(),
+            vision_provider: None,
+            vision_model: None,
+            openai_api_key: None,
+            anthropic_api_key: None,
+            google_api_key: None,
+            ollama_url: None,
+            temperature: default_temperature(),
+            max_tokens: default_max_tokens(),
+            frame_extraction_rate: default_frame_extraction_rate(),
+            monthly_budget_cents: None,
+            per_request_limit_cents: default_per_request_limit(),
+            current_month_usage_cents: 0,
+            current_usage_month: None,
+            auto_analyze_on_import: false,
+            auto_caption_on_import: false,
+            proposal_review_mode: ProposalReviewMode::default(),
+            cache_duration_hours: default_cache_duration(),
+            local_only_mode: false,
+        }
+    }
+}
+
+impl AISettings {
+    /// Normalize and clamp AI settings values to valid ranges
+    pub fn normalize(&mut self) {
+        // Temperature: 0.0 - 1.0
+        if !self.temperature.is_finite() {
+            self.temperature = default_temperature();
+        }
+        self.temperature = self.temperature.clamp(0.0, 1.0);
+
+        // Max tokens: 256 - 128000 (supports large context models)
+        if self.max_tokens == 0 {
+            self.max_tokens = default_max_tokens();
+        }
+        self.max_tokens = self.max_tokens.clamp(256, 128000);
+
+        // Frame extraction rate: 0.5 - 2.0 fps
+        if !self.frame_extraction_rate.is_finite() {
+            self.frame_extraction_rate = default_frame_extraction_rate();
+        }
+        self.frame_extraction_rate = self.frame_extraction_rate.clamp(0.5, 2.0);
+
+        // Per-request limit: at least 1 cent
+        if self.per_request_limit_cents == 0 {
+            self.per_request_limit_cents = 1;
+        }
+
+        // Cache duration: 1 - 168 hours (1 week max)
+        if self.cache_duration_hours == 0 {
+            self.cache_duration_hours = 1;
+        }
+        self.cache_duration_hours = self.cache_duration_hours.clamp(1, 168);
+    }
+
+    /// Get the API key for the specified provider
+    pub fn get_api_key(&self, provider: ProviderType) -> Option<&str> {
+        match provider {
+            ProviderType::OpenAI => self.openai_api_key.as_deref(),
+            ProviderType::Anthropic => self.anthropic_api_key.as_deref(),
+            ProviderType::Gemini => self.google_api_key.as_deref(),
+            ProviderType::Local => None, // Local doesn't use API key
+        }
+    }
+
+    /// Check if the provider is configured with necessary credentials
+    pub fn is_provider_configured(&self, provider: ProviderType) -> bool {
+        match provider {
+            ProviderType::Local => self.ollama_url.is_some(),
+            _ => self.get_api_key(provider).is_some(),
+        }
+    }
+
+    /// Calculate usage percentage of monthly budget
+    pub fn usage_percentage(&self) -> Option<f64> {
+        self.monthly_budget_cents.map(|budget| {
+            if budget == 0 {
+                100.0
+            } else {
+                (self.current_month_usage_cents as f64 / budget as f64) * 100.0
+            }
+        })
+    }
+
+    /// Check if usage is approaching the budget limit (80% threshold)
+    pub fn is_approaching_limit(&self) -> bool {
+        self.usage_percentage().map(|p| p >= 80.0).unwrap_or(false)
+    }
+
+    /// Check if usage has exceeded the budget
+    pub fn is_over_budget(&self) -> bool {
+        self.usage_percentage().map(|p| p >= 100.0).unwrap_or(false)
+    }
+}
+
 /// Settings manager for loading, saving, and resetting settings
 pub struct SettingsManager {
     settings_path: PathBuf,
@@ -706,6 +957,237 @@ impl SettingsManager {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // ============================================================
+    // AISettings Tests (TDD - RED phase first)
+    // ============================================================
+
+    #[test]
+    fn test_default_ai_settings() {
+        let ai_settings = AISettings::default();
+
+        // Provider defaults
+        assert_eq!(ai_settings.primary_provider, ProviderType::Anthropic);
+        assert_eq!(ai_settings.primary_model, "claude-sonnet-4-5-20251015");
+        assert!(ai_settings.vision_provider.is_none());
+        assert!(ai_settings.vision_model.is_none());
+
+        // API keys should be None by default
+        assert!(ai_settings.openai_api_key.is_none());
+        assert!(ai_settings.anthropic_api_key.is_none());
+        assert!(ai_settings.google_api_key.is_none());
+        assert!(ai_settings.ollama_url.is_none());
+
+        // Temperature defaults
+        assert!((ai_settings.temperature - 0.3).abs() < 0.001);
+        assert_eq!(ai_settings.max_tokens, 4096);
+        assert!((ai_settings.frame_extraction_rate - 1.0).abs() < 0.001);
+
+        // Cost control defaults
+        assert!(ai_settings.monthly_budget_cents.is_none());
+        assert_eq!(ai_settings.per_request_limit_cents, 50);
+        assert_eq!(ai_settings.current_month_usage_cents, 0);
+
+        // Behavior defaults
+        assert!(!ai_settings.auto_analyze_on_import);
+        assert!(!ai_settings.auto_caption_on_import);
+        assert_eq!(ai_settings.proposal_review_mode, ProposalReviewMode::Always);
+        assert_eq!(ai_settings.cache_duration_hours, 24);
+
+        // Privacy default
+        assert!(!ai_settings.local_only_mode);
+    }
+
+    #[test]
+    fn test_ai_settings_serialization() {
+        let ai_settings = AISettings::default();
+        let json = serde_json::to_string(&ai_settings).unwrap();
+        let deserialized: AISettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(ai_settings, deserialized);
+    }
+
+    #[test]
+    fn test_ai_settings_normalization() {
+        let mut ai_settings = AISettings {
+            // Set invalid values
+            temperature: 2.5,            // Over max 1.0
+            max_tokens: 0,               // Zero resets to default (4096)
+            frame_extraction_rate: 10.0, // Over max 2.0
+            per_request_limit_cents: 0,  // Zero resets to 1
+            cache_duration_hours: 0,     // Zero resets to 1
+            ..Default::default()
+        };
+
+        ai_settings.normalize();
+
+        // Should be clamped/reset to valid ranges
+        assert!((ai_settings.temperature - 1.0).abs() < 0.001);
+        assert_eq!(ai_settings.max_tokens, 4096); // Reset to default
+        assert!((ai_settings.frame_extraction_rate - 2.0).abs() < 0.001);
+        assert_eq!(ai_settings.per_request_limit_cents, 1);
+        assert_eq!(ai_settings.cache_duration_hours, 1);
+    }
+
+    #[test]
+    fn test_ai_settings_normalization_clamps_to_range() {
+        let mut ai_settings = AISettings {
+            // Set values outside valid range (but not zero)
+            temperature: -0.5,          // Below min 0.0
+            max_tokens: 100,            // Below min 256
+            frame_extraction_rate: 0.1, // Below min 0.5
+            cache_duration_hours: 500,  // Over max 168
+            ..Default::default()
+        };
+
+        ai_settings.normalize();
+
+        // Should be clamped to valid ranges
+        assert!((ai_settings.temperature - 0.0).abs() < 0.001);
+        assert_eq!(ai_settings.max_tokens, 256); // Clamped to min
+        assert!((ai_settings.frame_extraction_rate - 0.5).abs() < 0.001);
+        assert_eq!(ai_settings.cache_duration_hours, 168); // Clamped to max
+    }
+
+    #[test]
+    fn test_ai_settings_temperature_nan() {
+        let mut ai_settings = AISettings {
+            temperature: f32::NAN,
+            ..Default::default()
+        };
+
+        ai_settings.normalize();
+
+        // NaN should be reset to default
+        assert!(!ai_settings.temperature.is_nan());
+        assert!(ai_settings.temperature >= 0.0 && ai_settings.temperature <= 1.0);
+    }
+
+    #[test]
+    fn test_ai_settings_frame_rate_nan() {
+        let mut ai_settings = AISettings {
+            frame_extraction_rate: f32::NAN,
+            ..Default::default()
+        };
+
+        ai_settings.normalize();
+
+        assert!(!ai_settings.frame_extraction_rate.is_nan());
+        assert!(
+            ai_settings.frame_extraction_rate >= 0.5 && ai_settings.frame_extraction_rate <= 2.0
+        );
+    }
+
+    #[test]
+    fn test_provider_type_serialization() {
+        assert_eq!(
+            serde_json::to_string(&ProviderType::OpenAI).unwrap(),
+            "\"openai\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderType::Anthropic).unwrap(),
+            "\"anthropic\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderType::Gemini).unwrap(),
+            "\"gemini\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProviderType::Local).unwrap(),
+            "\"local\""
+        );
+    }
+
+    #[test]
+    fn test_proposal_review_mode_serialization() {
+        assert_eq!(
+            serde_json::to_string(&ProposalReviewMode::Always).unwrap(),
+            "\"always\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProposalReviewMode::Smart).unwrap(),
+            "\"smart\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ProposalReviewMode::AutoApply).unwrap(),
+            "\"auto_apply\""
+        );
+    }
+
+    #[test]
+    fn test_app_settings_includes_ai_settings() {
+        let settings = AppSettings::default();
+        assert_eq!(settings.ai.primary_provider, ProviderType::Anthropic);
+    }
+
+    #[test]
+    fn test_ai_settings_persist_and_load() {
+        let temp_dir = TempDir::new().unwrap();
+        let manager = SettingsManager::new(temp_dir.path().to_path_buf());
+
+        let mut settings = AppSettings::default();
+        settings.ai.openai_api_key = Some("sk-test-key".to_string());
+        settings.ai.primary_provider = ProviderType::OpenAI;
+        settings.ai.primary_model = "gpt-4o".to_string();
+        settings.ai.monthly_budget_cents = Some(1000);
+
+        manager.save(&settings).unwrap();
+        let loaded = manager.load();
+
+        assert_eq!(loaded.ai.openai_api_key, Some("sk-test-key".to_string()));
+        assert_eq!(loaded.ai.primary_provider, ProviderType::OpenAI);
+        assert_eq!(loaded.ai.primary_model, "gpt-4o");
+        assert_eq!(loaded.ai.monthly_budget_cents, Some(1000));
+    }
+
+    #[test]
+    fn test_ai_settings_cost_tracking() {
+        let ai_settings = AISettings {
+            // Record some usage
+            current_month_usage_cents: 500,
+            monthly_budget_cents: Some(1000),
+            ..Default::default()
+        };
+
+        // Verify budget check logic (50% used)
+        let usage_percentage = if let Some(budget) = ai_settings.monthly_budget_cents {
+            (ai_settings.current_month_usage_cents as f64 / budget as f64) * 100.0
+        } else {
+            0.0
+        };
+        assert!((usage_percentage - 50.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_ai_settings_partial_json_uses_defaults() {
+        let temp_dir = TempDir::new().unwrap();
+        let settings_path = temp_dir.path().join(SETTINGS_FILE);
+        fs::write(
+            &settings_path,
+            r#"{
+                "version": 1,
+                "ai": {
+                    "primaryProvider": "openai",
+                    "temperature": 0.7
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let manager = SettingsManager::new(temp_dir.path().to_path_buf());
+        let settings = manager.load();
+
+        // Custom values preserved
+        assert_eq!(settings.ai.primary_provider, ProviderType::OpenAI);
+        assert!((settings.ai.temperature - 0.7).abs() < 0.001);
+
+        // Defaults for missing fields
+        assert_eq!(settings.ai.max_tokens, 4096);
+        assert!(!settings.ai.auto_analyze_on_import);
+    }
+
+    // ============================================================
+    // Original Tests
+    // ============================================================
 
     #[test]
     fn test_default_settings() {
