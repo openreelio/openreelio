@@ -27,7 +27,7 @@ import { SnapIndicator, type SnapPoint } from './SnapIndicator';
 import { SelectionBox } from './SelectionBox';
 import { CaptionEditor } from '@/components/features/captions';
 import { CaptionExportDialog } from '@/components/features/export/CaptionExportDialog';
-import type { ClipWaveformConfig } from './Clip';
+import type { ClipWaveformConfig, ClipThumbnailConfig } from './Clip';
 import type { TimelineProps } from './types';
 import type { CaptionTrack as CaptionTrackType, Caption } from '@/types';
 import {
@@ -173,8 +173,11 @@ export function Timeline({
   // ===========================================================================
   // Derived Values
   // ===========================================================================
+  // Calculate timeline duration based on actual clip content
+  // Add padding for easier editing (20% extra or minimum 5 seconds after last clip)
   const duration = useMemo(() => {
     if (!sequence) return DEFAULT_TIMELINE_DURATION;
+
     const clipEndTimes = sequence.tracks.flatMap((track) =>
       track.clips.map(
         (clip) =>
@@ -182,9 +185,16 @@ export function Timeline({
           (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed,
       ),
     );
-    return clipEndTimes.length > 0
-      ? Math.max(DEFAULT_TIMELINE_DURATION, ...clipEndTimes)
-      : DEFAULT_TIMELINE_DURATION;
+
+    if (clipEndTimes.length === 0) {
+      // Empty timeline: show 10 seconds minimum
+      return 10;
+    }
+
+    const maxEndTime = Math.max(...clipEndTimes);
+    // Add 20% padding or minimum 5 seconds for easier editing
+    const padding = Math.max(maxEndTime * 0.2, 5);
+    return maxEndTime + padding;
   }, [sequence]);
 
   // ===========================================================================
@@ -319,6 +329,21 @@ export function Timeline({
     [assets],
   );
 
+  const getClipThumbnailConfig = useCallback(
+    (_clipId: string, assetId: string): ClipThumbnailConfig | undefined => {
+      const asset = assets.get(assetId);
+      if (!asset) return undefined;
+      // Enable thumbnails for video and image assets
+      const isVisual = asset.kind === 'video' || asset.kind === 'image';
+      if (!isVisual) return undefined;
+      return {
+        asset,
+        enabled: true,
+      };
+    },
+    [assets],
+  );
+
   const handleSeek = useCallback((time: number) => setPlayhead(time), [setPlayhead]);
 
   const handleClipClick = useCallback(
@@ -350,17 +375,27 @@ export function Timeline({
 
   /**
    * Combined mouse down handler for scrubbing and selection box
+   * Both can coexist: scrubbing sets playhead position immediately,
+   * while selection box handles drag-to-select.
    */
   const handleTracksAreaMouseDown = useCallback(
     (e: MouseEvent) => {
-      // Try selection box first (only activates on empty area)
-      // handleSelectionMouseDown returns true if it started a selection
-      const selectionStarted = handleSelectionMouseDown(e);
+      // Check if clicking on empty area (not on clips, buttons, or headers)
+      const target = e.target as HTMLElement;
+      const isEmptyAreaClick =
+        !target.closest('[data-testid^="clip-"]') &&
+        !target.closest('[data-testid="track-header"]') &&
+        !target.closest('button');
 
-      // If selection didn't start, try scrubbing
-      if (!selectionStarted) {
+      // Always try to set playhead position first (scrubbing)
+      // This ensures clicking anywhere on empty area moves the playhead
+      if (isEmptyAreaClick) {
         handleScrubStart(e);
       }
+
+      // Selection box will also activate on empty area for drag-to-select
+      // but scrubbing already handled the initial click
+      handleSelectionMouseDown(e);
     },
     [handleSelectionMouseDown, handleScrubStart],
   );
@@ -542,6 +577,7 @@ export function Timeline({
                 viewportWidth={viewportWidth}
                 selectedClipIds={selectedClipIds}
                 getClipWaveformConfig={getClipWaveformConfig}
+                getClipThumbnailConfig={getClipThumbnailConfig}
                 snapPoints={snapEnabled ? snapPoints : []}
                 snapThreshold={snapEnabled ? snapThreshold : 0}
                 onClipClick={handleClipClick}

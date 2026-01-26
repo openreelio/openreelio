@@ -9,6 +9,7 @@ import { renderHook, act } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { useTimelineActions } from './useTimelineActions';
 import { useProjectStore } from '@/stores';
+import { _resetCommandQueueForTesting } from '@/stores/projectStore';
 import type { Sequence, Track, Clip, Asset } from '@/types';
 
 // Mock the logger - define mock fn inline to avoid hoisting issues
@@ -125,6 +126,7 @@ function createMockAsset(overrides: Partial<Asset> = {}): Asset {
 describe('useTimelineActions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    _resetCommandQueueForTesting();
     // Reset projectStore
     useProjectStore.setState({
       isLoaded: true,

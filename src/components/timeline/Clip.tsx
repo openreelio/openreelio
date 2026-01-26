@@ -8,9 +8,10 @@
 import { useMemo, type MouseEvent } from 'react';
 import { useClipDrag, type DragPreviewPosition, type ClipDragData } from '@/hooks/useClipDrag';
 import { useWaveformPeaks } from '@/hooks/useWaveformPeaks';
-import type { Clip as ClipType, SnapPoint } from '@/types';
+import type { Clip as ClipType, SnapPoint, Asset } from '@/types';
 import { AudioClipWaveform } from './AudioClipWaveform';
 import { WaveformPeaksDisplay } from './WaveformPeaksDisplay';
+import { LazyThumbnailStrip } from './LazyThumbnailStrip';
 
 // =============================================================================
 // Types
@@ -42,6 +43,14 @@ export interface ClipWaveformConfig {
   color?: string;
 }
 
+/** Thumbnail display configuration for video clips */
+export interface ClipThumbnailConfig {
+  /** Asset for thumbnail extraction */
+  asset: Asset;
+  /** Whether thumbnails should be displayed */
+  enabled: boolean;
+}
+
 interface ClipProps {
   /** Clip data */
   clip: ClipType;
@@ -57,6 +66,8 @@ interface ClipProps {
   maxSourceDuration?: number;
   /** Waveform configuration for audio clips */
   waveformConfig?: ClipWaveformConfig;
+  /** Thumbnail configuration for video clips */
+  thumbnailConfig?: ClipThumbnailConfig;
   /** Snap points for intelligent snapping (clip edges, playhead, etc.) */
   snapPoints?: SnapPoint[];
   /** Snap threshold in seconds (distance within which snapping occurs) */
@@ -85,6 +96,7 @@ export function Clip({
   gridInterval = 0,
   maxSourceDuration,
   waveformConfig,
+  thumbnailConfig,
   snapPoints = [],
   snapThreshold = 0,
   onClick,
@@ -181,15 +193,19 @@ export function Clip({
   const hasEffects = clip.effects.length > 0;
   const hasSpeedChange = clip.speed !== 1;
 
+  // Determine if clip has visual content (thumbnails or waveform)
+  const hasVisualContent = thumbnailConfig?.enabled || waveformConfig?.enabled;
+
   return (
     <div
       data-testid={`clip-${clip.id}`}
       className={`
-        absolute h-full rounded-sm cursor-pointer transition-shadow select-none
+        absolute h-full rounded-sm cursor-pointer transition-shadow select-none overflow-hidden
         ${selected ? 'ring-2 ring-primary-400 z-10' : ''}
         ${disabled ? 'opacity-50 cursor-not-allowed' : 'hover:brightness-110'}
         ${isDragging ? 'opacity-80 z-20' : ''}
-        ${!backgroundColor ? 'bg-blue-600' : ''}
+        ${!backgroundColor && !hasVisualContent ? 'bg-blue-600' : ''}
+        ${hasVisualContent && !backgroundColor ? 'bg-gray-800' : ''}
       `}
       style={{
         left: `${displayPosition.left}px`,
@@ -200,6 +216,18 @@ export function Clip({
       onDoubleClick={handleDoubleClick}
       onMouseDown={handleClipMouseDown}
     >
+      {/* Video Thumbnails (background layer) */}
+      {thumbnailConfig?.enabled && !waveformConfig?.enabled && displayPosition.width > 0 && (
+        <LazyThumbnailStrip
+          asset={thumbnailConfig.asset}
+          sourceInSec={clip.range.sourceInSec}
+          sourceOutSec={clip.range.sourceOutSec}
+          width={displayPosition.width}
+          height={64}
+          className="absolute inset-0"
+        />
+      )}
+
       {/* Audio Waveform (background layer) */}
       {waveformConfig?.enabled && displayPosition.width > 0 && (
         <ClipWaveformRenderer
