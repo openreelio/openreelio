@@ -157,8 +157,8 @@ export function AssetList({
   if (isLoading) {
     return (
       <div data-testid="asset-list-loading" className="flex items-center justify-center p-8">
-        <div className="flex flex-col items-center gap-2 text-gray-400">
-          <div className="w-6 h-6 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+        <div className="flex flex-col items-center gap-2 text-text-secondary">
+          <div className="w-6 h-6 border-2 border-text-secondary border-t-transparent rounded-full animate-spin" />
           <span className="text-sm">Loading assets...</span>
         </div>
       </div>
@@ -172,7 +172,7 @@ export function AssetList({
   if (filteredAssets.length === 0) {
     return (
       <div data-testid="asset-list-empty" className="flex items-center justify-center p-8">
-        <div className="text-center text-gray-400">
+        <div className="text-center text-text-secondary">
           <div className="text-sm">No assets</div>
         </div>
       </div>

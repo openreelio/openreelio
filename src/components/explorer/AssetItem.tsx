@@ -167,7 +167,7 @@ export function AssetItem({
       aria-selected={isSelected}
       className={`
         flex items-center gap-2 p-2 rounded cursor-pointer select-none
-        hover:bg-gray-700/50 transition-colors
+        hover:bg-surface-active/50 transition-colors
         ${isSelected ? 'bg-primary-500/20 ring-1 ring-primary-500/50' : ''}
       `}
       onClick={handleClick}
@@ -192,30 +192,30 @@ export function AssetItem({
           />
         </div>
       ) : (
-        <div className="w-10 h-10 rounded bg-gray-700 flex items-center justify-center flex-shrink-0">
+        <div className="w-10 h-10 rounded bg-surface-active flex items-center justify-center flex-shrink-0 text-text-secondary">
           {renderIcon()}
         </div>
       )}
 
       {/* Info */}
       <div className="flex-1 min-w-0">
-        <div className="text-sm text-white truncate">{asset.name}</div>
+        <div className="text-sm text-text-primary truncate" title={asset.name}>{asset.name}</div>
         {/* Metadata Row */}
         {(asset.duration !== undefined || asset.resolution || asset.fileSize !== undefined) && (
-          <div data-testid="asset-metadata" className="flex items-center gap-1 text-xs text-gray-400 flex-wrap">
+          <div data-testid="asset-metadata" className="flex items-center gap-1 text-xs text-text-secondary flex-wrap">
             {asset.duration !== undefined && (
               <span data-testid="asset-duration">{formatDuration(asset.duration)}</span>
             )}
             {asset.resolution && asset.kind !== 'audio' && (
               <>
-                {asset.duration !== undefined && <span className="text-gray-600">·</span>}
+                {asset.duration !== undefined && <span className="text-text-muted">·</span>}
                 <span data-testid="asset-resolution">{formatResolution(asset.resolution)}</span>
               </>
             )}
             {asset.fileSize !== undefined && (
               <>
                 {(asset.duration !== undefined || (asset.resolution && asset.kind !== 'audio')) && (
-                  <span className="text-gray-600">·</span>
+                  <span className="text-text-muted">·</span>
                 )}
                 <span data-testid="asset-filesize">{formatFileSize(asset.fileSize)}</span>
               </>

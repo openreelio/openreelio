@@ -313,7 +313,7 @@ export function ProjectExplorer() {
   return (
     <div
       data-testid="project-explorer"
-      className="flex flex-col h-full bg-gray-800 text-white relative"
+      className="flex flex-col h-full bg-editor-sidebar text-editor-text relative"
       tabIndex={0}
       onKeyDown={handleKeyDown}
       onDragEnter={handleDragEnter}
@@ -334,17 +334,17 @@ export function ProjectExplorer() {
         </div>
       )}
       {/* Header */}
-      <div className="flex items-center justify-between p-3 border-b border-gray-700">
-        <h2 className="text-sm font-semibold">Project</h2>
+      <div className="flex items-center justify-between p-3 border-b border-editor-border">
+        <h2 className="text-sm font-semibold text-editor-text">Project</h2>
         <button
           data-testid="import-button"
-          className={`p-1.5 rounded transition-colors ${isImporting ? 'opacity-50 cursor-not-allowed' : 'hover:bg-gray-700'}`}
+          className={`p-1.5 rounded transition-colors ${isImporting ? 'opacity-50 cursor-not-allowed' : 'hover:bg-surface-active'}`}
           onClick={handleImport}
           disabled={isImporting}
           aria-label={isImporting ? 'Importing...' : 'Import asset'}
         >
           {isImporting ? (
-            <div className="w-4 h-4 border-2 border-gray-400 border-t-transparent rounded-full animate-spin" />
+            <div className="w-4 h-4 border-2 border-text-muted border-t-transparent rounded-full animate-spin" />
           ) : (
             <Plus className="w-4 h-4" />
           )}
@@ -370,9 +370,9 @@ export function ProjectExplorer() {
       )}
 
       {/* Search */}
-      <div className="p-2 border-b border-gray-700">
+      <div className="p-2 border-b border-editor-border">
         <div className="relative">
-          <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+          <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-text-secondary" />
           <input
             ref={searchInputRef}
             data-testid="asset-search"
@@ -380,12 +380,12 @@ export function ProjectExplorer() {
             placeholder="Search assets..."
             value={searchQuery}
             onChange={handleSearchChange}
-            className="w-full pl-8 pr-8 py-1.5 text-sm bg-gray-700 border border-gray-600 rounded focus:outline-none focus:border-primary-500"
+            className="w-full pl-8 pr-8 py-1.5 text-sm bg-surface-active border border-border-default rounded text-editor-text placeholder:text-text-muted focus:outline-none focus:border-border-focus focus:ring-1 focus:ring-border-focus/50"
           />
           {searchQuery && (
             <button
               data-testid="search-clear"
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-gray-600"
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-surface-highest"
               onClick={handleClearSearch}
               aria-label="Clear search"
             >
@@ -396,15 +396,15 @@ export function ProjectExplorer() {
       </div>
 
       {/* Filter Tabs and View Mode */}
-      <div className="flex items-center justify-between p-2 border-b border-gray-700">
-        <div className="flex gap-1">
+      <div className="flex items-center justify-between p-2 border-b border-editor-border">
+        <div className="flex gap-1 flex-wrap">
           {filterTabs.map((tab) => (
             <button
               key={tab.key}
               data-testid={`filter-${tab.key}`}
               className={`
                 flex items-center gap-1 px-2 py-1 text-xs rounded transition-colors
-                ${filter === tab.key ? 'bg-primary-500 text-white' : 'hover:bg-gray-700 text-gray-300'}
+                ${filter === tab.key ? 'bg-primary-500 text-white' : 'hover:bg-surface-active text-text-secondary'}
               `}
               onClick={() => handleFilterChange(tab.key)}
             >
@@ -414,10 +414,10 @@ export function ProjectExplorer() {
           ))}
         </div>
 
-        <div className="flex gap-1">
+        <div className="flex gap-1 flex-shrink-0">
           <button
             data-testid="view-mode-list"
-            className={`p-1 rounded transition-colors ${viewMode === 'list' ? 'bg-gray-600' : 'hover:bg-gray-700'}`}
+            className={`p-1 rounded transition-colors ${viewMode === 'list' ? 'bg-surface-highest' : 'hover:bg-surface-active'}`}
             onClick={() => setViewMode('list')}
             aria-label="List view"
           >
@@ -425,7 +425,7 @@ export function ProjectExplorer() {
           </button>
           <button
             data-testid="view-mode-grid"
-            className={`p-1 rounded transition-colors ${viewMode === 'grid' ? 'bg-gray-600' : 'hover:bg-gray-700'}`}
+            className={`p-1 rounded transition-colors ${viewMode === 'grid' ? 'bg-surface-highest' : 'hover:bg-surface-active'}`}
             onClick={() => setViewMode('grid')}
             aria-label="Grid view"
           >
@@ -437,7 +437,7 @@ export function ProjectExplorer() {
       {/* Asset List */}
       <div className="flex-1 overflow-y-auto p-2">
         {assetList.length === 0 && !isLoading ? (
-          <div data-testid="asset-list-empty" className="flex flex-col items-center justify-center h-full text-gray-400">
+          <div data-testid="asset-list-empty" className="flex flex-col items-center justify-center h-full text-text-secondary">
             <Plus className="w-12 h-12 mb-2 opacity-50" />
             <p className="text-sm">{emptyMessage}</p>
           </div>

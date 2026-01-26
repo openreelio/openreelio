@@ -192,9 +192,9 @@ export function Header({
           <div className="mx-3 h-4 w-px bg-editor-border" />
 
           {/* Project Info */}
-          <div className="flex items-center gap-2">
-            <FolderOpen className="w-4 h-4 text-editor-text-muted" />
-            <span className="text-sm text-editor-text">{meta.name}</span>
+          <div className="flex items-center gap-2 min-w-0 max-w-[200px]">
+            <FolderOpen className="w-4 h-4 text-editor-text-muted flex-shrink-0" />
+            <span className="text-sm text-editor-text truncate" title={meta.name}>{meta.name}</span>
 
             {/* Save Status Indicator */}
             <div className="flex items-center gap-1.5 ml-2">
@@ -233,12 +233,12 @@ export function Header({
       {/* Search Button */}
       <button
         onClick={() => setShowSearch(true)}
-        className="flex items-center gap-2 px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-gray-400 hover:text-white hover:border-gray-600 transition-colors"
+        className="flex items-center gap-2 px-3 py-1.5 bg-surface-panel border border-border-default rounded-lg text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
         title="Search (Ctrl+K)"
       >
         <Search className="w-4 h-4" />
-        <span className="text-sm">Search</span>
-        <kbd className="hidden sm:inline-block text-xs bg-gray-700 px-1.5 py-0.5 rounded">⌘K</kbd>
+        <span className="text-sm hidden sm:inline">Search</span>
+        <kbd className="hidden md:inline-block text-xs bg-surface-active px-1.5 py-0.5 rounded">⌘K</kbd>
       </button>
 
       {/* Spacer */}
@@ -312,42 +312,42 @@ export function Header({
           data-testid="unsaved-changes-dialog"
           role="dialog"
           aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
         >
           {/* Backdrop */}
           <div
-            className="absolute inset-0 bg-black/50"
+            className="absolute inset-0 bg-surface-overlay backdrop-blur-sm"
             onClick={handleCancelClose}
           />
 
           {/* Dialog Content */}
-          <div className="relative z-10 w-full max-w-md bg-gray-800 rounded-lg shadow-xl p-6">
-            <h2 className="text-lg font-semibold text-white mb-2">
+          <div className="relative z-10 w-full max-w-md bg-surface-elevated rounded-lg shadow-xl p-6 border border-border-default">
+            <h2 className="text-lg font-semibold text-text-primary mb-2">
               Unsaved Changes
             </h2>
-            <p className="text-gray-300 mb-6">
+            <p className="text-text-secondary mb-6">
               You have unsaved changes. Do you want to save before closing?
             </p>
 
             {/* Actions - 3 buttons: Save, Don't Save, Cancel */}
-            <div className="flex justify-end gap-3">
+            <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3">
               <button
                 type="button"
-                className="px-4 py-2 text-sm font-medium text-gray-300 bg-gray-700 rounded hover:bg-gray-600 transition-colors"
+                className="px-4 py-2 text-sm font-medium text-text-secondary bg-surface-active rounded hover:bg-surface-highest transition-colors"
                 onClick={handleCancelClose}
               >
                 Cancel
               </button>
               <button
                 type="button"
-                className="px-4 py-2 text-sm font-medium text-white bg-red-600 rounded hover:bg-red-700 transition-colors"
+                className="px-4 py-2 text-sm font-medium text-white bg-status-error rounded hover:bg-red-700 transition-colors"
                 onClick={handleDiscardAndClose}
               >
                 Don&apos;t Save
               </button>
               <button
                 type="button"
-                className="px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                className="px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
                 onClick={() => void handleSaveAndClose()}
                 disabled={isSaving}
               >

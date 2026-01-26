@@ -179,7 +179,7 @@ export function SearchPanel({
       {showBackdrop && (
         <div
           data-testid="search-panel-backdrop"
-          className="fixed inset-0 bg-black/50 z-40"
+          className="fixed inset-0 bg-surface-overlay backdrop-blur-sm z-40"
           onClick={onClose}
         />
       )}
@@ -188,16 +188,16 @@ export function SearchPanel({
       <div
         ref={panelRef}
         data-testid="search-panel"
-        className={`bg-gray-900 rounded-lg shadow-2xl overflow-hidden z-50 ${className}`}
+        className={`bg-surface-panel border border-border-default rounded-lg shadow-2xl overflow-hidden z-50 ${className}`}
         onKeyDown={handleKeyDown}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
-          <h2 className="text-sm font-medium text-white">{title}</h2>
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border-default">
+          <h2 className="text-sm font-medium text-text-primary">{title}</h2>
           <button
             data-testid="search-panel-close"
             onClick={onClose}
-            className="p-1 text-gray-400 hover:text-white transition-colors"
+            className="p-1 text-text-secondary hover:text-text-primary transition-colors"
             aria-label="Close search"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -207,7 +207,7 @@ export function SearchPanel({
         </div>
 
         {/* Search Bar */}
-        <div className="p-3 border-b border-gray-700">
+        <div className="p-3 border-b border-border-default">
           <SearchBar
             value={query}
             onChange={setQuery}
@@ -222,7 +222,7 @@ export function SearchPanel({
         <div className="max-h-96 overflow-y-auto">
           {!hasSearched ? (
             // Initial state
-            <div className="p-8 text-center text-gray-500">
+            <div className="p-8 text-center text-text-muted">
               <svg
                 className="w-12 h-12 mx-auto mb-3 opacity-50"
                 fill="none"
@@ -259,15 +259,15 @@ export function SearchPanel({
         </div>
 
         {/* Keyboard hints */}
-        <div className="px-3 py-2 border-t border-gray-700 text-xs text-gray-500 flex items-center gap-4">
+        <div className="px-3 py-2 border-t border-border-default text-xs text-text-muted flex flex-wrap items-center gap-3 sm:gap-4">
           <span>
-            <kbd className="px-1.5 py-0.5 bg-gray-800 rounded">↑↓</kbd> Navigate
+            <kbd className="px-1.5 py-0.5 bg-surface-active rounded">↑↓</kbd> Navigate
           </span>
           <span>
-            <kbd className="px-1.5 py-0.5 bg-gray-800 rounded">Enter</kbd> Select
+            <kbd className="px-1.5 py-0.5 bg-surface-active rounded">Enter</kbd> Select
           </span>
           <span>
-            <kbd className="px-1.5 py-0.5 bg-gray-800 rounded">Esc</kbd> Close
+            <kbd className="px-1.5 py-0.5 bg-surface-active rounded">Esc</kbd> Close
           </span>
         </div>
       </div>

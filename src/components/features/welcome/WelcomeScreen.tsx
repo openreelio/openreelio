@@ -99,27 +99,27 @@ export function WelcomeScreen({
     <div
       data-testid="welcome-screen"
       role="main"
-      className="flex flex-col items-center justify-center min-h-full bg-editor-bg text-editor-text p-8"
+      className="flex flex-col items-center justify-center min-h-full bg-editor-bg text-editor-text p-4 sm:p-8"
     >
       {/* Logo and Title */}
-      <div className="text-center mb-12">
-        <div className="w-24 h-24 mx-auto mb-6 bg-primary-600 rounded-2xl flex items-center justify-center shadow-lg">
-          <Film className="w-12 h-12 text-white" />
+      <div className="text-center mb-8 sm:mb-12">
+        <div className="w-20 h-20 sm:w-24 sm:h-24 mx-auto mb-4 sm:mb-6 bg-primary-600 rounded-2xl flex items-center justify-center shadow-lg">
+          <Film className="w-10 h-10 sm:w-12 sm:h-12 text-white" />
         </div>
-        <h1 className="text-4xl font-bold text-editor-text mb-2">OpenReelio</h1>
-        <p className="text-editor-text-muted text-lg">
+        <h1 className="text-3xl sm:text-4xl font-bold text-editor-text mb-2">OpenReelio</h1>
+        <p className="text-editor-text-muted text-base sm:text-lg">
           AI-powered video editing IDE
         </p>
       </div>
 
       {/* Action Buttons */}
-      <div className="flex gap-4 mb-12">
+      <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 mb-8 sm:mb-12 w-full sm:w-auto px-4 sm:px-0">
         <button
           data-testid="new-project-button"
           aria-label="Create a new project"
           disabled={isLoading}
           onClick={handleNewProject}
-          className="flex items-center gap-3 px-6 py-4 bg-primary-600 hover:bg-primary-700 disabled:bg-primary-800 disabled:cursor-not-allowed text-white rounded-lg transition-colors shadow-md"
+          className="flex items-center justify-center gap-3 px-6 py-4 bg-primary-600 hover:bg-primary-700 disabled:bg-primary-800 disabled:cursor-not-allowed text-white rounded-lg transition-colors shadow-md"
         >
           <Plus className="w-5 h-5" />
           <span className="font-medium">New Project</span>
@@ -130,7 +130,7 @@ export function WelcomeScreen({
           aria-label="Open an existing project"
           disabled={isLoading}
           onClick={handleOpenProject}
-          className="flex items-center gap-3 px-6 py-4 bg-editor-panel hover:bg-editor-sidebar border border-editor-border text-editor-text rounded-lg transition-colors shadow-md"
+          className="flex items-center justify-center gap-3 px-6 py-4 bg-editor-panel hover:bg-editor-sidebar border border-editor-border text-editor-text rounded-lg transition-colors shadow-md"
         >
           <FolderOpen className="w-5 h-5" />
           <span className="font-medium">Open Project</span>
@@ -141,10 +141,10 @@ export function WelcomeScreen({
       {recentProjects.length > 0 && (
         <div
           data-testid="recent-projects-section"
-          className="w-full max-w-md"
+          className="w-full max-w-md px-4 sm:px-0"
         >
           <div className="flex items-center gap-2 mb-4 text-editor-text-muted">
-            <Clock className="w-4 h-4" />
+            <Clock className="w-4 h-4 flex-shrink-0" />
             <h2 className="text-sm font-medium uppercase tracking-wide">
               Recent Projects
             </h2>
@@ -157,20 +157,20 @@ export function WelcomeScreen({
                   data-testid={`recent-project-${project.id}`}
                   onClick={() => handleRecentProjectClick(project.path)}
                   disabled={isLoading}
-                  className="w-full flex items-center gap-3 p-3 bg-editor-panel hover:bg-editor-sidebar border border-editor-border rounded-lg transition-colors text-left disabled:cursor-not-allowed"
+                  className="w-full flex items-center gap-3 p-3 bg-editor-panel hover:bg-editor-sidebar border border-editor-border rounded-lg transition-colors text-left disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   <div className="w-10 h-10 bg-editor-bg rounded flex items-center justify-center flex-shrink-0">
                     <Film className="w-5 h-5 text-primary-500" />
                   </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="font-medium text-editor-text truncate">
+                  <div className="flex-1 min-w-0 overflow-hidden">
+                    <p className="font-medium text-editor-text truncate" title={project.name}>
                       {project.name}
                     </p>
-                    <p className="text-xs text-editor-text-muted truncate">
+                    <p className="text-xs text-editor-text-muted truncate" title={project.path}>
                       {project.path}
                     </p>
                   </div>
-                  <span className="text-xs text-editor-text-muted flex-shrink-0">
+                  <span className="text-xs text-editor-text-muted flex-shrink-0 whitespace-nowrap">
                     {formatLastOpened(project.lastOpened)}
                   </span>
                 </button>
