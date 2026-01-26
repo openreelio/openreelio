@@ -6,7 +6,9 @@
  */
 
 import { useCallback, useState, useEffect, useMemo } from 'react';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, confirm } from '@tauri-apps/plugin-dialog';
+import { isTauri as isTauriApi } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { MainLayout, Header, Sidebar, BottomPanel, Panel } from './components/layout';
 import {
   ErrorBoundary,
@@ -431,9 +433,95 @@ function App(): JSX.Element {
     };
   }, []);
 
-  // Flush pending settings updates before app unload to prevent data loss
+  // Handle app close: save project and settings before closing
   useEffect(() => {
-    const handleBeforeUnload = () => {
+    let unlisten: (() => void) | undefined;
+
+    const setupCloseHandler = async () => {
+      try {
+        const currentWindow = getCurrentWindow();
+
+        unlisten = await currentWindow.onCloseRequested(async (event) => {
+          const { isDirty, saveProject, meta } = useProjectStore.getState();
+
+          // Check if there are unsaved changes
+          if (isDirty && meta?.path) {
+            // Prevent immediate close
+            event.preventDefault();
+
+            // Ask user what to do
+            const shouldSave = await confirm(
+              'You have unsaved changes. Do you want to save before closing?',
+              {
+                title: 'Unsaved Changes',
+                kind: 'warning',
+                okLabel: 'Save and Close',
+                cancelLabel: 'Close Without Saving',
+              },
+            );
+
+            if (shouldSave) {
+              try {
+                await saveProject();
+                logger.info('Project saved before closing');
+              } catch (saveError) {
+                logger.error('Failed to save project before closing', { error: saveError });
+                // Ask if they still want to close
+                const forceClose = await confirm(
+                  'Failed to save project. Close anyway?',
+                  {
+                    title: 'Save Failed',
+                    kind: 'error',
+                    okLabel: 'Close Anyway',
+                    cancelLabel: 'Cancel',
+                  },
+                );
+                if (!forceClose) {
+                  return; // Don't close
+                }
+              }
+            }
+
+            // Flush settings
+            const { flushPendingUpdates } = useSettingsStore.getState();
+            try {
+              await flushPendingUpdates();
+            } catch (flushError) {
+              logger.error('Failed to flush settings on close', { error: flushError });
+            }
+
+            // Now close the window
+            await currentWindow.close();
+          } else {
+            // No unsaved changes, just flush settings
+            const { flushPendingUpdates } = useSettingsStore.getState();
+            try {
+              await flushPendingUpdates();
+            } catch (flushError) {
+              logger.error('Failed to flush settings on close', { error: flushError });
+            }
+          }
+        });
+      } catch (error) {
+        logger.error('Failed to setup close handler', { error });
+      }
+    };
+
+    if (isTauriApi()) {
+      void setupCloseHandler();
+    }
+
+    // Also handle browser beforeunload as fallback
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      const { isDirty, meta } = useProjectStore.getState();
+
+      if (isDirty && meta?.path) {
+        // Show browser's native confirmation dialog
+        e.preventDefault();
+        e.returnValue = 'You have unsaved changes.';
+        return 'You have unsaved changes.';
+      }
+
       // Synchronously trigger flush - the promise won't complete before unload,
       // but starting it gives the best chance of saving
       const { flushPendingUpdates } = useSettingsStore.getState();
@@ -445,6 +533,9 @@ function App(): JSX.Element {
     window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
+      if (unlisten) {
+        unlisten();
+      }
       window.removeEventListener('beforeunload', handleBeforeUnload);
     };
   }, []);
@@ -474,6 +565,42 @@ function App(): JSX.Element {
   // Handle project creation from dialog
   const handleCreateProject = useCallback(
     async (data: ProjectCreateData) => {
+      // Check if current project has unsaved changes
+      const { isDirty: hasUnsavedChanges, meta: currentMeta, saveProject: saveCurrentProject } = useProjectStore.getState();
+
+      if (hasUnsavedChanges && currentMeta?.path) {
+        const shouldSave = await confirm(
+          'You have unsaved changes in the current project. Do you want to save before creating a new project?',
+          {
+            title: 'Unsaved Changes',
+            kind: 'warning',
+            okLabel: 'Save and Continue',
+            cancelLabel: 'Discard Changes',
+          },
+        );
+
+        if (shouldSave) {
+          try {
+            await saveCurrentProject();
+            addToast('Project saved', 'success');
+          } catch (saveError) {
+            logger.error('Failed to save current project', { error: saveError });
+            const forceCreate = await confirm(
+              'Failed to save the current project. Create new project anyway?',
+              {
+                title: 'Save Failed',
+                kind: 'error',
+                okLabel: 'Create Anyway',
+                cancelLabel: 'Cancel',
+              },
+            );
+            if (!forceCreate) {
+              return;
+            }
+          }
+        }
+      }
+
       setIsCreatingProject(true);
       try {
         // Validate and sanitize project name to prevent path traversal
@@ -517,6 +644,42 @@ function App(): JSX.Element {
 
   const handleOpenProject = useCallback(
     async (path?: string) => {
+      // Check if current project has unsaved changes
+      const { isDirty: hasUnsavedChanges, meta: currentMeta, saveProject: saveCurrentProject } = useProjectStore.getState();
+
+      if (hasUnsavedChanges && currentMeta?.path) {
+        const shouldSave = await confirm(
+          'You have unsaved changes in the current project. Do you want to save before opening another project?',
+          {
+            title: 'Unsaved Changes',
+            kind: 'warning',
+            okLabel: 'Save and Continue',
+            cancelLabel: 'Discard Changes',
+          },
+        );
+
+        if (shouldSave) {
+          try {
+            await saveCurrentProject();
+            addToast('Project saved', 'success');
+          } catch (saveError) {
+            logger.error('Failed to save current project', { error: saveError });
+            const forceOpen = await confirm(
+              'Failed to save the current project. Open new project anyway?',
+              {
+                title: 'Save Failed',
+                kind: 'error',
+                okLabel: 'Open Anyway',
+                cancelLabel: 'Cancel',
+              },
+            );
+            if (!forceOpen) {
+              return;
+            }
+          }
+        }
+      }
+
       let projectPath = path;
 
       if (!projectPath) {
@@ -542,6 +705,7 @@ function App(): JSX.Element {
             path: projectPath,
           });
           setRecentProjects(updated);
+          addToast(`Project opened: ${folderName}`, 'success');
         } catch (error) {
           logger.error('Failed to open project', { error, path: projectPath });
           const rawMessage = error instanceof Error ? error.message : String(error);

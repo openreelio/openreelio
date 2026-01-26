@@ -4,7 +4,7 @@
  * Displays time markers and allows seeking by clicking.
  */
 
-import { useMemo, useCallback, useRef, type MouseEvent } from 'react';
+import { useMemo, useCallback, useRef, useState, useEffect, type MouseEvent } from 'react';
 
 // =============================================================================
 // Types
@@ -65,27 +65,66 @@ export function TimeRuler({ duration, zoom, scrollX, onSeek }: TimeRulerProps) {
     return result;
   }, [duration, interval]);
 
-  // Handle click to seek
-  const handleClick = useCallback(
-    (e: MouseEvent<HTMLDivElement>) => {
-      if (!rulerRef.current || !onSeek) return;
+  // Track dragging state for scrubbing
+  const [isDragging, setIsDragging] = useState(false);
 
+  // Calculate time from mouse event
+  const getTimeFromEvent = useCallback(
+    (e: globalThis.MouseEvent | MouseEvent<HTMLDivElement>) => {
+      if (!rulerRef.current) return null;
       const rect = rulerRef.current.getBoundingClientRect();
       const clickX = e.clientX - rect.left + scrollX;
-      const time = clickX / zoom;
-
-      onSeek(Math.max(0, Math.min(duration, time)));
+      return Math.max(0, Math.min(duration, clickX / zoom));
     },
-    [zoom, scrollX, duration, onSeek]
+    [zoom, scrollX, duration]
   );
+
+  // Handle mouse down to start scrubbing
+  const handleMouseDown = useCallback(
+    (e: MouseEvent<HTMLDivElement>) => {
+      if (!onSeek) return;
+      e.preventDefault();
+
+      const time = getTimeFromEvent(e);
+      if (time !== null) {
+        onSeek(time);
+        setIsDragging(true);
+      }
+    },
+    [onSeek, getTimeFromEvent]
+  );
+
+  // Handle drag scrubbing
+  useEffect(() => {
+    if (!isDragging || !onSeek) return;
+
+    const handleMouseMove = (e: globalThis.MouseEvent) => {
+      const time = getTimeFromEvent(e);
+      if (time !== null) {
+        onSeek(time);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsDragging(false);
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isDragging, onSeek, getTimeFromEvent]);
 
   return (
     <div
       ref={rulerRef}
       data-testid="time-ruler"
-      className="h-6 bg-editor-sidebar border-b border-editor-border relative cursor-pointer select-none"
+      className={`h-6 bg-editor-sidebar border-b border-editor-border relative cursor-pointer select-none ${isDragging ? 'cursor-ew-resize' : ''}`}
       style={{ width: `${width}px` }}
-      onClick={handleClick}
+      onMouseDown={handleMouseDown}
     >
       {/* Time markers */}
       {markers.map(({ time, isMain, index }) => (

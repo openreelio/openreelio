@@ -32,6 +32,7 @@ const logger = createLogger('ProjectStore');
  * - FIFO queue with single concurrent execution
  * - Automatic error recovery (queue continues after failure)
  * - Timeout protection using Promise.race to prevent deadlocks
+ * - Backpressure protection with max queue size to prevent memory exhaustion
  */
 class CommandQueue {
   private queue: Array<{
@@ -40,11 +41,21 @@ class CommandQueue {
   }> = [];
   private isProcessing = false;
   private static readonly OPERATION_TIMEOUT_MS = 30000;
+  /** Maximum queue size to prevent memory exhaustion under heavy load */
+  private static readonly MAX_QUEUE_SIZE = 100;
 
-  async enqueue<T>(
-    operation: () => Promise<T>,
-    operationName = 'unknown'
-  ): Promise<T> {
+  async enqueue<T>(operation: () => Promise<T>, operationName = 'unknown'): Promise<T> {
+    // Backpressure protection: reject if queue is full
+    if (this.queue.length >= CommandQueue.MAX_QUEUE_SIZE) {
+      const errorMessage = `Command queue is full (${this.queue.length} pending operations). Please wait for current operations to complete.`;
+      logger.error('Queue backpressure triggered', {
+        operationName,
+        queueSize: this.queue.length,
+        maxSize: CommandQueue.MAX_QUEUE_SIZE,
+      });
+      throw new Error(errorMessage);
+    }
+
     return new Promise<T>((resolve, reject) => {
       const wrappedOperation = async (): Promise<void> => {
         // Use Promise.race to ensure timeout actually unblocks the queue
@@ -110,6 +121,89 @@ class CommandQueue {
 
 // Global command queue instance
 const commandQueue = new CommandQueue();
+
+// =============================================================================
+// Request Deduplication
+// =============================================================================
+
+/**
+ * Tracks in-flight requests to prevent duplicate operations from double-clicks
+ * or rapid repeated invocations. Uses a simple hash of command type + payload.
+ */
+class RequestDeduplicator {
+  private inFlight = new Map<string, Promise<unknown>>();
+  private static readonly DEBOUNCE_WINDOW_MS = 100;
+
+  /**
+   * Generates a unique key for the request based on type and payload
+   */
+  private generateKey(commandType: string, payload: unknown): string {
+    try {
+      return `${commandType}:${JSON.stringify(payload)}`;
+    } catch {
+      // If payload is not serializable, use only command type with timestamp bucket
+      const bucket = Math.floor(Date.now() / RequestDeduplicator.DEBOUNCE_WINDOW_MS);
+      return `${commandType}:${bucket}`;
+    }
+  }
+
+  /**
+   * Executes operation with deduplication. If an identical request is already
+   * in flight, returns the same promise instead of starting a new operation.
+   */
+  async execute<T>(commandType: string, payload: unknown, operation: () => Promise<T>): Promise<T> {
+    const key = this.generateKey(commandType, payload);
+
+    // Check if an identical request is already in flight
+    const existing = this.inFlight.get(key);
+    if (existing) {
+      logger.debug('Deduplicating request', { commandType, key });
+      return existing as Promise<T>;
+    }
+
+    // Execute the operation and track it
+    const promise = operation().finally(() => {
+      // Remove from tracking after a brief delay to catch rapid duplicates
+      setTimeout(() => {
+        this.inFlight.delete(key);
+      }, RequestDeduplicator.DEBOUNCE_WINDOW_MS);
+    });
+
+    this.inFlight.set(key, promise);
+    return promise;
+  }
+
+  /**
+   * Returns the number of in-flight requests (useful for debugging)
+   */
+  get inFlightCount(): number {
+    return this.inFlight.size;
+  }
+
+  /**
+   * Clears all tracked in-flight requests.
+   * FOR TESTING ONLY - do not call from production code.
+   */
+  clearForTesting(): void {
+    this.inFlight.clear();
+  }
+}
+
+// Global deduplicator instance
+const requestDeduplicator = new RequestDeduplicator();
+
+// =============================================================================
+// Test Utilities
+// =============================================================================
+
+/**
+ * Resets the command queue and deduplicator state.
+ * FOR TESTING ONLY - do not use in production code.
+ */
+export function _resetCommandQueueForTesting(): void {
+  commandQueue.clear();
+  requestDeduplicator.clearForTesting();
+}
 
 // =============================================================================
 // Proxy Event Types
@@ -488,81 +582,92 @@ export const useProjectStore = create<ProjectState>()(
     },
 
     /**
-     * Execute edit command with race condition protection.
+     * Execute edit command with race condition protection and deduplication.
      *
      * Uses command queue to serialize all command executions and state refreshes.
+     * Uses request deduplication to prevent duplicate operations from double-clicks.
      * This prevents data loss when multiple commands are issued rapidly.
      *
      * @param command - The command to execute
      * @returns CommandResult from backend
      */
     executeCommand: async (command: Command) => {
-      return commandQueue.enqueue(async () => {
-        const versionBefore = get().stateVersion;
+      // Deduplicate requests to prevent double-click issues
+      return requestDeduplicator.execute(command.type, command.payload, () =>
+        commandQueue.enqueue(async () => {
+          const versionBefore = get().stateVersion;
 
-        try {
-          logger.debug('Executing command', { type: command.type, version: versionBefore });
+          try {
+            logger.debug('Executing command', { type: command.type, version: versionBefore });
 
-          const result = await invoke<CommandResult>('execute_command', {
-            commandType: command.type,
-            payload: command.payload,
-          });
-
-          // Refresh state from backend to ensure consistency
-          // This is critical for maintaining sync between frontend and backend
-          const projectState = await invoke<{
-            assets: Asset[];
-            sequences: Sequence[];
-            activeSequenceId: string | null;
-          }>('get_project_state');
-
-          // Check for concurrent modifications before applying
-          const versionAfter = get().stateVersion;
-          if (versionBefore !== versionAfter) {
-            logger.warn('Concurrent modification detected during command execution', {
+            const result = await invoke<CommandResult>('execute_command', {
               commandType: command.type,
-              versionBefore,
-              versionAfter,
+              payload: command.payload,
             });
+
+            // Refresh state from backend to ensure consistency
+            // This is critical for maintaining sync between frontend and backend
+            const projectState = await invoke<{
+              assets: Asset[];
+              sequences: Sequence[];
+              activeSequenceId: string | null;
+            }>('get_project_state');
+
+            // Check for concurrent modifications before applying
+            // This prevents race conditions where multiple commands modify state simultaneously
+            const versionAfter = get().stateVersion;
+            if (versionBefore !== versionAfter) {
+              const concurrentError = new Error(
+                `Concurrent modification detected during command execution. ` +
+                  `State version changed from ${versionBefore} to ${versionAfter}. ` +
+                  `Please retry the operation.`,
+              );
+              logger.error('Concurrent modification detected - aborting command', {
+                commandType: command.type,
+                versionBefore,
+                versionAfter,
+              });
+              throw concurrentError;
+            }
+
+            set((state) => {
+              state.isDirty = true;
+              state.stateVersion += 1;
+              state.error = null;
+
+              // Update assets from backend
+              state.assets = new Map();
+              for (const asset of projectState.assets) {
+                state.assets.set(asset.id, asset);
+              }
+
+              // Update sequences from backend
+              state.sequences = new Map();
+              for (const sequence of projectState.sequences) {
+                state.sequences.set(sequence.id, sequence);
+              }
+
+              // Update active sequence ID from backend
+              state.activeSequenceId = projectState.activeSequenceId;
+            });
+
+            logger.debug('Command executed successfully', {
+              type: command.type,
+              newVersion: get().stateVersion,
+            });
+
+            return result;
+          } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            logger.error('Command execution failed', { type: command.type, error: errorMessage });
+
+            set((state) => {
+              state.error = errorMessage;
+            });
+            throw error;
           }
-
-          set((state) => {
-            state.isDirty = true;
-            state.stateVersion += 1;
-            state.error = null;
-
-            // Update assets from backend
-            state.assets = new Map();
-            for (const asset of projectState.assets) {
-              state.assets.set(asset.id, asset);
-            }
-
-            // Update sequences from backend
-            state.sequences = new Map();
-            for (const sequence of projectState.sequences) {
-              state.sequences.set(sequence.id, sequence);
-            }
-
-            // Update active sequence ID from backend
-            state.activeSequenceId = projectState.activeSequenceId;
-          });
-
-          logger.debug('Command executed successfully', {
-            type: command.type,
-            newVersion: get().stateVersion,
-          });
-
-          return result;
-        } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          logger.error('Command execution failed', { type: command.type, error: errorMessage });
-
-          set((state) => {
-            state.error = errorMessage;
-          });
-          throw error;
-        }
-      }, `executeCommand:${command.type}`);
+        }, `executeCommand:${command.type}`),
+      );
     },
 
     /**
@@ -682,7 +787,7 @@ export const useProjectStore = create<ProjectState>()(
         return false;
       }
     },
-  }))
+  })),
 );
 
 // =============================================================================
@@ -700,7 +805,9 @@ let isSettingUpListeners = false;
  * Returns false in web builds (Vite dev, Playwright E2E).
  */
 function isTauriRuntime(): boolean {
-  return typeof (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined';
+  return (
+    typeof (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined'
+  );
 }
 
 /**
@@ -747,7 +854,7 @@ export async function setupProxyEventListeners(): Promise<void> {
         (event) => {
           logger.info('Proxy generation started', { assetId: event.payload.assetId });
           updateAssetProxyStatus(event.payload.assetId, 'generating');
-        }
+        },
       );
       newUnlisteners.push(unlistenGenerating);
     } catch (error) {
@@ -756,16 +863,13 @@ export async function setupProxyEventListeners(): Promise<void> {
 
     // Listen for proxy ready event
     try {
-      const unlistenReady = await listen<ProxyReadyEvent>(
-        'asset:proxy-ready',
-        (event) => {
-          logger.info('Proxy generation completed', {
-            assetId: event.payload.assetId,
-            proxyUrl: event.payload.proxyUrl,
-          });
-          updateAssetProxyStatus(event.payload.assetId, 'ready', event.payload.proxyUrl);
-        }
-      );
+      const unlistenReady = await listen<ProxyReadyEvent>('asset:proxy-ready', (event) => {
+        logger.info('Proxy generation completed', {
+          assetId: event.payload.assetId,
+          proxyUrl: event.payload.proxyUrl,
+        });
+        updateAssetProxyStatus(event.payload.assetId, 'ready', event.payload.proxyUrl);
+      });
       newUnlisteners.push(unlistenReady);
     } catch (error) {
       logger.error('Failed to setup proxy-ready listener', { error });
@@ -773,16 +877,13 @@ export async function setupProxyEventListeners(): Promise<void> {
 
     // Listen for proxy failed event
     try {
-      const unlistenFailed = await listen<ProxyFailedEvent>(
-        'asset:proxy-failed',
-        (event) => {
-          logger.error('Proxy generation failed', {
-            assetId: event.payload.assetId,
-            error: event.payload.error,
-          });
-          updateAssetProxyStatus(event.payload.assetId, 'failed');
-        }
-      );
+      const unlistenFailed = await listen<ProxyFailedEvent>('asset:proxy-failed', (event) => {
+        logger.error('Proxy generation failed', {
+          assetId: event.payload.assetId,
+          error: event.payload.error,
+        });
+        updateAssetProxyStatus(event.payload.assetId, 'failed');
+      });
       newUnlisteners.push(unlistenFailed);
     } catch (error) {
       logger.error('Failed to setup proxy-failed listener', { error });

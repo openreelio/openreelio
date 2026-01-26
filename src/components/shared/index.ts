@@ -6,11 +6,11 @@
 
 export {
   ErrorBoundary,
-  withErrorBoundary,
   type ErrorBoundaryProps,
   type FallbackProps,
-  type WithErrorBoundaryOptions,
 } from './ErrorBoundary';
+
+export { withErrorBoundary, type WithErrorBoundaryOptions } from './withErrorBoundary';
 
 export {
   TimelineErrorBoundary,

@@ -39,7 +39,7 @@
       "csp": "default-src 'self' data: blob:; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost data: blob:; script-src 'self'; style-src 'self' 'unsafe-inline';",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA/**", "$APPCACHE/**"]
+        "scope": ["$APPCACHE/**", "$APPLOCALDATA/**"]
       }
     }
   },

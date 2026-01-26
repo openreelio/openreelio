@@ -39,13 +39,13 @@ describe('TimeRuler', () => {
   // ===========================================================================
 
   describe('interactions', () => {
-    it('should call onSeek when clicked', () => {
+    it('should call onSeek when mouse down', () => {
       const onSeek = vi.fn();
       render(<TimeRuler duration={60} zoom={100} scrollX={0} onSeek={onSeek} />);
 
       const ruler = screen.getByTestId('time-ruler');
-      // Click at position 500px = 5 seconds at zoom 100
-      fireEvent.click(ruler, { clientX: 500 });
+      // Mouse down at position 500px = 5 seconds at zoom 100
+      fireEvent.mouseDown(ruler, { clientX: 500 });
 
       expect(onSeek).toHaveBeenCalled();
     });

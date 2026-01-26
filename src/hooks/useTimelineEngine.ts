@@ -78,16 +78,25 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
   const initialDurationRef = useRef(duration);
 
   // Lazy initialization of engine (only on first access)
+  // IMPORTANT: Sync with store immediately to avoid race conditions where
+  // user actions (like clicking timeline to seek) happen before useEffect runs
   if (!engineRef.current) {
-    engineRef.current = new TimelineEngine({
+    const newEngine = new TimelineEngine({
       duration: initialDurationRef.current,
       playbackRate: 1,
     });
+    // Sync immediately so actions work right away
+    newEngine.syncWithStore({
+      setCurrentTime: playbackStore.setCurrentTime,
+      setIsPlaying: playbackStore.setIsPlaying,
+      setDuration: playbackStore.setDuration,
+    });
+    engineRef.current = newEngine;
   }
 
   const engine = engineRef.current;
 
-  // Sync engine with store (only on mount and when store changes)
+  // Re-sync engine with store when store changes (e.g., hot reload)
   useEffect(() => {
     engine.syncWithStore({
       setCurrentTime: playbackStore.setCurrentTime,

@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import type { Track as TrackType, Clip as ClipType, TrackKind, SnapPoint } from '@/types';
 import { useVirtualizedClips } from '@/hooks/useVirtualizedClips';
-import { Clip, type ClipDragData, type DragPreviewPosition, type ClickModifiers, type ClipWaveformConfig } from './Clip';
+import { Clip, type ClipDragData, type DragPreviewPosition, type ClickModifiers, type ClipWaveformConfig, type ClipThumbnailConfig } from './Clip';
 import type { DropValidity } from '@/utils/dropValidity';
 
 // =============================================================================
@@ -44,6 +44,8 @@ interface TrackProps {
   selectedClipIds?: string[];
   /** Function to get waveform config for a clip */
   getClipWaveformConfig?: (clipId: string, assetId: string) => ClipWaveformConfig | undefined;
+  /** Function to get thumbnail config for a clip */
+  getClipThumbnailConfig?: (clipId: string, assetId: string) => ClipThumbnailConfig | undefined;
   /** Snap points for intelligent snapping (clip edges, playhead, etc.) */
   snapPoints?: SnapPoint[];
   /** Snap threshold in seconds (distance within which snapping occurs) */
@@ -104,6 +106,7 @@ export function Track({
   viewportWidth,
   selectedClipIds = [],
   getClipWaveformConfig,
+  getClipThumbnailConfig,
   snapPoints = [],
   snapThreshold = 0,
   isDropTarget = false,
@@ -232,6 +235,7 @@ export function Track({
               selected={selectedClipIds.includes(clip.id)}
               disabled={track.locked}
               waveformConfig={getClipWaveformConfig?.(clip.id, clip.assetId)}
+              thumbnailConfig={getClipThumbnailConfig?.(clip.id, clip.assetId)}
               snapPoints={snapPoints}
               snapThreshold={snapThreshold}
               onClick={onClipClick}

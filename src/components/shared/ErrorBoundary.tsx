@@ -271,52 +271,6 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 }
 
 // =============================================================================
-// Higher-Order Component
-// =============================================================================
-
-/** Options for withErrorBoundary HOC */
-export interface WithErrorBoundaryOptions {
-  fallback?: ReactNode;
-  fallbackRender?: (props: FallbackProps) => ReactNode;
-  onError?: (error: Error, errorInfo: ErrorInfo) => void;
-  onReset?: () => void;
-  showReloadButton?: boolean;
-  showDetails?: boolean;
-}
-
-/**
- * Higher-order component that wraps a component with an error boundary.
- *
- * @param WrappedComponent - Component to wrap
- * @param options - ErrorBoundary options
- * @returns Wrapped component with error boundary
- *
- * @example
- * ```tsx
- * const SafeTimeline = withErrorBoundary(Timeline, {
- *   fallback: <div>Timeline failed to load</div>,
- *   onError: (error) => logger.error('Timeline error', { error }),
- * });
- * ```
- */
-export function withErrorBoundary<P extends object>(
-  WrappedComponent: React.ComponentType<P>,
-  options: WithErrorBoundaryOptions
-): React.FC<P> {
-  const displayName = WrappedComponent.displayName || WrappedComponent.name || 'Component';
-
-  const ComponentWithBoundary: React.FC<P> = (props: P) => (
-    <ErrorBoundary {...options}>
-      <WrappedComponent {...props} />
-    </ErrorBoundary>
-  );
-
-  ComponentWithBoundary.displayName = `withErrorBoundary(${displayName})`;
-
-  return ComponentWithBoundary;
-}
-
-// =============================================================================
 // Exports
 // =============================================================================
 
