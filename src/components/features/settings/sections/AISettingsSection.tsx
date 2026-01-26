@@ -2,12 +2,20 @@
  * AISettingsSection Component
  *
  * Comprehensive AI settings section for the settings dialog.
- * Includes provider configuration, generation parameters, cost controls, and behavior settings.
+ * Includes provider configuration, model selection, generation parameters,
+ * cost controls, and behavior settings.
+ *
+ * Security Features:
+ * - API keys are stored in encrypted vault (not localStorage)
+ * - Keys are never displayed in full after entry
+ * - Secure IPC communication for credential operations
  */
 
-import React, { useCallback } from 'react';
+import React, { useCallback, useState, useEffect } from 'react';
 import type { AISettings, ProviderType, ProposalReviewMode } from '@/stores/settingsStore';
 import { CostControlPanel } from './CostControlPanel';
+import { useAIModels, getDefaultModel } from '@/hooks/useAIModels';
+import { useCredentials, type CredentialProvider } from '@/hooks/useCredentials';
 
 // =============================================================================
 // Types
@@ -26,15 +34,27 @@ export interface AISettingsSectionProps {
 // Constants
 // =============================================================================
 
-const PROVIDER_OPTIONS: Array<{ value: ProviderType; label: string }> = [
-  { value: 'openai', label: 'OpenAI' },
-  { value: 'anthropic', label: 'Anthropic' },
-  { value: 'gemini', label: 'Google Gemini' },
-  { value: 'local', label: 'Local (Ollama)' },
+const PROVIDER_OPTIONS: Array<{ value: ProviderType; label: string; description: string }> = [
+  { value: 'openai', label: 'OpenAI', description: 'GPT-5, O3 models for advanced reasoning' },
+  {
+    value: 'anthropic',
+    label: 'Anthropic',
+    description: 'Claude 4.x models for coding and analysis',
+  },
+  { value: 'gemini', label: 'Google Gemini', description: 'Gemini 3 with 2M context window' },
+  { value: 'local', label: 'Local (Ollama)', description: 'Run models locally with Ollama' },
 ];
 
-const REVIEW_MODE_OPTIONS: Array<{ value: ProposalReviewMode; label: string; description: string }> = [
-  { value: 'always', label: 'Always Review', description: 'Always ask for confirmation before applying' },
+const REVIEW_MODE_OPTIONS: Array<{
+  value: ProposalReviewMode;
+  label: string;
+  description: string;
+}> = [
+  {
+    value: 'always',
+    label: 'Always Review',
+    description: 'Always ask for confirmation before applying',
+  },
   { value: 'smart', label: 'Smart Review', description: 'Only review high-impact changes' },
   { value: 'auto_apply', label: 'Auto Apply', description: 'Apply changes without confirmation' },
 ];
@@ -51,9 +71,7 @@ interface SectionHeaderProps {
 const SectionHeader: React.FC<SectionHeaderProps> = ({ title, description }) => (
   <div className="border-b border-editor-border pb-2 mb-4">
     <h3 className="text-sm font-medium text-editor-text">{title}</h3>
-    {description && (
-      <p className="text-xs text-editor-text-muted mt-1">{description}</p>
-    )}
+    {description && <p className="text-xs text-editor-text-muted mt-1">{description}</p>}
   </div>
 );
 
@@ -79,9 +97,7 @@ const ToggleField: React.FC<ToggleFieldProps> = ({
       <label htmlFor={id} className="text-sm text-editor-text cursor-pointer">
         {label}
       </label>
-      {description && (
-        <p className="text-xs text-editor-text-muted mt-0.5">{description}</p>
-      )}
+      {description && <p className="text-xs text-editor-text-muted mt-0.5">{description}</p>}
     </div>
     <input
       id={id}
@@ -94,6 +110,243 @@ const ToggleField: React.FC<ToggleFieldProps> = ({
   </div>
 );
 
+interface StatusBadgeProps {
+  isConfigured: boolean;
+  isLoading?: boolean;
+}
+
+const StatusBadge: React.FC<StatusBadgeProps> = ({ isConfigured, isLoading }) => {
+  if (isLoading) {
+    return (
+      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-600 text-gray-200">
+        Checking...
+      </span>
+    );
+  }
+
+  return isConfigured ? (
+    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-600 text-green-100">
+      Configured
+    </span>
+  ) : (
+    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-yellow-600 text-yellow-100">
+      Not configured
+    </span>
+  );
+};
+
+// =============================================================================
+// Model Selector Component
+// =============================================================================
+
+interface ModelSelectorProps {
+  id?: string;
+  provider: ProviderType;
+  value: string;
+  onChange: (model: string) => void;
+  disabled?: boolean;
+}
+
+const ModelSelector: React.FC<ModelSelectorProps> = ({
+  id,
+  provider,
+  value,
+  onChange,
+  disabled,
+}) => {
+  const { models, isLoading, error } = useAIModels(provider);
+
+  // Handle provider change - update to default model if current is not available
+  useEffect(() => {
+    if (!isLoading && models.length > 0 && !models.includes(value)) {
+      const defaultModel = getDefaultModel(provider);
+      if (models.includes(defaultModel)) {
+        onChange(defaultModel);
+      } else if (models[0]) {
+        onChange(models[0]);
+      }
+    }
+  }, [provider, models, value, onChange, isLoading]);
+
+  if (isLoading) {
+    return (
+      <div className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text-muted">
+        Loading models...
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-2">
+        <select
+          id={id}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled}
+          className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text focus:outline-none focus:border-primary-500 disabled:opacity-50"
+        >
+          <option value={value}>{value}</option>
+        </select>
+        <p className="text-xs text-red-400">Failed to load models: {error}</p>
+      </div>
+    );
+  }
+
+  return (
+    <select
+      id={id}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={disabled || models.length === 0}
+      className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text focus:outline-none focus:border-primary-500 disabled:opacity-50"
+    >
+      {models.map((model) => (
+        <option key={model} value={model}>
+          {model}
+        </option>
+      ))}
+    </select>
+  );
+};
+
+// =============================================================================
+// API Key Input Component
+// =============================================================================
+
+interface SecureApiKeyInputProps {
+  provider: CredentialProvider;
+  placeholder: string;
+  disabled?: boolean;
+  onSaved?: () => void;
+}
+
+const SecureApiKeyInput: React.FC<SecureApiKeyInputProps> = ({
+  provider,
+  placeholder,
+  disabled,
+  onSaved,
+}) => {
+  const { status, storeCredential, deleteCredential, isSaving, isLoading } = useCredentials();
+  const [inputValue, setInputValue] = useState('');
+  const [showInput, setShowInput] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const isConfigured = status[provider];
+
+  const handleSave = async () => {
+    if (!inputValue.trim()) return;
+
+    try {
+      setSaveError(null);
+      await storeCredential(provider, inputValue);
+      setInputValue('');
+      setShowInput(false);
+      onSaved?.();
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to save');
+    }
+  };
+
+  const handleDelete = async () => {
+    try {
+      setSaveError(null);
+      await deleteCredential(provider);
+    } catch (err) {
+      setSaveError(err instanceof Error ? err.message : 'Failed to delete');
+    }
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && inputValue.trim()) {
+      e.preventDefault();
+      handleSave();
+    } else if (e.key === 'Escape') {
+      setShowInput(false);
+      setInputValue('');
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text-muted">
+        Checking credentials...
+      </div>
+    );
+  }
+
+  if (isConfigured && !showInput) {
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <div className="flex-1 px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text">
+            ••••••••••••••••
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowInput(true)}
+            disabled={disabled}
+            className="px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text hover:bg-editor-bg-hover disabled:opacity-50"
+          >
+            Change
+          </button>
+          <button
+            type="button"
+            onClick={handleDelete}
+            disabled={disabled || isSaving}
+            className="px-3 py-2 rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+          >
+            {isSaving ? 'Deleting...' : 'Delete'}
+          </button>
+        </div>
+        <p className="text-xs text-green-400">API key is securely stored in encrypted vault</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <input
+          type="password"
+          value={inputValue}
+          onChange={(e) => setInputValue(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={placeholder}
+          disabled={disabled || isSaving}
+          className="flex-1 px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text placeholder-editor-text-muted focus:outline-none focus:border-primary-500 disabled:opacity-50"
+          autoComplete="new-password"
+        />
+        <button
+          type="button"
+          onClick={handleSave}
+          disabled={disabled || isSaving || !inputValue.trim()}
+          className="px-3 py-2 rounded bg-primary-500 text-white hover:bg-primary-600 disabled:opacity-50"
+        >
+          {isSaving ? 'Saving...' : 'Save'}
+        </button>
+        {isConfigured && (
+          <button
+            type="button"
+            onClick={() => {
+              setShowInput(false);
+              setInputValue('');
+            }}
+            disabled={disabled}
+            className="px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text hover:bg-editor-bg-hover disabled:opacity-50"
+          >
+            Cancel
+          </button>
+        )}
+      </div>
+      {saveError && <p className="text-xs text-red-400">{saveError}</p>}
+      <p className="text-xs text-editor-text-muted">
+        Your API key will be encrypted and stored securely. It never leaves your device.
+      </p>
+    </div>
+  );
+};
+
 // =============================================================================
 // Main Component
 // =============================================================================
@@ -103,26 +356,33 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
   onUpdate,
   disabled = false,
 }) => {
+  const { status: credentialStatus, isLoading: credentialsLoading } = useCredentials();
+
   // Handlers
   const handleProviderChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
-      onUpdate({ primaryProvider: e.target.value as ProviderType });
+      const newProvider = e.target.value as ProviderType;
+      const defaultModel = getDefaultModel(newProvider);
+      onUpdate({
+        primaryProvider: newProvider,
+        primaryModel: defaultModel,
+      });
     },
-    [onUpdate]
+    [onUpdate],
   );
 
-  const handleApiKeyChange = useCallback(
-    (field: keyof AISettings, value: string) => {
-      onUpdate({ [field]: value || null } as Partial<AISettings>);
+  const handleModelChange = useCallback(
+    (model: string) => {
+      onUpdate({ primaryModel: model });
     },
-    [onUpdate]
+    [onUpdate],
   );
 
   const handleTemperatureChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       onUpdate({ temperature: parseFloat(e.target.value) });
     },
-    [onUpdate]
+    [onUpdate],
   );
 
   const handleMaxTokensChange = useCallback(
@@ -132,90 +392,92 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
         onUpdate({ maxTokens: value });
       }
     },
-    [onUpdate]
+    [onUpdate],
   );
 
   const handleReviewModeChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
       onUpdate({ proposalReviewMode: e.target.value as ProposalReviewMode });
     },
-    [onUpdate]
+    [onUpdate],
   );
 
-  // Render API key field based on provider
-  const renderApiKeyField = () => {
-    switch (settings.primaryProvider) {
+  const handleOllamaUrlChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      onUpdate({ ollamaUrl: e.target.value || null });
+    },
+    [onUpdate],
+  );
+
+  // Get credential provider from settings provider
+  const getCredentialProvider = (provider: ProviderType): CredentialProvider | null => {
+    switch (provider) {
       case 'openai':
-        return (
-          <div>
-            <label htmlFor="openai-api-key" className="block text-sm font-medium text-editor-text-muted mb-1">
-              OpenAI API Key
-            </label>
-            <input
-              id="openai-api-key"
-              type="password"
-              value={settings.openaiApiKey || ''}
-              onChange={(e) => handleApiKeyChange('openaiApiKey', e.target.value)}
-              placeholder="sk-..."
-              disabled={disabled}
-              className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text placeholder-editor-text-muted focus:outline-none focus:border-primary-500 disabled:opacity-50"
-            />
-          </div>
-        );
+        return 'openai';
       case 'anthropic':
-        return (
-          <div>
-            <label htmlFor="anthropic-api-key" className="block text-sm font-medium text-editor-text-muted mb-1">
-              Anthropic API Key
-            </label>
-            <input
-              id="anthropic-api-key"
-              type="password"
-              value={settings.anthropicApiKey || ''}
-              onChange={(e) => handleApiKeyChange('anthropicApiKey', e.target.value)}
-              placeholder="sk-ant-..."
-              disabled={disabled}
-              className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text placeholder-editor-text-muted focus:outline-none focus:border-primary-500 disabled:opacity-50"
-            />
-          </div>
-        );
+        return 'anthropic';
       case 'gemini':
-        return (
-          <div>
-            <label htmlFor="google-api-key" className="block text-sm font-medium text-editor-text-muted mb-1">
-              Google API Key
-            </label>
-            <input
-              id="google-api-key"
-              type="password"
-              value={settings.googleApiKey || ''}
-              onChange={(e) => handleApiKeyChange('googleApiKey', e.target.value)}
-              placeholder="AIza..."
-              disabled={disabled}
-              className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text placeholder-editor-text-muted focus:outline-none focus:border-primary-500 disabled:opacity-50"
-            />
-          </div>
-        );
-      case 'local':
-        return (
-          <div>
-            <label htmlFor="ollama-url" className="block text-sm font-medium text-editor-text-muted mb-1">
-              Ollama URL
-            </label>
-            <input
-              id="ollama-url"
-              type="text"
-              value={settings.ollamaUrl || ''}
-              onChange={(e) => handleApiKeyChange('ollamaUrl', e.target.value)}
-              placeholder="http://localhost:11434"
-              disabled={disabled}
-              className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text placeholder-editor-text-muted focus:outline-none focus:border-primary-500 disabled:opacity-50"
-            />
-          </div>
-        );
+        return 'google';
       default:
         return null;
     }
+  };
+
+  // Render API key field based on provider
+  const renderApiKeyField = () => {
+    const credentialProvider = getCredentialProvider(settings.primaryProvider);
+
+    if (settings.primaryProvider === 'local') {
+      return (
+        <div>
+          <label
+            htmlFor="ollama-url"
+            className="block text-sm font-medium text-editor-text-muted mb-1"
+          >
+            Ollama URL
+          </label>
+          <input
+            id="ollama-url"
+            type="text"
+            value={settings.ollamaUrl || ''}
+            onChange={handleOllamaUrlChange}
+            placeholder="http://localhost:11434"
+            disabled={disabled}
+            className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text placeholder-editor-text-muted focus:outline-none focus:border-primary-500 disabled:opacity-50"
+          />
+          <p className="mt-1 text-xs text-editor-text-muted">
+            URL of your Ollama server. Ensure Ollama is running.
+          </p>
+        </div>
+      );
+    }
+
+    if (!credentialProvider) return null;
+
+    const providerLabels: Record<CredentialProvider, { label: string; placeholder: string }> = {
+      openai: { label: 'OpenAI API Key', placeholder: 'sk-...' },
+      anthropic: { label: 'Anthropic API Key', placeholder: 'sk-ant-...' },
+      google: { label: 'Google API Key', placeholder: 'AIza...' },
+    };
+
+    const { label, placeholder } = providerLabels[credentialProvider];
+
+    return (
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <label className="block text-sm font-medium text-editor-text-muted">{label}</label>
+          <StatusBadge
+            isConfigured={credentialStatus[credentialProvider]}
+            isLoading={credentialsLoading}
+          />
+        </div>
+        <SecureApiKeyInput
+          provider={credentialProvider}
+          placeholder={placeholder}
+          disabled={disabled}
+        />
+      </div>
+    );
   };
 
   return (
@@ -229,7 +491,10 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
         <div className="space-y-4">
           {/* Provider Selection */}
           <div>
-            <label htmlFor="primary-provider" className="block text-sm font-medium text-editor-text-muted mb-1">
+            <label
+              htmlFor="primary-provider"
+              className="block text-sm font-medium text-editor-text-muted mb-1"
+            >
               Primary Provider
             </label>
             <select
@@ -245,27 +510,31 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
                 </option>
               ))}
             </select>
+            <p className="mt-1 text-xs text-editor-text-muted">
+              {PROVIDER_OPTIONS.find((o) => o.value === settings.primaryProvider)?.description}
+            </p>
           </div>
 
           {/* API Key / URL Field */}
           {renderApiKeyField()}
 
-          {/* Model Input */}
+          {/* Model Selection */}
           <div>
-            <label htmlFor="primary-model" className="block text-sm font-medium text-editor-text-muted mb-1">
+            <label
+              htmlFor="primary-model"
+              className="block text-sm font-medium text-editor-text-muted mb-1"
+            >
               Model
             </label>
-            <input
+            <ModelSelector
               id="primary-model"
-              type="text"
+              provider={settings.primaryProvider}
               value={settings.primaryModel}
-              onChange={(e) => onUpdate({ primaryModel: e.target.value })}
-              placeholder="Enter model name"
+              onChange={handleModelChange}
               disabled={disabled}
-              className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text placeholder-editor-text-muted focus:outline-none focus:border-primary-500 disabled:opacity-50"
             />
             <p className="mt-1 text-xs text-editor-text-muted">
-              e.g., gpt-4, claude-sonnet-4-5, gemini-2.5-flash, llama3:latest
+              Select the AI model to use for editing operations
             </p>
           </div>
         </div>
@@ -284,7 +553,7 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
               <label htmlFor="temperature" className="text-sm font-medium text-editor-text-muted">
                 Temperature
               </label>
-              <span className="text-sm text-editor-text">{settings.temperature}</span>
+              <span className="text-sm text-editor-text">{settings.temperature.toFixed(1)}</span>
             </div>
             <input
               id="temperature"
@@ -305,13 +574,16 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
 
           {/* Max Tokens */}
           <div>
-            <label htmlFor="max-tokens" className="block text-sm font-medium text-editor-text-muted mb-1">
+            <label
+              htmlFor="max-tokens"
+              className="block text-sm font-medium text-editor-text-muted mb-1"
+            >
               Max Tokens
             </label>
             <input
               id="max-tokens"
               type="number"
-              min="1"
+              min="256"
               max="128000"
               value={settings.maxTokens}
               onChange={handleMaxTokensChange}
@@ -319,7 +591,7 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
               className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text focus:outline-none focus:border-primary-500 disabled:opacity-50"
             />
             <p className="mt-1 text-xs text-editor-text-muted">
-              Maximum number of tokens in the response (1-128,000)
+              Maximum number of tokens in the response (256-128,000)
             </p>
           </div>
         </div>
@@ -327,11 +599,7 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
 
       {/* Cost Controls */}
       <section>
-        <CostControlPanel
-          settings={settings}
-          onUpdate={onUpdate}
-          disabled={disabled}
-        />
+        <CostControlPanel settings={settings} onUpdate={onUpdate} disabled={disabled} />
       </section>
 
       {/* Behavior Settings */}
@@ -343,7 +611,10 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
         <div className="space-y-4">
           {/* Proposal Review Mode */}
           <div>
-            <label htmlFor="proposal-review-mode" className="block text-sm font-medium text-editor-text-muted mb-1">
+            <label
+              htmlFor="proposal-review-mode"
+              className="block text-sm font-medium text-editor-text-muted mb-1"
+            >
               Proposal Review Mode
             </label>
             <select
@@ -360,7 +631,10 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
               ))}
             </select>
             <p className="mt-1 text-xs text-editor-text-muted">
-              {REVIEW_MODE_OPTIONS.find((o) => o.value === settings.proposalReviewMode)?.description}
+              {
+                REVIEW_MODE_OPTIONS.find((o) => o.value === settings.proposalReviewMode)
+                  ?.description
+              }
             </p>
           </div>
 
