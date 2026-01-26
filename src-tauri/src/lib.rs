@@ -571,14 +571,13 @@ mod tauri_app {
                     }
                 });
 
-                match pool_guard {
-                    Some(guard) => Some((
+                pool_guard.map(|guard| {
+                    (
                         Arc::clone(&guard.queue),
                         Arc::clone(&guard.active_jobs),
                         guard.num_workers(),
-                    )),
-                    None => None,
-                }
+                    )
+                })
             };
 
             // Only start workers if we successfully acquired the job pool
