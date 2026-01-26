@@ -53,6 +53,61 @@ export interface SearchBarProps {
 }
 
 // =============================================================================
+// Constants
+// =============================================================================
+
+/** Maximum allowed search query length */
+const MAX_QUERY_LENGTH = 500;
+
+/** Minimum debounce delay to prevent excessive API calls */
+const MIN_DEBOUNCE_MS = 50;
+
+/** Maximum debounce delay to ensure responsiveness */
+const MAX_DEBOUNCE_MS = 2000;
+
+// =============================================================================
+// Utility Functions
+// =============================================================================
+
+/**
+ * Sanitizes search input to prevent security issues and excessive length.
+ *
+ * @param input - Raw input string
+ * @param trimWhitespace - Whether to trim leading/trailing whitespace (default: false)
+ * @returns Sanitized string safe for display and search
+ *
+ * @remarks
+ * - Limits length to MAX_QUERY_LENGTH
+ * - Removes null bytes and control characters (except spaces, newlines, tabs)
+ * - Does NOT strip HTML entities (handled by React's JSX escaping)
+ * - Optionally trims whitespace (should only be done on submission, not during typing)
+ */
+function sanitizeSearchInput(input: string, trimWhitespace: boolean = false): string {
+  if (typeof input !== 'string') {
+    return '';
+  }
+
+  // Remove null bytes and control characters (except spaces, newlines, tabs)
+  // Keep space (0x20), tab (0x09), and newline (0x0A, 0x0D)
+  // eslint-disable-next-line no-control-regex -- Intentionally matching control characters for sanitization
+  const cleaned = input.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+
+  // Limit length and optionally trim
+  const limited = cleaned.slice(0, MAX_QUERY_LENGTH);
+  return trimWhitespace ? limited.trim() : limited;
+}
+
+/**
+ * Validates and normalizes debounce delay.
+ */
+function normalizeDebounceMs(delay: number | undefined): number {
+  if (typeof delay !== 'number' || !Number.isFinite(delay)) {
+    return 300; // default
+  }
+  return Math.max(MIN_DEBOUNCE_MS, Math.min(MAX_DEBOUNCE_MS, delay));
+}
+
+// =============================================================================
 // Component
 // =============================================================================
 
@@ -68,20 +123,36 @@ export function SearchBar({
   className = '',
   isLoading = false,
   disabled = false,
-  debounceMs = 300,
+  debounceMs: rawDebounceMs = 300,
   id,
   label,
   'aria-label': ariaLabel,
 }: SearchBarProps) {
+  // Normalize debounce delay
+  const debounceMs = normalizeDebounceMs(rawDebounceMs);
+
   // Use controlled value if provided, otherwise use internal state
   const isControlled = controlledValue !== undefined;
   const [internalValue, setInternalValue] = useState('');
   const [isFocused, setIsFocused] = useState(false);
 
+  // Track mounted state for safe async updates
+  const isMountedRef = useRef(true);
   const inputRef = useRef<HTMLInputElement>(null);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const value = isControlled ? controlledValue : internalValue;
+  // Sanitize controlled value if provided
+  const value = isControlled
+    ? sanitizeSearchInput(controlledValue)
+    : internalValue;
+
+  // Track mounted state
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // ===========================================================================
   // Handlers
@@ -89,7 +160,8 @@ export function SearchBar({
 
   const handleChange = useCallback(
     (e: ChangeEvent<HTMLInputElement>) => {
-      const newValue = e.target.value;
+      // Sanitize input to prevent XSS and limit length
+      const newValue = sanitizeSearchInput(e.target.value);
 
       if (isControlled) {
         onChange?.(newValue);
@@ -100,12 +172,21 @@ export function SearchBar({
       // Clear existing debounce timer
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
+        debounceRef.current = null;
       }
 
       // Set up new debounce timer for onSearch
       if (onSearch) {
         debounceRef.current = setTimeout(() => {
-          onSearch(newValue);
+          // Verify component is still mounted before triggering search
+          if (isMountedRef.current) {
+            try {
+              onSearch(newValue);
+            } catch (error) {
+              // Defensive: Log but don't crash if search callback fails
+              console.error('Search callback failed:', error);
+            }
+          }
         }, debounceMs);
       }
     },
@@ -125,7 +206,13 @@ export function SearchBar({
       debounceRef.current = null;
     }
 
-    onClear?.();
+    try {
+      onClear?.();
+    } catch (error) {
+      // Defensive: Log but don't crash if clear callback fails
+      console.error('Clear callback failed:', error);
+    }
+
     inputRef.current?.focus();
   }, [isControlled, onChange, onClear]);
 
@@ -133,7 +220,18 @@ export function SearchBar({
     (e: KeyboardEvent<HTMLInputElement>) => {
       if (e.key === 'Enter') {
         e.preventDefault();
-        onSubmit?.(value);
+        // Cancel pending debounced search since we're submitting immediately
+        if (debounceRef.current) {
+          clearTimeout(debounceRef.current);
+          debounceRef.current = null;
+        }
+        try {
+          // Trim whitespace on submission
+          onSubmit?.(value.trim());
+        } catch (error) {
+          // Defensive: Log but don't crash if submit callback fails
+          console.error('Submit callback failed:', error);
+        }
       } else if (e.key === 'Escape') {
         e.preventDefault();
         handleClear();
@@ -163,6 +261,7 @@ export function SearchBar({
     return () => {
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
+        debounceRef.current = null;
       }
     };
   }, []);
@@ -187,7 +286,7 @@ export function SearchBar({
       {/* Search Icon */}
       <div
         data-testid="search-icon"
-        className="absolute left-3 pointer-events-none text-gray-400"
+        className="absolute left-3 pointer-events-none text-text-secondary"
       >
         <svg
           className="w-4 h-4"
@@ -219,11 +318,16 @@ export function SearchBar({
         placeholder={placeholder}
         disabled={disabled}
         aria-label={ariaLabel ?? label}
+        maxLength={MAX_QUERY_LENGTH}
+        autoComplete="off"
+        spellCheck="false"
+        aria-busy={isLoading}
+        aria-describedby={isLoading ? `${id}-loading` : undefined}
         className={`
           w-full pl-10 pr-8 py-2
-          bg-gray-800 border border-gray-700 rounded-lg
-          text-white placeholder-gray-500
-          focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent
+          bg-surface-active border border-border-default rounded-lg
+          text-text-primary placeholder-text-muted
+          focus:outline-none focus:ring-2 focus:ring-border-focus focus:border-transparent
           disabled:opacity-50 disabled:cursor-not-allowed
           transition-colors duration-150
         `}
@@ -232,8 +336,11 @@ export function SearchBar({
       {/* Loading Indicator */}
       {isLoading && (
         <div
+          id={id ? `${id}-loading` : undefined}
           data-testid="search-loading"
-          className="absolute right-3 text-gray-400"
+          className="absolute right-3 text-text-secondary"
+          role="status"
+          aria-label="Searching"
         >
           <svg
             className="w-4 h-4 animate-spin"
@@ -255,6 +362,7 @@ export function SearchBar({
               d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
             />
           </svg>
+          <span className="sr-only">Searching...</span>
         </div>
       )}
 
@@ -264,7 +372,7 @@ export function SearchBar({
           type="button"
           data-testid="search-clear-button"
           onClick={handleClear}
-          className="absolute right-3 text-gray-400 hover:text-white transition-colors"
+          className="absolute right-3 text-text-secondary hover:text-text-primary transition-colors"
           aria-label="Clear search"
         >
           <svg

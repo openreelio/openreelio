@@ -806,25 +806,25 @@ function App(): JSX.Element {
         showDetails={import.meta.env.DEV}
         showReloadButton={true}
         fallbackRender={({ error, resetError }) => (
-          <div className="flex flex-col items-center justify-center h-screen bg-editor-bg text-editor-text p-8 text-center">
-            <div className="text-red-500 text-6xl mb-4">⚠️</div>
-            <h1 className="text-2xl font-bold text-red-400 mb-2">Editor Error</h1>
-            <p className="text-editor-text-muted mb-6 max-w-md">
+          <div className="flex flex-col items-center justify-center h-screen bg-editor-bg text-editor-text p-4 sm:p-8 text-center">
+            <div className="text-status-error text-6xl mb-4">⚠️</div>
+            <h1 className="text-xl sm:text-2xl font-bold text-status-error mb-2">Editor Error</h1>
+            <p className="text-text-secondary mb-6 max-w-md px-4">
               The editor encountered an error. Your recent work may have been auto-saved.
             </p>
-            <p className="text-sm text-editor-text-muted mb-6 font-mono bg-editor-surface p-2 rounded max-w-md truncate">
+            <p className="text-sm text-text-muted mb-6 font-mono bg-surface-elevated p-2 rounded max-w-md w-full overflow-x-auto">
               {error.message}
             </p>
-            <div className="flex gap-4">
+            <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 w-full sm:w-auto px-4">
               <button
                 onClick={resetError}
-                className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded transition-colors"
+                className="px-6 py-2 bg-primary-600 hover:bg-primary-500 text-white rounded transition-colors"
               >
                 Try Again
               </button>
               <button
                 onClick={() => window.location.reload()}
-                className="px-6 py-2 bg-gray-600 hover:bg-gray-500 text-white rounded transition-colors"
+                className="px-6 py-2 bg-surface-active hover:bg-surface-highest text-text-primary rounded transition-colors"
               >
                 Reload Application
               </button>

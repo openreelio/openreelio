@@ -275,3 +275,9 @@ export type {
   ShotDetectionResult,
   UseShotDetectionReturn,
 } from './useShotDetection';
+
+export { usePlayheadDrag } from './usePlayheadDrag';
+export type {
+  UsePlayheadDragOptions,
+  UsePlayheadDragResult,
+} from './usePlayheadDrag';

@@ -103,7 +103,9 @@ describe('SearchResults', () => {
       render(<SearchResults results={mockResults} />);
 
       // 10.5 -> 0:10, 15.0 -> 0:15
-      expect(screen.getByText('0:10 - 0:15')).toBeInTheDocument();
+      // Times are now wrapped in <time> elements for semantic HTML
+      expect(screen.getByText('0:10')).toBeInTheDocument();
+      expect(screen.getByText('0:15')).toBeInTheDocument();
     });
 
     it('should display relevance score as percentage', () => {

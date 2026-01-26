@@ -98,20 +98,20 @@ export function FFmpegWarning({
       {/* Backdrop */}
       <div
         data-testid="ffmpeg-warning-backdrop"
-        className="absolute inset-0 bg-black/60"
+        className="absolute inset-0 bg-surface-overlay backdrop-blur-sm"
         onClick={handleBackdropClick}
       />
 
       {/* Dialog Content */}
       <div
-        className="relative z-10 w-full max-w-lg bg-gray-800 rounded-lg shadow-xl p-6"
+        className="relative z-10 w-[calc(100%-2rem)] max-w-lg mx-4 bg-surface-elevated rounded-lg shadow-xl p-6 border border-border-default"
         onClick={handleDialogClick}
       >
         {/* Warning Icon & Title */}
         <div className="flex items-start gap-4 mb-4">
-          <div className="flex-shrink-0 w-12 h-12 bg-yellow-600/20 rounded-full flex items-center justify-center">
+          <div className="flex-shrink-0 w-12 h-12 bg-status-warning/20 rounded-full flex items-center justify-center">
             <svg
-              className="w-6 h-6 text-yellow-500"
+              className="w-6 h-6 text-status-warning"
               fill="none"
               viewBox="0 0 24 24"
               stroke="currentColor"
@@ -124,33 +124,33 @@ export function FFmpegWarning({
               />
             </svg>
           </div>
-          <div>
-            <h2 id={titleId} className="text-lg font-semibold text-white">
+          <div className="min-w-0">
+            <h2 id={titleId} className="text-lg font-semibold text-text-primary">
               FFmpeg Not Found
             </h2>
-            <p className="text-gray-400 text-sm mt-1">
+            <p className="text-text-secondary text-sm mt-1">
               FFmpeg is required for video processing, preview, and export.
             </p>
           </div>
         </div>
 
         {/* Installation Instructions */}
-        <div className="bg-gray-900 rounded-lg p-4 mb-4">
-          <h3 className="text-sm font-medium text-gray-300 mb-3">
+        <div className="bg-surface-base rounded-lg p-4 mb-4">
+          <h3 className="text-sm font-medium text-text-secondary mb-3">
             Installation Instructions
           </h3>
 
           {/* Windows */}
           <div className="mb-3">
-            <div className="flex items-center gap-2 text-sm text-gray-400 mb-1">
-              <span className="font-medium text-gray-300">Windows:</span>
+            <div className="flex items-center gap-2 text-sm text-text-secondary mb-1">
+              <span className="font-medium text-text-primary">Windows:</span>
             </div>
-            <ol className="text-xs text-gray-400 list-decimal list-inside space-y-1 ml-2">
+            <ol className="text-xs text-text-secondary list-decimal list-inside space-y-1 ml-2">
               <li>
                 Download from{' '}
                 <button
                   type="button"
-                  className="text-blue-400 hover:text-blue-300 underline"
+                  className="text-primary-400 hover:text-primary-300 underline"
                   onClick={() => handleOpenLink(FFMPEG_WINDOWS_URL)}
                 >
                   gyan.dev/ffmpeg/builds
@@ -163,35 +163,35 @@ export function FFmpegWarning({
 
           {/* macOS */}
           <div className="mb-3">
-            <div className="flex items-center gap-2 text-sm text-gray-400 mb-1">
-              <span className="font-medium text-gray-300">macOS:</span>
+            <div className="flex items-center gap-2 text-sm text-text-secondary mb-1">
+              <span className="font-medium text-text-primary">macOS:</span>
             </div>
-            <code className="block text-xs bg-gray-800 text-green-400 px-2 py-1 rounded ml-2">
+            <code className="block text-xs bg-surface-active text-status-success px-2 py-1 rounded ml-2 font-mono">
               {FFMPEG_MAC_HOMEBREW}
             </code>
           </div>
 
           {/* Linux */}
           <div>
-            <div className="flex items-center gap-2 text-sm text-gray-400 mb-1">
-              <span className="font-medium text-gray-300">Linux (Debian/Ubuntu):</span>
+            <div className="flex items-center gap-2 text-sm text-text-secondary mb-1">
+              <span className="font-medium text-text-primary">Linux (Debian/Ubuntu):</span>
             </div>
-            <code className="block text-xs bg-gray-800 text-green-400 px-2 py-1 rounded ml-2">
+            <code className="block text-xs bg-surface-active text-status-success px-2 py-1 rounded ml-2 font-mono">
               {FFMPEG_LINUX_APT}
             </code>
           </div>
         </div>
 
         {/* Note */}
-        <p className="text-xs text-gray-500 mb-4">
+        <p className="text-xs text-text-muted mb-4">
           After installing FFmpeg, restart OpenReelio for changes to take effect.
         </p>
 
         {/* Actions */}
-        <div className="flex justify-end gap-3">
+        <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3">
           <button
             type="button"
-            className="px-4 py-2 text-sm font-medium text-gray-300 bg-gray-700 rounded hover:bg-gray-600 transition-colors"
+            className="px-4 py-2 text-sm font-medium text-text-secondary bg-surface-active rounded hover:bg-surface-highest transition-colors"
             onClick={() => handleOpenLink(FFMPEG_DOWNLOAD_URL)}
           >
             Official Download
@@ -201,7 +201,7 @@ export function FFmpegWarning({
               ref={dismissButtonRef}
               data-testid="ffmpeg-warning-dismiss"
               type="button"
-              className="px-4 py-2 text-sm font-medium text-white bg-yellow-600 rounded hover:bg-yellow-700 transition-colors"
+              className="px-4 py-2 text-sm font-medium text-white bg-status-warning rounded hover:brightness-110 transition-colors"
               onClick={onDismiss}
             >
               Continue Anyway

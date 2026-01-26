@@ -123,30 +123,30 @@ export function ConfirmDialog({
       {/* Backdrop */}
       <div
         data-testid="dialog-backdrop"
-        className="absolute inset-0 bg-black/50"
+        className="absolute inset-0 bg-surface-overlay backdrop-blur-sm"
         onClick={handleBackdropClick}
       />
 
       {/* Dialog Content */}
       <div
-        className="relative z-10 w-full max-w-md bg-gray-800 rounded-lg shadow-xl p-6"
+        className="relative z-10 w-[calc(100%-2rem)] max-w-md mx-4 bg-surface-elevated rounded-lg shadow-xl p-6 border border-border-default"
         onClick={handleDialogClick}
       >
         {/* Title */}
-        <h2 id={titleId} className="text-lg font-semibold text-white mb-2">
+        <h2 id={titleId} className="text-lg font-semibold text-text-primary mb-2">
           {title}
         </h2>
 
         {/* Message */}
-        <p className="text-gray-300 mb-6">{message}</p>
+        <p className="text-text-secondary mb-6 break-words">{message}</p>
 
         {/* Actions */}
-        <div className="flex justify-end gap-3">
+        <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3">
           <button
             ref={cancelButtonRef}
             data-testid="cancel-button"
             type="button"
-            className="px-4 py-2 text-sm font-medium text-gray-300 bg-gray-700 rounded hover:bg-gray-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            className="px-4 py-2 text-sm font-medium text-text-secondary bg-surface-active rounded hover:bg-surface-highest transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             onClick={onCancel}
             disabled={isLoading}
           >
@@ -155,7 +155,7 @@ export function ConfirmDialog({
           <button
             data-testid="confirm-button"
             type="button"
-            className={`px-4 py-2 text-sm font-medium text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 ${VARIANT_CLASSES[variant]}`}
+            className={`px-4 py-2 text-sm font-medium text-white rounded transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 ${VARIANT_CLASSES[variant]}`}
             onClick={onConfirm}
             disabled={isLoading}
           >
