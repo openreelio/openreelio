@@ -29,6 +29,49 @@ use crate::core::{
 use crate::ipc::serialize_to_json_string;
 use crate::{ActiveProject, AppState};
 
+/// Attempts to remove a lock file with retries.
+///
+/// On Windows, file locks can persist briefly after the handle is dropped.
+/// This function retries removal with exponential backoff to handle transient failures.
+fn remove_lock_file_with_retry(lock_path: &std::path::Path) {
+    const MAX_RETRIES: u32 = 3;
+    const INITIAL_DELAY_MS: u64 = 50;
+
+    for attempt in 0..MAX_RETRIES {
+        match std::fs::remove_file(lock_path) {
+            Ok(_) => {
+                tracing::debug!("Lock file removed successfully: {}", lock_path.display());
+                return;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // File already removed, nothing to do
+                return;
+            }
+            Err(e) => {
+                if attempt < MAX_RETRIES - 1 {
+                    let delay = INITIAL_DELAY_MS * (1 << attempt); // Exponential backoff
+                    tracing::debug!(
+                        "Failed to remove lock file (attempt {}/{}): {}. Retrying in {}ms...",
+                        attempt + 1,
+                        MAX_RETRIES,
+                        e,
+                        delay
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(delay));
+                } else {
+                    tracing::warn!(
+                        "Failed to remove lock file after {} attempts: {}. \
+                         File may need manual cleanup: {}",
+                        MAX_RETRIES,
+                        e,
+                        lock_path.display()
+                    );
+                }
+            }
+        }
+    }
+}
+
 fn allow_project_asset_protocol(
     state: &AppState,
     project_path: &std::path::Path,
@@ -226,8 +269,9 @@ pub async fn create_project(
 
     // Release lock and clean up lock file.
     // Dropping the file handle releases the OS-level lock.
+    // On Windows, the lock may persist briefly, so we use retry logic.
     drop(lock_file);
-    let _ = std::fs::remove_file(&lock_path);
+    remove_lock_file_with_retry(&lock_path);
 
     let project = result?;
 
@@ -4700,6 +4744,195 @@ fn merge_json(base: &mut serde_json::Value, patch: serde_json::Value) {
             *base = patch;
         }
     }
+}
+
+// =============================================================================
+// Credential Commands (Secure API Key Storage)
+// =============================================================================
+
+use crate::core::credentials::{CredentialType, CredentialVault};
+
+/// Status of credentials for each provider
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialStatusDto {
+    pub openai: bool,
+    pub anthropic: bool,
+    pub google: bool,
+}
+
+/// Stores an API key securely in the encrypted vault
+///
+/// The API key is encrypted at rest using XChaCha20-Poly1305 and stored
+/// in a secure vault file. Keys are never stored in plaintext.
+#[tauri::command]
+pub async fn store_credential(
+    app: tauri::AppHandle,
+    provider: String,
+    api_key: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let app_data_dir = get_app_data_dir(&app)?;
+    let vault_path = app_data_dir.join("credentials.vault");
+
+    // Lazily initialize and then reuse the in-memory vault instance.
+    // This avoids expensive key derivation and prevents file-level races.
+    let mut guard = state.credential_vault.lock().await;
+    if guard.is_none() {
+        *guard = Some(
+            CredentialVault::new(vault_path)
+                .map_err(|e| format!("Failed to initialize credential vault: {}", e))?,
+        );
+    }
+    let vault = guard
+        .as_ref()
+        .ok_or_else(|| "Credential vault unavailable".to_string())?;
+
+    let credential_type: CredentialType = provider
+        .parse()
+        .map_err(|e: crate::core::credentials::CredentialError| e.to_string())?;
+
+    vault
+        .store(credential_type, &api_key)
+        .await
+        .map_err(|e| format!("Failed to store credential: {}", e))?;
+
+    tracing::info!("Stored credential for provider: {}", provider);
+
+    Ok(())
+}
+
+/// Retrieves an API key from the encrypted vault
+///
+/// Returns the decrypted API key. The key is only decrypted in memory
+/// and is never written to disk in plaintext.
+#[tauri::command]
+pub async fn get_credential(app: tauri::AppHandle, provider: String) -> Result<String, String> {
+    let app_data_dir = get_app_data_dir(&app)?;
+    let vault_path = app_data_dir.join("credentials.vault");
+
+    if !vault_path.exists() {
+        return Err("No credentials stored".to_string());
+    }
+
+    let state = app.state::<AppState>();
+    let mut guard = state.credential_vault.lock().await;
+    if guard.is_none() {
+        *guard = Some(
+            CredentialVault::new(vault_path)
+                .map_err(|e| format!("Failed to initialize credential vault: {}", e))?,
+        );
+    }
+    let vault = guard
+        .as_ref()
+        .ok_or_else(|| "Credential vault unavailable".to_string())?;
+
+    let credential_type: CredentialType = provider
+        .parse()
+        .map_err(|e: crate::core::credentials::CredentialError| e.to_string())?;
+
+    vault
+        .retrieve(credential_type)
+        .await
+        .map_err(|e| format!("Failed to retrieve credential: {}", e))
+}
+
+/// Checks if a credential exists in the vault (without retrieving it)
+#[tauri::command]
+pub async fn has_credential(app: tauri::AppHandle, provider: String) -> Result<bool, String> {
+    let app_data_dir = get_app_data_dir(&app)?;
+    let vault_path = app_data_dir.join("credentials.vault");
+
+    if !vault_path.exists() {
+        return Ok(false);
+    }
+
+    let state = app.state::<AppState>();
+    let mut guard = state.credential_vault.lock().await;
+    if guard.is_none() {
+        *guard = Some(
+            CredentialVault::new(vault_path)
+                .map_err(|e| format!("Failed to initialize credential vault: {}", e))?,
+        );
+    }
+    let vault = guard
+        .as_ref()
+        .ok_or_else(|| "Credential vault unavailable".to_string())?;
+
+    let credential_type: CredentialType = provider
+        .parse()
+        .map_err(|e: crate::core::credentials::CredentialError| e.to_string())?;
+
+    Ok(vault.exists(credential_type).await)
+}
+
+/// Deletes a credential from the vault
+#[tauri::command]
+pub async fn delete_credential(app: tauri::AppHandle, provider: String) -> Result<(), String> {
+    let app_data_dir = get_app_data_dir(&app)?;
+    let vault_path = app_data_dir.join("credentials.vault");
+
+    if !vault_path.exists() {
+        return Ok(());
+    }
+
+    let state = app.state::<AppState>();
+    let mut guard = state.credential_vault.lock().await;
+    if guard.is_none() {
+        *guard = Some(
+            CredentialVault::new(vault_path)
+                .map_err(|e| format!("Failed to initialize credential vault: {}", e))?,
+        );
+    }
+    let vault = guard
+        .as_ref()
+        .ok_or_else(|| "Credential vault unavailable".to_string())?;
+
+    let credential_type: CredentialType = provider
+        .parse()
+        .map_err(|e: crate::core::credentials::CredentialError| e.to_string())?;
+
+    vault
+        .delete(credential_type)
+        .await
+        .map_err(|e| format!("Failed to delete credential: {}", e))?;
+
+    tracing::info!("Deleted credential for provider: {}", provider);
+
+    Ok(())
+}
+
+/// Gets the status of all credentials (which ones are configured)
+#[tauri::command]
+pub async fn get_credential_status(app: tauri::AppHandle) -> Result<CredentialStatusDto, String> {
+    let app_data_dir = get_app_data_dir(&app)?;
+    let vault_path = app_data_dir.join("credentials.vault");
+
+    if !vault_path.exists() {
+        return Ok(CredentialStatusDto {
+            openai: false,
+            anthropic: false,
+            google: false,
+        });
+    }
+
+    let state = app.state::<AppState>();
+    let mut guard = state.credential_vault.lock().await;
+    if guard.is_none() {
+        *guard = Some(
+            CredentialVault::new(vault_path)
+                .map_err(|e| format!("Failed to initialize credential vault: {}", e))?,
+        );
+    }
+    let vault = guard
+        .as_ref()
+        .ok_or_else(|| "Credential vault unavailable".to_string())?;
+
+    Ok(CredentialStatusDto {
+        openai: vault.exists(CredentialType::OpenaiApiKey).await,
+        anthropic: vault.exists(CredentialType::AnthropicApiKey).await,
+        google: vault.exists(CredentialType::GoogleApiKey).await,
+    })
 }
 
 // =============================================================================
