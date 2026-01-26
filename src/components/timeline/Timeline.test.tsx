@@ -200,8 +200,8 @@ describe('Timeline', () => {
       render(<Timeline sequence={mockSequence} />);
 
       const playhead = screen.getByTestId('playhead');
-      // At 5 seconds with zoom 100px/sec = 500px
-      expect(playhead).toHaveStyle({ left: '500px' });
+      // At 5 seconds with zoom 100px/sec + trackHeaderWidth(192) = 692px
+      expect(playhead).toHaveStyle({ left: '692px' });
     });
 
     // TODO: This test requires TimelineEngine to be properly synced with playbackStore.
