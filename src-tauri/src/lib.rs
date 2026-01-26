@@ -193,6 +193,13 @@ pub struct AppState {
     pub search_service: Mutex<Option<std::sync::Arc<SearchService>>>,
     /// AppHandle captured at startup for scope configuration helpers.
     pub app_handle: OnceLock<tauri::AppHandle>,
+
+    /// Encrypted credential vault (lazy initialized).
+    ///
+    /// This is intentionally kept behind a process-wide mutex:
+    /// - prevents concurrent reads/writes from racing on the vault file
+    /// - avoids re-deriving keys and re-reading the vault on every IPC call
+    pub credential_vault: Mutex<Option<crate::core::credentials::CredentialVault>>,
 }
 
 #[cfg(not(test))]
@@ -207,6 +214,7 @@ impl AppState {
             ai_gateway: Mutex::new(AIGateway::with_defaults()),
             search_service: Mutex::new(None),
             app_handle: OnceLock::new(),
+            credential_vault: Mutex::new(None),
         }
     }
 
@@ -425,6 +433,12 @@ mod tauri_app {
                 $crate::ipc::set_settings,
                 $crate::ipc::update_settings,
                 $crate::ipc::reset_settings,
+                // Credentials (Secure API Key Storage)
+                $crate::ipc::store_credential,
+                $crate::ipc::get_credential,
+                $crate::ipc::has_credential,
+                $crate::ipc::delete_credential,
+                $crate::ipc::get_credential_status,
                 // Updates
                 $crate::ipc::check_for_updates,
                 $crate::ipc::get_current_version,
@@ -466,17 +480,36 @@ mod tauri_app {
             let app_state: tauri::State<'_, AppState> = app.state();
             app_state.set_app_handle(app.handle().clone());
 
-            // Defense-in-depth: explicitly forbid access to the webview data directory.
-            if let Ok(local_data) = app.path().app_local_data_dir() {
-                app_state.forbid_asset_protocol_directory(&local_data, true);
-            }
-
-            // Allow app-managed cache/data directories.
+            // Allow app-managed cache/data directories first.
+            // These directories are used for proxies, thumbnails, frames, and other generated files.
             if let Ok(cache_dir) = app.path().app_cache_dir() {
+                tracing::debug!("Allowing asset protocol for cache dir: {}", cache_dir.display());
                 app_state.allow_asset_protocol_directory(&cache_dir, true);
             }
+            // Do NOT blanket-allow app_data_dir for the asset protocol.
+            // It can contain sensitive files (e.g. credential vaults) that should only be accessed
+            // via privileged IPC commands.
             if let Ok(data_dir) = app.path().app_data_dir() {
-                app_state.allow_asset_protocol_directory(&data_dir, true);
+                let vault_path = data_dir.join("credentials.vault");
+                if vault_path.exists() {
+                    tracing::debug!(
+                        "Forbidding asset protocol for credential vault: {}",
+                        vault_path.display()
+                    );
+                    app_state.forbid_asset_protocol_file(&vault_path);
+                }
+            }
+
+            // Defense-in-depth: forbid access to WebView internal data.
+            // On Windows, app_local_data_dir and app_cache_dir often overlap, so we only forbid
+            // the specific WebView data subdirectory to avoid blocking legitimate cache access.
+            // The EBWebView directory contains Microsoft Edge WebView2 runtime data.
+            if let Ok(local_data) = app.path().app_local_data_dir() {
+                let webview_data = local_data.join("EBWebView");
+                if webview_data.exists() {
+                    tracing::debug!("Forbidding asset protocol for WebView data: {}", webview_data.display());
+                    app_state.forbid_asset_protocol_directory(&webview_data, true);
+                }
             }
 
             // Initialize FFmpeg
@@ -519,39 +552,66 @@ mod tauri_app {
             let job_queue = {
                 // Use blocking to get the Arc references from WorkerPool
                 // This is safe during setup since we're not in an async context yet
-                let pool_guard =
-                    tauri::async_runtime::block_on(async { app_state.job_pool.lock().await });
-                (
-                    Arc::clone(&pool_guard.queue),
-                    Arc::clone(&pool_guard.active_jobs),
-                    pool_guard.num_workers(),
-                )
+                // Add timeout to prevent deadlock if lock is held during setup
+                let pool_guard = tauri::async_runtime::block_on(async {
+                    match tokio::time::timeout(
+                        tokio::time::Duration::from_secs(10),
+                        app_state.job_pool.lock(),
+                    )
+                    .await
+                    {
+                        Ok(guard) => Some(guard),
+                        Err(_) => {
+                            tracing::error!(
+                                "Timeout acquiring job pool lock during startup. \
+                                 Worker pool initialization skipped."
+                            );
+                            None
+                        }
+                    }
+                });
+
+                match pool_guard {
+                    Some(guard) => Some((
+                        Arc::clone(&guard.queue),
+                        Arc::clone(&guard.active_jobs),
+                        guard.num_workers(),
+                    )),
+                    None => None,
+                }
             };
 
-            let (queue_arc, active_jobs_arc, num_workers) = job_queue;
-            let shutdown_clone = Arc::clone(&shutdown);
+            // Only start workers if we successfully acquired the job pool
+            if let Some((queue_arc, active_jobs_arc, num_workers)) = job_queue {
+                let shutdown_clone = Arc::clone(&shutdown);
 
-            // Spawn workers using the cloned Arc references
-            tauri::async_runtime::spawn(async move {
-                // Wait for FFmpeg to initialize
-                tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+                // Spawn workers using the cloned Arc references
+                tauri::async_runtime::spawn(async move {
+                    // Wait for FFmpeg to initialize
+                    tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
 
-                // Start worker tasks that consume from the queue
-                crate::core::jobs::start_workers_with_arcs(
-                    queue_arc,
-                    active_jobs_arc,
-                    num_workers,
-                    ffmpeg_for_workers,
-                    app_handle_for_workers,
-                    cache_dir,
-                    shutdown_clone,
+                    // Start worker tasks that consume from the queue
+                    crate::core::jobs::start_workers_with_arcs(
+                        queue_arc,
+                        active_jobs_arc,
+                        num_workers,
+                        ffmpeg_for_workers,
+                        app_handle_for_workers,
+                        cache_dir,
+                        shutdown_clone,
+                    );
+
+                    tracing::info!(
+                        "Started {} background workers for job processing",
+                        num_workers
+                    );
+                });
+            } else {
+                tracing::warn!(
+                    "Background worker pool not started due to lock acquisition failure. \
+                     Background jobs may not be processed."
                 );
-
-                tracing::info!(
-                    "Started {} background workers for job processing",
-                    num_workers
-                );
-            });
+            }
 
             // Initialize Meilisearch service (optional)
             #[cfg(feature = "meilisearch")]
@@ -655,6 +715,12 @@ mod tauri_app {
             ipc::set_settings,
             ipc::update_settings,
             ipc::reset_settings,
+            // Credentials (Secure API Key Storage)
+            ipc::store_credential,
+            ipc::get_credential,
+            ipc::has_credential,
+            ipc::delete_credential,
+            ipc::get_credential_status,
             // Updates
             ipc::check_for_updates,
             ipc::get_current_version,
