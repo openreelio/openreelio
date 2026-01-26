@@ -92,7 +92,7 @@ hound = "3.5"
 whisper-rs = { version = "0.15", optional = true }
 
 # Meilisearch client (optional - enabled via meilisearch feature)
-meilisearch-sdk = { version = "0.27", optional = true }
+meilisearch-sdk = { version = "0.32", optional = true }
 futures = { version = "0.3", optional = true }
 
 # WASM Plugin System
