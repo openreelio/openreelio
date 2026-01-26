@@ -35,6 +35,9 @@ test.describe('Application Smoke Tests', () => {
         errors.push(msg.text());
       }
     });
+    page.on('pageerror', (error) => {
+      errors.push(error.stack ?? error.message);
+    });
 
     await page.goto('/');
     await page.waitForLoadState('networkidle');

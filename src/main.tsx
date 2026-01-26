@@ -11,7 +11,13 @@ const logger = createLogger('Root');
  * Root error fallback for catastrophic failures.
  * Shows a basic UI that allows the user to reload the application.
  */
-function RootErrorFallback({ error, resetError }: { error: Error; resetError: () => void }) {
+export function RootErrorFallback({
+  error,
+  resetError,
+}: {
+  error: Error;
+  resetError: () => void;
+}) {
   return (
     <div
       style={{
