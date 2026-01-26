@@ -4,16 +4,18 @@
  * Application header with branding, project info, menu bar, and toolbar.
  */
 
-import { X, Save, FolderOpen, Download, Search, Settings } from 'lucide-react';
+import { X, Save, FolderOpen, Download, Search, Settings, Check, Loader2, AlertCircle } from 'lucide-react';
 import { UndoRedoButtons } from '@/components/ui';
 import { SearchPanel } from '@/components/features/search';
 import { SettingsDialog } from '@/components/features/settings';
 import { ShortcutsDialog } from '@/components/features/help';
 import { useProjectStore } from '@/stores';
-import { useCallback, useState, useEffect } from 'react';
+import { useCallback, useState, useEffect, useRef } from 'react';
 import { createLogger } from '@/services/logger';
 import { updateService } from '@/services/updateService';
 import type { AssetSearchResultItem } from '@/hooks/useSearch';
+
+type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 const logger = createLogger('Header');
 
@@ -46,8 +48,12 @@ export function Header({
   onSearchResultSelect,
 }: HeaderProps) {
   const { meta, isDirty, closeProject, saveProject } = useProjectStore();
-  const [isSaving, setIsSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
   const [showCloseConfirm, setShowCloseConfirm] = useState(false);
+  const savedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Derived state for backward compatibility
+  const isSaving = saveStatus === 'saving';
   const [showSearch, setShowSearch] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -107,15 +113,38 @@ export function Header({
   );
 
   const handleSave = useCallback(async () => {
-    setIsSaving(true);
+    // Clear any existing "saved" timeout
+    if (savedTimeoutRef.current) {
+      clearTimeout(savedTimeoutRef.current);
+      savedTimeoutRef.current = null;
+    }
+
+    setSaveStatus('saving');
     try {
       await saveProject();
+      setSaveStatus('saved');
+      // Show "saved" for 3 seconds then return to idle
+      savedTimeoutRef.current = setTimeout(() => {
+        setSaveStatus('idle');
+      }, 3000);
     } catch (error) {
       logger.error('Failed to save project', { error });
-    } finally {
-      setIsSaving(false);
+      setSaveStatus('error');
+      // Show error for 5 seconds then return to idle
+      savedTimeoutRef.current = setTimeout(() => {
+        setSaveStatus('idle');
+      }, 5000);
     }
   }, [saveProject]);
+
+  // Cleanup timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (savedTimeoutRef.current) {
+        clearTimeout(savedTimeoutRef.current);
+      }
+    };
+  }, []);
 
   // Handle close button click - show confirmation if unsaved changes
   const handleCloseClick = useCallback(() => {
@@ -128,16 +157,15 @@ export function Header({
 
   // Save and close project
   const handleSaveAndClose = useCallback(async () => {
-    setIsSaving(true);
+    setSaveStatus('saving');
     try {
       await saveProject();
       setShowCloseConfirm(false);
       closeProject();
     } catch (error) {
       logger.error('Failed to save project', { error });
+      setSaveStatus('error');
       // Keep dialog open on error so user can retry or discard
-    } finally {
-      setIsSaving(false);
     }
   }, [saveProject, closeProject]);
 
@@ -167,11 +195,34 @@ export function Header({
           <div className="flex items-center gap-2">
             <FolderOpen className="w-4 h-4 text-editor-text-muted" />
             <span className="text-sm text-editor-text">{meta.name}</span>
-            {isDirty && (
-              <span className="text-xs text-yellow-500" title="Unsaved changes">
-                *
-              </span>
-            )}
+
+            {/* Save Status Indicator */}
+            <div className="flex items-center gap-1.5 ml-2">
+              {saveStatus === 'saving' && (
+                <span className="flex items-center gap-1 text-xs text-blue-400">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  Saving...
+                </span>
+              )}
+              {saveStatus === 'saved' && (
+                <span className="flex items-center gap-1 text-xs text-green-400">
+                  <Check className="w-3 h-3" />
+                  Saved
+                </span>
+              )}
+              {saveStatus === 'error' && (
+                <span className="flex items-center gap-1 text-xs text-red-400">
+                  <AlertCircle className="w-3 h-3" />
+                  Save failed
+                </span>
+              )}
+              {saveStatus === 'idle' && isDirty && (
+                <span className="flex items-center gap-1 text-xs text-yellow-500" title="Unsaved changes">
+                  <span className="w-2 h-2 bg-yellow-500 rounded-full" />
+                  Unsaved
+                </span>
+              )}
+            </div>
           </div>
         </>
       )}
@@ -205,10 +256,20 @@ export function Header({
           <button
             onClick={() => void handleSave()}
             disabled={!isDirty || isSaving}
-            className="p-1.5 rounded hover:bg-editor-bg transition-colors text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
-            title={isDirty ? 'Save project (Ctrl+S)' : 'No changes to save'}
+            className={`p-1.5 rounded hover:bg-editor-bg transition-colors disabled:cursor-not-allowed ${
+              isSaving
+                ? 'text-blue-400'
+                : isDirty
+                  ? 'text-yellow-500 hover:text-yellow-400'
+                  : 'text-editor-text-muted hover:text-editor-text disabled:opacity-50'
+            }`}
+            title={isSaving ? 'Saving...' : isDirty ? 'Save project (Ctrl+S)' : 'No changes to save'}
           >
-            <Save className="w-4 h-4" />
+            {isSaving ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Save className="w-4 h-4" />
+            )}
           </button>
 
           {/* Export Button */}
