@@ -7,6 +7,7 @@ pub mod ai;
 pub mod assets;
 pub mod captions;
 pub mod commands;
+pub mod credentials;
 pub mod effects;
 pub mod ffmpeg;
 pub mod fs;
