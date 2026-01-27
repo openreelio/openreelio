@@ -21,6 +21,14 @@ path = "src/main.rs"
 test = false
 bench = false
 
+[[bin]]
+name = "export_bindings"
+path = "src/bin/export_bindings.rs"
+# This is a developer utility binary; compiling it under `cargo test` is not required
+# and can break due to `cfg(test)` altering the app command surface.
+test = false
+bench = false
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 # FFmpeg bundler build dependencies

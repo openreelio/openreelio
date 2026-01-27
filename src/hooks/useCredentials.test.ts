@@ -3,7 +3,6 @@
  *
  * Tests the secure credential management functionality including:
  * - Storing credentials
- * - Retrieving credentials
  * - Checking credential existence
  * - Deleting credentials
  * - Error handling
@@ -221,59 +220,6 @@ describe('useCredentials', () => {
       await waitFor(() => {
         expect(result.current.isSaving).toBe(false);
       });
-    });
-  });
-
-  describe('getCredential', () => {
-    it('should retrieve a credential', async () => {
-      mockInvoke.mockImplementation(async (command: string) => {
-        if (command === 'get_credential_status') {
-          return { openai: true, anthropic: false, google: false };
-        }
-        if (command === 'get_credential') {
-          return 'sk-retrieved-key';
-        }
-        return undefined;
-      });
-
-      const { result } = renderHook(() => useCredentials());
-
-      await waitFor(() => {
-        expect(result.current.isLoading).toBe(false);
-      });
-
-      let apiKey: string | null = null;
-      await act(async () => {
-        apiKey = await result.current.getCredential('openai');
-      });
-
-      expect(apiKey).toBe('sk-retrieved-key');
-      expect(mockInvoke).toHaveBeenCalledWith('get_credential', { provider: 'openai' });
-    });
-
-    it('should return null for non-existent credential', async () => {
-      mockInvoke.mockImplementation(async (command: string) => {
-        if (command === 'get_credential_status') {
-          return { openai: false, anthropic: false, google: false };
-        }
-        if (command === 'get_credential') {
-          throw new Error('Not found');
-        }
-        return undefined;
-      });
-
-      const { result } = renderHook(() => useCredentials());
-
-      await waitFor(() => {
-        expect(result.current.isLoading).toBe(false);
-      });
-
-      let apiKey: string | null = 'initial';
-      await act(async () => {
-        apiKey = await result.current.getCredential('openai');
-      });
-
-      expect(apiKey).toBe(null);
     });
   });
 

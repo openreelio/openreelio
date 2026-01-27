@@ -18,6 +18,7 @@ import { useTimelineClipOperations } from '@/hooks/useTimelineClipOperations';
 import { useTimelineNavigation } from '@/hooks/useTimelineNavigation';
 import { useSelectionBox } from '@/hooks/useSelectionBox';
 import { useCaption } from '@/hooks/useCaption';
+import { useShotMarkers } from '@/hooks/useShotMarkers';
 import { TimeRuler } from './TimeRuler';
 import { Track } from './Track';
 import { CaptionTrack } from './CaptionTrack';
@@ -26,6 +27,7 @@ import { TimelineToolbar } from './TimelineToolbar';
 import { DragPreviewLayer } from './DragPreviewLayer';
 import { SnapIndicator, type SnapPoint } from './SnapIndicator';
 import { SelectionBox } from './SelectionBox';
+import { ShotMarkers } from './ShotMarkers';
 import { CaptionEditor } from '@/components/features/captions';
 import { CaptionExportDialog } from '@/components/features/export/CaptionExportDialog';
 import type { ClipWaveformConfig, ClipThumbnailConfig } from './Clip';
@@ -147,6 +149,29 @@ export function Timeline({
   const { updateCaption, deleteCaption } = useCaption();
 
   // ===========================================================================
+  // Shot Markers Hook
+  // ===========================================================================
+  // Find selected clip's asset for shot markers display
+  const selectedAssetInfo = useMemo(() => {
+    if (selectedClipIds.length !== 1 || !sequence) return null;
+
+    // Find the selected clip in any track
+    for (const track of sequence.tracks) {
+      const clip = track.clips.find((c) => c.id === selectedClipIds[0]);
+      if (clip) {
+        const asset = assets.get(clip.assetId);
+        if (asset && asset.kind === 'video') {
+          return {
+            assetId: asset.id,
+            videoPath: asset.uri,
+          };
+        }
+      }
+    }
+    return null;
+  }, [selectedClipIds, sequence, assets]);
+
+  // ===========================================================================
   // Viewport Width Measurement (for clip virtualization)
   // ===========================================================================
   useLayoutEffect(() => {
@@ -209,6 +234,16 @@ export function Timeline({
     stepForward,
     stepBackward,
   } = useTimelineEngine({ duration, fps: DEFAULT_FPS });
+
+  // ===========================================================================
+  // Shot Markers
+  // ===========================================================================
+  const { shots: shotMarkers } = useShotMarkers({
+    assetId: selectedAssetInfo?.assetId ?? null,
+    videoPath: selectedAssetInfo?.videoPath ?? null,
+    autoLoad: true,
+    onSeek: setPlayhead,
+  });
 
   // ===========================================================================
   // Coordinate System
@@ -636,6 +671,18 @@ export function Timeline({
             trackHeaderWidth={TRACK_HEADER_WIDTH}
             scrollX={scrollX}
           />
+          {/* Shot Markers - show detected shot boundaries for selected video clip */}
+          {shotMarkers.length > 0 && (
+            <ShotMarkers
+              shots={shotMarkers}
+              zoom={zoom}
+              scrollX={scrollX}
+              viewportWidth={viewportWidth}
+              duration={duration}
+              trackHeaderWidth={TRACK_HEADER_WIDTH}
+              onSeek={setPlayhead}
+            />
+          )}
           {isDraggingOver && (
             <div
               data-testid="drop-indicator"
