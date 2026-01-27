@@ -225,55 +225,74 @@ export function useJobs(options: UseJobsOptions = {}): UseJobsReturn {
       unlistenRefs.current = [];
 
       try {
-        // Listen for job progress events
-        const unlistenProgress = await listen<JobProgressEvent>(
-          'job-progress',
+        const addListeners = async <T>(
+          eventNames: readonly string[],
+          handler: Parameters<typeof listen<T>>[1]
+        ) => {
+          for (const name of eventNames) {
+            const unlisten = await listen<T>(name, handler);
+            unlistenRefs.current.push(unlisten);
+          }
+        };
+
+        await addListeners<JobProgressEvent>(
+          ['job-progress', 'job:progress'] as const,
           (event) => {
-            updateJobInState(event.payload.jobId, (job) => ({
-              ...job,
-              status: {
-                type: 'running',
-                progress: event.payload.progress,
-                message: event.payload.message,
-              },
-            }));
+            updateJobInState(event.payload.jobId, (job) => {
+              if (job.status.type === 'completed' || job.status.type === 'failed') {
+                return job;
+              }
+              return {
+                ...job,
+                status: {
+                  type: 'running',
+                  progress: event.payload.progress,
+                  message: event.payload.message,
+                },
+              };
+            });
           }
         );
-        unlistenRefs.current.push(unlistenProgress);
 
-        // Listen for job completion events
-        const unlistenComplete = await listen<JobCompleteEvent>(
-          'job-complete',
+        await addListeners<JobCompleteEvent>(
+          ['job-complete', 'job:completed'] as const,
           (event) => {
-            updateJobInState(event.payload.jobId, (job) => ({
-              ...job,
-              status: {
-                type: 'completed',
-                result: event.payload.result,
-              },
-              completedAt: new Date().toISOString(),
-            }));
+            updateJobInState(event.payload.jobId, (job) => {
+              if (job.status.type === 'completed') {
+                return job;
+              }
+              return {
+                ...job,
+                status: {
+                  type: 'completed',
+                  result: event.payload.result,
+                },
+                completedAt: new Date().toISOString(),
+              };
+            });
             void refreshStats();
           }
         );
-        unlistenRefs.current.push(unlistenComplete);
 
-        // Listen for job failure events
-        const unlistenFailed = await listen<JobFailedEvent>(
-          'job-failed',
+        await addListeners<JobFailedEvent>(
+          ['job-failed', 'job:failed'] as const,
           (event) => {
-            updateJobInState(event.payload.jobId, (job) => ({
-              ...job,
-              status: {
-                type: 'failed',
-                error: event.payload.error,
-              },
-              completedAt: new Date().toISOString(),
-            }));
+            updateJobInState(event.payload.jobId, (job) => {
+              if (job.status.type === 'failed') {
+                return job;
+              }
+              return {
+                ...job,
+                status: {
+                  type: 'failed',
+                  error: event.payload.error,
+                },
+                completedAt: new Date().toISOString(),
+              };
+            });
             void refreshStats();
           }
         );
-        unlistenRefs.current.push(unlistenFailed);
       } catch (err) {
         logger.error('Failed to set up job event listeners', { error: err });
       }
