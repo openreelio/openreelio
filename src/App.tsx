@@ -234,7 +234,7 @@ function App(): JSX.Element {
         showReloadButton={true}
         fallbackRender={({ error, resetError }) => (
           <div className="flex flex-col items-center justify-center h-screen bg-editor-bg text-editor-text p-4 sm:p-8 text-center">
-            <div className="text-status-error text-6xl mb-4">Warning</div>
+            <div className="text-status-error text-6xl mb-4">⚠️</div>
             <h1 className="text-xl sm:text-2xl font-bold text-status-error mb-2">Editor Error</h1>
             <p className="text-text-secondary mb-6 max-w-md px-4">
               The editor encountered an error. Your recent work may have been auto-saved.

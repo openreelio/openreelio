@@ -122,8 +122,10 @@ export class CommandQueue {
               : new Error(`Operation aborted: ${operationName}`);
           }
 
-          // Pass signal to operation if it accepts it, otherwise call without
-          const result = await operation(signal);
+          // Always pass the AbortSignal to the operation.
+          // JS safely ignores extra arguments for functions that don't declare them, and this
+          // keeps cancellation available even when operations are wrapped (e.g. vi.fn()).
+          const result = await (operation as CancellableOperation<T>)(signal);
 
           // Check if aborted during execution
           if (signal.aborted) {

@@ -4945,42 +4945,6 @@ pub async fn store_credential(
     Ok(())
 }
 
-/// Retrieves an API key from the encrypted vault
-///
-/// Returns the decrypted API key. The key is only decrypted in memory
-/// and is never written to disk in plaintext.
-#[tauri::command]
-#[specta::specta]
-pub async fn get_credential(app: tauri::AppHandle, provider: String) -> Result<String, String> {
-    let app_data_dir = get_app_data_dir(&app)?;
-    let vault_path = app_data_dir.join("credentials.vault");
-
-    if !vault_path.exists() {
-        return Err("No credentials stored".to_string());
-    }
-
-    let state = app.state::<AppState>();
-    let mut guard = state.credential_vault.lock().await;
-    if guard.is_none() {
-        *guard = Some(
-            CredentialVault::new(vault_path)
-                .map_err(|e| format!("Failed to initialize credential vault: {}", e))?,
-        );
-    }
-    let vault = guard
-        .as_ref()
-        .ok_or_else(|| "Credential vault unavailable".to_string())?;
-
-    let credential_type: CredentialType = provider
-        .parse()
-        .map_err(|e: crate::core::credentials::CredentialError| e.to_string())?;
-
-    vault
-        .retrieve(credential_type)
-        .await
-        .map_err(|e| format!("Failed to retrieve credential: {}", e))
-}
-
 /// Checks if a credential exists in the vault (without retrieving it)
 #[tauri::command]
 #[specta::specta]

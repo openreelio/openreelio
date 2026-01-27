@@ -1,7 +1,7 @@
 /**
  * Secure Credential Management Hook
  *
- * Provides a type-safe interface for storing and retrieving API keys
+ * Provides a type-safe interface for storing API keys
  * from the encrypted credential vault in the Tauri backend.
  *
  * Security Features:
@@ -60,8 +60,6 @@ interface UseCredentialsState {
 interface UseCredentialsActions {
   /** Store a credential securely */
   storeCredential: (provider: CredentialProvider, apiKey: string) => Promise<void>;
-  /** Retrieve a credential (use sparingly - prefer hasCredential for checks) */
-  getCredential: (provider: CredentialProvider) => Promise<string | null>;
   /** Check if a credential exists */
   hasCredential: (provider: CredentialProvider) => Promise<boolean>;
   /** Delete a credential */
@@ -167,30 +165,6 @@ export function useCredentials(): UseCredentialsReturn {
   );
 
   /**
-   * Retrieves a credential from the vault
-   *
-   * NOTE: Prefer using hasCredential() for existence checks to avoid
-   * unnecessary decryption operations.
-   */
-  const getCredential = useCallback(
-    async (provider: CredentialProvider): Promise<string | null> => {
-      try {
-        const apiKey = await invoke<string>('get_credential', { provider });
-        logger.debug('Credential retrieved', { provider, length: apiKey.length });
-        return apiKey;
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        if (message.includes('Not found') || message.includes('No credentials')) {
-          return null;
-        }
-        logger.error('Failed to retrieve credential', { provider, error: message });
-        throw new Error(message);
-      }
-    },
-    []
-  );
-
-  /**
    * Checks if a credential exists without retrieving it
    */
   const hasCredential = useCallback(
@@ -257,7 +231,6 @@ export function useCredentials(): UseCredentialsReturn {
     isSaving,
     error,
     storeCredential,
-    getCredential,
     hasCredential,
     deleteCredential,
     refreshStatus,

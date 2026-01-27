@@ -434,7 +434,6 @@ mod tauri_app {
                 $crate::ipc::reset_settings,
                 // Credentials (Secure API Key Storage)
                 $crate::ipc::store_credential,
-                $crate::ipc::get_credential,
                 $crate::ipc::has_credential,
                 $crate::ipc::delete_credential,
                 $crate::ipc::get_credential_status,
@@ -715,7 +714,6 @@ mod tauri_app {
             ipc::reset_settings,
             // Credentials (Secure API Key Storage)
             ipc::store_credential,
-            ipc::get_credential,
             ipc::has_credential,
             ipc::delete_credential,
             ipc::get_credential_status,

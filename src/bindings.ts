@@ -19,8 +19,7 @@ async createProject(name: string, path: string) : Promise<Result<ProjectInfo, st
     try {
     return { status: "ok", data: await TAURI_INVOKE("create_project", { name, path }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -30,8 +29,7 @@ async openProject(path: string) : Promise<Result<ProjectInfo, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("open_project", { path }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -44,8 +42,7 @@ async saveProject() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("save_project") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -55,8 +52,7 @@ async getProjectInfo() : Promise<Result<ProjectInfo | null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_project_info") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -66,8 +62,7 @@ async getProjectState() : Promise<Result<ProjectStateDto, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_project_state") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -80,8 +75,7 @@ async importAsset(uri: string) : Promise<Result<AssetImportResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("import_asset", { uri }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -91,8 +85,7 @@ async getAssets() : Promise<Result<Asset[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_assets") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -102,8 +95,7 @@ async removeAsset(assetId: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("remove_asset", { assetId }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -113,8 +105,7 @@ async generateAssetThumbnail(assetId: string) : Promise<Result<string | null, st
     try {
     return { status: "ok", data: await TAURI_INVOKE("generate_asset_thumbnail", { assetId }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -124,8 +115,7 @@ async generateProxyForAsset(assetId: string) : Promise<Result<string | null, str
     try {
     return { status: "ok", data: await TAURI_INVOKE("generate_proxy_for_asset", { assetId }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -137,8 +127,7 @@ async updateAssetProxy(assetId: string, proxyUrl: string | null, proxyStatus: Pr
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_asset_proxy", { assetId, proxyUrl, proxyStatus }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -148,8 +137,7 @@ async getSequences() : Promise<Result<Sequence[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_sequences") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -159,8 +147,7 @@ async createSequence(name: string, format: string) : Promise<Result<Sequence, st
     try {
     return { status: "ok", data: await TAURI_INVOKE("create_sequence", { name, format }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -170,8 +157,7 @@ async getSequence(sequenceId: string) : Promise<Result<Sequence, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_sequence", { sequenceId }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -181,8 +167,7 @@ async executeCommand(commandType: string, payload: JsonValue) : Promise<Result<C
     try {
     return { status: "ok", data: await TAURI_INVOKE("execute_command", { commandType, payload }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -192,8 +177,7 @@ async undo() : Promise<Result<UndoRedoResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("undo") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -203,8 +187,7 @@ async redo() : Promise<Result<UndoRedoResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("redo") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -214,8 +197,7 @@ async canUndo() : Promise<Result<boolean, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("can_undo") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -225,8 +207,7 @@ async canRedo() : Promise<Result<boolean, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("can_redo") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -236,8 +217,7 @@ async getJobs() : Promise<Result<JobInfoDto[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_jobs") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -247,8 +227,7 @@ async submitJob(jobType: string, priority: string | null, payload: JsonValue) : 
     try {
     return { status: "ok", data: await TAURI_INVOKE("submit_job", { jobType, priority, payload }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -258,8 +237,7 @@ async getJob(jobId: string) : Promise<Result<JobInfoDto | null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_job", { jobId }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -269,8 +247,7 @@ async cancelJob(jobId: string) : Promise<Result<boolean, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("cancel_job", { jobId }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -280,8 +257,7 @@ async getJobStats() : Promise<Result<JsonValue, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_job_stats") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -294,8 +270,7 @@ async startRender(sequenceId: string, outputPath: string, preset: string) : Prom
     try {
     return { status: "ok", data: await TAURI_INVOKE("start_render", { sequenceId, outputPath, preset }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -305,8 +280,7 @@ async analyzeIntent(intent: string, context: AIContextDto) : Promise<Result<Edit
     try {
     return { status: "ok", data: await TAURI_INVOKE("analyze_intent", { intent, context }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -316,8 +290,7 @@ async createProposal(editScript: EditScriptDto) : Promise<Result<ProposalDto, st
     try {
     return { status: "ok", data: await TAURI_INVOKE("create_proposal", { editScript }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -327,8 +300,7 @@ async applyEditScript(editScript: EditScriptDto) : Promise<Result<ApplyEditScrip
     try {
     return { status: "ok", data: await TAURI_INVOKE("apply_edit_script", { editScript }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -338,8 +310,7 @@ async validateEditScript(editScript: EditScriptDto) : Promise<Result<ValidationR
     try {
     return { status: "ok", data: await TAURI_INVOKE("validate_edit_script", { editScript }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -349,8 +320,7 @@ async configureAiProvider(config: ProviderConfigDto) : Promise<Result<ProviderSt
     try {
     return { status: "ok", data: await TAURI_INVOKE("configure_ai_provider", { config }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -360,8 +330,7 @@ async getAiProviderStatus() : Promise<Result<ProviderStatusDto, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_ai_provider_status") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -371,8 +340,7 @@ async clearAiProvider() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("clear_ai_provider") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -382,8 +350,7 @@ async testAiConnection() : Promise<Result<ConnectionTestResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("test_ai_connection") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -393,8 +360,7 @@ async generateEditScriptWithAi(intent: string, context: AIContextDto) : Promise<
     try {
     return { status: "ok", data: await TAURI_INVOKE("generate_edit_script_with_ai", { intent, context }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -404,8 +370,7 @@ async getAvailableAiModels(providerType: string) : Promise<Result<string[], stri
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_available_ai_models", { providerType }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -415,8 +380,7 @@ async checkFfmpeg() : Promise<Result<FFmpegStatus, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("check_ffmpeg") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -426,8 +390,7 @@ async extractFrame(inputPath: string, timeSec: number, outputPath: string) : Pro
     try {
     return { status: "ok", data: await TAURI_INVOKE("extract_frame", { inputPath, timeSec, outputPath }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -437,8 +400,7 @@ async generateThumbnail(inputPath: string, outputPath: string, width: number | n
     try {
     return { status: "ok", data: await TAURI_INVOKE("generate_thumbnail", { inputPath, outputPath, width, height }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -448,8 +410,7 @@ async probeMedia(inputPath: string) : Promise<Result<MediaInfo, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("probe_media", { inputPath }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -459,8 +420,7 @@ async generateWaveform(inputPath: string, outputPath: string, width: number, hei
     try {
     return { status: "ok", data: await TAURI_INVOKE("generate_waveform", { inputPath, outputPath, width, height }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -470,8 +430,7 @@ async getMemoryStats() : Promise<Result<MemoryStatsDto, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_memory_stats") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -481,8 +440,7 @@ async triggerMemoryCleanup() : Promise<Result<MemoryCleanupResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("trigger_memory_cleanup") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -492,8 +450,7 @@ async isTranscriptionAvailable() : Promise<Result<boolean, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("is_transcription_available") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -506,8 +463,7 @@ async transcribeAsset(assetId: string, options: TranscriptionOptionsDto | null) 
     try {
     return { status: "ok", data: await TAURI_INVOKE("transcribe_asset", { assetId, options }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -517,8 +473,7 @@ async submitTranscriptionJob(assetId: string, options: TranscriptionOptionsDto |
     try {
     return { status: "ok", data: await TAURI_INVOKE("submit_transcription_job", { assetId, options }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -532,8 +487,7 @@ async searchAssets(query: SearchQueryDto) : Promise<Result<SearchResponseDto, st
     try {
     return { status: "ok", data: await TAURI_INVOKE("search_assets", { query }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -545,8 +499,7 @@ async isMeilisearchAvailable() : Promise<Result<boolean, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("is_meilisearch_available") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -556,8 +509,7 @@ async searchContent(query: string, options: SearchOptionsDto | null) : Promise<R
     try {
     return { status: "ok", data: await TAURI_INVOKE("search_content", { query, options }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -567,8 +519,7 @@ async indexAssetForSearch(assetId: string, name: string, path: string, kind: str
     try {
     return { status: "ok", data: await TAURI_INVOKE("index_asset_for_search", { assetId, name, path, kind, duration, tags }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -578,8 +529,7 @@ async indexTranscriptsForSearch(assetId: string, segments: TranscriptionSegmentD
     try {
     return { status: "ok", data: await TAURI_INVOKE("index_transcripts_for_search", { assetId, segments, language }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -589,8 +539,7 @@ async removeAssetFromSearch(assetId: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("remove_asset_from_search", { assetId }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -600,8 +549,7 @@ async getSettings() : Promise<Result<AppSettingsDto, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_settings") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -611,8 +559,7 @@ async setSettings(settings: AppSettingsDto) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("set_settings", { settings }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -622,8 +569,7 @@ async updateSettings(partial: JsonValue) : Promise<Result<AppSettingsDto, string
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_settings", { partial }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -633,8 +579,7 @@ async resetSettings() : Promise<Result<AppSettingsDto, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("reset_settings") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -647,22 +592,7 @@ async storeCredential(provider: string, apiKey: string) : Promise<Result<null, s
     try {
     return { status: "ok", data: await TAURI_INVOKE("store_credential", { provider, apiKey }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Retrieves an API key from the encrypted vault
- * 
- * Returns the decrypted API key. The key is only decrypted in memory
- * and is never written to disk in plaintext.
- */
-async getCredential(provider: string) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_credential", { provider }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -672,8 +602,7 @@ async hasCredential(provider: string) : Promise<Result<boolean, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("has_credential", { provider }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -683,8 +612,7 @@ async deleteCredential(provider: string) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("delete_credential", { provider }) };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -694,8 +622,7 @@ async getCredentialStatus() : Promise<Result<CredentialStatusDto, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_credential_status") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -705,8 +632,7 @@ async checkForUpdates() : Promise<Result<UpdateCheckResultDto, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("check_for_updates") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 },
 /**
@@ -732,8 +658,7 @@ async downloadAndInstallUpdate() : Promise<Result<boolean, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("download_and_install_update") };
 } catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
+    return { status: "error", error: e  as any };
 }
 }
 }
