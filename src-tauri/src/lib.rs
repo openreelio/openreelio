@@ -6,8 +6,8 @@
 //!
 //! ## TypeScript Bindings
 //!
-//! All IPC types are automatically exported to TypeScript via tauri-specta.
-//! Run `cargo build` in development mode to regenerate `src/bindings.ts`.
+//! All IPC types can be exported to TypeScript via tauri-specta.
+//! Run `cargo run --manifest-path src-tauri/Cargo.toml --bin export_bindings` to regenerate `src/bindings.ts`.
 
 pub mod core;
 pub mod ipc;
@@ -364,7 +364,6 @@ mod tauri_app {
     macro_rules! collect_commands {
         () => {
             tauri_specta::collect_commands![
-                greet,
                 // Project commands
                 $crate::ipc::create_project,
                 $crate::ipc::open_project,

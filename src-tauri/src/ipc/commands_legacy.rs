@@ -143,15 +143,13 @@ fn forbid_project_asset_protocol(
 /// 2. Verifies directory state while holding the lock
 /// 3. Creates project files atomically
 #[tauri::command]
+#[specta::specta]
 #[tracing::instrument(skip(state), fields(project_name = %name, project_path = %path))]
 pub async fn create_project(
     name: String,
     path: String,
     state: State<'_, AppState>,
 ) -> Result<ProjectInfo, String> {
-    use fs2::FileExt;
-    use std::fs::OpenOptions;
-
     let name_trimmed = name.trim();
     if name_trimmed.is_empty() {
         return Err("Project name is empty".to_string());
@@ -191,89 +189,98 @@ pub async fn create_project(
         ));
     }
 
-    // Create parent directory if needed (but not the project directory itself yet)
-    if let Some(parent) = project_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create parent directory: {e}"))?;
-        }
-    }
+    // Perform filesystem work in a blocking task to avoid stalling the async runtime.
+    let name_for_create = name_trimmed.to_string();
+    let project_path_for_create = project_path.clone();
 
-    // Create a lock file in the parent directory to serialize project creation
-    let lock_path = project_path.with_extension("lock");
-    let lock_file = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(&lock_path)
-        .map_err(|e| format!("Failed to create project lock file: {e}"))?;
+    let project = tokio::task::spawn_blocking(move || -> Result<ActiveProject, String> {
+        use fs2::FileExt;
+        use std::fs::OpenOptions;
 
-    // Acquire exclusive lock to prevent concurrent project creation
-    lock_file
-        .lock_exclusive()
-        .map_err(|e| format!("Failed to acquire project lock: {e}"))?;
-
-    // After acquiring the lock, verify the directory state
-    // This prevents TOCTOU race conditions
-    let result = (|| {
-        if project_path.exists() {
-            if !project_path.is_dir() {
-                return Err(format!(
-                    "Project path must be a directory: {}",
-                    project_path.display()
-                ));
-            }
-
-            // Check for existing project files (our own files)
-            let has_project_json = project_path.join("project.json").exists();
-            let has_ops_log = project_path.join("ops.jsonl").exists();
-            if has_project_json || has_ops_log {
-                return Err(format!(
-                    "A project already exists at: {}",
-                    project_path.display()
-                ));
-            }
-
-            // Check if directory is non-empty (excluding hidden files we might have created)
-            let has_user_files = std::fs::read_dir(&project_path)
-                .map_err(|e| format!("Failed to read project directory: {e}"))?
-                .filter_map(|e| e.ok())
-                .any(|entry| {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    // Allow hidden directories that might be for caching
-                    !name_str.starts_with('.')
-                });
-
-            if has_user_files {
-                return Err(format!(
-                    "Project directory is not empty: {}",
-                    project_path.display()
-                ));
+        // Create parent directory if needed (but not the project directory itself yet).
+        if let Some(parent) = project_path_for_create.parent() {
+            if !parent.exists() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create parent directory: {e}"))?;
             }
         }
 
-        // Create project with atomic file operations
-        let project = ActiveProject::create(name_trimmed, project_path.clone())
-            .map_err(|e| e.to_ipc_error())?;
+        // Create a lock file in the parent directory to serialize project creation.
+        let lock_path = project_path_for_create.with_extension("lock");
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(|e| format!("Failed to create project lock file: {e}"))?;
 
-        tracing::info!(
-            "Created new project '{}' at {}",
-            name,
-            project_path.display()
-        );
+        // Acquire exclusive lock to prevent concurrent project creation.
+        lock_file
+            .lock_exclusive()
+            .map_err(|e| format!("Failed to acquire project lock: {e}"))?;
 
-        Ok(project)
-    })();
+        // After acquiring the lock, verify the directory state.
+        // This prevents TOCTOU race conditions.
+        let result = (|| {
+            if project_path_for_create.exists() {
+                if !project_path_for_create.is_dir() {
+                    return Err(format!(
+                        "Project path must be a directory: {}",
+                        project_path_for_create.display()
+                    ));
+                }
 
-    // Release lock and clean up lock file.
-    // Dropping the file handle releases the OS-level lock.
-    // On Windows, the lock may persist briefly, so we use retry logic.
-    drop(lock_file);
-    remove_lock_file_with_retry(&lock_path);
+                // Check for existing project files (our own files).
+                let has_project_json = project_path_for_create.join("project.json").exists();
+                let has_ops_log = project_path_for_create.join("ops.jsonl").exists();
+                if has_project_json || has_ops_log {
+                    return Err(format!(
+                        "A project already exists at: {}",
+                        project_path_for_create.display()
+                    ));
+                }
 
-    let project = result?;
+                // Check if directory is non-empty (excluding hidden files we might have created).
+                let has_user_files = std::fs::read_dir(&project_path_for_create)
+                    .map_err(|e| format!("Failed to read project directory: {e}"))?
+                    .filter_map(|e| e.ok())
+                    .any(|entry| {
+                        let name = entry.file_name();
+                        let name_str = name.to_string_lossy();
+                        // Allow hidden directories that might be for caching.
+                        !name_str.starts_with('.')
+                    });
+
+                if has_user_files {
+                    return Err(format!(
+                        "Project directory is not empty: {}",
+                        project_path_for_create.display()
+                    ));
+                }
+            }
+
+            // Create project with atomic file operations.
+            ActiveProject::create(&name_for_create, project_path_for_create.clone())
+                .map_err(|e| e.to_ipc_error())
+        })();
+
+        // Release lock and clean up lock file.
+        // Dropping the file handle releases the OS-level lock.
+        // On Windows, the lock may persist briefly, so we use retry logic.
+        drop(lock_file);
+        remove_lock_file_with_retry(&lock_path);
+
+        result
+    })
+    .await
+    .map_err(|e| format!("Project creation task failed: {e}"))??;
+
+    tracing::info!(
+        "Created new project '{}' at {}",
+        name,
+        project_path.display()
+    );
 
     // Canonicalize after creation to avoid mixed path representations.
     let project_path_canon =
@@ -305,6 +312,7 @@ pub async fn create_project(
 
 /// Opens an existing project
 #[tauri::command]
+#[specta::specta]
 #[tracing::instrument(skip(state), fields(project_path = %path))]
 pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<ProjectInfo, String> {
     // If another project is open, refuse to replace it if it has unsaved changes.
@@ -326,7 +334,11 @@ pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<Pr
         .map_err(|e| CoreError::ValidationError(e).to_ipc_error())?;
     let path = project_path.to_string_lossy().to_string();
 
-    let project = ActiveProject::open(project_path).map_err(|e| e.to_ipc_error())?;
+    // Opening can involve large reads + replays; keep it off the async runtime threads.
+    let project = tokio::task::spawn_blocking(move || ActiveProject::open(project_path))
+        .await
+        .map_err(|e| format!("Project open task failed: {e}"))?
+        .map_err(|e| e.to_ipc_error())?;
     let assets_for_scope: Vec<Asset> = project.state.assets.values().cloned().collect();
     let project_path_for_scope =
         std::fs::canonicalize(&project.path).unwrap_or_else(|_| project.path.clone());
@@ -356,6 +368,7 @@ pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<Pr
 
 /// Closes the current project, optionally requiring it to be saved.
 #[tauri::command]
+#[specta::specta]
 pub async fn close_project(
     require_saved: Option<bool>,
     state: State<'_, AppState>,
@@ -387,18 +400,70 @@ pub async fn close_project(
 /// After a successful save, the project's `is_dirty` flag is reset to `false`,
 /// allowing users to close or open another project without warnings.
 #[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state))]
 pub async fn save_project(state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.project.lock().await;
+    use crate::core::project::Snapshot;
 
+    let started_at = std::time::Instant::now();
+    let (project_path, state_snapshot, last_op_id_before) = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        (
+            project.path.clone(),
+            project.state.clone(),
+            project.state.last_op_id.clone(),
+        )
+    };
+
+    // Perform disk IO on a blocking worker thread.
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let snapshot_path = Snapshot::default_path(&project_path);
+        Snapshot::save(
+            &snapshot_path,
+            &state_snapshot,
+            state_snapshot.last_op_id.as_deref(),
+        )
+        .map_err(|e| e.to_ipc_error())?;
+
+        let meta_path = project_path.join("project.json");
+        crate::core::fs::atomic_write_json_pretty(&meta_path, &state_snapshot.meta)
+            .map_err(|e| e.to_ipc_error())?;
+
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("Project save task failed: {e}"))??;
+
+    // Only clear the dirty flag if no newer op was applied during the save window.
+    let mut guard = state.project.lock().await;
     let project = guard
         .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    project.save().map_err(|e| e.to_ipc_error())
+    if project.state.last_op_id == last_op_id_before {
+        project.state.is_dirty = false;
+        tracing::debug!("Project saved successfully, is_dirty reset to false");
+    } else {
+        tracing::warn!(
+            last_op_id_before = ?last_op_id_before,
+            last_op_id_after = ?project.state.last_op_id,
+            "Project state changed during save; keeping is_dirty=true"
+        );
+    }
+
+    tracing::info!(
+        elapsed_ms = started_at.elapsed().as_millis(),
+        "save_project completed"
+    );
+    Ok(())
 }
 
 /// Gets current project info
 #[tauri::command]
+#[specta::specta]
 pub async fn get_project_info(state: State<'_, AppState>) -> Result<Option<ProjectInfo>, String> {
     let guard = state.project.lock().await;
 
@@ -412,6 +477,7 @@ pub async fn get_project_info(state: State<'_, AppState>) -> Result<Option<Proje
 
 /// Gets the full project state for frontend sync
 #[tauri::command]
+#[specta::specta]
 pub async fn get_project_state(state: State<'_, AppState>) -> Result<ProjectStateDto, String> {
     let guard = state.project.lock().await;
 
@@ -444,6 +510,7 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<ProjectStat
 /// Automatically queues proxy generation job for video assets > 720p.
 /// Returns the job_id if a proxy job was queued.
 #[tauri::command]
+#[specta::specta]
 #[tracing::instrument(skip(state), fields(uri = %uri))]
 pub async fn import_asset(
     uri: String,
@@ -553,6 +620,7 @@ pub async fn import_asset(
 
 /// Gets all assets in the project
 #[tauri::command]
+#[specta::specta]
 pub async fn get_assets(state: State<'_, AppState>) -> Result<Vec<Asset>, String> {
     let guard = state.project.lock().await;
 
@@ -565,6 +633,7 @@ pub async fn get_assets(state: State<'_, AppState>) -> Result<Vec<Asset>, String
 
 /// Generates thumbnail for an asset and updates the asset's thumbnail URL
 #[tauri::command]
+#[specta::specta]
 pub async fn generate_asset_thumbnail(
     asset_id: String,
     state: State<'_, AppState>,
@@ -650,6 +719,7 @@ pub async fn generate_asset_thumbnail(
 
 /// Generates a proxy video for an asset for smooth preview playback
 #[tauri::command]
+#[specta::specta]
 pub async fn generate_proxy_for_asset(
     asset_id: String,
     state: State<'_, AppState>,
@@ -803,6 +873,7 @@ pub async fn generate_proxy_for_asset(
 ///
 /// Called by the frontend when receiving `asset:proxy-ready` or `asset:proxy-failed` events.
 #[tauri::command]
+#[specta::specta]
 pub async fn update_asset_proxy(
     asset_id: String,
     proxy_url: Option<String>,
@@ -841,6 +912,7 @@ pub async fn update_asset_proxy(
 /// Returns normalized peak values (0.0 - 1.0) for audio visualization.
 /// Returns None if waveform has not been generated yet.
 #[tauri::command]
+#[specta::specta]
 pub async fn get_waveform_data(
     asset_id: String,
     state: State<'_, AppState>,
@@ -889,6 +961,7 @@ pub async fn get_waveform_data(
 /// Extracts audio peaks from the asset and saves as JSON.
 /// Emits `waveform-complete` event on success, `waveform-error` on failure.
 #[tauri::command]
+#[specta::specta]
 pub async fn generate_waveform_for_asset(
     asset_id: String,
     samples_per_second: Option<u32>,
@@ -988,6 +1061,7 @@ pub async fn generate_waveform_for_asset(
 
 /// Removes an asset from the project
 #[tauri::command]
+#[specta::specta]
 pub async fn remove_asset(asset_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let mut guard = state.project.lock().await;
 
@@ -1010,6 +1084,7 @@ pub async fn remove_asset(asset_id: String, state: State<'_, AppState>) -> Resul
 
 /// Gets all sequences in the project
 #[tauri::command]
+#[specta::specta]
 pub async fn get_sequences(state: State<'_, AppState>) -> Result<Vec<Sequence>, String> {
     let guard = state.project.lock().await;
 
@@ -1022,6 +1097,7 @@ pub async fn get_sequences(state: State<'_, AppState>) -> Result<Vec<Sequence>, 
 
 /// Creates a new sequence
 #[tauri::command]
+#[specta::specta]
 pub async fn create_sequence(
     name: String,
     format: String,
@@ -1054,6 +1130,7 @@ pub async fn create_sequence(
 
 /// Gets a specific sequence by ID
 #[tauri::command]
+#[specta::specta]
 pub async fn get_sequence(
     sequence_id: String,
     state: State<'_, AppState>,
@@ -1081,6 +1158,7 @@ use crate::ipc::payloads::CommandPayload;
 
 /// Executes an edit command
 #[tauri::command]
+#[specta::specta]
 #[tracing::instrument(skip(state, payload), fields(command_type = %command_type))]
 pub async fn execute_command(
     command_type: String,
@@ -1170,6 +1248,7 @@ pub async fn execute_command(
 
 /// Undoes the last command
 #[tauri::command]
+#[specta::specta]
 pub async fn undo(state: State<'_, AppState>) -> Result<UndoRedoResult, String> {
     let mut guard = state.project.lock().await;
 
@@ -1191,6 +1270,7 @@ pub async fn undo(state: State<'_, AppState>) -> Result<UndoRedoResult, String> 
 
 /// Redoes the last undone command
 #[tauri::command]
+#[specta::specta]
 pub async fn redo(state: State<'_, AppState>) -> Result<UndoRedoResult, String> {
     let mut guard = state.project.lock().await;
 
@@ -1212,6 +1292,7 @@ pub async fn redo(state: State<'_, AppState>) -> Result<UndoRedoResult, String> 
 
 /// Checks if undo is available
 #[tauri::command]
+#[specta::specta]
 pub async fn can_undo(state: State<'_, AppState>) -> Result<bool, String> {
     let guard = state.project.lock().await;
 
@@ -1223,6 +1304,7 @@ pub async fn can_undo(state: State<'_, AppState>) -> Result<bool, String> {
 
 /// Checks if redo is available
 #[tauri::command]
+#[specta::specta]
 pub async fn can_redo(state: State<'_, AppState>) -> Result<bool, String> {
     let guard = state.project.lock().await;
 
@@ -1329,6 +1411,7 @@ impl From<&Job> for JobInfoDto {
 
 /// Gets all jobs from the worker pool (both active and queued)
 #[tauri::command]
+#[specta::specta]
 pub async fn get_jobs(state: State<'_, AppState>) -> Result<Vec<JobInfoDto>, String> {
     let pool = state.job_pool.lock().await;
 
@@ -1385,6 +1468,7 @@ fn parse_priority(priority: Option<&str>) -> Result<Priority, String> {
 
 /// Submits a new job to the worker pool
 #[tauri::command]
+#[specta::specta]
 #[tracing::instrument(skip(state, payload), fields(job_type = %job_type))]
 pub async fn submit_job(
     job_type: String,
@@ -1410,6 +1494,7 @@ pub async fn submit_job(
 
 /// Gets a specific job by ID
 #[tauri::command]
+#[specta::specta]
 pub async fn get_job(
     job_id: String,
     state: State<'_, AppState>,
@@ -1421,6 +1506,7 @@ pub async fn get_job(
 
 /// Cancels a job by ID
 #[tauri::command]
+#[specta::specta]
 pub async fn cancel_job(job_id: String, state: State<'_, AppState>) -> Result<bool, String> {
     let pool = state.job_pool.lock().await;
 
@@ -1437,6 +1523,7 @@ pub async fn cancel_job(job_id: String, state: State<'_, AppState>) -> Result<bo
 
 /// Gets the current queue statistics
 #[tauri::command]
+#[specta::specta]
 pub async fn get_job_stats(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
     let pool = state.job_pool.lock().await;
 
@@ -1461,6 +1548,7 @@ pub async fn get_job_stats(state: State<'_, AppState>) -> Result<serde_json::Val
 /// This command validates the export settings before starting the render,
 /// and reports real-time progress via Tauri events.
 #[tauri::command]
+#[specta::specta]
 #[tracing::instrument(skip(state, ffmpeg_state, app_handle), fields(sequence_id = %sequence_id, preset = %preset, output_path = %output_path))]
 pub async fn start_render(
     sequence_id: String,
@@ -1642,6 +1730,7 @@ pub async fn start_render(
 
 /// Analyzes user intent and generates an EditScript
 #[tauri::command]
+#[specta::specta]
 pub async fn analyze_intent(
     intent: String,
     context: AIContextDto,
@@ -1732,6 +1821,7 @@ pub async fn analyze_intent(
 
 /// Creates a Proposal from an EditScript and stores it for review
 #[tauri::command]
+#[specta::specta]
 pub async fn create_proposal(
     edit_script: EditScriptDto,
     state: State<'_, AppState>,
@@ -1765,6 +1855,7 @@ pub async fn create_proposal(
 
 /// Applies an EditScript by executing its commands
 #[tauri::command]
+#[specta::specta]
 pub async fn apply_edit_script(
     edit_script: EditScriptDto,
     state: State<'_, AppState>,
@@ -1966,6 +2057,7 @@ pub async fn apply_edit_script(
 
 /// Validates an EditScript without executing
 #[tauri::command]
+#[specta::specta]
 pub async fn validate_edit_script(
     edit_script: EditScriptDto,
     state: State<'_, AppState>,
@@ -2597,6 +2689,7 @@ pub struct MemoryCleanupResult {
 
 /// Gets memory statistics from the backend
 #[tauri::command]
+#[specta::specta]
 pub async fn get_memory_stats(state: State<'_, AppState>) -> Result<MemoryStatsDto, String> {
     let memory_state = state.memory_pool.lock().await;
     let cache_state = state.cache_manager.lock().await;
@@ -2618,6 +2711,7 @@ pub async fn get_memory_stats(state: State<'_, AppState>) -> Result<MemoryStatsD
 
 /// Triggers memory cleanup (shrink pools, evict expired cache)
 #[tauri::command]
+#[specta::specta]
 pub async fn trigger_memory_cleanup(
     state: State<'_, AppState>,
 ) -> Result<MemoryCleanupResult, String> {
@@ -2709,6 +2803,7 @@ pub struct TranscriptionOptionsDto {
 
 /// Checks if transcription is available
 #[tauri::command]
+#[specta::specta]
 pub async fn is_transcription_available() -> Result<bool, String> {
     Ok(crate::core::captions::whisper::is_whisper_available())
 }
@@ -2718,6 +2813,7 @@ pub async fn is_transcription_available() -> Result<bool, String> {
 /// This command extracts audio from the asset, runs Whisper transcription,
 /// and returns the transcribed text with timestamps.
 #[tauri::command]
+#[specta::specta]
 pub async fn transcribe_asset(
     asset_id: String,
     options: Option<TranscriptionOptionsDto>,
@@ -2857,6 +2953,7 @@ pub async fn transcribe_asset(
 
 /// Submits a transcription job to the worker pool
 #[tauri::command]
+#[specta::specta]
 pub async fn submit_transcription_job(
     asset_id: String,
     options: Option<TranscriptionOptionsDto>,
@@ -2937,6 +3034,7 @@ pub struct CaptionForExport {
 /// * `output_path` - File path where captions will be saved
 /// * `format` - Export format (SRT or VTT)
 #[tauri::command]
+#[specta::specta]
 pub async fn export_captions(
     captions: Vec<CaptionForExport>,
     output_path: String,
@@ -3017,6 +3115,7 @@ pub async fn export_captions(
 
 /// Gets caption content as a string in the specified format (without writing to file)
 #[tauri::command]
+#[specta::specta]
 pub async fn get_captions_as_string(
     captions: Vec<CaptionForExport>,
     format: CaptionExportFormat,
@@ -3125,6 +3224,7 @@ pub struct ShotDetectionResult {
 ///
 /// Shot detection result containing all detected shots
 #[tauri::command]
+#[specta::specta]
 pub async fn detect_shots(
     asset_id: String,
     video_path: String,
@@ -3283,6 +3383,7 @@ pub async fn detect_shots(
 ///
 /// List of shots if found, empty list otherwise
 #[tauri::command]
+#[specta::specta]
 pub async fn get_asset_shots(
     asset_id: String,
     state: State<'_, AppState>,
@@ -3316,6 +3417,7 @@ pub async fn get_asset_shots(
 ///
 /// * `asset_id` - The asset ID to delete shots for
 #[tauri::command]
+#[specta::specta]
 pub async fn delete_asset_shots(
     asset_id: String,
     state: State<'_, AppState>,
@@ -3349,6 +3451,7 @@ pub async fn delete_asset_shots(
 
 /// Checks if shot detection is available (requires FFmpeg)
 #[tauri::command]
+#[specta::specta]
 pub async fn is_shot_detection_available(
     ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
 ) -> Result<bool, String> {
@@ -3499,6 +3602,7 @@ pub struct SearchResponseDto {
 /// project's index database. Unlike Meilisearch, this is always available
 /// without additional feature flags.
 #[tauri::command]
+#[specta::specta]
 pub async fn search_assets(
     query: SearchQueryDto,
     state: State<'_, AppState>,
@@ -3589,6 +3693,7 @@ pub async fn search_assets(
 ///
 /// This is a best-effort check that may attempt lazy sidecar startup.
 #[tauri::command]
+#[specta::specta]
 pub async fn is_meilisearch_available(state: State<'_, AppState>) -> Result<bool, String> {
     if !crate::core::search::meilisearch::is_meilisearch_available() {
         return Ok(false);
@@ -3610,6 +3715,7 @@ pub async fn is_meilisearch_available(state: State<'_, AppState>) -> Result<bool
 
 /// Performs a full-text search using Meilisearch
 #[tauri::command]
+#[specta::specta]
 pub async fn search_content(
     query: String,
     options: Option<SearchOptionsDto>,
@@ -3680,6 +3786,7 @@ pub async fn search_content(
 
 /// Indexes an asset in Meilisearch
 #[tauri::command]
+#[specta::specta]
 pub async fn index_asset_for_search(
     asset_id: String,
     name: String,
@@ -3728,6 +3835,7 @@ pub async fn index_asset_for_search(
 
 /// Indexes transcript segments for an asset
 #[tauri::command]
+#[specta::specta]
 pub async fn index_transcripts_for_search(
     asset_id: String,
     segments: Vec<TranscriptionSegmentDto>,
@@ -3795,6 +3903,7 @@ pub async fn index_transcripts_for_search(
 
 /// Removes an asset and its transcripts from the search index
 #[tauri::command]
+#[specta::specta]
 pub async fn remove_asset_from_search(
     asset_id: String,
     state: State<'_, AppState>,
@@ -3872,6 +3981,7 @@ pub struct ProviderConfigDto {
 
 /// Configures an AI provider
 #[tauri::command]
+#[specta::specta]
 pub async fn configure_ai_provider(
     config: ProviderConfigDto,
     state: State<'_, AppState>,
@@ -4011,6 +4121,7 @@ pub async fn configure_ai_provider(
 
 /// Gets the current AI provider status
 #[tauri::command]
+#[specta::specta]
 pub async fn get_ai_provider_status(
     state: State<'_, AppState>,
 ) -> Result<ProviderStatusDto, String> {
@@ -4029,6 +4140,7 @@ pub async fn get_ai_provider_status(
 
 /// Clears the current AI provider
 #[tauri::command]
+#[specta::specta]
 pub async fn clear_ai_provider(state: State<'_, AppState>) -> Result<(), String> {
     let gateway = state.ai_gateway.lock().await;
     gateway.clear_provider().await;
@@ -4154,6 +4266,7 @@ fn categorize_error(error: &str) -> ConnectionErrorCode {
 
 /// Tests the AI connection by making a simple request with detailed results
 #[tauri::command]
+#[specta::specta]
 pub async fn test_ai_connection(
     state: State<'_, AppState>,
 ) -> Result<ConnectionTestResult, String> {
@@ -4240,6 +4353,7 @@ pub async fn test_ai_connection(
 
 /// Generates an EditScript from natural language using the AI provider
 #[tauri::command]
+#[specta::specta]
 pub async fn generate_edit_script_with_ai(
     intent: String,
     context: AIContextDto,
@@ -4328,6 +4442,7 @@ pub async fn generate_edit_script_with_ai(
 
 /// Gets available AI models for a provider type
 #[tauri::command]
+#[specta::specta]
 pub async fn get_available_ai_models(provider_type: String) -> Result<Vec<String>, String> {
     use crate::core::ai::ProviderType;
 
@@ -4702,6 +4817,7 @@ fn get_app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 /// Gets application settings
 #[tauri::command]
+#[specta::specta]
 pub async fn get_settings(app: tauri::AppHandle) -> Result<AppSettingsDto, String> {
     let app_data_dir = get_app_data_dir(&app)?;
     let manager = SettingsManager::new(app_data_dir);
@@ -4711,6 +4827,7 @@ pub async fn get_settings(app: tauri::AppHandle) -> Result<AppSettingsDto, Strin
 
 /// Saves application settings
 #[tauri::command]
+#[specta::specta]
 pub async fn set_settings(app: tauri::AppHandle, settings: AppSettingsDto) -> Result<(), String> {
     let app_data_dir = get_app_data_dir(&app)?;
     let manager = SettingsManager::new(app_data_dir);
@@ -4720,6 +4837,7 @@ pub async fn set_settings(app: tauri::AppHandle, settings: AppSettingsDto) -> Re
 
 /// Updates a partial section of settings (merge with existing)
 #[tauri::command]
+#[specta::specta]
 pub async fn update_settings(
     app: tauri::AppHandle,
     partial: serde_json::Value,
@@ -4746,6 +4864,7 @@ pub async fn update_settings(
 
 /// Resets settings to defaults
 #[tauri::command]
+#[specta::specta]
 pub async fn reset_settings(app: tauri::AppHandle) -> Result<AppSettingsDto, String> {
     let app_data_dir = get_app_data_dir(&app)?;
     let manager = SettingsManager::new(app_data_dir);
@@ -4789,6 +4908,7 @@ pub struct CredentialStatusDto {
 /// The API key is encrypted at rest using XChaCha20-Poly1305 and stored
 /// in a secure vault file. Keys are never stored in plaintext.
 #[tauri::command]
+#[specta::specta]
 pub async fn store_credential(
     app: tauri::AppHandle,
     provider: String,
@@ -4830,6 +4950,7 @@ pub async fn store_credential(
 /// Returns the decrypted API key. The key is only decrypted in memory
 /// and is never written to disk in plaintext.
 #[tauri::command]
+#[specta::specta]
 pub async fn get_credential(app: tauri::AppHandle, provider: String) -> Result<String, String> {
     let app_data_dir = get_app_data_dir(&app)?;
     let vault_path = app_data_dir.join("credentials.vault");
@@ -4862,6 +4983,7 @@ pub async fn get_credential(app: tauri::AppHandle, provider: String) -> Result<S
 
 /// Checks if a credential exists in the vault (without retrieving it)
 #[tauri::command]
+#[specta::specta]
 pub async fn has_credential(app: tauri::AppHandle, provider: String) -> Result<bool, String> {
     let app_data_dir = get_app_data_dir(&app)?;
     let vault_path = app_data_dir.join("credentials.vault");
@@ -4891,6 +5013,7 @@ pub async fn has_credential(app: tauri::AppHandle, provider: String) -> Result<b
 
 /// Deletes a credential from the vault
 #[tauri::command]
+#[specta::specta]
 pub async fn delete_credential(app: tauri::AppHandle, provider: String) -> Result<(), String> {
     let app_data_dir = get_app_data_dir(&app)?;
     let vault_path = app_data_dir.join("credentials.vault");
@@ -4927,6 +5050,7 @@ pub async fn delete_credential(app: tauri::AppHandle, provider: String) -> Resul
 
 /// Gets the status of all credentials (which ones are configured)
 #[tauri::command]
+#[specta::specta]
 pub async fn get_credential_status(app: tauri::AppHandle) -> Result<CredentialStatusDto, String> {
     let app_data_dir = get_app_data_dir(&app)?;
     let vault_path = app_data_dir.join("credentials.vault");
@@ -5034,6 +5158,7 @@ impl From<UpdateCheckResult> for UpdateCheckResultDto {
 
 /// Checks for available updates
 #[tauri::command]
+#[specta::specta]
 pub async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateCheckResultDto, String> {
     use tauri_plugin_updater::UpdaterExt;
 
@@ -5061,6 +5186,7 @@ pub async fn check_for_updates(app: tauri::AppHandle) -> Result<UpdateCheckResul
 
 /// Gets current app version
 #[tauri::command]
+#[specta::specta]
 pub fn get_current_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
@@ -5070,6 +5196,7 @@ pub fn get_current_version() -> String {
 /// This is intentionally implemented on the Rust side to avoid depending on a
 /// separate process plugin on the frontend.
 #[tauri::command]
+#[specta::specta]
 pub fn relaunch_app(app: tauri::AppHandle) {
     app.restart();
 }
@@ -5077,6 +5204,7 @@ pub fn relaunch_app(app: tauri::AppHandle) {
 /// Downloads and installs an update
 /// Returns true if restart is needed
 #[tauri::command]
+#[specta::specta]
 pub async fn download_and_install_update(app: tauri::AppHandle) -> Result<bool, String> {
     use tauri_plugin_updater::UpdaterExt;
 

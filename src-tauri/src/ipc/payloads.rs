@@ -146,9 +146,40 @@ pub enum CommandPayload {
 }
 
 impl CommandPayload {
+    /// Hard limit to prevent DoS via massive IPC payloads.
+    ///
+    /// This is intentionally conservative: edit commands should remain small and
+    /// structured (IDs + timestamps), not bulk data blobs.
+    const MAX_PAYLOAD_BYTES: usize = 512 * 1024; // 512 KiB
+
     pub fn parse(command_type: String, payload: serde_json::Value) -> Result<Self, String> {
+        let command_type_trimmed = command_type.trim();
+        if command_type_trimmed.is_empty() {
+            return Err("commandType is empty".to_string());
+        }
+        if command_type_trimmed.len() > 128 {
+            return Err("commandType is too long".to_string());
+        }
+        if command_type_trimmed.chars().any(|c| c.is_control()) {
+            return Err("commandType contains control characters".to_string());
+        }
+
+        // Best-effort size check before attempting strict deserialization.
+        // `serde_json::Value` already exists, so this is primarily to cap the
+        // additional work + allocations that can happen during parsing.
+        let payload_size = serde_json::to_vec(&payload)
+            .map(|v| v.len())
+            .unwrap_or(Self::MAX_PAYLOAD_BYTES + 1);
+        if payload_size > Self::MAX_PAYLOAD_BYTES {
+            return Err(format!(
+                "Command payload too large ({} bytes, max {})",
+                payload_size,
+                Self::MAX_PAYLOAD_BYTES
+            ));
+        }
+
         let raw_request = serde_json::json!({
-            "commandType": command_type,
+            "commandType": command_type_trimmed,
             "payload": payload
         });
         serde_json::from_value(raw_request).map_err(|e| format!("Invalid command payload: {}", e))
@@ -193,5 +224,53 @@ mod tests {
             err.contains("unknown field") || err.contains("unknown variant"),
             "expected unknown-field rejection, got: {err}"
         );
+    }
+
+    #[test]
+    fn parse_rejects_oversized_payload() {
+        // 600KiB of text exceeds the 512KiB limit.
+        let huge = "x".repeat(600 * 1024);
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "clipId": "clip_001",
+            "splitTime": 10.0,
+            "padding": huge,
+        });
+
+        let parsed = CommandPayload::parse("SplitClip".to_string(), payload);
+        assert!(parsed.is_err());
+        let err = parsed.unwrap_err();
+        assert!(
+            err.contains("too large"),
+            "expected payload-size rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_empty_command_type() {
+        let payload = serde_json::json!({});
+        let parsed = CommandPayload::parse("   ".to_string(), payload);
+        assert!(parsed.is_err());
+        assert!(parsed.unwrap_err().contains("commandType is empty"));
+    }
+
+    #[test]
+    fn parse_rejects_overlong_command_type() {
+        let payload = serde_json::json!({});
+        let long = "a".repeat(129);
+        let parsed = CommandPayload::parse(long, payload);
+        assert!(parsed.is_err());
+        assert!(parsed.unwrap_err().contains("commandType is too long"));
+    }
+
+    #[test]
+    fn parse_rejects_command_type_with_control_characters() {
+        let payload = serde_json::json!({});
+        let parsed = CommandPayload::parse("InsertClip\u{0007}".to_string(), payload);
+        assert!(parsed.is_err());
+        assert!(parsed
+            .unwrap_err()
+            .contains("commandType contains control characters"));
     }
 }
