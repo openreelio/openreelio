@@ -2,7 +2,7 @@
 
 > **Last Updated**: 2026-01-27
 > **Version**: v0.1.0 → v1.0.0 Planning
-> **Status**: MVP v0.1.0 at 95% completion | v0.2.0 AI Integration at 95%
+> **Status**: MVP v0.1.0 at 98% completion | v0.2.0 AI Integration at 98%
 > **Critical Blocker**: Code Signing + Auto-Update finalization required for v0.1.0 release
 
 This document outlines the complete development roadmap for OpenReelio, from MVP to production-ready release.
@@ -41,8 +41,8 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 
 | Milestone | Focus | Key Deliverables | Status |
 |-----------|-------|------------------|--------|
-| **v0.1.0** | Core Editor + Distribution | Timeline, Preview, Export, Auto-Update, Code Signing | 🔄 In Progress (95%) |
-| **v0.2.0** | AI Integration | Whisper, Meilisearch, AI Sidebar, Agent Framework | 🔄 In Progress (95%) |
+| **v0.1.0** | Core Editor + Distribution | Timeline, Preview, Export, Auto-Update, Code Signing | 🔄 In Progress (98%) |
+| **v0.2.0** | AI Integration | Whisper, Meilisearch, AI Sidebar, Agent Framework | 🔄 In Progress (98%) |
 | **v0.3.0** | Effects & Animation | Transitions, Keyframes, Audio FX | 📋 Planned |
 | **v0.4.0** | Plugin Ecosystem | WASM Host, Marketplace | 📋 Planned |
 | **v1.0.0** | Production | Performance, Stability, Docs | 📋 Planned |
@@ -169,7 +169,7 @@ Before v0.1.0 can be released, the following must be completed:
 
 **Goal**: Enable AI-powered editing with automatic transcription, smart search, and shot detection.
 
-> **Status**: 95% Complete - Full AI chat interface, agent framework, and editing tools implemented
+> **Status**: 98% Complete - Full AI chat interface, agent framework, and editing tools implemented
 
 ### Current Progress (as of 2026-01-27)
 
@@ -208,9 +208,9 @@ Before v0.1.0 can be released, the following must be completed:
 - ✅ **Error Boundaries** (AIErrorBoundary for graceful error handling)
 
 **Pending:**
-- ⏳ whisper.cpp (whisper-rs) integration for offline transcription
+- ✅ whisper.cpp (whisper-rs) integration for offline transcription
 - ⏳ Shot detection with candle ML
-- ⏳ Caption export to SRT/VTT formats
+- ✅ Caption export to SRT/VTT formats
 
 ### Core Features
 
@@ -329,7 +329,7 @@ pub struct Shot {
 
 | Task | Dependencies | Priority | Status |
 |------|--------------|----------|--------|
-| whisper-rs integration | None | HIGH | ⏳ Pending |
+| whisper-rs integration | None | HIGH | ✅ Complete |
 | Caption UI (edit, export) | whisper-rs | HIGH | ✅ Complete |
 | Meilisearch sidecar setup | None | HIGH | ✅ Complete |
 | Asset indexing pipeline | Meilisearch | HIGH | ✅ Complete |
@@ -338,13 +338,13 @@ pub struct Shot {
 | candle setup | None | MEDIUM | ⏳ Pending |
 | Shot detection impl | candle | MEDIUM | ⏳ Pending |
 | Shot UI (markers, navigation) | Shot detection | LOW | ⏳ Pending |
-| Caption export SRT/VTT | Caption UI | LOW | ⏳ Pending |
+| Caption export SRT/VTT | Caption UI | LOW | ✅ Complete |
 
 ### v0.2.0 Definition of Done
 
-- [ ] One-click captioning for video assets (UI ready, whisper-rs pending)
+- [x] One-click captioning for video assets (whisper-rs complete)
 - [x] Caption editing UI (CaptionEditor.tsx complete)
-- [ ] Caption export (SRT/VTT formats) - pending
+- [x] Caption export (SRT/VTT formats) - complete
 - [x] Full-text search across all assets (SearchPanel, Meilisearch)
 - [x] Transcript-based search ("find 'hello'") - infrastructure ready
 - [ ] Automatic shot detection with markers (candle pending)

@@ -1,6 +1,6 @@
 # OpenReelio Technical Assessment Report
 
-Date: 2026-01-23
+Date: 2026-01-27
 Focus: Tauri runtime behavior, IPC correctness, cross-platform filesystem safety, and update pipeline readiness
 
 ---
@@ -74,6 +74,44 @@ Residual risk:
 
 ---
 
+## Recent Changes (2026-01-27)
+
+### 1) IPC payload DoS hardening (command execution)
+
+Change:
+- `src-tauri/src/ipc/payloads.rs`: strict `commandType` validation (empty/control chars/length) and a 512 KiB payload size cap.
+
+Why:
+- `execute_command` is a trust boundary (UI/AI/plugins). Without bounds, a malicious or buggy caller can trigger excessive allocations and CPU time during JSON deserialization.
+
+Verification:
+- Unit tests in `src-tauri/src/ipc/payloads.rs` cover oversized payload rejection and invalid `commandType` strings.
+
+### 2) Async runtime safety for IO-heavy IPC commands
+
+Change:
+- `src-tauri/src/ipc/commands_legacy.rs`: `create_project`, `open_project`, and `save_project` move filesystem-heavy work into `tokio::task::spawn_blocking`.
+
+Why:
+- Tauri commands run on async executors; blocking filesystem operations on runtime threads can stall unrelated IPC calls and degrade UX under slow disks/AV scanning.
+
+Verification:
+- Rust unit tests remain green; runtime paths are exercised by the app and additional logging was added to `save_project` for timing visibility.
+
+### 3) Cross-layer type stability via tauri-specta bindings
+
+Change:
+- Added a developer utility binary `src-tauri/src/bin/export_bindings.rs` and `src/bindings.ts` generation.
+- Annotated all IPC entry points with `#[specta::specta]` to enable signature/type export.
+
+Why:
+- Prevent silent drift between Rust DTOs and TypeScript usage by generating bindings from the source of truth.
+
+Notes:
+- The exporter is configured with `BigIntExportBehavior::Number` to match current JSON serialization; values above JS safe integer range can lose precision (see Risks below).
+
+---
+
 ## Recommendations (Next Hardening Iteration)
 
 1) Pin FFmpeg artifacts
@@ -86,4 +124,11 @@ Residual risk:
 - Extend CI to run a minimal smoke test in a real Tauri runtime (not only WebView/Vite mode) for:
   - asset protocol allowlisting behavior
   - update check DTO correctness
+
+## Risks / Limitations (Post-Fix)
+
+1) `u64`/`i64` values across JSON
+- Some DTO fields (e.g. `fileSize`) use Rust `u64` which serializes as JSON number.
+- JavaScript numbers can lose precision above `2^53 - 1`.
+- Mitigation options: migrate wire format to string for large integers, or clamp/document invariants (file sizes remain well below the safe range for expected workloads).
 

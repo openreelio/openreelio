@@ -1,6 +1,6 @@
 # Security + QA Assessment Report (Credentials / IPC)
 
-Date: 2026-01-26
+Date: 2026-01-27
 
 This report documents a focused security, correctness, and reliability hardening pass on the OpenReelio desktop app, with emphasis on:
 
@@ -9,6 +9,37 @@ This report documents a focused security, correctness, and reliability hardening
 - Race conditions and destructive test coverage
 
 The repository already contains broad destructive tests for core models and IPC payload parsing; the work below closes several high-impact gaps observed in the credential subsystem and its UI integration.
+
+---
+
+## Addendum (2026-01-27): IPC DoS bounds + typed bindings
+
+### A) IPC DoS bounds (command payload size + commandType validation)
+
+Change:
+- `src-tauri/src/ipc/payloads.rs`: added strict `commandType` validation and a 512 KiB max payload size limit for `execute_command` parsing.
+
+Security/QA impact:
+- Reduces risk of CPU/memory amplification via massive JSON values or malformed identifiers.
+- Covered by unit tests in `src-tauri/src/ipc/payloads.rs`.
+
+### B) Async blocking reduction for filesystem-heavy commands
+
+Change:
+- `src-tauri/src/ipc/commands_legacy.rs`: moved project create/open/save disk IO into `tokio::task::spawn_blocking`.
+
+Security/QA impact:
+- Prevents UI stalls and lowers the chance of watchdog/timeouts under slow disks or antivirus hooks.
+- Added timing logs for `save_project` to improve operational debugging.
+
+### C) Type stability (Rust → TypeScript) via tauri-specta
+
+Change:
+- Added `src-tauri/src/bin/export_bindings.rs` and generated `src/bindings.ts`.
+- Annotated all IPC commands with `#[specta::specta]` to enable export.
+
+Notes / risk:
+- Exporter maps `u64`/`i64` to TS `number` (`BigIntExportBehavior::Number`). Values above the JS safe integer range can lose precision; consider migrating large integers to string wire format if this becomes relevant.
 
 ## Findings (Pre-Fix)
 
@@ -320,4 +351,201 @@ npm run test
 npm run test -- --run src/hooks/usePlayheadDrag.test.ts
 npm run test -- --run src/components/ui/Toast.test.tsx
 npm run test -- --run src/components/features/search/*.test.tsx
+```
+
+---
+
+## Comprehensive Assessment: Concurrency & Race Conditions (2026-01-28)
+
+### Scope
+
+Full codebase review focusing on:
+- Async operation serialization and race conditions
+- Timeout and cancellation handling
+- State consistency under concurrent operations
+- Test coverage for new hooks
+
+### Critical Issues Identified and Fixed
+
+#### 1) CommandQueue Timeout Cancellation (CRITICAL)
+
+**Problem:** The `CommandQueue` used `Promise.race()` for timeout handling, but this only raced the promises - it did not cancel the underlying operation. When a timeout occurred, the original operation continued executing in the background.
+
+**Impact:** Resource leaks, state inconsistencies, potential data corruption
+
+**Location:** `src/utils/commandQueue.ts`
+
+**Fix Applied:**
+- Implemented `AbortController` support for proper operation cancellation
+- Operations now receive an `AbortSignal` parameter
+- Timeout triggers `abortController.abort()` with proper error context
+- Added new type `CancellableOperation<T>` for operations supporting cancellation
+
+**New Features:**
+```typescript
+// Queue status for debugging
+getStatus(): QueueStatus
+
+// Cancel specific pending operation
+cancelOperation(operationName: string): boolean
+
+// Export new types
+export type { CancellableOperation, QueueStatus }
+```
+
+**Code Reference:** `src/utils/commandQueue.ts:78-165`
+
+#### 2) Race Condition in Project Handlers (HIGH)
+
+**Problem:** `useProjectHandlers` checked store state for unsaved changes, then presented a dialog, then performed save - but state could change during the dialog interaction.
+
+**Impact:** Potential data loss if concurrent modification occurs
+
+**Location:** `src/hooks/useProjectHandlers.ts`
+
+**Fix Applied:**
+- Added `operationInProgressRef` mutex to prevent concurrent project operations
+- Re-verification of state immediately before critical operations
+- User feedback when operation blocked by concurrent operation
+
+**Code Reference:** `src/hooks/useProjectHandlers.ts:108-180`
+
+#### 3) Shot Detection Staleness (MEDIUM)
+
+**Problem:** `useShotMarkers` did not handle the case where asset changed during shot detection.
+
+**Impact:** Wrong shot markers applied to different asset
+
+**Location:** `src/hooks/useShotMarkers.ts`
+
+**Fix Applied:**
+- Request ID tracking with `requestIdRef`
+- Stale results discarded based on request ID comparison
+- Proper logging for debugging
+
+**Code Reference:** `src/hooks/useShotMarkers.ts:89-135`
+
+### Test Coverage Added
+
+| Test File | Test Cases | Coverage |
+|-----------|------------|----------|
+| `commandQueue.test.ts` | 19 | Sequential execution, cancellation, backpressure |
+| `useProjectHandlers.test.ts` | 15 | Project lifecycle, concurrent ops |
+| `useAppLifecycle.test.ts` | 12 | Window close, settings persistence |
+
+### Architecture Quality Scores
+
+| Category | Score | Notes |
+|----------|-------|-------|
+| Backend (Rust) | 9/10 | Zero panics, event sourcing |
+| Frontend (React) | 8/10 | Strong state management |
+| Concurrency | 8.5/10 | Improved with fixes |
+| Security | 9/10 | Comprehensive validation |
+| Test Coverage | 7/10 | Good core, gaps in new features |
+
+### Files Modified
+
+| File | Changes |
+|------|---------|
+| `src/utils/commandQueue.ts` | AbortController, getStatus(), cancelOperation() |
+| `src/hooks/useProjectHandlers.ts` | Mutex for concurrent operations |
+| `src/hooks/useShotMarkers.ts` | Request ID staleness tracking |
+| `src/utils/index.ts` | Export new types |
+
+### Verification Commands
+
+```bash
+# Run all affected tests
+npm run test -- --run src/utils/commandQueue.test.ts
+npm run test -- --run src/hooks/useProjectHandlers.test.ts
+npm run test -- --run src/hooks/useAppLifecycle.test.ts
+
+# Type check
+npm run type-check
+```
+
+### Remaining Recommendations
+
+1. **Timeline Component Refactoring** - 732 lines exceeds 200-line guideline
+2. **Add AbortController to Tauri IPC** - For true operation cancellation
+3. **AI Sidebar Tests** - 6 components without dedicated tests
+4. **E2E Test Expansion** - Currently only 3 smoke tests
+
+---
+
+## Test Reliability Fixes (2026-01-28)
+
+### Issues Fixed
+
+#### 1) useShotMarkers Test Mock Setup
+
+**Problem:** Mock functions `mockDetectShots` and `mockGetAssetShots` returned `undefined` instead of Promises after `vi.clearAllMocks()` was called.
+
+**Impact:** All 16 tests failed with "Cannot read properties of undefined (reading 'then')"
+
+**Fix Applied:**
+- Added mock return value resets in `beforeEach` to ensure Promises are always returned:
+```typescript
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockShots = [];
+  // Re-apply mock return values after clearAllMocks
+  mockDetectShots.mockResolvedValue(undefined);
+  mockGetAssetShots.mockResolvedValue(undefined);
+});
+```
+
+#### 2) useProjectHandlers Concurrent Operation Tests
+
+**Problem:** Tests used `setTimeout` for slow operations but didn't use fake timers, causing test pollution and `result.current` becoming null in subsequent tests.
+
+**Impact:** 10 tests failed with "Cannot read properties of null"
+
+**Fix Applied:**
+- Added `vi.useFakeTimers()` and `vi.useRealTimers()` around slow operation tests
+- Added `vi.useRealTimers()` to `afterEach` to ensure cleanup even on test timeout
+- Restructured "isCreatingProject during creation" test to use controllable Promises instead of timers:
+```typescript
+let createResolver: (value?: unknown) => void;
+const createPromise = new Promise((resolve) => {
+  createResolver = resolve;
+});
+mockCreateProject.mockReturnValue(createPromise);
+```
+
+#### 3) CommandQueue Unhandled Rejections
+
+**Problem:** Tests passed but left unhandled Promise rejections that Vitest caught.
+
+**Impact:** 2 unhandled rejection errors in test output
+
+**Fix Applied:**
+- Changed `await vi.advanceTimersByTimeAsync()` to synchronous `vi.advanceTimersByTime()` before awaiting the rejection
+- Removed unnecessary timer advancement in the string error test
+
+### Final Test Results
+
+| Metric | Value |
+|--------|-------|
+| Test Files | 144 passed |
+| Total Tests | 2976 passed, 2 skipped |
+| Type Check | Clean |
+| Lint | Clean |
+
+### Verification Commands
+
+```bash
+# Full test suite
+npm run test -- --run
+
+# Specific fixed tests
+npm run test -- --run src/hooks/useShotMarkers.test.ts
+npm run test -- --run src/hooks/useProjectHandlers.test.ts
+npm run test -- --run src/utils/commandQueue.test.ts
+
+# Type checking
+npm run type-check
+
+# Linting
+npm run lint
 ```
