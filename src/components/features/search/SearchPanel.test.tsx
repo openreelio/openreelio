@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { SearchPanel } from './SearchPanel';
 
 // =============================================================================
@@ -220,14 +220,18 @@ describe('SearchPanel', () => {
       expect(onResultSelect).toHaveBeenCalledWith(mockSearchResponse.results[0]);
     });
 
-    it('should have focusable search input', () => {
+    it('should have focusable search input', async () => {
       render(<SearchPanel isOpen={true} onClose={vi.fn()} />);
 
       const input = screen.getByRole('searchbox');
 
       // Verify input can receive focus (manual focus works)
-      input.focus();
-      expect(document.activeElement).toBe(input);
+      act(() => {
+        input.focus();
+      });
+      await waitFor(() => {
+        expect(document.activeElement).toBe(input);
+      });
     });
   });
 

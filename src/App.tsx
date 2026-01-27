@@ -10,12 +10,14 @@ import { open, confirm } from '@tauri-apps/plugin-dialog';
 import { isTauri as isTauriApi } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { MainLayout, Header, Sidebar, BottomPanel, Panel } from './components/layout';
+import { AISidebar } from './components/features/ai';
 import {
   ErrorBoundary,
   TimelineErrorBoundary,
   PreviewErrorBoundary,
   ExplorerErrorBoundary,
   InspectorErrorBoundary,
+  AIErrorBoundary,
 } from './components/shared';
 import { WelcomeScreen } from './components/features/welcome';
 import { ProjectCreationDialog, type ProjectCreateData } from './components/features/project';
@@ -34,6 +36,7 @@ import {
   setupProxyEventListeners,
   cleanupProxyEventListeners,
 } from './stores';
+import { initializeAgentSystem } from './stores/aiStore';
 import {
   useTimelineActions,
   useFFmpegStatus,
@@ -96,6 +99,10 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
 
   // Export dialog state
   const [showExportDialog, setShowExportDialog] = useState(false);
+
+  // AI Sidebar state
+  const [aiSidebarCollapsed, setAiSidebarCollapsed] = useState(false);
+  const [aiSidebarWidth, setAiSidebarWidth] = useState(320);
 
   // Audio playback integration
   // The hook handles audio scheduling, volume control, and clip synchronization
@@ -284,15 +291,25 @@ function EditorView({ sequence }: EditorViewProps): JSX.Element {
           </Sidebar>
         }
         rightSidebar={
-          <Sidebar title="Inspector" position="right" width={288}>
-            <InspectorErrorBoundary onError={(error) => logger.error('Inspector error', { error })}>
-              <Inspector
-                selectedAsset={inspectorAsset}
-                selectedCaption={selectedCaption}
-                onCaptionChange={onCaptionChange}
+          <>
+            <Sidebar title="Inspector" position="right" width={288}>
+              <InspectorErrorBoundary onError={(error) => logger.error('Inspector error', { error })}>
+                <Inspector
+                  selectedAsset={inspectorAsset}
+                  selectedCaption={selectedCaption}
+                  onCaptionChange={onCaptionChange}
+                />
+              </InspectorErrorBoundary>
+            </Sidebar>
+            <AIErrorBoundary onError={(error) => logger.error('AISidebar error', { error })}>
+              <AISidebar
+                collapsed={aiSidebarCollapsed}
+                onToggle={() => setAiSidebarCollapsed(!aiSidebarCollapsed)}
+                width={aiSidebarWidth}
+                onWidthChange={setAiSidebarWidth}
               />
-            </InspectorErrorBoundary>
-          </Sidebar>
+            </AIErrorBoundary>
+          </>
         }
         footer={
           <BottomPanel title="Console">
@@ -431,6 +448,11 @@ function App(): JSX.Element {
         logger.error('Failed to cleanup proxy event listeners', { error });
       });
     };
+  }, []);
+
+  // Initialize AI agent system on app mount
+  useEffect(() => {
+    initializeAgentSystem();
   }, []);
 
   // Handle app close: save project and settings before closing

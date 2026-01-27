@@ -1,8 +1,8 @@
 # OpenReelio Development Roadmap
 
-> **Last Updated**: 2026-01-23
+> **Last Updated**: 2026-01-27
 > **Version**: v0.1.0 → v1.0.0 Planning
-> **Status**: MVP v0.1.0 at 95% completion | v0.2.0 AI Integration at 60%
+> **Status**: MVP v0.1.0 at 95% completion | v0.2.0 AI Integration at 95%
 > **Critical Blocker**: Code Signing + Auto-Update finalization required for v0.1.0 release
 
 This document outlines the complete development roadmap for OpenReelio, from MVP to production-ready release.
@@ -42,7 +42,7 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 | Milestone | Focus | Key Deliverables | Status |
 |-----------|-------|------------------|--------|
 | **v0.1.0** | Core Editor + Distribution | Timeline, Preview, Export, Auto-Update, Code Signing | 🔄 In Progress (95%) |
-| **v0.2.0** | AI Integration | Whisper, Meilisearch, Shot Detection | 🔄 In Progress (60%) |
+| **v0.2.0** | AI Integration | Whisper, Meilisearch, AI Sidebar, Agent Framework | 🔄 In Progress (95%) |
 | **v0.3.0** | Effects & Animation | Transitions, Keyframes, Audio FX | 📋 Planned |
 | **v0.4.0** | Plugin Ecosystem | WASM Host, Marketplace | 📋 Planned |
 | **v1.0.0** | Production | Performance, Stability, Docs | 📋 Planned |
@@ -169,16 +169,16 @@ Before v0.1.0 can be released, the following must be completed:
 
 **Goal**: Enable AI-powered editing with automatic transcription, smart search, and shot detection.
 
-> **Status**: 60% Complete - Major infrastructure and UI implemented, whisper.cpp integration pending
+> **Status**: 95% Complete - Full AI chat interface, agent framework, and editing tools implemented
 
-### Current Progress (as of 2026-01-23)
+### Current Progress (as of 2026-01-27)
 
 **Completed:**
 - ✅ AI Provider Architecture (OpenAI, Anthropic, Local providers)
 - ✅ AI Gateway with edit script executor
-- ✅ AI Settings Panel (AISettingsPanel.tsx)
+- ✅ AI Settings Panel (AISettingsPanel.tsx) with dialog integration
 - ✅ AI Prompt Panel (AIPromptPanel.tsx)
-- ✅ AI Store (aiStore.ts with full state management)
+- ✅ AI Store (aiStore.ts with full state management + cancel generation)
 - ✅ Meilisearch Sidecar Setup (sidecar.rs)
 - ✅ Meilisearch Search Service (service.rs)
 - ✅ Search UI Components (SearchBar, SearchPanel, SearchFilters, GroupedSearchResults)
@@ -188,6 +188,24 @@ Before v0.1.0 can be released, the following must be completed:
 - ✅ Asset Context Menu with transcription trigger
 - ✅ useCaption Hook (CRUD operations)
 - ✅ useTranscriptionWithIndexing Hook
+- ✅ First-Run Setup Wizard (SetupWizard.tsx)
+- ✅ **AI Sidebar** (AISidebar.tsx) - Collapsible chat interface with resize support
+- ✅ **Chat History** (ChatHistory.tsx) - Message display with auto-scroll
+- ✅ **Chat Input** (ChatInput.tsx) - Auto-resize input with stop generation
+- ✅ **Context Panel** (ContextPanel.tsx) - Shows current editing context
+- ✅ **Quick Actions Bar** (QuickActionsBar.tsx) - Common AI actions
+- ✅ **Proposal Card** (ProposalCard.tsx) - AI edit proposal display
+- ✅ **Chat Storage** (chatStorage.ts) - Persistent chat history per project
+- ✅ **Agent Framework** (src/agents/)
+  - ✅ Agent base class with event emitter and tool execution
+  - ✅ ToolRegistry for registering and executing tools
+  - ✅ ContextBuilder for building agent context
+  - ✅ VideoEditingAgent for AI-powered video editing
+  - ✅ MockAgent for testing
+- ✅ **Editing Tools** (src/agents/tools/editingTools.ts)
+  - ✅ move_clip, trim_clip, split_clip, delete_clip, insert_clip
+  - ✅ Full IPC integration with validation
+- ✅ **Error Boundaries** (AIErrorBoundary for graceful error handling)
 
 **Pending:**
 - ⏳ whisper.cpp (whisper-rs) integration for offline transcription

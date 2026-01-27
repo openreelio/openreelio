@@ -382,39 +382,42 @@ impl JobProcessor {
         }
     }
 
-    /// Emit job progress event
-    #[allow(dead_code)]
+    /// Emit job progress event.
+    ///
+    /// Backward compatible with both `job-progress` (legacy) and `job:progress` (namespaced).
     fn emit_progress(&self, job_id: &str, progress: f32, message: Option<&str>) {
-        let _ = self.app_handle.emit(
-            "job:progress",
-            serde_json::json!({
-                "jobId": job_id,
-                "progress": progress,
-                "message": message,
-            }),
-        );
+        let payload = serde_json::json!({
+            "jobId": job_id,
+            "progress": progress,
+            "message": message,
+        });
+
+        let _ = self.app_handle.emit("job:progress", payload.clone());
+        let _ = self.app_handle.emit("job-progress", payload);
     }
 
-    /// Emit job completion event
+    /// Emit job completion event.
+    ///
+    /// Backward compatible with both `job-complete` (legacy) and `job:completed` (namespaced).
     fn emit_completed(&self, job_id: &str, result: &serde_json::Value) {
-        let _ = self.app_handle.emit(
-            "job:completed",
-            serde_json::json!({
-                "jobId": job_id,
-                "result": result,
-            }),
-        );
+        let payload = serde_json::json!({
+            "jobId": job_id,
+            "result": result,
+        });
+        let _ = self.app_handle.emit("job:completed", payload.clone());
+        let _ = self.app_handle.emit("job-complete", payload);
     }
 
-    /// Emit job failure event
+    /// Emit job failure event.
+    ///
+    /// Backward compatible with both `job-failed` (legacy) and `job:failed` (namespaced).
     fn emit_failed(&self, job_id: &str, error: &str) {
-        let _ = self.app_handle.emit(
-            "job:failed",
-            serde_json::json!({
-                "jobId": job_id,
-                "error": error,
-            }),
-        );
+        let payload = serde_json::json!({
+            "jobId": job_id,
+            "error": error,
+        });
+        let _ = self.app_handle.emit("job:failed", payload.clone());
+        let _ = self.app_handle.emit("job-failed", payload);
     }
 
     /// Process thumbnail generation job
@@ -527,17 +530,16 @@ impl JobProcessor {
         // Spawn progress reporter
         let progress_task = tokio::spawn(async move {
             while let Some(progress) = progress_rx.recv().await {
-                let _ = app_handle.emit(
-                    "job:progress",
-                    serde_json::json!({
-                        "jobId": job_id,
-                        "assetId": asset_id_for_progress,
-                        "progress": progress.percent / 100.0,
-                        "message": format!("Encoding: {:.1}%", progress.percent),
-                        "fps": progress.fps,
-                        "etaSeconds": progress.eta_seconds,
-                    }),
-                );
+                let payload = serde_json::json!({
+                    "jobId": job_id,
+                    "assetId": asset_id_for_progress,
+                    "progress": progress.percent / 100.0,
+                    "message": format!("Encoding: {:.1}%", progress.percent),
+                    "fps": progress.fps,
+                    "etaSeconds": progress.eta_seconds,
+                });
+                let _ = app_handle.emit("job:progress", payload.clone());
+                let _ = app_handle.emit("job-progress", payload);
             }
         });
 
@@ -778,14 +780,7 @@ impl JobProcessor {
         );
 
         // Emit initial progress
-        let _ = self.app_handle.emit(
-            "job-progress",
-            serde_json::json!({
-                "jobId": job.id,
-                "progress": 0.1,
-                "message": "Extracting audio...",
-            }),
-        );
+        self.emit_progress(&job.id, 0.1, Some("Extracting audio..."));
 
         // Get FFmpeg path from runner
         let ffmpeg_path: Option<String> = {
@@ -819,14 +814,7 @@ impl JobProcessor {
             .map_err(|e| format!("Failed to extract audio: {}", e))?;
 
         // Emit progress after audio extraction
-        let _ = self.app_handle.emit(
-            "job-progress",
-            serde_json::json!({
-                "jobId": job.id,
-                "progress": 0.3,
-                "message": "Loading Whisper model...",
-            }),
-        );
+        self.emit_progress(&job.id, 0.3, Some("Loading Whisper model..."));
 
         // Parse model size
         let model_size: WhisperModel = model_name
@@ -852,14 +840,7 @@ impl JobProcessor {
             .map_err(|e| format!("Failed to load Whisper model: {}", e))?;
 
         // Emit progress after model loading
-        let _ = self.app_handle.emit(
-            "job-progress",
-            serde_json::json!({
-                "jobId": job.id,
-                "progress": 0.5,
-                "message": "Transcribing audio...",
-            }),
-        );
+        self.emit_progress(&job.id, 0.5, Some("Transcribing audio..."));
 
         // Configure transcription options
         let options = TranscriptionOptions {
@@ -879,14 +860,7 @@ impl JobProcessor {
         .map_err(|e| format!("Transcription failed: {}", e))?;
 
         // Emit progress after transcription
-        let _ = self.app_handle.emit(
-            "job-progress",
-            serde_json::json!({
-                "jobId": job.id,
-                "progress": 0.9,
-                "message": "Processing results...",
-            }),
-        );
+        self.emit_progress(&job.id, 0.9, Some("Processing results..."));
 
         // Convert segments to JSON
         let segments: Vec<serde_json::Value> = result
@@ -1002,14 +976,7 @@ impl JobProcessor {
             );
 
             // Emit progress
-            let _ = self.app_handle.emit(
-                "job-progress",
-                serde_json::json!({
-                    "jobId": job.id,
-                    "progress": 0.3,
-                    "message": "Building index documents...",
-                }),
-            );
+            self.emit_progress(&job.id, 0.3, Some("Building index documents..."));
 
             // Build asset document
             let mut asset_doc = AssetDocument::new(asset_id, asset_name, asset_path, asset_kind);
@@ -1058,14 +1025,7 @@ impl JobProcessor {
                 .index_transcripts(asset_id, &transcript_docs)
                 .await?;
 
-            let _ = self.app_handle.emit(
-                "job-progress",
-                serde_json::json!({
-                    "jobId": job.id,
-                    "progress": 0.9,
-                    "message": "Finalizing index...",
-                }),
-            );
+            self.emit_progress(&job.id, 0.9, Some("Finalizing index..."));
 
             tracing::info!(
                 "Indexed asset {} and {} transcript segments",

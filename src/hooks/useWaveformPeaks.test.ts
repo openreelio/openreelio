@@ -52,7 +52,7 @@ describe('useWaveformPeaks', () => {
   });
 
   describe('initial state', () => {
-    it('should return null data initially', () => {
+    it('should return null data initially', async () => {
       mockInvoke.mockResolvedValue(null);
 
       const { result } = renderHook(() => useWaveformPeaks('asset-123'));
@@ -60,6 +60,12 @@ describe('useWaveformPeaks', () => {
       expect(result.current.data).toBeNull();
       expect(result.current.isLoading).toBe(true);
       expect(result.current.error).toBeNull();
+
+      // Flush the initial async effect to avoid act() warnings.
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false);
+      });
+      expect(result.current.data).toBeNull();
     });
   });
 

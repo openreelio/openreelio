@@ -2,8 +2,10 @@
 //!
 //! Handles background job execution for proxy generation, rendering, transcription, etc.
 
+mod payloads;
 mod worker;
 
+pub use payloads::*;
 pub use worker::*;
 
 use serde::{Deserialize, Serialize};

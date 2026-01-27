@@ -1,0 +1,270 @@
+/**
+ * AISidebar Component Tests
+ *
+ * TDD tests for the AI sidebar container component.
+ * Tests rendering, toggle behavior, keyboard shortcuts, and child component integration.
+ */
+
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { AISidebar } from './AISidebar';
+
+// =============================================================================
+// Mocks
+// =============================================================================
+
+// Mock aiStore
+const mockChatMessages: unknown[] = [];
+const mockIsGenerating = false;
+const mockProviderStatus = {
+  providerType: 'openai' as const,
+  isConfigured: true,
+  isAvailable: true,
+  currentModel: 'gpt-4',
+  availableModels: ['gpt-4', 'gpt-3.5-turbo'],
+  errorMessage: null,
+};
+const mockLoadChatHistoryForProject = vi.fn();
+
+vi.mock('@/stores/aiStore', () => ({
+  useAIStore: (selector: (state: unknown) => unknown) => {
+    const state = {
+      chatMessages: mockChatMessages,
+      isGenerating: mockIsGenerating,
+      providerStatus: mockProviderStatus,
+      currentProposal: null,
+      error: null,
+      currentProjectId: 'seq_001',
+      addChatMessage: vi.fn(),
+      generateEditScript: vi.fn(),
+      clearChatHistory: vi.fn(),
+      loadChatHistoryForProject: mockLoadChatHistoryForProject,
+    };
+    return selector(state);
+  },
+}));
+
+// Mock stores
+vi.mock('@/stores', () => ({
+  useTimelineStore: (selector: (state: unknown) => unknown) => {
+    const state = {
+      playhead: 5.5,
+      selectedClipIds: ['clip_001'],
+      selectedTrackIds: ['track_001'],
+    };
+    return selector(state);
+  },
+  useProjectStore: (selector: (state: unknown) => unknown) => {
+    // Mock sequence with tracks containing clips
+    const mockSequence = {
+      id: 'seq_001',
+      name: 'Main Sequence',
+      tracks: [
+        {
+          id: 'track_001',
+          clips: [
+            { place: { timelineInSec: 0, durationSec: 120 } },
+          ],
+        },
+      ],
+    };
+    const sequencesMap = new Map([['seq_001', mockSequence]]);
+    const state = {
+      sequences: sequencesMap,
+      activeSequenceId: 'seq_001',
+    };
+    return selector(state);
+  },
+}));
+
+// =============================================================================
+// Test Setup
+// =============================================================================
+
+interface RenderProps {
+  collapsed?: boolean;
+  onToggle?: () => void;
+  width?: number;
+  onWidthChange?: (width: number) => void;
+}
+
+function renderAISidebar(props: RenderProps = {}) {
+  const defaultProps = {
+    collapsed: false,
+    onToggle: vi.fn(),
+    width: 320,
+    onWidthChange: vi.fn(),
+  };
+  return render(<AISidebar {...defaultProps} {...props} />);
+}
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+describe('AISidebar', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  describe('Rendering', () => {
+    it('renders in expanded state by default', () => {
+      renderAISidebar({ collapsed: false });
+
+      const sidebar = screen.getByTestId('ai-sidebar');
+      expect(sidebar).toBeInTheDocument();
+      expect(sidebar).not.toHaveClass('w-0');
+    });
+
+    it('renders in collapsed state when collapsed prop is true', () => {
+      renderAISidebar({ collapsed: true });
+
+      const sidebar = screen.getByTestId('ai-sidebar');
+      expect(sidebar).toBeInTheDocument();
+      expect(sidebar).toHaveClass('w-0');
+    });
+
+    it('renders the sidebar header with title', () => {
+      renderAISidebar();
+
+      expect(screen.getByText('AI Assistant')).toBeInTheDocument();
+    });
+
+    it('renders toggle button', () => {
+      renderAISidebar();
+
+      expect(screen.getByRole('button', { name: /toggle/i })).toBeInTheDocument();
+    });
+
+    it('renders with custom width', () => {
+      renderAISidebar({ width: 400 });
+
+      const sidebar = screen.getByTestId('ai-sidebar');
+      expect(sidebar).toHaveStyle({ width: '400px' });
+    });
+  });
+
+  describe('Toggle Behavior', () => {
+    it('calls onToggle when toggle button is clicked', async () => {
+      const user = userEvent.setup();
+      const onToggle = vi.fn();
+      renderAISidebar({ onToggle });
+
+      const toggleButton = screen.getByRole('button', { name: /toggle/i });
+      await user.click(toggleButton);
+
+      expect(onToggle).toHaveBeenCalledOnce();
+    });
+
+    it('calls onToggle when Ctrl+/ keyboard shortcut is pressed', async () => {
+      const user = userEvent.setup();
+      const onToggle = vi.fn();
+      renderAISidebar({ onToggle });
+
+      await user.keyboard('{Control>}/{/Control}');
+
+      expect(onToggle).toHaveBeenCalledOnce();
+    });
+
+    it('calls onToggle when Cmd+/ keyboard shortcut is pressed on Mac', async () => {
+      const user = userEvent.setup();
+      const onToggle = vi.fn();
+      renderAISidebar({ onToggle });
+
+      await user.keyboard('{Meta>}/{/Meta}');
+
+      expect(onToggle).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('Child Components', () => {
+    it('renders ChatHistory component when expanded', () => {
+      renderAISidebar({ collapsed: false });
+
+      expect(screen.getByTestId('chat-history')).toBeInTheDocument();
+    });
+
+    it('renders ContextPanel component when expanded', () => {
+      renderAISidebar({ collapsed: false });
+
+      expect(screen.getByTestId('context-panel')).toBeInTheDocument();
+    });
+
+    it('renders ChatInput component when expanded', () => {
+      renderAISidebar({ collapsed: false });
+
+      expect(screen.getByTestId('chat-input')).toBeInTheDocument();
+    });
+
+    it('does not render child components when collapsed', () => {
+      renderAISidebar({ collapsed: true });
+
+      expect(screen.queryByTestId('chat-history')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('context-panel')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('quick-actions-bar')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('chat-input')).not.toBeInTheDocument();
+    });
+
+    it('renders QuickActionsBar component when expanded', () => {
+      renderAISidebar({ collapsed: false });
+
+      expect(screen.getByTestId('quick-actions-bar')).toBeInTheDocument();
+    });
+  });
+
+  describe('Resize Behavior', () => {
+    it('has resize handle when expanded', () => {
+      renderAISidebar({ collapsed: false });
+
+      expect(screen.getByTestId('resize-handle')).toBeInTheDocument();
+    });
+
+    it('does not have resize handle when collapsed', () => {
+      renderAISidebar({ collapsed: true });
+
+      expect(screen.queryByTestId('resize-handle')).not.toBeInTheDocument();
+    });
+  });
+
+  describe('Provider Status', () => {
+    it('shows provider status indicator when configured', () => {
+      renderAISidebar();
+
+      expect(screen.getByTestId('provider-status')).toBeInTheDocument();
+      expect(screen.getByTestId('provider-status')).toHaveClass('bg-green-500');
+    });
+  });
+
+  describe('Accessibility', () => {
+    it('has proper aria-label for sidebar', () => {
+      renderAISidebar();
+
+      const sidebar = screen.getByTestId('ai-sidebar');
+      expect(sidebar).toHaveAttribute('aria-label', 'AI Assistant Sidebar');
+    });
+
+    it('toggle button has proper aria-expanded attribute', () => {
+      renderAISidebar({ collapsed: false });
+
+      const toggleButton = screen.getByRole('button', { name: /toggle/i });
+      expect(toggleButton).toHaveAttribute('aria-expanded', 'true');
+    });
+
+    it('toggle button reflects collapsed state in aria-expanded', () => {
+      renderAISidebar({ collapsed: true });
+
+      const toggleButton = screen.getByRole('button', { name: /toggle/i });
+      expect(toggleButton).toHaveAttribute('aria-expanded', 'false');
+    });
+  });
+
+  describe('Animation', () => {
+    it('has transition class for smooth animation', () => {
+      renderAISidebar();
+
+      const sidebar = screen.getByTestId('ai-sidebar');
+      expect(sidebar).toHaveClass('transition-all');
+    });
+  });
+});

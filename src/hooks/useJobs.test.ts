@@ -110,6 +110,18 @@ describe('useJobs', () => {
       await waitFor(() => {
         expect(mockListen).toHaveBeenCalled();
       });
+
+      const listenedEvents = mockListen.mock.calls.map(([event]) => event);
+      expect(listenedEvents).toEqual(
+        expect.arrayContaining([
+          'job-progress',
+          'job:progress',
+          'job-complete',
+          'job:completed',
+          'job-failed',
+          'job:failed',
+        ])
+      );
     });
 
     it('should not set up event listeners when disabled', async () => {

@@ -210,12 +210,15 @@ describe('useCancellablePromise', () => {
 
     // Start execution
     let resolvePromise: (value: string) => void;
-    const promise = result.current.execute(
-      () =>
-        new Promise<string>((resolve) => {
-          resolvePromise = resolve;
-        })
-    );
+    let promise: Promise<string | undefined>;
+    act(() => {
+      promise = result.current.execute(
+        () =>
+          new Promise<string>((resolve) => {
+            resolvePromise = resolve;
+          })
+      );
+    });
 
     // Loading should be true immediately after starting
     await waitFor(() => {
