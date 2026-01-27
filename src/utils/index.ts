@@ -110,3 +110,26 @@ export {
   prefersReducedMotion,
   getSafeDuration,
 } from './animations';
+
+export {
+  CommandQueue,
+  commandQueue,
+  _resetCommandQueueForTesting,
+  type CancellableOperation,
+  type QueueStatus,
+} from './commandQueue';
+
+export {
+  RequestDeduplicator,
+  requestDeduplicator,
+  _resetDeduplicatorForTesting,
+} from './requestDeduplicator';
+
+export {
+  fetchProjectState,
+  transformProjectState,
+  refreshProjectState,
+  applyProjectState,
+  type BackendProjectState,
+  type TransformedProjectState,
+} from './stateRefreshHelper';

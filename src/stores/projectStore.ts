@@ -17,180 +17,16 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { Asset, Sequence, Command, CommandResult, UndoRedoResult, ProxyStatus } from '@/types';
 import { createLogger } from '@/services/logger';
+import {
+  commandQueue,
+  requestDeduplicator,
+  _resetCommandQueueForTesting as resetCommandQueue,
+  _resetDeduplicatorForTesting as resetDeduplicator,
+  refreshProjectState,
+  applyProjectState,
+} from '@/utils';
 
 const logger = createLogger('ProjectStore');
-
-// =============================================================================
-// Command Queue for Serializing Async Operations
-// =============================================================================
-
-/**
- * CommandQueue ensures all async operations execute sequentially to prevent
- * race conditions. This is critical for data integrity in the editor.
- *
- * Design:
- * - FIFO queue with single concurrent execution
- * - Automatic error recovery (queue continues after failure)
- * - Timeout protection using Promise.race to prevent deadlocks
- * - Backpressure protection with max queue size to prevent memory exhaustion
- */
-class CommandQueue {
-  private queue: Array<{
-    operation: () => Promise<void>;
-    operationName: string;
-  }> = [];
-  private isProcessing = false;
-  private static readonly OPERATION_TIMEOUT_MS = 30000;
-  /** Maximum queue size to prevent memory exhaustion under heavy load */
-  private static readonly MAX_QUEUE_SIZE = 100;
-
-  async enqueue<T>(operation: () => Promise<T>, operationName = 'unknown'): Promise<T> {
-    // Backpressure protection: reject if queue is full
-    if (this.queue.length >= CommandQueue.MAX_QUEUE_SIZE) {
-      const errorMessage = `Command queue is full (${this.queue.length} pending operations). Please wait for current operations to complete.`;
-      logger.error('Queue backpressure triggered', {
-        operationName,
-        queueSize: this.queue.length,
-        maxSize: CommandQueue.MAX_QUEUE_SIZE,
-      });
-      throw new Error(errorMessage);
-    }
-
-    return new Promise<T>((resolve, reject) => {
-      const wrappedOperation = async (): Promise<void> => {
-        // Use Promise.race to ensure timeout actually unblocks the queue
-        const timeoutPromise = new Promise<never>((_, timeoutReject) => {
-          setTimeout(() => {
-            logger.error('Operation timeout', { operationName });
-            timeoutReject(new Error(`Operation timeout: ${operationName}`));
-          }, CommandQueue.OPERATION_TIMEOUT_MS);
-        });
-
-        try {
-          const result = await Promise.race([operation(), timeoutPromise]);
-          resolve(result);
-        } catch (error) {
-          reject(error instanceof Error ? error : new Error(String(error)));
-        }
-      };
-
-      this.queue.push({
-        operation: wrappedOperation,
-        operationName,
-      });
-
-      void this.processQueue();
-    });
-  }
-
-  private async processQueue(): Promise<void> {
-    if (this.isProcessing || this.queue.length === 0) {
-      return;
-    }
-
-    this.isProcessing = true;
-
-    while (this.queue.length > 0) {
-      const item = this.queue.shift();
-      if (!item) break;
-
-      try {
-        await item.operation();
-      } catch (error) {
-        logger.error('Queue operation failed', {
-          operationName: item.operationName,
-          error: error instanceof Error ? error.message : String(error),
-        });
-        // Continue processing queue even after failure
-      }
-    }
-
-    this.isProcessing = false;
-  }
-
-  get pendingCount(): number {
-    return this.queue.length;
-  }
-
-  clear(): void {
-    // Clear all pending operations from the queue
-    // Note: Operations already being awaited will complete normally
-    this.queue.splice(0);
-  }
-}
-
-// Global command queue instance
-const commandQueue = new CommandQueue();
-
-// =============================================================================
-// Request Deduplication
-// =============================================================================
-
-/**
- * Tracks in-flight requests to prevent duplicate operations from double-clicks
- * or rapid repeated invocations. Uses a simple hash of command type + payload.
- */
-class RequestDeduplicator {
-  private inFlight = new Map<string, Promise<unknown>>();
-  private static readonly DEBOUNCE_WINDOW_MS = 100;
-
-  /**
-   * Generates a unique key for the request based on type and payload
-   */
-  private generateKey(commandType: string, payload: unknown): string {
-    try {
-      return `${commandType}:${JSON.stringify(payload)}`;
-    } catch {
-      // If payload is not serializable, use only command type with timestamp bucket
-      const bucket = Math.floor(Date.now() / RequestDeduplicator.DEBOUNCE_WINDOW_MS);
-      return `${commandType}:${bucket}`;
-    }
-  }
-
-  /**
-   * Executes operation with deduplication. If an identical request is already
-   * in flight, returns the same promise instead of starting a new operation.
-   */
-  async execute<T>(commandType: string, payload: unknown, operation: () => Promise<T>): Promise<T> {
-    const key = this.generateKey(commandType, payload);
-
-    // Check if an identical request is already in flight
-    const existing = this.inFlight.get(key);
-    if (existing) {
-      logger.debug('Deduplicating request', { commandType, key });
-      return existing as Promise<T>;
-    }
-
-    // Execute the operation and track it
-    const promise = operation().finally(() => {
-      // Remove from tracking after a brief delay to catch rapid duplicates
-      setTimeout(() => {
-        this.inFlight.delete(key);
-      }, RequestDeduplicator.DEBOUNCE_WINDOW_MS);
-    });
-
-    this.inFlight.set(key, promise);
-    return promise;
-  }
-
-  /**
-   * Returns the number of in-flight requests (useful for debugging)
-   */
-  get inFlightCount(): number {
-    return this.inFlight.size;
-  }
-
-  /**
-   * Clears all tracked in-flight requests.
-   * FOR TESTING ONLY - do not call from production code.
-   */
-  clearForTesting(): void {
-    this.inFlight.clear();
-  }
-}
-
-// Global deduplicator instance
-const requestDeduplicator = new RequestDeduplicator();
 
 // =============================================================================
 // Test Utilities
@@ -201,8 +37,8 @@ const requestDeduplicator = new RequestDeduplicator();
  * FOR TESTING ONLY - do not use in production code.
  */
 export function _resetCommandQueueForTesting(): void {
-  commandQueue.clear();
-  requestDeduplicator.clearForTesting();
+  resetCommandQueue();
+  resetDeduplicator();
 }
 
 // =============================================================================
@@ -606,15 +442,9 @@ export const useProjectStore = create<ProjectState>()(
             });
 
             // Refresh state from backend to ensure consistency
-            // This is critical for maintaining sync between frontend and backend
-            const projectState = await invoke<{
-              assets: Asset[];
-              sequences: Sequence[];
-              activeSequenceId: string | null;
-            }>('get_project_state');
+            const freshState = await refreshProjectState();
 
             // Check for concurrent modifications before applying
-            // This prevents race conditions where multiple commands modify state simultaneously
             const versionAfter = get().stateVersion;
             if (versionBefore !== versionAfter) {
               const concurrentError = new Error(
@@ -634,21 +464,7 @@ export const useProjectStore = create<ProjectState>()(
               state.isDirty = true;
               state.stateVersion += 1;
               state.error = null;
-
-              // Update assets from backend
-              state.assets = new Map();
-              for (const asset of projectState.assets) {
-                state.assets.set(asset.id, asset);
-              }
-
-              // Update sequences from backend
-              state.sequences = new Map();
-              for (const sequence of projectState.sequences) {
-                state.sequences.set(sequence.id, sequence);
-              }
-
-              // Update active sequence ID from backend
-              state.activeSequenceId = projectState.activeSequenceId;
+              applyProjectState(state, freshState);
             });
 
             logger.debug('Command executed successfully', {
@@ -681,29 +497,13 @@ export const useProjectStore = create<ProjectState>()(
           const result = await invoke<UndoRedoResult>('undo');
 
           // Refresh state from backend after undo
-          const projectState = await invoke<{
-            assets: Asset[];
-            sequences: Sequence[];
-            activeSequenceId: string | null;
-          }>('get_project_state');
+          const freshState = await refreshProjectState();
 
           set((state) => {
             state.isDirty = true;
             state.stateVersion += 1;
             state.error = null;
-
-            state.assets = new Map();
-            for (const asset of projectState.assets) {
-              state.assets.set(asset.id, asset);
-            }
-
-            state.sequences = new Map();
-            for (const sequence of projectState.sequences) {
-              state.sequences.set(sequence.id, sequence);
-            }
-
-            // Update active sequence ID from backend
-            state.activeSequenceId = projectState.activeSequenceId;
+            applyProjectState(state, freshState);
           });
 
           logger.debug('Undo completed', { newVersion: get().stateVersion });
@@ -731,29 +531,13 @@ export const useProjectStore = create<ProjectState>()(
           const result = await invoke<UndoRedoResult>('redo');
 
           // Refresh state from backend after redo
-          const projectState = await invoke<{
-            assets: Asset[];
-            sequences: Sequence[];
-            activeSequenceId: string | null;
-          }>('get_project_state');
+          const freshState = await refreshProjectState();
 
           set((state) => {
             state.isDirty = true;
             state.stateVersion += 1;
             state.error = null;
-
-            state.assets = new Map();
-            for (const asset of projectState.assets) {
-              state.assets.set(asset.id, asset);
-            }
-
-            state.sequences = new Map();
-            for (const sequence of projectState.sequences) {
-              state.sequences.set(sequence.id, sequence);
-            }
-
-            // Update active sequence ID from backend
-            state.activeSequenceId = projectState.activeSequenceId;
+            applyProjectState(state, freshState);
           });
 
           logger.debug('Redo completed', { newVersion: get().stateVersion });
