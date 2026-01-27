@@ -54,6 +54,7 @@ export { CaptionTrack } from './CaptionTrack';
 // Marker components
 export { MarkerPin } from './MarkerPin';
 export { MarkerLayer } from './MarkerLayer';
+export { ShotMarkers } from './ShotMarkers';
 
 // Layer components
 export { DragPreviewLayer } from './DragPreviewLayer';
