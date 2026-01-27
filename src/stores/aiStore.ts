@@ -7,12 +7,22 @@
 
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import { persist } from 'zustand/middleware';
+import { persist, subscribeWithSelector } from 'zustand/middleware';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { createLogger } from '@/services/logger';
+import {
+  loadChatHistory,
+  clearChatHistory as clearStoredChatHistory,
+  createDebouncedSaver,
+  cleanupOldHistories,
+} from '@/services/chatStorage';
+import { registerEditingTools, globalToolRegistry } from '@/agents';
 
 const logger = createLogger('AIStore');
+
+// Debounced saver for chat persistence (1 second delay)
+const debouncedSaveChatHistory = createDebouncedSaver(1000);
 
 // =============================================================================
 // Types
@@ -127,6 +137,8 @@ interface AIState {
   // Chat
   chatMessages: ChatMessage[];
   isGenerating: boolean;
+  isCancelled: boolean;
+  currentProjectId: string | null;
 
   // Error handling
   error: string | null;
@@ -141,6 +153,7 @@ interface AIState {
   // Actions - AI Generation
   generateEditScript: (intent: string, context?: AIContext) => Promise<EditScript>;
   applyEditScript: (editScript: EditScript) => Promise<{ success: boolean; appliedOpIds: string[]; errors: string[] }>;
+  cancelGeneration: () => void;
 
   // Actions - Proposals
   createProposal: (editScript: EditScript) => void;
@@ -151,6 +164,8 @@ interface AIState {
   // Actions - Chat
   addChatMessage: (role: 'user' | 'assistant' | 'system', content: string, proposal?: AIProposal) => void;
   clearChatHistory: () => void;
+  loadChatHistoryForProject: (projectId: string) => void;
+  setCurrentProjectId: (projectId: string | null) => void;
 
   // Actions - Error handling
   setError: (error: string | null) => void;
@@ -173,8 +188,9 @@ export interface AIContext {
 // =============================================================================
 
 export const useAIStore = create<AIState>()(
-  persist(
-    immer((set, get) => ({
+  subscribeWithSelector(
+    persist(
+      immer((set, get) => ({
       // Initial state
       providerStatus: {
         providerType: null,
@@ -190,6 +206,8 @@ export const useAIStore = create<AIState>()(
       proposalHistory: [],
       chatMessages: [],
       isGenerating: false,
+      isCancelled: false,
+      currentProjectId: null,
       error: null,
 
       // Configure AI provider
@@ -310,10 +328,24 @@ export const useAIStore = create<AIState>()(
         }
       },
 
+      // Cancel ongoing generation
+      cancelGeneration: () => {
+        const wasGenerating = get().isGenerating;
+        if (wasGenerating) {
+          set((state) => {
+            state.isCancelled = true;
+            // Note: isGenerating will be set to false when the async operation
+            // detects the cancellation flag and handles it
+          });
+          logger.info('Generation cancellation requested by user');
+        }
+      },
+
       // Generate edit script from natural language
       generateEditScript: async (intent: string, context?: AIContext) => {
         set((state) => {
           state.isGenerating = true;
+          state.isCancelled = false;
           state.error = null;
         });
 
@@ -330,6 +362,16 @@ export const useAIStore = create<AIState>()(
             },
           });
 
+          // Check if cancelled during generation
+          if (get().isCancelled) {
+            set((state) => {
+              state.isCancelled = false;
+              state.isGenerating = false;
+            });
+            get().addChatMessage('system', 'Generation cancelled.');
+            throw new Error('Generation cancelled');
+          }
+
           set((state) => {
             state.isGenerating = false;
           });
@@ -342,6 +384,21 @@ export const useAIStore = create<AIState>()(
 
           return editScript;
         } catch (error) {
+          // Check if it was a cancellation
+          if (get().isCancelled || (error instanceof Error && error.message === 'Generation cancelled')) {
+            set((state) => {
+              state.isCancelled = false;
+              state.isGenerating = false;
+            });
+            // Only add message if not already added
+            const messages = get().chatMessages;
+            const lastMessage = messages[messages.length - 1];
+            if (!lastMessage || lastMessage.content !== 'Generation cancelled.') {
+              get().addChatMessage('system', 'Generation cancelled.');
+            }
+            throw new Error('Generation cancelled');
+          }
+
           // Fall back to local intent parsing
           try {
             const editScript = await invoke<EditScript>('analyze_intent', {
@@ -352,6 +409,21 @@ export const useAIStore = create<AIState>()(
                 selectedTracks: [],
               },
             });
+
+            // Check if cancelled during fallback
+            if (get().isCancelled) {
+              set((state) => {
+                state.isCancelled = false;
+                state.isGenerating = false;
+              });
+              // Only add message if not already added
+              const messages = get().chatMessages;
+              const lastMessage = messages[messages.length - 1];
+              if (!lastMessage || lastMessage.content !== 'Generation cancelled.') {
+                get().addChatMessage('system', 'Generation cancelled.');
+              }
+              throw new Error('Generation cancelled');
+            }
 
             set((state) => {
               state.isGenerating = false;
@@ -501,8 +573,33 @@ export const useAIStore = create<AIState>()(
 
       // Clear chat history
       clearChatHistory: () => {
+        const { currentProjectId } = get();
         set((state) => {
           state.chatMessages = [];
+        });
+        // Also clear from localStorage
+        if (currentProjectId) {
+          clearStoredChatHistory(currentProjectId);
+        }
+      },
+
+      // Load chat history for a project
+      loadChatHistoryForProject: (projectId: string) => {
+        const messages = loadChatHistory(projectId);
+        set((state) => {
+          state.chatMessages = messages;
+          state.currentProjectId = projectId;
+        });
+        logger.info('Loaded chat history for project', {
+          projectId,
+          messageCount: messages.length,
+        });
+      },
+
+      // Set current project ID (without loading history)
+      setCurrentProjectId: (projectId: string | null) => {
+        set((state) => {
+          state.currentProjectId = projectId;
         });
       },
 
@@ -520,19 +617,40 @@ export const useAIStore = create<AIState>()(
         });
       },
     })),
-    {
-      name: 'openreelio-ai-store',
-      // Only persist certain fields
-      partialize: (state) => ({
-        providerStatus: {
-          providerType: state.providerStatus.providerType,
-          currentModel: state.providerStatus.currentModel,
-          isConfigured: state.providerStatus.isConfigured,
-        },
-      }),
-    }
+      {
+        name: 'openreelio-ai-store',
+        // Only persist certain fields
+        partialize: (state) => ({
+          providerStatus: {
+            providerType: state.providerStatus.providerType,
+            currentModel: state.providerStatus.currentModel,
+            isConfigured: state.providerStatus.isConfigured,
+          },
+        }),
+      }
+    )
   )
 );
+
+// =============================================================================
+// Chat Persistence Subscription
+// =============================================================================
+
+// Subscribe to chat message changes and auto-save to localStorage
+useAIStore.subscribe(
+  (state) => ({ messages: state.chatMessages, projectId: state.currentProjectId }),
+  ({ messages, projectId }) => {
+    if (projectId && messages.length > 0) {
+      debouncedSaveChatHistory(projectId, messages);
+    }
+  },
+  { equalityFn: (a, b) => a.messages === b.messages && a.projectId === b.projectId }
+);
+
+// Cleanup old histories on module load
+if (typeof window !== 'undefined') {
+  cleanupOldHistories();
+}
 
 // =============================================================================
 // Event Listeners
@@ -590,3 +708,43 @@ export const selectProviderType = (state: AIState) => state.providerStatus.provi
 /** Selector for whether a proposal is pending */
 export const selectHasPendingProposal = (state: AIState) =>
   state.currentProposal?.status === 'pending' || state.currentProposal?.status === 'reviewing';
+
+// =============================================================================
+// Agent System Initialization
+// =============================================================================
+
+let isAgentSystemInitialized = false;
+
+/**
+ * Initialize the AI agent system.
+ * Registers editing tools and sets up the agent framework.
+ * Safe to call multiple times - will only initialize once.
+ */
+export function initializeAgentSystem(): void {
+  if (isAgentSystemInitialized) {
+    logger.debug('Agent system already initialized');
+    return;
+  }
+
+  // Register editing tools with the global registry
+  registerEditingTools();
+
+  isAgentSystemInitialized = true;
+  logger.info('Agent system initialized', {
+    toolCount: globalToolRegistry.listAll().length,
+  });
+}
+
+/**
+ * Check if the agent system is initialized.
+ */
+export function isAgentInitialized(): boolean {
+  return isAgentSystemInitialized;
+}
+
+/**
+ * Get the list of available agent tools.
+ */
+export function getAvailableAgentTools(): string[] {
+  return globalToolRegistry.listAll().map((t) => t.name);
+}
