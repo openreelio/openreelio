@@ -20,7 +20,7 @@ use crate::core::{
         default_export_allowed_roots, validate_existing_project_dir, validate_local_input_path,
         validate_path_id_component, validate_scoped_output_path,
     },
-    jobs::{Job, JobStatus, JobType, Priority},
+    jobs::{Job, JobStatus, JobType, Priority, ValidatedJobPayload},
     performance::memory::{CacheStats, PoolStats},
     settings::{AppSettings, SettingsManager},
     timeline::Sequence,
@@ -1345,6 +1345,44 @@ pub async fn get_jobs(state: State<'_, AppState>) -> Result<Vec<JobInfoDto>, Str
     Ok(all_jobs)
 }
 
+fn parse_job_type(job_type: &str) -> Result<JobType, String> {
+    match job_type {
+        // snake_case (legacy)
+        "proxy_generation" => Ok(JobType::ProxyGeneration),
+        "thumbnail_generation" => Ok(JobType::ThumbnailGeneration),
+        "waveform_generation" => Ok(JobType::WaveformGeneration),
+        "indexing" => Ok(JobType::Indexing),
+        "transcription" => Ok(JobType::Transcription),
+        "preview_render" => Ok(JobType::PreviewRender),
+        "final_render" => Ok(JobType::FinalRender),
+        "ai_completion" => Ok(JobType::AICompletion),
+
+        // camelCase (serde-friendly)
+        "proxyGeneration" => Ok(JobType::ProxyGeneration),
+        "thumbnailGeneration" => Ok(JobType::ThumbnailGeneration),
+        "waveformGeneration" => Ok(JobType::WaveformGeneration),
+        "previewRender" => Ok(JobType::PreviewRender),
+        "finalRender" => Ok(JobType::FinalRender),
+        "aiCompletion" => Ok(JobType::AICompletion),
+
+        other => Err(format!("Unknown job type: {other}")),
+    }
+}
+
+fn parse_priority(priority: Option<&str>) -> Result<Priority, String> {
+    match priority {
+        Some("background") => Ok(Priority::Background),
+        Some("normal") | None => Ok(Priority::Normal),
+        Some("preview") => Ok(Priority::Preview),
+        Some("user_request") => Ok(Priority::UserRequest),
+
+        // camelCase alias
+        Some("userRequest") => Ok(Priority::UserRequest),
+
+        Some(other) => Err(format!("Unknown priority: {other}")),
+    }
+}
+
 /// Submits a new job to the worker pool
 #[tauri::command]
 #[tracing::instrument(skip(state, payload), fields(job_type = %job_type))]
@@ -1354,27 +1392,12 @@ pub async fn submit_job(
     payload: serde_json::Value,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
-    let job_type_enum = match job_type.as_str() {
-        "proxy_generation" => JobType::ProxyGeneration,
-        "thumbnail_generation" => JobType::ThumbnailGeneration,
-        "waveform_generation" => JobType::WaveformGeneration,
-        "indexing" => JobType::Indexing,
-        "transcription" => JobType::Transcription,
-        "preview_render" => JobType::PreviewRender,
-        "final_render" => JobType::FinalRender,
-        "ai_completion" => JobType::AICompletion,
-        _ => return Err(format!("Unknown job type: {}", job_type)),
-    };
+    let job_type_enum = parse_job_type(&job_type)?;
+    let priority_enum = parse_priority(priority.as_deref())?;
 
-    let priority_enum = match priority.as_deref() {
-        Some("background") => Priority::Background,
-        Some("normal") | None => Priority::Normal,
-        Some("preview") => Priority::Preview,
-        Some("user_request") => Priority::UserRequest,
-        Some(other) => return Err(format!("Unknown priority: {}", other)),
-    };
-
-    let job = Job::new(job_type_enum, payload).with_priority(priority_enum);
+    // Strict payload validation (IPC is a trust boundary)
+    let validated_payload = ValidatedJobPayload::parse(&job_type_enum, payload)?;
+    let job = Job::new(job_type_enum, validated_payload.into_value()).with_priority(priority_enum);
 
     let pool = state.job_pool.lock().await;
 
