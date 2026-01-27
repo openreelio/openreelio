@@ -58,6 +58,7 @@ pub struct FFmpegStatus {
 
 /// Check if FFmpeg is available and return its status
 #[tauri::command]
+#[specta::specta]
 pub async fn check_ffmpeg(
     ffmpeg_state: tauri::State<'_, SharedFFmpegState>,
 ) -> Result<FFmpegStatus, String> {
@@ -84,6 +85,7 @@ pub async fn check_ffmpeg(
 
 /// Extract a single frame from a video
 #[tauri::command]
+#[specta::specta]
 pub async fn extract_frame(
     input_path: String,
     time_sec: f64,
@@ -113,6 +115,7 @@ pub async fn extract_frame(
 
 /// Generate a thumbnail for a video file
 #[tauri::command]
+#[specta::specta]
 pub async fn generate_thumbnail(
     input_path: String,
     output_path: String,
@@ -148,6 +151,7 @@ pub async fn generate_thumbnail(
 
 /// Probe media file to get information
 #[tauri::command]
+#[specta::specta]
 pub async fn probe_media(
     input_path: String,
     ffmpeg_state: tauri::State<'_, SharedFFmpegState>,
@@ -164,6 +168,7 @@ pub async fn probe_media(
 
 /// Generate audio waveform image
 #[tauri::command]
+#[specta::specta]
 pub async fn generate_waveform(
     input_path: String,
     output_path: String,
