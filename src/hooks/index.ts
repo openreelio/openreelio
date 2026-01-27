@@ -276,8 +276,23 @@ export type {
   UseShotDetectionReturn,
 } from './useShotDetection';
 
+export { useShotMarkers } from './useShotMarkers';
+export type {
+  UseShotMarkersOptions,
+  UseShotMarkersReturn,
+} from './useShotMarkers';
+
 export { usePlayheadDrag } from './usePlayheadDrag';
 export type {
   UsePlayheadDragOptions,
   UsePlayheadDragResult,
 } from './usePlayheadDrag';
+
+export { useProjectHandlers } from './useProjectHandlers';
+export type {
+  ProjectCreateData,
+  UseProjectHandlersOptions,
+  UseProjectHandlersResult,
+} from './useProjectHandlers';
+
+export { useAppLifecycle } from './useAppLifecycle';
