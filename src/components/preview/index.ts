@@ -36,3 +36,6 @@ export type { TimelinePreviewPlayerProps } from './TimelinePreviewPlayer';
 
 export { UnifiedPreviewPlayer } from './UnifiedPreviewPlayer';
 export type { UnifiedPreviewPlayerProps } from './UnifiedPreviewPlayer';
+
+export { TransformOverlay } from './TransformOverlay';
+export type { TransformOverlayProps } from './TransformOverlay';
