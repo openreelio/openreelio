@@ -134,7 +134,7 @@ describe('AISidebar', () => {
     it('renders toggle button', () => {
       renderAISidebar();
 
-      expect(screen.getByRole('button', { name: /toggle/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /collapse ai sidebar/i })).toBeInTheDocument();
     });
 
     it('renders with custom width', () => {
@@ -151,8 +151,8 @@ describe('AISidebar', () => {
       const onToggle = vi.fn();
       renderAISidebar({ onToggle });
 
-      const toggleButton = screen.getByRole('button', { name: /toggle/i });
-      await user.click(toggleButton);
+      const collapseButton = screen.getByRole('button', { name: /collapse ai sidebar/i });
+      await user.click(collapseButton);
 
       expect(onToggle).toHaveBeenCalledOnce();
     });
@@ -247,15 +247,18 @@ describe('AISidebar', () => {
     it('toggle button has proper aria-expanded attribute', () => {
       renderAISidebar({ collapsed: false });
 
-      const toggleButton = screen.getByRole('button', { name: /toggle/i });
-      expect(toggleButton).toHaveAttribute('aria-expanded', 'true');
+      // When expanded, the collapse button has aria-expanded="true"
+      const collapseButton = screen.getByRole('button', { name: /collapse ai sidebar/i });
+      expect(collapseButton).toHaveAttribute('aria-expanded', 'true');
     });
 
     it('toggle button reflects collapsed state in aria-expanded', () => {
       renderAISidebar({ collapsed: true });
 
-      const toggleButton = screen.getByRole('button', { name: /toggle/i });
-      expect(toggleButton).toHaveAttribute('aria-expanded', 'false');
+      // When collapsed, the collapse button still exists but has aria-expanded="false"
+      // Note: The "Open AI Assistant" button appears but doesn't have aria-expanded
+      const collapseButton = screen.getByRole('button', { name: /collapse ai sidebar/i });
+      expect(collapseButton).toHaveAttribute('aria-expanded', 'false');
     });
   });
 
