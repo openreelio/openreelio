@@ -259,8 +259,12 @@ export const useProjectStore = create<ProjectState>()(
 
     // Close project
     closeProject: () => {
+      // Clear command queue to prevent any pending operations from affecting the next project
+      commandQueue.clear();
+
       set((state) => {
         state.isLoaded = false;
+        state.isLoading = false;
         state.meta = null;
         state.assets = new Map();
         state.sequences = new Map();
@@ -268,7 +272,11 @@ export const useProjectStore = create<ProjectState>()(
         state.selectedAssetId = null;
         state.isDirty = false;
         state.error = null;
+        // Reset state version for new project
+        state.stateVersion = 0;
       });
+
+      logger.info('Project closed and state reset');
     },
 
     // Import asset
@@ -424,6 +432,11 @@ export const useProjectStore = create<ProjectState>()(
      * Uses request deduplication to prevent duplicate operations from double-clicks.
      * This prevents data loss when multiple commands are issued rapidly.
      *
+     * Architecture:
+     * - Commands are serialized through a FIFO queue (single concurrent execution)
+     * - State version is captured atomically within the set() call
+     * - Backend is the single source of truth; frontend state is refreshed after each command
+     *
      * @param command - The command to execute
      * @returns CommandResult from backend
      */
@@ -431,6 +444,8 @@ export const useProjectStore = create<ProjectState>()(
       // Deduplicate requests to prevent double-click issues
       return requestDeduplicator.execute(command.type, command.payload, () =>
         commandQueue.enqueue(async () => {
+          // Capture version atomically before any async operation
+          // This is safe because commandQueue ensures sequential execution
           const versionBefore = get().stateVersion;
 
           try {
@@ -444,28 +459,34 @@ export const useProjectStore = create<ProjectState>()(
             // Refresh state from backend to ensure consistency
             const freshState = await refreshProjectState();
 
-            // Check for concurrent modifications before applying
-            const versionAfter = get().stateVersion;
-            if (versionBefore !== versionAfter) {
-              const concurrentError = new Error(
-                `Concurrent modification detected during command execution. ` +
-                  `State version changed from ${versionBefore} to ${versionAfter}. ` +
-                  `Please retry the operation.`,
-              );
-              logger.error('Concurrent modification detected - aborting command', {
-                commandType: command.type,
-                versionBefore,
-                versionAfter,
-              });
-              throw concurrentError;
-            }
-
+            // Atomic state update with version check
+            // The set() callback executes synchronously, ensuring atomicity
+            let concurrentModificationDetected = false;
             set((state) => {
+              // Double-check version hasn't changed (defensive programming)
+              // This should never happen due to queue serialization, but provides an extra safety net
+              if (state.stateVersion !== versionBefore) {
+                concurrentModificationDetected = true;
+                logger.error('Concurrent modification detected in set() callback', {
+                  commandType: command.type,
+                  expectedVersion: versionBefore,
+                  actualVersion: state.stateVersion,
+                });
+                return; // Don't apply state changes
+              }
+
               state.isDirty = true;
               state.stateVersion += 1;
               state.error = null;
               applyProjectState(state, freshState);
             });
+
+            if (concurrentModificationDetected) {
+              throw new Error(
+                `Concurrent modification detected during command execution. ` +
+                  `State version changed unexpectedly. Please retry the operation.`,
+              );
+            }
 
             logger.debug('Command executed successfully', {
               type: command.type,
