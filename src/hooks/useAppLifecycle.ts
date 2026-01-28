@@ -3,12 +3,13 @@
  *
  * Manages application lifecycle events including:
  * - Window close handling with unsaved changes protection
+ * - Backend cleanup (workers, services) before close
  * - Settings persistence on close
  * - Browser beforeunload fallback
  */
 
 import { useEffect } from 'react';
-import { isTauri as isTauriApi } from '@tauri-apps/api/core';
+import { isTauri as isTauriApi, invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { useProjectStore, useSettingsStore } from '@/stores';
@@ -17,8 +18,46 @@ import { createLogger } from '@/services/logger';
 const logger = createLogger('useAppLifecycle');
 
 // =============================================================================
+// Types
+// =============================================================================
+
+/** Result from backend cleanup operation */
+interface AppCleanupResult {
+  projectSaved: boolean;
+  workersShutdown: boolean;
+  error: string | null;
+}
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+/** Timeout for cleanup operations in milliseconds */
+const CLEANUP_TIMEOUT_MS = 10000;
+
+/** Timeout for settings flush on close (do not block app exit indefinitely) */
+const SETTINGS_FLUSH_TIMEOUT_MS = 3000;
+
+/** Hard deadline for the close handler to finish before forcing a window destroy */
+const FORCE_CLOSE_DEADLINE_MS = 15000;
+
+// =============================================================================
 // Hook Implementation
 // =============================================================================
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(`${label} timeout`)), ms);
+  });
+
+  return Promise.race([promise, timeoutPromise]).finally(() => {
+    if (timeoutId !== null) {
+      clearTimeout(timeoutId);
+    }
+  });
+}
 
 /**
  * Hook that manages application lifecycle events.
@@ -35,70 +74,120 @@ const logger = createLogger('useAppLifecycle');
 export function useAppLifecycle(): void {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let isHandlingCloseRequest = false;
 
     const setupCloseHandler = async () => {
       try {
         const currentWindow = getCurrentWindow();
 
         unlisten = await currentWindow.onCloseRequested(async (event) => {
-          const { isDirty, saveProject, meta } = useProjectStore.getState();
+          const startedAt = Date.now();
 
-          // Check if there are unsaved changes
-          if (isDirty && meta?.path) {
-            // Prevent immediate close
+          // If a close is already being handled (e.g., user clicked X repeatedly),
+          // ignore duplicate requests but keep the window open until cleanup completes.
+          if (isHandlingCloseRequest) {
             event.preventDefault();
+            return;
+          }
+          isHandlingCloseRequest = true;
 
-            // Ask user what to do
-            const shouldSave = await confirm(
-              'You have unsaved changes. Do you want to save before closing?',
-              {
-                title: 'Unsaved Changes',
-                kind: 'warning',
-                okLabel: 'Save and Close',
-                cancelLabel: 'Close Without Saving',
-              },
-            );
+          // Fail-safe: if something in the close handler hangs (e.g., IPC never resolves),
+          // force-destroy the window after a hard deadline so the user can always exit.
+          const forceDestroyTimer = setTimeout(() => {
+            logger.error('Close handler exceeded deadline; forcing window destroy', {
+              elapsedMs: Date.now() - startedAt,
+            });
+            currentWindow.destroy().catch((err) => {
+              logger.error('Forced window destroy failed', { error: err });
+            });
+          }, FORCE_CLOSE_DEADLINE_MS);
 
-            if (shouldSave) {
-              try {
-                await saveProject();
-                logger.info('Project saved before closing');
-              } catch (saveError) {
-                logger.error('Failed to save project before closing', { error: saveError });
-                // Ask if they still want to close
-                const forceClose = await confirm(
-                  'Failed to save project. Close anyway?',
-                  {
-                    title: 'Save Failed',
-                    kind: 'error',
-                    okLabel: 'Close Anyway',
-                    cancelLabel: 'Cancel',
-                  },
-                );
-                if (!forceClose) {
-                  return; // Don't close
+          try {
+            const { isDirty, saveProject, meta } = useProjectStore.getState();
+
+            // Check if there are unsaved changes
+            if (isDirty && meta?.path) {
+              // Ask user what to do
+              const shouldSave = await confirm(
+                'You have unsaved changes. Do you want to save before closing?',
+                {
+                  title: 'Unsaved Changes',
+                  kind: 'warning',
+                  okLabel: 'Save and Close',
+                  cancelLabel: 'Close Without Saving',
+                },
+              );
+
+              if (shouldSave) {
+                try {
+                  await saveProject();
+                  logger.info('Project saved before closing');
+                } catch (saveError) {
+                  logger.error('Failed to save project before closing', { error: saveError });
+                  // Ask if they still want to close
+                  const forceClose = await confirm(
+                    'Failed to save project. Close anyway?',
+                    {
+                      title: 'Save Failed',
+                      kind: 'error',
+                      okLabel: 'Close Anyway',
+                      cancelLabel: 'Cancel',
+                    },
+                  );
+                  if (!forceClose) {
+                    // User explicitly cancelled closing.
+                    event.preventDefault();
+                    isHandlingCloseRequest = false;
+                    return; // Don't close
+                  }
                 }
               }
             }
 
-            // Flush settings
+            // Perform backend cleanup with timeout
+            try {
+              const result = await withTimeout(
+                invoke<AppCleanupResult>('app_cleanup'),
+                CLEANUP_TIMEOUT_MS,
+                'Cleanup',
+              );
+              logger.info('Backend cleanup completed', { result });
+
+              if (result.error) {
+                logger.warn('Backend cleanup had errors', { error: result.error });
+              }
+            } catch (cleanupError) {
+              // Don't block close on cleanup failure
+              logger.error('Backend cleanup failed', { error: cleanupError });
+            }
+
+            // Flush settings (bounded by timeout so close cannot hang)
             const { flushPendingUpdates } = useSettingsStore.getState();
             try {
-              await flushPendingUpdates();
+              await withTimeout(
+                flushPendingUpdates(),
+                SETTINGS_FLUSH_TIMEOUT_MS,
+                'Settings flush',
+              );
+              logger.debug('Settings flushed before close');
             } catch (flushError) {
               logger.error('Failed to flush settings on close', { error: flushError });
             }
 
-            // Now close the window
-            await currentWindow.close();
-          } else {
-            // No unsaved changes, just flush settings
-            const { flushPendingUpdates } = useSettingsStore.getState();
-            try {
-              await flushPendingUpdates();
-            } catch (flushError) {
-              logger.error('Failed to flush settings on close', { error: flushError });
-            }
+            // IMPORTANT: Do not call currentWindow.close() here.
+            //
+            // The onCloseRequested wrapper (inside @tauri-apps/api) will destroy the window
+            // automatically after this handler returns if preventDefault() was NOT called.
+            // Calling close() from within the handler can deadlock (waiting for a close event
+            // that cannot be processed until this handler completes).
+            logger.info('Close request approved; allowing window to close', {
+              elapsedMs: Date.now() - startedAt,
+            });
+          } catch (error) {
+            // Never throw from the close handler, otherwise Tauri may never destroy the window.
+            logger.error('Unhandled error in close handler', { error });
+          } finally {
+            clearTimeout(forceDestroyTimer);
           }
         });
       } catch (error) {
@@ -110,7 +199,9 @@ export function useAppLifecycle(): void {
       void setupCloseHandler();
     }
 
-    // Also handle browser beforeunload as fallback
+    // Browser-only beforeunload fallback:
+    // In the Tauri runtime we rely on the native close event (onCloseRequested).
+    const shouldRegisterBeforeUnload = !isTauriApi();
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       const { isDirty, meta } = useProjectStore.getState();
 
@@ -129,13 +220,17 @@ export function useAppLifecycle(): void {
       });
     };
 
-    window.addEventListener('beforeunload', handleBeforeUnload);
+    if (shouldRegisterBeforeUnload) {
+      window.addEventListener('beforeunload', handleBeforeUnload);
+    }
 
     return () => {
       if (unlisten) {
         unlisten();
       }
-      window.removeEventListener('beforeunload', handleBeforeUnload);
+      if (shouldRegisterBeforeUnload) {
+        window.removeEventListener('beforeunload', handleBeforeUnload);
+      }
     };
   }, []);
 }
