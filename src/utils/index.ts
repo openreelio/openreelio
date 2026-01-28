@@ -13,6 +13,10 @@ export {
 } from './formatters';
 
 export {
+  isError,
+  isErrorLike,
+  extractErrorMessage,
+  normalizeError,
   getUserFriendlyError,
   getErrorSeverity,
   createErrorHandler,
@@ -133,3 +137,10 @@ export {
   type BackendProjectState,
   type TransformedProjectState,
 } from './stateRefreshHelper';
+
+export {
+  shotResultToShot,
+  shotResultsToShots,
+  shotToShotResult,
+  mergeShots,
+} from './shotConverter';
