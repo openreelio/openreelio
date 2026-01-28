@@ -316,9 +316,11 @@ describe('Playhead', () => {
 
   describe('styling', () => {
     it('should have z-index for layering', () => {
+      // z-30 is used within an isolated stacking context (parent has isolation: isolate)
+      // This keeps the playhead above timeline elements but contained within the timeline
       render(<Playhead position={0} zoom={100} />);
       const playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveClass('z-50');
+      expect(playhead).toHaveClass('z-30');
     });
 
     it('should have shadow on head during drag', () => {

@@ -117,7 +117,7 @@ function PlayheadComponent({
       data-testid="playhead"
       data-playing={isPlaying ? 'true' : 'false'}
       data-dragging={isDragging ? 'true' : 'false'}
-      className="absolute top-0 h-full z-50 pointer-events-none"
+      className="absolute top-0 h-full z-30 pointer-events-none"
       style={{
         left: `${pixelPosition}px`,
         width: `${LINE_WIDTH}px`,
@@ -127,7 +127,7 @@ function PlayheadComponent({
       {/* Vertical line - extends full height (ruler + tracks) */}
       <div
         data-testid="playhead-line"
-        className="absolute top-0 left-0 w-full h-full pointer-events-none bg-primary-500"
+        className="absolute top-0 left-0 w-full h-full pointer-events-none bg-timeline-playhead-line"
       />
 
       {/* Draggable head marker - positioned in ruler area */}
@@ -171,7 +171,7 @@ function PlayheadComponent({
             height: 0,
             borderLeft: `${HEAD_SIZE / 2}px solid transparent`,
             borderRight: `${HEAD_SIZE / 2}px solid transparent`,
-            borderTop: `${HEAD_SIZE}px solid #22c55e`,
+            borderTop: `${HEAD_SIZE}px solid #ef4444`,
           }}
         />
       </div>

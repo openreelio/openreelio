@@ -179,20 +179,49 @@ export function Timeline({
     if (!element) return;
 
     // Initial measurement
-    setViewportWidth(element.clientWidth - TRACK_HEADER_WIDTH);
+    setViewportWidth(Math.max(0, element.clientWidth - TRACK_HEADER_WIDTH));
 
-    // Observe resize changes
-    const resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const width = entry.contentRect.width - TRACK_HEADER_WIDTH;
-        setViewportWidth(Math.max(0, width));
-      }
-    });
+    // Observe resize changes with error handling
+    let resizeObserver: ResizeObserver | null = null;
+    let isObserving = false;
 
-    resizeObserver.observe(element);
+    try {
+      resizeObserver = new ResizeObserver((entries) => {
+        // Guard against callbacks after disconnect
+        if (!isObserving) return;
+
+        for (const entry of entries) {
+          const width = entry.contentRect.width - TRACK_HEADER_WIDTH;
+          setViewportWidth(Math.max(0, width));
+        }
+      });
+
+      resizeObserver.observe(element);
+      isObserving = true;
+    } catch {
+      // ResizeObserver may fail in certain environments (e.g., headless browsers)
+      // Fall back to window resize events
+      const handleWindowResize = () => {
+        if (tracksAreaRef.current) {
+          const width = tracksAreaRef.current.clientWidth - TRACK_HEADER_WIDTH;
+          setViewportWidth(Math.max(0, width));
+        }
+      };
+      window.addEventListener('resize', handleWindowResize);
+      return () => {
+        window.removeEventListener('resize', handleWindowResize);
+      };
+    }
 
     return () => {
-      resizeObserver.disconnect();
+      isObserving = false;
+      if (resizeObserver) {
+        try {
+          resizeObserver.disconnect();
+        } catch {
+          // Ignore disconnect errors (element may already be removed)
+        }
+      }
     };
   }, []);
 
@@ -587,7 +616,8 @@ export function Timeline({
       <TimelineToolbar onFitToWindow={handleFitToWindow} />
 
       {/* Main timeline area with ruler and tracks - relative container for playhead */}
-      <div className="flex-1 flex flex-col relative">
+      {/* isolation: isolate creates a stacking context so playhead z-index doesn't escape to overlap modals */}
+      <div className="flex-1 flex flex-col relative isolate">
         {/* Ruler row */}
         <div className="flex border-b border-editor-border flex-shrink-0">
           <div className="w-48 flex-shrink-0 bg-editor-sidebar border-r border-editor-border" />
