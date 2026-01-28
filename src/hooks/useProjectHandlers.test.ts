@@ -261,7 +261,7 @@ describe('useProjectHandlers', () => {
       });
 
       expect(mockAddToast).toHaveBeenCalledWith(
-        expect.stringContaining('Failed to create'),
+        expect.stringContaining('Could not create the project'),
         'error'
       );
     });
@@ -276,8 +276,11 @@ describe('useProjectHandlers', () => {
 
       const { result } = renderUseProjectHandlers();
 
-      // Start first operation (don't await yet)
-      const firstOpPromise = result.current.handleCreateProject(projectData);
+      // Start first operation (wrapped in act to handle state updates)
+      let firstOpPromise: Promise<void>;
+      act(() => {
+        firstOpPromise = result.current.handleCreateProject(projectData);
+      });
 
       // Try to start second operation immediately (while first is in progress)
       await act(async () => {
@@ -293,8 +296,8 @@ describe('useProjectHandlers', () => {
       // Complete first operation
       await act(async () => {
         await vi.runAllTimersAsync();
+        await firstOpPromise!;
       });
-      await firstOpPromise;
 
       // Only one create call
       expect(mockCreateProject).toHaveBeenCalledTimes(1);
@@ -445,8 +448,11 @@ describe('useProjectHandlers', () => {
 
       const { result } = renderUseProjectHandlers();
 
-      // Start first operation (don't await yet)
-      const firstOpPromise = result.current.handleOpenProject('/first/project');
+      // Start first operation (wrapped in act to handle state updates)
+      let firstOpPromise: Promise<void>;
+      act(() => {
+        firstOpPromise = result.current.handleOpenProject('/first/project');
+      });
 
       // Try to start second operation immediately (while first is in progress)
       await act(async () => {
@@ -461,8 +467,8 @@ describe('useProjectHandlers', () => {
       // Complete first operation
       await act(async () => {
         await vi.runAllTimersAsync();
+        await firstOpPromise!;
       });
-      await firstOpPromise;
 
       expect(mockLoadProject).toHaveBeenCalledTimes(1);
 
