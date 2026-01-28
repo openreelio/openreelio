@@ -1,3 +1,4 @@
+use crate::core::timeline::Transform;
 use crate::core::{AssetId, ClipId, SequenceId, TimeSec, TrackId};
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +56,15 @@ pub struct TrimClipPayload {
     pub new_source_out: Option<TimeSec>,
     #[serde(alias = "newTimelineIn")]
     pub new_timeline_in: Option<TimeSec>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetClipTransformPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub transform: Transform,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -132,6 +142,9 @@ pub enum CommandPayload {
     #[serde(alias = "splitClip", alias = "SplitClip")]
     SplitClip(SplitClipPayload),
 
+    #[serde(alias = "setClipTransform", alias = "SetClipTransform")]
+    SetClipTransform(SetClipTransformPayload),
+
     #[serde(alias = "importAsset", alias = "ImportAsset")]
     ImportAsset(ImportAssetPayload),
 
@@ -204,6 +217,27 @@ mod tests {
         assert!(
             parsed.is_ok(),
             "expected UpdateCaption to parse, got: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_set_clip_transform_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "clipId": "clip_001",
+            "transform": {
+                "position": { "x": 0.5, "y": 0.5 },
+                "scale": { "x": 1.0, "y": 1.0 },
+                "rotationDeg": 0.0,
+                "anchor": { "x": 0.5, "y": 0.5 }
+            }
+        });
+
+        let parsed = CommandPayload::parse("SetClipTransform".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected SetClipTransform to parse, got: {parsed:?}"
         );
     }
 

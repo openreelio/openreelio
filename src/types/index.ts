@@ -367,6 +367,7 @@ export const DEFAULT_CAPTION_POSITION: CaptionPosition = {
 export type CommandType =
   | 'ImportAsset'
   | 'InsertClip'
+  | 'SetClipTransform'
   | 'SplitClip'
   | 'TrimClip'
   | 'MoveClip'
