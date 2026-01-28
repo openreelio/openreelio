@@ -5,7 +5,7 @@
  * Shows commands, risk assessment, and approve/reject actions.
  */
 
-import { useState, memo, useCallback } from 'react';
+import { useState, memo, useCallback, useRef, useEffect } from 'react';
 import { useAIStore, type AIProposal } from '@/stores/aiStore';
 
 // =============================================================================
@@ -27,6 +27,15 @@ export const ProposalCard = memo(function ProposalCard({
   const [isExpanded, setIsExpanded] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
 
+  // Track if component is mounted to avoid state updates after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   const approveProposal = useAIStore((state) => state.approveProposal);
   const rejectProposal = useAIStore((state) => state.rejectProposal);
 
@@ -40,7 +49,10 @@ export const ProposalCard = memo(function ProposalCard({
     try {
       await approveProposal(id);
     } finally {
-      setIsApplying(false);
+      // Only update state if component is still mounted
+      if (isMountedRef.current) {
+        setIsApplying(false);
+      }
     }
   }, [approveProposal, id]);
 
