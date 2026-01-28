@@ -187,8 +187,8 @@ export function useProjectHandlers({
         addToast(`Project "${projectName}" created successfully`, 'success');
       } catch (error) {
         logger.error('Failed to create project', { error });
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
-        addToast(`Failed to create project: ${errorMessage}`, 'error');
+        const friendlyMessage = getUserFriendlyError(error);
+        addToast(`Could not create the project. ${friendlyMessage}`, 'error');
       } finally {
         setIsCreatingProject(false);
         operationInProgressRef.current = false;

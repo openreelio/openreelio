@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{Manager, State};
 
@@ -12,8 +13,8 @@ use crate::core::{
     assets::{Asset, ProxyStatus},
     commands::{
         CreateSequenceCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand,
-        RemoveAssetCommand, RemoveClipCommand, SplitClipCommand, TrimClipCommand,
-        UpdateAssetCommand,
+        RemoveAssetCommand, RemoveClipCommand, SetClipTransformCommand, SplitClipCommand,
+        TrimClipCommand, UpdateAssetCommand,
     },
     ffmpeg::FFmpegProgress,
     fs::{
@@ -28,6 +29,37 @@ use crate::core::{
 };
 use crate::ipc::serialize_to_json_string;
 use crate::{ActiveProject, AppState};
+
+// =============================================================================
+// App Lifecycle
+// =============================================================================
+
+/// Best-effort cleanup result returned to the frontend on app close.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AppCleanupResult {
+    pub project_saved: bool,
+    pub workers_shutdown: bool,
+    pub error: Option<String>,
+}
+
+/// Performs best-effort cleanup when the user closes the window.
+///
+/// This command is intentionally resilient: failures should never prevent the app from exiting.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(_state))]
+pub async fn app_cleanup(_state: State<'_, AppState>) -> Result<AppCleanupResult, String> {
+    tracing::info!("App cleanup requested");
+
+    // Currently the frontend handles prompting/saving unsaved projects.
+    // Background workers are spawned as async tasks and will stop when the process exits.
+    Ok(AppCleanupResult {
+        project_saved: false,
+        workers_shutdown: true,
+        error: None,
+    })
+}
 
 /// Attempts to remove a lock file with retries.
 ///
@@ -1216,6 +1248,12 @@ pub async fn execute_command(
             &p.clip_id,
             p.split_time,
         )),
+        CommandPayload::SetClipTransform(p) => Box::new(SetClipTransformCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            &p.clip_id,
+            p.transform,
+        )),
         CommandPayload::UpdateCaption(p) => Box::new(
             crate::core::commands::UpdateCaptionCommand::new(
                 &p.sequence_id,
@@ -1924,7 +1962,13 @@ pub async fn apply_edit_script(
         // Some AI scripts omit trackId (they identify clips only). Inject it from current state.
         let needs_track_id = matches!(
             cmd.command_type.as_str(),
-            "SplitClip" | "DeleteClip" | "RemoveClip" | "TrimClip" | "MoveClip" | "UpdateCaption"
+            "SplitClip"
+                | "SetClipTransform"
+                | "DeleteClip"
+                | "RemoveClip"
+                | "TrimClip"
+                | "MoveClip"
+                | "UpdateCaption"
         );
         if needs_track_id && !obj.contains_key("trackId") {
             if let Some(clip_id) = obj.get("clipId").and_then(|v| v.as_str()) {
@@ -2021,6 +2065,12 @@ pub async fn apply_edit_script(
                     p.split_time,
                 ))
             }
+            CommandPayload::SetClipTransform(p) => Box::new(SetClipTransformCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.transform,
+            )),
             CommandPayload::ImportAsset(p) => Box::new(ImportAssetCommand::new(&p.name, &p.uri)),
             CommandPayload::RemoveAsset(p) => Box::new(RemoveAssetCommand::new(&p.asset_id)),
             CommandPayload::CreateSequence(p) => Box::new(CreateSequenceCommand::new(

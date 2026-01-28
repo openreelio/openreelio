@@ -649,6 +649,8 @@ mod tauri_app {
         })
         .invoke_handler(tauri::generate_handler![
             greet,
+            // App lifecycle
+            ipc::app_cleanup,
             // Project commands
             ipc::create_project,
             ipc::open_project,

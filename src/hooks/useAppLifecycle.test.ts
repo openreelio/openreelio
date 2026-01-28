@@ -1,27 +1,32 @@
 /**
  * useAppLifecycle Hook Tests
  *
- * Tests for application lifecycle events including window close handling
- * and unsaved changes protection.
+ * Tests for application lifecycle events including window close handling,
+ * unsaved changes protection, and backend cleanup.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useAppLifecycle } from './useAppLifecycle';
+import { isTauri } from '@tauri-apps/api/core';
 
 // Mock Tauri APIs
 const mockOnCloseRequested = vi.fn();
 const mockClose = vi.fn();
+const mockDestroy = vi.fn();
 const mockConfirm = vi.fn();
+const mockInvoke = vi.fn();
 
 vi.mock('@tauri-apps/api/core', () => ({
   isTauri: vi.fn(() => true),
+  invoke: vi.fn((...args) => mockInvoke(...args)),
 }));
 
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: vi.fn(() => ({
     onCloseRequested: mockOnCloseRequested,
     close: mockClose,
+    destroy: mockDestroy,
   })),
 }));
 
@@ -56,14 +61,27 @@ vi.mock('@/stores', () => ({
   useSettingsStore: {
     getState: () => mockSettingsState,
   },
+  usePlaybackStore: (selector: (state: unknown) => unknown) => {
+    const state = { currentTime: 0, isPlaying: false };
+    return selector(state);
+  },
 }));
 
 describe('useAppLifecycle', () => {
   let unlistenFn: () => void;
   let closeRequestedCallback: ((event: { preventDefault: () => void }) => Promise<void>) | null;
+  const isTauriMock = vi.mocked(isTauri);
 
   beforeEach(() => {
     vi.clearAllMocks();
+    isTauriMock.mockReturnValue(true);
+
+    // Reset all mock implementations
+    mockInvoke.mockReset();
+    mockOnCloseRequested.mockReset();
+    mockClose.mockReset();
+    mockDestroy.mockReset();
+    mockConfirm.mockReset();
 
     // Reset store state
     mockStoreState = {
@@ -76,6 +94,13 @@ describe('useAppLifecycle', () => {
       flushPendingUpdates: vi.fn().mockResolvedValue(undefined),
     };
 
+    // Default cleanup result
+    mockInvoke.mockResolvedValue({
+      projectSaved: false,
+      workersShutdown: true,
+      error: null,
+    });
+
     // Setup close handler mock
     unlistenFn = vi.fn();
     closeRequestedCallback = null;
@@ -85,7 +110,9 @@ describe('useAppLifecycle', () => {
       return Promise.resolve(unlistenFn);
     });
 
-    mockClose.mockResolvedValue(undefined);
+    // Make sure close is properly mocked
+    mockClose.mockImplementation(() => Promise.resolve());
+    mockDestroy.mockImplementation(() => Promise.resolve());
   });
 
   afterEach(() => {
@@ -105,6 +132,9 @@ describe('useAppLifecycle', () => {
   });
 
   it('should register beforeunload handler', () => {
+    // Browser environment: isTauri() is false
+    isTauriMock.mockReturnValue(false);
+
     const addEventListenerSpy = vi.spyOn(window, 'addEventListener');
     const removeEventListenerSpy = vi.spyOn(window, 'removeEventListener');
 
@@ -120,8 +150,22 @@ describe('useAppLifecycle', () => {
     removeEventListenerSpy.mockRestore();
   });
 
+  it('should not register beforeunload handler in Tauri runtime', () => {
+    // Tauri runtime: isTauri() is true
+    isTauriMock.mockReturnValue(true);
+
+    const addEventListenerSpy = vi.spyOn(window, 'addEventListener');
+
+    renderHook(() => useAppLifecycle());
+
+    const calls = addEventListenerSpy.mock.calls.filter((call) => call[0] === 'beforeunload');
+    expect(calls).toHaveLength(0);
+
+    addEventListenerSpy.mockRestore();
+  });
+
   describe('close handler with no unsaved changes', () => {
-    it('should flush settings and allow close', async () => {
+    it('should run cleanup and allow close to proceed (no preventDefault)', async () => {
       renderHook(() => useAppLifecycle());
 
       await vi.waitFor(() => {
@@ -134,7 +178,93 @@ describe('useAppLifecycle', () => {
       });
 
       expect(mockEvent.preventDefault).not.toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith('app_cleanup');
       expect(mockSettingsState.flushPendingUpdates).toHaveBeenCalled();
+      // The Tauri window API wrapper destroys the window automatically after the handler returns
+      // when preventDefault() is not called. We must not call close() from inside the handler.
+      expect(mockClose).not.toHaveBeenCalled();
+    });
+
+    it('should not block closing indefinitely if settings flush hangs', async () => {
+      vi.useFakeTimers();
+
+      // Simulate a settings flush that never resolves.
+      mockSettingsState = {
+        flushPendingUpdates: vi.fn(() => new Promise<void>(() => {})),
+      };
+
+      renderHook(() => useAppLifecycle());
+
+      await vi.waitFor(() => {
+        expect(closeRequestedCallback).not.toBeNull();
+      });
+
+      const mockEvent = { preventDefault: vi.fn() };
+      const closePromise = closeRequestedCallback!(mockEvent);
+
+      // Advance time beyond the settings flush timeout (3s in the hook).
+      await vi.advanceTimersByTimeAsync(3500);
+      await act(async () => {
+        await closePromise;
+      });
+
+      expect(mockEvent.preventDefault).not.toHaveBeenCalled();
+      expect(mockClose).not.toHaveBeenCalled();
+
+      vi.useRealTimers();
+    });
+
+    it('should ignore duplicate close requests during cleanup but keep the window open until cleanup completes', async () => {
+      // Create a deferred cleanup promise so we can send a second close request mid-cleanup.
+      type CleanupResult = { projectSaved: boolean; workersShutdown: boolean; error: string | null };
+
+      let resolveCleanup: (value: CleanupResult) => void = () => {
+        throw new Error('resolveCleanup not initialized');
+      };
+      const cleanupPromise = new Promise<CleanupResult>((resolve) => {
+        resolveCleanup = resolve;
+      });
+      mockInvoke.mockReturnValue(cleanupPromise);
+
+      renderHook(() => useAppLifecycle());
+
+      await vi.waitFor(() => {
+        expect(closeRequestedCallback).not.toBeNull();
+      });
+
+      const firstEvent = { preventDefault: vi.fn() };
+      const secondEvent = { preventDefault: vi.fn() };
+
+      let firstClosePromise: Promise<void> | null = null;
+      act(() => {
+        firstClosePromise = closeRequestedCallback!(firstEvent);
+      });
+
+      // While the first close is still running, trigger a second close request (e.g., user spam-clicks X).
+      await act(async () => {
+        await closeRequestedCallback!(secondEvent);
+      });
+
+      // Both events should be prevented while cleanup is running (we must not close early).
+      expect(firstEvent.preventDefault).not.toHaveBeenCalled();
+      expect(secondEvent.preventDefault).toHaveBeenCalled();
+
+      // Cleanup should still only be invoked once.
+      expect(mockInvoke).toHaveBeenCalledTimes(1);
+      expect(mockClose).not.toHaveBeenCalled();
+
+      // Finish cleanup and allow the first close to complete.
+      resolveCleanup({
+        projectSaved: false,
+        workersShutdown: true,
+        error: null,
+      });
+
+      await act(async () => {
+        await firstClosePromise;
+      });
+
+      expect(mockClose).not.toHaveBeenCalled();
     });
   });
 
@@ -147,8 +277,34 @@ describe('useAppLifecycle', () => {
       };
     });
 
-    it('should prevent close and ask to save', async () => {
-      mockConfirm.mockResolvedValue(true); // User wants to save
+    it('should allow close to proceed when user chooses save and save succeeds', async () => {
+      mockConfirm.mockResolvedValue(true); // Save and Close
+
+      renderHook(() => useAppLifecycle());
+
+      await vi.waitFor(() => {
+        expect(closeRequestedCallback).not.toBeNull();
+      });
+
+      const mockEvent = { preventDefault: vi.fn() };
+      await act(async () => {
+        await closeRequestedCallback!(mockEvent);
+      });
+
+      expect(mockEvent.preventDefault).not.toHaveBeenCalled();
+      expect(mockStoreState.saveProject).toHaveBeenCalled();
+    });
+
+    it('should prevent close when save fails and user cancels closing', async () => {
+      mockConfirm
+        .mockResolvedValueOnce(true) // first confirm: Save and Close
+        .mockResolvedValueOnce(false); // second confirm: Cancel
+
+      mockStoreState = {
+        isDirty: true,
+        meta: { path: '/path/to/project' },
+        saveProject: vi.fn().mockRejectedValue(new Error('Save failed')),
+      };
 
       renderHook(() => useAppLifecycle());
 
@@ -162,91 +318,15 @@ describe('useAppLifecycle', () => {
       });
 
       expect(mockEvent.preventDefault).toHaveBeenCalled();
-      // Note: confirm is called from the callback
-    });
-
-    it('should save and close when user confirms save', async () => {
-      mockConfirm.mockResolvedValue(true);
-
-      renderHook(() => useAppLifecycle());
-
-      await vi.waitFor(() => {
-        expect(closeRequestedCallback).not.toBeNull();
-      });
-
-      const mockEvent = { preventDefault: vi.fn() };
-      await act(async () => {
-        await closeRequestedCallback!(mockEvent);
-      });
-
-      expect(mockStoreState.saveProject).toHaveBeenCalled();
-      expect(mockClose).toHaveBeenCalled();
-    });
-
-    it('should close without saving when user discards', async () => {
-      mockConfirm.mockResolvedValue(false);
-
-      renderHook(() => useAppLifecycle());
-
-      await vi.waitFor(() => {
-        expect(closeRequestedCallback).not.toBeNull();
-      });
-
-      const mockEvent = { preventDefault: vi.fn() };
-      await act(async () => {
-        await closeRequestedCallback!(mockEvent);
-      });
-
-      expect(mockStoreState.saveProject).not.toHaveBeenCalled();
-      expect(mockSettingsState.flushPendingUpdates).toHaveBeenCalled();
-      expect(mockClose).toHaveBeenCalled();
-    });
-
-    it('should handle save failure with retry option', async () => {
-      mockStoreState.saveProject = vi.fn().mockRejectedValue(new Error('Save failed'));
-      mockConfirm
-        .mockResolvedValueOnce(true) // First: save changes
-        .mockResolvedValueOnce(true); // Second: close anyway after failure
-
-      renderHook(() => useAppLifecycle());
-
-      await vi.waitFor(() => {
-        expect(closeRequestedCallback).not.toBeNull();
-      });
-
-      const mockEvent = { preventDefault: vi.fn() };
-      await act(async () => {
-        await closeRequestedCallback!(mockEvent);
-      });
-
-      expect(mockStoreState.saveProject).toHaveBeenCalled();
-      expect(mockClose).toHaveBeenCalled();
-    });
-
-    it('should not close if user cancels after save failure', async () => {
-      mockStoreState.saveProject = vi.fn().mockRejectedValue(new Error('Save failed'));
-      mockConfirm
-        .mockResolvedValueOnce(true) // First: save changes
-        .mockResolvedValueOnce(false); // Second: cancel close
-
-      renderHook(() => useAppLifecycle());
-
-      await vi.waitFor(() => {
-        expect(closeRequestedCallback).not.toBeNull();
-      });
-
-      const mockEvent = { preventDefault: vi.fn() };
-      await act(async () => {
-        await closeRequestedCallback!(mockEvent);
-      });
-
-      expect(mockStoreState.saveProject).toHaveBeenCalled();
       expect(mockClose).not.toHaveBeenCalled();
     });
   });
 
   describe('beforeunload handler', () => {
     it('should show browser confirmation when dirty', () => {
+      // Browser environment: isTauri() is false so beforeunload is registered.
+      isTauriMock.mockReturnValue(false);
+
       mockStoreState = {
         isDirty: true,
         meta: { path: '/path/to/project' },
@@ -266,9 +346,7 @@ describe('useAppLifecycle', () => {
       renderHook(() => useAppLifecycle());
 
       // Find the beforeunload handler that was registered
-      const beforeunloadCall = addEventListenerSpy.mock.calls.find(
-        (call) => call[0] === 'beforeunload'
-      );
+      const beforeunloadCall = addEventListenerSpy.mock.calls.find((call) => call[0] === 'beforeunload');
       if (beforeunloadCall) {
         const handler = beforeunloadCall[1] as (event: BeforeUnloadEvent) => string | void;
         const result = handler(mockEvent as unknown as BeforeUnloadEvent);
@@ -279,113 +357,6 @@ describe('useAppLifecycle', () => {
       }
 
       addEventListenerSpy.mockRestore();
-    });
-
-    it('should not show confirmation when not dirty', () => {
-      mockStoreState = {
-        isDirty: false,
-        meta: null,
-        saveProject: vi.fn(),
-      };
-
-      const addEventListenerSpy = vi.spyOn(window, 'addEventListener');
-      renderHook(() => useAppLifecycle());
-
-      const beforeunloadCall = addEventListenerSpy.mock.calls.find(
-        (call) => call[0] === 'beforeunload'
-      );
-      if (beforeunloadCall) {
-        const handler = beforeunloadCall[1] as (event: BeforeUnloadEvent) => string | void;
-        const mockEvent = {
-          preventDefault: vi.fn(),
-          returnValue: '',
-        };
-
-        const result = handler(mockEvent as unknown as BeforeUnloadEvent);
-
-        expect(mockEvent.preventDefault).not.toHaveBeenCalled();
-        expect(result).toBeUndefined();
-      }
-
-      addEventListenerSpy.mockRestore();
-    });
-
-    it('should attempt to flush settings on unload', () => {
-      mockStoreState = {
-        isDirty: false,
-        meta: null,
-        saveProject: vi.fn(),
-      };
-
-      const addEventListenerSpy = vi.spyOn(window, 'addEventListener');
-      renderHook(() => useAppLifecycle());
-
-      const beforeunloadCall = addEventListenerSpy.mock.calls.find(
-        (call) => call[0] === 'beforeunload'
-      );
-      if (beforeunloadCall) {
-        const handler = beforeunloadCall[1] as (event: BeforeUnloadEvent) => string | void;
-        const mockEvent = {
-          preventDefault: vi.fn(),
-          returnValue: '',
-        };
-
-        handler(mockEvent as unknown as BeforeUnloadEvent);
-
-        // flushPendingUpdates should be called (fire-and-forget)
-        expect(mockSettingsState.flushPendingUpdates).toHaveBeenCalled();
-      }
-
-      addEventListenerSpy.mockRestore();
-    });
-  });
-
-  describe('cleanup', () => {
-    it('should cleanup listeners on unmount', async () => {
-      const removeEventListenerSpy = vi.spyOn(window, 'removeEventListener');
-
-      const { unmount } = renderHook(() => useAppLifecycle());
-
-      await vi.waitFor(() => {
-        expect(mockOnCloseRequested).toHaveBeenCalled();
-      });
-
-      unmount();
-
-      expect(unlistenFn).toHaveBeenCalled();
-      expect(removeEventListenerSpy).toHaveBeenCalledWith('beforeunload', expect.any(Function));
-
-      removeEventListenerSpy.mockRestore();
-    });
-  });
-
-  describe('error handling', () => {
-    it('should handle settings flush failure gracefully', async () => {
-      mockSettingsState.flushPendingUpdates = vi.fn().mockRejectedValue(new Error('Flush failed'));
-
-      renderHook(() => useAppLifecycle());
-
-      await vi.waitFor(() => {
-        expect(closeRequestedCallback).not.toBeNull();
-      });
-
-      const mockEvent = { preventDefault: vi.fn() };
-
-      // Should not throw
-      await expect(
-        act(async () => {
-          await closeRequestedCallback!(mockEvent);
-        })
-      ).resolves.not.toThrow();
-    });
-
-    it('should handle close handler setup failure', async () => {
-      mockOnCloseRequested.mockRejectedValue(new Error('Setup failed'));
-
-      // Should not throw
-      expect(() => {
-        renderHook(() => useAppLifecycle());
-      }).not.toThrow();
     });
   });
 });

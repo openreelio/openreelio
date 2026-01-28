@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
     project::ProjectState,
-    timeline::{Clip, ClipPlace, ClipRange, Track},
+    timeline::{Clip, ClipPlace, ClipRange, Track, Transform},
     AssetId, ClipId, CoreError, CoreResult, SequenceId, TimeSec, TrackId,
 };
 
@@ -812,6 +812,123 @@ impl SplitClipCommand {
     }
 }
 
+// =============================================================================
+// SetClipTransformCommand
+// =============================================================================
+
+/// Command to update a clip's transform (position/scale/rotation/anchor).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetClipTransformCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub transform: Transform,
+    #[serde(skip)]
+    previous_transform: Option<Transform>,
+}
+
+impl SetClipTransformCommand {
+    pub fn new(sequence_id: &str, track_id: &str, clip_id: &str, transform: Transform) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            transform,
+            previous_transform: None,
+        }
+    }
+
+    fn sanitize_transform(mut transform: Transform) -> Transform {
+        // Position/anchor are normalized.
+        transform.position.x = transform.position.x.clamp(0.0, 1.0);
+        transform.position.y = transform.position.y.clamp(0.0, 1.0);
+        transform.anchor.x = transform.anchor.x.clamp(0.0, 1.0);
+        transform.anchor.y = transform.anchor.y.clamp(0.0, 1.0);
+
+        // Scale must be finite and non-zero-ish. Clamp to a reasonable range.
+        if !transform.scale.x.is_finite() {
+            transform.scale.x = 1.0;
+        }
+        if !transform.scale.y.is_finite() {
+            transform.scale.y = 1.0;
+        }
+        transform.scale.x = transform.scale.x.clamp(0.01, 100.0);
+        transform.scale.y = transform.scale.y.clamp(0.01, 100.0);
+
+        // Rotation must be finite.
+        if !transform.rotation_deg.is_finite() {
+            transform.rotation_deg = 0.0;
+        }
+
+        transform
+    }
+}
+
+impl Command for SetClipTransformCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        let clip = track
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        self.previous_transform = Some(clip.transform.clone());
+        clip.transform = Self::sanitize_transform(self.transform.clone());
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(prev) = &self.previous_transform else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) else {
+            return Ok(());
+        };
+
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.transform = prev.clone();
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetClipTransform"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "transform": self.transform,
+        })
+    }
+}
+
 impl Command for SplitClipCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
         let sequence = state
@@ -951,6 +1068,7 @@ mod tests {
     use crate::core::{
         assets::{Asset, VideoInfo},
         timeline::{Sequence, SequenceFormat, Track, TrackKind},
+        Point2D,
     };
 
     fn create_test_state() -> ProjectState {
@@ -1444,5 +1562,47 @@ mod tests {
         let track = &state.sequences[&seq_id].tracks[0];
         assert_eq!(track.clips.len(), 3);
         assert_eq!(track.clips[1].id, middle_clip_id);
+    }
+
+    #[test]
+    fn test_set_clip_transform_command_updates_and_undoes() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        // Insert a clip.
+        let mut insert_cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let original = state.sequences[&seq_id].tracks[0].clips[0]
+            .transform
+            .clone();
+
+        let mut cmd = SetClipTransformCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            Transform {
+                position: Point2D::new(0.25, 0.75),
+                scale: Point2D::new(1.5, 0.5),
+                rotation_deg: 15.0,
+                anchor: Point2D::center(),
+            },
+        );
+
+        cmd.execute(&mut state).unwrap();
+
+        let updated = &state.sequences[&seq_id].tracks[0].clips[0].transform;
+        assert_eq!(updated.position.x, 0.25);
+        assert_eq!(updated.position.y, 0.75);
+        assert_eq!(updated.scale.x, 1.5);
+        assert_eq!(updated.scale.y, 0.5);
+        assert_eq!(updated.rotation_deg, 15.0);
+
+        cmd.undo(&mut state).unwrap();
+        let restored = &state.sequences[&seq_id].tracks[0].clips[0].transform;
+        assert_eq!(restored, &original);
     }
 }

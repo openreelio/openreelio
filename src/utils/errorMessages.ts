@@ -160,6 +160,22 @@ const ERROR_PATTERNS: Array<{
     pattern: /Permission denied/i,
     message: () => 'Access denied. Check file permissions.',
   },
+  {
+    pattern: /Access is denied/i,
+    message: () => 'Access denied. Please choose a folder you can write to (e.g., Documents).',
+  },
+  {
+    pattern: /os error 5/i,
+    message: () => 'Access denied. Please check file permissions and try again.',
+  },
+  {
+    pattern: /os error 2/i,
+    message: () => 'The file or folder could not be found. It may have been moved or deleted.',
+  },
+  {
+    pattern: /os error 32/i,
+    message: () => 'The file is in use by another program. Please close other apps and try again.',
+  },
 ];
 
 // =============================================================================
@@ -279,13 +295,10 @@ export function getUserFriendlyError(error: unknown): string {
     }
   }
 
-  // If no pattern matches, return a generic message with the original error
-  // For development, we include the original error; in production, you might want to hide it
-  if (import.meta.env?.DEV) {
-    return `An error occurred: ${errorStr}`;
-  }
-
-  return 'An unexpected error occurred. Please try again.';
+  // If no pattern matches, provide an actionable message and include details.
+  // Even in dev, avoid "Failed" with no clue; show the raw detail as a last resort.
+  const details = errorStr ? ` Details: ${errorStr}` : '';
+  return `Could not complete the operation.${details}`;
 }
 
 /**
