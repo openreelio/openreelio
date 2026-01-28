@@ -8,6 +8,7 @@ repository = "https://github.com/openreelio/openreelio"
 edition = "2021"
 # Note: transitive dependencies require Rust >= 1.85 (e.g. crates using Edition 2024).
 rust-version = "1.85"
+default-run = "openreelio"
 
 [lib]
 name = "openreelio_lib"
