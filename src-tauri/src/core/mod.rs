@@ -4,6 +4,7 @@
 //! Handles all core functionality including timeline, assets, rendering, and project management.
 
 pub mod ai;
+pub mod annotations;
 pub mod assets;
 pub mod captions;
 pub mod commands;

@@ -51,6 +51,9 @@
 // Core helpers shared across command modules
 pub mod helpers;
 
+// Annotation commands (Asset Annotation System - ADR-036)
+pub mod annotations;
+
 // Placeholder for future extracted modules
 // pub mod settings;
 
@@ -60,3 +63,6 @@ mod legacy;
 
 // Re-export all commands from legacy module
 pub use legacy::*;
+
+// Re-export annotation commands
+pub use annotations::*;

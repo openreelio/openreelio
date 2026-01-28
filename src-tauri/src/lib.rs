@@ -427,6 +427,16 @@ mod tauri_app {
                 $crate::ipc::index_asset_for_search,
                 $crate::ipc::index_transcripts_for_search,
                 $crate::ipc::remove_asset_from_search,
+                // Annotation commands
+                $crate::ipc::get_annotation,
+                $crate::ipc::analyze_asset,
+                $crate::ipc::estimate_analysis_cost,
+                $crate::ipc::delete_annotation,
+                $crate::ipc::list_annotations,
+                $crate::ipc::get_analysis_status,
+                $crate::ipc::get_available_providers,
+                $crate::ipc::configure_cloud_provider,
+                $crate::ipc::remove_cloud_provider,
                 // Settings
                 $crate::ipc::get_settings,
                 $crate::ipc::set_settings,
@@ -707,6 +717,16 @@ mod tauri_app {
             ipc::get_asset_shots,
             ipc::delete_asset_shots,
             ipc::is_shot_detection_available,
+            // Annotation commands
+            ipc::get_annotation,
+            ipc::analyze_asset,
+            ipc::estimate_analysis_cost,
+            ipc::delete_annotation,
+            ipc::list_annotations,
+            ipc::get_analysis_status,
+            ipc::get_available_providers,
+            ipc::configure_cloud_provider,
+            ipc::remove_cloud_provider,
             // Settings
             ipc::get_settings,
             ipc::set_settings,
