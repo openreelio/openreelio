@@ -245,7 +245,8 @@ describe('getUserFriendlyError', () => {
   describe('Unknown Errors', () => {
     it('should return generic message for unknown errors', () => {
       const result = getUserFriendlyError('Some random unknown error xyz123');
-      expect(result).toMatch(/error occurred/i);
+      expect(result).toMatch(/could not complete the operation/i);
+      expect(result).toMatch(/xyz123/);
     });
   });
 });
@@ -320,5 +321,211 @@ describe('createErrorHandler', () => {
     // The handler should call showError for unknown errors
     expect(showError).toHaveBeenCalled();
     // Logger is mocked so we just verify the function completes without throwing
+  });
+});
+
+// =============================================================================
+// Edge Cases and Additional Tests
+// =============================================================================
+
+describe('Edge Cases', () => {
+  describe('Case insensitivity', () => {
+    it('should match error patterns case-insensitively', () => {
+      expect(getUserFriendlyError('PROJECT NOT FOUND')).toBe(
+        'The project could not be found. It may have been moved or deleted.',
+      );
+      expect(getUserFriendlyError('pRoJeCt NoT fOuNd')).toBe(
+        'The project could not be found. It may have been moved or deleted.',
+      );
+    });
+  });
+
+  describe('Error messages with special characters', () => {
+    it('should handle error messages with newlines', () => {
+      const result = getUserFriendlyError('Error:\nProject not found\nPlease check path');
+      expect(result).toBe('The project could not be found. It may have been moved or deleted.');
+    });
+
+    it('should handle error messages with tabs', () => {
+      const result = getUserFriendlyError('Error:\tProject not found');
+      expect(result).toBe('The project could not be found. It may have been moved or deleted.');
+    });
+
+    it('should handle unicode characters in error messages', () => {
+      const result = getUserFriendlyError('프로젝트 오류: Project not found');
+      expect(result).toBe('The project could not be found. It may have been moved or deleted.');
+    });
+  });
+
+  describe('Permission errors (OS-specific)', () => {
+    it('should handle Windows permission denied (os error 5)', () => {
+      const result = getUserFriendlyError('Failed to write file: os error 5');
+      expect(result).toBe('Access denied. Please check file permissions and try again.');
+    });
+
+    it('should handle file not found (os error 2)', () => {
+      const result = getUserFriendlyError('Failed to open: os error 2');
+      expect(result).toBe(
+        'The file or folder could not be found. It may have been moved or deleted.',
+      );
+    });
+
+    it('should handle file in use (os error 32)', () => {
+      const result = getUserFriendlyError('Cannot delete: os error 32');
+      expect(result).toBe('The file is in use by another program. Please close other apps and try again.');
+    });
+
+    it('should handle generic permission denied', () => {
+      const result = getUserFriendlyError('Permission denied: cannot write to /path');
+      expect(result).toBe('Access denied. Check file permissions.');
+    });
+
+    it('should handle Windows "Access is denied"', () => {
+      const result = getUserFriendlyError('Access is denied. (os error 5)');
+      expect(result).toBe('Access denied. Please choose a folder you can write to (e.g., Documents).');
+    });
+  });
+
+  describe('Network errors', () => {
+    it('should handle network timeout', () => {
+      const result = getUserFriendlyError('Request timeout after 30 seconds');
+      expect(result).toBe('Connection error. Please check your network.');
+    });
+
+    it('should handle connection refused', () => {
+      const result = getUserFriendlyError('Connection refused: ECONNREFUSED');
+      expect(result).toBe('Connection error. Please check your network.');
+    });
+
+    it('should handle network error', () => {
+      const result = getUserFriendlyError('Network error: DNS resolution failed');
+      expect(result).toBe('Connection error. Please check your network.');
+    });
+  });
+
+  describe('FFprobe errors', () => {
+    it('should handle FFprobe errors', () => {
+      const result = getUserFriendlyError('FFprobe error: Invalid data found');
+      expect(result).toBe('Could not read media information. The file may be corrupted.');
+    });
+  });
+
+  describe('Empty and unusual inputs', () => {
+    it('should handle empty string', () => {
+      const result = getUserFriendlyError('');
+      expect(result).toMatch(/could not complete the operation/i);
+    });
+
+    it('should handle whitespace only', () => {
+      const result = getUserFriendlyError('   ');
+      expect(result).toMatch(/could not complete the operation/i);
+    });
+
+    it('should handle very long error messages', () => {
+      const longError = 'Project not found ' + 'x'.repeat(10000);
+      const result = getUserFriendlyError(longError);
+      expect(result).toBe('The project could not be found. It may have been moved or deleted.');
+    });
+
+    it('should handle arrays', () => {
+      const result = getUserFriendlyError(['error1', 'error2']);
+      expect(result).toMatch(/could not complete the operation/i);
+    });
+
+    it('should handle objects with toString', () => {
+      const objWithToString = {
+        toString: () => 'Project not found',
+      };
+      const result = getUserFriendlyError(objWithToString);
+      // Objects are stringified using String(), which calls toString()
+      expect(result).toBe('The project could not be found. It may have been moved or deleted.');
+    });
+  });
+
+  describe('Pattern matching priority', () => {
+    it('should match first pattern when multiple patterns could match', () => {
+      // 'Project not found' matches both 'Project not found' and 'File not found'
+      // The patterns are ordered, so 'Project not found' should win
+      const result = getUserFriendlyError('Project not found');
+      expect(result).toBe('The project could not be found. It may have been moved or deleted.');
+    });
+
+    it('should match more specific patterns before generic ones', () => {
+      // 'FFmpeg not found' should match the FFmpeg pattern, not the generic 'not found'
+      const result = getUserFriendlyError('FFmpeg not found on system PATH');
+      expect(result).toBe('FFmpeg is not installed. Export and preview features require FFmpeg.');
+    });
+  });
+
+  describe('extractErrorMessage with complex types', () => {
+    it('should handle Promise-like objects', () => {
+      const promiseLike = {
+        then: () => {},
+        message: 'Promise error',
+      };
+      const result = extractErrorMessage(promiseLike);
+      expect(result).toBe('Promise error');
+    });
+
+    it('should handle circular references gracefully', () => {
+      const circular: Record<string, unknown> = { a: 1 };
+      circular.self = circular;
+      const result = extractErrorMessage(circular);
+      expect(result).toBe('[object Object]');
+    });
+
+    it('should handle symbols', () => {
+      const sym = Symbol('test');
+      const result = extractErrorMessage(sym);
+      expect(result).toBe('Symbol(test)');
+    });
+
+    it('should handle BigInt', () => {
+      const bigInt = BigInt(12345678901234567890n);
+      const result = extractErrorMessage(bigInt);
+      expect(result).toBe('12345678901234567890');
+    });
+
+    it('should handle functions', () => {
+      const fn = function testFunction() {};
+      const result = extractErrorMessage(fn);
+      expect(result).toContain('testFunction');
+    });
+  });
+
+  describe('normalizeError preserves cause', () => {
+    it('should preserve object as cause', () => {
+      const original = { code: 'ERR_001', message: 'Error occurred' };
+      const normalized = normalizeError(original);
+      expect((normalized as Error & { cause?: unknown }).cause).toBe(original);
+    });
+
+    it('should not add cause for primitives', () => {
+      const normalized = normalizeError('simple string');
+      // String is not an object, so cause should not be set
+      expect((normalized as Error & { cause?: unknown }).cause).toBeUndefined();
+    });
+  });
+
+  describe('getErrorSeverity edge cases', () => {
+    it('should treat "already exists" as warning', () => {
+      expect(getErrorSeverity('File already exists')).toBe('warning');
+    });
+
+    it('should handle error-like objects (uses String conversion)', () => {
+      // Note: getErrorSeverity uses String(error) for non-Error objects,
+      // which gives '[object Object]' rather than the message property.
+      // This is by design - use an actual Error for proper matching.
+      const errorLike = { message: 'Nothing to redo' };
+      // String(errorLike) = '[object Object]' which doesn't match warning patterns
+      expect(getErrorSeverity(errorLike)).toBe('error');
+      // For proper warning detection, use an Error instance
+      expect(getErrorSeverity(new Error('Nothing to redo'))).toBe('warning');
+    });
+
+    it('should handle mixed case patterns', () => {
+      expect(getErrorSeverity('NOTHING TO UNDO')).toBe('warning');
+      expect(getErrorSeverity('Asset IN USE')).toBe('warning');
+    });
   });
 });
