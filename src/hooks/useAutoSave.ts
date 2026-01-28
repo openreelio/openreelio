@@ -102,18 +102,42 @@ export function useAutoSave(options: UseAutoSaveOptions = {}): UseAutoSaveReturn
     isSavingRef.current = true;
     setIsSaving(true);
     setLastError(null);
-    onSaveStart?.();
+
+    // Clear timers immediately to prevent re-scheduling during save
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+      saveTimeoutRef.current = null;
+    }
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+
+    try {
+      onSaveStart?.();
+    } catch (callbackError) {
+      // Don't let callback errors prevent save
+      logger.warn('onSaveStart callback threw', { error: callbackError });
+    }
 
     try {
       logger.debug('Auto-save starting');
       await saveProject();
       setLastSavedAt(new Date());
-      onSaveComplete?.();
+      try {
+        onSaveComplete?.();
+      } catch (callbackError) {
+        logger.warn('onSaveComplete callback threw', { error: callbackError });
+      }
       logger.debug('Auto-save completed successfully');
     } catch (error) {
       const err = error instanceof Error ? error : new Error(String(error));
       setLastError(err);
-      onSaveError?.(err);
+      try {
+        onSaveError?.(err);
+      } catch (callbackError) {
+        logger.warn('onSaveError callback threw', { error: callbackError });
+      }
       logger.error('Auto-save failed', { error: err.message });
     } finally {
       isSavingRef.current = false;
