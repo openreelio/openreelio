@@ -74,7 +74,7 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
   // This prevents the "stale closure" problem with the shuttle index
   const shuttleIndexRef = useRef(STOP_INDEX);
 
-  // Store actions
+  // Store actions - Zustand store functions are stable and don't change
   const {
     togglePlayback,
     setCurrentTime,
@@ -82,13 +82,32 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
     setPlaybackRate,
     play,
     pause,
-    isPlaying, // This triggers re-runs if we use it in dependency array
+    isPlaying,
     stepForward,
     stepBackward,
   } = usePlaybackStore();
 
   const { zoomIn, zoomOut, selectedClipIds, clearClipSelection } = useTimelineStore();
   const { undo, redo, saveProject, isLoaded } = useProjectStore();
+
+  // Use refs for frequently-changing state values to avoid recreating the callback
+  // This significantly reduces re-renders when selection changes
+  const selectedClipIdsRef = useRef(selectedClipIds);
+  const isLoadedRef = useRef(isLoaded);
+  const durationRef = useRef(duration);
+
+  // Keep refs up to date (cheap updates, don't cause callback recreation)
+  useEffect(() => {
+    selectedClipIdsRef.current = selectedClipIds;
+  }, [selectedClipIds]);
+
+  useEffect(() => {
+    isLoadedRef.current = isLoaded;
+  }, [isLoaded]);
+
+  useEffect(() => {
+    durationRef.current = duration;
+  }, [duration]);
 
   // Reset shuttle index when playback state changes externally (e.g. hitting stop button in UI)
   useEffect(() => {
@@ -186,7 +205,7 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
 
       if (key === 'End') {
         e.preventDefault();
-        setCurrentTime(duration);
+        setCurrentTime(durationRef.current);
         return;
       }
 
@@ -214,7 +233,7 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       if (key.toLowerCase() === 'z' && ctrl && !shiftKey) {
         e.preventDefault();
         if (onUndo) onUndo();
-        else if (isLoaded) void undo();
+        else if (isLoadedRef.current) void undo();
         return;
       }
 
@@ -222,7 +241,7 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       if ((key.toLowerCase() === 'z' && ctrl && shiftKey) || (key.toLowerCase() === 'y' && ctrl)) {
         e.preventDefault();
         if (onRedo) onRedo();
-        else if (isLoaded) void redo();
+        else if (isLoadedRef.current) void redo();
         return;
       }
 
@@ -230,13 +249,13 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       if (key.toLowerCase() === 's' && ctrl && !shiftKey) {
         e.preventDefault();
         if (onSave) onSave();
-        else if (isLoaded) void saveProject();
+        else if (isLoadedRef.current) void saveProject();
         return;
       }
 
       // Delete
       if ((key === 'Delete' || key === 'Backspace') && !ctrl) {
-        if (selectedClipIds.length > 0) {
+        if (selectedClipIdsRef.current.length > 0) {
           e.preventDefault();
           if (onDeleteClips) onDeleteClips();
         }
@@ -245,7 +264,7 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
 
       // Split (Blade)
       if (key.toLowerCase() === 's' && !ctrl && !shiftKey) {
-        if (selectedClipIds.length > 0 && onSplitAtPlayhead) {
+        if (selectedClipIdsRef.current.length > 0 && onSplitAtPlayhead) {
           e.preventDefault();
           onSplitAtPlayhead();
         }
@@ -266,11 +285,13 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
         return;
       }
     },
+    // Dependencies optimized: frequently-changing values (selectedClipIds, duration, isLoaded)
+    // are accessed via refs to prevent unnecessary callback recreation.
+    // Store functions (togglePlayback, play, pause, etc.) are stable and don't change.
     [
       enabled,
       togglePlayback,
       setCurrentTime,
-      duration,
       setPlaybackRate,
       play,
       pause,
@@ -278,7 +299,6 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       stepBackward,
       zoomIn,
       zoomOut,
-      selectedClipIds,
       clearClipSelection,
       onUndo,
       onRedo,
@@ -289,7 +309,6 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       undo,
       redo,
       saveProject,
-      isLoaded,
     ],
   );
 

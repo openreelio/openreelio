@@ -330,15 +330,15 @@ export const useAIStore = create<AIState>()(
 
       // Cancel ongoing generation
       cancelGeneration: () => {
-        const wasGenerating = get().isGenerating;
-        if (wasGenerating) {
-          set((state) => {
+        // Atomically check and set cancellation flag
+        // This prevents race conditions where cancellation is requested
+        // just as generation completes
+        set((state) => {
+          if (state.isGenerating) {
             state.isCancelled = true;
-            // Note: isGenerating will be set to false when the async operation
-            // detects the cancellation flag and handles it
-          });
-          logger.info('Generation cancellation requested by user');
-        }
+            logger.info('Generation cancellation requested by user');
+          }
+        });
       },
 
       // Generate edit script from natural language
@@ -657,6 +657,7 @@ if (typeof window !== 'undefined') {
 // =============================================================================
 
 let aiEventUnlisteners: UnlistenFn[] = [];
+let isSettingUpAIListeners = false;
 
 function isTauriRuntime(): boolean {
   return typeof (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined';
@@ -664,34 +665,84 @@ function isTauriRuntime(): boolean {
 
 /**
  * Setup event listeners for AI-related events.
+ *
+ * Features:
+ * - Re-entrant safe: prevents duplicate setup during async operations
+ * - Error resilient: continues even if individual listeners fail
+ * - Hot reload safe: cleans up existing listeners before setting up new ones
  */
 export async function setupAIEventListeners(): Promise<void> {
-  await cleanupAIEventListeners();
-
-  if (!isTauriRuntime()) {
+  // Prevent re-entrant setup (especially during hot reload)
+  if (isSettingUpAIListeners) {
+    logger.debug('AI event listener setup already in progress');
     return;
   }
 
-  // Listen for AI completion events
-  const unlistenCompletion = await listen<{ jobId: string; result: unknown }>(
-    'ai-completion',
-    (event) => {
-      logger.info('AI completion event received', { jobId: event.payload.jobId });
-    }
-  );
-  aiEventUnlisteners.push(unlistenCompletion);
+  isSettingUpAIListeners = true;
 
-  logger.info('AI event listeners initialized');
+  try {
+    await cleanupAIEventListeners();
+
+    if (!isTauriRuntime()) {
+      logger.debug('Skipping AI event listeners in non-Tauri environment');
+      return;
+    }
+
+    const newUnlisteners: UnlistenFn[] = [];
+
+    // Listen for AI completion events
+    try {
+      const unlistenCompletion = await listen<{ jobId: string; result: unknown }>(
+        'ai-completion',
+        (event) => {
+          logger.info('AI completion event received', { jobId: event.payload.jobId });
+        }
+      );
+      newUnlisteners.push(unlistenCompletion);
+    } catch (error) {
+      logger.error('Failed to setup ai-completion listener', { error });
+    }
+
+    // Listen for transcription complete events
+    try {
+      const unlistenTranscription = await listen<{ assetId: string; text: string }>(
+        'transcription-complete',
+        (event) => {
+          logger.info('Transcription complete', { assetId: event.payload.assetId });
+        }
+      );
+      newUnlisteners.push(unlistenTranscription);
+    } catch (error) {
+      logger.error('Failed to setup transcription-complete listener', { error });
+    }
+
+    // Only assign after all setup attempts complete
+    aiEventUnlisteners = newUnlisteners;
+    logger.info('AI event listeners initialized', { listenerCount: newUnlisteners.length });
+  } finally {
+    isSettingUpAIListeners = false;
+  }
 }
 
 /**
  * Cleanup AI event listeners.
+ * Safe to call multiple times - will not throw.
  */
 export async function cleanupAIEventListeners(): Promise<void> {
-  for (const unlisten of aiEventUnlisteners) {
-    unlisten();
-  }
+  const listenersToCleanup = aiEventUnlisteners;
   aiEventUnlisteners = [];
+
+  for (const unlisten of listenersToCleanup) {
+    try {
+      unlisten();
+    } catch (error) {
+      logger.warn('Error during AI listener cleanup', { error });
+    }
+  }
+
+  if (listenersToCleanup.length > 0) {
+    logger.debug('AI event listeners cleaned up', { count: listenersToCleanup.length });
+  }
 }
 
 // =============================================================================

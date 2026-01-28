@@ -6,13 +6,18 @@
  */
 
 import { useEffect, useCallback, useRef, useState } from 'react';
+import { Bot, Settings, ChevronRight, ChevronLeft, X } from 'lucide-react';
 import { useAIStore } from '@/stores/aiStore';
 import { useProjectStore } from '@/stores';
+import { AIErrorBoundary } from '@/components/shared/FeatureErrorBoundaries';
 import { ChatHistory } from './ChatHistory';
 import { ChatInput } from './ChatInput';
 import { ContextPanel } from './ContextPanel';
 import { QuickActionsBar } from './QuickActionsBar';
 import { AISettingsPanel } from '../settings/AISettingsPanel';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('AISidebar');
 
 // =============================================================================
 // Constants
@@ -145,30 +150,43 @@ export function AISidebar({
     <aside
       data-testid="ai-sidebar"
       aria-label="AI Assistant Sidebar"
-      className={`flex flex-col bg-editor-bg border-l border-editor-border transition-all duration-200 ease-in-out ${
+      className={`flex flex-col bg-editor-bg border-l border-editor-border transition-all duration-200 ease-in-out relative ${
         collapsed ? 'w-0 overflow-hidden' : ''
       }`}
       style={collapsed ? undefined : { width: `${width}px` }}
     >
+      {/* Expand button - visible when collapsed */}
+      {collapsed && (
+        <button
+          type="button"
+          onClick={onToggle}
+          className="absolute right-full top-1/2 -translate-y-1/2 flex items-center gap-1.5 px-2 py-3 bg-editor-surface border border-editor-border border-r-0 rounded-l-lg hover:bg-primary-500/10 hover:border-primary-500/50 transition-all group shadow-lg z-10"
+          aria-label="Open AI Assistant"
+          title="Open AI Assistant (Ctrl+/)"
+        >
+          <Bot className="w-4 h-4 text-purple-400 group-hover:text-purple-300 transition-colors" />
+          <ChevronLeft className="w-3 h-3 text-editor-text-muted group-hover:text-editor-text transition-colors" />
+        </button>
+      )}
       {/* Resize handle */}
       {!collapsed && (
         <div
           ref={resizeHandleRef}
           data-testid="resize-handle"
           onMouseDown={handleResizeStart}
-          className="absolute left-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-blue-500/50 transition-colors z-10"
+          className="absolute left-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-primary-500/50 active:bg-primary-500/70 transition-colors z-20"
         />
       )}
 
       {/* Header */}
-      <header className="flex items-center justify-between px-3 py-2 border-b border-editor-border">
+      <header className="flex items-center justify-between px-3 py-2.5 border-b border-editor-border bg-editor-sidebar/50">
         <div className="flex items-center gap-2">
-          <AIIcon />
+          <Bot className="w-5 h-5 text-purple-400" />
           <h2 className="text-sm font-medium text-editor-text">AI Assistant</h2>
           {/* Provider status indicator */}
           <div
             data-testid="provider-status"
-            className={`w-2 h-2 rounded-full ${getProviderStatusColor()}`}
+            className={`w-2 h-2 rounded-full ${getProviderStatusColor()} ring-2 ring-offset-1 ring-offset-editor-sidebar/50 ring-transparent`}
             title={
               providerStatus.isConfigured
                 ? providerStatus.isAvailable
@@ -180,33 +198,39 @@ export function AISidebar({
         </div>
 
         {/* Actions */}
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-0.5">
           {/* Settings button */}
           <button
             type="button"
             onClick={() => setShowSettings(true)}
-            className="p-1 rounded hover:bg-editor-surface transition-colors"
+            className="p-1.5 rounded-md hover:bg-editor-surface transition-colors text-editor-text-muted hover:text-editor-text"
             aria-label="AI settings"
+            title="AI Settings"
           >
-            <SettingsIcon />
+            <Settings className="w-4 h-4" />
           </button>
 
-          {/* Toggle button */}
+          {/* Collapse button */}
           <button
             type="button"
             onClick={onToggle}
-            className="p-1 rounded hover:bg-editor-surface transition-colors"
-            aria-label="Toggle AI sidebar"
+            className="p-1.5 rounded-md hover:bg-editor-surface transition-colors text-editor-text-muted hover:text-editor-text"
+            aria-label="Collapse AI sidebar"
             aria-expanded={!collapsed}
+            title="Collapse (Ctrl+/)"
           >
-            <CollapseIcon collapsed={collapsed} />
+            <ChevronRight className="w-4 h-4" />
           </button>
         </div>
       </header>
 
       {/* Content - only render when not collapsed */}
       {!collapsed && (
-        <>
+        <AIErrorBoundary
+          onError={(error) => {
+            logger.error('AI Sidebar error caught by boundary', { error });
+          }}
+        >
           {/* Chat history - takes remaining space */}
           <ChatHistory />
 
@@ -218,13 +242,13 @@ export function AISidebar({
 
           {/* Chat input */}
           <ChatInput />
-        </>
+        </AIErrorBoundary>
       )}
 
-      {/* Settings Dialog */}
+      {/* Settings Dialog - z-[60] to be above toast level */}
       {showSettings && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm"
           onClick={(e) => {
             // Close on backdrop click
             if (e.target === e.currentTarget) {
@@ -245,12 +269,10 @@ export function AISidebar({
                 <button
                   type="button"
                   onClick={() => setShowSettings(false)}
-                  className="p-1 rounded hover:bg-editor-surface transition-colors"
+                  className="p-1.5 rounded-md hover:bg-editor-surface transition-colors text-editor-text-muted hover:text-editor-text"
                   aria-label="Close settings"
                 >
-                  <svg className="w-5 h-5 text-editor-text-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                  </svg>
+                  <X className="w-5 h-5" />
                 </button>
               </div>
 
@@ -268,68 +290,3 @@ export function AISidebar({
   );
 }
 
-// =============================================================================
-// Icons
-// =============================================================================
-
-function AIIcon() {
-  return (
-    <svg
-      className="w-5 h-5 text-purple-400"
-      fill="none"
-      stroke="currentColor"
-      viewBox="0 0 24 24"
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth={2}
-        d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"
-      />
-    </svg>
-  );
-}
-
-function SettingsIcon() {
-  return (
-    <svg
-      className="w-4 h-4 text-editor-text-secondary"
-      fill="none"
-      stroke="currentColor"
-      viewBox="0 0 24 24"
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth={2}
-        d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"
-      />
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth={2}
-        d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-      />
-    </svg>
-  );
-}
-
-function CollapseIcon({ collapsed }: { collapsed: boolean }) {
-  return (
-    <svg
-      className={`w-4 h-4 text-editor-text-secondary transition-transform ${
-        collapsed ? 'rotate-180' : ''
-      }`}
-      fill="none"
-      stroke="currentColor"
-      viewBox="0 0 24 24"
-    >
-      <path
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth={2}
-        d="M13 5l7 7-7 7M5 5l7 7-7 7"
-      />
-    </svg>
-  );
-}

@@ -6,6 +6,10 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import {
+  isError,
+  isErrorLike,
+  extractErrorMessage,
+  normalizeError,
   getUserFriendlyError,
   getErrorSeverity,
   createErrorHandler,
@@ -20,6 +24,93 @@ vi.mock('@/services/logger', () => ({
     error: vi.fn(),
   }),
 }));
+
+// =============================================================================
+// Type-Safe Error Utilities Tests
+// =============================================================================
+
+describe('isError', () => {
+  it('returns true for Error instances', () => {
+    expect(isError(new Error('test'))).toBe(true);
+    expect(isError(new TypeError('type error'))).toBe(true);
+    expect(isError(new RangeError('range error'))).toBe(true);
+  });
+
+  it('returns false for non-Error values', () => {
+    expect(isError('error string')).toBe(false);
+    expect(isError({ message: 'error object' })).toBe(false);
+    expect(isError(null)).toBe(false);
+    expect(isError(undefined)).toBe(false);
+    expect(isError(123)).toBe(false);
+  });
+});
+
+describe('isErrorLike', () => {
+  it('returns true for objects with message property', () => {
+    expect(isErrorLike({ message: 'error' })).toBe(true);
+    expect(isErrorLike({ message: 'error', code: 123 })).toBe(true);
+    expect(isErrorLike(new Error('test'))).toBe(true);
+  });
+
+  it('returns false for non-error-like values', () => {
+    expect(isErrorLike('error string')).toBe(false);
+    expect(isErrorLike({ error: 'missing message' })).toBe(false);
+    expect(isErrorLike({ message: 123 })).toBe(false); // message must be string
+    expect(isErrorLike(null)).toBe(false);
+    expect(isErrorLike(undefined)).toBe(false);
+  });
+});
+
+describe('extractErrorMessage', () => {
+  it('extracts message from Error instances', () => {
+    expect(extractErrorMessage(new Error('test error'))).toBe('test error');
+    expect(extractErrorMessage(new TypeError('type error'))).toBe('type error');
+  });
+
+  it('extracts message from error-like objects', () => {
+    expect(extractErrorMessage({ message: 'error object' })).toBe('error object');
+  });
+
+  it('returns string errors directly', () => {
+    expect(extractErrorMessage('string error')).toBe('string error');
+  });
+
+  it('handles null and undefined', () => {
+    expect(extractErrorMessage(null)).toBe('Unknown error (null)');
+    expect(extractErrorMessage(undefined)).toBe('Unknown error (undefined)');
+  });
+
+  it('stringifies other values', () => {
+    expect(extractErrorMessage(123)).toBe('123');
+    expect(extractErrorMessage({ foo: 'bar' })).toBe('[object Object]');
+  });
+});
+
+describe('normalizeError', () => {
+  it('returns Error instances unchanged', () => {
+    const err = new Error('test');
+    expect(normalizeError(err)).toBe(err);
+  });
+
+  it('wraps strings in Error', () => {
+    const result = normalizeError('string error');
+    expect(result).toBeInstanceOf(Error);
+    expect(result.message).toBe('string error');
+  });
+
+  it('wraps error-like objects in Error', () => {
+    const result = normalizeError({ message: 'error object' });
+    expect(result).toBeInstanceOf(Error);
+    expect(result.message).toBe('error object');
+    // cause property is stored on the error (ES2022+ feature)
+    expect((result as Error & { cause?: unknown }).cause).toEqual({ message: 'error object' });
+  });
+
+  it('handles null and undefined', () => {
+    expect(normalizeError(null).message).toBe('Unknown error (null)');
+    expect(normalizeError(undefined).message).toBe('Unknown error (undefined)');
+  });
+});
 
 // =============================================================================
 // getUserFriendlyError Tests

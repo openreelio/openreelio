@@ -543,6 +543,102 @@ async removeAssetFromSearch(assetId: string) : Promise<Result<null, string>> {
 }
 },
 /**
+ * Gets annotation for an asset
+ * 
+ * Returns the annotation data if it exists, along with the analysis status.
+ */
+async getAnnotation(assetId: string) : Promise<Result<GetAnnotationResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_annotation", { assetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Analyzes an asset using the specified provider
+ * 
+ * Performs analysis and stores results in the annotation store.
+ */
+async analyzeAsset(request: AnalyzeAssetRequest) : Promise<Result<AnalyzeAssetResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("analyze_asset", { request }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Estimates cost for analysis
+ * 
+ * Returns cost estimate for cloud providers, None for local providers.
+ */
+async estimateAnalysisCost(assetId: string, provider: AnalysisProvider, analysisTypes: AnalysisType[]) : Promise<Result<CostEstimate | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("estimate_analysis_cost", { assetId, provider, analysisTypes }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Deletes annotation for an asset
+ */
+async deleteAnnotation(assetId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_annotation", { assetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Lists all annotated asset IDs
+ */
+async listAnnotations() : Promise<Result<string[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_annotations") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Gets analysis status for an asset
+ */
+async getAnalysisStatus(assetId: string) : Promise<Result<AnalysisStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_analysis_status", { assetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Gets available analysis providers
+ */
+async getAvailableProviders() : Promise<Result<ProviderCapabilities[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_available_providers") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Configures Google Cloud API key
+ */
+async configureCloudProvider(apiKey: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("configure_cloud_provider", { apiKey }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Removes Google Cloud API key configuration
+ */
+async removeCloudProvider() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("remove_cloud_provider") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Gets application settings
  */
 async getSettings() : Promise<Result<AppSettingsDto, string>> {
@@ -707,6 +803,182 @@ assetIds?: string[];
 trackIds?: string[] }
 export type AISettingsDto = { primaryProvider: ProviderTypeDto; primaryModel: string; visionProvider: ProviderTypeDto | null; visionModel: string | null; openaiApiKey: string | null; anthropicApiKey: string | null; googleApiKey: string | null; ollamaUrl: string | null; temperature: number; maxTokens: number; frameExtractionRate: number; monthlyBudgetCents: number | null; perRequestLimitCents: number; currentMonthUsageCents: number; currentUsageMonth: number | null; autoAnalyzeOnImport: boolean; autoCaptionOnImport: boolean; proposalReviewMode: ProposalReviewModeDto; cacheDurationHours: number; localOnlyMode: boolean }
 /**
+ * Provider that performed the analysis
+ */
+export type AnalysisProvider = 
+/**
+ * FFmpeg-based local analysis (shots only)
+ */
+"ffmpeg" | 
+/**
+ * Whisper-based local transcription (future plugin)
+ */
+"whisper" | 
+/**
+ * Google Cloud Video Intelligence / Vision API
+ */
+"google_cloud" | 
+/**
+ * Custom/unknown provider
+ */
+{ custom: string }
+/**
+ * Response from analysis
+ */
+export type AnalysisResponse = { 
+/**
+ * Shot detection results
+ */
+shots?: AnalysisResult<ShotResult> | null; 
+/**
+ * Transcription results
+ */
+transcript?: AnalysisResult<TranscriptSegment> | null; 
+/**
+ * Object detection results
+ */
+objects?: AnalysisResult<ObjectDetection> | null; 
+/**
+ * Face detection results
+ */
+faces?: AnalysisResult<FaceDetection> | null; 
+/**
+ * Text detection results
+ */
+textOcr?: AnalysisResult<TextDetection> | null; 
+/**
+ * Total cost in cents (for cloud providers)
+ */
+totalCostCents: number }
+/**
+ * Generic wrapper for analysis results of a specific type
+ */
+export type AnalysisResult<T> = { 
+/**
+ * Provider that performed the analysis
+ */
+provider: AnalysisProvider; 
+/**
+ * ISO 8601 timestamp when analysis was performed
+ */
+analyzedAt: string; 
+/**
+ * Configuration used for analysis
+ */
+config: JsonValue; 
+/**
+ * Cost in cents (for cloud providers)
+ */
+costCents?: number | null; 
+/**
+ * Analysis results
+ */
+results: T[] }
+/**
+ * Container for all analysis results for an asset
+ */
+export type AnalysisResults = { 
+/**
+ * Shot/scene detection results
+ */
+shots?: AnalysisResult<ShotResult> | null; 
+/**
+ * Transcription results
+ */
+transcript?: AnalysisResult<TranscriptSegment> | null; 
+/**
+ * Object detection results
+ */
+objects?: AnalysisResult<ObjectDetection> | null; 
+/**
+ * Face detection results
+ */
+faces?: AnalysisResult<FaceDetection> | null; 
+/**
+ * Text detection (OCR) results
+ */
+textOcr?: AnalysisResult<TextDetection> | null }
+/**
+ * Status of analysis for an asset
+ */
+export type AnalysisStatus = 
+/**
+ * No analysis has been performed
+ */
+"notAnalyzed" | 
+/**
+ * Analysis is in progress
+ */
+"inProgress" | 
+/**
+ * Analysis completed successfully
+ */
+"completed" | 
+/**
+ * Analysis is stale (asset changed)
+ */
+"stale" | 
+/**
+ * Analysis failed
+ */
+"failed"
+/**
+ * Types of analysis that can be performed on an asset
+ */
+export type AnalysisType = 
+/**
+ * Shot/scene boundary detection
+ */
+"shots" | 
+/**
+ * Speech-to-text transcription
+ */
+"transcript" | 
+/**
+ * Object detection in frames
+ */
+"objects" | 
+/**
+ * Face detection and recognition
+ */
+"faces" | 
+/**
+ * Text detection (OCR)
+ */
+"textOcr"
+/**
+ * Request for analyze_asset command
+ */
+export type AnalyzeAssetRequest = { 
+/**
+ * Asset ID to analyze
+ */
+assetId: string; 
+/**
+ * Provider to use
+ */
+provider: AnalysisProvider; 
+/**
+ * Analysis types to perform
+ */
+analysisTypes: AnalysisType[]; 
+/**
+ * Shot detection config (optional)
+ */
+shotConfig?: ShotDetectionConfig | null }
+/**
+ * Response for analyze_asset command
+ */
+export type AnalyzeAssetResponse = { 
+/**
+ * Updated annotation
+ */
+annotation: AssetAnnotation; 
+/**
+ * Analysis response with results
+ */
+response: AnalysisResponse }
+/**
  * DTO for app settings (mirrors Rust AppSettings)
  */
 export type AppSettingsDto = { version: number; general: GeneralSettingsDto; editor: EditorSettingsDto; playback: PlaybackSettingsDto; export: ExportSettingsDto; appearance: AppearanceSettingsDto; shortcuts: ShortcutSettingsDto; autoSave: AutoSaveSettingsDto; performance: PerformanceSettingsDto; ai: AISettingsDto }
@@ -791,6 +1063,34 @@ proxyStatus?: ProxyStatus;
  * Proxy video URL for preview playback (via Tauri asset protocol)
  */
 proxyUrl?: string | null }
+/**
+ * Complete annotation data for an asset
+ */
+export type AssetAnnotation = { 
+/**
+ * Schema version
+ */
+version: string; 
+/**
+ * Asset ID this annotation belongs to
+ */
+assetId: string; 
+/**
+ * SHA256 hash of the asset file (for staleness detection)
+ */
+assetHash: string; 
+/**
+ * ISO 8601 timestamp when annotation was created
+ */
+createdAt: string; 
+/**
+ * ISO 8601 timestamp when annotation was last updated
+ */
+updatedAt: string; 
+/**
+ * Analysis results
+ */
+analysis: AnalysisResults }
 /**
  * Asset event payload.
  */
@@ -912,6 +1212,26 @@ export type AutoSaveSettingsDto = { enabled: boolean; intervalSeconds: number; b
  * Blend mode for video tracks
  */
 export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "add"
+/**
+ * Bounding box for detected objects
+ */
+export type BoundingBox = { 
+/**
+ * Normalized left coordinate (0.0 - 1.0)
+ */
+left: number; 
+/**
+ * Normalized top coordinate (0.0 - 1.0)
+ */
+top: number; 
+/**
+ * Normalized width (0.0 - 1.0)
+ */
+width: number; 
+/**
+ * Normalized height (0.0 - 1.0)
+ */
+height: number }
 /**
  * Cache usage statistics.
  */
@@ -1109,6 +1429,46 @@ errorCode: ConnectionErrorCode | null;
  */
 errorDetails: string | null }
 /**
+ * Cost breakdown for a single analysis type
+ */
+export type CostBreakdownItem = { 
+/**
+ * Analysis type
+ */
+analysisType: AnalysisType; 
+/**
+ * Estimated cost in cents
+ */
+costCents: number; 
+/**
+ * Rate description (e.g., "$0.05/min")
+ */
+rateDescription: string }
+/**
+ * Cost estimate for analysis
+ */
+export type CostEstimate = { 
+/**
+ * Provider for the estimate
+ */
+provider: AnalysisProvider; 
+/**
+ * Requested analysis types
+ */
+analysisTypes: AnalysisType[]; 
+/**
+ * Estimated cost in cents
+ */
+estimatedCostCents: number; 
+/**
+ * Asset duration in seconds (for reference)
+ */
+assetDurationSec: number; 
+/**
+ * Breakdown by analysis type
+ */
+breakdown: CostBreakdownItem[] }
+/**
  * Status of credentials for each provider
  */
 export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google: boolean }
@@ -1186,7 +1546,43 @@ ffmpegPath: string | null;
  * Path to ffprobe executable
  */
 ffprobePath: string | null }
+/**
+ * A detected face in a frame
+ */
+export type FaceDetection = { 
+/**
+ * Time in seconds when face was detected
+ */
+timeSec: number; 
+/**
+ * Detection confidence (0.0 - 1.0)
+ */
+confidence: number; 
+/**
+ * Bounding box
+ */
+boundingBox: BoundingBox; 
+/**
+ * Detected emotions (if available)
+ */
+emotions: string[]; 
+/**
+ * Face ID for tracking (if available)
+ */
+faceId?: string | null }
 export type GeneralSettingsDto = { language: string; showWelcomeOnStartup: boolean; hasCompletedSetup: boolean; recentProjectsLimit: number; checkUpdatesOnStartup: boolean; defaultProjectLocation: string | null }
+/**
+ * Response for get_annotation command
+ */
+export type GetAnnotationResponse = { 
+/**
+ * Annotation data (null if not found)
+ */
+annotation: AssetAnnotation | null; 
+/**
+ * Analysis status
+ */
+status: AnalysisStatus }
 /**
  * History (undo/redo) state event payload.
  */
@@ -1404,6 +1800,26 @@ allocatedBytes: number;
  * System memory info (if available)
  */
 systemMemory: SystemMemoryDto | null }
+/**
+ * A detected object in a frame
+ */
+export type ObjectDetection = { 
+/**
+ * Time in seconds when object was detected
+ */
+timeSec: number; 
+/**
+ * Object labels/categories
+ */
+labels: string[]; 
+/**
+ * Detection confidence (0.0 - 1.0)
+ */
+confidence: number; 
+/**
+ * Bounding box (if available)
+ */
+boundingBox?: BoundingBox | null }
 export type PerformanceSettingsDto = { hardwareAcceleration: boolean; proxyGeneration: boolean; proxyResolution: string; maxConcurrentJobs: number; memoryLimitMb: number; cacheSizeMb: number }
 export type PlaybackSettingsDto = { defaultVolume: number; loopPlayback: boolean; previewQuality: string; audioScrubbing: boolean }
 /**
@@ -1602,6 +2018,30 @@ appliedOpIds: string[] | null }
  * Proposal review mode for settings DTO
  */
 export type ProposalReviewModeDto = "always" | "smart" | "auto_apply"
+/**
+ * Capabilities of an analysis provider
+ */
+export type ProviderCapabilities = { 
+/**
+ * Provider identifier
+ */
+provider: AnalysisProvider; 
+/**
+ * Supported analysis types
+ */
+supportedTypes: AnalysisType[]; 
+/**
+ * Whether the provider requires network access
+ */
+requiresNetwork: boolean; 
+/**
+ * Whether the provider has associated costs
+ */
+hasCost: boolean; 
+/**
+ * Human-readable description
+ */
+description: string }
 /**
  * AI provider configuration DTO
  */
@@ -1896,6 +2336,43 @@ audioSampleRate: number;
 audioChannels: number }
 export type ShortcutSettingsDto = { customShortcuts: { [key in string]: string } }
 /**
+ * Configuration for shot detection
+ */
+export type ShotDetectionConfig = { 
+/**
+ * Scene change threshold (0.0 - 1.0)
+ * Lower = more sensitive (more shots detected)
+ */
+threshold?: number; 
+/**
+ * Minimum shot duration in seconds
+ */
+minDurationSec?: number; 
+/**
+ * Generate keyframe thumbnails
+ */
+generateKeyframes?: boolean }
+/**
+ * A detected shot/scene boundary
+ */
+export type ShotResult = { 
+/**
+ * Start time in seconds
+ */
+startSec: number; 
+/**
+ * End time in seconds
+ */
+endSec: number; 
+/**
+ * Detection confidence (0.0 - 1.0)
+ */
+confidence: number; 
+/**
+ * Optional keyframe thumbnail path
+ */
+keyframePath?: string | null }
+/**
  * State change types for event broadcasting.
  */
 export type StateChange = 
@@ -2004,6 +2481,30 @@ usedBytes: number;
  */
 usagePercent: number }
 /**
+ * Detected text in a frame
+ */
+export type TextDetection = { 
+/**
+ * Time in seconds when text was detected
+ */
+timeSec: number; 
+/**
+ * Detected text content
+ */
+text: string; 
+/**
+ * Detection confidence (0.0 - 1.0)
+ */
+confidence: number; 
+/**
+ * Bounding box
+ */
+boundingBox?: BoundingBox | null; 
+/**
+ * Detected language code
+ */
+language?: string | null }
+/**
  * Track (contains clips directly for denormalized storage)
  */
 export type Track = { id: string; kind: TrackKind; name: string; 
@@ -2059,6 +2560,34 @@ endTime: number;
  * Language code
  */
 language: string | null }
+/**
+ * A transcribed speech segment
+ */
+export type TranscriptSegment = { 
+/**
+ * Start time in seconds
+ */
+startSec: number; 
+/**
+ * End time in seconds
+ */
+endSec: number; 
+/**
+ * Transcribed text
+ */
+text: string; 
+/**
+ * Transcription confidence (0.0 - 1.0)
+ */
+confidence: number; 
+/**
+ * Detected language code (e.g., "en", "ko")
+ */
+language?: string | null; 
+/**
+ * Speaker ID (if speaker diarization is enabled)
+ */
+speakerId?: string | null }
 /**
  * Options for transcription request.
  */

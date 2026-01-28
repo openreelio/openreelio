@@ -282,6 +282,18 @@ export type {
   UseShotMarkersReturn,
 } from './useShotMarkers';
 
+export { useAnnotation } from './useAnnotation';
+export type {
+  UseAnnotationOptions,
+  UseAnnotationResult,
+} from './useAnnotation';
+
+export { useAnnotationShots } from './useAnnotationShots';
+export type {
+  UseAnnotationShotsOptions,
+  UseAnnotationShotsReturn,
+} from './useAnnotationShots';
+
 export { usePlayheadDrag } from './usePlayheadDrag';
 export type {
   UsePlayheadDragOptions,

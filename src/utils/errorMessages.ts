@@ -163,6 +163,102 @@ const ERROR_PATTERNS: Array<{
 ];
 
 // =============================================================================
+// Type-Safe Error Utilities
+// =============================================================================
+
+/**
+ * Type guard to check if a value is an Error object.
+ *
+ * @param value - Value to check
+ * @returns True if value is an Error
+ */
+export function isError(value: unknown): value is Error {
+  return value instanceof Error;
+}
+
+/**
+ * Type guard to check if a value has an error-like shape.
+ * Useful for catching non-Error thrown values that have a message property.
+ *
+ * @param value - Value to check
+ * @returns True if value looks like an error
+ */
+export function isErrorLike(value: unknown): value is { message: string } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'message' in value &&
+    typeof (value as { message: unknown }).message === 'string'
+  );
+}
+
+/**
+ * Safely extract an error message from any value.
+ * Handles Error objects, error-like objects, strings, and other types.
+ *
+ * @param error - Any caught value
+ * @returns Error message string
+ */
+export function extractErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (isErrorLike(error)) {
+    return error.message;
+  }
+
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  if (error === null) {
+    return 'Unknown error (null)';
+  }
+
+  if (error === undefined) {
+    return 'Unknown error (undefined)';
+  }
+
+  // Try to stringify other values
+  try {
+    return String(error);
+  } catch {
+    return 'Unknown error (could not convert to string)';
+  }
+}
+
+/**
+ * Extended Error interface with cause property (ES2022+)
+ */
+interface ErrorWithCause extends Error {
+  cause?: unknown;
+}
+
+/**
+ * Normalize any thrown value to an Error object.
+ * Useful for consistent error handling.
+ *
+ * @param error - Any caught value
+ * @returns An Error object
+ */
+export function normalizeError(error: unknown): Error {
+  if (error instanceof Error) {
+    return error;
+  }
+
+  const message = extractErrorMessage(error);
+  const normalized = new Error(message) as ErrorWithCause;
+
+  // Preserve original error as cause if available (ES2022+)
+  if (typeof error === 'object' && error !== null) {
+    normalized.cause = error;
+  }
+
+  return normalized;
+}
+
+// =============================================================================
 // Functions
 // =============================================================================
 
@@ -173,7 +269,7 @@ const ERROR_PATTERNS: Array<{
  * @returns User-friendly error message
  */
 export function getUserFriendlyError(error: unknown): string {
-  const errorStr = error instanceof Error ? error.message : String(error);
+  const errorStr = extractErrorMessage(error);
 
   // Try to match against known patterns
   for (const { pattern, message } of ERROR_PATTERNS) {
@@ -185,7 +281,7 @@ export function getUserFriendlyError(error: unknown): string {
 
   // If no pattern matches, return a generic message with the original error
   // For development, we include the original error; in production, you might want to hide it
-  if (process.env.NODE_ENV === 'development') {
+  if (import.meta.env?.DEV) {
     return `An error occurred: ${errorStr}`;
   }
 
@@ -246,6 +342,10 @@ export function createErrorHandler(
 }
 
 export default {
+  isError,
+  isErrorLike,
+  extractErrorMessage,
+  normalizeError,
   getUserFriendlyError,
   getErrorSeverity,
   createErrorHandler,

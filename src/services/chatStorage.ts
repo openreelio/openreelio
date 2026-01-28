@@ -77,8 +77,10 @@ export function loadChatHistory(projectId: string): ChatMessage[] {
       });
     }
 
-    // Validate and filter messages
-    const messages = data.messages.filter(isValidMessage);
+    // Validate, filter, and sanitize messages
+    const messages = data.messages
+      .filter(isValidMessage)
+      .map(sanitizeMessage);
 
     logger.info('Loaded chat history', {
       projectId,
@@ -259,8 +261,53 @@ export function getStoredProjectIds(): string[] {
 }
 
 // =============================================================================
-// Validation
+// Validation & Sanitization
 // =============================================================================
+
+/** Maximum allowed message content length */
+const MAX_MESSAGE_LENGTH = 50000;
+
+/** Maximum allowed ID length */
+const MAX_ID_LENGTH = 100;
+
+/**
+ * Sanitize a string to prevent XSS and other injection attacks.
+ * This is a defense-in-depth measure - React already escapes content.
+ *
+ * @param str - String to sanitize
+ * @param maxLength - Maximum allowed length
+ * @returns Sanitized string
+ */
+function sanitizeString(str: string, maxLength: number): string {
+  if (typeof str !== 'string') {
+    return '';
+  }
+
+  // Truncate to max length
+  let sanitized = str.slice(0, maxLength);
+
+  // Remove null bytes and other control characters (except newlines/tabs)
+  // eslint-disable-next-line no-control-regex
+  sanitized = sanitized.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+
+  return sanitized;
+}
+
+/**
+ * Sanitize a message object.
+ *
+ * @param message - Message to sanitize
+ * @returns Sanitized message
+ */
+function sanitizeMessage(message: ChatMessage): ChatMessage {
+  return {
+    id: sanitizeString(message.id, MAX_ID_LENGTH),
+    role: message.role,
+    content: sanitizeString(message.content, MAX_MESSAGE_LENGTH),
+    timestamp: message.timestamp,
+    proposal: message.proposal, // Don't sanitize complex object, just validate presence
+  };
+}
 
 /**
  * Check if a message object is valid.
@@ -272,12 +319,30 @@ function isValidMessage(message: unknown): message is ChatMessage {
 
   const msg = message as Record<string, unknown>;
 
-  return (
-    typeof msg.id === 'string' &&
-    (msg.role === 'user' || msg.role === 'assistant' || msg.role === 'system') &&
-    typeof msg.content === 'string' &&
-    typeof msg.timestamp === 'string'
-  );
+  // Basic type validation
+  if (typeof msg.id !== 'string' || msg.id.length === 0 || msg.id.length > MAX_ID_LENGTH) {
+    return false;
+  }
+
+  if (msg.role !== 'user' && msg.role !== 'assistant' && msg.role !== 'system') {
+    return false;
+  }
+
+  if (typeof msg.content !== 'string' || msg.content.length > MAX_MESSAGE_LENGTH) {
+    return false;
+  }
+
+  if (typeof msg.timestamp !== 'string') {
+    return false;
+  }
+
+  // Validate timestamp is a valid ISO date
+  const date = new Date(msg.timestamp);
+  if (isNaN(date.getTime())) {
+    return false;
+  }
+
+  return true;
 }
 
 // =============================================================================

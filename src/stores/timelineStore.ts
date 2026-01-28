@@ -72,6 +72,9 @@ interface TimelineState {
   timeToPixels: (time: TimeSec) => number;
   pixelsToTime: (pixels: number) => TimeSec;
   isClipSelected: (clipId: string) => boolean;
+
+  // Reset
+  reset: () => void;
 }
 
 // =============================================================================
@@ -298,6 +301,27 @@ export const useTimelineStore = create<TimelineState>()(
 
     isClipSelected: (clipId: string) => {
       return get().selectedClipIds.includes(clipId);
+    },
+
+    /**
+     * Reset timeline state to initial values.
+     * Called when project is closed to prevent stale state.
+     */
+    reset: () => {
+      set((state) => {
+        state.playhead = 0;
+        state.isPlaying = false;
+        state.playbackRate = 1;
+        state.selectedClipIds = [];
+        state.selectedTrackIds = [];
+        state.zoom = DEFAULT_ZOOM;
+        state.scrollX = 0;
+        state.scrollY = 0;
+        state.snapEnabled = true;
+        state.snapToClips = true;
+        state.snapToMarkers = true;
+        state.snapToPlayhead = true;
+      });
     },
   }))
 );
