@@ -331,12 +331,24 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
     ],
   );
 
-  // Cleanup on unmount
+  // Cleanup on unmount - ensures no dangling event listeners
   useEffect(() => {
     return () => {
+      // Call any existing cleanup function
       if (cleanupRef.current) {
         cleanupRef.current();
+        cleanupRef.current = null;
       }
+
+      // Reset all refs to prevent stale state
+      dragDataRef.current = null;
+      previewPositionRef.current = null;
+
+      // Also clear state (this may not run during rapid unmount, but helps with normal cleanup)
+      setIsDragging(false);
+      setDragType(null);
+      setPreviewPosition(null);
+      setActiveSnapPoint(null);
     };
   }, []);
 
