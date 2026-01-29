@@ -89,14 +89,17 @@ export function TimeRuler({
   const mainInterval = interval >= 1 ? interval : 1;
 
   // Calculate time from mouse event
+  // Note: getBoundingClientRect() already includes CSS transforms from parent,
+  // so we don't need to add scrollX here. The parent's translateX(-scrollX)
+  // is already reflected in rect.left.
   const getTimeFromEvent = useCallback(
     (e: globalThis.MouseEvent | MouseEvent<HTMLDivElement>) => {
       if (!containerRef.current) return null;
       const rect = containerRef.current.getBoundingClientRect();
-      const clickX = e.clientX - rect.left + scrollX;
+      const clickX = e.clientX - rect.left;
       return Math.max(0, Math.min(duration, clickX / zoom));
     },
-    [zoom, scrollX, duration]
+    [zoom, duration]
   );
 
   // Draw the ruler using Canvas API
