@@ -3,10 +3,21 @@
  *
  * Handles coordinate transformations between pixels and time units
  * on the timeline, including snapping functionality.
+ *
+ * Performance optimized:
+ * - Clip snap points are cached separately from playhead snap point
+ * - Grid snap points are cached separately
+ * - Only recalculates when necessary dependencies change
  */
 
 import { useCallback, useMemo, type RefObject, type MouseEvent } from 'react';
-import { getSnapPoints, snapToNearestPoint, calculateSnapThreshold } from '@/utils/gridSnapping';
+import {
+  snapToNearestPoint,
+  calculateSnapThreshold,
+  createPlayheadSnapPoint,
+  createGridSnapPoints,
+  createClipSnapPoints,
+} from '@/utils/gridSnapping';
 import { getGridIntervalForZoom } from '@/utils/timeline';
 import type { Sequence, SnapPoint } from '@/types';
 
@@ -91,44 +102,79 @@ export function useTimelineCoordinates({
   // Calculate grid interval based on zoom
   const gridInterval = useMemo(() => getGridIntervalForZoom(zoom), [zoom]);
 
-  // Calculate snap points for all clips
-  const snapPoints = useMemo(() => {
+  /**
+   * Clip snap points - only recalculated when sequence changes.
+   * This is the expensive calculation that was previously running every frame.
+   */
+  const clipSnapPoints = useMemo(() => {
     if (!sequence || !snapEnabled) return [];
 
-    const clips = sequence.tracks.flatMap((track) =>
-      track.clips.map((clip) => ({
-        id: clip.id,
-        startTime: clip.place.timelineInSec,
-        endTime:
+    const points: SnapPoint[] = [];
+    for (const track of sequence.tracks) {
+      for (const clip of track.clips) {
+        const endTime =
           clip.place.timelineInSec +
-          (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed,
-      }))
-    );
+          (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+        points.push(...createClipSnapPoints(clip.id, clip.place.timelineInSec, endTime));
+      }
+    }
+    return points;
+  }, [sequence, snapEnabled]);
 
-    return getSnapPoints({
-      clips,
-      playheadTime: playhead,
-      excludeClipId: null,
-      gridInterval,
-      timelineStart: 0,
-      timelineEnd: duration,
-    });
-  }, [sequence, snapEnabled, playhead, gridInterval, duration]);
+  /**
+   * Grid snap points - recalculated when grid interval or duration changes.
+   * Separate from clip points to avoid recalculating both together.
+   */
+  const gridSnapPoints = useMemo(() => {
+    if (!snapEnabled || gridInterval <= 0 || duration <= 0) return [];
+    return createGridSnapPoints(0, duration, gridInterval);
+  }, [snapEnabled, gridInterval, duration]);
+
+  /**
+   * Playhead snap point - cheap to create, changes frequently during playback.
+   * By separating this, we avoid recalculating expensive clip points.
+   */
+  const playheadSnapPoint = useMemo(() => {
+    if (!snapEnabled) return null;
+    return createPlayheadSnapPoint(playhead);
+  }, [snapEnabled, playhead]);
+
+  /**
+   * Combined snap points - merges all snap point sources.
+   * Only creates new array when any source changes.
+   */
+  const snapPoints = useMemo(() => {
+    if (!snapEnabled) return [];
+
+    const points: SnapPoint[] = [...clipSnapPoints, ...gridSnapPoints];
+    if (playheadSnapPoint) {
+      points.push(playheadSnapPoint);
+    }
+    return points;
+  }, [snapEnabled, clipSnapPoints, gridSnapPoints, playheadSnapPoint]);
 
   // Calculate snap threshold based on zoom
   const snapThreshold = useMemo(() => calculateSnapThreshold(zoom), [zoom]);
 
-  // Convert time to pixel position
+  // Convert time to pixel position with input validation
   const timeToPixel = useCallback(
     (time: number): number => {
+      // Guard against NaN/Infinity
+      if (!Number.isFinite(time)) {
+        return 0;
+      }
       return time * zoom;
     },
     [zoom]
   );
 
-  // Convert pixel position to time
+  // Convert pixel position to time with input validation
   const pixelToTime = useCallback(
     (pixel: number): number => {
+      // Guard against NaN/Infinity and division by zero
+      if (!Number.isFinite(pixel) || zoom <= 0) {
+        return 0;
+      }
       return pixel / zoom;
     },
     [zoom]

@@ -3,9 +3,15 @@
  *
  * Provides intelligent snapping behavior for timeline operations.
  * Supports snapping to clip edges, playhead, markers, and grid lines.
+ * Includes hysteresis (snap lock) to prevent jitter when dragging.
  */
 
 import type { SnapPoint, SnapPointType } from '@/types';
+import {
+  PRECISION,
+  calculateSnapThreshold as calcThreshold,
+  calculateSnapReleaseThreshold,
+} from '@/constants/precision';
 
 // Re-export for convenience
 export type { SnapPoint, SnapPointType } from '@/types';
@@ -17,6 +23,30 @@ export interface SnapResult {
   time: number;
   /** The snap point that was snapped to (if any) */
   snapPoint?: SnapPoint;
+}
+
+/**
+ * State for snap hysteresis (snap lock).
+ * Prevents jitter when dragging near snap points.
+ */
+export interface SnapHysteresisState {
+  /** Whether currently snapped to a point */
+  isSnapped: boolean;
+  /** The snap point currently locked to */
+  snapPoint: SnapPoint | null;
+  /** The threshold at which snap will release */
+  releaseThreshold: number;
+}
+
+/**
+ * Create initial hysteresis state (not snapped).
+ */
+export function createInitialSnapState(): SnapHysteresisState {
+  return {
+    isSnapped: false,
+    snapPoint: null,
+    releaseThreshold: 0,
+  };
 }
 
 export interface NearestSnapResult {
@@ -165,15 +195,11 @@ export function getSnapPoints(options: GetSnapPointsOptions): SnapPoint[] {
  * Returns null if no snap point is within the threshold.
  */
 /**
- * Epsilon for floating point comparison
- */
-const EPSILON = 1e-10;
-
-/**
- * Checks if two numbers are approximately equal
+ * Checks if two numbers are approximately equal.
+ * Uses centralized SNAP_EPSILON from precision constants.
  */
 function approxEqual(a: number, b: number): boolean {
-  return Math.abs(a - b) < EPSILON;
+  return Math.abs(a - b) < PRECISION.SNAP_EPSILON;
 }
 
 export function findNearestSnapPoint(
@@ -192,7 +218,7 @@ export function findNearestSnapPoint(
 
     if (nearest === null) {
       nearest = { point, distance };
-    } else if (distance < nearest.distance - EPSILON) {
+    } else if (distance < nearest.distance - PRECISION.SNAP_EPSILON) {
       // Clearly closer
       nearest = { point, distance };
     } else if (approxEqual(distance, nearest.distance)) {
@@ -245,12 +271,78 @@ export function snapToNearestPoint(
 /**
  * Calculates an appropriate snap threshold based on zoom level.
  * Higher zoom = smaller threshold (more precise).
+ * Now includes MIN/MAX bounds to prevent extreme values.
+ *
+ * @param zoom Pixels per second
+ * @returns Threshold in seconds, clamped between MIN_THRESHOLD and MAX_THRESHOLD
  */
 export function calculateSnapThreshold(zoom: number): number {
-  // At zoom 100 (100px/sec), threshold is 0.1 seconds (10px)
-  // Threshold scales inversely with zoom
-  const baseThreshold = 10; // pixels
-  return baseThreshold / zoom;
+  // Use centralized threshold calculation with bounds
+  return calcThreshold(zoom);
+}
+
+/**
+ * Performs snapping with hysteresis (snap lock).
+ * Once snapped, stays snapped until the release threshold is exceeded.
+ * This prevents jitter when dragging near snap points.
+ *
+ * @param time Current time position
+ * @param snapPoints Available snap points
+ * @param threshold Snap threshold (for initial snap)
+ * @param currentState Current hysteresis state
+ * @returns Snap result and updated hysteresis state
+ */
+export function snapWithHysteresis(
+  time: number,
+  snapPoints: SnapPoint[],
+  threshold: number,
+  currentState: SnapHysteresisState
+): { result: SnapResult; newState: SnapHysteresisState } {
+  // If currently snapped, check if we should release
+  if (currentState.isSnapped && currentState.snapPoint) {
+    const distance = Math.abs(time - currentState.snapPoint.time);
+
+    // Stay snapped if within release threshold
+    if (distance <= currentState.releaseThreshold) {
+      return {
+        result: {
+          snapped: true,
+          time: currentState.snapPoint.time,
+          snapPoint: currentState.snapPoint,
+        },
+        newState: currentState,
+      };
+    }
+
+    // Release snap - continue to find new snap point
+  }
+
+  // Find new snap point
+  const nearest = findNearestSnapPoint(time, snapPoints, threshold);
+
+  if (nearest === null) {
+    // No snap point found - return unsnapped
+    return {
+      result: { snapped: false, time },
+      newState: createInitialSnapState(),
+    };
+  }
+
+  // Found snap point - create new snapped state with hysteresis
+  const releaseThreshold = calculateSnapReleaseThreshold(threshold);
+
+  return {
+    result: {
+      snapped: true,
+      time: nearest.point.time,
+      snapPoint: nearest.point,
+    },
+    newState: {
+      isSnapped: true,
+      snapPoint: nearest.point,
+      releaseThreshold,
+    },
+  };
 }
 
 /**
