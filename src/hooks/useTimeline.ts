@@ -2,11 +2,15 @@
  * useTimeline Hook
  *
  * Custom hook for timeline operations.
- * Wraps timelineStore with a cleaner API.
+ * Provides unified API for timeline state management.
+ *
+ * IMPORTANT: Playback state (playhead/currentTime, isPlaying, playbackRate)
+ * is sourced from PlaybackStore as the single source of truth.
+ * TimelineStore only manages view state (zoom, scroll, selection, snap).
  */
 
 import { useCallback, useMemo } from 'react';
-import { useTimelineStore } from '@/stores';
+import { useTimelineStore, usePlaybackStore } from '@/stores';
 
 // =============================================================================
 // Types
@@ -67,25 +71,38 @@ const MAX_ZOOM = 500;
 /**
  * Hook for managing timeline state and operations
  *
+ * Playback state is sourced from PlaybackStore (single source of truth).
+ * View state is sourced from TimelineStore.
+ *
  * @returns Timeline state and actions
  *
  * @example
  * const { playhead, isPlaying, togglePlayback, seek } = useTimeline();
  */
 export function useTimeline(): UseTimelineReturn {
-  // Get state from store
-  const playhead = useTimelineStore((state) => state.playhead);
-  const isPlaying = useTimelineStore((state) => state.isPlaying);
+  // =========================================================================
+  // Playback state from PlaybackStore (SINGLE SOURCE OF TRUTH)
+  // =========================================================================
+  const playhead = usePlaybackStore((state) => state.currentTime);
+  const isPlaying = usePlaybackStore((state) => state.isPlaying);
+
+  // Playback actions from PlaybackStore
+  const setCurrentTime = usePlaybackStore((state) => state.setCurrentTime);
+  const storePlay = usePlaybackStore((state) => state.play);
+  const storePause = usePlaybackStore((state) => state.pause);
+  const storeTogglePlayback = usePlaybackStore((state) => state.togglePlayback);
+  const storeStepForward = usePlaybackStore((state) => state.stepForward);
+  const storeStepBackward = usePlaybackStore((state) => state.stepBackward);
+
+  // =========================================================================
+  // View state from TimelineStore
+  // =========================================================================
   const zoom = useTimelineStore((state) => state.zoom);
   const scrollX = useTimelineStore((state) => state.scrollX);
   const scrollY = useTimelineStore((state) => state.scrollY);
   const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
 
-  // Get actions from store
-  const setPlayhead = useTimelineStore((state) => state.setPlayhead);
-  const storePlay = useTimelineStore((state) => state.play);
-  const storePause = useTimelineStore((state) => state.pause);
-  const storeTogglePlayback = useTimelineStore((state) => state.togglePlayback);
+  // View and selection actions from TimelineStore
   const setZoom = useTimelineStore((state) => state.setZoom);
   const setScrollX = useTimelineStore((state) => state.setScrollX);
   const setScrollY = useTimelineStore((state) => state.setScrollY);
@@ -114,31 +131,51 @@ export function useTimeline(): UseTimelineReturn {
 
   const seek = useCallback(
     (time: number) => {
-      setPlayhead(Math.max(0, time));
+      setCurrentTime(Math.max(0, time));
     },
-    [setPlayhead]
+    [setCurrentTime]
   );
 
   const stepForward = useCallback(
     (frames: number = 1) => {
-      const frameTime = 1 / DEFAULT_FPS;
-      setPlayhead(playhead + frames * frameTime);
+      // Validate input: must be positive integer
+      const validFrames = Math.max(1, Math.floor(Math.abs(frames)));
+      // Single batch operation for performance - calculate total delta
+      const frameDuration = 1 / DEFAULT_FPS;
+      const totalDelta = validFrames * frameDuration;
+      // Use seek for multi-frame steps to avoid N state updates
+      if (validFrames === 1) {
+        storeStepForward(DEFAULT_FPS);
+      } else {
+        const currentTime = usePlaybackStore.getState().currentTime;
+        setCurrentTime(currentTime + totalDelta);
+      }
     },
-    [playhead, setPlayhead]
+    [storeStepForward, setCurrentTime]
   );
 
   const stepBackward = useCallback(
     (frames: number = 1) => {
-      const frameTime = 1 / DEFAULT_FPS;
-      setPlayhead(Math.max(0, playhead - frames * frameTime));
+      // Validate input: must be positive integer
+      const validFrames = Math.max(1, Math.floor(Math.abs(frames)));
+      // Single batch operation for performance - calculate total delta
+      const frameDuration = 1 / DEFAULT_FPS;
+      const totalDelta = validFrames * frameDuration;
+      // Use seek for multi-frame steps to avoid N state updates
+      if (validFrames === 1) {
+        storeStepBackward(DEFAULT_FPS);
+      } else {
+        const currentTime = usePlaybackStore.getState().currentTime;
+        setCurrentTime(Math.max(0, currentTime - totalDelta));
+      }
     },
-    [playhead, setPlayhead]
+    [storeStepBackward, setCurrentTime]
   );
 
   // Selection actions
   const selectClip = useCallback(
-    (clipId: string) => {
-      storeSelectClip(clipId);
+    (clipId: string, additive?: boolean) => {
+      storeSelectClip(clipId, additive);
     },
     [storeSelectClip]
   );
@@ -179,9 +216,13 @@ export function useTimeline(): UseTimelineReturn {
     [setScrollX, setScrollY]
   );
 
-  // Conversion utilities
+  // Conversion utilities with input validation
   const timeToPixels = useCallback(
     (time: number): number => {
+      // Guard against NaN/Infinity
+      if (!Number.isFinite(time)) {
+        return 0;
+      }
       return time * zoom;
     },
     [zoom]
@@ -189,6 +230,10 @@ export function useTimeline(): UseTimelineReturn {
 
   const pixelsToTime = useCallback(
     (pixels: number): number => {
+      // Guard against NaN/Infinity and division by zero
+      if (!Number.isFinite(pixels) || zoom <= 0) {
+        return 0;
+      }
       return pixels / zoom;
     },
     [zoom]
