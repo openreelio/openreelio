@@ -155,28 +155,52 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
 
   /**
    * Main playback loop
+   *
+   * Optimized RAF scheduling:
+   * - Uses proper frame timing to reduce unnecessary callbacks
+   * - Handles frame drops gracefully
+   * - Maintains accurate time progression
    */
   const playbackLoop = useCallback(
     (timestamp: number) => {
       if (!isMountedRef.current) return;
 
-      // Calculate delta time
-      const deltaMs = timestamp - lastFrameTimeRef.current;
-
-      // FPS throttling - skip if not enough time has passed
-      if (deltaMs < frameIntervalMs) {
+      // First frame initialization
+      if (lastFrameTimeRef.current === 0) {
+        lastFrameTimeRef.current = timestamp;
         rafIdRef.current = requestAnimationFrame(playbackLoop);
         return;
       }
 
-      // Calculate actual time delta (cap to prevent huge jumps)
-      const actualDeltaMs = Math.min(deltaMs, PLAYBACK.FRAME_DROP_THRESHOLD_MS * 2);
-      const deltaSec = (actualDeltaMs / 1000) * playbackRate;
+      // Calculate delta time
+      const deltaMs = timestamp - lastFrameTimeRef.current;
 
-      // Frame drop detection
-      if (allowFrameDrop && deltaMs > PLAYBACK.FRAME_DROP_THRESHOLD_MS) {
-        setDroppedFrames((prev) => prev + Math.floor(deltaMs / frameIntervalMs) - 1);
+      // FPS throttling - skip frame but don't reschedule immediately
+      // This reduces unnecessary RAF callbacks
+      if (deltaMs < frameIntervalMs) {
+        // Only schedule if we're still playing
+        if (isMountedRef.current) {
+          rafIdRef.current = requestAnimationFrame(playbackLoop);
+        }
+        return;
       }
+
+      // Calculate how many frames we should have rendered
+      const framesElapsed = Math.floor(deltaMs / frameIntervalMs);
+
+      // Frame drop detection - only count actual drops
+      if (allowFrameDrop && framesElapsed > 1) {
+        const droppedCount = framesElapsed - 1;
+        setDroppedFrames((prev) => prev + droppedCount);
+      }
+
+      // Calculate actual time delta (cap to prevent huge jumps)
+      // Use framesElapsed * frameIntervalMs for smoother timing
+      const cappedDeltaMs = Math.min(
+        framesElapsed * frameIntervalMs,
+        PLAYBACK.FRAME_DROP_THRESHOLD_MS * 2
+      );
+      const deltaSec = (cappedDeltaMs / 1000) * playbackRate;
 
       // Update playback time
       let newTime = lastPlaybackTimeRef.current + deltaSec;
@@ -194,8 +218,8 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
           setIsActive(false);
           onEnded?.();
 
-          // Don't schedule next frame
-          lastFrameTimeRef.current = timestamp;
+          // Reset for next play session
+          lastFrameTimeRef.current = 0;
           lastPlaybackTimeRef.current = newTime;
           return;
         }
@@ -204,7 +228,10 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       // Update store
       setCurrentTime(newTime);
       lastPlaybackTimeRef.current = newTime;
-      lastFrameTimeRef.current = timestamp;
+
+      // Adjust lastFrameTimeRef to account for any accumulated sub-frame time
+      // This prevents drift over long playback sessions
+      lastFrameTimeRef.current = timestamp - (deltaMs % frameIntervalMs);
 
       // Update stats
       setFrameCount((prev) => prev + 1);
