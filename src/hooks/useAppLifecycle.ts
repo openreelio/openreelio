@@ -83,13 +83,19 @@ export function useAppLifecycle(): void {
         unlisten = await currentWindow.onCloseRequested(async (event) => {
           const startedAt = Date.now();
 
+          // We perform async work in this handler (prompts, IPC cleanup, settings flush).
+          // Prevent the default close so we can explicitly destroy the window only after
+          // cleanup finishes (or after our hard deadline forces a destroy).
+          event.preventDefault();
+
           // If a close is already being handled (e.g., user clicked X repeatedly),
           // ignore duplicate requests but keep the window open until cleanup completes.
           if (isHandlingCloseRequest) {
-            event.preventDefault();
             return;
           }
           isHandlingCloseRequest = true;
+          let shouldClose = true;
+          let destroySucceeded = false;
 
           // Fail-safe: if something in the close handler hangs (e.g., IPC never resolves),
           // force-destroy the window after a hard deadline so the user can always exit.
@@ -136,8 +142,7 @@ export function useAppLifecycle(): void {
                   );
                   if (!forceClose) {
                     // User explicitly cancelled closing.
-                    event.preventDefault();
-                    isHandlingCloseRequest = false;
+                    shouldClose = false;
                     return; // Don't close
                   }
                 }
@@ -145,6 +150,7 @@ export function useAppLifecycle(): void {
             }
 
             // Perform backend cleanup with timeout
+            logger.debug('Starting backend cleanup...');
             try {
               const result = await withTimeout(
                 invoke<AppCleanupResult>('app_cleanup'),
@@ -162,6 +168,7 @@ export function useAppLifecycle(): void {
             }
 
             // Flush settings (bounded by timeout so close cannot hang)
+            logger.debug('Starting settings flush...');
             const { flushPendingUpdates } = useSettingsStore.getState();
             try {
               await withTimeout(
@@ -173,21 +180,40 @@ export function useAppLifecycle(): void {
             } catch (flushError) {
               logger.error('Failed to flush settings on close', { error: flushError });
             }
+            logger.debug('Cleanup phase complete, proceeding to window destroy...');
 
-            // IMPORTANT: Do not call currentWindow.close() here.
-            //
-            // The onCloseRequested wrapper (inside @tauri-apps/api) will destroy the window
-            // automatically after this handler returns if preventDefault() was NOT called.
-            // Calling close() from within the handler can deadlock (waiting for a close event
-            // that cannot be processed until this handler completes).
-            logger.info('Close request approved; allowing window to close', {
+          } catch (error) {
+            // Never throw from the close handler, otherwise the window may never be destroyed.
+            logger.error('Unhandled error in close handler', { error });
+          }
+
+          // Handle the close decision outside of finally block to avoid unsafe return
+          if (!shouldClose) {
+            logger.info('Close request cancelled; keeping window open', {
               elapsedMs: Date.now() - startedAt,
             });
-          } catch (error) {
-            // Never throw from the close handler, otherwise Tauri may never destroy the window.
-            logger.error('Unhandled error in close handler', { error });
-          } finally {
             clearTimeout(forceDestroyTimer);
+            isHandlingCloseRequest = false;
+            return;
+          }
+
+          // IMPORTANT: Do not call currentWindow.close() here (can deadlock).
+          // We explicitly destroy the window after cleanup completes.
+          try {
+            logger.info('Close request approved; destroying window after cleanup', {
+              elapsedMs: Date.now() - startedAt,
+            });
+            await currentWindow.destroy();
+            destroySucceeded = true;
+          } catch (destroyError) {
+            // Keep the force-destroy timer armed so the user can still exit.
+            logger.error('Window destroy failed', { error: destroyError });
+          } finally {
+            if (destroySucceeded) {
+              clearTimeout(forceDestroyTimer);
+            }
+            // If destroy() fails for some reason, allow future close attempts.
+            isHandlingCloseRequest = false;
           }
         });
       } catch (error) {

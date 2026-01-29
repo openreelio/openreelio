@@ -165,7 +165,7 @@ describe('useAppLifecycle', () => {
   });
 
   describe('close handler with no unsaved changes', () => {
-    it('should run cleanup and allow close to proceed (no preventDefault)', async () => {
+    it('should prevent default, run cleanup, and explicitly destroy the window', async () => {
       renderHook(() => useAppLifecycle());
 
       await vi.waitFor(() => {
@@ -177,12 +177,38 @@ describe('useAppLifecycle', () => {
         await closeRequestedCallback!(mockEvent);
       });
 
-      expect(mockEvent.preventDefault).not.toHaveBeenCalled();
+      expect(mockEvent.preventDefault).toHaveBeenCalled();
       expect(mockInvoke).toHaveBeenCalledWith('app_cleanup');
       expect(mockSettingsState.flushPendingUpdates).toHaveBeenCalled();
-      // The Tauri window API wrapper destroys the window automatically after the handler returns
-      // when preventDefault() is not called. We must not call close() from inside the handler.
+      // We must not call close() from inside the close handler (can deadlock).
       expect(mockClose).not.toHaveBeenCalled();
+      expect(mockDestroy).toHaveBeenCalled();
+    });
+
+    it('should fall back to forced destroy if explicit destroy fails', async () => {
+      vi.useFakeTimers();
+
+      mockDestroy.mockRejectedValue(new Error('destroy failed'));
+
+      renderHook(() => useAppLifecycle());
+
+      await vi.waitFor(() => {
+        expect(closeRequestedCallback).not.toBeNull();
+      });
+
+      const mockEvent = { preventDefault: vi.fn() };
+      await act(async () => {
+        await closeRequestedCallback!(mockEvent);
+      });
+
+      expect(mockEvent.preventDefault).toHaveBeenCalled();
+      expect(mockDestroy).toHaveBeenCalledTimes(1);
+
+      // Force-close deadline should trigger another destroy attempt.
+      await vi.advanceTimersByTimeAsync(15000);
+      expect(mockDestroy).toHaveBeenCalledTimes(2);
+
+      vi.useRealTimers();
     });
 
     it('should not block closing indefinitely if settings flush hangs', async () => {
@@ -208,8 +234,9 @@ describe('useAppLifecycle', () => {
         await closePromise;
       });
 
-      expect(mockEvent.preventDefault).not.toHaveBeenCalled();
+      expect(mockEvent.preventDefault).toHaveBeenCalled();
       expect(mockClose).not.toHaveBeenCalled();
+      expect(mockDestroy).toHaveBeenCalled();
 
       vi.useRealTimers();
     });
@@ -246,7 +273,7 @@ describe('useAppLifecycle', () => {
       });
 
       // Both events should be prevented while cleanup is running (we must not close early).
-      expect(firstEvent.preventDefault).not.toHaveBeenCalled();
+      expect(firstEvent.preventDefault).toHaveBeenCalled();
       expect(secondEvent.preventDefault).toHaveBeenCalled();
 
       // Cleanup should still only be invoked once.
@@ -265,6 +292,7 @@ describe('useAppLifecycle', () => {
       });
 
       expect(mockClose).not.toHaveBeenCalled();
+      expect(mockDestroy).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -291,8 +319,9 @@ describe('useAppLifecycle', () => {
         await closeRequestedCallback!(mockEvent);
       });
 
-      expect(mockEvent.preventDefault).not.toHaveBeenCalled();
+      expect(mockEvent.preventDefault).toHaveBeenCalled();
       expect(mockStoreState.saveProject).toHaveBeenCalled();
+      expect(mockDestroy).toHaveBeenCalled();
     });
 
     it('should prevent close when save fails and user cancels closing', async () => {
@@ -319,6 +348,7 @@ describe('useAppLifecycle', () => {
 
       expect(mockEvent.preventDefault).toHaveBeenCalled();
       expect(mockClose).not.toHaveBeenCalled();
+      expect(mockDestroy).not.toHaveBeenCalled();
     });
   });
 
