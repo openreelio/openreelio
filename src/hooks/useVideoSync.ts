@@ -3,10 +3,13 @@
  *
  * Synchronizes multiple video elements to timeline playback position.
  * Handles seeking, playback rate, and play/pause state synchronization.
+ *
+ * Uses centralized precision constants for accurate frame-level sync.
  */
 
 import { useEffect, useCallback, useRef } from 'react';
 import { usePlaybackStore } from '@/stores/playbackStore';
+import { SYNC_THRESHOLDS } from '@/constants/precision';
 import type { Clip, Asset } from '@/types';
 
 // =============================================================================
@@ -35,8 +38,12 @@ export interface UseVideoSyncReturn {
 // Constants
 // =============================================================================
 
-/** Threshold for seeking (in seconds) */
-const SEEK_THRESHOLD = 0.1;
+/**
+ * Threshold for seeking (in seconds).
+ * Uses frame-accurate threshold from centralized constants.
+ * 33ms = 1 frame at 30fps for accurate sync.
+ */
+const SEEK_THRESHOLD = SYNC_THRESHOLDS.SEEK_THRESHOLD;
 
 /** Maximum time to wait for video to be ready (ms) */
 const READY_TIMEOUT = 5000;
@@ -51,13 +58,25 @@ export function useVideoSync({
   assets,
   enabled = true,
 }: UseVideoSyncOptions): UseVideoSyncReturn {
-  // Note: 'assets' is available for future enhancements (e.g., loading state, proxy URL lookup)
-  void assets;
   const lastSyncTimeRef = useRef<number>(0);
+
+  /**
+   * Get asset for a clip to check proxy status or other asset metadata.
+   * Returns null if asset not found.
+   */
+  const getAssetForClip = useCallback(
+    (clip: Clip): Asset | null => {
+      return assets.get(clip.assetId) ?? null;
+    },
+    [assets]
+  );
   const syncingRef = useRef<Set<string>>(new Set());
 
-  // Playback state from store
-  const { currentTime, isPlaying, playbackRate } = usePlaybackStore();
+  // Playback state from store - including syncWithTimeline flag
+  const { currentTime, isPlaying, playbackRate, syncWithTimeline } = usePlaybackStore();
+
+  // Effective enabled state: both 'enabled' prop and 'syncWithTimeline' flag must be true
+  const effectivelyEnabled = enabled && syncWithTimeline;
 
   /**
    * Calculate the source time for a clip given a timeline time
@@ -114,13 +133,17 @@ export function useVideoSync({
    * Sync a single video element to the timeline
    */
   const syncVideo = useCallback((clipId: string) => {
-    if (!enabled) return;
+    if (!effectivelyEnabled) return;
 
     const video = videoRefs.get(clipId);
     if (!video) return;
 
     const clip = clips.find(c => c.id === clipId);
     if (!clip) return;
+
+    // Verify asset exists and is ready
+    const asset = getAssetForClip(clip);
+    if (!asset) return;
 
     // Prevent recursive syncing
     if (syncingRef.current.has(clipId)) return;
@@ -159,22 +182,22 @@ export function useVideoSync({
     } finally {
       syncingRef.current.delete(clipId);
     }
-  }, [enabled, videoRefs, clips, currentTime, isPlaying, playbackRate, calculateSourceTime]);
+  }, [effectivelyEnabled, videoRefs, clips, currentTime, isPlaying, playbackRate, calculateSourceTime, getAssetForClip]);
 
   /**
    * Sync all video elements
    */
   const syncAll = useCallback(() => {
-    if (!enabled) return;
+    if (!effectivelyEnabled) return;
 
     clips.forEach(clip => {
       syncVideo(clip.id);
     });
-  }, [enabled, clips, syncVideo]);
+  }, [effectivelyEnabled, clips, syncVideo]);
 
   // Sync videos when currentTime changes (seeking)
   useEffect(() => {
-    if (!enabled) return;
+    if (!effectivelyEnabled) return;
 
     // Debounce syncing during rapid time updates
     const now = performance.now();
@@ -182,18 +205,18 @@ export function useVideoSync({
     lastSyncTimeRef.current = now;
 
     syncAll();
-  }, [enabled, currentTime, syncAll]);
+  }, [effectivelyEnabled, currentTime, syncAll]);
 
   // Sync videos when play state changes
   useEffect(() => {
-    if (!enabled) return;
+    if (!effectivelyEnabled) return;
 
     syncAll();
-  }, [enabled, isPlaying, syncAll]);
+  }, [effectivelyEnabled, isPlaying, syncAll]);
 
   // Sync videos when playback rate changes
   useEffect(() => {
-    if (!enabled) return;
+    if (!effectivelyEnabled) return;
 
     clips.forEach(clip => {
       const video = videoRefs.get(clip.id);
@@ -201,11 +224,11 @@ export function useVideoSync({
         video.playbackRate = playbackRate * clip.speed;
       }
     });
-  }, [enabled, playbackRate, clips, videoRefs]);
+  }, [effectivelyEnabled, playbackRate, clips, videoRefs]);
 
   // Handle new video elements being added
   useEffect(() => {
-    if (!enabled) return;
+    if (!effectivelyEnabled) return;
 
     clips.forEach(clip => {
       const video = videoRefs.get(clip.id);
@@ -218,7 +241,7 @@ export function useVideoSync({
           });
       }
     });
-  }, [enabled, clips, videoRefs, isVideoReady, waitForVideoReady, syncVideo]);
+  }, [effectivelyEnabled, clips, videoRefs, isVideoReady, waitForVideoReady, syncVideo]);
 
   return {
     syncAll,
