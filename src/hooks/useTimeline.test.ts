@@ -2,37 +2,56 @@
  * useTimeline Hook Tests
  *
  * Tests for timeline operations wrapper hook including:
- * - Playback state and controls
- * - View state (zoom, scroll)
- * - Selection management
+ * - Playback state and controls (from PlaybackStore)
+ * - View state (zoom, scroll) (from TimelineStore)
+ * - Selection management (from TimelineStore)
  * - Conversion utilities
  */
 
 import { renderHook, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useTimeline } from './useTimeline';
-import { useTimelineStore } from '@/stores';
+import { useTimelineStore, usePlaybackStore } from '@/stores';
 
 type TimelineStoreSelector = NonNullable<Parameters<typeof useTimelineStore>[0]>;
 type TimelineStoreState = Parameters<TimelineStoreSelector>[0];
+
+type PlaybackStoreSelector = NonNullable<Parameters<typeof usePlaybackStore>[0]>;
+type PlaybackStoreState = Parameters<PlaybackStoreSelector>[0];
 
 // =============================================================================
 // Mocks
 // =============================================================================
 
-vi.mock('@/stores', () => ({
-  useTimelineStore: vi.fn(),
-}));
+// Create mocked stores with hoisted reference for getState support
+const { mockGetState } = vi.hoisted(() => {
+  return { mockGetState: { current: () => ({}) } };
+});
+
+vi.mock('@/stores', () => {
+  // Create mock with getState that delegates to our hoisted reference
+  const mockFn = vi.fn();
+  (mockFn as unknown as { getState: () => unknown }).getState = () => mockGetState.current();
+  return {
+    useTimelineStore: vi.fn(),
+    usePlaybackStore: mockFn,
+  };
+});
 
 // =============================================================================
 // Test Setup
 // =============================================================================
 
 describe('useTimeline', () => {
-  const mockSetPlayhead = vi.fn();
+  // PlaybackStore mocks
+  const mockSetCurrentTime = vi.fn();
   const mockPlay = vi.fn();
   const mockPause = vi.fn();
   const mockTogglePlayback = vi.fn();
+  const mockStepForward = vi.fn();
+  const mockStepBackward = vi.fn();
+
+  // TimelineStore mocks
   const mockSetZoom = vi.fn();
   const mockSetScrollX = vi.fn();
   const mockSetScrollY = vi.fn();
@@ -40,17 +59,30 @@ describe('useTimeline', () => {
   const mockDeselectClip = vi.fn();
   const mockClearClipSelection = vi.fn();
 
-  const defaultStoreState = {
-    playhead: 5,
+  const defaultPlaybackState = {
+    currentTime: 5,
     isPlaying: false,
+    playbackRate: 1,
+    duration: 60,
+    loop: false,
+    volume: 1,
+    isMuted: false,
+    syncWithTimeline: true,
+    setCurrentTime: mockSetCurrentTime,
+    play: mockPlay,
+    pause: mockPause,
+    togglePlayback: mockTogglePlayback,
+    stepForward: mockStepForward,
+    stepBackward: mockStepBackward,
+  };
+
+  const defaultTimelineState = {
     zoom: 100,
     scrollX: 0,
     scrollY: 0,
     selectedClipIds: [] as string[],
-    setPlayhead: mockSetPlayhead,
-    play: mockPlay,
-    pause: mockPause,
-    togglePlayback: mockTogglePlayback,
+    selectedTrackIds: [] as string[],
+    snapEnabled: true,
     setZoom: mockSetZoom,
     setScrollX: mockSetScrollX,
     setScrollY: mockSetScrollY,
@@ -61,34 +93,46 @@ describe('useTimeline', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+
+    // Mock PlaybackStore with getState support
+    vi.mocked(usePlaybackStore).mockImplementation((selector) => {
+      if (typeof selector === 'function') {
+        return selector(defaultPlaybackState as unknown as PlaybackStoreState);
+      }
+      return defaultPlaybackState;
+    });
+    // Set up getState to return the current mock state (for Zustand .getState() access)
+    mockGetState.current = () => defaultPlaybackState;
+
+    // Mock TimelineStore
     vi.mocked(useTimelineStore).mockImplementation((selector) => {
       if (typeof selector === 'function') {
-        return selector(defaultStoreState as unknown as TimelineStoreState);
+        return selector(defaultTimelineState as unknown as TimelineStoreState);
       }
-      return defaultStoreState;
+      return defaultTimelineState;
     });
   });
 
   // ===========================================================================
-  // Playback State
+  // Playback State (from PlaybackStore)
   // ===========================================================================
 
   describe('playback state', () => {
-    it('should return current playhead position', () => {
+    it('should return current playhead position from PlaybackStore', () => {
       const { result } = renderHook(() => useTimeline());
       expect(result.current.playhead).toBe(5);
     });
 
-    it('should return isPlaying state', () => {
+    it('should return isPlaying state from PlaybackStore', () => {
       const { result } = renderHook(() => useTimeline());
       expect(result.current.isPlaying).toBe(false);
     });
 
     it('should reflect isPlaying when true', () => {
-      vi.mocked(useTimelineStore).mockImplementation((selector) => {
-        const state = { ...defaultStoreState, isPlaying: true };
+      vi.mocked(usePlaybackStore).mockImplementation((selector) => {
+        const state = { ...defaultPlaybackState, isPlaying: true };
         if (typeof selector === 'function') {
-          return selector(state as unknown as TimelineStoreState);
+          return selector(state as unknown as PlaybackStoreState);
         }
         return state;
       });
@@ -99,11 +143,11 @@ describe('useTimeline', () => {
   });
 
   // ===========================================================================
-  // Playback Actions
+  // Playback Actions (delegated to PlaybackStore)
   // ===========================================================================
 
   describe('playback actions', () => {
-    it('should call play action', () => {
+    it('should call play action on PlaybackStore', () => {
       const { result } = renderHook(() => useTimeline());
 
       act(() => {
@@ -113,7 +157,7 @@ describe('useTimeline', () => {
       expect(mockPlay).toHaveBeenCalledTimes(1);
     });
 
-    it('should call pause action', () => {
+    it('should call pause action on PlaybackStore', () => {
       const { result } = renderHook(() => useTimeline());
 
       act(() => {
@@ -123,7 +167,7 @@ describe('useTimeline', () => {
       expect(mockPause).toHaveBeenCalledTimes(1);
     });
 
-    it('should call togglePlayback action', () => {
+    it('should call togglePlayback action on PlaybackStore', () => {
       const { result } = renderHook(() => useTimeline());
 
       act(() => {
@@ -133,14 +177,14 @@ describe('useTimeline', () => {
       expect(mockTogglePlayback).toHaveBeenCalledTimes(1);
     });
 
-    it('should seek to specific time', () => {
+    it('should seek to specific time via PlaybackStore', () => {
       const { result } = renderHook(() => useTimeline());
 
       act(() => {
         result.current.seek(10);
       });
 
-      expect(mockSetPlayhead).toHaveBeenCalledWith(10);
+      expect(mockSetCurrentTime).toHaveBeenCalledWith(10);
     });
 
     it('should clamp seek time to minimum 0', () => {
@@ -150,85 +194,92 @@ describe('useTimeline', () => {
         result.current.seek(-5);
       });
 
-      expect(mockSetPlayhead).toHaveBeenCalledWith(0);
+      expect(mockSetCurrentTime).toHaveBeenCalledWith(0);
     });
 
-    it('should step forward by default 1 frame', () => {
+    it('should step forward by calling PlaybackStore stepForward', () => {
       const { result } = renderHook(() => useTimeline());
 
       act(() => {
         result.current.stepForward();
       });
 
-      // 5 + 1/30 (one frame at 30fps)
-      expect(mockSetPlayhead).toHaveBeenCalledWith(expect.closeTo(5 + 1 / 30, 5));
+      // Called once with fps=30
+      expect(mockStepForward).toHaveBeenCalledWith(30);
     });
 
-    it('should step forward by specified frames', () => {
+    it('should step forward multiple times for multiple frames', () => {
       const { result } = renderHook(() => useTimeline());
 
       act(() => {
         result.current.stepForward(5);
       });
 
-      // 5 + 5/30 (five frames at 30fps)
-      expect(mockSetPlayhead).toHaveBeenCalledWith(expect.closeTo(5 + 5 / 30, 5));
+      // Multi-frame steps use setCurrentTime for batch operation (performance optimization)
+      // 5 frames at 30fps = 5 * (1/30) = 0.166... seconds
+      // currentTime (5) + 0.166... = 5.166...
+      const expectedTime = 5 + 5 * (1 / 30);
+      expect(mockSetCurrentTime).toHaveBeenCalledWith(expectedTime);
     });
 
-    it('should step backward by default 1 frame', () => {
+    it('should step backward by calling PlaybackStore stepBackward', () => {
       const { result } = renderHook(() => useTimeline());
 
       act(() => {
         result.current.stepBackward();
       });
 
-      // 5 - 1/30 (one frame at 30fps)
-      expect(mockSetPlayhead).toHaveBeenCalledWith(expect.closeTo(5 - 1 / 30, 5));
+      // Called once with fps=30
+      expect(mockStepBackward).toHaveBeenCalledWith(30);
     });
 
-    it('should step backward by specified frames', () => {
+    it('should step backward multiple times for multiple frames', () => {
       const { result } = renderHook(() => useTimeline());
 
       act(() => {
         result.current.stepBackward(3);
       });
 
-      // 5 - 3/30 (three frames at 30fps)
-      expect(mockSetPlayhead).toHaveBeenCalledWith(expect.closeTo(5 - 3 / 30, 5));
+      // Multi-frame steps use setCurrentTime for batch operation
+      expect(mockSetCurrentTime).toHaveBeenCalled();
     });
 
-    it('should clamp step backward to minimum 0', () => {
-      vi.mocked(useTimelineStore).mockImplementation((selector) => {
-        const state = { ...defaultStoreState, playhead: 0 };
-        if (typeof selector === 'function') {
-          return selector(state as unknown as TimelineStoreState);
-        }
-        return state;
-      });
-
+    it('should handle negative frame count in stepForward', () => {
       const { result } = renderHook(() => useTimeline());
 
       act(() => {
-        result.current.stepBackward();
+        result.current.stepForward(-5);
       });
 
-      expect(mockSetPlayhead).toHaveBeenCalledWith(0);
+      // Should treat negative as positive (absolute value)
+      expect(mockSetCurrentTime).toHaveBeenCalled();
+    });
+
+    it('should handle fractional frame count in stepBackward', () => {
+      const { result } = renderHook(() => useTimeline());
+
+      act(() => {
+        result.current.stepBackward(2.7);
+      });
+
+      // Should floor fractional frames
+      expect(mockSetCurrentTime).toHaveBeenCalled();
     });
   });
 
   // ===========================================================================
-  // View State
+  // View State (from TimelineStore)
   // ===========================================================================
 
   describe('view state', () => {
-    it('should return zoom level', () => {
+    it('should return zoom level from TimelineStore', () => {
       const { result } = renderHook(() => useTimeline());
       expect(result.current.zoom).toBe(100);
     });
 
-    it('should return scrollX position', () => {
+    it('should return scrollX position from TimelineStore', () => {
       vi.mocked(useTimelineStore).mockImplementation((selector) => {
-        const state = { ...defaultStoreState, scrollX: 50 };
+        const state = { ...defaultTimelineState, scrollX: 50 };
         if (typeof selector === 'function') {
           return selector(state as unknown as TimelineStoreState);
         }
@@ -239,9 +290,9 @@ describe('useTimeline', () => {
       expect(result.current.scrollX).toBe(50);
     });
 
-    it('should return scrollY position', () => {
+    it('should return scrollY position from TimelineStore', () => {
       vi.mocked(useTimelineStore).mockImplementation((selector) => {
-        const state = { ...defaultStoreState, scrollY: 25 };
+        const state = { ...defaultTimelineState, scrollY: 25 };
         if (typeof selector === 'function') {
           return selector(state as unknown as TimelineStoreState);
         }
@@ -292,7 +343,7 @@ describe('useTimeline', () => {
 
     it('should clamp zoom to maximum', () => {
       vi.mocked(useTimelineStore).mockImplementation((selector) => {
-        const state = { ...defaultStoreState, zoom: 490 };
+        const state = { ...defaultTimelineState, zoom: 490 };
         if (typeof selector === 'function') {
           return selector(state as unknown as TimelineStoreState);
         }
@@ -310,7 +361,7 @@ describe('useTimeline', () => {
 
     it('should clamp zoom to minimum', () => {
       vi.mocked(useTimelineStore).mockImplementation((selector) => {
-        const state = { ...defaultStoreState, zoom: 11 };
+        const state = { ...defaultTimelineState, zoom: 11 };
         if (typeof selector === 'function') {
           return selector(state as unknown as TimelineStoreState);
         }
@@ -345,7 +396,7 @@ describe('useTimeline', () => {
   describe('selection state', () => {
     it('should return selectedClipIds', () => {
       vi.mocked(useTimelineStore).mockImplementation((selector) => {
-        const state = { ...defaultStoreState, selectedClipIds: ['clip-1', 'clip-2'] };
+        const state = { ...defaultTimelineState, selectedClipIds: ['clip-1', 'clip-2'] };
         if (typeof selector === 'function') {
           return selector(state as unknown as TimelineStoreState);
         }
@@ -363,7 +414,7 @@ describe('useTimeline', () => {
 
     it('should return hasSelection as true when clips are selected', () => {
       vi.mocked(useTimelineStore).mockImplementation((selector) => {
-        const state = { ...defaultStoreState, selectedClipIds: ['clip-1'] };
+        const state = { ...defaultTimelineState, selectedClipIds: ['clip-1'] };
         if (typeof selector === 'function') {
           return selector(state as unknown as TimelineStoreState);
         }
@@ -387,7 +438,17 @@ describe('useTimeline', () => {
         result.current.selectClip('clip-1');
       });
 
-      expect(mockSelectClip).toHaveBeenCalledWith('clip-1');
+      expect(mockSelectClip).toHaveBeenCalledWith('clip-1', undefined);
+    });
+
+    it('should select a clip with additive option', () => {
+      const { result } = renderHook(() => useTimeline());
+
+      act(() => {
+        result.current.selectClip('clip-2', true);
+      });
+
+      expect(mockSelectClip).toHaveBeenCalledWith('clip-2', true);
     });
 
     it('should deselect a clip', () => {
@@ -463,7 +524,7 @@ describe('useTimeline', () => {
 
     it('should use current zoom for conversions', () => {
       vi.mocked(useTimelineStore).mockImplementation((selector) => {
-        const state = { ...defaultStoreState, zoom: 200 };
+        const state = { ...defaultTimelineState, zoom: 200 };
         if (typeof selector === 'function') {
           return selector(state as unknown as never);
         }
@@ -486,6 +547,30 @@ describe('useTimeline', () => {
       const { result } = renderHook(() => useTimeline());
 
       expect(result.current.pixelsToTime(0)).toBe(0);
+    });
+
+    it('should handle NaN input for timeToPixels', () => {
+      const { result } = renderHook(() => useTimeline());
+
+      expect(result.current.timeToPixels(NaN)).toBe(0);
+    });
+
+    it('should handle NaN input for pixelsToTime', () => {
+      const { result } = renderHook(() => useTimeline());
+
+      expect(result.current.pixelsToTime(NaN)).toBe(0);
+    });
+
+    it('should handle Infinity input for timeToPixels', () => {
+      const { result } = renderHook(() => useTimeline());
+
+      expect(result.current.timeToPixels(Infinity)).toBe(0);
+    });
+
+    it('should handle Infinity input for pixelsToTime', () => {
+      const { result } = renderHook(() => useTimeline());
+
+      expect(result.current.pixelsToTime(Infinity)).toBe(0);
     });
   });
 

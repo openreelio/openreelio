@@ -12,6 +12,33 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 import type { Sequence } from '@/types';
 
 // =============================================================================
+// Canvas Mock for TimeRuler
+// =============================================================================
+
+const createMockCanvasContext = () => ({
+  fillRect: vi.fn(),
+  fillText: vi.fn(),
+  strokeRect: vi.fn(),
+  clearRect: vi.fn(),
+  beginPath: vi.fn(),
+  moveTo: vi.fn(),
+  lineTo: vi.fn(),
+  stroke: vi.fn(),
+  fill: vi.fn(),
+  scale: vi.fn(),
+  save: vi.fn(),
+  restore: vi.fn(),
+  setTransform: vi.fn(),
+  resetTransform: vi.fn(),
+  fillStyle: '',
+  strokeStyle: '',
+  lineWidth: 1,
+  font: '',
+  textAlign: 'left' as CanvasTextAlign,
+  textBaseline: 'alphabetic' as CanvasTextBaseline,
+});
+
+// =============================================================================
 // Test Data
 // =============================================================================
 
@@ -57,8 +84,19 @@ const mockSequence: Sequence = {
 
 describe('Timeline', () => {
   const originalGetBoundingClientRect = Element.prototype.getBoundingClientRect;
+  const originalGetContext = HTMLCanvasElement.prototype.getContext;
 
   beforeEach(() => {
+    // Mock Canvas API for TimeRuler component
+    HTMLCanvasElement.prototype.getContext = vi.fn().mockReturnValue(createMockCanvasContext());
+
+    // Mock window.devicePixelRatio
+    Object.defineProperty(window, 'devicePixelRatio', {
+      value: 1,
+      writable: true,
+      configurable: true,
+    });
+
     // Reset timeline store before each test
     useTimelineStore.setState({
       playhead: 0,
@@ -103,8 +141,9 @@ describe('Timeline', () => {
   });
 
   afterEach(() => {
-    // Restore original
+    // Restore originals
     Element.prototype.getBoundingClientRect = originalGetBoundingClientRect;
+    HTMLCanvasElement.prototype.getContext = originalGetContext;
   });
 
   // ===========================================================================

@@ -8,7 +8,7 @@
 
 import { useCallback, memo } from 'react';
 import { useAIStore } from '@/stores/aiStore';
-import { useTimelineStore } from '@/stores';
+import { useTimelineStore, usePlaybackStore } from '@/stores';
 
 // =============================================================================
 // Types
@@ -74,8 +74,9 @@ export const QuickActionsBar = memo(function QuickActionsBar({
   const generateEditScript = useAIStore((state) => state.generateEditScript);
   const isGenerating = useAIStore((state) => state.isGenerating);
 
-  // Get timeline context
-  const playhead = useTimelineStore((state) => state.playhead);
+  // Get playhead from PlaybackStore (single source of truth)
+  const playhead = usePlaybackStore((state) => state.currentTime);
+  // Get selection from TimelineStore
   const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
   const selectedTrackIds = useTimelineStore((state) => state.selectedTrackIds);
 

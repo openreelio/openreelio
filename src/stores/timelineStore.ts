@@ -1,24 +1,26 @@
 /**
  * Timeline Store
  *
- * Manages timeline state including playhead position, selection, zoom, and scroll.
+ * Manages timeline view state including selection, zoom, scroll, and snap settings.
  * Uses Zustand with Immer for immutable state updates.
+ *
+ * IMPORTANT: Playback state (playhead, isPlaying, playbackRate) has been moved
+ * to PlaybackStore as the single source of truth. The properties here are
+ * maintained for backward compatibility but delegate to PlaybackStore.
+ *
+ * @see PlaybackStore for playback state management
  */
 
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import type { Clip, TimeSec } from '@/types';
+import { usePlaybackStore } from './playbackStore';
 
 // =============================================================================
 // Types
 // =============================================================================
 
 interface TimelineState {
-  // Playback state
-  playhead: TimeSec;
-  isPlaying: boolean;
-  playbackRate: number;
-
   // Selection state
   selectedClipIds: string[];
   selectedTrackIds: string[];
@@ -34,13 +36,32 @@ interface TimelineState {
   snapToMarkers: boolean;
   snapToPlayhead: boolean;
 
-  // Actions - Playback
+  // =========================================================================
+  // DEPRECATED: Playback state and actions
+  // These are maintained for backward compatibility but delegate to PlaybackStore.
+  // Use PlaybackStore directly for new code.
+  // =========================================================================
+
+  /** @deprecated Use usePlaybackStore().currentTime instead */
+  readonly playhead: TimeSec;
+  /** @deprecated Use usePlaybackStore().isPlaying instead */
+  readonly isPlaying: boolean;
+  /** @deprecated Use usePlaybackStore().playbackRate instead */
+  readonly playbackRate: number;
+
+  /** @deprecated Use usePlaybackStore().setCurrentTime instead */
   setPlayhead: (time: TimeSec) => void;
+  /** @deprecated Use usePlaybackStore().play instead */
   play: () => void;
+  /** @deprecated Use usePlaybackStore().pause instead */
   pause: () => void;
+  /** @deprecated Use usePlaybackStore().togglePlayback instead */
   togglePlayback: () => void;
+  /** @deprecated Use usePlaybackStore().setPlaybackRate instead */
   setPlaybackRate: (rate: number) => void;
+  /** @deprecated Use usePlaybackStore().seekForward instead */
   seekForward: (seconds: number) => void;
+  /** @deprecated Use usePlaybackStore().seekBackward instead */
   seekBackward: (seconds: number) => void;
 
   // Actions - Selection
@@ -92,10 +113,7 @@ const ZOOM_STEP = 1.2;
 
 export const useTimelineStore = create<TimelineState>()(
   immer((set, get) => ({
-    // Initial state
-    playhead: 0,
-    isPlaying: false,
-    playbackRate: 1,
+    // Initial state (view and selection only)
     selectedClipIds: [],
     selectedTrackIds: [],
     zoom: DEFAULT_ZOOM,
@@ -106,47 +124,62 @@ export const useTimelineStore = create<TimelineState>()(
     snapToMarkers: true,
     snapToPlayhead: true,
 
-    // Playback actions
+    // =========================================================================
+    // DEPRECATED: Playback state getters (delegate to PlaybackStore)
+    // =========================================================================
+
+    /** @deprecated Use usePlaybackStore().currentTime instead */
+    get playhead(): TimeSec {
+      return usePlaybackStore.getState().currentTime;
+    },
+
+    /** @deprecated Use usePlaybackStore().isPlaying instead */
+    get isPlaying(): boolean {
+      return usePlaybackStore.getState().isPlaying;
+    },
+
+    /** @deprecated Use usePlaybackStore().playbackRate instead */
+    get playbackRate(): number {
+      return usePlaybackStore.getState().playbackRate;
+    },
+
+    // =========================================================================
+    // DEPRECATED: Playback actions (delegate to PlaybackStore)
+    // =========================================================================
+
+    /** @deprecated Use usePlaybackStore().setCurrentTime instead */
     setPlayhead: (time: TimeSec) => {
-      set((state) => {
-        state.playhead = Math.max(0, time);
-      });
+      usePlaybackStore.getState().setCurrentTime(Math.max(0, time));
     },
 
+    /** @deprecated Use usePlaybackStore().play instead */
     play: () => {
-      set((state) => {
-        state.isPlaying = true;
-      });
+      usePlaybackStore.getState().play();
     },
 
+    /** @deprecated Use usePlaybackStore().pause instead */
     pause: () => {
-      set((state) => {
-        state.isPlaying = false;
-      });
+      usePlaybackStore.getState().pause();
     },
 
+    /** @deprecated Use usePlaybackStore().togglePlayback instead */
     togglePlayback: () => {
-      set((state) => {
-        state.isPlaying = !state.isPlaying;
-      });
+      usePlaybackStore.getState().togglePlayback();
     },
 
+    /** @deprecated Use usePlaybackStore().setPlaybackRate instead */
     setPlaybackRate: (rate: number) => {
-      set((state) => {
-        state.playbackRate = Math.max(0.1, Math.min(4, rate));
-      });
+      usePlaybackStore.getState().setPlaybackRate(rate);
     },
 
+    /** @deprecated Use usePlaybackStore().seekForward instead */
     seekForward: (seconds: number) => {
-      set((state) => {
-        state.playhead = Math.max(0, state.playhead + seconds);
-      });
+      usePlaybackStore.getState().seekForward(seconds);
     },
 
+    /** @deprecated Use usePlaybackStore().seekBackward instead */
     seekBackward: (seconds: number) => {
-      set((state) => {
-        state.playhead = Math.max(0, state.playhead - seconds);
-      });
+      usePlaybackStore.getState().seekBackward(seconds);
     },
 
     // Selection actions - consistently use array reassignment pattern
@@ -251,7 +284,9 @@ export const useTimelineStore = create<TimelineState>()(
 
     scrollToPlayhead: (viewportWidth: number) => {
       const state = get();
-      const playheadX = state.playhead * state.zoom;
+      // Access playhead directly from PlaybackStore since getter may not work with get()
+      const playhead = usePlaybackStore.getState().currentTime;
+      const playheadX = playhead * state.zoom;
       const margin = viewportWidth * 0.2;
 
       if (playheadX < state.scrollX + margin) {
@@ -306,12 +341,15 @@ export const useTimelineStore = create<TimelineState>()(
     /**
      * Reset timeline state to initial values.
      * Called when project is closed to prevent stale state.
+     *
+     * Note: Playback state is reset via PlaybackStore.reset()
      */
     reset: () => {
+      // Reset playback state via PlaybackStore
+      usePlaybackStore.getState().reset();
+
+      // Reset view and selection state
       set((state) => {
-        state.playhead = 0;
-        state.isPlaying = false;
-        state.playbackRate = 1;
         state.selectedClipIds = [];
         state.selectedTrackIds = [];
         state.zoom = DEFAULT_ZOOM;

@@ -7,6 +7,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { useTimelineStore } from './timelineStore';
+import { usePlaybackStore } from './playbackStore';
 import type { Clip } from '@/types';
 
 // =============================================================================
@@ -15,21 +16,12 @@ import type { Clip } from '@/types';
 
 describe('timelineStore', () => {
   beforeEach(() => {
-    // Reset store to initial state before each test
-    useTimelineStore.setState({
-      playhead: 0,
-      isPlaying: false,
-      playbackRate: 1,
-      selectedClipIds: [],
-      selectedTrackIds: [],
-      zoom: 100,
-      scrollX: 0,
-      scrollY: 0,
-      snapEnabled: true,
-      snapToClips: true,
-      snapToMarkers: true,
-      snapToPlayhead: true,
-    });
+    // Reset timeline store (which also resets PlaybackStore internally)
+    useTimelineStore.getState().reset();
+
+    // Set duration after reset - this is critical for seek operations to work
+    // (seek clamps to duration, so if duration is 0, seek will always result in 0)
+    usePlaybackStore.getState().setDuration(60);
   });
 
   // ===========================================================================
@@ -39,10 +31,14 @@ describe('timelineStore', () => {
   describe('initial state', () => {
     it('should have correct initial state', () => {
       const state = useTimelineStore.getState();
+      const playbackState = usePlaybackStore.getState();
 
-      expect(state.playhead).toBe(0);
-      expect(state.isPlaying).toBe(false);
-      expect(state.playbackRate).toBe(1);
+      // Playback state is in PlaybackStore (the source of truth)
+      expect(playbackState.currentTime).toBe(0);
+      expect(playbackState.isPlaying).toBe(false);
+      expect(playbackState.playbackRate).toBe(1);
+
+      // View/selection state is in TimelineStore
       expect(state.selectedClipIds).toEqual([]);
       expect(state.selectedTrackIds).toEqual([]);
       expect(state.zoom).toBe(100);
@@ -62,14 +58,16 @@ describe('timelineStore', () => {
         const { setPlayhead } = useTimelineStore.getState();
         setPlayhead(10.5);
 
-        expect(useTimelineStore.getState().playhead).toBe(10.5);
+        // Verify via PlaybackStore (the source of truth)
+        expect(usePlaybackStore.getState().currentTime).toBe(10.5);
       });
 
       it('should not allow negative playhead', () => {
         const { setPlayhead } = useTimelineStore.getState();
         setPlayhead(-5);
 
-        expect(useTimelineStore.getState().playhead).toBe(0);
+        // Verify via PlaybackStore (the source of truth)
+        expect(usePlaybackStore.getState().currentTime).toBe(0);
       });
 
       it('should handle zero playhead', () => {
@@ -77,7 +75,8 @@ describe('timelineStore', () => {
         setPlayhead(10);
         setPlayhead(0);
 
-        expect(useTimelineStore.getState().playhead).toBe(0);
+        // Verify via PlaybackStore (the source of truth)
+        expect(usePlaybackStore.getState().currentTime).toBe(0);
       });
     });
 
@@ -86,18 +85,20 @@ describe('timelineStore', () => {
         const { play } = useTimelineStore.getState();
         play();
 
-        expect(useTimelineStore.getState().isPlaying).toBe(true);
+        // Verify via PlaybackStore (the source of truth)
+        expect(usePlaybackStore.getState().isPlaying).toBe(true);
       });
     });
 
     describe('pause', () => {
       it('should set isPlaying to false', () => {
-        useTimelineStore.setState({ isPlaying: true });
+        usePlaybackStore.getState().play();
 
         const { pause } = useTimelineStore.getState();
         pause();
 
-        expect(useTimelineStore.getState().isPlaying).toBe(false);
+        // Verify via PlaybackStore (the source of truth)
+        expect(usePlaybackStore.getState().isPlaying).toBe(false);
       });
     });
 
@@ -106,16 +107,18 @@ describe('timelineStore', () => {
         const { togglePlayback } = useTimelineStore.getState();
         togglePlayback();
 
-        expect(useTimelineStore.getState().isPlaying).toBe(true);
+        // Verify via PlaybackStore (the source of truth)
+        expect(usePlaybackStore.getState().isPlaying).toBe(true);
       });
 
       it('should toggle from playing to paused', () => {
-        useTimelineStore.setState({ isPlaying: true });
+        usePlaybackStore.getState().play();
 
         const { togglePlayback } = useTimelineStore.getState();
         togglePlayback();
 
-        expect(useTimelineStore.getState().isPlaying).toBe(false);
+        // Verify via PlaybackStore (the source of truth)
+        expect(usePlaybackStore.getState().isPlaying).toBe(false);
       });
     });
 
@@ -124,52 +127,61 @@ describe('timelineStore', () => {
         const { setPlaybackRate } = useTimelineStore.getState();
         setPlaybackRate(2);
 
-        expect(useTimelineStore.getState().playbackRate).toBe(2);
+        // Verify via PlaybackStore (the source of truth)
+        expect(usePlaybackStore.getState().playbackRate).toBe(2);
       });
 
       it('should clamp playback rate to minimum 0.1', () => {
         const { setPlaybackRate } = useTimelineStore.getState();
         setPlaybackRate(0.05);
 
-        expect(useTimelineStore.getState().playbackRate).toBe(0.1);
+        // PlaybackStore has MIN of 0.25, not 0.1 (that was old TimelineStore logic)
+        expect(usePlaybackStore.getState().playbackRate).toBe(0.25);
       });
 
       it('should clamp playback rate to maximum 4', () => {
         const { setPlaybackRate } = useTimelineStore.getState();
         setPlaybackRate(8);
 
-        expect(useTimelineStore.getState().playbackRate).toBe(4);
+        // Verify via PlaybackStore (the source of truth)
+        expect(usePlaybackStore.getState().playbackRate).toBe(4);
       });
     });
 
     describe('seekForward', () => {
       it('should move playhead forward', () => {
-        useTimelineStore.setState({ playhead: 5 });
+        // Use seek action to set initial position
+        usePlaybackStore.getState().seek(5);
 
         const { seekForward } = useTimelineStore.getState();
         seekForward(3);
 
-        expect(useTimelineStore.getState().playhead).toBe(8);
+        // Verify via PlaybackStore (the source of truth)
+        expect(usePlaybackStore.getState().currentTime).toBe(8);
       });
     });
 
     describe('seekBackward', () => {
       it('should move playhead backward', () => {
-        useTimelineStore.setState({ playhead: 10 });
+        // Use seek action to set initial position
+        usePlaybackStore.getState().seek(10);
 
         const { seekBackward } = useTimelineStore.getState();
         seekBackward(3);
 
-        expect(useTimelineStore.getState().playhead).toBe(7);
+        // Verify via PlaybackStore (the source of truth)
+        expect(usePlaybackStore.getState().currentTime).toBe(7);
       });
 
       it('should not go below zero', () => {
-        useTimelineStore.setState({ playhead: 2 });
+        // Use seek action to set initial position
+        usePlaybackStore.getState().seek(2);
 
         const { seekBackward } = useTimelineStore.getState();
         seekBackward(5);
 
-        expect(useTimelineStore.getState().playhead).toBe(0);
+        // Verify via PlaybackStore (the source of truth)
+        expect(usePlaybackStore.getState().currentTime).toBe(0);
       });
     });
   });
@@ -479,7 +491,9 @@ describe('timelineStore', () => {
 
     describe('scrollToPlayhead', () => {
       it('should scroll left when playhead is before visible area', () => {
-        useTimelineStore.setState({ playhead: 1, zoom: 100, scrollX: 500 });
+        // Use seek action instead of setState to ensure proper state update
+        usePlaybackStore.getState().seek(1);
+        useTimelineStore.setState({ zoom: 100, scrollX: 500 });
 
         const { scrollToPlayhead } = useTimelineStore.getState();
         scrollToPlayhead(400); // viewport 400px
@@ -489,7 +503,9 @@ describe('timelineStore', () => {
       });
 
       it('should scroll right when playhead is after visible area', () => {
-        useTimelineStore.setState({ playhead: 10, zoom: 100, scrollX: 0 });
+        // Use seek action instead of setState to ensure proper state update
+        usePlaybackStore.getState().seek(10);
+        useTimelineStore.setState({ zoom: 100, scrollX: 0 });
 
         const { scrollToPlayhead } = useTimelineStore.getState();
         scrollToPlayhead(400); // viewport 400px
@@ -499,7 +515,9 @@ describe('timelineStore', () => {
       });
 
       it('should not scroll when playhead is within visible area', () => {
-        useTimelineStore.setState({ playhead: 2, zoom: 100, scrollX: 0 });
+        // Use seek action instead of setState to ensure proper state update
+        usePlaybackStore.getState().seek(2);
+        useTimelineStore.setState({ zoom: 100, scrollX: 0 });
 
         const { scrollToPlayhead } = useTimelineStore.getState();
         scrollToPlayhead(400); // viewport 400px, playhead at 200px

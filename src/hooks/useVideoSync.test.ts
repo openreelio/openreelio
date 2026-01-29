@@ -17,6 +17,7 @@ const mockPlaybackStore = {
   currentTime: 0,
   isPlaying: false,
   playbackRate: 1,
+  syncWithTimeline: true,
 };
 
 vi.mock('@/stores/playbackStore', () => ({
@@ -97,6 +98,7 @@ describe('useVideoSync', () => {
     mockPlaybackStore.currentTime = 0;
     mockPlaybackStore.isPlaying = false;
     mockPlaybackStore.playbackRate = 1;
+    mockPlaybackStore.syncWithTimeline = true;
   });
 
   describe('syncVideo', () => {
@@ -264,6 +266,52 @@ describe('useVideoSync', () => {
       });
 
       expect(video.currentTime).toBe(0); // Should not change
+    });
+  });
+
+  describe('asset verification', () => {
+    it('does not sync when asset is not found', () => {
+      const clip = createMockClip({ assetId: 'non-existent-asset' });
+      const video = createMockVideoElement();
+      const videoRefs = new Map<string, HTMLVideoElement>([[clip.id, video]]);
+      const assets = new Map<string, Asset>(); // Empty assets map
+
+      mockPlaybackStore.currentTime = 5;
+
+      const { result } = renderHook(() =>
+        useVideoSync({ videoRefs, clips: [clip], assets })
+      );
+
+      act(() => {
+        result.current.syncVideo(clip.id);
+      });
+
+      expect(video.currentTime).toBe(0); // Should not change
+    });
+
+    it('syncs only clips with valid assets', () => {
+      const clip1 = createMockClip({ id: 'clip-1', assetId: 'asset-1' });
+      const clip2 = createMockClip({ id: 'clip-2', assetId: 'non-existent' });
+      const video1 = createMockVideoElement();
+      const video2 = createMockVideoElement();
+      const videoRefs = new Map<string, HTMLVideoElement>([
+        [clip1.id, video1],
+        [clip2.id, video2],
+      ]);
+      const assets = new Map<string, Asset>([[createMockAsset().id, createMockAsset()]]);
+
+      mockPlaybackStore.currentTime = 5;
+
+      const { result } = renderHook(() =>
+        useVideoSync({ videoRefs, clips: [clip1, clip2], assets })
+      );
+
+      act(() => {
+        result.current.syncAll();
+      });
+
+      expect(video1.currentTime).toBe(5); // Asset exists, should sync
+      expect(video2.currentTime).toBe(0); // Asset missing, should not sync
     });
   });
 });

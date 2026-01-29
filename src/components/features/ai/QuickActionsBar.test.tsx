@@ -28,9 +28,14 @@ vi.mock('@/stores/aiStore', () => ({
 vi.mock('@/stores', () => ({
   useTimelineStore: (selector: (state: unknown) => unknown) => {
     const state = {
-      playhead: 5.5,
       selectedClipIds: ['clip_001'],
       selectedTrackIds: ['track_001'],
+    };
+    return selector(state);
+  },
+  usePlaybackStore: (selector: (state: unknown) => unknown) => {
+    const state = {
+      currentTime: 5.5,
     };
     return selector(state);
   },

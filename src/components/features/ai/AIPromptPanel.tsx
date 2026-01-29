@@ -7,7 +7,7 @@
 
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { useAIAgent, type AIContext } from '@/hooks/useAIAgent';
-import { useTimelineStore } from '@/stores';
+import { useTimelineStore, usePlaybackStore } from '@/stores';
 import { useAIStore, selectIsAIReady } from '@/stores/aiStore';
 import { ProposalDialog } from './ProposalDialog';
 import { createLogger } from '@/services/logger';
@@ -51,8 +51,9 @@ export const AIPromptPanel: React.FC<AIPromptPanelProps> = ({
     clearError,
   } = useAIAgent();
 
-  // Get context from stores
-  const playhead = useTimelineStore((state) => state.playhead);
+  // Get playhead from PlaybackStore (single source of truth)
+  const playhead = usePlaybackStore((state) => state.currentTime);
+  // Get selection from TimelineStore
   const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
   const selectedTrackIds = useTimelineStore((state) => state.selectedTrackIds);
 

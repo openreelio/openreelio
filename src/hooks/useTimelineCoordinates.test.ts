@@ -138,11 +138,19 @@ describe('useTimelineCoordinates', () => {
       expect(result.current.snapPoints).toEqual([]);
     });
 
-    it('should return empty array when sequence is null', () => {
+    it('should still include grid and playhead snap points when sequence is null', () => {
       const { result } = renderHook(() =>
         useTimelineCoordinates({ ...createDefaultOptions(), sequence: null })
       );
-      expect(result.current.snapPoints).toEqual([]);
+      // With separated snap point calculation, grid and playhead snaps are still generated
+      // even without a sequence. Only clip snap points are empty.
+      const clipSnapPoints = result.current.snapPoints.filter(
+        (p) => p.type === 'clip-start' || p.type === 'clip-end'
+      );
+      expect(clipSnapPoints).toEqual([]);
+      // But playhead and grid should still exist
+      const playheadPoints = result.current.snapPoints.filter((p) => p.type === 'playhead');
+      expect(playheadPoints.length).toBeGreaterThan(0);
     });
 
     it('should include playhead snap point', () => {
@@ -196,11 +204,13 @@ describe('useTimelineCoordinates', () => {
       expect(result.current.snapThreshold).toBe(0.1); // 10px / 100 zoom
     });
 
-    it('should have smaller threshold at higher zoom', () => {
+    it('should have smaller threshold at higher zoom but clamp to MIN_THRESHOLD', () => {
       const { result } = renderHook(() =>
         useTimelineCoordinates({ ...createDefaultOptions(), zoom: 500 })
       );
-      expect(result.current.snapThreshold).toBe(0.02); // 10px / 500 zoom
+      // At zoom 500, raw threshold = 10/500 = 0.02
+      // But MIN_THRESHOLD = 0.05, so it should clamp to 0.05
+      expect(result.current.snapThreshold).toBe(0.05);
     });
   });
 
@@ -233,6 +243,36 @@ describe('useTimelineCoordinates', () => {
         useTimelineCoordinates({ ...createDefaultOptions(), zoom: 200 })
       );
       expect(result.current.pixelToTime(1000)).toBe(5);
+    });
+
+    it('should return 0 for NaN input', () => {
+      const { result } = renderHook(() =>
+        useTimelineCoordinates({ ...createDefaultOptions(), zoom: 100 })
+      );
+      expect(result.current.pixelToTime(NaN)).toBe(0);
+    });
+
+    it('should return 0 for Infinity input', () => {
+      const { result } = renderHook(() =>
+        useTimelineCoordinates({ ...createDefaultOptions(), zoom: 100 })
+      );
+      expect(result.current.pixelToTime(Infinity)).toBe(0);
+    });
+  });
+
+  describe('timeToPixel edge cases', () => {
+    it('should return 0 for NaN input', () => {
+      const { result } = renderHook(() =>
+        useTimelineCoordinates({ ...createDefaultOptions(), zoom: 100 })
+      );
+      expect(result.current.timeToPixel(NaN)).toBe(0);
+    });
+
+    it('should return 0 for Infinity input', () => {
+      const { result } = renderHook(() =>
+        useTimelineCoordinates({ ...createDefaultOptions(), zoom: 100 })
+      );
+      expect(result.current.timeToPixel(Infinity)).toBe(0);
     });
   });
 
