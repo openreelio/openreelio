@@ -16,8 +16,13 @@ import { ContextPanel } from './ContextPanel';
 vi.mock('@/stores', () => ({
   useTimelineStore: (selector: (state: unknown) => unknown) => {
     const state = {
-      playhead: 65.5,
       selectedClipIds: ['clip_001', 'clip_002'],
+    };
+    return selector(state);
+  },
+  usePlaybackStore: (selector: (state: unknown) => unknown) => {
+    const state = {
+      currentTime: 65.5,
     };
     return selector(state);
   },

@@ -14,7 +14,7 @@ import {
   type ChangeEvent,
 } from 'react';
 import { useAIStore } from '@/stores/aiStore';
-import { useTimelineStore } from '@/stores';
+import { useTimelineStore, usePlaybackStore } from '@/stores';
 
 // =============================================================================
 // Constants
@@ -49,8 +49,9 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
   const generateEditScript = useAIStore((state) => state.generateEditScript);
   const cancelGeneration = useAIStore((state) => state.cancelGeneration);
 
-  // Get timeline context
-  const playhead = useTimelineStore((state) => state.playhead);
+  // Get playhead from PlaybackStore (single source of truth)
+  const playhead = usePlaybackStore((state) => state.currentTime);
+  // Get selection from TimelineStore
   const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
   const selectedTrackIds = useTimelineStore((state) => state.selectedTrackIds);
 

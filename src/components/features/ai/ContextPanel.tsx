@@ -6,7 +6,7 @@
  */
 
 import { useState, memo } from 'react';
-import { useTimelineStore, useProjectStore } from '@/stores';
+import { useTimelineStore, useProjectStore, usePlaybackStore } from '@/stores';
 import { formatDuration } from '@/utils/formatters';
 
 // =============================================================================
@@ -30,8 +30,9 @@ export const ContextPanel = memo(function ContextPanel({
 }: ContextPanelProps) {
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
 
-  // Get context from timeline store
-  const playhead = useTimelineStore((state) => state.playhead);
+  // Get playhead from PlaybackStore (single source of truth)
+  const playhead = usePlaybackStore((state) => state.currentTime);
+  // Get selection from TimelineStore
   const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
 
   // Get sequence duration from project store (calculated from tracks)
