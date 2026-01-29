@@ -1,10 +1,18 @@
 /**
  * TimeRuler Component
  *
- * Displays time markers and allows seeking by clicking.
+ * Canvas-based time ruler for efficient rendering of timeline markers.
+ * Uses Canvas API instead of DOM elements for better performance with
+ * many markers during zoom and scroll operations.
  */
 
-import { useMemo, useCallback, useRef, useState, useEffect, type MouseEvent } from 'react';
+import {
+  useCallback,
+  useRef,
+  useState,
+  useEffect,
+  type MouseEvent,
+} from 'react';
 
 // =============================================================================
 // Types
@@ -17,9 +25,30 @@ interface TimeRulerProps {
   zoom: number;
   /** Horizontal scroll offset */
   scrollX: number;
+  /** Visible viewport width */
+  viewportWidth?: number;
   /** Callback when user clicks to seek */
   onSeek?: (time: number) => void;
 }
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+const RULER_HEIGHT = 24; // h-6 = 24px
+const MAIN_MARKER_HEIGHT = 12;
+const SUB_MARKER_HEIGHT = 8;
+const FONT_SIZE = 10;
+const FONT = `${FONT_SIZE}px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace`;
+
+// Colors matching Tailwind classes
+const COLORS = {
+  background: '#1e1e2e', // editor-sidebar
+  border: '#313244', // editor-border
+  mainMarker: '#a6adc8', // editor-text-muted
+  subMarker: '#45475a', // editor-border
+  text: '#a6adc8', // editor-text-muted
+};
 
 // =============================================================================
 // Utilities
@@ -44,40 +73,97 @@ function getMarkerInterval(zoom: number): number {
 // Component
 // =============================================================================
 
-export function TimeRuler({ duration, zoom, scrollX, onSeek }: TimeRulerProps) {
-  const rulerRef = useRef<HTMLDivElement>(null);
+export function TimeRuler({
+  duration,
+  zoom,
+  scrollX,
+  viewportWidth = 1000,
+  onSeek,
+}: TimeRulerProps) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
   const width = duration * zoom;
   const interval = getMarkerInterval(zoom);
-
-  // Generate time markers
-  const markers = useMemo(() => {
-    const result: { time: number; isMain: boolean; index: number }[] = [];
-    const mainInterval = interval >= 1 ? interval : 1;
-
-    let index = 0;
-    for (let t = 0; t <= duration; t += interval) {
-      // Use rounded time to avoid floating point precision issues
-      const roundedTime = Math.round(t * 1000) / 1000;
-      const isMain = Math.abs(roundedTime % mainInterval) < 0.001 || interval < 1;
-      result.push({ time: roundedTime, isMain, index: index++ });
-    }
-
-    return result;
-  }, [duration, interval]);
-
-  // Track dragging state for scrubbing
-  const [isDragging, setIsDragging] = useState(false);
+  const mainInterval = interval >= 1 ? interval : 1;
 
   // Calculate time from mouse event
   const getTimeFromEvent = useCallback(
     (e: globalThis.MouseEvent | MouseEvent<HTMLDivElement>) => {
-      if (!rulerRef.current) return null;
-      const rect = rulerRef.current.getBoundingClientRect();
+      if (!containerRef.current) return null;
+      const rect = containerRef.current.getBoundingClientRect();
       const clickX = e.clientX - rect.left + scrollX;
       return Math.max(0, Math.min(duration, clickX / zoom));
     },
     [zoom, scrollX, duration]
   );
+
+  // Draw the ruler using Canvas API
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+
+    // Set canvas size with device pixel ratio for crisp rendering
+    const dpr = window.devicePixelRatio || 1;
+    const displayWidth = Math.min(width, viewportWidth + 200); // Extra buffer
+    canvas.width = displayWidth * dpr;
+    canvas.height = RULER_HEIGHT * dpr;
+    canvas.style.width = `${displayWidth}px`;
+    canvas.style.height = `${RULER_HEIGHT}px`;
+    ctx.scale(dpr, dpr);
+
+    // Clear canvas
+    ctx.fillStyle = COLORS.background;
+    ctx.fillRect(0, 0, displayWidth, RULER_HEIGHT);
+
+    // Draw bottom border
+    ctx.strokeStyle = COLORS.border;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, RULER_HEIGHT - 0.5);
+    ctx.lineTo(displayWidth, RULER_HEIGHT - 0.5);
+    ctx.stroke();
+
+    // Calculate visible range with buffer
+    const bufferTime = 50 / zoom; // 50px buffer
+    const startTime = Math.max(0, Math.floor((scrollX / zoom - bufferTime) / interval) * interval);
+    const endTime = Math.min(duration, (scrollX + viewportWidth) / zoom + bufferTime);
+
+    // Set up text rendering
+    ctx.font = FONT;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+
+    // Draw markers
+    for (let t = startTime; t <= endTime; t += interval) {
+      // Use rounded time to avoid floating point precision issues
+      const roundedTime = Math.round(t * 1000) / 1000;
+      const x = roundedTime * zoom - scrollX;
+
+      // Skip if outside visible area
+      if (x < -50 || x > displayWidth + 50) continue;
+
+      const isMain = Math.abs(roundedTime % mainInterval) < 0.001 || interval < 1;
+
+      // Draw marker line
+      ctx.beginPath();
+      ctx.strokeStyle = isMain ? COLORS.mainMarker : COLORS.subMarker;
+      ctx.lineWidth = 1;
+      ctx.moveTo(Math.round(x) + 0.5, 0);
+      ctx.lineTo(Math.round(x) + 0.5, isMain ? MAIN_MARKER_HEIGHT : SUB_MARKER_HEIGHT);
+      ctx.stroke();
+
+      // Draw time label for main markers
+      if (isMain) {
+        ctx.fillStyle = COLORS.text;
+        ctx.fillText(formatTime(roundedTime), x, MAIN_MARKER_HEIGHT + 2);
+      }
+    }
+  }, [duration, zoom, scrollX, viewportWidth, interval, mainInterval, width]);
 
   // Handle mouse down to start scrubbing
   const handleMouseDown = useCallback(
@@ -120,31 +206,20 @@ export function TimeRuler({ duration, zoom, scrollX, onSeek }: TimeRulerProps) {
 
   return (
     <div
-      ref={rulerRef}
+      ref={containerRef}
       data-testid="time-ruler"
-      className={`h-6 bg-editor-sidebar border-b border-editor-border relative cursor-pointer select-none ${isDragging ? 'cursor-ew-resize' : ''}`}
+      className={`h-6 relative cursor-pointer select-none ${isDragging ? 'cursor-ew-resize' : ''}`}
       style={{ width: `${width}px` }}
       onMouseDown={handleMouseDown}
     >
-      {/* Time markers */}
-      {markers.map(({ time, isMain, index }) => (
-        <div
-          key={index}
-          className="absolute top-0 h-full flex flex-col items-center"
-          style={{ left: `${time * zoom}px` }}
-        >
-          {/* Marker line */}
-          <div
-            className={`w-px ${isMain ? 'h-3 bg-editor-text-muted' : 'h-2 bg-editor-border'}`}
-          />
-          {/* Time label (only for main markers) */}
-          {isMain && (
-            <span className="text-[10px] text-editor-text-muted mt-0.5">
-              {formatTime(time)}
-            </span>
-          )}
-        </div>
-      ))}
+      <canvas
+        ref={canvasRef}
+        className="absolute top-0 left-0 pointer-events-none"
+        style={{
+          transform: `translateX(${scrollX}px)`,
+          willChange: 'transform',
+        }}
+      />
     </div>
   );
 }
