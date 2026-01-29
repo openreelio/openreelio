@@ -18,13 +18,24 @@ import { useTimelineEngine } from './useTimelineEngine';
 import { usePlaybackStore } from '@/stores/playbackStore';
 
 describe('useTimelineEngine (store sync)', () => {
+  let mockPerformanceNow: number;
+
   beforeEach(() => {
+    mockPerformanceNow = 1000;
     usePlaybackStore.getState().reset();
 
     // Prevent the engine's RAF loop from advancing time during these sync tests.
     // We only care that external store mutations are reflected in engine state.
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation(() => 1 as unknown as number);
     vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
+
+    // Mock performance.now() to return predictable increasing values.
+    // This ensures the timestamp-based guard in useTimelineEngine doesn't
+    // block store updates during tests.
+    vi.spyOn(performance, 'now').mockImplementation(() => {
+      mockPerformanceNow += 100; // Always advance by 100ms to pass the 50ms grace period
+      return mockPerformanceNow;
+    });
   });
 
   afterEach(() => {

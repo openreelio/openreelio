@@ -8,6 +8,7 @@
 import { useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { TimelineEngine } from '@/core/TimelineEngine';
 import { usePlaybackStore } from '@/stores/playbackStore';
+import { PRECISION, isApproximatelyEqual } from '@/constants/precision';
 
 // =============================================================================
 // Types
@@ -71,7 +72,18 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
   const { currentTime, isPlaying, playbackRate, loop } = playbackStore;
   const { setCurrentTime, setIsPlaying, setDuration } = playbackStore;
 
-  const isApplyingEngineUpdateRef = useRef(false);
+  /**
+   * Track engine updates using timestamp instead of boolean flag.
+   * This prevents race conditions where async state updates could
+   * cause the flag to be reset before the update completes.
+   */
+  const lastEngineUpdateRef = useRef<number>(0);
+
+  /**
+   * Grace period for ignoring store updates that originated from the engine.
+   * 50ms is enough for React's batching to complete.
+   */
+  const ENGINE_UPDATE_GRACE_MS = 50;
 
   // Create engine instance (stable reference)
   const engineRef = useRef<TimelineEngine | null>(null);
@@ -96,15 +108,11 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
     const getState = typeof storeApi.getState === 'function' ? storeApi.getState : null;
 
     /**
-     * Safely compare two numbers with tolerance, handling NaN values.
-     * Returns true if values are approximately equal (within epsilon).
-     * NaN values are never considered equal to anything.
+     * Mark that an engine update is in progress.
+     * Uses timestamp to handle async state updates properly.
      */
-    const isApproximatelyEqual = (a: number, b: number, epsilon = 1e-9): boolean => {
-      if (!Number.isFinite(a) || !Number.isFinite(b)) {
-        return false;
-      }
-      return Math.abs(a - b) <= epsilon;
+    const markEngineUpdate = () => {
+      lastEngineUpdateRef.current = performance.now();
     };
 
     engine.syncWithStore({
@@ -118,14 +126,13 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
           if (
             state &&
             typeof state.currentTime === 'number' &&
-            isApproximatelyEqual(state.currentTime, time)
+            isApproximatelyEqual(state.currentTime, time, PRECISION.TIME_EPSILON)
           ) {
             return;
           }
         }
-        isApplyingEngineUpdateRef.current = true;
+        markEngineUpdate();
         setCurrentTime(time);
-        isApplyingEngineUpdateRef.current = false;
       },
       setIsPlaying: (playing) => {
         if (getState) {
@@ -134,9 +141,8 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
             return;
           }
         }
-        isApplyingEngineUpdateRef.current = true;
+        markEngineUpdate();
         setIsPlaying(playing);
-        isApplyingEngineUpdateRef.current = false;
       },
       setDuration: (nextDuration) => {
         // Guard against NaN/Infinity values from engine
@@ -148,14 +154,13 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
           if (
             state &&
             typeof state.duration === 'number' &&
-            isApproximatelyEqual(state.duration, nextDuration)
+            isApproximatelyEqual(state.duration, nextDuration, PRECISION.TIME_EPSILON)
           ) {
             return;
           }
         }
-        isApplyingEngineUpdateRef.current = true;
+        markEngineUpdate();
         setDuration(nextDuration);
-        isApplyingEngineUpdateRef.current = false;
       },
     });
 
@@ -179,7 +184,13 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
     }
 
     const unsubscribe = storeApi.subscribe((state: unknown) => {
-      if (isApplyingEngineUpdateRef.current) return;
+      // Check if this update originated from the engine using timestamp
+      const timeSinceEngineUpdate = performance.now() - lastEngineUpdateRef.current;
+      if (timeSinceEngineUpdate < ENGINE_UPDATE_GRACE_MS) {
+        // This update likely originated from the engine, skip to prevent loops
+        return;
+      }
+
       if (!state || typeof state !== 'object') return;
 
       const next = state as { isPlaying?: boolean; currentTime?: number; playbackRate?: number; loop?: boolean };
@@ -190,12 +201,12 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
         else engine.pause();
       }
 
-      // Sync currentTime with NaN guard
+      // Sync currentTime with proper epsilon comparison
       if (
         typeof next.currentTime === 'number' &&
         Number.isFinite(next.currentTime) &&
         Number.isFinite(engine.currentTime) &&
-        Math.abs(next.currentTime - engine.currentTime) > 1e-6
+        !isApproximatelyEqual(next.currentTime, engine.currentTime, PRECISION.TIME_EPSILON)
       ) {
         engine.seek(next.currentTime);
       }
