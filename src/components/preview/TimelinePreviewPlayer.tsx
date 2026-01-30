@@ -298,6 +298,9 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   // Frame Rendering (Multi-Layer Composition)
   // ===========================================================================
 
+  // Ref to track loading state without causing re-renders
+  const isLoadingRef = useRef(false);
+
   const renderFrame = useCallback(
     async (time: number) => {
       // Update last render time for race condition prevention
@@ -314,17 +317,18 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
       const activeClips = getActiveClipsAtTime(time);
 
-      // Clear canvas with black background
-      ctx.fillStyle = '#000000';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-
       if (activeClips.length === 0) {
-        // No clips at this time - just show black
+        // No clips at this time - clear canvas and show black
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
         return;
       }
 
-      // Track multi-frame loading (only if mounted)
-      if (isMountedRef.current) {
+      // Track loading state via ref to avoid re-renders during playback
+      // Only update React state when transitioning between loading/not-loading
+      const wasLoading = isLoadingRef.current;
+      isLoadingRef.current = true;
+      if (!wasLoading && isMountedRef.current) {
         setIsMultiFrameLoading(true);
       }
 
@@ -355,6 +359,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       // Check if this is still the latest request (race condition prevention)
       if (time !== lastRenderTimeRef.current) {
         // Clear loading state before early return
+        isLoadingRef.current = false;
         if (isMountedRef.current) {
           setIsMultiFrameLoading(false);
         }
@@ -385,6 +390,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       // Check again for race condition after async image loading
       if (time !== lastRenderTimeRef.current) {
         // Clear loading state before early return
+        isLoadingRef.current = false;
         if (isMountedRef.current) {
           setIsMultiFrameLoading(false);
         }
@@ -448,8 +454,10 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         ctx.restore();
       }
 
-      // Clear multi-frame loading state (only if mounted)
-      if (isMountedRef.current) {
+      // Clear multi-frame loading state (only if mounted and was loading)
+      const wasLoadingAtEnd = isLoadingRef.current;
+      isLoadingRef.current = false;
+      if (wasLoadingAtEnd && isMountedRef.current) {
         setIsMultiFrameLoading(false);
       }
 

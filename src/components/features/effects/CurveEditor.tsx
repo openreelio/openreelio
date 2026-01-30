@@ -299,8 +299,9 @@ export const CurveEditor = memo(function CurveEditor({
       if (index === 0 || index === 2) {
         newPoints[index] = clamp(num, 0, 1);
       } else {
-        // Allow y values outside 0-1 for overshoot
-        newPoints[index] = num;
+        // Clamp y values to [-0.5, 1.5] for controlled overshoot
+        // (consistent with mouse drag clamping)
+        newPoints[index] = clamp(num, -0.5, 1.5);
       }
 
       onChange(newPoints);

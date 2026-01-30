@@ -2,10 +2,11 @@
  * ThumbnailStrip Component
  *
  * Displays a strip of video thumbnails for a clip on the timeline.
- * Used to show visual preview of video content within clips.
+ * Uses IntersectionObserver for lazy loading to optimize performance
+ * on long timelines with many clips.
  */
 
-import { memo, useEffect, useMemo, useState } from 'react';
+import { memo, useEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useFrameExtractor } from '@/hooks';
 import { normalizeFileUriToPath } from '@/utils/uri';
@@ -42,6 +43,7 @@ interface ThumbnailData {
   src: string | null;
   loading: boolean;
   error: boolean;
+  isVisible: boolean;
 }
 
 // =============================================================================
@@ -51,6 +53,8 @@ interface ThumbnailData {
 const DEFAULT_MAX_THUMBNAILS = 10;
 const DEFAULT_THUMBNAIL_ASPECT_RATIO = 16 / 9;
 const MIN_THUMBNAIL_WIDTH = 40;
+/** Pre-load margin for IntersectionObserver */
+const PRELOAD_MARGIN = '50px';
 
 // =============================================================================
 // Component
@@ -67,6 +71,9 @@ export const ThumbnailStrip = memo(function ThumbnailStrip({
   thumbnailAspectRatio = DEFAULT_THUMBNAIL_ASPECT_RATIO,
 }: ThumbnailStripProps) {
   const [thumbnails, setThumbnails] = useState<ThumbnailData[]>([]);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const thumbnailRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+  const observerRef = useRef<IntersectionObserver | null>(null);
 
   const { getFrame, isExtracting } = useFrameExtractor();
 
@@ -96,54 +103,161 @@ export const ThumbnailStrip = memo(function ThumbnailStrip({
     return Array.from({ length: thumbnailCount }, (_, i) => sourceInSec + interval * (i + 0.5));
   }, [thumbnailCount, sourceInSec, sourceOutSec]);
 
+  // Initialize thumbnails with isVisible: false for lazy loading
   useEffect(() => {
     if (!asset || !assetPath || thumbnailTimes.length === 0) {
       setThumbnails([]);
       return;
     }
 
-    let isActive = true;
-
     const initialThumbnails: ThumbnailData[] = thumbnailTimes.map((timeSec) => ({
       timeSec,
       src: null,
-      loading: true,
+      loading: false,
       error: false,
+      isVisible: false,
     }));
     setThumbnails(initialThumbnails);
+  }, [asset, assetPath, thumbnailTimes]);
 
-    const loadThumbnails = async () => {
-      const results = await Promise.all(
-        thumbnailTimes.map(async (timeSec): Promise<ThumbnailData> => {
-          try {
-            const framePath = await getFrame(assetPath, timeSec);
-            if (!isActive) return { timeSec, src: null, loading: false, error: true };
-            if (!framePath) {
-              logger.warn('Thumbnail extraction returned empty result', { assetId: asset.id, timeSec, assetPath });
-              return { timeSec, src: null, loading: false, error: true };
+  // Load a single thumbnail
+  const loadThumbnail = useCallback(
+    async (index: number, timeSec: number) => {
+      if (!asset || !assetPath) return;
+
+      // Mark as loading
+      setThumbnails((prev) => {
+        const next = [...prev];
+        if (next[index] && !next[index].src && !next[index].loading) {
+          next[index] = { ...next[index], loading: true };
+        }
+        return next;
+      });
+
+      try {
+        const framePath = await getFrame(assetPath, timeSec);
+        if (!framePath) {
+          logger.warn('Thumbnail extraction returned empty result', {
+            assetId: asset.id,
+            timeSec,
+            assetPath,
+          });
+          setThumbnails((prev) => {
+            const next = [...prev];
+            if (next[index]) {
+              next[index] = { ...next[index], loading: false, error: true };
             }
-            return { timeSec, src: convertFileSrc(framePath), loading: false, error: false };
-          } catch (err) {
-            logger.error('Thumbnail extraction threw', {
-              assetId: asset.id,
-              timeSec,
-              error: err instanceof Error ? err.message : String(err),
-            });
-            return { timeSec, src: null, loading: false, error: true };
+            return next;
+          });
+          return;
+        }
+        setThumbnails((prev) => {
+          const next = [...prev];
+          if (next[index]) {
+            next[index] = {
+              ...next[index],
+              src: convertFileSrc(framePath),
+              loading: false,
+              error: false,
+            };
           }
-        }),
-      );
+          return next;
+        });
+      } catch (err) {
+        logger.error('Thumbnail extraction threw', {
+          assetId: asset.id,
+          timeSec,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        setThumbnails((prev) => {
+          const next = [...prev];
+          if (next[index]) {
+            next[index] = { ...next[index], loading: false, error: true };
+          }
+          return next;
+        });
+      }
+    },
+    [asset, assetPath, getFrame]
+  );
 
-      if (!isActive) return;
-      setThumbnails(results);
-    };
+  // Set up IntersectionObserver for lazy loading
+  useEffect(() => {
+    if (thumbnails.length === 0) return;
 
-    void loadThumbnails();
+    // Clean up previous observer
+    if (observerRef.current) {
+      observerRef.current.disconnect();
+    }
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) {
+            const indexAttr = entry.target.getAttribute('data-index');
+            if (indexAttr === null) return;
+            const index = parseInt(indexAttr, 10);
+            if (Number.isNaN(index)) return;
+
+            // Mark as visible and trigger load
+            setThumbnails((prev) => {
+              const thumb = prev[index];
+              if (!thumb || thumb.isVisible) return prev;
+
+              const next = [...prev];
+              next[index] = { ...next[index], isVisible: true };
+              return next;
+            });
+          }
+        });
+      },
+      {
+        root: null, // Use viewport
+        rootMargin: PRELOAD_MARGIN,
+        threshold: 0,
+      }
+    );
+
+    observerRef.current = observer;
+
+    // Observe all thumbnail elements
+    thumbnailRefs.current.forEach((element) => {
+      observer.observe(element);
+    });
 
     return () => {
-      isActive = false;
+      observer.disconnect();
     };
-  }, [asset, assetPath, getFrame, thumbnailTimes]);
+  }, [thumbnails.length]);
+
+  // Load visible thumbnails
+  useEffect(() => {
+    thumbnails.forEach((thumb, index) => {
+      if (thumb.isVisible && !thumb.src && !thumb.loading && !thumb.error) {
+        void loadThumbnail(index, thumb.timeSec);
+      }
+    });
+  }, [thumbnails, loadThumbnail]);
+
+  // Callback ref for thumbnail elements
+  const setThumbnailRef = useCallback(
+    (index: number, element: HTMLDivElement | null) => {
+      if (element) {
+        thumbnailRefs.current.set(index, element);
+        // Observe immediately if observer exists
+        if (observerRef.current) {
+          observerRef.current.observe(element);
+        }
+      } else {
+        const existing = thumbnailRefs.current.get(index);
+        if (existing && observerRef.current) {
+          observerRef.current.unobserve(existing);
+        }
+        thumbnailRefs.current.delete(index);
+      }
+    },
+    []
+  );
 
   if (!asset || thumbnailCount === 0) {
     return (
@@ -161,6 +275,7 @@ export const ThumbnailStrip = memo(function ThumbnailStrip({
 
   return (
     <div
+      ref={containerRef}
       data-testid="thumbnail-strip"
       className={`relative flex overflow-hidden ${className}`}
       style={{ width, height }}
@@ -168,6 +283,7 @@ export const ThumbnailStrip = memo(function ThumbnailStrip({
       {thumbnails.map((thumb, index) => (
         <div
           key={`${thumb.timeSec}-${index}`}
+          ref={(el) => setThumbnailRef(index, el)}
           data-testid={`thumbnail-${index}`}
           data-index={index}
           className="relative flex-shrink-0 bg-gray-800"
@@ -193,13 +309,18 @@ export const ThumbnailStrip = memo(function ThumbnailStrip({
               <span className="text-gray-500 text-xs">!</span>
             </div>
           )}
+
+          {/* Placeholder for not-yet-visible thumbnails */}
+          {!thumb.isVisible && !thumb.loading && !thumb.src && !thumb.error && (
+            <div className="absolute inset-0 bg-gray-800" />
+          )}
         </div>
       ))}
 
-      {isExtracting && thumbnails.length > 0 && thumbnails.every((t) => t.loading) && (
+      {isExtracting && thumbnails.length > 0 && thumbnails.some((t) => t.loading) && (
         <div
           data-testid="thumbnail-strip-loading"
-          className="absolute inset-0 flex items-center justify-center bg-gray-800 bg-opacity-50"
+          className="absolute inset-0 flex items-center justify-center bg-gray-800 bg-opacity-50 pointer-events-none"
         >
           <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
         </div>

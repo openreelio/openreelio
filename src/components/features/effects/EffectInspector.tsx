@@ -90,17 +90,42 @@ function getEffectLabel(effectType: Effect['effectType']): string {
 }
 
 function getDefaultValue(paramDef: ParamDef): SimpleParamValue {
-  // Validate paramDef.default exists and has a value property
-  if (!paramDef?.default || !('value' in paramDef.default)) {
-    // Return type-appropriate defaults based on common param types
-    if (paramDef?.min !== undefined && paramDef?.max !== undefined) {
-      // Numeric param with bounds - use midpoint
-      return (paramDef.min + paramDef.max) / 2;
-    }
-    // Generic fallback
-    return 0;
+  // Use explicit default if available
+  if (paramDef?.default && 'value' in paramDef.default) {
+    return paramDef.default.value;
   }
-  return paramDef.default.value;
+
+  // Infer type from default.type if available
+  const paramType = paramDef?.default && 'type' in paramDef.default
+    ? paramDef.default.type
+    : undefined;
+
+  // Return type-appropriate defaults based on paramDef.default.type
+  switch (paramType) {
+    case 'float':
+    case 'int':
+      // Numeric param with bounds - use midpoint if available
+      if (paramDef.min !== undefined && paramDef.max !== undefined) {
+        return (paramDef.min + paramDef.max) / 2;
+      }
+      return 0;
+    case 'bool':
+      return false;
+    case 'string':
+      return '';
+    case 'color':
+      return [1, 1, 1, 1]; // Default white RGBA
+    default:
+      // Fallback: check if numeric bounds exist
+      if (paramDef?.min !== undefined && paramDef?.max !== undefined) {
+        return (paramDef.min + paramDef.max) / 2;
+      }
+      // Check for options (enum-like)
+      if (paramDef?.options && paramDef.options.length > 0) {
+        return paramDef.options[0];
+      }
+      return 0;
+  }
 }
 
 // =============================================================================
