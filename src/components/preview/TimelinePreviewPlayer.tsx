@@ -5,19 +5,27 @@
  * from multiple clips at the current playback position.
  *
  * Features:
+ * - Multi-layer composition (renders ALL active clips)
+ * - Transform support (position, scale, rotation, anchor)
+ * - Opacity and blend mode support
  * - RAF-based playback loop via usePlaybackLoop
- * - Frame extraction via useAssetFrameExtractor
+ * - Frame extraction via shared FrameCache
  * - Seek bar with drag support
  * - Keyboard shortcuts (space for play/pause)
  * - FPS statistics display
  */
 
 import { useRef, useEffect, useCallback, useState, useMemo, memo, type KeyboardEvent } from 'react';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { usePlaybackLoop } from '@/hooks/usePlaybackLoop';
 import { useAssetFrameExtractor } from '@/hooks/useFrameExtractor';
-import type { Clip, Track, Sequence } from '@/types';
+import { frameCache } from '@/services/frameCache';
+import { extractFrame as extractFrameIPC } from '@/utils/ffmpeg';
+import { buildFrameOutputPath } from '@/services/framePaths';
+import { createFrameCacheKey } from '@/constants/preview';
+import type { Clip, Track, Sequence, Asset, BlendMode } from '@/types';
 
 // =============================================================================
 // Types
@@ -44,6 +52,16 @@ export interface TimelinePreviewPlayerProps {
   onFrameRender?: (time: number) => void;
 }
 
+/** Clip info with resolved data for rendering */
+interface ActiveClipInfo {
+  clip: Clip;
+  track: Track;
+  trackIndex: number;
+  clipIndex: number;
+  sourceTime: number;
+  asset: Asset | undefined;
+}
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -51,6 +69,15 @@ export interface TimelinePreviewPlayerProps {
 const DEFAULT_ASPECT_RATIO = 16 / 9;
 const DEFAULT_WIDTH = 640;
 const DEFAULT_HEIGHT = 360;
+
+/** Map BlendMode to Canvas globalCompositeOperation */
+const BLEND_MODE_MAP: Record<BlendMode, GlobalCompositeOperation> = {
+  normal: 'source-over',
+  multiply: 'multiply',
+  screen: 'screen',
+  overlay: 'overlay',
+  add: 'lighter',
+};
 
 // =============================================================================
 // Component
@@ -71,14 +98,19 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   const containerRef = useRef<HTMLDivElement>(null);
   const seekBarRef = useRef<HTMLDivElement>(null);
   const [isDragging, setIsDragging] = useState(false);
-  const [isFrameLoading, setIsFrameLoading] = useState(false);
-  const [frameError, setFrameError] = useState<Error | null>(null);
+  const [isMultiFrameLoading, setIsMultiFrameLoading] = useState(false);
 
   // Ref to track latest render request time (for race condition prevention)
   const lastRenderTimeRef = useRef<number>(0);
 
   // Ref to track last prefetch time (to avoid thrashing)
   const lastPrefetchTimeRef = useRef<number>(0);
+
+  // Track pending extractions to prevent duplicate requests
+  const pendingExtractions = useRef<Map<string, Promise<string | null>>>(new Map());
+
+  // Track component mount state to prevent state updates after unmount
+  const isMountedRef = useRef(true);
 
   // Store state
   const {
@@ -102,44 +134,93 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     return activeSequence?.tracks ?? [];
   }, [activeSequence]);
 
-  // Find the topmost video clip at current time
-  const getClipAtTime = useCallback(
-    (time: number): { clip: Clip; sourceTime: number } | null => {
-      // Determine render order: later tracks are treated as "on top".
-      // (The backend model doesn't include a track index yet.)
-      const videoTracks = tracks.filter(
-        (t: Track) => t.kind === 'video' && t.visible && !t.muted
-      );
+  // Note: Sequence format canvas dimensions are available via activeSequence?.format.canvas
+  // Currently transforms are calculated relative to the preview canvas dimensions
 
-      for (let ti = videoTracks.length - 1; ti >= 0; ti -= 1) {
-        const track = videoTracks[ti];
-        for (const clip of track.clips) {
+  // ===========================================================================
+  // Get ALL Active Clips at Time
+  // ===========================================================================
+
+  /**
+   * Returns all renderable clips (video and overlay) active at the given time,
+   * sorted by layer order (lower track index = further back, rendered first).
+   */
+  const getActiveClipsAtTime = useCallback(
+    (time: number): ActiveClipInfo[] => {
+      const activeClips: ActiveClipInfo[] = [];
+
+      tracks.forEach((track, trackIndex) => {
+        // Skip non-renderable tracks (audio, caption), hidden tracks, and muted tracks
+        // Both 'video' and 'overlay' tracks can contain visual content
+        const isRenderableTrack = track.kind === 'video' || track.kind === 'overlay';
+        if (!isRenderableTrack || !track.visible || track.muted) {
+          return;
+        }
+
+        // Find all clips on this track that are active at the current time
+        // Build clip index map for efficient sorting later
+        for (let clipIndex = 0; clipIndex < track.clips.length; clipIndex++) {
+          const clip = track.clips[clipIndex];
           const clipStart = clip.place.timelineInSec;
           const clipEnd = clipStart + clip.place.durationSec;
 
           if (time >= clipStart && time < clipEnd) {
-            // Calculate source time within the clip, respecting playback speed.
-            // timeline delta -> source delta = delta * speed
+            // Calculate source time within the clip, respecting playback speed
             const deltaTimeline = time - clipStart;
             const sourceTimeUnclamped = clip.range.sourceInSec + deltaTimeline * clip.speed;
-            const sourceTime = Math.min(sourceTimeUnclamped, clip.range.sourceOutSec);
-            return { clip, sourceTime };
+            // Clamp source time to valid range [sourceInSec, sourceOutSec]
+            // This prevents both underflow (before clip start) and overflow (past clip end)
+            const sourceTime = Math.max(
+              clip.range.sourceInSec,
+              Math.min(sourceTimeUnclamped, clip.range.sourceOutSec)
+            );
+
+            activeClips.push({
+              clip,
+              track,
+              trackIndex,
+              clipIndex,
+              sourceTime,
+              asset: assets.get(clip.assetId),
+            });
           }
         }
-      }
+      });
 
-      return null;
+      // Sort by track index (lower index = render first = background)
+      // Then by clip order within track (later clips render on top)
+      activeClips.sort((a, b) => {
+        if (a.trackIndex !== b.trackIndex) {
+          return a.trackIndex - b.trackIndex;
+        }
+        return a.clipIndex - b.clipIndex;
+      });
+
+      return activeClips;
     },
-    [tracks]
+    [tracks, assets]
   );
 
-  // Get active clip info for frame extraction
+  // Get active clip info for the legacy single-asset frame extractor
+  // (used for prefetching on the topmost visible clip)
+  const getClipAtTime = useCallback(
+    (time: number): { clip: Clip; sourceTime: number } | null => {
+      const activeClips = getActiveClipsAtTime(time);
+      if (activeClips.length === 0) return null;
+      // Return the topmost clip (last in sorted array)
+      const topClip = activeClips[activeClips.length - 1];
+      return { clip: topClip.clip, sourceTime: topClip.sourceTime };
+    },
+    [getActiveClipsAtTime]
+  );
+
+  // Get active clip info for frame extraction (legacy hook compatibility)
   const clipInfo = getClipAtTime(currentTime);
   const activeAsset = clipInfo ? assets.get(clipInfo.clip.assetId) : null;
 
-  // Frame extractor for the active asset
+  // Frame extractor for the topmost active asset (for prefetching)
+  // Note: extractFrame is not destructured as we use extractFrameForAsset for multi-layer rendering
   const {
-    extractFrame,
     prefetchFrames,
     isLoading: extractorLoading,
     error: extractorError,
@@ -149,18 +230,72 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     enabled: !!activeAsset,
   });
 
-  // Sync frame loading state
-  useEffect(() => {
-    setIsFrameLoading(extractorLoading);
-  }, [extractorLoading]);
-
-  // Sync frame error state
-  useEffect(() => {
-    setFrameError(extractorError);
-  }, [extractorError]);
+  // Derive frame loading/error state directly from extractor
+  // (Removed useEffect syncing - per Vercel best practices, derive state during render)
+  const isFrameLoadingDerived = extractorLoading;
+  const frameErrorDerived = extractorError;
 
   // ===========================================================================
-  // Frame Rendering
+  // Frame Extraction (Multi-Asset Support)
+  // ===========================================================================
+
+  /**
+   * Extract a frame for a specific asset at a given time.
+   * Uses the shared FrameCache for caching.
+   */
+  const extractFrameForAsset = useCallback(
+    async (assetId: string, assetPath: string, timeSec: number): Promise<string | null> => {
+      const cacheKey = createFrameCacheKey(assetId, timeSec);
+
+      // Check cache first
+      const cached = frameCache.get(cacheKey);
+      if (cached) {
+        return cached;
+      }
+
+      // Check if extraction is already pending
+      const pending = pendingExtractions.current.get(cacheKey);
+      if (pending) {
+        return pending;
+      }
+
+      // Start new extraction
+      const extractionPromise = (async () => {
+        try {
+          const safeAssetName = assetId.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
+          const timeMs = Math.floor(timeSec * 1000);
+          const outputPath = await buildFrameOutputPath(safeAssetName, timeMs, 'png');
+
+          await extractFrameIPC({
+            inputPath: assetPath,
+            timeSec,
+            outputPath,
+          });
+
+          // Convert to asset URL
+          const url = convertFileSrc(outputPath);
+
+          // Cache the result (estimate ~100KB per 1080p JPEG frame)
+          const estimatedSizeBytes = 100 * 1024;
+          frameCache.set(cacheKey, url, estimatedSizeBytes);
+
+          return url;
+        } catch (error) {
+          console.error(`Failed to extract frame for ${assetId} at ${timeSec}:`, error);
+          return null;
+        } finally {
+          pendingExtractions.current.delete(cacheKey);
+        }
+      })();
+
+      pendingExtractions.current.set(cacheKey, extractionPromise);
+      return extractionPromise;
+    },
+    []
+  );
+
+  // ===========================================================================
+  // Frame Rendering (Multi-Layer Composition)
   // ===========================================================================
 
   const renderFrame = useCallback(
@@ -172,69 +307,155 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       if (!canvas) return;
 
       const ctx = canvas.getContext('2d');
-      if (!ctx) return;
-
-      const info = getClipAtTime(time);
-
-      if (!info) {
-        // No clip at this time - render black
-        ctx.fillStyle = '#000000';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      if (!ctx) {
+        console.error('TimelinePreviewPlayer: Failed to get 2D canvas context');
         return;
       }
 
-      try {
-        const frameUrl = await extractFrame(info.sourceTime);
+      const activeClips = getActiveClipsAtTime(time);
 
-        // Check if this is still the latest request (race condition prevention)
-        if (time !== lastRenderTimeRef.current) {
-          return;
-        }
+      // Clear canvas with black background
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        if (frameUrl) {
-          // Load and render the image
-          const img = new Image();
-          img.crossOrigin = 'anonymous';
-          img.onload = () => {
-            // Double-check we're still rendering this frame
-            if (time !== lastRenderTimeRef.current) {
-              return;
-            }
+      if (activeClips.length === 0) {
+        // No clips at this time - just show black
+        return;
+      }
 
-            // Clear canvas
-            ctx.fillStyle = '#000000';
-            ctx.fillRect(0, 0, canvas.width, canvas.height);
+      // Track multi-frame loading (only if mounted)
+      if (isMountedRef.current) {
+        setIsMultiFrameLoading(true);
+      }
 
-            // Calculate scaling to fit
-            const scale = Math.min(
-              canvas.width / img.width,
-              canvas.height / img.height
-            );
-            const x = (canvas.width - img.width * scale) / 2;
-            const y = (canvas.height - img.height * scale) / 2;
+      // Load all frames in parallel
+      const framePromises = activeClips.map(async (clipInfo) => {
+        if (!clipInfo.asset) return { clipInfo, img: null };
 
-            ctx.drawImage(img, x, y, img.width * scale, img.height * scale);
+        // For images, use the asset URI directly
+        if (clipInfo.asset.kind === 'image') {
+          return {
+            clipInfo,
+            imgUrl: convertFileSrc(clipInfo.asset.uri),
           };
-          img.onerror = () => {
-            // Failed to load image - render black (only if still current)
-            if (time === lastRenderTimeRef.current) {
-              ctx.fillStyle = '#000000';
-              ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+
+        // For videos, extract the frame
+        const frameUrl = await extractFrameForAsset(
+          clipInfo.asset.id,
+          clipInfo.asset.uri,
+          clipInfo.sourceTime
+        );
+
+        return { clipInfo, imgUrl: frameUrl };
+      });
+
+      const frameResults = await Promise.all(framePromises);
+
+      // Check if this is still the latest request (race condition prevention)
+      if (time !== lastRenderTimeRef.current) {
+        // Clear loading state before early return
+        if (isMountedRef.current) {
+          setIsMultiFrameLoading(false);
+        }
+        return;
+      }
+
+      // Load all images
+      const loadedFrames = await Promise.all(
+        frameResults.map(async (result) => {
+          // Type guard: check if imgUrl exists and is a string
+          const imgUrl = 'imgUrl' in result ? result.imgUrl : null;
+          if (!imgUrl || typeof imgUrl !== 'string') {
+            return { clipInfo: result.clipInfo, img: null };
+          }
+
+          return new Promise<{ clipInfo: ActiveClipInfo; img: HTMLImageElement | null }>(
+            (resolve) => {
+              const img = new Image();
+              img.crossOrigin = 'anonymous';
+              img.onload = () => resolve({ clipInfo: result.clipInfo, img });
+              img.onerror = () => resolve({ clipInfo: result.clipInfo, img: null });
+              img.src = imgUrl;
             }
-          };
-          img.src = frameUrl;
+          );
+        })
+      );
+
+      // Check again for race condition after async image loading
+      if (time !== lastRenderTimeRef.current) {
+        // Clear loading state before early return
+        if (isMountedRef.current) {
+          setIsMultiFrameLoading(false);
         }
-      } catch {
-        // Error extracting frame - render black (only if still current)
-        if (time === lastRenderTimeRef.current) {
-          ctx.fillStyle = '#000000';
-          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        return;
+      }
+
+      // Clear canvas again before compositing
+      ctx.fillStyle = '#000000';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      // Render each clip in layer order (back to front)
+      for (const { clipInfo, img } of loadedFrames) {
+        if (!img) continue;
+
+        const { clip, track } = clipInfo;
+        const transform = clip.transform;
+
+        // Save context state
+        ctx.save();
+
+        // Apply opacity
+        ctx.globalAlpha = clip.opacity;
+
+        // Apply blend mode
+        ctx.globalCompositeOperation = BLEND_MODE_MAP[track.blendMode] || 'source-over';
+
+        // Calculate base scale to fit image in canvas (letterboxing)
+        const baseScaleX = canvas.width / img.width;
+        const baseScaleY = canvas.height / img.height;
+        const baseScale = Math.min(baseScaleX, baseScaleY);
+
+        // Calculate scaled dimensions
+        const scaledWidth = img.width * baseScale * transform.scale.x;
+        const scaledHeight = img.height * baseScale * transform.scale.y;
+
+        // Calculate center position (normalized coordinates to pixels)
+        const centerX = transform.position.x * canvas.width;
+        const centerY = transform.position.y * canvas.height;
+
+        // Calculate anchor offset
+        const anchorOffsetX = transform.anchor.x * scaledWidth;
+        const anchorOffsetY = transform.anchor.y * scaledHeight;
+
+        // Apply transformations
+        ctx.translate(centerX, centerY);
+
+        if (transform.rotationDeg !== 0) {
+          ctx.rotate((transform.rotationDeg * Math.PI) / 180);
         }
+
+        // Draw image centered on anchor
+        ctx.drawImage(
+          img,
+          -anchorOffsetX,
+          -anchorOffsetY,
+          scaledWidth,
+          scaledHeight
+        );
+
+        // Restore context state
+        ctx.restore();
+      }
+
+      // Clear multi-frame loading state (only if mounted)
+      if (isMountedRef.current) {
+        setIsMultiFrameLoading(false);
       }
 
       onFrameRender?.(time);
     },
-    [getClipAtTime, extractFrame, onFrameRender]
+    [getActiveClipsAtTime, extractFrameForAsset, onFrameRender]
   );
 
   // Playback loop integration
@@ -357,9 +578,20 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   // ===========================================================================
 
   useEffect(() => {
+    // Mark as mounted
+    isMountedRef.current = true;
+
+    // Capture ref value for cleanup (required by react-hooks/exhaustive-deps)
+    const extractionsMap = pendingExtractions.current;
+
     return () => {
+      // Mark as unmounted to prevent state updates
+      isMountedRef.current = false;
       // Stop playback on unmount
       pause();
+      // Clear pending extractions to prevent memory leaks
+      // and stale updates after unmount
+      extractionsMap.clear();
     };
   }, [pause]);
 
@@ -419,7 +651,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       />
 
       {/* Loading Indicator */}
-      {isFrameLoading && (
+      {(isFrameLoadingDerived || isMultiFrameLoading) && (
         <div
           data-testid="preview-loading"
           className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50"
@@ -429,7 +661,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       )}
 
       {/* Error State */}
-      {frameError && !isFrameLoading && (
+      {frameErrorDerived && !isFrameLoadingDerived && (
         <div
           data-testid="preview-error"
           className="absolute inset-0 flex items-center justify-center bg-black bg-opacity-50"
@@ -466,7 +698,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
           >
             <div
               className="h-full bg-blue-500 rounded"
-              style={{ width: `${(currentTime / duration) * 100}%` }}
+              style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
             />
           </div>
 
@@ -536,7 +768,15 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 // Helpers
 // =============================================================================
 
+/**
+ * Format seconds to MM:SS display format.
+ * Handles edge cases like NaN, Infinity, and negative values.
+ */
 function formatTime(seconds: number): string {
+  // Handle invalid inputs
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return '0:00';
+  }
   const mins = Math.floor(seconds / 60);
   const secs = Math.floor(seconds % 60);
   return `${mins}:${secs.toString().padStart(2, '0')}`;

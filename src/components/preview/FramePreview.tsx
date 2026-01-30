@@ -8,7 +8,11 @@
 import { useState, useEffect, useRef, memo } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useFrameExtractor } from '@/hooks';
+import { normalizeFileUriToPath } from '@/utils/uri';
 import type { Asset, TimeSec } from '@/types';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('FramePreview');
 
 // =============================================================================
 // Types
@@ -97,11 +101,7 @@ export const FramePreview = memo(function FramePreview({
 
       const loadFrame = async () => {
         try {
-          // Get asset path (remove file:// prefix if present)
-          let assetPath = asset.uri;
-          if (assetPath.startsWith('file://')) {
-            assetPath = assetPath.replace('file://', '');
-          }
+          const assetPath = normalizeFileUriToPath(asset.uri);
 
           const framePath = await getFrame(assetPath, timeSec);
 
@@ -116,6 +116,7 @@ export const FramePreview = memo(function FramePreview({
             lastSuccessRef.current = { assetId: asset.id, timeSec };
             onFrameLoaded?.(framePath);
           } else {
+            logger.warn('Frame extraction returned empty result', { assetId: asset.id, timeSec, assetPath });
             setError('Failed to extract frame');
             onError?.('Failed to extract frame');
           }
@@ -124,6 +125,7 @@ export const FramePreview = memo(function FramePreview({
           if (!isActive) return;
 
           const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+          logger.error('Frame extraction threw', { assetId: asset.id, timeSec, error: errorMessage });
           setError(errorMessage);
           onError?.(errorMessage);
         } finally {

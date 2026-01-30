@@ -282,4 +282,67 @@ describe('FramePreview', () => {
       expect(mockGetFrame).toHaveBeenCalledTimes(1);
     });
   });
+
+  describe('destructive scenarios', () => {
+    it('should only request the latest frame during rapid scrubbing', async () => {
+      vi.useFakeTimers();
+      try {
+        mockGetFrame.mockImplementation(async (_path: string, sec: number) => {
+          await new Promise<void>((resolve) => setTimeout(resolve, 10));
+          return `/path/to/frame-${sec}.png`;
+        });
+
+        const { rerender } = render(<FramePreview asset={mockAsset} timeSec={1.0} />);
+
+        rerender(<FramePreview asset={mockAsset} timeSec={2.0} />);
+        rerender(<FramePreview asset={mockAsset} timeSec={3.0} />);
+
+        // Debounce delay in component is 100ms.
+        await act(async () => {
+          vi.advanceTimersByTime(100);
+        });
+
+        // Resolve getFrame() promise.
+        await act(async () => {
+          vi.advanceTimersByTime(20);
+        });
+
+        expect(mockGetFrame).toHaveBeenCalledTimes(1);
+        expect(mockGetFrame).toHaveBeenCalledWith('/path/to/video.mp4', 3.0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should not call callbacks after unmount (in-flight extraction)', async () => {
+      vi.useFakeTimers();
+      try {
+        const onFrameLoaded = vi.fn();
+        const deferred: { resolve: (value: string | null) => void } = { resolve: () => undefined };
+
+        mockGetFrame.mockImplementation(() => new Promise<string | null>((resolve) => (deferred.resolve = resolve)));
+
+        const { unmount } = render(
+          <FramePreview asset={mockAsset} timeSec={1.0} onFrameLoaded={onFrameLoaded} />,
+        );
+
+        // Kick off extraction after debounce.
+        await act(async () => {
+          vi.advanceTimersByTime(100);
+        });
+
+        unmount();
+
+        // Resolve after unmount; callback should not run.
+        deferred.resolve('/path/to/frame.png');
+        await act(async () => {
+          await Promise.resolve();
+        });
+
+        expect(onFrameLoaded).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });
