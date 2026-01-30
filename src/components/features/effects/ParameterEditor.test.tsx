@@ -37,6 +37,28 @@ const intParam: ParamDef = {
   step: 1,
 };
 
+const selectParam: ParamDef = {
+  name: 'direction',
+  label: 'Direction',
+  default: { type: 'string', value: 'left' },
+  inputType: 'select',
+  options: ['left', 'right', 'up', 'down'],
+};
+
+const fileParam: ParamDef = {
+  name: 'file',
+  label: 'LUT File',
+  default: { type: 'string', value: '' },
+  inputType: 'file',
+  fileExtensions: ['cube', '3dl', 'lut'],
+};
+
+const textParam: ParamDef = {
+  name: 'text',
+  label: 'Text',
+  default: { type: 'string', value: '' },
+};
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -268,6 +290,181 @@ describe('ParameterEditor', () => {
       fireEvent.click(screen.getByTestId('reset-button'));
 
       expect(onChange).toHaveBeenCalledWith('brightness', 0);
+    });
+  });
+
+  // ===========================================================================
+  // Select Parameter Tests
+  // ===========================================================================
+
+  describe('select parameter', () => {
+    it('should render dropdown for select parameter', () => {
+      render(
+        <ParameterEditor
+          paramDef={selectParam}
+          value="left"
+          onChange={vi.fn()}
+        />
+      );
+
+      expect(screen.getByText('Direction')).toBeInTheDocument();
+      expect(screen.getByRole('combobox')).toBeInTheDocument();
+    });
+
+    it('should show all options', () => {
+      render(
+        <ParameterEditor
+          paramDef={selectParam}
+          value="left"
+          onChange={vi.fn()}
+        />
+      );
+
+      const select = screen.getByRole('combobox');
+      expect(select).toHaveValue('left');
+
+      const options = screen.getAllByRole('option');
+      expect(options).toHaveLength(4);
+      expect(options[0]).toHaveTextContent('left');
+      expect(options[1]).toHaveTextContent('right');
+      expect(options[2]).toHaveTextContent('up');
+      expect(options[3]).toHaveTextContent('down');
+    });
+
+    it('should call onChange when selection changes', () => {
+      const onChange = vi.fn();
+      render(
+        <ParameterEditor
+          paramDef={selectParam}
+          value="left"
+          onChange={onChange}
+        />
+      );
+
+      fireEvent.change(screen.getByRole('combobox'), { target: { value: 'right' } });
+
+      expect(onChange).toHaveBeenCalledWith('direction', 'right');
+    });
+
+    it('should be disabled in readOnly mode', () => {
+      render(
+        <ParameterEditor
+          paramDef={selectParam}
+          value="left"
+          onChange={vi.fn()}
+          readOnly
+        />
+      );
+
+      expect(screen.getByRole('combobox')).toBeDisabled();
+    });
+  });
+
+  // ===========================================================================
+  // File Parameter Tests
+  // ===========================================================================
+
+  describe('file parameter', () => {
+    it('should render file input for file parameter', () => {
+      render(
+        <ParameterEditor
+          paramDef={fileParam}
+          value=""
+          onChange={vi.fn()}
+        />
+      );
+
+      expect(screen.getByText('LUT File')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /browse/i })).toBeInTheDocument();
+    });
+
+    it('should display selected file path', () => {
+      render(
+        <ParameterEditor
+          paramDef={fileParam}
+          value="/path/to/lut.cube"
+          onChange={vi.fn()}
+        />
+      );
+
+      expect(screen.getByDisplayValue('/path/to/lut.cube')).toBeInTheDocument();
+    });
+
+    it('should be disabled in readOnly mode', () => {
+      render(
+        <ParameterEditor
+          paramDef={fileParam}
+          value=""
+          onChange={vi.fn()}
+          readOnly
+        />
+      );
+
+      expect(screen.getByRole('button', { name: /browse/i })).toBeDisabled();
+    });
+
+    it('should show clear button when file is selected', () => {
+      render(
+        <ParameterEditor
+          paramDef={fileParam}
+          value="/path/to/lut.cube"
+          onChange={vi.fn()}
+        />
+      );
+
+      expect(screen.getByRole('button', { name: /clear/i })).toBeInTheDocument();
+    });
+
+    it('should call onChange with empty string when clear is clicked', () => {
+      const onChange = vi.fn();
+      render(
+        <ParameterEditor
+          paramDef={fileParam}
+          value="/path/to/lut.cube"
+          onChange={onChange}
+        />
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: /clear/i }));
+
+      expect(onChange).toHaveBeenCalledWith('file', '');
+    });
+  });
+
+  // ===========================================================================
+  // Text Parameter Tests
+  // ===========================================================================
+
+  describe('text parameter', () => {
+    it('should render text input for string parameter without inputType', () => {
+      render(
+        <ParameterEditor
+          paramDef={textParam}
+          value="Hello"
+          onChange={vi.fn()}
+        />
+      );
+
+      expect(screen.getByText('Text')).toBeInTheDocument();
+      const input = screen.getByRole('textbox');
+      expect(input).toHaveValue('Hello');
+    });
+
+    it('should call onChange when text changes and blurs', () => {
+      const onChange = vi.fn();
+      render(
+        <ParameterEditor
+          paramDef={textParam}
+          value="Hello"
+          onChange={onChange}
+        />
+      );
+
+      const input = screen.getByRole('textbox');
+      fireEvent.change(input, { target: { value: 'World' } });
+      fireEvent.blur(input);
+
+      expect(onChange).toHaveBeenCalledWith('text', 'World');
     });
   });
 });

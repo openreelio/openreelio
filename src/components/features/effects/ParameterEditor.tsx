@@ -2,11 +2,13 @@
  * ParameterEditor Component
  *
  * Renders appropriate control for editing an effect parameter based on its type.
- * Supports float sliders, integer inputs, boolean toggles, and more.
+ * Supports float sliders, integer inputs, boolean toggles, select dropdowns,
+ * file pickers, and text inputs.
  */
 
 import { useCallback, useMemo, useState, useEffect } from 'react';
-import { RotateCcw } from 'lucide-react';
+import { RotateCcw, Folder, X } from 'lucide-react';
+import { open } from '@tauri-apps/plugin-dialog';
 import type { ParamDef, ParamValue, SimpleParamValue } from '@/types';
 
 // =============================================================================
@@ -81,6 +83,13 @@ function isIntegerParam(paramDef: ParamDef): boolean {
 }
 
 /**
+ * Determine if parameter is a string type
+ */
+function isStringParam(paramDef: ParamDef): boolean {
+  return paramDef.default.type === 'string';
+}
+
+/**
  * Clamp value to min/max range
  */
 function clampValue(value: number, min?: number, max?: number): number {
@@ -102,9 +111,11 @@ export function ParameterEditor({
 }: ParameterEditorProps): JSX.Element {
   const isBoolean = isBooleanParam(paramDef);
   const isInteger = isIntegerParam(paramDef);
+  const isString = isStringParam(paramDef);
 
   // Compute numeric values (used for non-boolean params, but computed always for hooks)
   const numericValue = typeof value === 'number' ? value : 0;
+  const stringValue = typeof value === 'string' ? value : '';
 
   // All hooks must be called unconditionally at the top level
   const showResetButton = useMemo(
@@ -117,12 +128,23 @@ export function ParameterEditor({
   const [inputText, setInputText] = useState(String(numericValue));
   const [isEditing, setIsEditing] = useState(false);
 
+  // Local state for string text input
+  const [textInputValue, setTextInputValue] = useState(stringValue);
+  const [isEditingText, setIsEditingText] = useState(false);
+
   // Sync local text with external value when not editing
   useEffect(() => {
-    if (!isEditing && !isBoolean) {
+    if (!isEditing && !isBoolean && !isString) {
       setInputText(String(numericValue));
     }
-  }, [numericValue, isEditing, isBoolean]);
+  }, [numericValue, isEditing, isBoolean, isString]);
+
+  // Sync text input with external string value when not editing
+  useEffect(() => {
+    if (!isEditingText && isString) {
+      setTextInputValue(stringValue);
+    }
+  }, [stringValue, isEditingText, isString]);
 
   // Handle numeric value change
   const handleNumericChange = useCallback(
@@ -148,6 +170,14 @@ export function ParameterEditor({
     [paramDef.name, onChange]
   );
 
+  // Handle string change
+  const handleStringChange = useCallback(
+    (newValue: string) => {
+      onChange(paramDef.name, newValue);
+    },
+    [paramDef.name, onChange]
+  );
+
   // Handle reset to default
   const handleReset = useCallback(() => {
     const defaultValue = getDefaultSimpleValue(paramDef.default);
@@ -166,6 +196,12 @@ export function ParameterEditor({
     setIsEditing(false);
   }, [inputText, numericValue, handleNumericChange]);
 
+  // Commit the string text input value
+  const commitTextInputValue = useCallback(() => {
+    handleStringChange(textInputValue);
+    setIsEditingText(false);
+  }, [textInputValue, handleStringChange]);
+
   // Handle key down for Enter key
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -177,10 +213,48 @@ export function ParameterEditor({
     [commitInputValue]
   );
 
+  // Handle key down for text input
+  const handleTextKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === 'Enter') {
+        commitTextInputValue();
+        e.currentTarget.blur();
+      }
+    },
+    [commitTextInputValue]
+  );
+
+  // Handle file browse
+  const handleFileBrowse = useCallback(async () => {
+    try {
+      const extensions = paramDef.fileExtensions ?? [];
+      const result = await open({
+        multiple: false,
+        filters: extensions.length > 0
+          ? [{ name: paramDef.label, extensions }]
+          : undefined,
+      });
+
+      if (result && typeof result === 'string') {
+        onChange(paramDef.name, result);
+      }
+    } catch {
+      // User cancelled or error
+    }
+  }, [paramDef.name, paramDef.label, paramDef.fileExtensions, onChange]);
+
+  // Handle file clear
+  const handleFileClear = useCallback(() => {
+    onChange(paramDef.name, '');
+  }, [paramDef.name, onChange]);
+
+  const inputId = `param-${paramDef.name}`;
+
+  // -------------------------------------------------------------------------
   // Render boolean toggle
+  // -------------------------------------------------------------------------
   if (isBoolean) {
     const checked = Boolean(value);
-    const inputId = `param-${paramDef.name}`;
 
     return (
       <div className="flex items-center justify-between py-1.5">
@@ -209,11 +283,143 @@ export function ParameterEditor({
     );
   }
 
+  // -------------------------------------------------------------------------
+  // Render select dropdown
+  // -------------------------------------------------------------------------
+  if (isString && paramDef.inputType === 'select' && paramDef.options) {
+    return (
+      <div className="flex items-center justify-between py-1.5">
+        <label htmlFor={inputId} className="text-sm text-editor-text">{paramDef.label}</label>
+        <div className="flex items-center gap-2">
+          <select
+            id={inputId}
+            value={stringValue}
+            onChange={(e) => handleStringChange(e.target.value)}
+            disabled={readOnly}
+            className="px-2 py-0.5 text-sm bg-editor-bg border border-editor-border rounded text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {paramDef.options.map((option) => (
+              <option key={option} value={option}>
+                {option}
+              </option>
+            ))}
+          </select>
+          {showResetButton && !readOnly && (
+            <button
+              data-testid="reset-button"
+              onClick={handleReset}
+              className="p-0.5 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
+              title="Reset to default"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Render file picker
+  // -------------------------------------------------------------------------
+  if (isString && paramDef.inputType === 'file') {
+    const hasFile = stringValue.length > 0;
+
+    return (
+      <div className="py-1.5">
+        <div className="flex items-center justify-between mb-1">
+          <label htmlFor={inputId} className="text-sm text-editor-text">{paramDef.label}</label>
+          <div className="flex items-center gap-1">
+            {hasFile && !readOnly && (
+              <button
+                onClick={handleFileClear}
+                className="p-0.5 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
+                title="Clear file"
+                aria-label="Clear file"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            )}
+            {showResetButton && !readOnly && (
+              <button
+                data-testid="reset-button"
+                onClick={handleReset}
+                className="p-0.5 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
+                title="Reset to default"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <input
+            id={inputId}
+            type="text"
+            value={stringValue}
+            onChange={(e) => handleStringChange(e.target.value)}
+            disabled={readOnly}
+            readOnly
+            placeholder="No file selected"
+            className="flex-1 px-2 py-1 text-sm bg-editor-bg border border-editor-border rounded text-editor-text truncate disabled:opacity-50"
+          />
+          <button
+            onClick={handleFileBrowse}
+            disabled={readOnly}
+            className="flex items-center gap-1 px-2 py-1 text-sm bg-editor-bg border border-editor-border rounded text-editor-text hover:bg-editor-border disabled:opacity-50 disabled:cursor-not-allowed"
+            aria-label="Browse files"
+          >
+            <Folder className="w-3.5 h-3.5" />
+            Browse
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Render text input for string params without special inputType
+  // -------------------------------------------------------------------------
+  if (isString) {
+    return (
+      <div className="py-1.5">
+        <div className="flex items-center justify-between mb-1">
+          <label htmlFor={inputId} className="text-sm text-editor-text">{paramDef.label}</label>
+          {showResetButton && !readOnly && (
+            <button
+              data-testid="reset-button"
+              onClick={handleReset}
+              className="p-0.5 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
+              title="Reset to default"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+        <input
+          id={inputId}
+          type="text"
+          value={textInputValue}
+          onChange={(e) => {
+            setIsEditingText(true);
+            setTextInputValue(e.target.value);
+          }}
+          onFocus={() => setIsEditingText(true)}
+          onBlur={commitTextInputValue}
+          onKeyDown={handleTextKeyDown}
+          disabled={readOnly}
+          className="w-full px-2 py-1 text-sm bg-editor-bg border border-editor-border rounded text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
+        />
+      </div>
+    );
+  }
+
+  // -------------------------------------------------------------------------
   // Render numeric slider + input
+  // -------------------------------------------------------------------------
   const min = paramDef.min ?? 0;
   const max = paramDef.max ?? 100;
   const step = paramDef.step ?? (isInteger ? 1 : 0.01);
-  const inputId = `param-${paramDef.name}`;
   const sliderId = `param-slider-${paramDef.name}`;
 
   return (
