@@ -464,56 +464,93 @@ impl ProjectState {
 
         let dest_track_id = op.payload["trackId"].as_str();
 
-        if let Some(sequence) = self.sequences.get_mut(seq_id) {
-            // Find the current track containing the clip.
-            let mut src_track_idx = None;
-            let mut src_clip_idx = None;
-            for (t_idx, track) in sequence.tracks.iter().enumerate() {
-                if let Some(c_idx) = track.clips.iter().position(|c| c.id == clip_id) {
-                    src_track_idx = Some(t_idx);
-                    src_clip_idx = Some(c_idx);
-                    break;
-                }
+        let sequence = self
+            .sequences
+            .get_mut(seq_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Sequence not found: {}", seq_id)))?;
+
+        // Find the current track containing the clip.
+        let mut src_track_idx = None;
+        let mut src_clip_idx = None;
+        for (t_idx, track) in sequence.tracks.iter().enumerate() {
+            if let Some(c_idx) = track.clips.iter().position(|c| c.id == clip_id) {
+                src_track_idx = Some(t_idx);
+                src_clip_idx = Some(c_idx);
+                break;
             }
+        }
 
-            let (src_track_idx, src_clip_idx) = match (src_track_idx, src_clip_idx) {
-                (Some(t), Some(c)) => (t, c),
-                _ => return Ok(()),
-            };
-
-            // Update placement.
-            let new_timeline_in = op.payload["timelineIn"].as_f64();
-
-            // Cross-track move if trackId is provided.
-            if let Some(dest_track_id) = dest_track_id {
-                let current_track_id = sequence.tracks[src_track_idx].id.clone();
-                if current_track_id != dest_track_id {
-                    let mut clip = sequence.tracks[src_track_idx].clips.remove(src_clip_idx);
-                    if let Some(timeline_in) = new_timeline_in {
-                        clip.place.timeline_in_sec = timeline_in;
-                    }
-
-                    if let Some(dest_idx) =
-                        sequence.tracks.iter().position(|t| t.id == dest_track_id)
-                    {
-                        sequence.tracks[dest_idx].clips.push(clip);
-                        Self::sort_track_clips(&mut sequence.tracks[dest_idx]);
-                        Self::validate_track_no_overlap(&sequence.tracks[dest_idx])?;
-                    }
-
-                    Self::sort_track_clips(&mut sequence.tracks[src_track_idx]);
-                    Self::validate_track_no_overlap(&sequence.tracks[src_track_idx])?;
-                    return Ok(());
-                }
+        let (src_track_idx, src_clip_idx) = match (src_track_idx, src_clip_idx) {
+            (Some(t), Some(c)) => (t, c),
+            _ => {
+                return Err(CoreError::NotFound(format!(
+                    "Clip not found in sequence: {}",
+                    clip_id
+                )));
             }
+        };
 
-            // Same-track move.
-            if let Some(clip) = sequence.tracks[src_track_idx].get_clip_mut(clip_id) {
+        // Update placement.
+        let new_timeline_in = op.payload["timelineIn"].as_f64();
+
+        // Cross-track move if trackId is provided and differs from source.
+        if let Some(dest_track_id) = dest_track_id {
+            let current_track_id = sequence.tracks[src_track_idx].id.clone();
+            if current_track_id != dest_track_id {
+                // Validate destination track exists BEFORE removing clip from source.
+                // This prevents data loss if destination track is not found.
+                let dest_idx = sequence
+                    .tracks
+                    .iter()
+                    .position(|t| t.id == dest_track_id)
+                    .ok_or_else(|| {
+                        CoreError::NotFound(format!(
+                            "Destination track not found: {}",
+                            dest_track_id
+                        ))
+                    })?;
+
+                // Now safe to remove clip from source track.
+                let mut clip = sequence.tracks[src_track_idx].clips.remove(src_clip_idx);
                 if let Some(timeline_in) = new_timeline_in {
                     clip.place.timeline_in_sec = timeline_in;
                 }
+
+                // Add to destination track.
+                sequence.tracks[dest_idx].clips.push(clip);
+
+                // Validate overlap on destination track. If validation fails, we need
+                // to restore the clip to source track to maintain consistency.
+                if let Err(e) = Self::validate_track_no_overlap(&sequence.tracks[dest_idx]) {
+                    // Restore clip to source track - remove from destination first.
+                    if let Some(clip) = sequence.tracks[dest_idx].clips.pop() {
+                        sequence.tracks[src_track_idx].clips.push(clip);
+                        Self::sort_track_clips(&mut sequence.tracks[src_track_idx]);
+                    }
+                    return Err(e);
+                }
+
+                Self::sort_track_clips(&mut sequence.tracks[dest_idx]);
                 Self::sort_track_clips(&mut sequence.tracks[src_track_idx]);
-                Self::validate_track_no_overlap(&sequence.tracks[src_track_idx])?;
+                return Ok(());
+            }
+        }
+
+        // Same-track move.
+        if let Some(clip) = sequence.tracks[src_track_idx].get_clip_mut(clip_id) {
+            let old_timeline_in = clip.place.timeline_in_sec;
+            if let Some(timeline_in) = new_timeline_in {
+                clip.place.timeline_in_sec = timeline_in;
+            }
+            Self::sort_track_clips(&mut sequence.tracks[src_track_idx]);
+
+            // Validate overlap. If fails, restore original position.
+            if let Err(e) = Self::validate_track_no_overlap(&sequence.tracks[src_track_idx]) {
+                if let Some(clip) = sequence.tracks[src_track_idx].get_clip_mut(clip_id) {
+                    clip.place.timeline_in_sec = old_timeline_in;
+                }
+                Self::sort_track_clips(&mut sequence.tracks[src_track_idx]);
+                return Err(e);
             }
         }
         Ok(())
@@ -597,6 +634,12 @@ impl ProjectState {
             .as_str()
             .ok_or_else(|| CoreError::InvalidCommand("Missing clipId".to_string()))?;
 
+        let position = op
+            .payload
+            .get("position")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize);
+
         // Parse the effect from payload
         let effect: Effect = serde_json::from_value(op.payload["effect"].clone())
             .map_err(|e| CoreError::InvalidCommand(format!("Invalid effect data: {}", e)))?;
@@ -612,7 +655,21 @@ impl ProjectState {
         let mut clip_found = false;
         for track in &mut sequence.tracks {
             if let Some(clip) = track.get_clip_mut(clip_id) {
-                clip.effects.push(effect_id.clone());
+                if clip.effects.iter().any(|e| e == &effect_id) {
+                    return Err(CoreError::InvalidCommand(format!(
+                        "Effect already present on clip: {}",
+                        effect_id
+                    )));
+                }
+
+                match position {
+                    Some(pos) if pos < clip.effects.len() => {
+                        clip.effects.insert(pos, effect_id.clone());
+                    }
+                    _ => {
+                        clip.effects.push(effect_id.clone());
+                    }
+                }
                 clip_found = true;
                 break;
             }
@@ -665,6 +722,8 @@ impl ProjectState {
     }
 
     fn apply_effect_update(&mut self, op: &Operation) -> CoreResult<()> {
+        use crate::core::effects::ParamValue;
+
         let effect_id = op.payload["effectId"]
             .as_str()
             .ok_or_else(|| CoreError::InvalidCommand("Missing effectId".to_string()))?;
@@ -675,21 +734,46 @@ impl ProjectState {
             .ok_or_else(|| CoreError::NotFound(format!("Effect not found: {}", effect_id)))?;
 
         // Update enabled state if provided
-        if let Some(enabled) = op.payload["enabled"].as_bool() {
-            effect.enabled = enabled;
+        if let Some(enabled_value) = op.payload.get("enabled") {
+            if enabled_value.is_null() {
+                // no-op
+            } else if let Some(enabled) = enabled_value.as_bool() {
+                effect.enabled = enabled;
+            } else {
+                return Err(CoreError::InvalidCommand(
+                    "Invalid enabled value (expected boolean)".to_string(),
+                ));
+            }
         }
 
         // Update order if provided
-        if let Some(order) = op.payload["order"].as_i64() {
-            effect.order = order as u32;
+        if let Some(order_value) = op.payload.get("order") {
+            if order_value.is_null() {
+                // no-op
+            } else if let Some(order_u64) = order_value.as_u64() {
+                if order_u64 > u32::MAX as u64 {
+                    return Err(CoreError::InvalidCommand(
+                        "Invalid order value (out of range)".to_string(),
+                    ));
+                }
+                effect.order = order_u64 as u32;
+            } else {
+                return Err(CoreError::InvalidCommand(
+                    "Invalid order value (expected unsigned integer)".to_string(),
+                ));
+            }
         }
 
         // Update parameters if provided
         if let Some(params) = op.payload["params"].as_object() {
             for (key, value) in params {
-                if let Ok(param_value) = serde_json::from_value(value.clone()) {
-                    effect.set_param(key, param_value);
-                }
+                let param_value: ParamValue =
+                    serde_json::from_value(value.clone()).map_err(|e| {
+                        CoreError::InvalidCommand(format!(
+                            "Invalid effect param value for '{key}': {e}"
+                        ))
+                    })?;
+                effect.set_param(key, param_value);
             }
         }
 
@@ -1633,6 +1717,75 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_effect_update_rejects_invalid_param_values() {
+        use crate::core::effects::{Effect, EffectType};
+
+        let mut state = ProjectState::new("Test Project");
+
+        // Setup sequence, track, clip
+        let sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ))
+            .unwrap();
+
+        let track = Track::new("Video 1", TrackKind::Video);
+        let track_id = track.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::TrackAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "track": track
+                }),
+            ))
+            .unwrap();
+
+        let clip = Clip::new("asset_001").with_source_range(0.0, 10.0);
+        let clip_id = clip.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::ClipAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": clip
+                }),
+            ))
+            .unwrap();
+
+        // Add effect
+        let blur_effect = Effect::new(EffectType::GaussianBlur);
+        let effect_id = blur_effect.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::EffectAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": clip_id,
+                    "effect": blur_effect
+                }),
+            ))
+            .unwrap();
+
+        // Attempt to apply invalid param type (object is not a valid ParamValue).
+        let result = state.apply_operation(&Operation::new(
+            OpKind::EffectUpdate,
+            serde_json::json!({
+                "effectId": effect_id,
+                "params": {
+                    "radius": { "bad": true }
+                }
+            }),
+        ));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_get_clip_effects() {
         use crate::core::effects::{Effect, EffectType, ParamValue};
 
@@ -1869,5 +2022,189 @@ mod tests {
         assert_eq!(clip.label.as_deref(), Some("New"));
         assert_eq!(clip.place.timeline_in_sec, 3.0);
         assert!((clip.place.duration_sec - 2.5).abs() < f64::EPSILON);
+    }
+
+    // -------------------------------------------------------------------------
+    // Cross-Track Move Safety Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_cross_track_move_preserves_clip_on_invalid_destination() {
+        let mut state = ProjectState::new("Test Project");
+
+        // Create sequence with one track and one clip
+        let sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ))
+            .unwrap();
+
+        let track = Track::new("Video 1", TrackKind::Video);
+        let track_id = track.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::TrackAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "track": track
+                }),
+            ))
+            .unwrap();
+
+        let clip = Clip::new("asset_001")
+            .with_source_range(0.0, 10.0)
+            .place_at(0.0);
+        let clip_id = clip.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::ClipAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": clip
+                }),
+            ))
+            .unwrap();
+
+        // Attempt to move clip to nonexistent track
+        let result = state.apply_operation(&Operation::new(
+            OpKind::ClipMove,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "clipId": clip_id,
+                "trackId": "nonexistent_track",
+                "timelineIn": 5.0
+            }),
+        ));
+
+        // Move should fail
+        assert!(result.is_err());
+
+        // Clip should still exist in original track at original position
+        let (_, _, found_clip) = state.find_clip(&clip_id).unwrap();
+        assert_eq!(found_clip.place.timeline_in_sec, 0.0);
+    }
+
+    #[test]
+    fn test_cross_track_move_success() {
+        let mut state = ProjectState::new("Test Project");
+
+        // Create sequence with two tracks
+        let sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ))
+            .unwrap();
+
+        let track1 = Track::new("Video 1", TrackKind::Video);
+        let track1_id = track1.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::TrackAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "track": track1
+                }),
+            ))
+            .unwrap();
+
+        let track2 = Track::new("Video 2", TrackKind::Video);
+        let track2_id = track2.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::TrackAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "track": track2
+                }),
+            ))
+            .unwrap();
+
+        // Add clip to track1
+        let clip = Clip::new("asset_001")
+            .with_source_range(0.0, 10.0)
+            .place_at(0.0);
+        let clip_id = clip.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::ClipAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track1_id,
+                    "clip": clip
+                }),
+            ))
+            .unwrap();
+
+        // Move clip to track2
+        state
+            .apply_operation(&Operation::new(
+                OpKind::ClipMove,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": clip_id,
+                    "trackId": track2_id,
+                    "timelineIn": 5.0
+                }),
+            ))
+            .unwrap();
+
+        // Verify clip is now in track2 at new position
+        let sequence = state.get_sequence(&seq_id).unwrap();
+        let track1 = sequence.get_track(&track1_id).unwrap();
+        let track2 = sequence.get_track(&track2_id).unwrap();
+
+        assert!(track1.get_clip(&clip_id).is_none());
+        let moved_clip = track2.get_clip(&clip_id).unwrap();
+        assert_eq!(moved_clip.place.timeline_in_sec, 5.0);
+    }
+
+    #[test]
+    fn test_clip_move_to_nonexistent_sequence_fails() {
+        let mut state = ProjectState::new("Test Project");
+
+        // Try to move clip in nonexistent sequence
+        let result = state.apply_operation(&Operation::new(
+            OpKind::ClipMove,
+            serde_json::json!({
+                "sequenceId": "nonexistent_seq",
+                "clipId": "some_clip",
+                "timelineIn": 5.0
+            }),
+        ));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_clip_move_nonexistent_clip_fails() {
+        let mut state = ProjectState::new("Test Project");
+
+        let sequence = Sequence::new("Main", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+        state
+            .apply_operation(&Operation::new(
+                OpKind::SequenceCreate,
+                serde_json::to_value(&sequence).unwrap(),
+            ))
+            .unwrap();
+
+        // Try to move nonexistent clip
+        let result = state.apply_operation(&Operation::new(
+            OpKind::ClipMove,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "clipId": "nonexistent_clip",
+                "timelineIn": 5.0
+            }),
+        ));
+
+        assert!(result.is_err());
     }
 }
