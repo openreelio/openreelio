@@ -456,7 +456,9 @@ impl FFmpegRunner {
             "-i",
             &input.to_string_lossy(),
             "-vf",
-            &format!("scale={}:{}", settings.width, settings.height),
+            // Scale to 720p height while preserving aspect ratio
+            // -2 ensures width is divisible by 2 (H.264 codec requirement)
+            "scale=-2:720",
             "-c:v",
             &settings.video_codec,
             "-preset",
