@@ -1,6 +1,8 @@
+use crate::core::effects::{EffectType, ParamValue};
 use crate::core::timeline::Transform;
-use crate::core::{AssetId, ClipId, SequenceId, TimeSec, TrackId};
+use crate::core::{AssetId, ClipId, EffectId, SequenceId, TimeSec, TrackId};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // =============================================================================
 // Payload Structs (Strict / Injection-Resistant)
@@ -116,6 +118,45 @@ pub struct UpdateCaptionPayload {
 }
 
 // =============================================================================
+// Effect Payloads
+// =============================================================================
+
+/// Payload for adding an effect to a clip.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AddEffectPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub effect_type: EffectType,
+    #[serde(default)]
+    pub params: HashMap<String, ParamValue>,
+    /// Optional position in the effect list (None = append at end)
+    pub position: Option<usize>,
+}
+
+/// Payload for removing an effect from a clip.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveEffectPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub effect_id: EffectId,
+}
+
+/// Payload for updating effect parameters.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateEffectPayload {
+    pub effect_id: EffectId,
+    #[serde(default)]
+    pub params: HashMap<String, ParamValue>,
+    /// Optional - toggle effect enabled state
+    pub enabled: Option<bool>,
+}
+
+// =============================================================================
 // Tagged Union
 // =============================================================================
 
@@ -156,6 +197,15 @@ pub enum CommandPayload {
 
     #[serde(alias = "updateCaption", alias = "UpdateCaption")]
     UpdateCaption(UpdateCaptionPayload),
+
+    #[serde(alias = "addEffect", alias = "AddEffect")]
+    AddEffect(AddEffectPayload),
+
+    #[serde(alias = "removeEffect", alias = "RemoveEffect")]
+    RemoveEffect(RemoveEffectPayload),
+
+    #[serde(alias = "updateEffect", alias = "UpdateEffect")]
+    UpdateEffect(UpdateEffectPayload),
 }
 
 impl CommandPayload {

@@ -12,9 +12,10 @@ use tauri::{Manager, State};
 use crate::core::{
     assets::{Asset, ProxyStatus},
     commands::{
-        CreateSequenceCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand,
-        RemoveAssetCommand, RemoveClipCommand, SetClipTransformCommand, SplitClipCommand,
-        TrimClipCommand, UpdateAssetCommand,
+        AddEffectCommand, CreateSequenceCommand, ImportAssetCommand, InsertClipCommand,
+        MoveClipCommand, RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand,
+        SetClipTransformCommand, SplitClipCommand, TrimClipCommand, UpdateAssetCommand,
+        UpdateEffectCommand,
     },
     ffmpeg::FFmpegProgress,
     fs::{
@@ -1263,6 +1264,33 @@ pub async fn execute_command(
             .with_text(p.text)
             .with_time_range(p.start_sec, p.end_sec),
         ),
+        CommandPayload::AddEffect(p) => {
+            let mut cmd =
+                AddEffectCommand::new(&p.sequence_id, &p.track_id, &p.clip_id, p.effect_type);
+            for (key, value) in p.params {
+                cmd = cmd.with_param(key, value);
+            }
+            if let Some(pos) = p.position {
+                cmd = cmd.at_position(pos);
+            }
+            Box::new(cmd)
+        }
+        CommandPayload::RemoveEffect(p) => Box::new(RemoveEffectCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            &p.clip_id,
+            &p.effect_id,
+        )),
+        CommandPayload::UpdateEffect(p) => {
+            let mut cmd = UpdateEffectCommand::new(&p.effect_id);
+            for (key, value) in p.params {
+                cmd = cmd.with_param(key, value);
+            }
+            if let Some(enabled) = p.enabled {
+                cmd = cmd.set_enabled(enabled);
+            }
+            Box::new(cmd)
+        }
     };
 
     let result = project
@@ -2086,6 +2114,33 @@ pub async fn apply_edit_script(
                 .with_text(p.text)
                 .with_time_range(p.start_sec, p.end_sec),
             ),
+            CommandPayload::AddEffect(p) => {
+                let mut cmd =
+                    AddEffectCommand::new(&p.sequence_id, &p.track_id, &p.clip_id, p.effect_type);
+                for (key, value) in p.params {
+                    cmd = cmd.with_param(key, value);
+                }
+                if let Some(pos) = p.position {
+                    cmd = cmd.at_position(pos);
+                }
+                Box::new(cmd)
+            }
+            CommandPayload::RemoveEffect(p) => Box::new(RemoveEffectCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                &p.effect_id,
+            )),
+            CommandPayload::UpdateEffect(p) => {
+                let mut cmd = UpdateEffectCommand::new(&p.effect_id);
+                for (key, value) in p.params {
+                    cmd = cmd.with_param(key, value);
+                }
+                if let Some(enabled) = p.enabled {
+                    cmd = cmd.set_enabled(enabled);
+                }
+                Box::new(cmd)
+            }
         };
 
         match project.executor.execute(command, &mut project.state) {
