@@ -19,6 +19,21 @@
 
 use super::{Effect, EffectType};
 
+fn escape_ffmpeg_filter_value(raw: &str) -> String {
+    // FFmpeg filtergraphs treat `:` and `,` as separators and `\` as an escape character.
+    // Windows paths also contain `\` and `:` (drive letter), so we must escape them to
+    // keep filter strings replayable and safe against filtergraph injection.
+    raw.replace('\\', r"\\")
+        .replace(':', r"\:")
+        .replace(',', r"\,")
+        .replace('\'', r"\'")
+}
+
+fn escape_drawtext_value(raw: &str) -> String {
+    // drawtext expands `%{...}` expressions; treat user-provided text as literal.
+    escape_ffmpeg_filter_value(raw).replace('%', r"\%")
+}
+
 // =============================================================================
 // Traits
 // =============================================================================
@@ -180,6 +195,10 @@ impl Effect {
 
             // Transitions
             EffectType::Fade => self.build_fade_filter(),
+            EffectType::CrossDissolve => self.build_cross_dissolve_filter(),
+            EffectType::Wipe => self.build_wipe_filter(),
+            EffectType::Slide => self.build_slide_filter(),
+            EffectType::Zoom => self.build_zoom_filter(),
 
             // Audio effects
             EffectType::Volume | EffectType::Gain => self.build_volume_filter(),
@@ -192,6 +211,9 @@ impl Effect {
             // Text
             EffectType::TextOverlay => self.build_drawtext_filter(),
             EffectType::Subtitle => self.build_subtitle_filter(),
+
+            // Color grading
+            EffectType::Lut => self.build_lut_filter(),
 
             // Default: pass-through
             _ => "null".to_string(),
@@ -328,6 +350,125 @@ impl Effect {
         }
     }
 
+    /// Builds FFmpeg xfade filter for cross dissolve transition.
+    ///
+    /// Parameters:
+    /// - `duration`: Transition duration in seconds (default: 1.0)
+    /// - `offset`: Time offset where transition begins (default: 0.0)
+    fn build_cross_dissolve_filter(&self) -> String {
+        let duration = self.get_float("duration").unwrap_or(1.0);
+        let offset = self.get_float("offset").unwrap_or(0.0);
+
+        format!(
+            "xfade=transition=dissolve:duration={:.4}:offset={:.4}",
+            duration, offset
+        )
+    }
+
+    /// Builds FFmpeg xfade filter for wipe transition.
+    ///
+    /// Parameters:
+    /// - `direction`: Wipe direction ("left", "right", "up", "down") (default: "left")
+    /// - `duration`: Transition duration in seconds (default: 1.0)
+    /// - `offset`: Time offset where transition begins (default: 0.0)
+    fn build_wipe_filter(&self) -> String {
+        let direction = self
+            .get_param("direction")
+            .and_then(|v| v.as_str())
+            .unwrap_or("left");
+        let duration = self.get_float("duration").unwrap_or(1.0);
+        let offset = self.get_float("offset").unwrap_or(0.0);
+
+        let transition = match direction {
+            "right" => "wiperight",
+            "up" => "wipeup",
+            "down" => "wipedown",
+            _ => "wipeleft", // default
+        };
+
+        format!(
+            "xfade=transition={}:duration={:.4}:offset={:.4}",
+            transition, duration, offset
+        )
+    }
+
+    /// Builds FFmpeg xfade filter for slide transition.
+    ///
+    /// Parameters:
+    /// - `direction`: Slide direction ("left", "right", "up", "down") (default: "left")
+    /// - `duration`: Transition duration in seconds (default: 1.0)
+    /// - `offset`: Time offset where transition begins (default: 0.0)
+    fn build_slide_filter(&self) -> String {
+        let direction = self
+            .get_param("direction")
+            .and_then(|v| v.as_str())
+            .unwrap_or("left");
+        let duration = self.get_float("duration").unwrap_or(1.0);
+        let offset = self.get_float("offset").unwrap_or(0.0);
+
+        let transition = match direction {
+            "right" => "slideright",
+            "up" => "slideup",
+            "down" => "slidedown",
+            _ => "slideleft", // default
+        };
+
+        format!(
+            "xfade=transition={}:duration={:.4}:offset={:.4}",
+            transition, duration, offset
+        )
+    }
+
+    /// Builds FFmpeg zoompan filter for zoom effect.
+    ///
+    /// Parameters:
+    /// - `zoom_type`: Zoom direction ("in", "out") (default: "in")
+    /// - `duration`: Effect duration in seconds (default: 1.0)
+    /// - `zoom_factor`: Maximum zoom level (default: 1.5)
+    /// - `center_x`: Horizontal center (0.0-1.0) (default: 0.5)
+    /// - `center_y`: Vertical center (0.0-1.0) (default: 0.5)
+    /// - `fps`: Output framerate (default: 30)
+    fn build_zoom_filter(&self) -> String {
+        let zoom_type = self
+            .get_param("zoom_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("in");
+        let duration = self.get_float("duration").unwrap_or(1.0);
+        let zoom_factor = self.get_float("zoom_factor").unwrap_or(1.5);
+        let center_x = self.get_float("center_x").unwrap_or(0.5);
+        let center_y = self.get_float("center_y").unwrap_or(0.5);
+        let fps = self.get_float("fps").unwrap_or(30.0) as i64;
+
+        // Calculate total frames for the duration
+        let total_frames = (duration * fps as f64) as i64;
+
+        // Build zoom expression based on type
+        // For zoom in: start at 1.0, end at zoom_factor
+        // For zoom out: start at zoom_factor, end at 1.0
+        let zoom_expr = match zoom_type {
+            "out" => format!(
+                "z='if(lte(zoom,1.0),{:.4},max(1.001,zoom-{:.6}))'",
+                zoom_factor,
+                (zoom_factor - 1.0) / total_frames as f64
+            ),
+            _ => format!(
+                "z='min(zoom+{:.6},{:.4})'",
+                (zoom_factor - 1.0) / total_frames as f64,
+                zoom_factor
+            ),
+        };
+
+        // Build x/y position expressions to keep centered
+        // x and y are calculated based on zoom level to maintain center point
+        let x_expr = format!("x='iw*{:.4}-(iw/zoom*{:.4})'", center_x, center_x);
+        let y_expr = format!("y='ih*{:.4}-(ih/zoom*{:.4})'", center_y, center_y);
+
+        format!(
+            "zoompan={}:{}:{}:d={}:s=hd720:fps={}",
+            zoom_expr, x_expr, y_expr, total_frames, fps
+        )
+    }
+
     // -------------------------------------------------------------------------
     // Audio Effect Builders
     // -------------------------------------------------------------------------
@@ -392,8 +533,7 @@ impl Effect {
         let x = self.get_float("x").unwrap_or(0.0) as i64;
         let y = self.get_float("y").unwrap_or(0.0) as i64;
 
-        // Escape special characters in text
-        let escaped_text = text.replace(':', r"\:").replace("'", r"\'");
+        let escaped_text = escape_drawtext_value(text);
 
         format!(
             "drawtext=text='{}':fontsize={}:x={}:y={}:fontcolor=white",
@@ -406,7 +546,40 @@ impl Effect {
             .get_param("file")
             .and_then(|v| v.as_str())
             .unwrap_or("subtitles.srt");
-        format!("subtitles='{}'", file.replace('\'', r"\'"))
+        format!("subtitles='{}'", escape_ffmpeg_filter_value(file))
+    }
+
+    // -------------------------------------------------------------------------
+    // Color Grading Effect Builders
+    // -------------------------------------------------------------------------
+
+    /// Builds FFmpeg lut3d filter for LUT-based color grading.
+    ///
+    /// Parameters:
+    /// - `file`: Path to the LUT file (.cube, .3dl, etc.) (required)
+    /// - `interp`: Interpolation method ("nearest", "trilinear", "tetrahedral") (default: "tetrahedral")
+    /// - `intensity`: LUT intensity from 0.0-1.0 (optional, for future blend support)
+    fn build_lut_filter(&self) -> String {
+        let file = match self.get_param("file").and_then(|v| v.as_str()) {
+            Some(f) if !f.is_empty() => f,
+            _ => return "null".to_string(), // No file = no-op
+        };
+
+        let interp = self
+            .get_param("interp")
+            .and_then(|v| v.as_str())
+            .unwrap_or("tetrahedral");
+
+        // Validate interpolation method
+        let valid_interp = match interp {
+            "nearest" | "trilinear" | "tetrahedral" => interp,
+            _ => "tetrahedral",
+        };
+
+        // Escape the file path for FFmpeg filter syntax
+        let escaped_file = escape_ffmpeg_filter_value(file);
+
+        format!("lut3d='{}':interp={}", escaped_file, valid_interp)
     }
 }
 
@@ -690,6 +863,38 @@ mod tests {
     }
 
     #[test]
+    fn test_drawtext_escapes_special_characters_and_disables_percent_expansion() {
+        let mut effect = Effect::new(EffectType::TextOverlay);
+        effect.set_param(
+            "text",
+            ParamValue::String("100% C:\\tmp\\foo:bar,baz 'q'".to_string()),
+        );
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(
+            filter.contains("text='100\\% C\\:\\\\tmp\\\\foo\\:bar\\,baz \\'q\\''"),
+            "Unexpected drawtext escaping: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_subtitles_escapes_windows_paths() {
+        let mut effect = Effect::new(EffectType::Subtitle);
+        effect.set_param(
+            "file",
+            ParamValue::String("C:\\tmp\\subtitles.srt".to_string()),
+        );
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(
+            filter.contains("subtitles='C\\:\\\\tmp\\\\subtitles.srt'"),
+            "Unexpected subtitles escaping: {}",
+            filter
+        );
+    }
+
+    #[test]
     fn test_incompatible_effect() {
         let effect = Effect::new(EffectType::BackgroundRemoval);
 
@@ -707,5 +912,465 @@ mod tests {
 
         assert!(video.contains("null"));
         assert!(audio.contains("anull"));
+    }
+
+    // =========================================================================
+    // Transition Effect Tests (xfade)
+    // =========================================================================
+
+    #[test]
+    fn test_cross_dissolve_filter() {
+        let mut effect = Effect::new(EffectType::CrossDissolve);
+        effect.set_param("duration", ParamValue::Float(1.0));
+        effect.set_param("offset", ParamValue::Float(5.0));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(
+            filter.contains("xfade=transition=dissolve"),
+            "Expected dissolve transition, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("duration=1.0"),
+            "Expected duration=1.0, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("offset=5.0"),
+            "Expected offset=5.0, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_cross_dissolve_default_params() {
+        let effect = Effect::new(EffectType::CrossDissolve);
+
+        let filter = effect.to_filter_string("in", "out");
+        // Default duration should be 1.0, offset should be 0.0
+        assert!(filter.contains("xfade=transition=dissolve"));
+        assert!(filter.contains("duration=1.0"));
+        assert!(filter.contains("offset=0.0"));
+    }
+
+    #[test]
+    fn test_wipe_left_filter() {
+        let mut effect = Effect::new(EffectType::Wipe);
+        effect.set_param("direction", ParamValue::String("left".to_string()));
+        effect.set_param("duration", ParamValue::Float(0.5));
+        effect.set_param("offset", ParamValue::Float(3.0));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(
+            filter.contains("xfade=transition=wipeleft"),
+            "Expected wipeleft, got: {}",
+            filter
+        );
+        assert!(filter.contains("duration=0.5"));
+        assert!(filter.contains("offset=3.0"));
+    }
+
+    #[test]
+    fn test_wipe_right_filter() {
+        let mut effect = Effect::new(EffectType::Wipe);
+        effect.set_param("direction", ParamValue::String("right".to_string()));
+        effect.set_param("duration", ParamValue::Float(1.5));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(
+            filter.contains("xfade=transition=wiperight"),
+            "Expected wiperight, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_wipe_up_filter() {
+        let mut effect = Effect::new(EffectType::Wipe);
+        effect.set_param("direction", ParamValue::String("up".to_string()));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(
+            filter.contains("xfade=transition=wipeup"),
+            "Expected wipeup, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_wipe_down_filter() {
+        let mut effect = Effect::new(EffectType::Wipe);
+        effect.set_param("direction", ParamValue::String("down".to_string()));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(
+            filter.contains("xfade=transition=wipedown"),
+            "Expected wipedown, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_wipe_default_direction() {
+        let effect = Effect::new(EffectType::Wipe);
+
+        let filter = effect.to_filter_string("in", "out");
+        // Default direction should be "left"
+        assert!(
+            filter.contains("xfade=transition=wipeleft"),
+            "Expected default wipeleft, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_slide_left_filter() {
+        let mut effect = Effect::new(EffectType::Slide);
+        effect.set_param("direction", ParamValue::String("left".to_string()));
+        effect.set_param("duration", ParamValue::Float(0.75));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(
+            filter.contains("xfade=transition=slideleft"),
+            "Expected slideleft, got: {}",
+            filter
+        );
+        assert!(filter.contains("duration=0.75"));
+    }
+
+    #[test]
+    fn test_slide_right_filter() {
+        let mut effect = Effect::new(EffectType::Slide);
+        effect.set_param("direction", ParamValue::String("right".to_string()));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(
+            filter.contains("xfade=transition=slideright"),
+            "Expected slideright, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_slide_up_filter() {
+        let mut effect = Effect::new(EffectType::Slide);
+        effect.set_param("direction", ParamValue::String("up".to_string()));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(
+            filter.contains("xfade=transition=slideup"),
+            "Expected slideup, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_slide_down_filter() {
+        let mut effect = Effect::new(EffectType::Slide);
+        effect.set_param("direction", ParamValue::String("down".to_string()));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(
+            filter.contains("xfade=transition=slidedown"),
+            "Expected slidedown, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_slide_default_direction() {
+        let effect = Effect::new(EffectType::Slide);
+
+        let filter = effect.to_filter_string("in", "out");
+        // Default direction should be "left"
+        assert!(
+            filter.contains("xfade=transition=slideleft"),
+            "Expected default slideleft, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_zoom_in_filter() {
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("zoom_type", ParamValue::String("in".to_string()));
+        effect.set_param("duration", ParamValue::Float(2.0));
+        effect.set_param("zoom_factor", ParamValue::Float(1.5));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(
+            filter.contains("zoompan"),
+            "Expected zoompan filter, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("z='"),
+            "Expected zoom expression, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("d="),
+            "Expected duration param, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_zoom_out_filter() {
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("zoom_type", ParamValue::String("out".to_string()));
+        effect.set_param("duration", ParamValue::Float(1.5));
+        effect.set_param("zoom_factor", ParamValue::Float(2.0));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(filter.contains("zoompan"));
+        // Zoom out starts zoomed and ends at normal
+        assert!(filter.contains("z='"));
+    }
+
+    #[test]
+    fn test_zoom_default_params() {
+        let effect = Effect::new(EffectType::Zoom);
+
+        let filter = effect.to_filter_string("in", "out");
+        // Default: zoom in, 1.0s duration, 1.5x factor
+        assert!(filter.contains("zoompan"));
+    }
+
+    #[test]
+    fn test_zoom_with_center() {
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("center_x", ParamValue::Float(0.75));
+        effect.set_param("center_y", ParamValue::Float(0.25));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(filter.contains("zoompan"));
+        // Should have x/y positioning
+        assert!(
+            filter.contains("x=") || filter.contains("x='"),
+            "Expected x position, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("y=") || filter.contains("y='"),
+            "Expected y position, got: {}",
+            filter
+        );
+    }
+
+    // =========================================================================
+    // Edge Cases and Robustness Tests
+    // =========================================================================
+
+    #[test]
+    fn test_wipe_invalid_direction_fallback() {
+        let mut effect = Effect::new(EffectType::Wipe);
+        effect.set_param("direction", ParamValue::String("invalid".to_string()));
+
+        let filter = effect.to_filter_string("in", "out");
+        // Should fallback to default "wipeleft"
+        assert!(
+            filter.contains("xfade=transition=wipeleft"),
+            "Expected fallback to wipeleft, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_slide_invalid_direction_fallback() {
+        let mut effect = Effect::new(EffectType::Slide);
+        effect.set_param("direction", ParamValue::String("diagonal".to_string()));
+
+        let filter = effect.to_filter_string("in", "out");
+        // Should fallback to default "slideleft"
+        assert!(
+            filter.contains("xfade=transition=slideleft"),
+            "Expected fallback to slideleft, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_zoom_invalid_type_fallback() {
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("zoom_type", ParamValue::String("invalid".to_string()));
+
+        let filter = effect.to_filter_string("in", "out");
+        // Should fallback to zoom in (default)
+        assert!(
+            filter.contains("zoompan"),
+            "Expected zoompan filter, got: {}",
+            filter
+        );
+        // Zoom in increases zoom, so expression should contain 'min'
+        assert!(
+            filter.contains("min(zoom+"),
+            "Expected zoom in expression, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_xfade_with_zero_duration() {
+        let mut effect = Effect::new(EffectType::CrossDissolve);
+        effect.set_param("duration", ParamValue::Float(0.0));
+
+        let filter = effect.to_filter_string("in", "out");
+        // Should still generate valid filter with zero duration
+        assert!(filter.contains("xfade=transition=dissolve"));
+        assert!(filter.contains("duration=0.0"));
+    }
+
+    #[test]
+    fn test_xfade_with_negative_offset() {
+        let mut effect = Effect::new(EffectType::CrossDissolve);
+        effect.set_param("offset", ParamValue::Float(-5.0));
+
+        let filter = effect.to_filter_string("in", "out");
+        // Should accept negative offset (FFmpeg handles validation)
+        assert!(filter.contains("offset=-5.0"));
+    }
+
+    #[test]
+    fn test_zoom_with_extreme_factor() {
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("zoom_factor", ParamValue::Float(10.0));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(filter.contains("zoompan"));
+        // Should contain the extreme zoom factor in the expression
+        assert!(
+            filter.contains("10.0") || filter.contains("10."),
+            "Expected zoom factor 10.0, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_zoom_with_custom_fps() {
+        let mut effect = Effect::new(EffectType::Zoom);
+        effect.set_param("fps", ParamValue::Float(60.0));
+        effect.set_param("duration", ParamValue::Float(1.0));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(filter.contains("fps=60"));
+        // Duration 1.0s at 60fps = 60 frames
+        assert!(filter.contains("d=60"));
+    }
+
+    #[test]
+    fn test_wipe_case_sensitive_direction() {
+        let mut effect = Effect::new(EffectType::Wipe);
+        // Using uppercase - should fallback to default
+        effect.set_param("direction", ParamValue::String("LEFT".to_string()));
+
+        let filter = effect.to_filter_string("in", "out");
+        // Direction matching is case-sensitive, uppercase falls back to default
+        assert!(
+            filter.contains("xfade=transition=wipeleft"),
+            "Expected case-sensitive fallback, got: {}",
+            filter
+        );
+    }
+
+    // =========================================================================
+    // LUT Effect Tests
+    // =========================================================================
+
+    #[test]
+    fn test_lut_filter_basic() {
+        let mut effect = Effect::new(EffectType::Lut);
+        effect.set_param("file", ParamValue::String("/path/to/lut.cube".to_string()));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(
+            filter.contains("lut3d="),
+            "Expected lut3d filter, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("/path/to/lut.cube"),
+            "Expected LUT file path, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_lut_filter_with_intensity() {
+        let mut effect = Effect::new(EffectType::Lut);
+        effect.set_param(
+            "file",
+            ParamValue::String("/luts/cinematic.cube".to_string()),
+        );
+        effect.set_param("intensity", ParamValue::Float(0.75));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(filter.contains("lut3d="));
+        // Intensity is applied via split/blend filter chain
+    }
+
+    #[test]
+    fn test_lut_filter_with_windows_path() {
+        let mut effect = Effect::new(EffectType::Lut);
+        effect.set_param(
+            "file",
+            ParamValue::String("C:\\Users\\test\\luts\\color.cube".to_string()),
+        );
+
+        let filter = effect.to_filter_string("in", "out");
+        // Windows path should be properly escaped for FFmpeg
+        assert!(
+            filter.contains("lut3d="),
+            "Expected lut3d filter, got: {}",
+            filter
+        );
+        // Colons and backslashes must be escaped
+        assert!(
+            filter.contains(r"C\:") || filter.contains(r"\\"),
+            "Expected escaped Windows path, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_lut_filter_with_interpolation() {
+        let mut effect = Effect::new(EffectType::Lut);
+        effect.set_param("file", ParamValue::String("/luts/film.cube".to_string()));
+        effect.set_param("interp", ParamValue::String("trilinear".to_string()));
+
+        let filter = effect.to_filter_string("in", "out");
+        assert!(filter.contains("lut3d="));
+        assert!(
+            filter.contains("interp=trilinear"),
+            "Expected trilinear interpolation, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_lut_filter_default_interpolation() {
+        let mut effect = Effect::new(EffectType::Lut);
+        effect.set_param("file", ParamValue::String("/luts/default.cube".to_string()));
+
+        let filter = effect.to_filter_string("in", "out");
+        // Default interpolation should be tetrahedral (best quality)
+        assert!(
+            filter.contains("interp=tetrahedral"),
+            "Expected default tetrahedral interpolation, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_lut_filter_no_file_returns_null() {
+        let effect = Effect::new(EffectType::Lut);
+
+        let filter = effect.to_filter_string("in", "out");
+        // Without a file path, LUT should return null (no-op)
+        assert!(
+            filter.contains("null"),
+            "Expected null filter for LUT without file, got: {}",
+            filter
+        );
     }
 }

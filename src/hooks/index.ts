@@ -308,3 +308,23 @@ export type {
 } from './useProjectHandlers';
 
 export { useAppLifecycle } from './useAppLifecycle';
+
+export { useTransitionZones } from './useTransitionZones';
+export type {
+  TransitionZoneData,
+  TransitionZoneOptions,
+} from './useTransitionZones';
+
+export { useKeyframeAnimation, useAnimatedEffect } from './useKeyframeAnimation';
+export type {
+  UseAnimatedEffectOptions,
+  AnimatedParams,
+} from './useKeyframeAnimation';
+
+export { useEffectParamDefs } from './useEffectParamDefs';
+
+export { useAudioEffectChain } from './useAudioEffectChain';
+export type {
+  UseAudioEffectChainProps,
+  UseAudioEffectChainResult,
+} from './useAudioEffectChain';

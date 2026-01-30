@@ -4,7 +4,7 @@
  * Displays a single track with its clips and controls.
  */
 
-import { useRef } from 'react';
+import { useRef, useMemo, useCallback } from 'react';
 import {
   Video,
   Music,
@@ -20,7 +20,9 @@ import {
 } from 'lucide-react';
 import type { Track as TrackType, Clip as ClipType, TrackKind, SnapPoint } from '@/types';
 import { useVirtualizedClips } from '@/hooks/useVirtualizedClips';
+import { useTransitionZones } from '@/hooks/useTransitionZones';
 import { Clip, type ClipDragData, type DragPreviewPosition, type ClickModifiers, type ClipWaveformConfig, type ClipThumbnailConfig } from './Clip';
+import { TransitionZone } from './TransitionZone';
 import type { DropValidity } from '@/utils/dropValidity';
 
 // =============================================================================
@@ -70,6 +72,10 @@ interface TrackProps {
   onClipDrag?: (trackId: string, data: ClipDragData, previewPosition: DragPreviewPosition) => void;
   /** Clip drag end handler */
   onClipDragEnd?: (trackId: string, data: ClipDragData, finalPosition: DragPreviewPosition) => void;
+  /** Whether to show transition zones between adjacent clips */
+  showTransitionZones?: boolean;
+  /** Transition zone click handler */
+  onTransitionZoneClick?: (clipAId: string, clipBId: string) => void;
 }
 
 // =============================================================================
@@ -93,6 +99,10 @@ const DEFAULT_VIEWPORT_WIDTH = 1200;
 /** Buffer zone in pixels for pre-rendering off-screen clips */
 const VIRTUALIZATION_BUFFER_PX = 300;
 
+/** Empty array constants for stable references (prevents re-renders from new array allocations) */
+const EMPTY_STRING_ARRAY: string[] = [];
+const EMPTY_SNAP_POINTS: SnapPoint[] = [];
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -104,10 +114,10 @@ export function Track({
   scrollX = 0,
   duration = 60,
   viewportWidth,
-  selectedClipIds = [],
+  selectedClipIds = EMPTY_STRING_ARRAY,
   getClipWaveformConfig,
   getClipThumbnailConfig,
-  snapPoints = [],
+  snapPoints = EMPTY_SNAP_POINTS,
   snapThreshold = 0,
   isDropTarget = false,
   dropValidity,
@@ -119,6 +129,8 @@ export function Track({
   onClipDragStart,
   onClipDrag,
   onClipDragEnd,
+  showTransitionZones = false,
+  onTransitionZoneClick,
 }: TrackProps) {
   // Ref for measuring viewport width if not provided
   const contentRef = useRef<HTMLDivElement>(null);
@@ -133,6 +145,25 @@ export function Track({
     viewportWidth: actualViewportWidth,
     bufferPx: VIRTUALIZATION_BUFFER_PX,
   });
+
+  // Find transition zones between adjacent clips
+  const transitionZones = useTransitionZones(clips);
+
+  // Create clip lookup map for TransitionZone components
+  const clipMap = useMemo(() => {
+    const map = new Map<string, ClipType>();
+    clips.forEach((clip) => map.set(clip.id, clip));
+    return map;
+  }, [clips]);
+
+  // Handle transition zone click
+  const handleTransitionZoneClick = useCallback(
+    (clipAId: string, clipBId: string) => {
+      if (track.locked) return;
+      onTransitionZoneClick?.(clipAId, clipBId);
+    },
+    [track.locked, onTransitionZoneClick]
+  );
 
   // Calculate track content width based on duration and zoom
   const contentWidth = duration * zoom;
@@ -245,6 +276,25 @@ export function Track({
               onDragEnd={(data, finalPosition) => onClipDragEnd?.(track.id, data, finalPosition)}
             />
           ))}
+
+          {/* Transition zones between adjacent clips */}
+          {showTransitionZones &&
+            transitionZones.map((zone) => {
+              const clipA = clipMap.get(zone.clipAId);
+              const clipB = clipMap.get(zone.clipBId);
+              if (!clipA || !clipB) return null;
+
+              return (
+                <TransitionZone
+                  key={`transition-${zone.clipAId}-${zone.clipBId}`}
+                  clipA={clipA}
+                  clipB={clipB}
+                  zoom={zoom}
+                  disabled={track.locked}
+                  onClick={handleTransitionZoneClick}
+                />
+              );
+            })}
         </div>
 
         {/* Drop validity message overlay */}

@@ -1,9 +1,9 @@
 # OpenReelio Work Plan
 
-> **Last Updated**: 2026-01-27
-> **Current Phase**: v0.2.0 AI Integration - 98% Complete
-> **Target**: Distribution infrastructure + shot detection
-> **Active Sprint**: v0.2.0 final polish
+> **Last Updated**: 2026-01-30
+> **Current Phase**: v0.3.0 Effects & Transitions - 98% Complete
+> **Target**: Audio Preview integration (final task)
+> **Active Sprint**: Audio effect factory and chain hook implemented
 
 This document provides actionable task breakdowns for immediate development work.
 
@@ -41,12 +41,104 @@ This document provides actionable task breakdowns for immediate development work
 - ✅ `ExportDialog` - Full UI with preset selection, progress display
 
 ### Test Coverage
-- **Frontend**: 1937 tests passing (91 test files)
-- **Backend**: 813+ Rust tests passing
+- **Frontend**: 3645 tests passing (166 test files)
+- **Backend**: 1264 Rust tests passing
 
 ---
 
-## Current Phase: v0.2.0 AI Integration (98% Complete)
+## Current Phase: v0.3.0 Effects & Transitions (98% Complete)
+
+### Completed Tasks (2026-01-30)
+
+| Task | Status | Tests | Description |
+|------|--------|-------|-------------|
+| **FFmpeg Transition Filters** | ✅ COMPLETE | 38 | `build_cross_dissolve_filter()`, `build_wipe_filter()`, `build_slide_filter()`, `build_zoom_filter()` |
+| **Effect Commands** | ✅ COMPLETE | 19 | `AddEffectCommand`, `RemoveEffectCommand`, `UpdateEffectCommand` with full undo support |
+| **IPC Integration** | ✅ COMPLETE | - | Effect payloads, CommandPayload variants, event handlers |
+| **Frontend Types** | ✅ COMPLETE | - | `AddEffect`, `UpdateEffect` in CommandType |
+| **EffectsBrowser** | ✅ COMPLETE | 28 | 45+ effects, 8 categories, search functionality |
+| **TransitionPicker** | ✅ COMPLETE | 28 | Duration, direction, zoom type configuration |
+| **EffectInspector** | ✅ COMPLETE | 28 | Parameter editing, enable/delete/reset, keyframe integration |
+| **TransitionZone** | ✅ COMPLETE | 42 | Visual zone between clips for transition placement |
+| **useTransitionZones** | ✅ COMPLETE | 12 | Hook to calculate adjacent clip pairs |
+| **Keyframe Interpolation** | ✅ COMPLETE | 28 | Easing functions, value interpolation, getValueAtTime |
+| **useKeyframeAnimation** | ✅ COMPLETE | 20 | Hook for animated effect parameters |
+| **KeyframeEditor** | ✅ COMPLETE | 20 | Visual keyframe editor with markers, easing selection |
+| **Effect Param Defs** | ✅ COMPLETE | 25 | Centralized parameter definitions for all effects |
+| **useEffectParamDefs** | ✅ COMPLETE | 12 | Hook for accessing effect parameter definitions |
+| **LUT Support** | ✅ COMPLETE | 6 | `build_lut_filter()` with file path and interpolation |
+| **ParameterEditor Enhancement** | ✅ COMPLETE | 11 | Select dropdown, file picker, text input support |
+| **Bezier Curve Utility** | ✅ COMPLETE | 25 | Newton-Raphson solver, presets, validation, memoized easing factory |
+| **CurveEditor Component** | ✅ COMPLETE | 19 | Visual Bezier editor with canvas, drag handles, presets, copy CSS |
+| **Audio Effect Factory** | ✅ COMPLETE | 36 | Web Audio node factory, dB/linear conversion, gain/EQ/compressor/delay/pan support |
+| **useAudioEffectChain** | ✅ COMPLETE | 4 | Hook for real-time audio effect chain management |
+
+### Files Created/Modified
+
+**Backend (Rust):**
+- `src-tauri/src/core/effects/filter_builder.rs` - Transition & LUT FFmpeg filters
+- `src-tauri/src/core/commands/effect.rs` - Effect commands (NEW)
+- `src-tauri/src/core/commands/mod.rs` - Module registration
+- `src-tauri/src/core/commands/traits.rs` - StateChange variants
+- `src-tauri/src/ipc/payloads.rs` - Effect payloads
+- `src-tauri/src/ipc/commands_legacy.rs` - Command handlers
+- `src-tauri/src/ipc/events.rs` - Event handlers
+
+**Frontend (TypeScript):**
+- `src/types/index.ts` - CommandType additions, ParamInputType, ParamDef extended
+- `src/components/features/effects/EffectsBrowser.tsx` - Enhanced browser
+- `src/components/features/effects/TransitionPicker.tsx` - NEW
+- `src/components/features/effects/EffectInspector.tsx` - NEW (with keyframe integration)
+- `src/components/features/effects/KeyframeEditor.tsx` - NEW (visual keyframe editor)
+- `src/components/features/effects/ParameterEditor.tsx` - Enhanced (select, file, text inputs)
+- `src/components/features/effects/index.ts` - Exports
+- `src/components/timeline/TransitionZone.tsx` - NEW (transition zone between clips)
+- `src/components/timeline/index.ts` - TransitionZone export
+- `src/hooks/useTransitionZones.ts` - NEW (adjacent clip pair detection)
+- `src/hooks/useKeyframeAnimation.ts` - NEW (animated effect parameters)
+- `src/utils/keyframeInterpolation.ts` - NEW (easing functions, interpolation)
+- `src/utils/effectParamDefs.ts` - NEW (centralized effect parameter definitions, file/select options)
+- `src/hooks/useEffectParamDefs.ts` - NEW (hook for param defs lookup)
+- `src/hooks/index.ts` - useTransitionZones, useKeyframeAnimation, useEffectParamDefs export
+- `src/utils/index.ts` - keyframeInterpolation, effectParamDefs, bezierCurve exports
+- `src/utils/bezierCurve.ts` - NEW (Cubic Bezier evaluation with Newton-Raphson)
+- `src/utils/bezierCurve.test.ts` - NEW (25 tests)
+- `src/components/features/effects/CurveEditor.tsx` - NEW (visual Bezier editor)
+- `src/components/features/effects/CurveEditor.test.tsx` - NEW (19 tests)
+- `src/services/audioEffectFactory.ts` - NEW (Web Audio node factory)
+- `src/services/audioEffectFactory.test.ts` - NEW (36 tests)
+- `src/hooks/useAudioEffectChain.ts` - NEW (audio effect chain hook)
+- `src/hooks/useAudioEffectChain.test.ts` - NEW (4 tests)
+
+### Pending Tasks
+
+| Task | Priority | Description |
+|------|----------|-------------|
+| Audio Preview Integration | LOW | Integrate useAudioEffectChain with useAudioPlayback |
+
+### Recently Completed (2026-01-30)
+
+| Task | Status | Description |
+|------|--------|-------------|
+| LUT Support | ✅ COMPLETE | `build_lut_filter()` with file path escaping, interpolation options (nearest/trilinear/tetrahedral) |
+| ParameterEditor Enhancement | ✅ COMPLETE | Select dropdown for options, file picker with browse dialog, text input for strings |
+| ParamDef Type Extension | ✅ COMPLETE | Added `inputType`, `options`, `fileExtensions` to ParamDef interface |
+| Effect Param Defs | ✅ COMPLETE | Centralized parameter definitions for all 45+ effects (audio, video, transitions) |
+| useEffectParamDefs | ✅ COMPLETE | Hook for accessing effect parameter definitions with memoization |
+| KeyframeEditor UI | ✅ COMPLETE | Visual keyframe editor with add/delete, easing selection, time indicator |
+| EffectInspector Integration | ✅ COMPLETE | KeyframeEditor integrated with toggle, currentTime, duration props |
+| Timeline Integration | ✅ COMPLETE | TransitionZone integrated into Track component with showTransitionZones prop |
+| Audio Effect Factory | ✅ COMPLETE | Web Audio node factory with GainNode, BiquadFilter, DynamicsCompressor, Delay, StereoPanner |
+| useAudioEffectChain | ✅ COMPLETE | Hook to create and manage audio effect chains for real-time preview |
+| dB/Linear Conversion | ✅ COMPLETE | `convertDbToLinear()`, `convertLinearToDb()` utility functions |
+| Bezier Curve Utility | ✅ COMPLETE | Newton-Raphson solver, CSS presets, memoized easing factory with lookup tables |
+| CurveEditor Component | ✅ COMPLETE | Canvas-based visual editor, draggable control points, numeric inputs, presets, copy CSS |
+| BezierControlPoints Type | ✅ COMPLETE | Extended Keyframe interface with optional bezierPoints for custom easing |
+| Keyframe Interpolation Update | ✅ COMPLETE | Updated cubic_bezier to use proper Bezier evaluation, added getKeyframeEasingFunction |
+
+---
+
+## Previous Phase: v0.2.0 AI Integration (98% Complete)
 
 ### Priority Tasks
 

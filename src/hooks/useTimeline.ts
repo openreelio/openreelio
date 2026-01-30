@@ -9,7 +9,7 @@
  * TimelineStore only manages view state (zoom, scroll, selection, snap).
  */
 
-import { useCallback, useMemo } from 'react';
+import { useCallback } from 'react';
 import { useTimelineStore, usePlaybackStore } from '@/stores';
 
 // =============================================================================
@@ -110,11 +110,8 @@ export function useTimeline(): UseTimelineReturn {
   const storeDeselectClip = useTimelineStore((state) => state.deselectClip);
   const clearClipSelection = useTimelineStore((state) => state.clearClipSelection);
 
-  // Computed values
-  const hasSelection = useMemo(
-    () => selectedClipIds.length > 0,
-    [selectedClipIds]
-  );
+  // Derived values (no useMemo needed - comparison cost > recomputation cost for simple operations)
+  const hasSelection = selectedClipIds.length > 0;
 
   // Playback actions
   const play = useCallback(() => {

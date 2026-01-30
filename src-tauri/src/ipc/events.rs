@@ -447,6 +447,20 @@ impl EventEmitter {
                     )
                     .map_err(|e| format!("Failed to emit effect removed event: {}", e))?;
                 }
+                StateChange::EffectAdded { effect_id, clip_id } => {
+                    app.emit(
+                        "effect:added",
+                        &serde_json::json!({ "effectId": effect_id, "clipId": clip_id }),
+                    )
+                    .map_err(|e| format!("Failed to emit effect added event: {}", e))?;
+                }
+                StateChange::EffectUpdated { effect_id } => {
+                    app.emit(
+                        "effect:updated",
+                        &serde_json::json!({ "effectId": effect_id }),
+                    )
+                    .map_err(|e| format!("Failed to emit effect updated event: {}", e))?;
+                }
             }
         }
         Ok(())

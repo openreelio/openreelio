@@ -82,8 +82,12 @@ pub enum StateChange {
     CaptionModified { caption_id: String },
     /// A caption was deleted
     CaptionDeleted { caption_id: String },
-    /// An effect was applied to a clip
+    /// An effect was applied to a clip (legacy alias for EffectAdded)
     EffectApplied { effect_id: String },
+    /// A new effect was added to a clip
+    EffectAdded { effect_id: String, clip_id: String },
+    /// An effect was updated
+    EffectUpdated { effect_id: String },
     /// An effect was removed from a clip
     EffectRemoved { effect_id: String },
     /// A new sequence was created

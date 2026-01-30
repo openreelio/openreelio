@@ -66,6 +66,7 @@ export function PreviewPlayer({
   const [isMuted, setIsMuted] = useState(false);
   const [buffered, setBuffered] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
 
   // Use external values if provided, otherwise use internal
   const currentTime = playhead !== undefined ? playhead : internalPlayhead;
@@ -277,6 +278,7 @@ export function PreviewPlayer({
         src={src}
         poster={poster}
         currentTime={playhead}
+        playbackRate={playbackRate}
         onTimeUpdate={handleTimeUpdate}
         onPlayStateChange={handlePlayStateChange}
         onDurationChange={handleDurationChange}
@@ -298,11 +300,13 @@ export function PreviewPlayer({
             isMuted={isMuted}
             buffered={buffered}
             isFullscreen={isFullscreen}
+            playbackRate={playbackRate}
             onPlayPause={handlePlayPause}
             onSeek={handleSeek}
             onVolumeChange={handleVolumeChange}
             onMuteToggle={handleMuteToggle}
             onFullscreenToggle={handleFullscreenToggle}
+            onPlaybackRateChange={setPlaybackRate}
           />
         </div>
       )}

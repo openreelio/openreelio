@@ -16,7 +16,8 @@ import {
   Maximize,
   Type,
 } from 'lucide-react';
-import { formatDuration } from '@/utils';
+// Direct import instead of barrel to avoid bundling all utilities
+import { formatDuration } from '@/utils/formatters';
 import { EffectsList } from '../effects';
 import type { Effect, EffectId, CaptionStyle } from '@/types';
 

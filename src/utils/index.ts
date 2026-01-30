@@ -144,3 +144,33 @@ export {
   shotToShotResult,
   mergeShots,
 } from './shotConverter';
+
+export {
+  easingFunctions,
+  interpolateValue,
+  getValueAtTime,
+  getKeyframesInRange,
+  hasKeyframeAtTime,
+  getKeyframeAtTime,
+  getKeyframeEasingFunction,
+  type InterpolatedValue,
+  type InterpolationOptions,
+  type EasingFunction,
+} from './keyframeInterpolation';
+
+export {
+  getEffectParamDefs,
+  AUDIO_EFFECT_PARAM_DEFS,
+  VIDEO_EFFECT_PARAM_DEFS,
+  TRANSITION_EFFECT_PARAM_DEFS,
+} from './effectParamDefs';
+
+export {
+  evaluateCubicBezier,
+  createBezierEasing,
+  isValidBezierPoints,
+  clampBezierPoints,
+  BEZIER_PRESETS,
+  type BezierPoints,
+  type EasingFn,
+} from './bezierCurve';

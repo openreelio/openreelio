@@ -63,3 +63,7 @@ export { SnapIndicator } from './SnapIndicator';
 export type { SnapPoint } from './SnapIndicator';
 export { DropIndicator } from './DropIndicator';
 export type { DropIndicatorProps } from './DropIndicator';
+
+// Transition components
+export { TransitionZone } from './TransitionZone';
+export type { TransitionZoneProps } from './TransitionZone';

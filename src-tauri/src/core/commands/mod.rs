@@ -6,6 +6,7 @@
 mod asset;
 mod caption;
 mod clip;
+mod effect;
 mod executor;
 mod sequence;
 mod track;
@@ -14,10 +15,8 @@ mod traits;
 pub use asset::*;
 pub use caption::*;
 pub use clip::*;
+pub use effect::*;
 pub use executor::*;
 pub use sequence::*;
 pub use track::*;
 pub use traits::*;
-
-// Future command modules
-// pub mod effect;

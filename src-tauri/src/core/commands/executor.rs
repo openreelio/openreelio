@@ -136,6 +136,13 @@ impl CommandExecutor {
         let command_json = command.to_json();
         let prev_op_id = state.last_op_id.clone();
 
+        tracing::debug!(
+            command_type = %type_name,
+            record_history,
+            clear_redo,
+            "Executing command"
+        );
+
         // Execute the command (needs &mut self)
         let result = command.execute(state)?;
 
@@ -145,6 +152,13 @@ impl CommandExecutor {
         let op_kind = Self::type_name_to_op_kind(&type_name);
         let op_payload =
             Self::build_operation_payload(op_kind.clone(), command_json, &result, state)?;
+
+        tracing::debug!(
+            command_type = %type_name,
+            op_id = %result.op_id,
+            op_kind = ?op_kind,
+            "Command executed"
+        );
 
         // Log the operation if persistence is enabled
         let op_timestamp = if let Some(ops_log) = &self.ops_log {
@@ -168,9 +182,12 @@ impl CommandExecutor {
             let entry = HistoryEntry::new(command, result.clone());
             self.undo_stack.push_back(entry);
 
-            // Trim history if needed
-            while self.undo_stack.len() > self.max_history_size {
-                self.undo_stack.pop_front();
+            // Trim history if needed - use drain for efficient batch removal
+            // instead of popping one element at a time in a loop.
+            if self.undo_stack.len() > self.max_history_size {
+                let excess = self.undo_stack.len() - self.max_history_size;
+                // drain(0..excess) removes elements from the front efficiently.
+                drop(self.undo_stack.drain(0..excess));
             }
         }
 
@@ -435,6 +452,76 @@ impl CommandExecutor {
                 }))
             }
 
+            OpKind::EffectAdd => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("EffectAdd payload missing sequenceId".to_string())
+                })?;
+                let clip_id = get_str(&command_json, "clipId").ok_or_else(|| {
+                    CoreError::Internal("EffectAdd payload missing clipId".to_string())
+                })?;
+                let effect_id = result.created_ids.first().ok_or_else(|| {
+                    CoreError::Internal("EffectAdd missing createdId".to_string())
+                })?;
+                let effect = state.effects.get(effect_id).ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "EffectAdd could not find effect in state: {effect_id}"
+                    ))
+                })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": clip_id,
+                    "effect": to_value(effect)?,
+                    "position": get_usize(&command_json, "position"),
+                }))
+            }
+
+            OpKind::EffectRemove => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("EffectRemove payload missing sequenceId".to_string())
+                })?;
+                let clip_id = get_str(&command_json, "clipId").ok_or_else(|| {
+                    CoreError::Internal("EffectRemove payload missing clipId".to_string())
+                })?;
+                let effect_id = get_str(&command_json, "effectId").ok_or_else(|| {
+                    CoreError::Internal("EffectRemove payload missing effectId".to_string())
+                })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": clip_id,
+                    "effectId": effect_id,
+                }))
+            }
+
+            OpKind::EffectUpdate => {
+                let effect_id = get_str(&command_json, "effectId").ok_or_else(|| {
+                    CoreError::Internal("EffectUpdate payload missing effectId".to_string())
+                })?;
+
+                // Persist a canonical payload that ProjectState::apply_effect_update can replay.
+                // NOTE: Keep this schema stable over time; treat missing keys as no-ops.
+                let enabled = command_json
+                    .get("enabled")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let order = command_json
+                    .get("order")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let params = command_json
+                    .get("params")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+
+                Ok(serde_json::json!({
+                    "effectId": effect_id,
+                    "enabled": enabled,
+                    "order": order,
+                    "params": params,
+                }))
+            }
+
             // For everything else, fall back to the command JSON.
             _ => Ok(command_json),
         }
@@ -579,10 +666,12 @@ mod tests {
     use super::*;
     use crate::core::assets::{Asset, VideoInfo};
     use crate::core::commands::{
-        CreateSequenceCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand,
-        SplitClipCommand, StateChange, TrimClipCommand,
+        AddEffectCommand, CreateSequenceCommand, ImportAssetCommand, InsertClipCommand,
+        MoveClipCommand, SplitClipCommand, StateChange, TrimClipCommand,
     };
-    use crate::core::project::{OpsLog, ProjectMeta, ProjectState};
+    use crate::core::effects::{EffectType, ParamValue};
+    use crate::core::project::{OpKind, Operation, OpsLog, ProjectMeta, ProjectState};
+    use crate::core::timeline::{Clip, Sequence, SequenceFormat, Track, TrackKind};
     use tempfile::TempDir;
 
     // Test command implementation
@@ -704,6 +793,98 @@ mod tests {
         assert_eq!(state.last_op_id.as_deref(), Some(persisted.id.as_str()));
         assert_eq!(state.op_count, 1);
         assert_eq!(state.meta.modified_at, persisted.timestamp);
+    }
+
+    #[test]
+    fn test_executor_persists_effect_add_payload_is_replayable() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+        let ops_log = OpsLog::new(&ops_path);
+
+        // Build an initial, replayable timeline via operations (no direct state mutation).
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let sequence = Sequence::new("Test Sequence", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+        let seq_op = Operation::new(
+            OpKind::SequenceCreate,
+            serde_json::to_value(&sequence).unwrap(),
+        );
+        ops_log.append(&seq_op).unwrap();
+        state.apply_operation(&seq_op).unwrap();
+
+        let track = Track::new("Video Track", TrackKind::Video);
+        let track_id = track.id.clone();
+        let track_op = Operation::new(
+            OpKind::TrackAdd,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "track": track,
+                "position": 0,
+            }),
+        );
+        ops_log.append(&track_op).unwrap();
+        state.apply_operation(&track_op).unwrap();
+
+        let clip = Clip::with_range("asset_001", 0.0, 5.0).place_at(0.0);
+        let clip_id = clip.id.clone();
+        let clip_op = Operation::new(
+            OpKind::ClipAdd,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "trackId": track_id,
+                "clip": clip,
+            }),
+        );
+        ops_log.append(&clip_op).unwrap();
+        state.apply_operation(&clip_op).unwrap();
+
+        // Execute effect commands with persistence enabled.
+        let mut executor = CommandExecutor::with_ops_log(ops_log);
+
+        let add_blur =
+            AddEffectCommand::new(&seq_id, &track_id, &clip_id, EffectType::GaussianBlur)
+                .with_param("radius", ParamValue::Float(5.0));
+        let blur_result = executor.execute(Box::new(add_blur), &mut state).unwrap();
+        let blur_id = blur_result.created_ids[0].clone();
+
+        // Insert another effect at position 0 to validate stable ordering on replay.
+        let add_brightness =
+            AddEffectCommand::new(&seq_id, &track_id, &clip_id, EffectType::Brightness)
+                .with_param("value", ParamValue::Float(0.2))
+                .at_position(0);
+        let brightness_result = executor
+            .execute(Box::new(add_brightness), &mut state)
+            .unwrap();
+        let brightness_id = brightness_result.created_ids[0].clone();
+
+        // Validate persisted payload schema for EffectAdd (must include realized effect object).
+        let persisted = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted.kind, OpKind::EffectAdd);
+        assert_eq!(
+            persisted.payload["sequenceId"].as_str(),
+            Some(seq_id.as_str())
+        );
+        assert_eq!(persisted.payload["clipId"].as_str(), Some(clip_id.as_str()));
+        assert_eq!(
+            persisted.payload["effect"]["id"].as_str(),
+            Some(brightness_id.as_str())
+        );
+        assert_eq!(persisted.payload["position"].as_u64(), Some(0));
+
+        // Replay ops log and ensure the resulting state matches the executed ordering.
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let seq = replayed.get_sequence(&seq_id).unwrap();
+        let track = seq.get_track(&track_id).unwrap();
+        let clip = track.get_clip(&clip_id).unwrap();
+
+        assert_eq!(clip.effects.len(), 2);
+        assert_eq!(clip.effects[0], brightness_id);
+        assert_eq!(clip.effects[1], blur_id);
+        assert!(replayed.effects.contains_key(&brightness_id));
+        assert!(replayed.effects.contains_key(&blur_id));
     }
 
     #[test]

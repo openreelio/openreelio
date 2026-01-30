@@ -25,3 +25,14 @@ export {
   type FrameCacheConfig,
   type CacheStats,
 } from './frameCache';
+
+export {
+  createAudioEffectNode,
+  updateAudioEffectNode,
+  getEffectNodeType,
+  convertDbToLinear,
+  convertLinearToDb,
+  type AudioNodeType,
+  type EffectNodeConfig,
+  type AudioEffectNode,
+} from './audioEffectFactory';

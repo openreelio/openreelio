@@ -9,3 +9,24 @@ export type { EffectsListProps } from './EffectsList';
 
 export { ParameterEditor } from './ParameterEditor';
 export type { ParameterEditorProps } from './ParameterEditor';
+
+export { EffectsBrowser } from './EffectsBrowser';
+export type { EffectsBrowserProps } from './EffectsBrowser';
+
+export { TransitionPicker } from './TransitionPicker';
+export type {
+  TransitionPickerProps,
+  TransitionConfig,
+  TransitionType,
+  TransitionDirection,
+  ZoomType,
+} from './TransitionPicker';
+
+export { EffectInspector } from './EffectInspector';
+export type { EffectInspectorProps } from './EffectInspector';
+
+export { KeyframeEditor } from './KeyframeEditor';
+export type { KeyframeEditorProps } from './KeyframeEditor';
+
+export { CurveEditor } from './CurveEditor';
+export type { CurveEditorProps } from './CurveEditor';

@@ -17,14 +17,16 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type { Asset, Sequence, Command, CommandResult, UndoRedoResult, ProxyStatus } from '@/types';
 import { createLogger } from '@/services/logger';
+// Direct imports instead of barrel to avoid bundling all utilities
 import {
   commandQueue,
-  requestDeduplicator,
   _resetCommandQueueForTesting as resetCommandQueue,
+} from '@/utils/commandQueue';
+import {
+  requestDeduplicator,
   _resetDeduplicatorForTesting as resetDeduplicator,
-  refreshProjectState,
-  applyProjectState,
-} from '@/utils';
+} from '@/utils/requestDeduplicator';
+import { refreshProjectState, applyProjectState } from '@/utils/stateRefreshHelper';
 
 const logger = createLogger('ProjectStore');
 

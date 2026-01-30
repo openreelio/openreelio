@@ -38,6 +38,7 @@ interface ActiveClip {
 // =============================================================================
 
 const FRAME_INTERVAL = 1000 / 30; // 30fps for animation frame updates
+const SEEK_TOLERANCE = 0.05; // Seek tolerance in seconds (50ms for responsive scrubbing)
 
 // =============================================================================
 // Component
@@ -68,6 +69,7 @@ export function ProxyPreviewPlayer({
     togglePlayback,
     setVolume,
     toggleMute,
+    setPlaybackRate,
   } = usePlaybackStore();
 
   // Local state
@@ -90,6 +92,13 @@ export function ProxyPreviewPlayer({
       }
     }
     return maxEnd;
+  }, [sequence]);
+
+  // Calculate sequence FPS
+  const sequenceFps = useMemo(() => {
+    if (!sequence?.format?.fps) return 30;
+    const { num, den } = sequence.format.fps;
+    return den > 0 ? num / den : 30;
   }, [sequence]);
 
   // Update store duration when sequence changes
@@ -178,8 +187,8 @@ export function ProxyPreviewPlayer({
       const offsetInClip = currentTime - clip.place.timelineInSec;
       const sourceTime = clip.range.sourceInSec + (offsetInClip * clip.speed);
 
-      // Only seek if difference is significant
-      if (Math.abs(video.currentTime - sourceTime) > 0.1) {
+      // Only seek if difference is significant (reduced tolerance for responsive scrubbing)
+      if (Math.abs(video.currentTime - sourceTime) > SEEK_TOLERANCE) {
         video.currentTime = sourceTime;
       }
 
@@ -208,15 +217,16 @@ export function ProxyPreviewPlayer({
     if (timestamp - lastUpdateTimeRef.current >= FRAME_INTERVAL) {
       lastUpdateTimeRef.current = timestamp;
 
-      // Get the first active video to sync time from
-      const firstActiveClip = activeClips[0];
-      if (firstActiveClip) {
-        const video = videoRefs.current.get(firstActiveClip.clip.id);
-        if (video && !video.paused) {
+      // Find the first playing video to sync time from (not just first clip)
+      // This handles cases where some clips may have load errors or be paused
+      for (const { clip } of activeClips) {
+        const video = videoRefs.current.get(clip.id);
+        if (video && !video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
           // Calculate timeline time from video time
-          const offsetInSource = video.currentTime - firstActiveClip.clip.range.sourceInSec;
-          const timelineTime = firstActiveClip.clip.place.timelineInSec + (offsetInSource / firstActiveClip.clip.speed);
+          const offsetInSource = video.currentTime - clip.range.sourceInSec;
+          const timelineTime = clip.place.timelineInSec + (offsetInSource / clip.speed);
           setCurrentTime(timelineTime);
+          break; // Use first valid video as time source
         }
       }
     }
@@ -390,12 +400,18 @@ export function ProxyPreviewPlayer({
     }
   }, [togglePlayback, handleFullscreenToggle]);
 
+  // Calculate aspect ratio from sequence format
+  const aspectRatio = sequence?.format?.canvas
+    ? sequence.format.canvas.width / sequence.format.canvas.height
+    : 16 / 9;
+
   // Empty state
   if (!sequence) {
     return (
       <div
         data-testid="proxy-preview-empty"
-        className={`flex items-center justify-center bg-black aspect-video ${className}`}
+        className={`flex items-center justify-center bg-black ${className}`}
+        style={{ aspectRatio: 16 / 9 }}
         role="region"
         aria-label="Video preview"
       >
@@ -429,7 +445,8 @@ export function ProxyPreviewPlayer({
     <div
       ref={containerRef}
       data-testid="proxy-preview-player"
-      className={`relative bg-black aspect-video overflow-hidden ${className}`}
+      className={`relative bg-black overflow-hidden ${className}`}
+      style={{ aspectRatio }}
       tabIndex={0}
       role="region"
       aria-label="Video preview"
@@ -510,11 +527,14 @@ export function ProxyPreviewPlayer({
             isMuted={isMuted}
             buffered={buffered}
             isFullscreen={isFullscreen}
+            fps={sequenceFps}
+            playbackRate={playbackRate}
             onPlayPause={handlePlayPause}
             onSeek={handleSeek}
             onVolumeChange={handleVolumeChange}
             onMuteToggle={handleMuteToggle}
             onFullscreenToggle={handleFullscreenToggle}
+            onPlaybackRateChange={setPlaybackRate}
           />
         </div>
       )}

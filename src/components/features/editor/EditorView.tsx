@@ -26,11 +26,10 @@ import {
   usePlaybackStore,
   useTimelineStore,
 } from '@/stores';
-import {
-  useTimelineActions,
-  useKeyboardShortcuts,
-  useAudioPlayback,
-} from '@/hooks';
+// Direct imports instead of barrel to avoid bundling all 100+ hooks
+import { useTimelineActions } from '@/hooks/useTimelineActions';
+import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
+import { useAudioPlayback } from '@/hooks/useAudioPlayback';
 import { createLogger } from '@/services/logger';
 import type { Sequence } from '@/types';
 

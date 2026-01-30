@@ -1,8 +1,8 @@
 # OpenReelio Development Roadmap
 
-> **Last Updated**: 2026-01-27
+> **Last Updated**: 2026-01-30
 > **Version**: v0.1.0 → v1.0.0 Planning
-> **Status**: MVP v0.1.0 at 98% completion | v0.2.0 AI Integration at 98%
+> **Status**: MVP v0.1.0 at 98% | v0.2.0 AI at 98% | v0.3.0 Effects at 65%
 > **Critical Blocker**: Code Signing + Auto-Update finalization required for v0.1.0 release
 
 This document outlines the complete development roadmap for OpenReelio, from MVP to production-ready release.
@@ -43,7 +43,7 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 |-----------|-------|------------------|--------|
 | **v0.1.0** | Core Editor + Distribution | Timeline, Preview, Export, Auto-Update, Code Signing | 🔄 In Progress (98%) |
 | **v0.2.0** | AI Integration | Whisper, Meilisearch, AI Sidebar, Agent Framework | 🔄 In Progress (98%) |
-| **v0.3.0** | Effects & Animation | Transitions, Keyframes, Audio FX | 📋 Planned |
+| **v0.3.0** | Effects & Animation | Transitions, Keyframes, Audio FX | 🔄 In Progress (65%) |
 | **v0.4.0** | Plugin Ecosystem | WASM Host, Marketplace | 📋 Planned |
 | **v1.0.0** | Production | Performance, Stability, Docs | 📋 Planned |
 
@@ -356,6 +356,28 @@ pub struct Shot {
 
 **Goal**: Professional-grade video effects, transitions, and keyframe animation system.
 
+> **Status**: 65% Complete (as of 2026-01-30)
+> **Current Focus**: Keyframe data model complete, UI pending
+
+### Current Progress
+
+| Component | Status | Tests |
+|-----------|--------|-------|
+| FFmpeg Transition Filters | ✅ Complete | 38 tests |
+| Effect Commands (Add/Remove/Update) | ✅ Complete | 19 tests |
+| IPC Integration | ✅ Complete | - |
+| Frontend Types | ✅ Complete | - |
+| EffectsBrowser UI | ✅ Complete | 28 tests |
+| TransitionPicker UI | ✅ Complete | 28 tests |
+| EffectInspector UI | ✅ Complete | 21 tests |
+| TransitionZone Component | ✅ Complete | 30 tests |
+| useTransitionZones Hook | ✅ Complete | 12 tests |
+| Timeline Integration | ✅ Complete | 5 tests |
+| Keyframe Interpolation | ✅ Complete | 28 tests |
+| useKeyframeAnimation Hook | ✅ Complete | 11 tests |
+| Keyframe UI | ⏳ Pending | - |
+| Audio Effects | ⏳ Pending | - |
+
 ### Core Features
 
 #### 1. Video Effects Pipeline
@@ -376,40 +398,27 @@ pub struct Shot {
 
 #### 2. Transition System
 
-**Implementation:**
+**✅ Implemented (filter_builder.rs):**
 ```rust
-pub struct Transition {
-    pub id: String,
-    pub transition_type: TransitionType,
-    pub duration: f64,
-    pub easing: EasingFunction,
-    pub params: HashMap<String, ParameterValue>,
-}
-
-pub enum TransitionType {
-    CrossDissolve,
-    Fade { to_color: Color },
-    Wipe { direction: WipeDirection, softness: f32 },
-    Slide { direction: SlideDirection },
-    Zoom { center: Point, direction: ZoomDirection },
-    Custom { filter_graph: String },
-}
+// build_cross_dissolve_filter() - xfade=transition=dissolve
+// build_wipe_filter() - xfade with wipeleft/wiperight/wipeup/wipedown
+// build_slide_filter() - xfade with slideleft/slideright/slideup/slidedown
+// build_zoom_filter() - zoompan filter with configurable center and zoom factor
 ```
 
-**FFmpeg Filter Generation:**
+**✅ Effect Commands (effect.rs):**
 ```rust
-impl Transition {
-    pub fn to_filter_graph(&self, clip_a: &Clip, clip_b: &Clip) -> String {
-        match &self.transition_type {
-            TransitionType::CrossDissolve => {
-                format!("[{}][{}]xfade=transition=fade:duration={}",
-                    clip_a.id, clip_b.id, self.duration)
-            }
-            // ... other transitions
-        }
-    }
-}
+pub struct AddEffectCommand { ... }     // Add effect to clip
+pub struct RemoveEffectCommand { ... }  // Remove effect with undo support
+pub struct UpdateEffectCommand { ... }  // Update effect parameters
 ```
+
+**✅ UI Components:**
+- `EffectsBrowser` - 45+ effects across 8 categories with search
+- `TransitionPicker` - Duration, direction, zoom type configuration
+- `EffectInspector` - Parameter editing with reset/delete actions
+- `TransitionZone` - Visual zone between clips for transition placement
+- `useTransitionZones` - Hook to calculate adjacent clip pairs
 
 #### 3. Keyframe Animation
 
@@ -453,22 +462,31 @@ pub enum EasingFunction {
 
 ### v0.3.0 Task Breakdown
 
-| Task | Priority | Effort |
-|------|----------|--------|
-| Transition data model | HIGH | 2 days |
-| Transition FFmpeg generation | HIGH | 1 week |
-| Transition UI (drag between clips) | HIGH | 3 days |
-| Keyframe data model | HIGH | 2 days |
-| Keyframe interpolation | HIGH | 3 days |
-| Keyframe UI (Inspector) | HIGH | 1 week |
-| Curve editor component | MEDIUM | 1 week |
-| LUT support | MEDIUM | 3 days |
-| Audio effects pipeline | MEDIUM | 1 week |
+| Task | Priority | Status | Effort |
+|------|----------|--------|--------|
+| Transition data model | HIGH | ✅ Complete | 2 days |
+| Transition FFmpeg generation | HIGH | ✅ Complete | 1 week |
+| Effect Commands (Add/Remove/Update) | HIGH | ✅ Complete | 2 days |
+| EffectsBrowser UI | HIGH | ✅ Complete | 1 day |
+| TransitionPicker UI | HIGH | ✅ Complete | 1 day |
+| EffectInspector UI | HIGH | ✅ Complete | 1 day |
+| Transition UI (drag between clips) | HIGH | ⏳ Pending | 3 days |
+| Keyframe data model | HIGH | ⏳ Pending | 2 days |
+| Keyframe interpolation | HIGH | ⏳ Pending | 3 days |
+| Keyframe UI (Inspector) | HIGH | ⏳ Pending | 1 week |
+| Curve editor component | MEDIUM | ⏳ Pending | 1 week |
+| LUT support | MEDIUM | ⏳ Pending | 3 days |
+| Audio effects pipeline | MEDIUM | ⏳ Pending | 1 week |
 
 ### v0.3.0 Definition of Done
 
+- [x] 5+ built-in transitions (CrossDissolve, Fade, Wipe, Slide, Zoom)
 - [ ] 10+ built-in transitions
 - [ ] Custom transition support
+- [x] Effect Commands with undo/redo
+- [x] Effects Browser UI
+- [x] Transition Picker UI
+- [x] Effect Inspector UI
 - [ ] Keyframe animation for all effect parameters
 - [ ] Bezier curve editor
 - [ ] Audio fade in/out
