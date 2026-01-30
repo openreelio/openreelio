@@ -211,16 +211,19 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
           // Loop back to start
           newTime = newTime % duration;
         } else {
-          // Stop playback
-          newTime = duration;
-          setCurrentTime(newTime);
+          // Stop playback and return to start (standard NLE behavior)
           setIsPlaying(false);
           setIsActive(false);
+          setCurrentTime(0);
+
+          // Render the first frame so the preview shows the start position
+          onFrameRef.current(0);
+
           onEnded?.();
 
           // Reset for next play session
           lastFrameTimeRef.current = 0;
-          lastPlaybackTimeRef.current = newTime;
+          lastPlaybackTimeRef.current = 0;
           return;
         }
       }

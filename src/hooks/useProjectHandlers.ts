@@ -15,14 +15,14 @@ import { useCallback, useState, useRef } from 'react';
 import { open, confirm } from '@tauri-apps/plugin-dialog';
 import { useProjectStore } from '@/stores';
 import { createLogger } from '@/services/logger';
+// Direct imports instead of barrel to avoid bundling all utilities
 import {
   addRecentProject,
   removeRecentProjectByPath,
-  buildProjectPath,
-  validateProjectName,
-  getUserFriendlyError,
   type RecentProject,
-} from '@/utils';
+} from '@/utils/recentProjects';
+import { buildProjectPath, validateProjectName } from '@/utils/projectPath';
+import { getUserFriendlyError } from '@/utils/errorMessages';
 import type { ToastVariant } from '@/components/ui';
 
 const logger = createLogger('useProjectHandlers');

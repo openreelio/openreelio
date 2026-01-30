@@ -9,7 +9,7 @@ import { renderHook, act } from '@testing-library/react';
 import { useProjectHandlers, type ProjectCreateData } from './useProjectHandlers';
 import { useProjectStore } from '@/stores';
 import { open, confirm } from '@tauri-apps/plugin-dialog';
-import type { RecentProject } from '@/utils';
+import type { RecentProject } from '@/utils/recentProjects';
 
 // Mock dependencies
 vi.mock('@tauri-apps/plugin-dialog', () => ({
@@ -30,14 +30,21 @@ vi.mock('@/services/logger', () => ({
   }),
 }));
 
-vi.mock('@/utils', () => ({
+// Mock direct module imports (matching the source file's direct imports)
+vi.mock('@/utils/recentProjects', () => ({
   addRecentProject: vi.fn((project: RecentProject) => [project]),
   removeRecentProjectByPath: vi.fn(() => []),
+}));
+
+vi.mock('@/utils/projectPath', () => ({
   buildProjectPath: vi.fn((base: string, name: string) => `${base}/${name}`),
   validateProjectName: vi.fn((name: string) => ({
     sanitized: name,
     errors: [],
   })),
+}));
+
+vi.mock('@/utils/errorMessages', () => ({
   getUserFriendlyError: vi.fn((error: unknown) =>
     error instanceof Error ? error.message : String(error)
   ),

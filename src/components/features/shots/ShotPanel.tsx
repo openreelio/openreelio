@@ -15,7 +15,8 @@ import {
   RefreshCw,
   Settings2,
 } from 'lucide-react';
-import { formatDuration } from '@/utils';
+// Direct import instead of barrel to avoid bundling all utilities
+import { formatDuration } from '@/utils/formatters';
 import type { Shot, ShotDetectionConfig } from '@/hooks/useShotDetection';
 
 // =============================================================================
