@@ -373,7 +373,9 @@ export type CommandType =
   | 'MoveClip'
   | 'DeleteClip'
   | 'ApplyEffect'
+  | 'AddEffect'
   | 'RemoveEffect'
+  | 'UpdateEffect'
   | 'UpdateCaption'
   | 'CreateCaption'
   | 'DeleteCaption'
@@ -667,6 +669,9 @@ export type ParamValue =
 export type SimpleParamValue = number | boolean | string | [number, number, number, number] | [number, number];
 
 /** Parameter definition with constraints */
+/** Input type for parameter editor UI */
+export type ParamInputType = 'text' | 'file' | 'select' | 'color';
+
 export interface ParamDef {
   /** Parameter name (key) */
   name: string;
@@ -680,6 +685,12 @@ export interface ParamDef {
   max?: number;
   /** Step size for UI */
   step?: number;
+  /** Input type for string params (default: 'text') */
+  inputType?: ParamInputType;
+  /** Options for select input type */
+  options?: string[];
+  /** File filter extensions for file input (e.g., ['cube', '3dl']) */
+  fileExtensions?: string[];
 }
 
 /** Easing function for keyframe interpolation */
@@ -692,6 +703,9 @@ export type Easing =
   | 'step'
   | 'hold';
 
+/** Bezier control points [x1, y1, x2, y2] for cubic-bezier easing */
+export type BezierControlPoints = [number, number, number, number];
+
 /** A keyframe for parameter animation */
 export interface Keyframe {
   /** Time offset from effect start (seconds) */
@@ -700,6 +714,8 @@ export interface Keyframe {
   value: ParamValue;
   /** Easing to next keyframe */
   easing: Easing;
+  /** Custom Bezier control points (only used when easing is 'cubic_bezier') */
+  bezierPoints?: BezierControlPoints;
 }
 
 /** An effect instance applied to a clip */
