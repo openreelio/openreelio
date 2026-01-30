@@ -50,6 +50,43 @@ const mockClips: ClipType[] = [
   },
 ];
 
+// Adjacent clips for transition zone testing
+const adjacentClips: ClipType[] = [
+  {
+    id: 'clip_001',
+    assetId: 'asset_001',
+    range: { sourceInSec: 0, sourceOutSec: 5 },
+    place: { timelineInSec: 0, durationSec: 5 },
+    transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+    opacity: 1,
+    speed: 1,
+    effects: [],
+    audio: { volumeDb: 0, pan: 0, muted: false },
+  },
+  {
+    id: 'clip_002',
+    assetId: 'asset_002',
+    range: { sourceInSec: 0, sourceOutSec: 5 },
+    place: { timelineInSec: 5, durationSec: 5 }, // Starts exactly where clip_001 ends
+    transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+    opacity: 1,
+    speed: 1,
+    effects: [],
+    audio: { volumeDb: 0, pan: 0, muted: false },
+  },
+  {
+    id: 'clip_003',
+    assetId: 'asset_003',
+    range: { sourceInSec: 0, sourceOutSec: 5 },
+    place: { timelineInSec: 10, durationSec: 5 }, // Starts exactly where clip_002 ends
+    transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+    opacity: 1,
+    speed: 1,
+    effects: [],
+    audio: { volumeDb: 0, pan: 0, muted: false },
+  },
+];
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -142,6 +179,96 @@ describe('Track', () => {
 
       rerender(<Track track={audioTrack} clips={[]} zoom={100} />);
       expect(screen.getByTestId('track-header')).toHaveAttribute('data-track-kind', 'audio');
+    });
+  });
+
+  // ===========================================================================
+  // TransitionZone Integration Tests
+  // ===========================================================================
+
+  describe('transition zones', () => {
+    it('should render transition zones between adjacent clips', () => {
+      render(
+        <Track
+          track={mockTrack}
+          clips={adjacentClips}
+          zoom={100}
+          viewportWidth={2000}
+          showTransitionZones
+        />
+      );
+
+      // 3 adjacent clips = 2 transition zones
+      const zones = screen.getAllByTestId('transition-zone');
+      expect(zones).toHaveLength(2);
+    });
+
+    it('should not render transition zones when showTransitionZones is false', () => {
+      render(
+        <Track
+          track={mockTrack}
+          clips={adjacentClips}
+          zoom={100}
+          viewportWidth={2000}
+          showTransitionZones={false}
+        />
+      );
+
+      expect(screen.queryAllByTestId('transition-zone')).toHaveLength(0);
+    });
+
+    it('should not render transition zones between non-adjacent clips', () => {
+      render(
+        <Track
+          track={mockTrack}
+          clips={mockClips} // These clips have a gap between them
+          zoom={100}
+          viewportWidth={3000}
+          showTransitionZones
+        />
+      );
+
+      expect(screen.queryAllByTestId('transition-zone')).toHaveLength(0);
+    });
+
+    it('should call onTransitionZoneClick when zone is clicked', () => {
+      const onTransitionZoneClick = vi.fn();
+      render(
+        <Track
+          track={mockTrack}
+          clips={adjacentClips}
+          zoom={100}
+          viewportWidth={2000}
+          showTransitionZones
+          onTransitionZoneClick={onTransitionZoneClick}
+        />
+      );
+
+      const zones = screen.getAllByTestId('transition-zone');
+      fireEvent.click(zones[0]);
+
+      expect(onTransitionZoneClick).toHaveBeenCalledWith('clip_001', 'clip_002');
+    });
+
+    it('should disable transition zones when track is locked', () => {
+      const lockedTrack = { ...mockTrack, locked: true };
+      const onTransitionZoneClick = vi.fn();
+
+      render(
+        <Track
+          track={lockedTrack}
+          clips={adjacentClips}
+          zoom={100}
+          viewportWidth={2000}
+          showTransitionZones
+          onTransitionZoneClick={onTransitionZoneClick}
+        />
+      );
+
+      const zones = screen.getAllByTestId('transition-zone');
+      fireEvent.click(zones[0]);
+
+      expect(onTransitionZoneClick).not.toHaveBeenCalled();
     });
   });
 });

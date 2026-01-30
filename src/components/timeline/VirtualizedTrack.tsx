@@ -35,7 +35,8 @@ import {
   type ClickModifiers,
   type ClipWaveformConfig,
 } from './Clip';
-import { useVirtualizedClips, type VirtualizationConfig } from '@/hooks';
+// Direct import instead of barrel to avoid bundling all hooks
+import { useVirtualizedClips, type VirtualizationConfig } from '@/hooks/useVirtualizedClips';
 
 // =============================================================================
 // Types

@@ -13,6 +13,7 @@
 import { useMemo, memo, useCallback } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useFrameExtractor, useLazyThumbnails, type ThumbnailRequest } from '@/hooks';
+import { normalizeFileUriToPath } from '@/utils/uri';
 import type { Asset, TimeSec } from '@/types';
 
 // =============================================================================
@@ -91,11 +92,7 @@ export const LazyThumbnailStrip = memo(function LazyThumbnailStrip({
   const thumbnailRequests = useMemo((): ThumbnailRequest[] => {
     if (!asset || thumbnailCount <= 0) return [];
 
-    // Get asset path (strip file:// prefix if present)
-    let assetPath = asset.uri;
-    if (assetPath.startsWith('file://')) {
-      assetPath = assetPath.replace('file://', '');
-    }
+    const assetPath = normalizeFileUriToPath(asset.uri);
 
     const duration = sourceOutSec - sourceInSec;
     const interval = duration / thumbnailCount;
