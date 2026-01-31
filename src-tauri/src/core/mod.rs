@@ -20,10 +20,12 @@ pub mod plugin;
 pub mod process;
 pub mod project;
 pub mod qc;
+pub mod recovery;
 pub mod render;
 pub mod search;
 pub mod settings;
 pub mod template;
+pub mod text;
 pub mod timeline;
 pub mod update;
 
