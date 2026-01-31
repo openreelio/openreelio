@@ -55,6 +55,33 @@
     ],
     "resources": {
       "binaries/*": "binaries/"
-    }
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "timestampUrl": "http://timestamp.digicert.com",
+      "digestAlgorithm": "sha256",
+      "wix": null,
+      "nsis": {
+        "compression": "lzma",
+        "displayLanguageSelector": false,
+        "installerIcon": "icons/icon.ico",
+        "installMode": "currentUser"
+      }
+    },
+    "macOS": {
+      "signingIdentity": null,
+      "entitlements": null,
+      "minimumSystemVersion": "10.15"
+    },
+    "linux": {
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    },
+    "category": "DeveloperTool",
+    "shortDescription": "AI-powered video editing IDE",
+    "longDescription": "OpenReelio is an AI agent-driven, prompt-based video editing IDE. Like Claude Code or Cursor AI, it enables video editing through conversational prompts.",
+    "copyright": "Copyright (c) 2024-2026 OpenReelio Contributors",
+    "publisher": "OpenReelio"
   }
 }
