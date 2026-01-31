@@ -376,11 +376,9 @@ export const useAIStore = create<AIState>()(
             state.isGenerating = false;
           });
 
-          // Add assistant message with the proposal
-          get().addChatMessage('assistant', editScript.explanation);
-
-          // Create proposal
+          // Create proposal first, then add assistant message with it attached
           get().createProposal(editScript);
+          get().addChatMessage('assistant', editScript.explanation, get().currentProposal ?? undefined);
 
           return editScript;
         } catch (error) {
@@ -429,8 +427,9 @@ export const useAIStore = create<AIState>()(
               state.isGenerating = false;
             });
 
-            get().addChatMessage('assistant', editScript.explanation);
+            // Create proposal first, then add assistant message with it attached
             get().createProposal(editScript);
+            get().addChatMessage('assistant', editScript.explanation, get().currentProposal ?? undefined);
 
             return editScript;
           } catch (fallbackError) {

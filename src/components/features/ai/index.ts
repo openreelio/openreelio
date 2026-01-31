@@ -16,7 +16,3 @@ export { ChatInput, type ChatInputProps } from './ChatInput';
 export { ContextPanel, type ContextPanelProps } from './ContextPanel';
 export { ProposalCard, type ProposalCardProps } from './ProposalCard';
 export { QuickActionsBar, type QuickActionsBarProps, type QuickAction } from './QuickActionsBar';
-
-// Legacy components (kept for backward compatibility)
-export { AIPromptPanel, type AIPromptPanelProps } from './AIPromptPanel';
-export { ProposalDialog, type ProposalDialogProps } from './ProposalDialog';
