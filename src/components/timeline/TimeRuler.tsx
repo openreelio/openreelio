@@ -13,6 +13,7 @@ import {
   useEffect,
   type MouseEvent,
 } from 'react';
+import { formatTimestamp } from '@/constants/precision';
 
 // =============================================================================
 // Types
@@ -53,12 +54,6 @@ const COLORS = {
 // =============================================================================
 // Utilities
 // =============================================================================
-
-function formatTime(seconds: number): string {
-  const mins = Math.floor(seconds / 60);
-  const secs = Math.floor(seconds % 60);
-  return `${mins}:${secs.toString().padStart(2, '0')}`;
-}
 
 function getMarkerInterval(zoom: number): number {
   // Adjust marker density based on zoom
@@ -163,7 +158,7 @@ export function TimeRuler({
       // Draw time label for main markers
       if (isMain) {
         ctx.fillStyle = COLORS.text;
-        ctx.fillText(formatTime(roundedTime), x, MAIN_MARKER_HEIGHT + 2);
+        ctx.fillText(formatTimestamp(roundedTime), x, MAIN_MARKER_HEIGHT + 2);
       }
     }
   }, [duration, zoom, scrollX, viewportWidth, interval, mainInterval, width]);
