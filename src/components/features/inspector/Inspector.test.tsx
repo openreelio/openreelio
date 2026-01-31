@@ -6,7 +6,10 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { Inspector } from './Inspector';
+import { createTextClipData, createTitleTextClipData } from '@/types';
+import type { SelectedTextClip } from './TextInspector';
 
 // Mock Tauri API
 vi.mock('@tauri-apps/api/core', () => ({
@@ -202,5 +205,136 @@ describe('Inspector', () => {
     render(<Inspector />);
 
     expect(screen.getByTestId('inspector')).toHaveAttribute('aria-label', 'Properties inspector');
+  });
+
+  // ===========================================================================
+  // Text Clip Selection Tests
+  // ===========================================================================
+
+  describe('Text Clip Selection', () => {
+    const createTestTextClip = (content: string = 'Test Text'): SelectedTextClip => ({
+      id: 'text-clip-1',
+      textData: createTextClipData(content),
+      timelineInSec: 5.0,
+      durationSec: 3.0,
+    });
+
+    it('renders TextInspector when text clip is selected', () => {
+      const selectedTextClip = createTestTextClip('Hello World');
+
+      render(<Inspector selectedTextClip={selectedTextClip} />);
+
+      // TextInspector should be rendered
+      expect(screen.getByTestId('text-inspector')).toBeInTheDocument();
+      expect(screen.getByText('Text Properties')).toBeInTheDocument();
+    });
+
+    it('displays text content in TextInspector', () => {
+      const selectedTextClip = createTestTextClip('My Title Text');
+
+      render(<Inspector selectedTextClip={selectedTextClip} />);
+
+      const textarea = screen.getByTestId('text-content-input');
+      expect(textarea).toHaveValue('My Title Text');
+    });
+
+    it('calls onTextDataChange when text content is modified', async () => {
+      const user = userEvent.setup();
+      const handleTextDataChange = vi.fn();
+      const selectedTextClip = createTestTextClip('Original');
+
+      render(
+        <Inspector
+          selectedTextClip={selectedTextClip}
+          onTextDataChange={handleTextDataChange}
+        />
+      );
+
+      const textarea = screen.getByTestId('text-content-input');
+      await user.clear(textarea);
+      await user.type(textarea, 'Updated');
+
+      expect(handleTextDataChange).toHaveBeenCalled();
+      // Last call should have the clip ID and updated text data
+      const lastCall = handleTextDataChange.mock.calls[handleTextDataChange.mock.calls.length - 1];
+      expect(lastCall[0]).toBe('text-clip-1');
+      expect(lastCall[1].content).toBe('Updated');
+    });
+
+    it('renders TextInspector with title preset styling', () => {
+      const selectedTextClip: SelectedTextClip = {
+        id: 'title-clip-1',
+        textData: createTitleTextClipData('Welcome'),
+        timelineInSec: 0.0,
+        durationSec: 5.0,
+      };
+
+      render(<Inspector selectedTextClip={selectedTextClip} />);
+
+      expect(screen.getByTestId('text-inspector')).toBeInTheDocument();
+      expect(screen.getByTestId('text-content-input')).toHaveValue('Welcome');
+    });
+
+    it('prioritizes text clip over regular clip when both provided', () => {
+      // When both a text clip and a regular clip are selected,
+      // the text inspector should take precedence
+      const selectedTextClip = createTestTextClip('Text Clip');
+      const selectedClip = {
+        id: 'regular-clip-1',
+        name: 'Regular Clip',
+        assetId: 'asset-1',
+        range: { sourceInSec: 0, sourceOutSec: 10 },
+        place: { trackId: 'track-1', timelineInSec: 0 },
+      };
+
+      render(
+        <Inspector
+          selectedTextClip={selectedTextClip}
+          selectedClip={selectedClip}
+        />
+      );
+
+      // Should show TextInspector, not Clip Properties
+      expect(screen.getByTestId('text-inspector')).toBeInTheDocument();
+      expect(screen.queryByText('Clip Properties')).not.toBeInTheDocument();
+    });
+
+    it('allows toggling text styling options', async () => {
+      const user = userEvent.setup();
+      const handleTextDataChange = vi.fn();
+      const selectedTextClip = createTestTextClip('Styled Text');
+
+      render(
+        <Inspector
+          selectedTextClip={selectedTextClip}
+          onTextDataChange={handleTextDataChange}
+        />
+      );
+
+      // Find and click Bold button
+      const boldButton = screen.getByTitle('Bold');
+      await user.click(boldButton);
+
+      expect(handleTextDataChange).toHaveBeenCalledWith(
+        'text-clip-1',
+        expect.objectContaining({
+          style: expect.objectContaining({ bold: true }),
+        })
+      );
+    });
+
+    it('passes readOnly prop to TextInspector', () => {
+      const selectedTextClip = createTestTextClip('Read Only Text');
+
+      render(
+        <Inspector
+          selectedTextClip={selectedTextClip}
+          readOnly={true}
+        />
+      );
+
+      const textarea = screen.getByTestId('text-content-input');
+      expect(textarea).toBeDisabled();
+    });
   });
 });

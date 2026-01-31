@@ -3,6 +3,7 @@
  *
  * Property inspector panel for selected clips and assets.
  * Displays and allows editing of properties.
+ * Supports text clips with the TextInspector sub-component.
  */
 
 import { useMemo, useState, useCallback } from 'react';
@@ -19,7 +20,9 @@ import {
 // Direct import instead of barrel to avoid bundling all utilities
 import { formatDuration } from '@/utils/formatters';
 import { EffectsList } from '../effects';
-import type { Effect, EffectId, CaptionStyle } from '@/types';
+import { TextInspector } from './TextInspector';
+import type { SelectedTextClip } from './TextInspector';
+import type { Effect, EffectId, CaptionStyle, TextClipData, ClipId } from '@/types';
 
 // =============================================================================
 // Types
@@ -68,12 +71,16 @@ export interface SelectedCaption {
 export interface InspectorProps {
   /** Currently selected clip */
   selectedClip?: SelectedClip;
+  /** Currently selected text clip */
+  selectedTextClip?: SelectedTextClip;
   /** Currently selected asset */
   selectedAsset?: SelectedAsset;
   /** Currently selected caption */
   selectedCaption?: SelectedCaption;
   /** Callback when clip property changes */
   onClipChange?: (clipId: string, property: string, value: unknown) => void;
+  /** Callback when text clip data changes */
+  onTextDataChange?: (clipId: ClipId, textData: TextClipData) => void;
   /** Callback when caption property changes */
   onCaptionChange?: (captionId: string, property: string, value: unknown) => void;
   /** Callback when an effect is toggled */
@@ -82,6 +89,8 @@ export interface InspectorProps {
   onEffectRemove?: (clipId: string, effectId: EffectId) => void;
   /** Callback when add effect is requested */
   onAddEffect?: (clipId: string) => void;
+  /** Whether the inspector is read-only */
+  readOnly?: boolean;
 }
 
 // =============================================================================
@@ -137,13 +146,16 @@ function PropertyRow({ label, value, testId, icon }: PropertyRowProps): JSX.Elem
 
 export function Inspector({
   selectedClip,
+  selectedTextClip,
   selectedAsset,
   selectedCaption,
   // onClipChange is reserved for future clip property editing
+  onTextDataChange,
   onCaptionChange,
   onEffectToggle,
   onEffectRemove,
   onAddEffect,
+  readOnly = false,
 }: InspectorProps): JSX.Element {
   // ===========================================================================
   // State
@@ -200,7 +212,7 @@ export function Inspector({
   // Render Empty State
   // ===========================================================================
 
-  if (!selectedClip && !selectedAsset && !selectedCaption) {
+  if (!selectedClip && !selectedTextClip && !selectedAsset && !selectedCaption) {
     return (
       <div
         data-testid="inspector"
@@ -214,6 +226,20 @@ export function Inspector({
           Select a clip or asset to view properties
         </p>
       </div>
+    );
+  }
+
+  // ===========================================================================
+  // Render Text Clip Properties (Priority over regular clips)
+  // ===========================================================================
+
+  if (selectedTextClip) {
+    return (
+      <TextInspector
+        selectedTextClip={selectedTextClip}
+        onTextDataChange={onTextDataChange ?? (() => {})}
+        readOnly={readOnly}
+      />
     );
   }
 

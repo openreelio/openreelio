@@ -73,6 +73,7 @@ const EFFECT_CATEGORIES: CategoryDefinition[] = [
       { type: 'saturation', label: EFFECT_TYPE_LABELS.saturation ?? 'Saturation' },
       { type: 'hue', label: EFFECT_TYPE_LABELS.hue ?? 'Hue' },
       { type: 'color_balance', label: EFFECT_TYPE_LABELS.color_balance ?? 'Color Balance' },
+      { type: 'color_wheels', label: EFFECT_TYPE_LABELS.color_wheels ?? 'Color Wheels' },
       { type: 'gamma', label: EFFECT_TYPE_LABELS.gamma ?? 'Gamma' },
       { type: 'levels', label: EFFECT_TYPE_LABELS.levels ?? 'Levels' },
       { type: 'curves', label: EFFECT_TYPE_LABELS.curves ?? 'Curves' },

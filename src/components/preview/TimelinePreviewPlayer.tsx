@@ -25,6 +25,8 @@ import { frameCache } from '@/services/frameCache';
 import { extractFrame as extractFrameIPC } from '@/utils/ffmpeg';
 import { buildFrameOutputPath } from '@/services/framePaths';
 import { createFrameCacheKey } from '@/constants/preview';
+import { extractTextDataFromClip, renderTextToCanvas } from '@/utils/textRenderer';
+import { isTextClip } from '@/types';
 import type { Clip, Track, Sequence, Asset, BlendMode } from '@/types';
 
 // =============================================================================
@@ -332,8 +334,20 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         setIsMultiFrameLoading(true);
       }
 
-      // Load all frames in parallel
-      const framePromises = activeClips.map(async (clipInfo) => {
+      // Separate text clips from video/image clips
+      const textClips: ActiveClipInfo[] = [];
+      const mediaClips: ActiveClipInfo[] = [];
+
+      for (const clipInfo of activeClips) {
+        if (isTextClip(clipInfo.clip.assetId)) {
+          textClips.push(clipInfo);
+        } else {
+          mediaClips.push(clipInfo);
+        }
+      }
+
+      // Load all frames in parallel (only for media clips)
+      const framePromises = mediaClips.map(async (clipInfo) => {
         if (!clipInfo.asset) return { clipInfo, img: null };
 
         // For images, use the asset URI directly
@@ -358,11 +372,8 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
       // Check if this is still the latest request (race condition prevention)
       if (time !== lastRenderTimeRef.current) {
-        // Clear loading state before early return
-        isLoadingRef.current = false;
-        if (isMountedRef.current) {
-          setIsMultiFrameLoading(false);
-        }
+        // Don't clear loading state here - a newer request is in progress
+        // and will manage its own loading state
         return;
       }
 
@@ -389,11 +400,8 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
       // Check again for race condition after async image loading
       if (time !== lastRenderTimeRef.current) {
-        // Clear loading state before early return
-        isLoadingRef.current = false;
-        if (isMountedRef.current) {
-          setIsMultiFrameLoading(false);
-        }
+        // Don't clear loading state here - a newer request is in progress
+        // and will manage its own loading state
         return;
       }
 
@@ -449,6 +457,26 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
           scaledWidth,
           scaledHeight
         );
+
+        // Restore context state
+        ctx.restore();
+      }
+
+      // Render text clips on top of media clips
+      for (const clipInfo of textClips) {
+        const { clip, track } = clipInfo;
+        const textData = extractTextDataFromClip(clip);
+
+        if (!textData) continue;
+
+        // Save context state
+        ctx.save();
+
+        // Apply blend mode
+        ctx.globalCompositeOperation = BLEND_MODE_MAP[track.blendMode] || 'source-over';
+
+        // Render text with clip opacity
+        renderTextToCanvas(ctx, textData, canvas.width, canvas.height, clip.opacity);
 
         // Restore context state
         ctx.restore();
