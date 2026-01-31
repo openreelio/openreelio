@@ -103,6 +103,28 @@ npm run tauri build
 
 Download the latest release from the [Releases](https://github.com/openreelio/openreelio/releases) page.
 
+#### Windows
+
+1. Download `OpenReelio-x.x.x-windows-x64.msi`
+2. Run the installer
+3. If you see **"Windows protected your PC"**:
+   - Click **"More info"**
+   - Click **"Run anyway"**
+
+#### macOS
+
+1. Download `OpenReelio-x.x.x-macos-x64.dmg` (Intel) or `OpenReelio-x.x.x-macos-arm64.dmg` (Apple Silicon)
+2. Open the DMG and drag to Applications
+3. If you see **"cannot be opened"**:
+   - Right-click the app → **"Open"**
+   - Click **"Open"** in the dialog
+
+#### Linux
+
+1. Download `OpenReelio-x.x.x-linux-x64.AppImage`
+2. Make executable: `chmod +x OpenReelio-*.AppImage`
+3. Run: `./OpenReelio-*.AppImage`
+
 ## Documentation
 
 - [Architecture Overview](docs/ARCHITECTURE.md)
@@ -162,7 +184,19 @@ Notes:
 
 ## Roadmap
 
-- [ ] Real AI provider integration (OpenAI, Anthropic)
+### v0.1.0 (Current)
+- [x] Core timeline editing
+- [x] Effects and transitions
+- [x] Audio mixing
+- [x] Export pipeline (7 presets)
+
+### v0.2.0
+- [x] AI provider integration (OpenAI, Anthropic, Ollama)
+- [x] Speech-to-text transcription (Whisper)
+- [x] Smart asset search
+- [ ] Release and distribution
+
+### Future
 - [ ] Video generation (Sora, Runway)
 - [ ] Collaboration features
 - [ ] Cloud project sync
