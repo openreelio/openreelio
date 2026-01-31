@@ -110,7 +110,8 @@ export function useEdgeAutoScroll({
       const distanceFromLeft = mouseClientX - rect.left;
       if (distanceFromLeft < EDGE_ZONE_PX && currentScroll > 0) {
         // Calculate speed multiplier based on how close to edge (closer = faster)
-        const normalizedDistance = distanceFromLeft / EDGE_ZONE_PX;
+        // Clamp to [0, 1] to prevent speed exceeding MAX when pointer is outside container
+        const normalizedDistance = Math.max(0, Math.min(1, distanceFromLeft / EDGE_ZONE_PX));
         const speedMultiplier =
           MAX_SPEED_MULTIPLIER -
           normalizedDistance * (MAX_SPEED_MULTIPLIER - MIN_SPEED_MULTIPLIER);
@@ -121,7 +122,8 @@ export function useEdgeAutoScroll({
       const distanceFromRight = rect.right - mouseClientX;
       if (distanceFromRight < EDGE_ZONE_PX && currentScroll < maxScroll) {
         // Calculate speed multiplier based on how close to edge (closer = faster)
-        const normalizedDistance = distanceFromRight / EDGE_ZONE_PX;
+        // Clamp to [0, 1] to prevent speed exceeding MAX when pointer is outside container
+        const normalizedDistance = Math.max(0, Math.min(1, distanceFromRight / EDGE_ZONE_PX));
         const speedMultiplier =
           MAX_SPEED_MULTIPLIER -
           normalizedDistance * (MAX_SPEED_MULTIPLIER - MIN_SPEED_MULTIPLIER);

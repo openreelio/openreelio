@@ -169,11 +169,13 @@ export class PlaybackMonitor {
 
   /**
    * Record dropped frames directly.
+   * Also increments total frame count to maintain accurate drop rate calculation.
    *
    * @param count Number of frames dropped
    */
   recordDroppedFrames(count: number): void {
     if (!this.isActive) return;
+    this.frameCount += count;
     this.droppedFrameCount += count;
   }
 

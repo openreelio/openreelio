@@ -322,15 +322,20 @@ export class SnapPointManager {
 
   /**
    * Rebuild the combined snap points cache.
+   * Preserves clipId for proper exclusion filtering.
    */
   private rebuildCache(): void {
     const points: SnapPoint[] = [];
 
-    // Add clip snap points
+    // Add clip snap points - preserve clipId from sourceId
     if (this.config.snapToClips) {
       for (const clipPoints of this.clipSnapPoints.values()) {
         for (const point of clipPoints) {
-          points.push({ time: point.time, type: point.type });
+          points.push({
+            time: point.time,
+            type: point.type,
+            clipId: point.sourceId,
+          });
         }
       }
     }
@@ -397,12 +402,10 @@ export class SnapPointManager {
     let nearestDistance = Infinity;
 
     for (const point of snapPoints) {
-      // Skip excluded clip's snap points
-      if (excludeClipId) {
-        const clipPoints = this.clipSnapPoints.get(excludeClipId);
-        if (clipPoints?.some(p => Math.abs(p.time - point.time) < 0.0001)) {
-          continue;
-        }
+      // Skip excluded clip's snap points using clipId for accurate filtering
+      // This avoids accidentally excluding grid/marker points at the same time
+      if (excludeClipId && point.clipId === excludeClipId) {
+        continue;
       }
 
       const distance = Math.abs(point.time - time);
