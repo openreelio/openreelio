@@ -44,7 +44,7 @@ impl Default for BackupConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            interval_secs: 300,      // 5 minutes
+            interval_secs: 300, // 5 minutes
             max_backups: 10,
             backup_on_close: true,
             backup_dir: ".openreelio/backups".to_string(),
@@ -56,7 +56,7 @@ impl BackupConfig {
     /// Creates config with frequent backups (for testing or high-risk editing)
     pub fn frequent() -> Self {
         Self {
-            interval_secs: 60,       // 1 minute
+            interval_secs: 60, // 1 minute
             max_backups: 20,
             ..Default::default()
         }
@@ -65,7 +65,7 @@ impl BackupConfig {
     /// Creates config with minimal backups
     pub fn minimal() -> Self {
         Self {
-            interval_secs: 600,      // 10 minutes
+            interval_secs: 600, // 10 minutes
             max_backups: 5,
             ..Default::default()
         }
@@ -191,7 +191,9 @@ impl BackupManager {
     ) -> CoreResult<BackupInfo> {
         // Prevent concurrent backups
         if self.backup_in_progress.swap(true, Ordering::Acquire) {
-            return Err(CoreError::Internal("Backup already in progress".to_string()));
+            return Err(CoreError::Internal(
+                "Backup already in progress".to_string(),
+            ));
         }
 
         let result = self.create_backup_internal(state, last_op_id, reason, is_auto);
@@ -314,9 +316,9 @@ impl BackupManager {
     pub fn restore_latest(&self) -> CoreResult<ProjectState> {
         let backups = self.list_backups()?;
 
-        let latest = backups.first().ok_or_else(|| {
-            CoreError::NotFound("No backups available".to_string())
-        })?;
+        let latest = backups
+            .first()
+            .ok_or_else(|| CoreError::NotFound("No backups available".to_string()))?;
 
         self.restore_backup(&latest.path)
     }
@@ -508,7 +510,9 @@ mod tests {
         let state = create_test_state();
 
         // Create backup
-        let info = manager.create_backup(&state, None, "manual", false).unwrap();
+        let info = manager
+            .create_backup(&state, None, "manual", false)
+            .unwrap();
 
         // Restore
         let restored = manager.restore_backup(&info.path).unwrap();
@@ -560,7 +564,9 @@ mod tests {
         let manager = BackupManager::with_defaults(temp_dir.path().to_path_buf());
         let state = create_test_state();
 
-        let info = manager.create_backup(&state, None, "manual", false).unwrap();
+        let info = manager
+            .create_backup(&state, None, "manual", false)
+            .unwrap();
         assert!(info.path.exists());
 
         manager.delete_backup(&info.path).unwrap();
@@ -575,7 +581,9 @@ mod tests {
 
         // Create backups
         manager.create_backup(&state, None, "auto", true).unwrap();
-        manager.create_backup(&state, None, "manual", false).unwrap();
+        manager
+            .create_backup(&state, None, "manual", false)
+            .unwrap();
 
         let count = manager.clear_all_backups().unwrap();
         assert_eq!(count, 2);
@@ -629,7 +637,9 @@ mod tests {
         let manager = BackupManager::with_defaults(temp_dir.path().to_path_buf());
         let state = create_test_state();
 
-        let info = manager.create_backup(&state, None, "manual", false).unwrap();
+        let info = manager
+            .create_backup(&state, None, "manual", false)
+            .unwrap();
 
         let json = serde_json::to_string(&info).unwrap();
         assert!(json.contains("\"reason\":\"manual\""));

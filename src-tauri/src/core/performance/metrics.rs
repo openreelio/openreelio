@@ -42,11 +42,11 @@ impl Default for MetricsConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            sample_interval_ms: 1000,      // 1 second
-            max_history_samples: 300,       // 5 minutes at 1s intervals
+            sample_interval_ms: 1000, // 1 second
+            max_history_samples: 300, // 5 minutes at 1s intervals
             frame_timing_enabled: true,
             memory_tracking_enabled: true,
-            report_interval_ms: 0,          // Manual reporting by default
+            report_interval_ms: 0, // Manual reporting by default
         }
     }
 }
@@ -56,8 +56,8 @@ impl MetricsConfig {
     pub fn minimal() -> Self {
         Self {
             enabled: true,
-            sample_interval_ms: 5000,       // 5 seconds
-            max_history_samples: 60,        // 5 minutes at 5s intervals
+            sample_interval_ms: 5000, // 5 seconds
+            max_history_samples: 60,  // 5 minutes at 5s intervals
             frame_timing_enabled: false,
             memory_tracking_enabled: false,
             report_interval_ms: 0,
@@ -68,11 +68,11 @@ impl MetricsConfig {
     pub fn verbose() -> Self {
         Self {
             enabled: true,
-            sample_interval_ms: 100,        // 100ms
-            max_history_samples: 600,       // 1 minute at 100ms
+            sample_interval_ms: 100,  // 100ms
+            max_history_samples: 600, // 1 minute at 100ms
             frame_timing_enabled: true,
             memory_tracking_enabled: true,
-            report_interval_ms: 10000,      // Report every 10s
+            report_interval_ms: 10000, // Report every 10s
         }
     }
 }
@@ -734,19 +734,19 @@ mod tests {
     fn test_memory_metrics_target() {
         // 400MB base (under target)
         let good = MemoryMetrics::new(
-            500 * 1024 * 1024,  // 500MB current
-            600 * 1024 * 1024,  // 600MB peak
-            450 * 1024 * 1024,  // 450MB avg
-            100 * 1024 * 1024,  // 100MB cache
+            500 * 1024 * 1024, // 500MB current
+            600 * 1024 * 1024, // 600MB peak
+            450 * 1024 * 1024, // 450MB avg
+            100 * 1024 * 1024, // 100MB cache
         );
         assert!(good.meets_target, "400MB base should meet 500MB target");
 
         // 600MB base (over target)
         let bad = MemoryMetrics::new(
-            700 * 1024 * 1024,  // 700MB current
-            800 * 1024 * 1024,  // 800MB peak
-            650 * 1024 * 1024,  // 650MB avg
-            100 * 1024 * 1024,  // 100MB cache
+            700 * 1024 * 1024, // 700MB current
+            800 * 1024 * 1024, // 800MB peak
+            650 * 1024 * 1024, // 650MB avg
+            100 * 1024 * 1024, // 100MB cache
         );
         assert!(!bad.meets_target, "600MB base should not meet 500MB target");
     }
@@ -816,7 +816,9 @@ mod tests {
         for _ in 0..5 {
             collector.record_preview_latency(50.0).await;
         }
-        collector.record_memory(400 * 1024 * 1024, 100 * 1024 * 1024).await;
+        collector
+            .record_memory(400 * 1024 * 1024, 100 * 1024 * 1024)
+            .await;
 
         let report = collector.generate_report().await;
         assert!(report.health_score > 0);

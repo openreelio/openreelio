@@ -483,11 +483,15 @@ impl Effect {
                 // anlmdn filter params (non-local means denoise)
                 params.insert("strength".to_string(), ParamValue::Float(0.00001)); // s parameter
                 params.insert("patch_size".to_string(), ParamValue::Float(7.0)); // p parameter (odd 1-99)
-                params.insert("research_size".to_string(), ParamValue::Float(15.0)); // r parameter (odd 1-99)
+                params.insert("research_size".to_string(), ParamValue::Float(15.0));
+                // r parameter (odd 1-99)
             }
             EffectType::ChromaKey => {
                 // chromakey filter params
-                params.insert("key_color".to_string(), ParamValue::String("#00FF00".to_string())); // Green screen default
+                params.insert(
+                    "key_color".to_string(),
+                    ParamValue::String("#00FF00".to_string()),
+                ); // Green screen default
                 params.insert("similarity".to_string(), ParamValue::Float(0.3)); // Color similarity threshold (0.0-1.0)
                 params.insert("blend".to_string(), ParamValue::Float(0.1)); // Blend/feather amount (0.0-1.0)
             }
@@ -511,15 +515,15 @@ impl Effect {
                 // Hue selection
                 params.insert("hue_center".to_string(), ParamValue::Float(120.0)); // Center hue in degrees (0-360, 120=green)
                 params.insert("hue_width".to_string(), ParamValue::Float(30.0)); // Hue range width in degrees
-                // Saturation range
+                                                                                 // Saturation range
                 params.insert("sat_min".to_string(), ParamValue::Float(0.2)); // Minimum saturation (0.0-1.0)
                 params.insert("sat_max".to_string(), ParamValue::Float(1.0)); // Maximum saturation (0.0-1.0)
-                // Luminance range
+                                                                              // Luminance range
                 params.insert("lum_min".to_string(), ParamValue::Float(0.0)); // Minimum luminance (0.0-1.0)
                 params.insert("lum_max".to_string(), ParamValue::Float(1.0)); // Maximum luminance (0.0-1.0)
-                // Softness/feather
+                                                                              // Softness/feather
                 params.insert("softness".to_string(), ParamValue::Float(0.1)); // Edge softness (0.0-1.0)
-                // Adjustment values to apply to qualified region
+                                                                               // Adjustment values to apply to qualified region
                 params.insert("hue_shift".to_string(), ParamValue::Float(0.0)); // Hue rotation (-180 to 180)
                 params.insert("sat_adjust".to_string(), ParamValue::Float(0.0)); // Saturation adjustment (-1.0 to 1.0)
                 params.insert("lum_adjust".to_string(), ParamValue::Float(0.0)); // Luminance adjustment (-1.0 to 1.0)
@@ -530,7 +534,10 @@ impl Effect {
                 params.insert("target_lufs".to_string(), ParamValue::Float(-14.0)); // Target integrated loudness (-70 to -5 LUFS)
                 params.insert("target_lra".to_string(), ParamValue::Float(11.0)); // Target loudness range (1-50 LU)
                 params.insert("target_tp".to_string(), ParamValue::Float(-1.0)); // Target true peak (-9 to 0 dBTP)
-                params.insert("print_format".to_string(), ParamValue::String("summary".to_string())); // Output format
+                params.insert(
+                    "print_format".to_string(),
+                    ParamValue::String("summary".to_string()),
+                ); // Output format
             }
             _ => {}
         }
@@ -657,7 +664,10 @@ impl Effect {
 
     /// Gets a parameter value as String
     pub fn get_string(&self, name: &str) -> Option<String> {
-        self.params.get(name).and_then(|v| v.as_str()).map(|s| s.to_string())
+        self.params
+            .get(name)
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
     }
 
     /// Validates all parameters

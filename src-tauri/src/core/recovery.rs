@@ -309,8 +309,11 @@ impl RecoveryManager {
         };
 
         if let Some(crash) = crash_info {
-            RecoveryState::needs_recovery(crash)
-                .with_recovery_files(recovery_snapshot, recovery_ops_log, project_path)
+            RecoveryState::needs_recovery(crash).with_recovery_files(
+                recovery_snapshot,
+                recovery_ops_log,
+                project_path,
+            )
         } else if recovery_snapshot.is_some() || recovery_ops_log.is_some() {
             // No crash info but recovery files exist
             RecoveryState {

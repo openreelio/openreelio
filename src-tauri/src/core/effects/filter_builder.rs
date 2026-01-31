@@ -693,18 +693,26 @@ impl Effect {
     /// - `patch_size`: Patch size for comparison (odd 1-99, default: 7)
     /// - `research_size`: Research area size (odd 1-99, default: 15)
     fn build_noise_reduction_filter(&self) -> String {
-        let strength = self.get_float("strength").unwrap_or(0.00001).clamp(0.00001, 0.0001);
+        let strength = self
+            .get_float("strength")
+            .unwrap_or(0.00001)
+            .clamp(0.00001, 0.0001);
         let patch_size = (self.get_float("patch_size").unwrap_or(7.0) as i32).clamp(1, 99);
         let research_size = (self.get_float("research_size").unwrap_or(15.0) as i32).clamp(1, 99);
 
         // Ensure patch_size and research_size are odd
-        let patch_size = if patch_size % 2 == 0 { patch_size + 1 } else { patch_size };
-        let research_size = if research_size % 2 == 0 { research_size + 1 } else { research_size };
+        let patch_size = if patch_size % 2 == 0 {
+            patch_size + 1
+        } else {
+            patch_size
+        };
+        let research_size = if research_size % 2 == 0 {
+            research_size + 1
+        } else {
+            research_size
+        };
 
-        format!(
-            "anlmdn=s={}:p={}:r={}",
-            strength, patch_size, research_size
-        )
+        format!("anlmdn=s={}:p={}:r={}", strength, patch_size, research_size)
     }
 
     // -------------------------------------------------------------------------
@@ -868,14 +876,23 @@ impl Effect {
     /// - `invert`: Invert the selection - reserved for future
     fn build_hsl_qualifier_filter(&self) -> String {
         // Get parameters
-        let hue_center = self.get_float("hue_center").unwrap_or(120.0).rem_euclid(360.0);
-        let hue_width = self.get_float("hue_width").unwrap_or(30.0).clamp(1.0, 180.0);
+        let hue_center = self
+            .get_float("hue_center")
+            .unwrap_or(120.0)
+            .rem_euclid(360.0);
+        let hue_width = self
+            .get_float("hue_width")
+            .unwrap_or(30.0)
+            .clamp(1.0, 180.0);
         let sat_min = self.get_float("sat_min").unwrap_or(0.2).clamp(0.0, 1.0);
         let sat_max = self.get_float("sat_max").unwrap_or(1.0).clamp(0.0, 1.0);
         let _lum_min = self.get_float("lum_min").unwrap_or(0.0).clamp(0.0, 1.0);
         let _lum_max = self.get_float("lum_max").unwrap_or(1.0).clamp(0.0, 1.0);
         let softness = self.get_float("softness").unwrap_or(0.1).clamp(0.0, 1.0);
-        let hue_shift = self.get_float("hue_shift").unwrap_or(0.0).clamp(-180.0, 180.0);
+        let hue_shift = self
+            .get_float("hue_shift")
+            .unwrap_or(0.0)
+            .clamp(-180.0, 180.0);
         let sat_adjust = self.get_float("sat_adjust").unwrap_or(0.0).clamp(-1.0, 1.0);
         let lum_adjust = self.get_float("lum_adjust").unwrap_or(0.0).clamp(-1.0, 1.0);
         let invert = self.get_bool("invert").unwrap_or(false);
@@ -912,10 +929,7 @@ impl Effect {
 
         // Build saturation condition (S is 0-1 in hue filter)
         // Reserved for future advanced HSL qualifying with enable expressions
-        let _sat_condition = format!(
-            "if(gte(S,{:.3})*lte(S,{:.3}),1,0)",
-            sat_min, sat_max
-        );
+        let _sat_condition = format!("if(gte(S,{:.3})*lte(S,{:.3}),1,0)", sat_min, sat_max);
 
         // For brightness/luminance, we use the brightness parameter
         // Note: hue filter doesn't have direct luminance access, so we approximate
@@ -973,8 +987,14 @@ impl Effect {
     /// - `target_tp`: Target true peak (-9 to 0 dBTP)
     /// - `print_format`: Output format for stats ("summary", "json", "none")
     fn build_loudness_normalize_filter(&self) -> String {
-        let target_lufs = self.get_float("target_lufs").unwrap_or(-14.0).clamp(-70.0, -5.0);
-        let target_lra = self.get_float("target_lra").unwrap_or(11.0).clamp(1.0, 50.0);
+        let target_lufs = self
+            .get_float("target_lufs")
+            .unwrap_or(-14.0)
+            .clamp(-70.0, -5.0);
+        let target_lra = self
+            .get_float("target_lra")
+            .unwrap_or(11.0)
+            .clamp(1.0, 50.0);
         let target_tp = self.get_float("target_tp").unwrap_or(-1.0).clamp(-9.0, 0.0);
         let print_format = self
             .get_string("print_format")
@@ -2887,7 +2907,10 @@ mod tests {
     fn test_chromakey_is_video_effect() {
         let effect = Effect::new(EffectType::ChromaKey);
         assert!(effect.is_video(), "ChromaKey should be a video effect");
-        assert!(!effect.is_audio(), "ChromaKey should not be an audio effect");
+        assert!(
+            !effect.is_audio(),
+            "ChromaKey should not be an audio effect"
+        );
     }
 
     #[test]
@@ -3213,7 +3236,10 @@ mod tests {
     fn test_blend_mode_is_video_effect() {
         let effect = Effect::new(EffectType::BlendMode);
         assert!(effect.is_video(), "BlendMode should be a video effect");
-        assert!(!effect.is_audio(), "BlendMode should not be an audio effect");
+        assert!(
+            !effect.is_audio(),
+            "BlendMode should not be an audio effect"
+        );
     }
 
     #[test]
@@ -3506,7 +3532,10 @@ mod tests {
     #[test]
     fn test_loudness_normalize_is_audio() {
         let effect = Effect::new(EffectType::LoudnessNormalize);
-        assert!(effect.is_audio(), "LoudnessNormalize should be an audio effect");
+        assert!(
+            effect.is_audio(),
+            "LoudnessNormalize should be an audio effect"
+        );
         assert!(!effect.is_video());
     }
 
