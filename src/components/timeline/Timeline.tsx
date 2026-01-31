@@ -6,6 +6,7 @@
  */
 
 import { useState, useCallback, useRef, useMemo, useLayoutEffect, type MouseEvent } from 'react';
+import type { PlayheadHandle } from './Playhead';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineEngine } from '@/hooks/useTimelineEngine';
@@ -129,6 +130,7 @@ export function Timeline({
   // Refs and Local State
   // ===========================================================================
   const tracksAreaRef = useRef<HTMLDivElement>(null);
+  const playheadRef = useRef<PlayheadHandle>(null);
   const [activeSnapPoint, setActiveSnapPoint] = useState<SnapPoint | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
 
@@ -307,6 +309,10 @@ export function Timeline({
     seek: setPlayhead,
     calculateTimeFromMouseEvent,
     onSnapChange: setActiveSnapPoint,
+    playheadRef,
+    zoom,
+    scrollX,
+    trackHeaderWidth: TRACK_HEADER_WIDTH,
   });
 
   // ===========================================================================
@@ -318,6 +324,7 @@ export function Timeline({
     handlePointerDown: handlePlayheadPointerDown,
   } = usePlayheadDrag({
     containerRef: tracksAreaRef,
+    playheadRef,
     zoom,
     scrollX,
     duration,
@@ -741,6 +748,7 @@ export function Timeline({
         {/* Playhead - spans ruler and tracks, positioned outside overflow-hidden areas */}
         {playheadPixelPosition >= TRACK_HEADER_WIDTH - 20 && (
           <Playhead
+            ref={playheadRef}
             position={playhead}
             zoom={zoom}
             scrollX={scrollX}

@@ -14,6 +14,7 @@
 import { useRef, useCallback, useEffect } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { usePlaybackStore } from '@/stores/playbackStore';
+import { playbackController } from '@/services/PlaybackController';
 import type { Sequence, Asset, Clip } from '@/types';
 import { createLogger } from '@/services/logger';
 
@@ -61,8 +62,27 @@ interface FailedLoadInfo {
 // Constants
 // =============================================================================
 
-const SCHEDULE_AHEAD_TIME = 0.5; // Schedule audio 500ms ahead
-const RESCHEDULE_INTERVAL = 0.25; // Check for rescheduling every 250ms
+/**
+ * Base schedule-ahead time in seconds.
+ * Extended during rapid seeking to catch more clips.
+ */
+const BASE_SCHEDULE_AHEAD_TIME = 0.5;
+
+/**
+ * Maximum schedule-ahead time during rapid seeking.
+ */
+const MAX_SCHEDULE_AHEAD_TIME = 2.0;
+
+/**
+ * Check for rescheduling every 250ms.
+ */
+const RESCHEDULE_INTERVAL = 0.25;
+
+/**
+ * Seek velocity threshold (seconds per second) for extended scheduling.
+ * If seeking faster than this, extend the schedule window.
+ */
+const RAPID_SEEK_VELOCITY_THRESHOLD = 5.0;
 
 /** Maximum retry attempts for failed audio loads */
 const MAX_RETRY_ATTEMPTS = 3;
@@ -331,8 +351,29 @@ export function useAudioPlayback({
     return trackVolume * clipLinearVolume;
   }, []);
 
+  // Track seek velocity for dynamic scheduling window (ref used across effects)
+  const seekVelocityRef = useRef(0);
+
   /**
-   * Schedule audio clips for playback
+   * Calculate dynamic schedule-ahead time based on seek velocity.
+   * Extends window during rapid seeking to catch more clips.
+   */
+  const getScheduleAheadTime = useCallback((): number => {
+    const velocity = seekVelocityRef.current;
+
+    // If seeking rapidly, extend the schedule window
+    if (velocity > RAPID_SEEK_VELOCITY_THRESHOLD) {
+      // Scale window based on velocity, up to max
+      const scaleFactor = Math.min(velocity / RAPID_SEEK_VELOCITY_THRESHOLD, 4);
+      return Math.min(BASE_SCHEDULE_AHEAD_TIME * scaleFactor, MAX_SCHEDULE_AHEAD_TIME);
+    }
+
+    return BASE_SCHEDULE_AHEAD_TIME;
+  }, []);
+
+  /**
+   * Schedule audio clips for playback.
+   * Uses dynamic scheduling window based on seek velocity.
    */
   const scheduleAudioClips = useCallback(async () => {
     if (!audioContextRef.current || !masterGainRef.current || !enabled) return;
@@ -346,6 +387,7 @@ export function useAudioPlayback({
     lastScheduleTimeRef.current = now;
 
     const audioClips = getAudioClips();
+    const scheduleAheadTime = getScheduleAheadTime();
 
     // Find clips that need to be scheduled
     for (const { clip, asset, trackVolume, trackMuted } of audioClips) {
@@ -358,8 +400,8 @@ export function useAudioPlayback({
       // Skip clips that have ended
       if (currentTime >= clipEnd) continue;
 
-      // Skip clips that are too far in the future
-      if (clip.place.timelineInSec > currentTime + SCHEDULE_AHEAD_TIME) continue;
+      // Skip clips that are too far in the future (using dynamic window)
+      if (clip.place.timelineInSec > currentTime + scheduleAheadTime) continue;
 
       // Check if already scheduled
       if (scheduledSourcesRef.current.has(clip.id)) continue;
@@ -421,6 +463,22 @@ export function useAudioPlayback({
         scheduled.source.playbackRate.value = playbackRate * clipData.clip.speed;
       }
     });
+
+    // Report audio time to PlaybackController for A/V sync tracking
+    if (ctx && scheduledSourcesRef.current.size > 0) {
+      // Find the first active clip to calculate audio timeline position
+      const firstActiveClip = audioClips.find(c => {
+        const clipEnd = c.clip.place.timelineInSec +
+          (c.clip.range.sourceOutSec - c.clip.range.sourceInSec) / c.clip.speed;
+        return currentTime >= c.clip.place.timelineInSec && currentTime < clipEnd;
+      });
+
+      if (firstActiveClip) {
+        // Report the current audio time to the controller
+        // This enables drift detection and correction
+        playbackController.reportAudioTime(currentTime);
+      }
+    }
   }, [
     enabled,
     isPlaying,
@@ -431,6 +489,7 @@ export function useAudioPlayback({
     getAudioClips,
     loadAudioBuffer,
     calculateClipVolume,
+    getScheduleAheadTime,
   ]);
 
   // Handle play/pause
@@ -469,15 +528,29 @@ export function useAudioPlayback({
     return () => clearInterval(intervalId);
   }, [enabled, isPlaying, scheduleAudioClips]);
 
-  // Handle seek - stop and reschedule
+  // Handle seek - stop and reschedule with velocity tracking
   const lastSeekTimeRef = useRef(currentTime);
+  const lastSeekTimestampRef = useRef(Date.now());
+  // Note: seekVelocityRef is defined above with getScheduleAheadTime
+
   useEffect(() => {
     if (!enabled) return;
 
-    // Only handle significant seeks (more than 0.1 second difference)
+    const now = Date.now();
     const timeDiff = Math.abs(currentTime - lastSeekTimeRef.current);
+    const timestampDiff = (now - lastSeekTimestampRef.current) / 1000; // seconds
+
+    // Only handle significant seeks (more than 0.1 second difference)
     if (timeDiff < 0.1) return;
+
+    // Calculate seek velocity (timeline seconds per real second)
+    // This helps detect rapid scrubbing vs normal playback
+    if (timestampDiff > 0) {
+      seekVelocityRef.current = timeDiff / timestampDiff;
+    }
+
     lastSeekTimeRef.current = currentTime;
+    lastSeekTimestampRef.current = now;
 
     // Stop current sources on seek
     stopAllSources();
@@ -486,6 +559,14 @@ export function useAudioPlayback({
     if (isPlaying) {
       lastScheduleTimeRef.current = 0; // Allow immediate rescheduling
       void scheduleAudioClips();
+    }
+
+    // Log if rapid seeking detected (for performance monitoring)
+    if (seekVelocityRef.current > RAPID_SEEK_VELOCITY_THRESHOLD) {
+      logger.debug('Rapid seek detected', {
+        velocity: seekVelocityRef.current.toFixed(1),
+        timeDiff: timeDiff.toFixed(2),
+      });
     }
   }, [enabled, currentTime, isPlaying, stopAllSources, scheduleAudioClips]);
 

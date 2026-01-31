@@ -67,3 +67,11 @@ export type { DropIndicatorProps } from './DropIndicator';
 // Transition components
 export { TransitionZone } from './TransitionZone';
 export type { TransitionZoneProps } from './TransitionZone';
+
+// Timecode display
+export { TimecodeDisplay, CurrentTimeDisplay } from './TimecodeDisplay';
+export type {
+  TimecodeDisplayProps,
+  TimecodeFormat,
+  CurrentTimeDisplayProps,
+} from './TimecodeDisplay';

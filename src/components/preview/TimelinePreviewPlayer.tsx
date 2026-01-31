@@ -21,11 +21,9 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { usePlaybackLoop } from '@/hooks/usePlaybackLoop';
 import { useAssetFrameExtractor } from '@/hooks/useFrameExtractor';
-import { frameCache } from '@/services/frameCache';
-import { extractFrame as extractFrameIPC } from '@/utils/ffmpeg';
-import { buildFrameOutputPath } from '@/services/framePaths';
-import { createFrameCacheKey } from '@/constants/preview';
+import { videoFrameBuffer } from '@/services/videoFrameBuffer';
 import { extractTextDataFromClip, renderTextToCanvas } from '@/utils/textRenderer';
+import { SeekBar } from './SeekBar';
 import { isTextClip } from '@/types';
 import type { Clip, Track, Sequence, Asset, BlendMode } from '@/types';
 
@@ -98,8 +96,6 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 }: TimelinePreviewPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const seekBarRef = useRef<HTMLDivElement>(null);
-  const [isDragging, setIsDragging] = useState(false);
   const [isMultiFrameLoading, setIsMultiFrameLoading] = useState(false);
 
   // Ref to track latest render request time (for race condition prevention)
@@ -243,55 +239,30 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
   /**
    * Extract a frame for a specific asset at a given time.
-   * Uses the shared FrameCache for caching.
+   * Uses the VideoFrameBuffer for optimized dual-frame buffering and smart seeking.
+   *
+   * Features:
+   * - Dual-frame buffer (current + next frame prefetch)
+   * - Smart seeking: iterate forward for small jumps
+   * - Automatic deduplication of pending requests
    */
   const extractFrameForAsset = useCallback(
     async (assetId: string, assetPath: string, timeSec: number): Promise<string | null> => {
-      const cacheKey = createFrameCacheKey(assetId, timeSec);
-
-      // Check cache first
-      const cached = frameCache.get(cacheKey);
-      if (cached) {
-        return cached;
+      // Use the advanced VideoFrameBuffer for optimized frame fetching
+      // It handles caching, deduplication, and prefetching internally
+      try {
+        const frameUrl = await videoFrameBuffer.getFrame(assetId, assetPath, timeSec);
+        return frameUrl;
+      } catch (error) {
+        // Log extraction failure with structured data for debugging
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error('[TimelinePreviewPlayer] Frame extraction failed:', {
+          assetId,
+          timeSec: timeSec.toFixed(3),
+          error: errorMessage,
+        });
+        return null;
       }
-
-      // Check if extraction is already pending
-      const pending = pendingExtractions.current.get(cacheKey);
-      if (pending) {
-        return pending;
-      }
-
-      // Start new extraction
-      const extractionPromise = (async () => {
-        try {
-          const safeAssetName = assetId.replace(/[^a-zA-Z0-9]/g, '_').substring(0, 50);
-          const timeMs = Math.floor(timeSec * 1000);
-          const outputPath = await buildFrameOutputPath(safeAssetName, timeMs, 'png');
-
-          await extractFrameIPC({
-            inputPath: assetPath,
-            timeSec,
-            outputPath,
-          });
-
-          // Convert to asset URL
-          const url = convertFileSrc(outputPath);
-
-          // Cache the result (estimate ~100KB per 1080p JPEG frame)
-          const estimatedSizeBytes = 100 * 1024;
-          frameCache.set(cacheKey, url, estimatedSizeBytes);
-
-          return url;
-        } catch (error) {
-          console.error(`Failed to extract frame for ${assetId} at ${timeSec}:`, error);
-          return null;
-        } finally {
-          pendingExtractions.current.delete(cacheKey);
-        }
-      })();
-
-      pendingExtractions.current.set(cacheKey, extractionPromise);
-      return extractionPromise;
     },
     []
   );
@@ -558,56 +529,17 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   // Seeking
   // ===========================================================================
 
-  const calculateSeekTime = useCallback(
-    (clientX: number): number => {
-      const seekBar = seekBarRef.current;
-      if (!seekBar) return currentTime;
-
-      const rect = seekBar.getBoundingClientRect();
-      const x = clientX - rect.left;
-      const ratio = Math.max(0, Math.min(1, x / rect.width));
-      return ratio * duration;
+  /**
+   * Handle seek from the SeekBar component.
+   * Clamps time to valid range and updates store.
+   */
+  const handleSeek = useCallback(
+    (time: number) => {
+      const clampedTime = Math.max(0, Math.min(duration, time));
+      setCurrentTime(clampedTime);
     },
-    [currentTime, duration]
+    [duration, setCurrentTime]
   );
-
-  const handleSeekBarClick = useCallback(
-    (e: React.MouseEvent) => {
-      const time = calculateSeekTime(e.clientX);
-      setCurrentTime(time);
-    },
-    [calculateSeekTime, setCurrentTime]
-  );
-
-  const handleSeekBarMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      setIsDragging(true);
-      const time = calculateSeekTime(e.clientX);
-      setCurrentTime(time);
-    },
-    [calculateSeekTime, setCurrentTime]
-  );
-
-  useEffect(() => {
-    if (!isDragging) return;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      const time = calculateSeekTime(e.clientX);
-      setCurrentTime(time);
-    };
-
-    const handleMouseUp = () => {
-      setIsDragging(false);
-    };
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [isDragging, calculateSeekTime, setCurrentTime]);
 
   // ===========================================================================
   // Cleanup
@@ -725,16 +657,12 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       {showControls && (
         <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-2">
           {/* Seek Bar */}
-          <div
-            ref={seekBarRef}
-            data-testid="preview-seek-bar"
-            className="h-1 bg-gray-700 rounded cursor-pointer mb-2"
-            onClick={handleSeekBarClick}
-            onMouseDown={handleSeekBarMouseDown}
-          >
-            <div
-              className="h-full bg-blue-500 rounded"
-              style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
+          <div className="mb-2">
+            <SeekBar
+              currentTime={currentTime}
+              duration={duration}
+              onSeek={handleSeek}
+              disabled={!activeSequence}
             />
           </div>
 

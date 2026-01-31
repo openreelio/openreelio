@@ -7,9 +7,13 @@
  * - Memory-based eviction when maxMemoryMB exceeded
  * - TTL-based expiration
  * - Hit/miss statistics tracking
+ * - Proper blob URL lifecycle management with error logging
  */
 
 import { FRAME_EXTRACTION } from '@/constants/preview';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('FrameCache');
 
 // =============================================================================
 // Types
@@ -267,17 +271,32 @@ export class FrameCache {
   /**
    * Evict entries if cache limits are exceeded.
    * Uses LRU (Least Recently Used) eviction policy.
+   * Logs warnings when memory pressure is high.
    */
   private evictIfNeeded(): void {
+    let evictionCount = 0;
+
     // Evict by entry count
     while (this.entries.size > this.config.maxEntries) {
       this.evictLeastRecentlyUsed();
+      evictionCount++;
     }
 
     // Evict by memory
     const maxBytes = this.config.maxMemoryMB * 1024 * 1024;
     while (this.getTotalSize() > maxBytes && this.entries.size > 0) {
       this.evictLeastRecentlyUsed();
+      evictionCount++;
+    }
+
+    // Log warning if significant eviction occurred (indicates memory pressure)
+    if (evictionCount > 5) {
+      logger.warn('High frame cache eviction rate', {
+        evicted: evictionCount,
+        remainingEntries: this.entries.size,
+        totalSizeMB: (this.getTotalSize() / 1024 / 1024).toFixed(2),
+        hitRate: (this.getStats().hitRate * 100).toFixed(1) + '%',
+      });
     }
   }
 
@@ -303,13 +322,18 @@ export class FrameCache {
 
   /**
    * Revoke a blob URL to free memory.
+   * Logs warnings on failure to help debug potential memory leaks.
    */
   private revokeIfBlobUrl(url: string): void {
     if (url.startsWith('blob:')) {
       try {
         URL.revokeObjectURL(url);
-      } catch {
-        // Ignore errors (URL may already be revoked)
+      } catch (error) {
+        // Log warning - failed revocation can indicate memory leak risk
+        logger.warn('Failed to revoke blob URL', {
+          url: url.substring(0, 50) + '...',
+          error: error instanceof Error ? error.message : String(error),
+        });
       }
     }
   }

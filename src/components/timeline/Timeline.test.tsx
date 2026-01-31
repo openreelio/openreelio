@@ -240,7 +240,8 @@ describe('Timeline', () => {
 
       const playhead = screen.getByTestId('playhead');
       // At 5 seconds with zoom 100px/sec + trackHeaderWidth(192) = 692px
-      expect(playhead).toHaveStyle({ left: '692px' });
+      // Playhead now uses CSS transform for GPU-accelerated positioning
+      expect(playhead.style.transform).toBe('translateX(692px)');
     });
 
     // TODO: This test requires TimelineEngine to be properly synced with playbackStore.

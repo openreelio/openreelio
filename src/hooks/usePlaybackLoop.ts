@@ -12,6 +12,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { PLAYBACK } from '@/constants/preview';
+import { playbackMonitor } from '@/services/playbackMonitor';
 
 // =============================================================================
 // Types
@@ -192,6 +193,8 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       if (allowFrameDrop && framesElapsed > 1) {
         const droppedCount = framesElapsed - 1;
         setDroppedFrames((prev) => prev + droppedCount);
+        // Report to performance monitor
+        playbackMonitor.recordDroppedFrames(droppedCount);
       }
 
       // Calculate actual time delta (cap to prevent huge jumps)
@@ -241,7 +244,14 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       updateFps(timestamp);
 
       // Call frame callback (using ref for stability)
+      // Track render time for performance monitoring
+      const frameStartTime = performance.now();
       onFrameRef.current(newTime);
+      const frameEndTime = performance.now();
+      const renderTimeMs = frameEndTime - frameStartTime;
+
+      // Report frame render to performance monitor
+      playbackMonitor.recordFrame(renderTimeMs, false);
 
       // Schedule next frame
       rafIdRef.current = requestAnimationFrame(playbackLoop);
@@ -270,6 +280,9 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
     frameTimesRef.current = [];
     setIsActive(true);
 
+    // Start performance monitoring
+    playbackMonitor.start();
+
     rafIdRef.current = requestAnimationFrame(playbackLoop);
   }, [playbackLoop]);
 
@@ -282,6 +295,11 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       rafIdRef.current = null;
     }
     setIsActive(false);
+
+    // Stop performance monitoring and log summary
+    if (playbackMonitor.active) {
+      playbackMonitor.stop();
+    }
   }, []);
 
   // Respond to play/pause changes

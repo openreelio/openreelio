@@ -426,10 +426,10 @@ describe('TimelinePreviewPlayer', () => {
     it('should seek when seek bar is clicked', async () => {
       render(<TimelinePreviewPlayer showControls />);
 
-      const seekBar = screen.getByTestId('preview-seek-bar');
+      const seekBar = screen.getByTestId('seek-bar');
 
       // Mock getBoundingClientRect
-      const mockRect = { left: 0, width: 100 } as DOMRect;
+      const mockRect = { left: 0, width: 100, top: 0, height: 14, right: 100, bottom: 14, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
       vi.spyOn(seekBar, 'getBoundingClientRect').mockReturnValue(mockRect);
 
       // Click at 50% of the seek bar - use async act() to wait for all state updates
@@ -446,23 +446,23 @@ describe('TimelinePreviewPlayer', () => {
     it('should support drag seeking', async () => {
       render(<TimelinePreviewPlayer showControls />);
 
-      const seekBar = screen.getByTestId('preview-seek-bar');
-      const mockRect = { left: 0, width: 100 } as DOMRect;
+      const seekBar = screen.getByTestId('seek-bar');
+      const mockRect = { left: 0, width: 100, top: 0, height: 14, right: 100, bottom: 14, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
       vi.spyOn(seekBar, 'getBoundingClientRect').mockReturnValue(mockRect);
 
-      // Wrap all drag events in async act() to handle async state updates
+      // SeekBar uses pointer events for dragging
       await act(async () => {
-        fireEvent.mouseDown(seekBar, { clientX: 25 });
+        fireEvent.pointerDown(seekBar, { clientX: 25, pointerId: 1 });
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
 
       await act(async () => {
-        fireEvent.mouseMove(window, { clientX: 75 });
+        fireEvent.pointerMove(seekBar, { clientX: 75, pointerId: 1 });
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
 
       await act(async () => {
-        fireEvent.mouseUp(window);
+        fireEvent.pointerUp(seekBar, { pointerId: 1 });
         await new Promise((resolve) => setTimeout(resolve, 0));
       });
 

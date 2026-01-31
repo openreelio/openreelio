@@ -73,17 +73,31 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
   const { setCurrentTime, setIsPlaying, setDuration } = playbackStore;
 
   /**
-   * Track engine updates using timestamp instead of boolean flag.
-   * This prevents race conditions where async state updates could
-   * cause the flag to be reset before the update completes.
+   * Track the last time value that the engine explicitly set.
+   * This allows us to detect external seeks by comparing time values,
+   * not just timestamps, which fixes the issue where continuous playback
+   * blocks external seek updates.
    */
-  const lastEngineUpdateRef = useRef<number>(0);
+  const lastEngineTimeRef = useRef<number>(0);
 
   /**
-   * Grace period for ignoring store updates that originated from the engine.
+   * Track engine updates using timestamp for play/pause state only.
+   */
+  const lastEngineStateUpdateRef = useRef<number>(0);
+
+  /**
+   * Grace period for ignoring store updates for play/pause state.
    * 50ms is enough for React's batching to complete.
    */
-  const ENGINE_UPDATE_GRACE_MS = 50;
+  const STATE_UPDATE_GRACE_MS = 50;
+
+  /**
+   * Threshold for detecting external seeks (vs normal playback progression).
+   * If the time difference between store and engine is larger than this,
+   * it's likely an external seek that should be synced.
+   * At 30fps with 2x playback, frames are ~67ms apart, so 100ms is safe.
+   */
+  const SEEK_DETECTION_THRESHOLD_SEC = 0.1;
 
   // Create engine instance (stable reference)
   const engineRef = useRef<TimelineEngine | null>(null);
@@ -108,11 +122,10 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
     const getState = typeof storeApi.getState === 'function' ? storeApi.getState : null;
 
     /**
-     * Mark that an engine update is in progress.
-     * Uses timestamp to handle async state updates properly.
+     * Mark that an engine state update (play/pause) is in progress.
      */
-    const markEngineUpdate = () => {
-      lastEngineUpdateRef.current = performance.now();
+    const markEngineStateUpdate = () => {
+      lastEngineStateUpdateRef.current = performance.now();
     };
 
     engine.syncWithStore({
@@ -131,7 +144,8 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
             return;
           }
         }
-        markEngineUpdate();
+        // Track the time value that engine set (for external seek detection)
+        lastEngineTimeRef.current = time;
         setCurrentTime(time);
       },
       setIsPlaying: (playing) => {
@@ -141,7 +155,7 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
             return;
           }
         }
-        markEngineUpdate();
+        markEngineStateUpdate();
         setIsPlaying(playing);
       },
       setDuration: (nextDuration) => {
@@ -159,7 +173,7 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
             return;
           }
         }
-        markEngineUpdate();
+        markEngineStateUpdate();
         setDuration(nextDuration);
       },
     });
@@ -184,35 +198,47 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
     }
 
     const unsubscribe = storeApi.subscribe((state: unknown) => {
-      // Check if this update originated from the engine using timestamp
-      const timeSinceEngineUpdate = performance.now() - lastEngineUpdateRef.current;
-      if (timeSinceEngineUpdate < ENGINE_UPDATE_GRACE_MS) {
-        // This update likely originated from the engine, skip to prevent loops
-        return;
-      }
-
       if (!state || typeof state !== 'object') return;
 
       const next = state as { isPlaying?: boolean; currentTime?: number; playbackRate?: number; loop?: boolean };
 
-      // Sync isPlaying state
-      if (typeof next.isPlaying === 'boolean' && next.isPlaying !== engine.isPlaying) {
+      // Check if state updates (play/pause) originated from the engine
+      const timeSinceStateUpdate = performance.now() - lastEngineStateUpdateRef.current;
+      const isEngineStateUpdate = timeSinceStateUpdate < STATE_UPDATE_GRACE_MS;
+
+      // Sync isPlaying state (use timestamp-based check for play/pause)
+      if (!isEngineStateUpdate && typeof next.isPlaying === 'boolean' && next.isPlaying !== engine.isPlaying) {
         if (next.isPlaying) engine.play();
         else engine.pause();
       }
 
-      // Sync currentTime with proper epsilon comparison
+      // Sync currentTime: Use VALUE-BASED detection for external seeks
+      // This fixes the issue where continuous playback blocked external seek updates
       if (
         typeof next.currentTime === 'number' &&
         Number.isFinite(next.currentTime) &&
-        Number.isFinite(engine.currentTime) &&
-        !isApproximatelyEqual(next.currentTime, engine.currentTime, PRECISION.TIME_EPSILON)
+        Number.isFinite(engine.currentTime)
       ) {
-        engine.seek(next.currentTime);
+        // Check if this is an external seek (not from normal playback progression)
+        // Compare store's currentTime with the last time the ENGINE set
+        const timeDiffFromLastEngineSet = Math.abs(next.currentTime - lastEngineTimeRef.current);
+        const timeDiffFromEngineNow = Math.abs(next.currentTime - engine.currentTime);
+
+        // If the store's time differs significantly from what engine last set,
+        // AND differs from engine's current time, it's likely an external seek
+        const isExternalSeek = timeDiffFromLastEngineSet > SEEK_DETECTION_THRESHOLD_SEC &&
+                               timeDiffFromEngineNow > PRECISION.TIME_EPSILON;
+
+        if (isExternalSeek) {
+          // Update our tracking ref to prevent echo
+          lastEngineTimeRef.current = next.currentTime;
+          engine.seek(next.currentTime);
+        }
       }
 
-      // Sync playbackRate with validation
+      // Sync playbackRate with validation (use timestamp check)
       if (
+        !isEngineStateUpdate &&
         typeof next.playbackRate === 'number' &&
         Number.isFinite(next.playbackRate) &&
         next.playbackRate > 0 &&
@@ -221,8 +247,8 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
         engine.setPlaybackRate(next.playbackRate);
       }
 
-      // Sync loop state
-      if (typeof next.loop === 'boolean' && next.loop !== engine.loop) {
+      // Sync loop state (use timestamp check)
+      if (!isEngineStateUpdate && typeof next.loop === 'boolean' && next.loop !== engine.loop) {
         engine.setLoop(next.loop);
       }
     });

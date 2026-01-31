@@ -23,6 +23,16 @@ const createMockMouseEvent = (options: Partial<MouseEventInit> = {}): MouseEvent
   ...options,
 });
 
+/**
+ * Helper to check playhead transform position.
+ * The playhead uses CSS transform for GPU-accelerated positioning.
+ */
+const expectPlayheadPosition = (element: HTMLElement, expectedPixels: number) => {
+  const transform = element.style.transform;
+  const expectedTransform = `translateX(${expectedPixels}px)`;
+  expect(transform).toBe(expectedTransform);
+};
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -68,66 +78,66 @@ describe('Playhead', () => {
     it('should position playhead at track header width when position is 0', () => {
       render(<Playhead position={0} zoom={100} trackHeaderWidth={0} />);
       const playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '0px' });
+      expectPlayheadPosition(playhead, 0);
     });
 
     it('should position playhead based on time and zoom', () => {
       // With trackHeaderWidth=0: 5 * 100 = 500px
       render(<Playhead position={5} zoom={100} trackHeaderWidth={0} />);
       const playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '500px' });
+      expectPlayheadPosition(playhead, 500);
     });
 
     it('should include trackHeaderWidth in position calculation', () => {
       // With default trackHeaderWidth=192: 5 * 100 + 192 = 692px
       render(<Playhead position={5} zoom={100} />);
       const playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '692px' });
+      expectPlayheadPosition(playhead, 692);
     });
 
     it('should account for scrollX in position', () => {
       // With trackHeaderWidth=192, scrollX=100: 5 * 100 + 192 - 100 = 592px
       render(<Playhead position={5} zoom={100} scrollX={100} />);
       const playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '592px' });
+      expectPlayheadPosition(playhead, 592);
     });
 
     it('should update position when position prop changes', () => {
       const { rerender } = render(<Playhead position={5} zoom={100} trackHeaderWidth={0} />);
       let playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '500px' });
+      expectPlayheadPosition(playhead, 500);
 
       rerender(<Playhead position={10} zoom={100} trackHeaderWidth={0} />);
       playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '1000px' });
+      expectPlayheadPosition(playhead, 1000);
     });
 
     it('should update position when zoom changes', () => {
       const { rerender } = render(<Playhead position={5} zoom={100} trackHeaderWidth={0} />);
       let playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '500px' });
+      expectPlayheadPosition(playhead, 500);
 
       rerender(<Playhead position={5} zoom={200} trackHeaderWidth={0} />);
       playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '1000px' });
+      expectPlayheadPosition(playhead, 1000);
     });
 
     it('should handle fractional positions', () => {
       render(<Playhead position={2.5} zoom={100} trackHeaderWidth={0} />);
       const playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '250px' });
+      expectPlayheadPosition(playhead, 250);
     });
 
     it('should handle high zoom levels', () => {
       render(<Playhead position={1} zoom={500} trackHeaderWidth={0} />);
       const playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '500px' });
+      expectPlayheadPosition(playhead, 500);
     });
 
     it('should handle low zoom levels', () => {
       render(<Playhead position={10} zoom={10} trackHeaderWidth={0} />);
       const playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '100px' });
+      expectPlayheadPosition(playhead, 100);
     });
   });
 
@@ -345,7 +355,8 @@ describe('Playhead', () => {
       rerender(<Playhead position={5} zoom={100} onDragStart={onDragStart} trackHeaderWidth={0} />);
 
       // Component should still be rendered correctly
-      expect(screen.getByTestId('playhead')).toHaveStyle({ left: '500px' });
+      const playhead = screen.getByTestId('playhead');
+      expectPlayheadPosition(playhead, 500);
     });
   });
 
@@ -357,19 +368,24 @@ describe('Playhead', () => {
     it('should handle zero zoom gracefully', () => {
       render(<Playhead position={5} zoom={0} trackHeaderWidth={0} />);
       const playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '0px' });
+      // 5 * 0 = 0px
+      expectPlayheadPosition(playhead, 0);
     });
 
     it('should handle very large position values', () => {
       render(<Playhead position={3600} zoom={100} trackHeaderWidth={0} />);
       const playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '360000px' });
+      // 3600 * 100 = 360000px
+      expectPlayheadPosition(playhead, 360000);
     });
 
     it('should handle very small position values', () => {
       render(<Playhead position={0.001} zoom={100} trackHeaderWidth={0} />);
       const playhead = screen.getByTestId('playhead');
-      expect(playhead).toHaveStyle({ left: '0.1px' });
+      // 0.001 * 100 = 0.1px
+      // Note: The actual transform may differ slightly due to floating point
+      const transform = playhead.style.transform;
+      expect(transform).toMatch(/translateX\(0\.1(000+)?px\)/);
     });
 
     it('should handle simultaneous isPlaying and isDragging', () => {

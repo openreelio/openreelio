@@ -6,14 +6,38 @@
  * - A vertical line indicating the current time position (spanning ruler and tracks)
  * - A draggable head marker at the top for direct manipulation
  *
+ * Performance optimizations:
+ * - Uses CSS transform instead of left for GPU acceleration
+ * - Exposes ref for direct DOM manipulation during drag (bypasses React)
+ * - Uses will-change hint during active states
+ *
  * @module components/timeline/Playhead
  */
 
-import { memo, useCallback, type MouseEvent, type PointerEvent } from 'react';
+import {
+  memo,
+  useCallback,
+  useRef,
+  useImperativeHandle,
+  forwardRef,
+  type MouseEvent,
+  type PointerEvent,
+} from 'react';
 
 // =============================================================================
 // Types
 // =============================================================================
+
+/**
+ * Imperative handle for direct DOM manipulation of playhead position.
+ * This allows parent components to update position without React re-renders.
+ */
+export interface PlayheadHandle {
+  /** Directly set the pixel position (bypasses React state for smooth dragging) */
+  setPixelPosition: (pixelX: number) => void;
+  /** Get the current DOM element */
+  getElement: () => HTMLDivElement | null;
+}
 
 /**
  * Props for the Playhead component.
@@ -69,20 +93,45 @@ const RULER_HEIGHT = 24;
  * - Touch-friendly hit area
  * - Visual feedback during drag operations
  * - Animation during playback
+ * - GPU-accelerated positioning via CSS transform
+ * - Direct DOM manipulation support for smooth dragging
  * - Memoized for performance
  */
-function PlayheadComponent({
-  position,
-  zoom,
-  scrollX = 0,
-  trackHeaderWidth = DEFAULT_TRACK_HEADER_WIDTH,
-  isPlaying = false,
-  isDragging = false,
-  onDragStart,
-  onPointerDown,
-}: PlayheadProps) {
+const PlayheadComponent = forwardRef<PlayheadHandle, PlayheadProps>(function PlayheadComponent(
+  {
+    position,
+    zoom,
+    scrollX = 0,
+    trackHeaderWidth = DEFAULT_TRACK_HEADER_WIDTH,
+    isPlaying = false,
+    isDragging = false,
+    onDragStart,
+    onPointerDown,
+  },
+  ref
+) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
   // Calculate pixel position: (time * zoom) + trackHeader - scroll
   const pixelPosition = position * zoom + trackHeaderWidth - scrollX;
+
+  /**
+   * Expose imperative handle for direct DOM manipulation.
+   * This allows usePlayheadDrag to update position without React re-renders.
+   */
+  useImperativeHandle(
+    ref,
+    () => ({
+      setPixelPosition: (pixelX: number) => {
+        if (containerRef.current) {
+          // Use transform for GPU-accelerated, jank-free updates
+          containerRef.current.style.transform = `translateX(${pixelX}px)`;
+        }
+      },
+      getElement: () => containerRef.current,
+    }),
+    []
+  );
 
   /**
    * Handle mouse down on the playhead head.
@@ -112,16 +161,30 @@ function PlayheadComponent({
   const isInteractive = Boolean(onDragStart || onPointerDown);
   const headCursor = isDragging ? 'grabbing' : isInteractive ? 'grab' : 'default';
 
+  // Track the last known pixel position for smooth drag transitions
+  // This prevents a visual flash when switching between React state and direct DOM manipulation
+  const lastPixelPositionRef = useRef<number>(pixelPosition);
+
+  // Update the ref when not dragging (React state controls position)
+  if (!isDragging) {
+    lastPixelPositionRef.current = pixelPosition;
+  }
+
   return (
     <div
+      ref={containerRef}
       data-testid="playhead"
       data-playing={isPlaying ? 'true' : 'false'}
       data-dragging={isDragging ? 'true' : 'false'}
-      className="absolute top-0 h-full z-30 pointer-events-none"
+      className="absolute top-0 left-0 h-full z-30 pointer-events-none"
       style={{
-        left: `${pixelPosition}px`,
         width: `${LINE_WIDTH}px`,
-        willChange: isPlaying || isDragging ? 'left' : undefined,
+        // Use transform for GPU-accelerated positioning
+        // When not dragging, position is controlled by React state
+        // When dragging, position is controlled directly via ref.setPixelPosition()
+        // Use lastPixelPositionRef during drag to prevent visual flash before DOM takes over
+        transform: `translateX(${isDragging ? lastPixelPositionRef.current : pixelPosition}px)`,
+        willChange: isPlaying || isDragging ? 'transform' : undefined,
       }}
     >
       {/* Vertical line - extends full height (ruler + tracks) */}
@@ -177,10 +240,10 @@ function PlayheadComponent({
       </div>
     </div>
   );
-}
+});
 
 /**
- * Memoized Playhead component.
+ * Memoized Playhead component with forwardRef support.
  */
 export const Playhead = memo(PlayheadComponent);
 
