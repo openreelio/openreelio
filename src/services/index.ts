@@ -36,3 +36,33 @@ export {
   type EffectNodeConfig,
   type AudioEffectNode,
 } from './audioEffectFactory';
+
+export {
+  PlaybackController,
+  playbackController,
+  usePlaybackController,
+  type SyncState,
+  type DragOperation,
+  type PlaybackMode,
+  type PlaybackEvent,
+  type PlaybackEventListener,
+  type PlaybackControllerConfig,
+} from './PlaybackController';
+
+export {
+  SnapPointManager,
+  snapPointManager,
+  useSnapPointManager,
+  type SnapPointSource,
+  type SnapPointManagerConfig,
+  type SnapResult,
+} from './SnapPointManager';
+
+export {
+  PlaybackMonitor,
+  playbackMonitor,
+  usePlaybackMonitor,
+  type DriftEvent,
+  type FrameStats,
+  type SessionStats,
+} from './playbackMonitor';
