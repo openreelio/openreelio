@@ -1,0 +1,42 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+
+reviews:
+  profile: chill
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: true
+  request_changes_workflow: false
+
+  path_filters:
+    - "!**/package-lock.json"
+    - "!**/Cargo.lock"
+    - "!**/dist/**"
+    - "!**/target/**"
+    - "!**/node_modules/**"
+    - "!**/*.tsbuildinfo"
+    - "!**/bindings.ts"
+
+  path_instructions:
+    - path: "**/*.rs"
+      instructions: "Ensure proper error handling. Avoid unwrap() in production code."
+
+    - path: "**/*.tsx"
+      instructions: "Check for React best practices and accessibility."
+
+    - path: "**/*.test.{ts,tsx}"
+      instructions: "Verify adequate test coverage and edge cases."
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - main
+    ignore_title_keywords:
+      - "WIP"
+      - "DO NOT MERGE"
+
+chat:
+  auto_reply: true
