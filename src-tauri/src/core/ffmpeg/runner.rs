@@ -761,32 +761,42 @@ impl FFmpegRunner {
         .stderr(Stdio::piped());
 
         let mut child = cmd.spawn().map_err(FFmpegError::ProcessError)?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            FFmpegError::ExecutionFailed("Failed to capture FFmpeg stderr".to_string())
-        })?;
+        let stderr = child.stderr.take();
 
-        let mut collector = WaveformLogCollector::new(total_samples);
-        let mut tail = LineTail::new(80);
+        // Spawn stderr reader task to prevent pipe deadlock.
+        // If FFmpeg produces stderr faster than we can consume, the pipe fills up
+        // and FFmpeg blocks. By reading in a separate task, we drain the pipe
+        // concurrently with waiting for the child process.
+        let expected = total_samples;
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel::<(Vec<f32>, String)>();
 
-        {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let reader = BufReader::new(stderr);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tail.push(&line);
-                collector.ingest(&line);
+        let stderr_task = tokio::spawn(async move {
+            let mut collector = WaveformLogCollector::new(expected);
+            let mut tail = LineTail::new(80);
+
+            if let Some(stderr) = stderr {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let reader = BufReader::new(stderr);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    tail.push(&line);
+                    collector.ingest(&line);
+                }
             }
-        }
+
+            let _ = result_tx.send((collector.finalize(), tail.joined()));
+        });
 
         let status = child.wait().await.map_err(FFmpegError::ProcessError)?;
+        let (peaks, tail) = result_rx.await.unwrap_or_else(|_| (vec![], String::new()));
+        let _ = stderr_task.await;
+
         if !status.success() {
             return Err(FFmpegError::ExecutionFailed(format!(
                 "Waveform analysis failed. Stderr tail:\n{}",
-                tail.joined()
+                tail
             )));
         }
-
-        let peaks = collector.finalize();
 
         // Normalize peaks to 0-1 range
         let max_peak = peaks.iter().cloned().fold(0.0f32, f32::max);

@@ -12,10 +12,10 @@ use tauri::{Manager, State};
 use crate::core::{
     assets::{Asset, ProxyStatus},
     commands::{
-        AddEffectCommand, CreateSequenceCommand, ImportAssetCommand, InsertClipCommand,
-        MoveClipCommand, RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand,
-        SetClipTransformCommand, SplitClipCommand, TrimClipCommand, UpdateAssetCommand,
-        UpdateEffectCommand,
+        AddEffectCommand, AddTextClipCommand, CreateSequenceCommand, ImportAssetCommand,
+        InsertClipCommand, MoveClipCommand, RemoveAssetCommand, RemoveClipCommand,
+        RemoveEffectCommand, RemoveTextClipCommand, SetClipTransformCommand, SplitClipCommand,
+        TrimClipCommand, UpdateAssetCommand, UpdateEffectCommand, UpdateTextCommand,
     },
     ffmpeg::FFmpegProgress,
     fs::{
@@ -1291,6 +1291,25 @@ pub async fn execute_command(
             }
             Box::new(cmd)
         }
+        // Text clip commands
+        CommandPayload::AddTextClip(p) => Box::new(AddTextClipCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            p.timeline_in,
+            p.duration,
+            p.text_data,
+        )),
+        CommandPayload::UpdateTextClip(p) => Box::new(UpdateTextCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            &p.clip_id,
+            p.text_data,
+        )),
+        CommandPayload::RemoveTextClip(p) => Box::new(RemoveTextClipCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            &p.clip_id,
+        )),
     };
 
     let result = project
@@ -1629,8 +1648,8 @@ pub async fn start_render(
     };
     use tauri::Emitter;
 
-    // Get sequence/assets + project path from project state
-    let (sequence, assets, project_path) = {
+    // Get sequence/assets/effects + project path from project state
+    let (sequence, assets, effects, project_path) = {
         let guard = state.project.lock().await;
 
         let project = guard
@@ -1651,7 +1670,14 @@ pub async fn start_render(
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
-        (sequence, assets, project.path.clone())
+        let effects: std::collections::HashMap<String, crate::core::effects::Effect> = project
+            .state
+            .effects
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        (sequence, assets, effects, project.path.clone())
     };
 
     // Validate output path within allowed roots (defense-in-depth for compromised renderer).
@@ -1691,7 +1717,7 @@ pub async fn start_render(
     let settings = ExportSettings::from_preset(export_preset, validated_output_path.clone());
 
     // Validate export settings before starting
-    let validation = validate_export_settings(&sequence, &assets, &settings);
+    let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
     if !validation.is_valid {
         let error_msg = validation.errors.join("; ");
         return Err(format!("Export validation failed: {}", error_msg));
@@ -2141,6 +2167,25 @@ pub async fn apply_edit_script(
                 }
                 Box::new(cmd)
             }
+            // Text clip commands
+            CommandPayload::AddTextClip(p) => Box::new(AddTextClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.timeline_in,
+                p.duration,
+                p.text_data,
+            )),
+            CommandPayload::UpdateTextClip(p) => Box::new(UpdateTextCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.text_data,
+            )),
+            CommandPayload::RemoveTextClip(p) => Box::new(RemoveTextClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+            )),
         };
 
         match project.executor.execute(command, &mut project.state) {

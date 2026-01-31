@@ -1,4 +1,5 @@
 use crate::core::effects::{EffectType, ParamValue};
+use crate::core::text::TextClipData;
 use crate::core::timeline::Transform;
 use crate::core::{AssetId, ClipId, EffectId, SequenceId, TimeSec, TrackId};
 use serde::{Deserialize, Serialize};
@@ -157,6 +158,103 @@ pub struct UpdateEffectPayload {
 }
 
 // =============================================================================
+// Text Clip Payloads
+// =============================================================================
+
+/// Payload for adding a text clip to a track.
+///
+/// Creates a new clip with a virtual text asset and applies a TextOverlay
+/// effect containing the text styling data.
+///
+/// # Example
+///
+/// ```json
+/// {
+///     "sequenceId": "seq_001",
+///     "trackId": "video_001",
+///     "timelineIn": 5.0,
+///     "duration": 3.0,
+///     "textData": {
+///         "content": "Hello World",
+///         "style": {
+///             "fontFamily": "Arial",
+///             "fontSize": 48,
+///             "color": "#FFFFFF"
+///         }
+///     }
+/// }
+/// ```
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AddTextClipPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    /// Timeline position to insert the text clip at (seconds)
+    #[serde(alias = "timelineStart")]
+    pub timeline_in: TimeSec,
+    /// Duration of the text clip (seconds)
+    pub duration: TimeSec,
+    /// Text content and styling data
+    pub text_data: TextClipData,
+}
+
+/// Payload for updating a text clip's content and styling.
+///
+/// Updates the TextOverlay effect parameters associated with a text clip.
+/// Only text clips (clips with virtual text asset IDs) can be updated.
+///
+/// # Example
+///
+/// ```json
+/// {
+///     "sequenceId": "seq_001",
+///     "trackId": "video_001",
+///     "clipId": "clip_001",
+///     "textData": {
+///         "content": "Updated Text",
+///         "style": {
+///             "fontFamily": "Helvetica",
+///             "fontSize": 64,
+///             "color": "#FF0000",
+///             "bold": true
+///         }
+///     }
+/// }
+/// ```
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateTextClipPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    /// New text content and styling data
+    pub text_data: TextClipData,
+}
+
+/// Payload for removing a text clip from a track.
+///
+/// Removes both the clip and its associated TextOverlay effect.
+/// Only text clips (clips with virtual text asset IDs) can be removed
+/// using this command.
+///
+/// # Example
+///
+/// ```json
+/// {
+///     "sequenceId": "seq_001",
+///     "trackId": "video_001",
+///     "clipId": "clip_001"
+/// }
+/// ```
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveTextClipPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+}
+
+// =============================================================================
 // Tagged Union
 // =============================================================================
 
@@ -206,6 +304,16 @@ pub enum CommandPayload {
 
     #[serde(alias = "updateEffect", alias = "UpdateEffect")]
     UpdateEffect(UpdateEffectPayload),
+
+    // Text clip commands
+    #[serde(alias = "addTextClip", alias = "AddTextClip")]
+    AddTextClip(AddTextClipPayload),
+
+    #[serde(alias = "updateTextClip", alias = "UpdateTextClip")]
+    UpdateTextClip(UpdateTextClipPayload),
+
+    #[serde(alias = "removeTextClip", alias = "RemoveTextClip")]
+    RemoveTextClip(RemoveTextClipPayload),
 }
 
 impl CommandPayload {
@@ -356,5 +464,212 @@ mod tests {
         assert!(parsed
             .unwrap_err()
             .contains("commandType contains control characters"));
+    }
+
+    // =========================================================================
+    // Text Clip Payload Tests
+    // =========================================================================
+
+    #[test]
+    fn parse_add_text_clip_payload() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "timelineIn": 5.0,
+            "duration": 3.0,
+            "textData": {
+                "content": "Hello World",
+                "style": {
+                    "fontFamily": "Arial",
+                    "fontSize": 48,
+                    "color": "#FFFFFF"
+                },
+                "position": {
+                    "x": 0.5,
+                    "y": 0.5
+                }
+            }
+        });
+
+        let parsed = CommandPayload::parse("AddTextClip".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected AddTextClip to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::AddTextClip(p)) = parsed {
+            assert_eq!(p.sequence_id, "seq_001");
+            assert_eq!(p.track_id, "track_001");
+            assert!((p.timeline_in - 5.0).abs() < 0.001);
+            assert!((p.duration - 3.0).abs() < 0.001);
+            assert_eq!(p.text_data.content, "Hello World");
+        }
+    }
+
+    #[test]
+    fn parse_add_text_clip_with_full_styling() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "timelineIn": 0.0,
+            "duration": 5.0,
+            "textData": {
+                "content": "Styled Title",
+                "style": {
+                    "fontFamily": "Helvetica",
+                    "fontSize": 72,
+                    "color": "#FF0000",
+                    "backgroundColor": "#000000",
+                    "backgroundPadding": 10,
+                    "alignment": "center",
+                    "bold": true,
+                    "italic": false,
+                    "underline": false,
+                    "lineHeight": 1.2,
+                    "letterSpacing": 0
+                },
+                "position": {
+                    "x": 0.5,
+                    "y": 0.8
+                },
+                "shadow": {
+                    "color": "#000000",
+                    "offsetX": 3,
+                    "offsetY": 3,
+                    "blur": 2
+                },
+                "outline": {
+                    "color": "#FFFFFF",
+                    "width": 2
+                },
+                "rotation": 0.0,
+                "opacity": 1.0
+            }
+        });
+
+        let parsed = CommandPayload::parse("AddTextClip".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected AddTextClip with full styling to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::AddTextClip(p)) = parsed {
+            assert_eq!(p.text_data.style.font_family, "Helvetica");
+            assert_eq!(p.text_data.style.font_size, 72);
+            assert!(p.text_data.style.bold);
+            assert!(p.text_data.shadow.is_some());
+            assert!(p.text_data.outline.is_some());
+        }
+    }
+
+    #[test]
+    fn parse_update_text_clip_payload() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "clipId": "clip_001",
+            "textData": {
+                "content": "Updated Text",
+                "style": {
+                    "fontFamily": "Verdana",
+                    "fontSize": 64,
+                    "color": "#00FF00"
+                },
+                "position": {
+                    "x": 0.5,
+                    "y": 0.5
+                }
+            }
+        });
+
+        let parsed = CommandPayload::parse("UpdateTextClip".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected UpdateTextClip to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::UpdateTextClip(p)) = parsed {
+            assert_eq!(p.sequence_id, "seq_001");
+            assert_eq!(p.clip_id, "clip_001");
+            assert_eq!(p.text_data.content, "Updated Text");
+        }
+    }
+
+    #[test]
+    fn parse_remove_text_clip_payload() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "clipId": "clip_001"
+        });
+
+        let parsed = CommandPayload::parse("RemoveTextClip".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected RemoveTextClip to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::RemoveTextClip(p)) = parsed {
+            assert_eq!(p.sequence_id, "seq_001");
+            assert_eq!(p.track_id, "track_001");
+            assert_eq!(p.clip_id, "clip_001");
+        }
+    }
+
+    #[test]
+    fn parse_add_text_clip_rejects_unknown_fields() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "timelineIn": 0.0,
+            "duration": 5.0,
+            "textData": {
+                "content": "Test",
+                "style": {
+                    "fontFamily": "Arial",
+                    "fontSize": 48,
+                    "color": "#FFFFFF"
+                },
+                "position": { "x": 0.5, "y": 0.5 }
+            },
+            "unknownField": "should_fail"
+        });
+
+        let parsed = CommandPayload::parse("AddTextClip".to_string(), payload);
+        assert!(parsed.is_err());
+        let err = parsed.unwrap_err();
+        assert!(
+            err.contains("unknown field"),
+            "expected unknown-field rejection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_add_text_clip_with_timeline_start_alias() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "timelineStart": 10.0,
+            "duration": 5.0,
+            "textData": {
+                "content": "Test",
+                "style": {
+                    "fontFamily": "Arial",
+                    "fontSize": 48,
+                    "color": "#FFFFFF"
+                },
+                "position": { "x": 0.5, "y": 0.5 }
+            }
+        });
+
+        let parsed = CommandPayload::parse("AddTextClip".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected timelineStart alias to work, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::AddTextClip(p)) = parsed {
+            assert!((p.timeline_in - 10.0).abs() < 0.001);
+        }
     }
 }
