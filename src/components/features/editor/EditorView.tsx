@@ -7,7 +7,7 @@
  */
 
 import { useCallback, useState, useEffect, useMemo } from 'react';
-import { MainLayout, Header, Sidebar, BottomPanel, Panel } from '@/components/layout';
+import { MainLayout, Header, Sidebar, TabbedBottomPanel, Panel, type BottomPanelTab } from '@/components/layout';
 import { AISidebar } from '@/components/features/ai';
 import {
   TimelineErrorBoundary,
@@ -17,7 +17,9 @@ import {
   AIErrorBoundary,
 } from '@/components/shared';
 import { ExportDialog } from '@/components/features/export';
+import { AddTextDialog, type AddTextPayload } from '@/components/features/text';
 import { Inspector, type SelectedCaption } from '@/components/features/inspector';
+import { AudioMixerPanel, type ChannelLevels } from '@/components/features/mixer';
 import { ProjectExplorer } from '@/components/explorer';
 import { UnifiedPreviewPlayer } from '@/components/preview';
 import { Timeline } from '@/components/timeline';
@@ -30,26 +32,12 @@ import {
 import { useTimelineActions } from '@/hooks/useTimelineActions';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useAudioPlayback } from '@/hooks/useAudioPlayback';
+import { useTextClip } from '@/hooks/useTextClip';
 import { createLogger } from '@/services/logger';
+import { Terminal, Sliders } from 'lucide-react';
 import type { Sequence } from '@/types';
 
 const logger = createLogger('EditorView');
-
-// =============================================================================
-// Console Component (Bottom Panel Content)
-// =============================================================================
-
-function ConsolePanel(): JSX.Element {
-  return (
-    <div
-      data-testid="console-panel"
-      className="h-full bg-editor-bg rounded border border-editor-border p-2 font-mono text-xs text-editor-text-muted overflow-auto"
-    >
-      <p>OpenReelio initialized.</p>
-      <p>Ready to edit.</p>
-    </div>
-  );
-}
 
 // =============================================================================
 // EditorView Component
@@ -69,9 +57,21 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
   // Export dialog state
   const [showExportDialog, setShowExportDialog] = useState(false);
 
+  // Add Text dialog state
+  const [showAddTextDialog, setShowAddTextDialog] = useState(false);
+
   // AI Sidebar state
   const [aiSidebarCollapsed, setAiSidebarCollapsed] = useState(false);
   const [aiSidebarWidth, setAiSidebarWidth] = useState(320);
+
+  // Audio Mixer state
+  const [soloedTrackIds, setSoloedTrackIds] = useState<Set<string>>(new Set());
+  const [trackPans, setTrackPans] = useState<Map<string, number>>(new Map());
+  const [masterMuted, setMasterMuted] = useState(false);
+  const [masterVolume, setMasterVolume] = useState(1.0);
+  // Audio levels would come from actual audio analysis - using mock for now
+  const [trackLevels] = useState<Map<string, ChannelLevels>>(new Map());
+  const [masterLevels] = useState<ChannelLevels>({ left: 0, right: 0 });
 
   // Audio playback integration
   // The hook handles audio scheduling, volume control, and clip synchronization
@@ -125,6 +125,9 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
     handleTrackVisibilityToggle,
     handleUpdateCaption,
   } = useTimelineActions({ sequence });
+
+  // Text clip operations
+  const { addTextClip } = useTextClip();
 
   // Split at playhead handler for keyboard shortcut
   const handleSplitAtPlayhead = useCallback(() => {
@@ -246,6 +249,119 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
     setShowExportDialog(false);
   }, []);
 
+  // Add Text handlers
+  const handleOpenAddText = useCallback(() => {
+    setShowAddTextDialog(true);
+  }, []);
+
+  const handleCloseAddText = useCallback(() => {
+    setShowAddTextDialog(false);
+  }, []);
+
+  const handleAddTextClip = useCallback(
+    async (payload: AddTextPayload) => {
+      if (!sequence) return;
+
+      await addTextClip({
+        trackId: payload.trackId,
+        timelineIn: payload.timelineIn,
+        duration: payload.duration,
+        textData: payload.textData,
+      });
+    },
+    [sequence, addTextClip]
+  );
+
+  // Audio Mixer handlers
+  const handleMixerVolumeChange = useCallback((trackId: string, volumeDb: number) => {
+    // TODO: Connect to audio engine for actual volume control
+    logger.debug('Volume change', { trackId, volumeDb });
+  }, []);
+
+  const handleMixerPanChange = useCallback((trackId: string, pan: number) => {
+    setTrackPans((prev) => new Map(prev).set(trackId, pan));
+  }, []);
+
+  const handleMixerMuteToggle = useCallback((trackId: string) => {
+    if (!sequence) return;
+    handleTrackMuteToggle?.({ sequenceId: sequence.id, trackId });
+  }, [sequence, handleTrackMuteToggle]);
+
+  const handleMixerSoloToggle = useCallback((trackId: string) => {
+    setSoloedTrackIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(trackId)) {
+        next.delete(trackId);
+      } else {
+        next.add(trackId);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleMasterVolumeChange = useCallback((volumeDb: number) => {
+    // Convert dB to linear: 0dB = 1.0, -6dB ≈ 0.5, +6dB ≈ 2.0
+    const linear = Math.pow(10, volumeDb / 20);
+    setMasterVolume(Math.max(0, Math.min(2, linear)));
+  }, []);
+
+  const handleMasterMuteToggle = useCallback(() => {
+    setMasterMuted((prev) => !prev);
+  }, []);
+
+  // Bottom panel tabs
+  const bottomPanelTabs: BottomPanelTab[] = useMemo(() => [
+    {
+      id: 'console',
+      label: 'Console',
+      icon: <Terminal className="w-3 h-3" />,
+      content: (
+        <div className="h-full p-2 font-mono text-xs text-editor-text-muted overflow-auto">
+          <p>OpenReelio initialized.</p>
+          <p>Ready to edit.</p>
+        </div>
+      ),
+    },
+    {
+      id: 'mixer',
+      label: 'Mixer',
+      icon: <Sliders className="w-3 h-3" />,
+      content: (
+        <AudioMixerPanel
+          tracks={sequence?.tracks ?? []}
+          trackLevels={trackLevels}
+          trackPans={trackPans}
+          soloedTrackIds={soloedTrackIds}
+          masterVolume={masterVolume}
+          masterMuted={masterMuted}
+          masterLevels={masterLevels}
+          onVolumeChange={handleMixerVolumeChange}
+          onPanChange={handleMixerPanChange}
+          onMuteToggle={handleMixerMuteToggle}
+          onSoloToggle={handleMixerSoloToggle}
+          onMasterVolumeChange={handleMasterVolumeChange}
+          onMasterMuteToggle={handleMasterMuteToggle}
+          compact
+          className="h-full"
+        />
+      ),
+    },
+  ], [
+    sequence?.tracks,
+    trackLevels,
+    trackPans,
+    soloedTrackIds,
+    masterVolume,
+    masterMuted,
+    masterLevels,
+    handleMixerVolumeChange,
+    handleMixerPanChange,
+    handleMixerMuteToggle,
+    handleMixerSoloToggle,
+    handleMasterVolumeChange,
+    handleMasterMuteToggle,
+  ]);
+
   return (
     <>
       <MainLayout
@@ -281,9 +397,11 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
           </>
         }
         footer={
-          <BottomPanel title="Console">
-            <ConsolePanel />
-          </BottomPanel>
+          <TabbedBottomPanel
+            tabs={bottomPanelTabs}
+            defaultTab="console"
+            defaultHeight={160}
+          />
         }
       >
         {/* Center content split between preview and timeline */}
@@ -313,6 +431,7 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
                   onTrackMuteToggle={handleTrackMuteToggle}
                   onTrackLockToggle={handleTrackLockToggle}
                   onTrackVisibilityToggle={handleTrackVisibilityToggle}
+                  onAddText={handleOpenAddText}
                 />
               </TimelineErrorBoundary>
             </Panel>
@@ -326,6 +445,15 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
         onClose={handleCloseExport}
         sequenceId={sequence?.id ?? null}
         sequenceName={sequence?.name}
+      />
+
+      {/* Add Text Dialog */}
+      <AddTextDialog
+        isOpen={showAddTextDialog}
+        onClose={handleCloseAddText}
+        onAdd={handleAddTextClip}
+        tracks={sequence?.tracks ?? []}
+        currentTime={currentTime}
       />
     </>
   );

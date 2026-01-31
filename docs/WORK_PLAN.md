@@ -1,11 +1,58 @@
 # OpenReelio Work Plan
 
-> **Last Updated**: 2026-01-30
-> **Current Phase**: v0.3.0 Effects & Transitions - 98% Complete
-> **Target**: Audio Preview integration (final task)
-> **Active Sprint**: Audio effect factory and chain hook implemented
+> **Last Updated**: 2026-01-30 (Revised after code audit)
+> **Current Phase**: Bug Fixes & Integration
+> **Target**: Fix critical bugs blocking core functionality
+> **Active Sprint**: AI Chat Fix, Export Pipeline Completion
 
 This document provides actionable task breakdowns for immediate development work.
+
+---
+
+## 🚨 Status Summary (Updated 2026-01-30)
+
+| Version | Status | Progress | Notes |
+|---------|--------|----------|-------|
+| v0.1.0 MVP | ✅ READY | **99%** | All P2 issues resolved |
+| v0.2.0 AI | ✅ READY | **98%** | AI proposal flow fixed, tests added |
+| v0.3.0 Effects | ✅ READY | **90%** | Export integration complete |
+| v0.4.0 Plugins | 📋 PLANNED | **60%** | WASM host exists |
+| **v0.5.0 Pro Foundation** | 📋 **NEW** | **0%** | Critical gaps identified |
+| **v0.6.0 Adv Editing** | 📋 **NEW** | **0%** | Multicam, Keying |
+| **v0.7.0 Color/VFX** | 📋 **NEW** | **0%** | Professional color |
+
+**See**:
+- `docs/ISSUES.md` for bug list
+- `docs/GAP_ANALYSIS.md` for professional feature comparison (**NEW**)
+- `docs/ROADMAP.md` for updated milestones
+
+---
+
+## 🔴 CRITICAL GAPS IDENTIFIED (Professional NLE Standards)
+
+Based on industry research comparing OpenReelio to DaVinci Resolve, Premiere Pro, and Final Cut Pro:
+
+| Gap | Severity | Impact |
+|-----|----------|--------|
+| **No Text/Title System** | CRITICAL | Users cannot add ANY text |
+| **No Color Wheels** | CRITICAL | No professional color grading |
+| **No Video Scopes** | CRITICAL | Cannot grade to broadcast standards |
+| **No Audio Mixer** | CRITICAL | Cannot see/adjust audio levels |
+| **No Multicam** | HIGH | Manual sync only |
+| **No Keying** | HIGH | No green screen support |
+
+### Immediate Priority: v0.5.0 - Professional Foundation
+
+**Goal**: Enable basic professional workflows
+
+| Task | Priority | Effort |
+|------|----------|--------|
+| Text/Title clip system | CRITICAL | 1 week |
+| Color Wheels component | CRITICAL | 1 week |
+| Video Scopes (Waveform, Vector) | CRITICAL | 1 week |
+| Audio Mixer panel | CRITICAL | 1 week |
+| Bins/folders in Project Explorer | HIGH | 3 days |
+| Customizable shortcuts | HIGH | 3 days |
 
 ---
 
@@ -41,37 +88,76 @@ This document provides actionable task breakdowns for immediate development work
 - ✅ `ExportDialog` - Full UI with preset selection, progress display
 
 ### Test Coverage
-- **Frontend**: 3645 tests passing (166 test files)
+- **Frontend**: 3671 tests passing (168 test files)
 - **Backend**: 1264 Rust tests passing
 
 ---
 
-## Current Phase: v0.3.0 Effects & Transitions (98% Complete)
+## Current Phase: P2 Issues & Polish
 
-### Completed Tasks (2026-01-30)
+### ✅ CRITICAL BUGS FIXED (2026-01-30)
+
+| Bug | Status | Fix |
+|-----|--------|-----|
+| **BUG-001** | ✅ FIXED | AI Proposal attached to chat message in `aiStore.ts` |
+| **BUG-002** | ✅ FIXED | Transitions apply xfade filters in `export.rs` |
+| **BUG-003** | ✅ FIXED | Keyframes interpolated at midpoint in `export.rs` |
+| **ISSUE-004** | ✅ FIXED | Asset URI validated before FFmpeg |
+| **ISSUE-005** | ✅ VERIFIED | LUT filter was already working |
+| **ISSUE-006** | ✅ FIXED | Toast feedback for incompatible track drops |
+| **Dead Code** | ✅ REMOVED | 1,370+ lines removed (6 files) |
+| **aiStore Tests** | ✅ ADDED | 24 tests in `aiStore.test.ts` |
+
+### ✅ P2 ISSUES RESOLVED (2026-01-30)
+
+| Issue | Location | Fix |
+|-------|----------|-----|
+| **ISSUE-007** | `ProxyPreviewPlayer.tsx` | Added synthetic time advancement fallback |
+| **ISSUE-008** | `TimelinePreviewPlayer.tsx` | Fixed race condition - don't clear loading state prematurely |
+| **ISSUE-009** | `useTimelineClipOperations.ts` | Added MAX_TIMELINE_POSITION (86400s = 24h) upper bound |
+| **ISSUE-010** | `Timeline.tsx` | Shot markers now show for any selection, not just single clip |
+
+### ✅ E2E TESTS ADDED (2026-01-30)
+
+| Test | Status | Description |
+|------|--------|-------------|
+| Export with transitions | ✅ DONE | `test_export_with_transition_applies_xfade` in export.rs |
+| Export with keyframes | ✅ DONE | `test_export_with_keyframes_interpolates_params`, `test_export_effect_with_keyframes_in_filter_graph` |
+
+### ✅ VISUAL FEEDBACK VERIFIED (2026-01-30)
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| Drop validity feedback | ✅ ALREADY WORKING | DragPreviewLayer shows blue for valid, red for invalid drops |
+
+---
+
+## v0.3.0 Effects & Transitions (70% Complete - Export Integrated)
+
+### Completed (UI/Data Model)
 
 | Task | Status | Tests | Description |
 |------|--------|-------|-------------|
-| **FFmpeg Transition Filters** | ✅ COMPLETE | 38 | `build_cross_dissolve_filter()`, `build_wipe_filter()`, `build_slide_filter()`, `build_zoom_filter()` |
-| **Effect Commands** | ✅ COMPLETE | 19 | `AddEffectCommand`, `RemoveEffectCommand`, `UpdateEffectCommand` with full undo support |
-| **IPC Integration** | ✅ COMPLETE | - | Effect payloads, CommandPayload variants, event handlers |
-| **Frontend Types** | ✅ COMPLETE | - | `AddEffect`, `UpdateEffect` in CommandType |
+| **FFmpeg Transition Filters** | ✅ CODE EXISTS | 38 | `build_cross_dissolve_filter()` etc. - **BUT NOT CALLED** |
+| **Effect Commands** | ✅ COMPLETE | 19 | `AddEffectCommand`, `RemoveEffectCommand`, `UpdateEffectCommand` |
 | **EffectsBrowser** | ✅ COMPLETE | 28 | 45+ effects, 8 categories, search functionality |
 | **TransitionPicker** | ✅ COMPLETE | 28 | Duration, direction, zoom type configuration |
-| **EffectInspector** | ✅ COMPLETE | 28 | Parameter editing, enable/delete/reset, keyframe integration |
-| **TransitionZone** | ✅ COMPLETE | 42 | Visual zone between clips for transition placement |
+| **EffectInspector** | ✅ COMPLETE | 28 | Parameter editing, enable/delete/reset |
+| **TransitionZone** | ✅ COMPLETE | 42 | Visual zone between clips |
 | **useTransitionZones** | ✅ COMPLETE | 12 | Hook to calculate adjacent clip pairs |
-| **Keyframe Interpolation** | ✅ COMPLETE | 28 | Easing functions, value interpolation, getValueAtTime |
-| **useKeyframeAnimation** | ✅ COMPLETE | 20 | Hook for animated effect parameters |
-| **KeyframeEditor** | ✅ COMPLETE | 20 | Visual keyframe editor with markers, easing selection |
-| **Effect Param Defs** | ✅ COMPLETE | 25 | Centralized parameter definitions for all effects |
-| **useEffectParamDefs** | ✅ COMPLETE | 12 | Hook for accessing effect parameter definitions |
-| **LUT Support** | ✅ COMPLETE | 6 | `build_lut_filter()` with file path and interpolation |
-| **ParameterEditor Enhancement** | ✅ COMPLETE | 11 | Select dropdown, file picker, text input support |
-| **Bezier Curve Utility** | ✅ COMPLETE | 25 | Newton-Raphson solver, presets, validation, memoized easing factory |
-| **CurveEditor Component** | ✅ COMPLETE | 19 | Visual Bezier editor with canvas, drag handles, presets, copy CSS |
-| **Audio Effect Factory** | ✅ COMPLETE | 36 | Web Audio node factory, dB/linear conversion, gain/EQ/compressor/delay/pan support |
-| **useAudioEffectChain** | ✅ COMPLETE | 4 | Hook for real-time audio effect chain management |
+| **Keyframe Interpolation** | ✅ CODE EXISTS | 28 | Easing functions - **BUT NOT USED IN EXPORT** |
+| **KeyframeEditor** | ✅ COMPLETE | 20 | Visual keyframe editor |
+| **LUT Support** | ✅ CODE EXISTS | 6 | `build_lut_filter()` - **BUT NOT CONNECTED** |
+| **Audio Effect Factory** | ✅ COMPLETE | 36 | Web Audio node factory (preview only) |
+
+### Export Integration (COMPLETED 2026-01-30)
+
+| Task | Status | Description |
+|------|--------|-------------|
+| **Transition Export** | ✅ DONE | xfade filters applied in export pipeline |
+| **Keyframe Export** | ✅ DONE | Keyframes interpolated at midpoint |
+| **LUT Export** | ✅ VERIFIED | Already working via FilterGraph |
+| **aiStore Tests** | ✅ DONE | 24 tests in aiStore.test.ts |
 
 ### Files Created/Modified
 
@@ -109,12 +195,14 @@ This document provides actionable task breakdowns for immediate development work
 - `src/services/audioEffectFactory.test.ts` - NEW (36 tests)
 - `src/hooks/useAudioEffectChain.ts` - NEW (audio effect chain hook)
 - `src/hooks/useAudioEffectChain.test.ts` - NEW (4 tests)
+- `src/hooks/useAudioPlaybackWithEffects.ts` - NEW (audio playback with effect chain integration)
+- `src/hooks/useAudioPlaybackWithEffects.test.ts` - NEW (19 tests)
 
 ### Pending Tasks
 
-| Task | Priority | Description |
-|------|----------|-------------|
-| Audio Preview Integration | LOW | Integrate useAudioEffectChain with useAudioPlayback |
+| Task | Status | Description |
+|------|--------|-------------|
+| Audio Preview Integration | ✅ COMPLETE | `useAudioPlaybackWithEffects` hook integrates audio effect chains with playback |
 
 ### Recently Completed (2026-01-30)
 
@@ -156,25 +244,29 @@ This document provides actionable task breakdowns for immediate development work
 | **whisper.cpp integration** | ✅ COMPLETE | WhisperEngine, audio extraction, job worker, IPC commands |
 | **Caption Export** | ✅ COMPLETE | SRT/VTT formats, CaptionExportDialog, timeline integration |
 | **First-Run Setup Wizard** | ✅ COMPLETE | 4-step wizard with FFmpeg check, theme, settings |
-| **Shot detection** | ⏳ PENDING | candle-based scene detection (FFmpeg scenedetect available) |
+| **Shot detection** | ✅ COMPLETE | FFmpeg scenedetect implemented, candle ML deferred to v0.3.0+ |
 
 ---
 
-## Current Sprint: v0.2.0 Completion & Distribution Readiness
+## Current Sprint: v0.1.0 Release Ready
 
-### Priority Matrix
+### Priority Matrix (Updated 2026-01-30)
 
 ```
                     IMPACT
               HIGH           LOW
          ┌─────────────┬─────────────┐
-    HIGH │  DO FIRST   │  SCHEDULE   │
-URGENCY  │  Code Sign  │  Crash Rep. │
+    HIGH │  QA/Testing │  Docs/Help  │
+URGENCY  │  Bug Fixes  │             │
          ├─────────────┼─────────────┤
-    LOW  │  Shot Det.  │   DEFER     │
-         │  (candle)   │   v0.3.0+   │
+    LOW  │  Code Sign  │  ML Shot    │
+         │  (Optional) │  Detection  │
          └─────────────┴─────────────┘
 ```
+
+> **Note**: Code signing is OPTIONAL for open source projects.
+> Users can bypass OS warnings (Windows SmartScreen, macOS Gatekeeper).
+> See README.md for installation instructions.
 
 ### Completed in This Sprint ✅
 
@@ -199,18 +291,27 @@ URGENCY  │  Code Sign  │  Crash Rep. │
    - ✅ Theme and project location configuration
    - ✅ Full test coverage (18+ tests)
 
-### Immediate Action Items (Remaining)
+4. **Audio Preview Integration** ✅ COMPLETE (2026-01-30)
+   - ✅ `useAudioPlaybackWithEffects` hook (19 tests)
+   - ✅ Real-time audio effect chain during playback
+   - ✅ Per-clip effect application
 
-1. **Distribution Infrastructure** (HIGH/HIGH - BLOCKER)
-   - [ ] Windows code signing (Authenticode)
-   - [ ] macOS notarization
-   - [ ] Update manifest generation
-   - [ ] CI/CD release pipeline
+### Next Action Items
 
-2. **Shot Detection Enhancement** (LOW/HIGH)
-   - [ ] Add candle dependencies for ML-based detection
-   - [ ] Implement scene boundary confidence scoring
-   - [ ] Create shot markers UI on timeline
+1. **v0.1.0 Release Preparation** (HIGH)
+   - [ ] Final QA testing on Windows/macOS/Linux
+   - [ ] README.md installation instructions (bypass OS warnings)
+   - [ ] Create release tag and GitHub Release
+   - [ ] Verify auto-updater works without signing
+
+2. **Code Signing** (DEFERRED - When funding available)
+   - [ ] Windows Authenticode ($200-700/year)
+   - [ ] macOS Notarization ($99/year Apple Developer)
+   - See `docs/DISTRIBUTION.md` for setup guide
+
+3. **ML Shot Detection** (DEFERRED to v0.4.0+)
+   - [ ] candle dependencies
+   - [ ] ResNet embeddings for scene similarity
 
 ---
 

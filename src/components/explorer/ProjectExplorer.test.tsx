@@ -14,10 +14,12 @@ import type { Asset } from './AssetList';
 // =============================================================================
 
 const mockUseProjectStore = vi.fn();
+const mockUseBinStore = vi.fn();
 const mockUseAssetImport = vi.fn();
 
 vi.mock('@/stores', () => ({
   useProjectStore: (...args: unknown[]) => mockUseProjectStore(...args),
+  useBinStore: (...args: unknown[]) => mockUseBinStore(...args),
 }));
 
 vi.mock('@/hooks', () => ({
@@ -60,6 +62,17 @@ describe('ProjectExplorer', () => {
       selectedAssetId: null,
       selectAsset: vi.fn(),
       removeAsset: vi.fn(),
+    });
+    mockUseBinStore.mockReturnValue({
+      bins: {},
+      selectedBinId: null,
+      editingBinId: null,
+      selectBin: vi.fn(),
+      createBin: vi.fn(),
+      renameBin: vi.fn(),
+      toggleExpand: vi.fn(),
+      cancelEditing: vi.fn(),
+      getBinsArray: vi.fn(() => []),
     });
     mockUseAssetImport.mockReturnValue({
       importFiles: vi.fn(),

@@ -16,10 +16,14 @@ import {
   LayoutGrid,
   AlertCircle,
   Upload,
+  FolderPlus,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { useProjectStore } from '@/stores';
+import { useProjectStore, useBinStore } from '@/stores';
 import { useAssetImport, useTranscriptionWithIndexing } from '@/hooks';
+import { BinTree } from './BinTree';
 import { AssetList, type Asset, type ViewMode } from './AssetList';
 import type { AssetKind, AssetData } from './AssetItem';
 import type { Asset as ProjectAsset } from '@/types';
@@ -49,6 +53,21 @@ export function ProjectExplorer() {
   const { assets, isLoading, selectedAssetId, selectAsset, removeAsset } =
     useProjectStore();
 
+  // Bin Store
+  const {
+    selectedBinId,
+    editingBinId,
+    selectBin,
+    createBin,
+    renameBin,
+    toggleExpand,
+    cancelEditing,
+    getBinsArray,
+  } = useBinStore();
+
+  // Bin tree visibility state
+  const [showBinTree, setShowBinTree] = useState(true);
+
   // Asset import hook
   const { importFiles, importFromUris, isImporting, error: importError, clearError } = useAssetImport();
 
@@ -77,6 +96,17 @@ export function ProjectExplorer() {
 
   const assetList = useMemo<Asset[]>(() => {
     return Array.from(assets.values())
+      .filter((asset: ProjectAsset) => {
+        // Filter by selected bin (null means root, undefined or missing binId goes to root)
+        const assetBinId = asset.binId ?? null;
+        if (selectedBinId !== null && assetBinId !== selectedBinId) {
+          return false;
+        }
+        if (selectedBinId === null && assetBinId !== null) {
+          return false;
+        }
+        return true;
+      })
       .map((asset: ProjectAsset): Asset | null => {
         if (asset.kind !== 'video' && asset.kind !== 'audio' && asset.kind !== 'image') {
           return null;
@@ -105,7 +135,7 @@ export function ProjectExplorer() {
         };
       })
       .filter((asset): asset is Asset => asset !== null);
-  }, [assets]);
+  }, [assets, selectedBinId]);
 
   // Local state
   const [searchQuery, setSearchQuery] = useState('');
@@ -277,6 +307,32 @@ export function ProjectExplorer() {
   );
 
   // ===========================================================================
+  // Bin Handlers
+  // ===========================================================================
+
+  const handleSelectBin = useCallback((binId: string | null) => {
+    selectBin(binId);
+  }, [selectBin]);
+
+  const handleCreateBin = useCallback((parentId: string | null) => {
+    createBin('New Folder', parentId);
+  }, [createBin]);
+
+  const handleRenameBin = useCallback((binId: string, newName: string) => {
+    renameBin(binId, newName);
+  }, [renameBin]);
+
+  const handleToggleBinTree = useCallback(() => {
+    setShowBinTree((prev) => !prev);
+  }, []);
+
+  // Convert assets Map to array for BinTree
+  const assetsArray = useMemo(() => Array.from(assets.values()), [assets]);
+
+  // Get bins array for BinTree
+  const binsArray = getBinsArray();
+
+  // ===========================================================================
   // Filter Tabs
   // ===========================================================================
 
@@ -336,19 +392,30 @@ export function ProjectExplorer() {
       {/* Header */}
       <div className="flex items-center justify-between p-3 border-b border-editor-border">
         <h2 className="text-sm font-semibold text-editor-text">Project</h2>
-        <button
-          data-testid="import-button"
-          className={`p-1.5 rounded transition-colors ${isImporting ? 'opacity-50 cursor-not-allowed' : 'hover:bg-surface-active'}`}
-          onClick={handleImport}
-          disabled={isImporting}
-          aria-label={isImporting ? 'Importing...' : 'Import asset'}
-        >
-          {isImporting ? (
-            <div className="w-4 h-4 border-2 border-text-muted border-t-transparent rounded-full animate-spin" />
-          ) : (
-            <Plus className="w-4 h-4" />
-          )}
-        </button>
+        <div className="flex items-center gap-1">
+          <button
+            data-testid="create-folder-button"
+            className="p-1.5 rounded transition-colors hover:bg-surface-active"
+            onClick={() => handleCreateBin(selectedBinId)}
+            aria-label="Create folder"
+            title="Create folder"
+          >
+            <FolderPlus className="w-4 h-4" />
+          </button>
+          <button
+            data-testid="import-button"
+            className={`p-1.5 rounded transition-colors ${isImporting ? 'opacity-50 cursor-not-allowed' : 'hover:bg-surface-active'}`}
+            onClick={handleImport}
+            disabled={isImporting}
+            aria-label={isImporting ? 'Importing...' : 'Import asset'}
+          >
+            {isImporting ? (
+              <div className="w-4 h-4 border-2 border-text-muted border-t-transparent rounded-full animate-spin" />
+            ) : (
+              <Plus className="w-4 h-4" />
+            )}
+          </button>
+        </div>
       </div>
 
       {/* Import Error */}
@@ -393,6 +460,45 @@ export function ProjectExplorer() {
             </button>
           )}
         </div>
+      </div>
+
+      {/* Bins Section */}
+      <div className="border-b border-editor-border">
+        {/* Bins Header */}
+        <button
+          data-testid="bins-toggle"
+          className="flex items-center justify-between w-full p-2 text-xs font-medium text-editor-text-muted hover:bg-surface-active transition-colors"
+          onClick={handleToggleBinTree}
+          aria-expanded={showBinTree}
+        >
+          <span className="flex items-center gap-1">
+            {showBinTree ? (
+              <ChevronDown className="w-3 h-3" />
+            ) : (
+              <ChevronRight className="w-3 h-3" />
+            )}
+            Folders
+          </span>
+          <span className="text-xs text-text-secondary">{binsArray.length}</span>
+        </button>
+
+        {/* Bin Tree */}
+        {showBinTree && (
+          <div className="max-h-40 overflow-y-auto">
+            <BinTree
+              bins={binsArray}
+              assets={assetsArray}
+              selectedBinId={selectedBinId}
+              editingBinId={editingBinId}
+              showRoot
+              onSelectBin={handleSelectBin}
+              onToggleExpand={toggleExpand}
+              onCreateBin={handleCreateBin}
+              onRenameBin={handleRenameBin}
+              onCancelEdit={cancelEditing}
+            />
+          </div>
+        )}
       </div>
 
       {/* Filter Tabs and View Mode */}

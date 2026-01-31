@@ -103,6 +103,7 @@ export function Timeline({
   onTrackMuteToggle,
   onTrackLockToggle,
   onTrackVisibilityToggle,
+  onAddText,
 }: TimelineProps) {
   // ===========================================================================
   // Store State
@@ -151,25 +152,34 @@ export function Timeline({
   // ===========================================================================
   // Shot Markers Hook
   // ===========================================================================
-  // Find selected clip's asset for shot markers display
-  const selectedAssetInfo = useMemo(() => {
-    if (selectedClipIds.length !== 1 || !sequence) return null;
+  // Find selected clips' assets for shot markers display
+  // Shows markers for all selected video clips (not just single selection)
+  const selectedAssetInfos = useMemo(() => {
+    if (selectedClipIds.length === 0 || !sequence) return [];
 
-    // Find the selected clip in any track
+    const results: Array<{ assetId: string; videoPath: string }> = [];
+    const seenAssetIds = new Set<string>();
+
+    // Find all selected clips in any track
     for (const track of sequence.tracks) {
-      const clip = track.clips.find((c) => c.id === selectedClipIds[0]);
-      if (clip) {
-        const asset = assets.get(clip.assetId);
-        if (asset && asset.kind === 'video') {
-          return {
-            assetId: asset.id,
-            videoPath: asset.uri,
-          };
+      for (const clip of track.clips) {
+        if (selectedClipIds.includes(clip.id)) {
+          const asset = assets.get(clip.assetId);
+          if (asset && asset.kind === 'video' && !seenAssetIds.has(asset.id)) {
+            seenAssetIds.add(asset.id);
+            results.push({
+              assetId: asset.id,
+              videoPath: asset.uri,
+            });
+          }
         }
       }
     }
-    return null;
+    return results;
   }, [selectedClipIds, sequence, assets]);
+
+  // For backward compatibility, provide single asset info (first selected)
+  const selectedAssetInfo = selectedAssetInfos.length > 0 ? selectedAssetInfos[0] : null;
 
   // ===========================================================================
   // Viewport Width Measurement (for clip virtualization)
@@ -613,7 +623,11 @@ export function Timeline({
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
-      <TimelineToolbar onFitToWindow={handleFitToWindow} />
+      <TimelineToolbar
+        onFitToWindow={handleFitToWindow}
+        onAddText={onAddText}
+        hasActiveSequence={sequence !== null}
+      />
 
       {/* Main timeline area with ruler and tracks - relative container for playhead */}
       {/* isolation: isolate creates a stacking context so playhead z-index doesn't escape to overlap modals */}

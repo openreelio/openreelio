@@ -6,9 +6,11 @@
  */
 
 import { useMemo, type MouseEvent } from 'react';
+import { Type } from 'lucide-react';
 import { useClipDrag, type DragPreviewPosition, type ClipDragData } from '@/hooks/useClipDrag';
 import { useWaveformPeaks } from '@/hooks/useWaveformPeaks';
 import type { Clip as ClipType, SnapPoint, Asset } from '@/types';
+import { isTextClip } from '@/types';
 import { AudioClipWaveform } from './AudioClipWaveform';
 import { WaveformPeaksDisplay } from './WaveformPeaksDisplay';
 import { LazyThumbnailStrip } from './LazyThumbnailStrip';
@@ -193,8 +195,15 @@ export function Clip({
   const hasEffects = clip.effects.length > 0;
   const hasSpeedChange = clip.speed !== 1;
 
+  // Determine if this is a text clip
+  const isText = isTextClip(clip.assetId);
+
   // Determine if clip has visual content (thumbnails or waveform)
-  const hasVisualContent = thumbnailConfig?.enabled || waveformConfig?.enabled;
+  // Text clips don't have visual content like thumbnails or waveforms
+  const hasVisualContent = !isText && (thumbnailConfig?.enabled || waveformConfig?.enabled);
+
+  // Display label for text clips (default to "Text" if no label)
+  const displayLabel = clip.label ?? (isText ? 'Text' : undefined);
 
   return (
     <div
@@ -204,20 +213,21 @@ export function Clip({
         ${selected ? 'ring-2 ring-primary-400 z-10' : ''}
         ${disabled ? 'opacity-50 cursor-not-allowed' : 'hover:brightness-110'}
         ${isDragging ? 'opacity-80 z-20' : ''}
-        ${!backgroundColor && !hasVisualContent ? 'bg-blue-600' : ''}
-        ${hasVisualContent && !backgroundColor ? 'bg-gray-800' : ''}
+        ${isText ? 'bg-teal-600' : ''}
+        ${!backgroundColor && !hasVisualContent && !isText ? 'bg-blue-600' : ''}
+        ${hasVisualContent && !backgroundColor && !isText ? 'bg-gray-800' : ''}
       `}
       style={{
         left: `${displayPosition.left}px`,
         width: `${Math.max(displayPosition.width, 4)}px`,
-        backgroundColor,
+        backgroundColor: isText ? undefined : backgroundColor,
       }}
       onClick={handleClick}
       onDoubleClick={handleDoubleClick}
       onMouseDown={handleClipMouseDown}
     >
-      {/* Video Thumbnails (background layer) */}
-      {thumbnailConfig?.enabled && !waveformConfig?.enabled && displayPosition.width > 0 && (
+      {/* Video Thumbnails (background layer) - not for text clips */}
+      {!isText && thumbnailConfig?.enabled && !waveformConfig?.enabled && displayPosition.width > 0 && (
         <LazyThumbnailStrip
           asset={thumbnailConfig.asset}
           sourceInSec={clip.range.sourceInSec}
@@ -228,8 +238,8 @@ export function Clip({
         />
       )}
 
-      {/* Audio Waveform (background layer) */}
-      {waveformConfig?.enabled && displayPosition.width > 0 && (
+      {/* Audio Waveform (background layer) - not for text clips */}
+      {!isText && waveformConfig?.enabled && displayPosition.width > 0 && (
         <ClipWaveformRenderer
           config={waveformConfig}
           clipRange={clip.range}
@@ -238,13 +248,35 @@ export function Clip({
         />
       )}
 
+      {/* Text Clip Icon (background layer) */}
+      {isText && (
+        <div className="absolute inset-0 flex items-center justify-center opacity-20 pointer-events-none">
+          <Type className="w-8 h-8 text-white" />
+        </div>
+      )}
+
       {/* Clip content */}
       <div className="h-full p-1 overflow-hidden pointer-events-none relative z-10">
         {/* Label */}
-        {clip.label && <span className="text-xs text-white truncate block drop-shadow-sm">{clip.label}</span>}
+        {displayLabel && (
+          <span className="text-xs text-white truncate block drop-shadow-sm">
+            {displayLabel}
+          </span>
+        )}
 
         {/* Indicators */}
         <div className="absolute bottom-1 right-1 flex gap-1">
+          {/* Text clip indicator */}
+          {isText && (
+            <div
+              data-testid="text-clip-indicator"
+              className="w-3 h-3 bg-teal-400 rounded-full flex items-center justify-center"
+              title="Text clip"
+            >
+              <Type className="w-2 h-2 text-white" />
+            </div>
+          )}
+
           {/* Effects indicator */}
           {hasEffects && (
             <div

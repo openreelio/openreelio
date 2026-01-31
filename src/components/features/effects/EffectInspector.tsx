@@ -15,6 +15,7 @@ import type { Effect, EffectId, ParamDef, SimpleParamValue, Keyframe } from '@/t
 import { EFFECT_TYPE_LABELS, isAudioEffect } from '@/types';
 import { ParameterEditor } from './ParameterEditor';
 import { KeyframeEditor } from './KeyframeEditor';
+import { ColorWheelsPanel, type ColorWheelsValues, type ColorWheelsParamName } from './ColorWheelsPanel';
 
 // =============================================================================
 // Constants
@@ -126,6 +127,52 @@ function getDefaultValue(paramDef: ParamDef): SimpleParamValue {
       }
       return 0;
   }
+}
+
+// =============================================================================
+// ColorWheels Helpers
+// =============================================================================
+
+/** Default ColorWheels values (all neutral) */
+const DEFAULT_COLOR_WHEELS: ColorWheelsValues = {
+  lift_r: 0,
+  lift_g: 0,
+  lift_b: 0,
+  gamma_r: 0,
+  gamma_g: 0,
+  gamma_b: 0,
+  gain_r: 0,
+  gain_g: 0,
+  gain_b: 0,
+};
+
+/**
+ * Converts effect params to ColorWheelsValues.
+ * Falls back to defaults for missing values.
+ */
+function paramsToColorWheelsValues(
+  params: Record<string, SimpleParamValue> | undefined
+): ColorWheelsValues {
+  if (!params) return DEFAULT_COLOR_WHEELS;
+
+  return {
+    lift_r: typeof params.lift_r === 'number' ? params.lift_r : 0,
+    lift_g: typeof params.lift_g === 'number' ? params.lift_g : 0,
+    lift_b: typeof params.lift_b === 'number' ? params.lift_b : 0,
+    gamma_r: typeof params.gamma_r === 'number' ? params.gamma_r : 0,
+    gamma_g: typeof params.gamma_g === 'number' ? params.gamma_g : 0,
+    gamma_b: typeof params.gamma_b === 'number' ? params.gamma_b : 0,
+    gain_r: typeof params.gain_r === 'number' ? params.gain_r : 0,
+    gain_g: typeof params.gain_g === 'number' ? params.gain_g : 0,
+    gain_b: typeof params.gain_b === 'number' ? params.gain_b : 0,
+  };
+}
+
+/**
+ * Check if an effect is a ColorWheels effect.
+ */
+function isColorWheelsEffect(effectType: Effect['effectType']): boolean {
+  return effectType === 'color_wheels';
 }
 
 // =============================================================================
@@ -326,7 +373,17 @@ export const EffectInspector = memo(function EffectInspector({
 
       {/* Parameters */}
       <div className="flex-1 overflow-auto p-3 space-y-2">
-        {paramDefs.length === 0 ? (
+        {/* Special UI for ColorWheels effect */}
+        {isColorWheelsEffect(effect.effectType) ? (
+          <ColorWheelsPanel
+            values={paramsToColorWheelsValues(effectParams)}
+            onChange={(paramName: ColorWheelsParamName, value: number) => {
+              handleParamChange(paramName, value);
+            }}
+            onReset={handleReset}
+            readOnly={readOnly}
+          />
+        ) : paramDefs.length === 0 ? (
           <p className="text-sm text-editor-text-muted text-center py-4">
             No configurable parameters
           </p>

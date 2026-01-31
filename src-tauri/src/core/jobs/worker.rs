@@ -1379,7 +1379,7 @@ impl JobProcessor {
                 ExportSettings::from_preset(export_preset, validated_output_path.clone());
 
             // 4. Validate export feasibility
-            let validation = validate_export_settings(&sequence, &assets, &settings);
+            let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
             if !validation.is_valid {
                 let error_msg = validation.errors.join("; ");
                 let _ = self.app_handle.emit(

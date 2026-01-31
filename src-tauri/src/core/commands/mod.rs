@@ -9,6 +9,7 @@ mod clip;
 mod effect;
 mod executor;
 mod sequence;
+mod text;
 mod track;
 mod traits;
 
@@ -18,5 +19,6 @@ pub use clip::*;
 pub use effect::*;
 pub use executor::*;
 pub use sequence::*;
+pub use text::*;
 pub use track::*;
 pub use traits::*;

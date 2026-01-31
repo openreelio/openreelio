@@ -209,16 +209,21 @@ export function ProxyPreviewPlayer({
     });
   }, [activeClips, currentTime, isPlaying, playbackRate, volume, isMuted]);
 
+  // Track playback start time for synthetic time advancement
+  const playbackStartRef = useRef<{ timestamp: number; timelineTime: number } | null>(null);
+
   // Animation frame loop for playback
   const updatePlayback = useCallback((timestamp: number) => {
     if (!isPlaying) return;
 
     // Limit updates to avoid excessive re-renders
     if (timestamp - lastUpdateTimeRef.current >= FRAME_INTERVAL) {
+      const prevTimestamp = lastUpdateTimeRef.current;
       lastUpdateTimeRef.current = timestamp;
 
       // Find the first playing video to sync time from (not just first clip)
       // This handles cases where some clips may have load errors or be paused
+      let foundVideoSource = false;
       for (const { clip } of activeClips) {
         const video = videoRefs.current.get(clip.id);
         if (video && !video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
@@ -226,13 +231,30 @@ export function ProxyPreviewPlayer({
           const offsetInSource = video.currentTime - clip.range.sourceInSec;
           const timelineTime = clip.place.timelineInSec + (offsetInSource / clip.speed);
           setCurrentTime(timelineTime);
+          // Update synthetic time reference
+          playbackStartRef.current = { timestamp, timelineTime };
+          foundVideoSource = true;
           break; // Use first valid video as time source
+        }
+      }
+
+      // Fallback: If no video is available, advance time synthetically
+      // This ensures playback continues even when all videos fail to load
+      if (!foundVideoSource && prevTimestamp > 0) {
+        const elapsed = (timestamp - prevTimestamp) / 1000; // Convert to seconds
+        const timeAdvance = elapsed * playbackRate;
+        const newTime = Math.min(currentTime + timeAdvance, duration);
+        setCurrentTime(newTime);
+
+        // Stop at end of duration
+        if (newTime >= duration) {
+          setIsPlaying(false);
         }
       }
     }
 
     animationFrameRef.current = requestAnimationFrame(updatePlayback);
-  }, [isPlaying, activeClips, setCurrentTime]);
+  }, [isPlaying, activeClips, setCurrentTime, playbackRate, currentTime, duration, setIsPlaying]);
 
   // Start/stop animation frame loop
   useEffect(() => {

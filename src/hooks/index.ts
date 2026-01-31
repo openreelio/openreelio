@@ -30,18 +30,6 @@ export type { UseAudioPlaybackOptions, UseAudioPlaybackReturn } from './useAudio
 export { useVideoSync, calculateTimelineTime, isTimeInClip, getClipTimelineDuration } from './useVideoSync';
 export type { UseVideoSyncOptions, UseVideoSyncReturn } from './useVideoSync';
 
-export { useAIAgent } from './useAIAgent';
-export type {
-  UseAIAgentReturn,
-  AIContext,
-  EditScript,
-  EditCommand,
-  ApplyResult,
-  ValidationResult,
-  RiskAssessment,
-  Requirement,
-} from './useAIAgent';
-
 export { useFrameExtractor, useAssetFrameExtractor } from './useFrameExtractor';
 export type {
   UseFrameExtractorOptions,
@@ -328,3 +316,28 @@ export type {
   UseAudioEffectChainProps,
   UseAudioEffectChainResult,
 } from './useAudioEffectChain';
+
+export { useAudioPlaybackWithEffects } from './useAudioPlaybackWithEffects';
+export type {
+  UseAudioPlaybackWithEffectsOptions,
+  UseAudioPlaybackWithEffectsReturn,
+} from './useAudioPlaybackWithEffects';
+
+export { useTextClip } from './useTextClip';
+export type {
+  AddTextClipParams,
+  UpdateTextClipParams,
+  RemoveTextClipParams,
+  UseTextClipResult,
+} from './useTextClip';
+
+export { useVideoScopes } from './useVideoScopes';
+export type {
+  UseVideoScopesOptions,
+  UseVideoScopesResult,
+} from './useVideoScopes';
+
+export { useShortcutSettings } from './useShortcutSettings';
+export type {
+  UseShortcutSettingsReturn,
+} from './useShortcutSettings';
