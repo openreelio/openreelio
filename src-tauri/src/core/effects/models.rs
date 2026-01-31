@@ -31,6 +31,12 @@ pub enum EffectCategory {
     Audio,
     /// Text overlay effects
     Text,
+    /// Keying effects (chroma key, luma key)
+    Keying,
+    /// Compositing effects (blend mode, opacity)
+    Compositing,
+    /// Advanced color grading (HSL qualifier, color match)
+    AdvancedColor,
     /// AI-powered effects
     Ai,
     /// Custom/plugin effects
@@ -47,6 +53,7 @@ pub enum EffectType {
     Saturation,
     Hue,
     ColorBalance,
+    ColorWheels, // Lift/Gamma/Gain (3-way color corrector)
     Gamma,
     Levels,
     Curves,
@@ -96,6 +103,20 @@ pub enum EffectType {
     TextOverlay,
     Subtitle,
 
+    // Keying
+    ChromaKey,
+    LumaKey,
+
+    // Compositing
+    BlendMode,
+    Opacity,
+
+    // Advanced Color Grading
+    HSLQualifier,
+
+    // Audio Metering
+    LoudnessNormalize,
+
     // AI
     BackgroundRemoval,
     AutoReframe,
@@ -115,6 +136,7 @@ impl EffectType {
             | Self::Saturation
             | Self::Hue
             | Self::ColorBalance
+            | Self::ColorWheels
             | Self::Gamma
             | Self::Levels
             | Self::Curves
@@ -151,6 +173,14 @@ impl EffectType {
             | Self::Delay => EffectCategory::Audio,
 
             Self::TextOverlay | Self::Subtitle => EffectCategory::Text,
+
+            Self::ChromaKey | Self::LumaKey => EffectCategory::Keying,
+
+            Self::BlendMode | Self::Opacity => EffectCategory::Compositing,
+
+            Self::HSLQualifier => EffectCategory::AdvancedColor,
+
+            Self::LoudnessNormalize => EffectCategory::Audio,
 
             Self::BackgroundRemoval | Self::AutoReframe | Self::FaceBlur | Self::ObjectTracking => {
                 EffectCategory::Ai
@@ -264,6 +294,18 @@ impl ParamDef {
             name: name.to_string(),
             label: label.to_string(),
             default: ParamValue::Bool(default),
+            min: None,
+            max: None,
+            step: None,
+        }
+    }
+
+    /// Creates a new string parameter definition
+    pub fn string(name: &str, label: &str, default: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            label: label.to_string(),
+            default: ParamValue::String(default.to_string()),
             min: None,
             max: None,
             step: None,
@@ -416,12 +458,79 @@ impl Effect {
                 params.insert("intensity".to_string(), ParamValue::Float(0.5));
                 params.insert("radius".to_string(), ParamValue::Float(0.8));
             }
+            EffectType::ColorWheels => {
+                // Lift (shadows) - affects dark regions
+                params.insert("lift_r".to_string(), ParamValue::Float(0.0));
+                params.insert("lift_g".to_string(), ParamValue::Float(0.0));
+                params.insert("lift_b".to_string(), ParamValue::Float(0.0));
+                // Gamma (midtones) - affects mid-range luminance
+                params.insert("gamma_r".to_string(), ParamValue::Float(0.0));
+                params.insert("gamma_g".to_string(), ParamValue::Float(0.0));
+                params.insert("gamma_b".to_string(), ParamValue::Float(0.0));
+                // Gain (highlights) - affects bright regions
+                params.insert("gain_r".to_string(), ParamValue::Float(0.0));
+                params.insert("gain_g".to_string(), ParamValue::Float(0.0));
+                params.insert("gain_b".to_string(), ParamValue::Float(0.0));
+            }
             EffectType::Volume => {
                 params.insert("level".to_string(), ParamValue::Float(1.0));
             }
             EffectType::Fade => {
                 params.insert("duration".to_string(), ParamValue::Float(1.0));
                 params.insert("fade_in".to_string(), ParamValue::Bool(true));
+            }
+            EffectType::NoiseReduction => {
+                // anlmdn filter params (non-local means denoise)
+                params.insert("strength".to_string(), ParamValue::Float(0.00001)); // s parameter
+                params.insert("patch_size".to_string(), ParamValue::Float(7.0)); // p parameter (odd 1-99)
+                params.insert("research_size".to_string(), ParamValue::Float(15.0)); // r parameter (odd 1-99)
+            }
+            EffectType::ChromaKey => {
+                // chromakey filter params
+                params.insert("key_color".to_string(), ParamValue::String("#00FF00".to_string())); // Green screen default
+                params.insert("similarity".to_string(), ParamValue::Float(0.3)); // Color similarity threshold (0.0-1.0)
+                params.insert("blend".to_string(), ParamValue::Float(0.1)); // Blend/feather amount (0.0-1.0)
+            }
+            EffectType::LumaKey => {
+                // lumakey filter params
+                params.insert("threshold".to_string(), ParamValue::Float(0.1)); // Luminance threshold (0.0-1.0)
+                params.insert("tolerance".to_string(), ParamValue::Float(0.1)); // Tolerance range (0.0-1.0)
+                params.insert("softness".to_string(), ParamValue::Float(0.0)); // Edge softness (0.0-1.0)
+            }
+            EffectType::BlendMode => {
+                // blend filter params - blend modes: normal, multiply, screen, overlay, add, subtract, difference
+                params.insert("mode".to_string(), ParamValue::String("normal".to_string()));
+                params.insert("opacity".to_string(), ParamValue::Float(1.0)); // Overall opacity 0.0-1.0
+            }
+            EffectType::Opacity => {
+                // Simple opacity control
+                params.insert("value".to_string(), ParamValue::Float(1.0)); // 0.0 = transparent, 1.0 = opaque
+            }
+            EffectType::HSLQualifier => {
+                // HSL Qualifier for selective color correction
+                // Hue selection
+                params.insert("hue_center".to_string(), ParamValue::Float(120.0)); // Center hue in degrees (0-360, 120=green)
+                params.insert("hue_width".to_string(), ParamValue::Float(30.0)); // Hue range width in degrees
+                // Saturation range
+                params.insert("sat_min".to_string(), ParamValue::Float(0.2)); // Minimum saturation (0.0-1.0)
+                params.insert("sat_max".to_string(), ParamValue::Float(1.0)); // Maximum saturation (0.0-1.0)
+                // Luminance range
+                params.insert("lum_min".to_string(), ParamValue::Float(0.0)); // Minimum luminance (0.0-1.0)
+                params.insert("lum_max".to_string(), ParamValue::Float(1.0)); // Maximum luminance (0.0-1.0)
+                // Softness/feather
+                params.insert("softness".to_string(), ParamValue::Float(0.1)); // Edge softness (0.0-1.0)
+                // Adjustment values to apply to qualified region
+                params.insert("hue_shift".to_string(), ParamValue::Float(0.0)); // Hue rotation (-180 to 180)
+                params.insert("sat_adjust".to_string(), ParamValue::Float(0.0)); // Saturation adjustment (-1.0 to 1.0)
+                params.insert("lum_adjust".to_string(), ParamValue::Float(0.0)); // Luminance adjustment (-1.0 to 1.0)
+                params.insert("invert".to_string(), ParamValue::Bool(false)); // Invert selection
+            }
+            EffectType::LoudnessNormalize => {
+                // EBU R128 loudness normalization
+                params.insert("target_lufs".to_string(), ParamValue::Float(-14.0)); // Target integrated loudness (-70 to -5 LUFS)
+                params.insert("target_lra".to_string(), ParamValue::Float(11.0)); // Target loudness range (1-50 LU)
+                params.insert("target_tp".to_string(), ParamValue::Float(-1.0)); // Target true peak (-9 to 0 dBTP)
+                params.insert("print_format".to_string(), ParamValue::String("summary".to_string())); // Output format
             }
             _ => {}
         }
@@ -455,6 +564,73 @@ impl Effect {
                 ParamDef::float("duration", "Duration", 1.0, 0.0, 10.0),
                 ParamDef::boolean("fade_in", "Fade In", true),
             ],
+            EffectType::ColorWheels => vec![
+                // Lift (shadows)
+                ParamDef::float("lift_r", "Lift Red", 0.0, -1.0, 1.0),
+                ParamDef::float("lift_g", "Lift Green", 0.0, -1.0, 1.0),
+                ParamDef::float("lift_b", "Lift Blue", 0.0, -1.0, 1.0),
+                // Gamma (midtones)
+                ParamDef::float("gamma_r", "Gamma Red", 0.0, -1.0, 1.0),
+                ParamDef::float("gamma_g", "Gamma Green", 0.0, -1.0, 1.0),
+                ParamDef::float("gamma_b", "Gamma Blue", 0.0, -1.0, 1.0),
+                // Gain (highlights)
+                ParamDef::float("gain_r", "Gain Red", 0.0, -1.0, 1.0),
+                ParamDef::float("gain_g", "Gain Green", 0.0, -1.0, 1.0),
+                ParamDef::float("gain_b", "Gain Blue", 0.0, -1.0, 1.0),
+            ],
+            EffectType::NoiseReduction => vec![
+                // anlmdn (non-local means denoise) parameters
+                ParamDef::float("strength", "Strength", 0.00001, 0.00001, 0.0001),
+                ParamDef::float("patch_size", "Patch Size", 7.0, 1.0, 99.0),
+                ParamDef::float("research_size", "Research Size", 15.0, 1.0, 99.0),
+            ],
+            EffectType::ChromaKey => vec![
+                // chromakey parameters
+                ParamDef::string("key_color", "Key Color", "#00FF00"),
+                ParamDef::float("similarity", "Similarity", 0.3, 0.0, 1.0),
+                ParamDef::float("blend", "Blend", 0.1, 0.0, 1.0),
+            ],
+            EffectType::LumaKey => vec![
+                // lumakey parameters
+                ParamDef::float("threshold", "Threshold", 0.1, 0.0, 1.0),
+                ParamDef::float("tolerance", "Tolerance", 0.1, 0.0, 1.0),
+                ParamDef::float("softness", "Softness", 0.0, 0.0, 1.0),
+            ],
+            EffectType::BlendMode => vec![
+                // blend mode parameters
+                ParamDef::string("mode", "Blend Mode", "normal"),
+                ParamDef::float("opacity", "Opacity", 1.0, 0.0, 1.0),
+            ],
+            EffectType::Opacity => vec![
+                // opacity parameter
+                ParamDef::float("value", "Opacity", 1.0, 0.0, 1.0),
+            ],
+            EffectType::HSLQualifier => vec![
+                // Hue selection
+                ParamDef::float("hue_center", "Hue Center", 120.0, 0.0, 360.0),
+                ParamDef::float("hue_width", "Hue Width", 30.0, 1.0, 180.0),
+                // Saturation range
+                ParamDef::float("sat_min", "Saturation Min", 0.2, 0.0, 1.0),
+                ParamDef::float("sat_max", "Saturation Max", 1.0, 0.0, 1.0),
+                // Luminance range
+                ParamDef::float("lum_min", "Luminance Min", 0.0, 0.0, 1.0),
+                ParamDef::float("lum_max", "Luminance Max", 1.0, 0.0, 1.0),
+                // Softness
+                ParamDef::float("softness", "Softness", 0.1, 0.0, 1.0),
+                // Adjustments
+                ParamDef::float("hue_shift", "Hue Shift", 0.0, -180.0, 180.0),
+                ParamDef::float("sat_adjust", "Saturation Adjust", 0.0, -1.0, 1.0),
+                ParamDef::float("lum_adjust", "Luminance Adjust", 0.0, -1.0, 1.0),
+                // Invert
+                ParamDef::boolean("invert", "Invert Selection", false),
+            ],
+            EffectType::LoudnessNormalize => vec![
+                // EBU R128 loudness normalization parameters
+                ParamDef::float("target_lufs", "Target LUFS", -14.0, -70.0, -5.0),
+                ParamDef::float("target_lra", "Target LRA", 11.0, 1.0, 50.0),
+                ParamDef::float("target_tp", "Target True Peak", -1.0, -9.0, 0.0),
+                ParamDef::string("print_format", "Print Format", "summary"),
+            ],
             _ => vec![],
         }
     }
@@ -477,6 +653,11 @@ impl Effect {
     /// Gets a parameter value as bool
     pub fn get_bool(&self, name: &str) -> Option<bool> {
         self.params.get(name).and_then(|v| v.as_bool())
+    }
+
+    /// Gets a parameter value as String
+    pub fn get_string(&self, name: &str) -> Option<String> {
+        self.params.get(name).and_then(|v| v.as_str()).map(|s| s.to_string())
     }
 
     /// Validates all parameters
@@ -603,6 +784,38 @@ impl Effect {
     /// Returns true if this is a video effect
     pub fn is_video(&self) -> bool {
         self.effect_type.is_video()
+    }
+
+    /// Creates a copy of the effect with all keyframed parameters resolved at a specific time.
+    /// Useful for FFmpeg export where we need static values.
+    ///
+    /// # Arguments
+    ///
+    /// * `time_offset` - Time offset in seconds from effect start
+    ///
+    /// # Returns
+    ///
+    /// A new Effect with params containing interpolated values, keyframes cleared
+    pub fn with_params_at_time(&self, time_offset: f64) -> Self {
+        let mut resolved = self.clone();
+
+        // Resolve all keyframed parameters to their interpolated values
+        for (param_name, keyframes) in &self.keyframes {
+            if !keyframes.is_empty() {
+                let interpolated = self.interpolate_keyframes(keyframes, time_offset);
+                resolved.params.insert(param_name.clone(), interpolated);
+            }
+        }
+
+        // Clear keyframes since we've resolved them
+        resolved.keyframes.clear();
+
+        resolved
+    }
+
+    /// Returns true if this effect has any keyframes
+    pub fn has_keyframes(&self) -> bool {
+        self.keyframes.values().any(|kfs| !kfs.is_empty())
     }
 }
 
@@ -748,6 +961,64 @@ mod tests {
         let fade = Effect::new(EffectType::Fade);
         assert_eq!(fade.get_float("duration"), Some(1.0));
         assert_eq!(fade.get_bool("fade_in"), Some(true));
+    }
+
+    #[test]
+    fn test_color_wheels_default_params() {
+        let color_wheels = Effect::new(EffectType::ColorWheels);
+
+        // Lift (shadows) defaults
+        assert_eq!(color_wheels.get_float("lift_r"), Some(0.0));
+        assert_eq!(color_wheels.get_float("lift_g"), Some(0.0));
+        assert_eq!(color_wheels.get_float("lift_b"), Some(0.0));
+
+        // Gamma (midtones) defaults
+        assert_eq!(color_wheels.get_float("gamma_r"), Some(0.0));
+        assert_eq!(color_wheels.get_float("gamma_g"), Some(0.0));
+        assert_eq!(color_wheels.get_float("gamma_b"), Some(0.0));
+
+        // Gain (highlights) defaults
+        assert_eq!(color_wheels.get_float("gain_r"), Some(0.0));
+        assert_eq!(color_wheels.get_float("gain_g"), Some(0.0));
+        assert_eq!(color_wheels.get_float("gain_b"), Some(0.0));
+    }
+
+    #[test]
+    fn test_color_wheels_param_definitions() {
+        let color_wheels = Effect::new(EffectType::ColorWheels);
+        let defs = color_wheels.param_definitions();
+
+        // Should have 9 parameters (3 for each of lift, gamma, gain)
+        assert_eq!(defs.len(), 9, "ColorWheels should have 9 parameters");
+
+        // Verify parameter names
+        let param_names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(param_names.contains(&"lift_r"));
+        assert!(param_names.contains(&"lift_g"));
+        assert!(param_names.contains(&"lift_b"));
+        assert!(param_names.contains(&"gamma_r"));
+        assert!(param_names.contains(&"gamma_g"));
+        assert!(param_names.contains(&"gamma_b"));
+        assert!(param_names.contains(&"gain_r"));
+        assert!(param_names.contains(&"gain_g"));
+        assert!(param_names.contains(&"gain_b"));
+
+        // Verify range constraints (-1.0 to 1.0)
+        for def in &defs {
+            assert_eq!(def.min, Some(-1.0), "Min should be -1.0 for {}", def.name);
+            assert_eq!(def.max, Some(1.0), "Max should be 1.0 for {}", def.name);
+        }
+    }
+
+    #[test]
+    fn test_color_wheels_category() {
+        assert_eq!(EffectType::ColorWheels.category(), EffectCategory::Color);
+    }
+
+    #[test]
+    fn test_color_wheels_is_video() {
+        assert!(EffectType::ColorWheels.is_video());
+        assert!(!EffectType::ColorWheels.is_audio());
     }
 
     // -------------------------------------------------------------------------

@@ -9,8 +9,10 @@ use tokio::sync::mpsc::Sender;
 
 use crate::core::{
     assets::Asset,
-    effects::{Effect, FilterGraph},
+    commands::TEXT_ASSET_PREFIX,
+    effects::{Effect, EffectCategory, EffectType, FilterGraph, IntoFFmpegFilter},
     ffmpeg::FFmpegRunner,
+    fs::validate_local_input_path,
     process::configure_tokio_command,
     timeline::{Clip, Sequence, Track, TrackKind},
 };
@@ -63,6 +65,21 @@ pub enum AudioCodec {
     Copy,
 }
 
+/// HDR (High Dynamic Range) mode for export
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HdrMode {
+    /// SDR (Standard Dynamic Range) - default
+    #[default]
+    Sdr,
+    /// HDR10 with PQ (Perceptual Quantizer) transfer function
+    /// Uses BT.2020 color primaries and 10-bit color depth
+    Hdr10,
+    /// HLG (Hybrid Log-Gamma) HDR format
+    /// Compatible with both HDR and SDR displays
+    Hlg,
+}
+
 /// Export settings
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,6 +110,17 @@ pub struct ExportSettings {
     pub start_time: Option<f64>,
     /// End time in seconds (for partial export)
     pub end_time: Option<f64>,
+    /// HDR mode (SDR, HDR10, or HLG)
+    #[serde(default)]
+    pub hdr_mode: HdrMode,
+    /// Maximum Content Light Level in cd/m² (nits) for HDR10
+    /// Typical values: 1000-4000 for consumer content, 10000 for reference
+    pub max_cll: Option<u32>,
+    /// Maximum Frame-Average Light Level in cd/m² for HDR10
+    /// Should be <= max_cll
+    pub max_fall: Option<u32>,
+    /// Color bit depth (8, 10, or 12)
+    pub bit_depth: Option<u8>,
 }
 
 impl Default for ExportSettings {
@@ -111,6 +139,10 @@ impl Default for ExportSettings {
             two_pass: false,
             start_time: None,
             end_time: None,
+            hdr_mode: HdrMode::Sdr,
+            max_cll: None,
+            max_fall: None,
+            bit_depth: None,
         }
     }
 }
@@ -133,6 +165,10 @@ impl ExportSettings {
                 two_pass: false,
                 start_time: None,
                 end_time: None,
+                hdr_mode: HdrMode::Sdr,
+                max_cll: None,
+                max_fall: None,
+                bit_depth: None,
             },
             ExportPreset::Youtube4k => Self {
                 preset: ExportPreset::Youtube4k,
@@ -148,6 +184,10 @@ impl ExportSettings {
                 two_pass: true,
                 start_time: None,
                 end_time: None,
+                hdr_mode: HdrMode::Sdr,
+                max_cll: None,
+                max_fall: None,
+                bit_depth: None,
             },
             ExportPreset::YoutubeShorts => Self {
                 preset: ExportPreset::YoutubeShorts,
@@ -163,6 +203,10 @@ impl ExportSettings {
                 two_pass: false,
                 start_time: None,
                 end_time: None,
+                hdr_mode: HdrMode::Sdr,
+                max_cll: None,
+                max_fall: None,
+                bit_depth: None,
             },
             ExportPreset::Twitter => Self {
                 preset: ExportPreset::Twitter,
@@ -178,6 +222,10 @@ impl ExportSettings {
                 two_pass: false,
                 start_time: None,
                 end_time: None,
+                hdr_mode: HdrMode::Sdr,
+                max_cll: None,
+                max_fall: None,
+                bit_depth: None,
             },
             ExportPreset::Instagram => Self {
                 preset: ExportPreset::Instagram,
@@ -193,6 +241,10 @@ impl ExportSettings {
                 two_pass: false,
                 start_time: None,
                 end_time: None,
+                hdr_mode: HdrMode::Sdr,
+                max_cll: None,
+                max_fall: None,
+                bit_depth: None,
             },
             ExportPreset::WebmVp9 => Self {
                 preset: ExportPreset::WebmVp9,
@@ -208,6 +260,10 @@ impl ExportSettings {
                 two_pass: false,
                 start_time: None,
                 end_time: None,
+                hdr_mode: HdrMode::Sdr,
+                max_cll: None,
+                max_fall: None,
+                bit_depth: None,
             },
             ExportPreset::ProRes => Self {
                 preset: ExportPreset::ProRes,
@@ -223,6 +279,10 @@ impl ExportSettings {
                 two_pass: false,
                 start_time: None,
                 end_time: None,
+                hdr_mode: HdrMode::Sdr,
+                max_cll: None,
+                max_fall: None,
+                bit_depth: None,
             },
             ExportPreset::Custom => Self {
                 preset: ExportPreset::Custom,
@@ -260,7 +320,136 @@ impl ExportSettings {
             two_pass: false,
             start_time,
             end_time,
+            hdr_mode: HdrMode::Sdr,
+            max_cll: None,
+            max_fall: None,
+            bit_depth: None,
         }
+    }
+
+    /// Returns the FFmpeg arguments for HDR color metadata.
+    ///
+    /// **Important**: HDR export requires H.265 (HEVC) codec. Use `validate_hdr_settings()`
+    /// to check compatibility before export.
+    ///
+    /// For HDR10:
+    /// - BT.2020 color primaries
+    /// - BT.2020 non-constant luminance colorspace
+    /// - SMPTE ST 2084 (PQ) transfer characteristics
+    /// - 10-bit pixel format
+    /// - MaxCLL/MaxFALL metadata
+    ///
+    /// For HLG:
+    /// - BT.2020 color primaries
+    /// - BT.2020 non-constant luminance colorspace
+    /// - ARIB STD-B67 (HLG) transfer characteristics
+    /// - 10-bit pixel format
+    pub fn hdr_args(&self) -> Vec<String> {
+        match self.hdr_mode {
+            HdrMode::Sdr => Vec::new(),
+            HdrMode::Hdr10 => {
+                let mut args = vec![
+                    // Color primaries: BT.2020
+                    "-color_primaries".to_string(),
+                    "bt2020".to_string(),
+                    // Color space: BT.2020 non-constant luminance
+                    "-colorspace".to_string(),
+                    "bt2020nc".to_string(),
+                    // Transfer function: PQ (Perceptual Quantizer)
+                    "-color_trc".to_string(),
+                    "smpte2084".to_string(),
+                    // 10-bit pixel format
+                    "-pix_fmt".to_string(),
+                    "yuv420p10le".to_string(),
+                ];
+
+                // Add HDR10 static metadata if provided (only valid for H.265)
+                if let (Some(max_cll), Some(max_fall)) = (self.max_cll, self.max_fall) {
+                    if matches!(self.video_codec, VideoCodec::H265) {
+                        args.push("-x265-params".to_string());
+                        args.push(format!(
+                            "hdr-opt=1:repeat-headers=1:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc:max-cll={},{}",
+                            max_cll, max_fall
+                        ));
+                    }
+                }
+
+                args
+            }
+            HdrMode::Hlg => {
+                vec![
+                    // Color primaries: BT.2020
+                    "-color_primaries".to_string(),
+                    "bt2020".to_string(),
+                    // Color space: BT.2020 non-constant luminance
+                    "-colorspace".to_string(),
+                    "bt2020nc".to_string(),
+                    // Transfer function: HLG (Hybrid Log-Gamma)
+                    "-color_trc".to_string(),
+                    "arib-std-b67".to_string(),
+                    // 10-bit pixel format
+                    "-pix_fmt".to_string(),
+                    "yuv420p10le".to_string(),
+                ]
+            }
+        }
+    }
+
+    /// Returns true if HDR mode is enabled
+    pub fn is_hdr(&self) -> bool {
+        !matches!(self.hdr_mode, HdrMode::Sdr)
+    }
+
+    /// Validates HDR settings and returns an error message if invalid.
+    ///
+    /// HDR export has the following requirements:
+    /// - **Codec**: Must use H.265 (HEVC). H.264 does not support HDR metadata.
+    /// - **MaxCLL/MaxFALL**: For HDR10, these should be set for proper display mapping.
+    ///
+    /// # Returns
+    ///
+    /// - `None` if settings are valid
+    /// - `Some(error_message)` if there's a validation issue
+    pub fn validate_hdr_settings(&self) -> Option<String> {
+        if !self.is_hdr() {
+            return None; // SDR mode, no validation needed
+        }
+
+        // HDR requires H.265 codec
+        if !matches!(self.video_codec, VideoCodec::H265) {
+            return Some(format!(
+                "HDR export requires H.265 (HEVC) codec. Current codec: {:?}. \
+                 H.264 does not support HDR metadata.",
+                self.video_codec
+            ));
+        }
+
+        // Warning for HDR10 without metadata (not an error, just a warning)
+        if matches!(self.hdr_mode, HdrMode::Hdr10)
+            && (self.max_cll.is_none() || self.max_fall.is_none())
+        {
+            // This is a warning, not an error - return None but log warning
+            tracing::warn!(
+                "HDR10 export without MaxCLL/MaxFALL metadata. \
+                 Consider setting max_cll and max_fall for proper display mapping."
+            );
+        }
+
+        None
+    }
+
+    /// Returns settings with HDR-compatible codec if HDR is enabled.
+    ///
+    /// Automatically switches to H.265 if HDR mode is enabled with an incompatible codec.
+    pub fn with_hdr_compatible_codec(mut self) -> Self {
+        if self.is_hdr() && !matches!(self.video_codec, VideoCodec::H265) {
+            tracing::info!(
+                "Switching from {:?} to H.265 for HDR export compatibility",
+                self.video_codec
+            );
+            self.video_codec = VideoCodec::H265;
+        }
+        self
     }
 }
 
@@ -344,6 +533,64 @@ impl AssetAudioInfo {
             has_audio: asset.audio.is_some(),
         }
     }
+}
+
+// =============================================================================
+// Text Clip Detection
+// =============================================================================
+
+/// Check if a clip is a text clip (virtual asset with __text__ prefix).
+///
+/// Text clips don't have file-based assets - they generate video from
+/// text overlays using FFmpeg's drawtext filter.
+pub fn is_text_clip(clip: &Clip) -> bool {
+    clip.asset_id.starts_with(TEXT_ASSET_PREFIX)
+}
+
+/// Build FFmpeg filter for a text clip.
+///
+/// Text clips use a color source as input and apply the drawtext filter
+/// from the TextOverlay effect to generate the video.
+///
+/// # Arguments
+///
+/// * `clip` - The text clip
+/// * `effects` - Map of effect ID to Effect (for looking up TextOverlay effect)
+/// * `width` - Output video width
+/// * `height` - Output video height
+///
+/// # Returns
+///
+/// FFmpeg input arguments and filter string for the text clip
+fn build_text_clip_filter(
+    clip: &Clip,
+    effects: &std::collections::HashMap<String, Effect>,
+    width: u32,
+    height: u32,
+) -> Option<(Vec<String>, String)> {
+    // Find the TextOverlay effect
+    let text_effect = clip.effects.iter().find_map(|effect_id| {
+        effects
+            .get(effect_id)
+            .filter(|e| e.effect_type == EffectType::TextOverlay && e.enabled)
+    })?;
+
+    // Calculate clip duration
+    let duration = clip.range.source_out_sec - clip.range.source_in_sec;
+
+    // Build color source input for transparent background
+    // Using color=c=black for solid background (can be changed to color=c=black@0.0 for transparent)
+    let input_args = vec![
+        "-f".to_string(),
+        "lavfi".to_string(),
+        "-i".to_string(),
+        format!("color=c=black:s={}x{}:d={}:r=30", width, height, duration),
+    ];
+
+    // Build drawtext filter from text effect parameters
+    let drawtext_filter = text_effect.to_filter_body();
+
+    Some((input_args, drawtext_filter))
 }
 
 // =============================================================================
@@ -471,6 +718,9 @@ impl ExportEngine {
             }
         }
 
+        // HDR metadata
+        args.extend(settings.hdr_args());
+
         // Frame rate
         if let Some(fps) = settings.fps {
             args.push("-r".to_string());
@@ -504,6 +754,9 @@ impl ExportEngine {
     }
 
     /// Build FilterGraph for a clip's effects
+    ///
+    /// If effects have keyframes, they are resolved at the midpoint of the clip
+    /// duration since FFmpeg filters cannot animate parameters directly.
     fn build_clip_filter_graph(
         &self,
         clip: &Clip,
@@ -511,10 +764,21 @@ impl ExportEngine {
     ) -> FilterGraph {
         let mut graph = FilterGraph::new();
 
+        // Calculate midpoint of clip for keyframe interpolation
+        // FFmpeg filters use static values, so we use the midpoint as representative
+        let clip_duration = clip.range.source_out_sec - clip.range.source_in_sec;
+        let midpoint_time = clip_duration / 2.0;
+
         // Look up each effect ID and add to graph
         for effect_id in &clip.effects {
             if let Some(effect) = effects.get(effect_id) {
-                graph.add_effect(effect.clone());
+                // If effect has keyframes, resolve them at midpoint
+                let resolved_effect = if effect.has_keyframes() {
+                    effect.with_params_at_time(midpoint_time)
+                } else {
+                    effect.clone()
+                };
+                graph.add_effect(resolved_effect);
             }
         }
 
@@ -570,11 +834,52 @@ impl ExportEngine {
             return Err(ExportError::NoClips);
         }
 
+        // Get output dimensions from settings or use defaults
+        let output_width = settings.width.unwrap_or(1920);
+        let output_height = settings.height.unwrap_or(1080);
+
         // Add inputs and build filter graph
         for (clip, track) in &all_clips {
+            // Check if this is a text clip (virtual asset with __text__ prefix)
+            if is_text_clip(clip) {
+                // Text clips use a color source input with drawtext filter
+                if let Some((input_args, drawtext_filter)) =
+                    build_text_clip_filter(clip, effects, output_width, output_height)
+                {
+                    // Add color source input
+                    args.extend(input_args);
+
+                    let video_out_label = format!("v{}", input_index);
+
+                    // Apply drawtext filter directly to color source
+                    let text_filter = format!(
+                        "[{}:v]{}[{}]",
+                        input_index, drawtext_filter, video_out_label
+                    );
+                    filter_complex.push_str(&text_filter);
+                    filter_complex.push(';');
+
+                    video_streams.push(format!("[{}]", video_out_label));
+
+                    // Text clips have no audio
+                    input_index += 1;
+                    continue;
+                } else {
+                    return Err(ExportError::InvalidSettings(format!(
+                        "Text clip '{}' is missing an enabled TextOverlay effect",
+                        clip.id
+                    )));
+                }
+            }
+
+            // Regular clip - look up the asset
             let asset = assets.get(&clip.asset_id).ok_or_else(|| {
                 ExportError::InvalidSettings(format!("Asset not found: {}", clip.asset_id))
             })?;
+
+            // Validate asset URI before passing to FFmpeg
+            let validated_path = validate_local_input_path(&asset.uri, "Asset file")
+                .map_err(ExportError::InvalidSettings)?;
 
             // Check if this asset has audio
             let clip_has_audio = audio_info
@@ -585,9 +890,9 @@ impl ExportEngine {
                     AssetAudioInfo::from_asset(asset).has_audio
                 });
 
-            // Add input
+            // Add input (using validated path)
             args.push("-i".to_string());
-            args.push(asset.uri.clone());
+            args.push(validated_path.to_string_lossy().to_string());
 
             // Build FilterGraph for this clip's effects
             let clip_filter_graph = self.build_clip_filter_graph(clip, effects);
@@ -705,14 +1010,56 @@ impl ExportEngine {
         }
         filter_complex.push(';');
 
-        // Concat all video streams
+        // Collect transition effects for each clip (if any)
+        let mut clip_transitions: Vec<Option<&Effect>> = Vec::new();
+        for (clip, _track) in &all_clips {
+            let transition = clip
+                .effects
+                .iter()
+                .filter_map(|eid| effects.get(eid))
+                .find(|e| e.effect_type.category() == EffectCategory::Transition);
+            clip_transitions.push(transition);
+        }
+
+        // Concat video streams with optional xfade transitions
         if video_streams.len() == 1 {
             // Single clip - just use the processed stream
             filter_complex.push_str(&format!("{}null[outv]", video_streams[0]));
         } else {
-            // Multiple clips - concat
-            filter_complex.push_str(&video_streams.join(""));
-            filter_complex.push_str(&format!("concat=n={}:v=1:a=0[outv]", video_streams.len()));
+            // Multiple clips - check for transitions and apply xfade where needed
+            let mut current_stream = video_streams[0].clone();
+
+            for i in 0..video_streams.len() - 1 {
+                let next_stream = &video_streams[i + 1];
+                let output_label = if i == video_streams.len() - 2 {
+                    "[outv]".to_string()
+                } else {
+                    format!("[xfade{}]", i)
+                };
+
+                // Check if current clip has a transition effect (applies to transition INTO next clip)
+                if let Some(transition_effect) = clip_transitions.get(i).and_then(|t| *t) {
+                    // Build xfade filter using the transition effect parameters
+                    let xfade_filter = transition_effect.to_filter_body();
+
+                    // Apply xfade: [current][next]xfade=...[output]
+                    filter_complex.push_str(&format!(
+                        "{}{}{}{}",
+                        current_stream, next_stream, xfade_filter, output_label
+                    ));
+                } else {
+                    // No transition - use concat for these two clips
+                    filter_complex.push_str(&format!(
+                        "{}{}concat=n=2:v=1:a=0{}",
+                        current_stream, next_stream, output_label
+                    ));
+                }
+
+                if i < video_streams.len() - 2 {
+                    filter_complex.push(';');
+                    current_stream = output_label;
+                }
+            }
         }
 
         // Concat audio streams ONLY if we have any
@@ -1283,6 +1630,7 @@ impl ExportValidation {
 pub fn validate_export_settings(
     sequence: &Sequence,
     assets: &std::collections::HashMap<String, Asset>,
+    effects: &std::collections::HashMap<String, Effect>,
     settings: &ExportSettings,
 ) -> ExportValidation {
     let mut validation = ExportValidation::valid();
@@ -1294,13 +1642,39 @@ pub fn validate_export_settings(
         return validation;
     }
 
-    // Check all clip assets exist
+    // Check all clip assets exist (except virtual text clips) and are safe to read.
     for track in &sequence.tracks {
         for clip in &track.clips {
-            if !assets.contains_key(&clip.asset_id) {
+            if is_text_clip(clip) {
+                // Ensure the clip has an enabled TextOverlay effect so rendering is deterministic.
+                let has_text_overlay = clip.effects.iter().any(|effect_id| {
+                    effects
+                        .get(effect_id)
+                        .is_some_and(|e| e.effect_type == EffectType::TextOverlay && e.enabled)
+                });
+                if !has_text_overlay {
+                    validation.add_error(format!(
+                        "Text clip '{}' is missing an enabled TextOverlay effect",
+                        clip.id
+                    ));
+                }
+                continue;
+            }
+
+            let Some(asset) = assets.get(&clip.asset_id) else {
                 validation.add_error(format!(
                     "Asset '{}' not found for clip '{}'",
                     clip.asset_id, clip.id
+                ));
+                continue;
+            };
+
+            // Defense-in-depth: validate local file path early to avoid starting an export
+            // that will certainly fail (or could be abused if the state is compromised).
+            if let Err(err) = validate_local_input_path(&asset.uri, "Asset file") {
+                validation.add_error(format!(
+                    "Invalid asset path for asset '{}': {}",
+                    asset.id, err
                 ));
             }
         }
@@ -1383,22 +1757,71 @@ pub fn build_complex_filter_args_with_audio_info(
     }
 
     // Build FilterGraph helper (inline version without engine)
+    // If effects have keyframes, they are resolved at the midpoint of the clip
     fn build_clip_filter_graph_standalone(
         clip: &Clip,
         effects: &std::collections::HashMap<String, Effect>,
     ) -> FilterGraph {
         let mut graph = FilterGraph::new();
+
+        // Calculate midpoint for keyframe interpolation
+        let clip_duration = clip.range.source_out_sec - clip.range.source_in_sec;
+        let midpoint_time = clip_duration / 2.0;
+
         for effect_id in &clip.effects {
             if let Some(effect) = effects.get(effect_id) {
-                graph.add_effect(effect.clone());
+                // If effect has keyframes, resolve them at midpoint
+                let resolved_effect = if effect.has_keyframes() {
+                    effect.with_params_at_time(midpoint_time)
+                } else {
+                    effect.clone()
+                };
+                graph.add_effect(resolved_effect);
             }
         }
         graph.sort_by_order();
         graph
     }
 
+    // Get output dimensions from settings or use defaults
+    let output_width = settings.width.unwrap_or(1920);
+    let output_height = settings.height.unwrap_or(1080);
+
     // Add inputs and build filter graph
     for (clip, track) in &all_clips {
+        // Check if this is a text clip (virtual asset with __text__ prefix)
+        if is_text_clip(clip) {
+            // Text clips use a color source input with drawtext filter
+            if let Some((input_args, drawtext_filter)) =
+                build_text_clip_filter(clip, effects, output_width, output_height)
+            {
+                // Add color source input
+                args.extend(input_args);
+
+                let video_out_label = format!("v{}", input_index);
+
+                // Apply drawtext filter directly to color source
+                let text_filter = format!(
+                    "[{}:v]{}[{}]",
+                    input_index, drawtext_filter, video_out_label
+                );
+                filter_complex.push_str(&text_filter);
+                filter_complex.push(';');
+
+                video_streams.push(format!("[{}]", video_out_label));
+
+                // Text clips have no audio
+                input_index += 1;
+                continue;
+            } else {
+                return Err(ExportError::InvalidSettings(format!(
+                    "Text clip '{}' is missing an enabled TextOverlay effect",
+                    clip.id
+                )));
+            }
+        }
+
+        // Regular clip - look up the asset
         let asset = assets.get(&clip.asset_id).ok_or_else(|| {
             ExportError::InvalidSettings(format!("Asset not found: {}", clip.asset_id))
         })?;
@@ -1409,9 +1832,13 @@ pub fn build_complex_filter_args_with_audio_info(
             .map(|info| info.has_audio)
             .unwrap_or_else(|| AssetAudioInfo::from_asset(asset).has_audio);
 
-        // Add input
+        // Validate asset URI before passing to FFmpeg
+        let validated_path = validate_local_input_path(&asset.uri, "Asset file")
+            .map_err(ExportError::InvalidSettings)?;
+
+        // Add input (using validated path)
         args.push("-i".to_string());
-        args.push(asset.uri.clone());
+        args.push(validated_path.to_string_lossy().to_string());
 
         // Build FilterGraph for this clip's effects
         let clip_filter_graph = build_clip_filter_graph_standalone(clip, effects);
@@ -1655,6 +2082,16 @@ pub fn detect_timeline_gaps(sequence: &Sequence) -> Vec<TimelineGap> {
 mod tests {
     use super::*;
 
+    fn create_temp_media_file(filename: &str) -> String {
+        let dir = std::env::temp_dir().join("openreelio-test-media");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let unique = ulid::Ulid::new().to_string();
+        let path = dir.join(format!("{unique}_{filename}"));
+        std::fs::write(&path, b"").expect("create temp media file");
+        path.to_string_lossy().to_string()
+    }
+
     // -------------------------------------------------------------------------
     // Progress Parsing Tests
     // -------------------------------------------------------------------------
@@ -1788,9 +2225,10 @@ mod tests {
 
         let sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
         let assets = std::collections::HashMap::new();
+        let effects = std::collections::HashMap::new();
         let settings = ExportSettings::default();
 
-        let validation = validate_export_settings(&sequence, &assets, &settings);
+        let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
 
         assert!(!validation.is_valid);
         assert!(validation.errors.iter().any(|e| e.contains("no clips")));
@@ -1810,12 +2248,72 @@ mod tests {
         sequence.add_track(track);
 
         let assets = std::collections::HashMap::new();
+        let effects = std::collections::HashMap::new();
         let settings = ExportSettings::default();
 
-        let validation = validate_export_settings(&sequence, &assets, &settings);
+        let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
 
         assert!(!validation.is_valid);
         assert!(validation.errors.iter().any(|e| e.contains("not found")));
+    }
+
+    #[test]
+    fn test_validation_text_clip_requires_text_overlay_effect() {
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let mut clip = Clip::new(&format!("{}clip_1", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.effects = vec![]; // Missing TextOverlay effect
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let assets = std::collections::HashMap::new();
+        let effects = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
+        assert!(!validation.is_valid);
+        assert!(validation
+            .errors
+            .iter()
+            .any(|e| e.to_lowercase().contains("textoverlay")));
+    }
+
+    #[test]
+    fn test_validation_text_clip_does_not_require_asset_entry() {
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::effects::{Effect, EffectType};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let mut clip = Clip::new(&format!("{}clip_1", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+
+        let effect = Effect::new(EffectType::TextOverlay);
+        let effect_id = effect.id.clone();
+        clip.effects = vec![effect_id.clone()];
+
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let assets = std::collections::HashMap::new(); // No asset for text clip
+        let mut effects = std::collections::HashMap::new();
+        effects.insert(effect_id, effect);
+        let settings = ExportSettings::default();
+
+        let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
+        assert!(
+            validation.is_valid,
+            "Expected valid export, got: {validation:?}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -2201,13 +2699,11 @@ mod tests {
         sequence.add_track(track);
 
         // Create asset WITHOUT audio (silent video)
-        let mut silent_asset = Asset::new_video(
-            "silent_video.mp4",
-            "/path/to/silent_video.mp4",
-            VideoInfo::default(),
-        )
-        .with_duration(10.0)
-        .with_file_size(10_000_000);
+        let silent_path = create_temp_media_file("silent_video.mp4");
+        let mut silent_asset =
+            Asset::new_video("silent_video.mp4", &silent_path, VideoInfo::default())
+                .with_duration(10.0)
+                .with_file_size(10_000_000);
         // Override the generated ID with our test ID
         silent_asset.id = "silent_asset".to_string();
         // Ensure no audio
@@ -2279,13 +2775,11 @@ mod tests {
         sequence.add_track(track);
 
         // Create asset WITH audio
-        let mut normal_asset = Asset::new_video(
-            "normal_video.mp4",
-            "/path/to/normal_video.mp4",
-            VideoInfo::default(),
-        )
-        .with_duration(10.0)
-        .with_file_size(10_000_000);
+        let normal_path = create_temp_media_file("normal_video.mp4");
+        let mut normal_asset =
+            Asset::new_video("normal_video.mp4", &normal_path, VideoInfo::default())
+                .with_duration(10.0)
+                .with_file_size(10_000_000);
         // Override the generated ID with our test ID
         normal_asset.id = "normal_asset".to_string();
         // Add audio info
@@ -2358,20 +2852,19 @@ mod tests {
         sequence.add_track(track);
 
         // Create asset WITH audio
-        let mut with_audio_asset = Asset::new_video(
-            "with_audio.mp4",
-            "/path/to/with_audio.mp4",
-            VideoInfo::default(),
-        )
-        .with_duration(5.0)
-        .with_file_size(5_000_000);
+        let with_audio_path = create_temp_media_file("with_audio.mp4");
+        let mut with_audio_asset =
+            Asset::new_video("with_audio.mp4", &with_audio_path, VideoInfo::default())
+                .with_duration(5.0)
+                .with_file_size(5_000_000);
         with_audio_asset.id = "with_audio".to_string();
         with_audio_asset.audio = Some(AudioInfo::default());
 
         // Create asset WITHOUT audio
+        let without_audio_path = create_temp_media_file("without_audio.mp4");
         let mut without_audio_asset = Asset::new_video(
             "without_audio.mp4",
-            "/path/to/without_audio.mp4",
+            &without_audio_path,
             VideoInfo::default(),
         )
         .with_duration(5.0)
@@ -2414,5 +2907,752 @@ mod tests {
             "Export should include audio from clips that have it. Got: {}",
             args_str
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Transition Export Tests (E2E)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_export_with_transition_applies_xfade() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::effects::{EffectType, ParamValue};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // Create sequence with two consecutive clips
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        // First clip: 0-5 seconds with a dissolve transition effect
+        let mut clip1 = Clip::new("asset1")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        let transition_effect_id = "transition_effect_1".to_string();
+        clip1.effects.push(transition_effect_id.clone());
+        track.add_clip(clip1);
+
+        // Second clip: 5-10 seconds
+        let clip2 = Clip::new("asset2")
+            .with_source_range(0.0, 5.0)
+            .place_at(5.0);
+        track.add_clip(clip2);
+
+        sequence.add_track(track);
+
+        // Create assets
+        let video1_path = create_temp_media_file("video1.mp4");
+        let mut asset1 = Asset::new_video("video1.mp4", &video1_path, VideoInfo::default())
+            .with_duration(10.0)
+            .with_file_size(10_000_000);
+        asset1.id = "asset1".to_string();
+
+        let video2_path = create_temp_media_file("video2.mp4");
+        let mut asset2 = Asset::new_video("video2.mp4", &video2_path, VideoInfo::default())
+            .with_duration(10.0)
+            .with_file_size(10_000_000);
+        asset2.id = "asset2".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("asset1".to_string(), asset1);
+        assets.insert("asset2".to_string(), asset2);
+
+        // Create dissolve transition effect
+        let mut transition_effect = Effect::new(EffectType::CrossDissolve);
+        transition_effect.id = transition_effect_id.clone();
+        transition_effect
+            .params
+            .insert("duration".to_string(), ParamValue::Float(1.0));
+        transition_effect
+            .params
+            .insert("offset".to_string(), ParamValue::Float(0.0));
+        transition_effect.enabled = true;
+
+        let mut effects = std::collections::HashMap::new();
+        effects.insert(transition_effect_id, transition_effect);
+
+        let audio_info_map = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        // Build args
+        let result = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &settings,
+        );
+
+        assert!(result.is_ok(), "Build should succeed");
+        let args = result.unwrap();
+        let args_str = args.join(" ");
+
+        // Verify xfade filter is present (transition effect applied)
+        assert!(
+            args_str.contains("xfade"),
+            "Export with transition should include xfade filter. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("dissolve"),
+            "Dissolve transition should specify dissolve type. Got: {}",
+            args_str
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Keyframe Export Tests (E2E)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_export_with_keyframes_interpolates_params() {
+        use crate::core::effects::{Easing, EffectType, Keyframe, ParamValue};
+
+        // Create an effect with keyframes
+        let mut effect = Effect::new(EffectType::GaussianBlur);
+        effect.id = "blur_effect".to_string();
+        effect.enabled = true;
+
+        // Add keyframes: sigma goes from 0.0 at t=0 to 10.0 at t=5
+        let keyframes = vec![
+            Keyframe {
+                time_offset: 0.0,
+                value: ParamValue::Float(0.0),
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                time_offset: 5.0,
+                value: ParamValue::Float(10.0),
+                easing: Easing::Linear,
+            },
+        ];
+        effect.keyframes.insert("sigma".to_string(), keyframes);
+
+        // Verify has_keyframes returns true
+        assert!(effect.has_keyframes(), "Effect should have keyframes");
+
+        // Resolve parameters at midpoint (t=2.5)
+        let resolved = effect.with_params_at_time(2.5);
+
+        // Verify sigma is interpolated to ~5.0 (linear interpolation)
+        let sigma = resolved
+            .params
+            .get("sigma")
+            .and_then(|v| v.as_float())
+            .unwrap_or(-1.0);
+
+        assert!(
+            (sigma - 5.0).abs() < 0.1,
+            "Sigma should be interpolated to ~5.0 at midpoint. Got: {}",
+            sigma
+        );
+
+        // Verify keyframes are cleared after resolution
+        assert!(
+            !resolved.has_keyframes(),
+            "Resolved effect should not have keyframes"
+        );
+    }
+
+    #[test]
+    fn test_export_effect_with_keyframes_in_filter_graph() {
+        use crate::core::effects::{Easing, EffectType, Keyframe, ParamValue};
+        use crate::core::timeline::Clip;
+
+        // Create clip with duration 4.0 seconds
+        let mut clip = Clip::new("asset1")
+            .with_source_range(0.0, 4.0)
+            .place_at(0.0);
+        let effect_id = "animated_blur".to_string();
+        clip.effects.push(effect_id.clone());
+
+        // Create effect with keyframes
+        let mut effect = Effect::new(EffectType::GaussianBlur);
+        effect.id = effect_id.clone();
+        effect.enabled = true;
+
+        // Keyframes: sigma 2.0 at t=0, 8.0 at t=4
+        let keyframes = vec![
+            Keyframe {
+                time_offset: 0.0,
+                value: ParamValue::Float(2.0),
+                easing: Easing::Linear,
+            },
+            Keyframe {
+                time_offset: 4.0,
+                value: ParamValue::Float(8.0),
+                easing: Easing::Linear,
+            },
+        ];
+        effect.keyframes.insert("sigma".to_string(), keyframes);
+
+        let mut effects = std::collections::HashMap::new();
+        effects.insert(effect_id, effect);
+
+        // Build filter graph for clip (uses midpoint interpolation)
+        // ExportEngine::build_clip_filter_graph is a method, so we test via a helper
+        let graph = build_test_filter_graph(&clip, &effects);
+
+        // Verify filter graph has video effects
+        assert!(
+            graph.has_video_effects(),
+            "Filter graph should have video effects"
+        );
+
+        // Get the filter complex string
+        let filter_str = graph.to_video_filter_complex("in", "out");
+
+        // The filter should contain gblur
+        assert!(
+            filter_str.contains("gblur"),
+            "Filter should contain gblur. Got: {}",
+            filter_str
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Text Clip Export Tests (E2E)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_is_text_clip_detection() {
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::timeline::Clip;
+
+        // Text clip has virtual asset ID with __text__ prefix
+        let text_clip = Clip::new(&format!("{}12345", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        assert!(
+            is_text_clip(&text_clip),
+            "Should detect text clip by asset_id prefix"
+        );
+
+        // Regular clip does not have the prefix
+        let regular_clip = Clip::new("regular_asset")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        assert!(
+            !is_text_clip(&regular_clip),
+            "Should not detect regular clip as text clip"
+        );
+    }
+
+    #[test]
+    fn test_export_text_clip_missing_effect_is_error() {
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let text_clip = Clip::new(&format!("{}clip1", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        track.add_clip(text_clip);
+        sequence.add_track(track);
+
+        let assets = std::collections::HashMap::new();
+        let effects = std::collections::HashMap::new();
+        let audio_info = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        let err = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info,
+            &settings,
+        )
+        .unwrap_err();
+
+        match err {
+            ExportError::InvalidSettings(msg) => {
+                assert!(msg.to_lowercase().contains("textoverlay"), "Got: {msg}");
+            }
+            other => panic!("Expected InvalidSettings error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_export_text_clip_uses_color_source_input() {
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::effects::{EffectType, ParamValue};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // Create sequence with a text clip
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        // Text clip: has __text__ prefix and TextOverlay effect
+        let text_effect_id = "text_effect_1".to_string();
+        let mut text_clip = Clip::new(&format!("{}clip1", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        text_clip.effects.push(text_effect_id.clone());
+        track.add_clip(text_clip);
+        sequence.add_track(track);
+
+        // Create TextOverlay effect
+        let mut text_effect = Effect::new(EffectType::TextOverlay);
+        text_effect.id = text_effect_id.clone();
+        text_effect.set_param("text", ParamValue::String("Hello World".to_string()));
+        text_effect.set_param("font_family", ParamValue::String("Arial".to_string()));
+        text_effect.set_param("font_size", ParamValue::Float(48.0));
+        text_effect.set_param("color", ParamValue::String("#FFFFFF".to_string()));
+        text_effect.set_param("x", ParamValue::Float(0.5));
+        text_effect.set_param("y", ParamValue::Float(0.5));
+        text_effect.enabled = true;
+
+        let mut effects = std::collections::HashMap::new();
+        effects.insert(text_effect_id, text_effect);
+
+        // No regular assets needed - text clips use virtual assets
+        let assets = std::collections::HashMap::new();
+        let audio_info_map = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        // Build args
+        let result = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &settings,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Text clip export should succeed. Error: {:?}",
+            result.err()
+        );
+        let args = result.unwrap();
+        let args_str = args.join(" ");
+
+        // Should use color source input for text clip (no file input)
+        assert!(
+            args_str.contains("color=c="),
+            "Text clip should use color source input. Got: {}",
+            args_str
+        );
+
+        // Should contain drawtext filter
+        assert!(
+            args_str.contains("drawtext"),
+            "Text clip should include drawtext filter. Got: {}",
+            args_str
+        );
+
+        // Should contain the text content
+        assert!(
+            args_str.contains("Hello World") || args_str.contains("Hello\\ World"),
+            "Text clip filter should include text content. Got: {}",
+            args_str
+        );
+    }
+
+    #[test]
+    fn test_export_mixed_regular_and_text_clips() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::effects::{EffectType, ParamValue};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // Create sequence with both regular and text clips
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        // Regular clip first: 0-5 seconds
+        let clip1 = Clip::new("regular_asset")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        track.add_clip(clip1);
+
+        // Text clip second: 5-10 seconds
+        let text_effect_id = "text_effect_1".to_string();
+        let mut text_clip = Clip::new(&format!("{}clip2", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 5.0)
+            .place_at(5.0);
+        text_clip.effects.push(text_effect_id.clone());
+        track.add_clip(text_clip);
+
+        sequence.add_track(track);
+
+        // Create regular asset
+        let regular_path = create_temp_media_file("video1.mp4");
+        let mut regular_asset = Asset::new_video("video1.mp4", &regular_path, VideoInfo::default())
+            .with_duration(10.0)
+            .with_file_size(10_000_000);
+        regular_asset.id = "regular_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("regular_asset".to_string(), regular_asset);
+
+        // Create TextOverlay effect
+        let mut text_effect = Effect::new(EffectType::TextOverlay);
+        text_effect.id = text_effect_id.clone();
+        text_effect.set_param("text", ParamValue::String("Title".to_string()));
+        text_effect.set_param("font_family", ParamValue::String("Arial".to_string()));
+        text_effect.set_param("font_size", ParamValue::Float(72.0));
+        text_effect.set_param("color", ParamValue::String("#FFFFFF".to_string()));
+        text_effect.set_param("x", ParamValue::Float(0.5));
+        text_effect.set_param("y", ParamValue::Float(0.5));
+        text_effect.enabled = true;
+
+        let mut effects = std::collections::HashMap::new();
+        effects.insert(text_effect_id, text_effect);
+
+        let audio_info_map = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        // Build args
+        let result = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &settings,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Mixed clips export should succeed. Error: {:?}",
+            result.err()
+        );
+        let args = result.unwrap();
+        let args_str = args.join(" ");
+
+        // Should have both file input and color source
+        assert!(
+            args_str.contains(&regular_path),
+            "Should include file input for regular clip. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("color=c="),
+            "Should include color source for text clip. Got: {}",
+            args_str
+        );
+
+        // Should have concat for multiple clips
+        assert!(
+            args_str.contains("concat=n=2"),
+            "Should concat two video streams. Got: {}",
+            args_str
+        );
+    }
+
+    #[test]
+    fn test_export_text_clip_with_styling() {
+        use crate::core::commands::TEXT_ASSET_PREFIX;
+        use crate::core::effects::{EffectType, ParamValue};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        // Create sequence with styled text clip
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let text_effect_id = "styled_text".to_string();
+        let mut text_clip = Clip::new(&format!("{}styled", TEXT_ASSET_PREFIX))
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        text_clip.effects.push(text_effect_id.clone());
+        track.add_clip(text_clip);
+        sequence.add_track(track);
+
+        // Create TextOverlay effect with full styling
+        let mut text_effect = Effect::new(EffectType::TextOverlay);
+        text_effect.id = text_effect_id.clone();
+        text_effect.set_param("text", ParamValue::String("Styled Text".to_string()));
+        text_effect.set_param("font_family", ParamValue::String("Helvetica".to_string()));
+        text_effect.set_param("font_size", ParamValue::Float(72.0));
+        text_effect.set_param("color", ParamValue::String("#FF0000".to_string()));
+        text_effect.set_param("x", ParamValue::Float(0.5));
+        text_effect.set_param("y", ParamValue::Float(0.5));
+        // Shadow
+        text_effect.set_param("shadow_color", ParamValue::String("#000000".to_string()));
+        text_effect.set_param("shadow_x", ParamValue::Int(2));
+        text_effect.set_param("shadow_y", ParamValue::Int(2));
+        // Outline
+        text_effect.set_param("outline_color", ParamValue::String("#000000".to_string()));
+        text_effect.set_param("outline_width", ParamValue::Int(2));
+        text_effect.enabled = true;
+
+        let mut effects = std::collections::HashMap::new();
+        effects.insert(text_effect_id, text_effect);
+
+        let assets = std::collections::HashMap::new();
+        let audio_info_map = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        let result = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &settings,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Styled text export should succeed. Error: {:?}",
+            result.err()
+        );
+        let args = result.unwrap();
+        let args_str = args.join(" ");
+
+        // Verify styling is applied in drawtext filter
+        assert!(
+            args_str.contains("drawtext"),
+            "Should include drawtext filter. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("fontsize=72"),
+            "Should include font size. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("shadowx=2") && args_str.contains("shadowy=2"),
+            "Should include shadow offset. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("borderw=2"),
+            "Should include outline width. Got: {}",
+            args_str
+        );
+    }
+
+    // =========================================================================
+    // HDR Export Tests
+    // =========================================================================
+
+    #[test]
+    fn test_hdr_mode_default_is_sdr() {
+        let settings = ExportSettings::default();
+        assert_eq!(settings.hdr_mode, HdrMode::Sdr);
+        assert!(!settings.is_hdr());
+    }
+
+    #[test]
+    fn test_sdr_mode_returns_empty_args() {
+        let settings = ExportSettings::default();
+        let args = settings.hdr_args();
+        assert!(args.is_empty(), "SDR mode should return empty args");
+    }
+
+    #[test]
+    fn test_hdr10_mode_args() {
+        let settings = ExportSettings {
+            hdr_mode: HdrMode::Hdr10,
+            ..Default::default()
+        };
+
+        let args = settings.hdr_args();
+        assert!(settings.is_hdr());
+
+        // Check for required HDR10 arguments
+        assert!(args.contains(&"-color_primaries".to_string()));
+        assert!(args.contains(&"bt2020".to_string()));
+        assert!(args.contains(&"-colorspace".to_string()));
+        assert!(args.contains(&"bt2020nc".to_string()));
+        assert!(args.contains(&"-color_trc".to_string()));
+        assert!(args.contains(&"smpte2084".to_string()));
+        assert!(args.contains(&"-pix_fmt".to_string()));
+        assert!(args.contains(&"yuv420p10le".to_string()));
+    }
+
+    #[test]
+    fn test_hdr10_mode_with_metadata_and_h265() {
+        let settings = ExportSettings {
+            hdr_mode: HdrMode::Hdr10,
+            video_codec: VideoCodec::H265, // HDR requires H.265
+            max_cll: Some(1000),
+            max_fall: Some(400),
+            ..Default::default()
+        };
+
+        let args = settings.hdr_args();
+        let args_str = args.join(" ");
+
+        assert!(
+            args_str.contains("-x265-params"),
+            "Should include x265 params for HDR metadata with H.265 codec"
+        );
+        assert!(
+            args_str.contains("max-cll=1000,400"),
+            "Should include MaxCLL,MaxFALL. Got: {}",
+            args_str
+        );
+    }
+
+    #[test]
+    fn test_hdr10_mode_with_h264_no_x265_params() {
+        let settings = ExportSettings {
+            hdr_mode: HdrMode::Hdr10,
+            video_codec: VideoCodec::H264, // H.264 doesn't support x265-params
+            max_cll: Some(1000),
+            max_fall: Some(400),
+            ..Default::default()
+        };
+
+        let args = settings.hdr_args();
+        let args_str = args.join(" ");
+
+        // Should NOT include x265-params with H.264 codec
+        assert!(
+            !args_str.contains("-x265-params"),
+            "Should not include x265 params with H.264 codec. Got: {}",
+            args_str
+        );
+        // But should still have color metadata
+        assert!(args_str.contains("bt2020"));
+    }
+
+    #[test]
+    fn test_hdr_validation_sdr_always_valid() {
+        let settings = ExportSettings::default(); // SDR with H.264
+        assert!(settings.validate_hdr_settings().is_none());
+    }
+
+    #[test]
+    fn test_hdr_validation_hdr_with_h264_fails() {
+        let settings = ExportSettings {
+            hdr_mode: HdrMode::Hdr10,
+            video_codec: VideoCodec::H264,
+            ..Default::default()
+        };
+
+        let result = settings.validate_hdr_settings();
+        assert!(result.is_some(), "HDR with H.264 should fail validation");
+        assert!(result.unwrap().contains("H.265"));
+    }
+
+    #[test]
+    fn test_hdr_validation_hdr_with_h265_passes() {
+        let settings = ExportSettings {
+            hdr_mode: HdrMode::Hdr10,
+            video_codec: VideoCodec::H265,
+            max_cll: Some(1000),
+            max_fall: Some(400),
+            ..Default::default()
+        };
+
+        assert!(settings.validate_hdr_settings().is_none());
+    }
+
+    #[test]
+    fn test_with_hdr_compatible_codec() {
+        let settings = ExportSettings {
+            hdr_mode: HdrMode::Hdr10,
+            video_codec: VideoCodec::H264,
+            ..Default::default()
+        };
+
+        // Should fail validation
+        assert!(settings.validate_hdr_settings().is_some());
+
+        // Apply HDR-compatible codec
+        let fixed = settings.with_hdr_compatible_codec();
+        assert_eq!(fixed.video_codec, VideoCodec::H265);
+        assert!(fixed.validate_hdr_settings().is_none());
+    }
+
+    #[test]
+    fn test_hlg_mode_args() {
+        let settings = ExportSettings {
+            hdr_mode: HdrMode::Hlg,
+            ..Default::default()
+        };
+
+        let args = settings.hdr_args();
+        assert!(settings.is_hdr());
+
+        // Check for required HLG arguments
+        assert!(args.contains(&"-color_primaries".to_string()));
+        assert!(args.contains(&"bt2020".to_string()));
+        assert!(args.contains(&"-colorspace".to_string()));
+        assert!(args.contains(&"bt2020nc".to_string()));
+        assert!(args.contains(&"-color_trc".to_string()));
+        assert!(args.contains(&"arib-std-b67".to_string()));
+        assert!(args.contains(&"-pix_fmt".to_string()));
+        assert!(args.contains(&"yuv420p10le".to_string()));
+    }
+
+    #[test]
+    fn test_hdr_mode_serialization() {
+        let hdr10 = HdrMode::Hdr10;
+        let json = serde_json::to_string(&hdr10).unwrap();
+        assert_eq!(json, "\"hdr10\"");
+
+        let hlg = HdrMode::Hlg;
+        let json = serde_json::to_string(&hlg).unwrap();
+        assert_eq!(json, "\"hlg\"");
+
+        let sdr = HdrMode::Sdr;
+        let json = serde_json::to_string(&sdr).unwrap();
+        assert_eq!(json, "\"sdr\"");
+    }
+
+    #[test]
+    fn test_hdr_mode_deserialization() {
+        let hdr10: HdrMode = serde_json::from_str("\"hdr10\"").unwrap();
+        assert_eq!(hdr10, HdrMode::Hdr10);
+
+        let hlg: HdrMode = serde_json::from_str("\"hlg\"").unwrap();
+        assert_eq!(hlg, HdrMode::Hlg);
+
+        let sdr: HdrMode = serde_json::from_str("\"sdr\"").unwrap();
+        assert_eq!(sdr, HdrMode::Sdr);
+    }
+
+    #[test]
+    fn test_export_settings_with_hdr_serialization() {
+        let settings = ExportSettings {
+            hdr_mode: HdrMode::Hdr10,
+            max_cll: Some(1000),
+            max_fall: Some(400),
+            bit_depth: Some(10),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("\"hdrMode\":\"hdr10\""));
+        assert!(json.contains("\"maxCll\":1000"));
+        assert!(json.contains("\"maxFall\":400"));
+        assert!(json.contains("\"bitDepth\":10"));
+
+        // Deserialize and verify
+        let parsed: ExportSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.hdr_mode, HdrMode::Hdr10);
+        assert_eq!(parsed.max_cll, Some(1000));
+        assert_eq!(parsed.max_fall, Some(400));
+        assert_eq!(parsed.bit_depth, Some(10));
+    }
+
+    #[test]
+    fn test_all_presets_default_to_sdr() {
+        use std::path::PathBuf;
+
+        let presets = vec![
+            ExportPreset::Youtube1080p,
+            ExportPreset::Youtube4k,
+            ExportPreset::YoutubeShorts,
+            ExportPreset::Twitter,
+            ExportPreset::Instagram,
+            ExportPreset::WebmVp9,
+            ExportPreset::ProRes,
+            ExportPreset::Custom,
+        ];
+
+        for preset in presets {
+            let settings = ExportSettings::from_preset(preset.clone(), PathBuf::from("test.mp4"));
+            assert_eq!(
+                settings.hdr_mode,
+                HdrMode::Sdr,
+                "Preset {:?} should default to SDR",
+                preset
+            );
+        }
     }
 }
