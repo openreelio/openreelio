@@ -260,6 +260,39 @@ pub fn validate_output_path(path: &str, label: &str) -> Result<PathBuf, String> 
     Ok(pb)
 }
 
+fn validate_output_path_no_create(path: &str, label: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} is empty"));
+    }
+
+    let pb = PathBuf::from(trimmed);
+    if !pb.is_absolute() {
+        return Err(format!(
+            "{label} must be an absolute path: {}",
+            pb.display()
+        ));
+    }
+
+    // Prevent traversal tricks in scoped IPC paths. Normalizing absolute paths correctly across
+    // platforms is subtle; for security, reject any `.`/`..` segments up front.
+    if pb.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    }) {
+        return Err(format!("{label} must not contain '.' or '..' segments"));
+    }
+
+    // Don't allow overwriting a directory
+    if pb.exists() && pb.is_dir() {
+        return Err(format!("{label} points to a directory: {}", pb.display()));
+    }
+
+    Ok(pb)
+}
+
 /// Validates an output path and enforces that it is within one of the allowed root directories.
 ///
 /// This is a defense-in-depth control for IPC commands that accept an output path from the
@@ -269,23 +302,83 @@ pub fn validate_scoped_output_path(
     label: &str,
     allowed_roots: &[&Path],
 ) -> Result<PathBuf, String> {
-    let pb = validate_output_path(path, label)?;
+    let pb = validate_output_path_no_create(path, label)?;
 
     let parent = pb
         .parent()
         .ok_or_else(|| format!("{label} has no parent directory: {}", pb.display()))?;
 
+    #[cfg(windows)]
+    fn starts_with_path_case_insensitive(path: &Path, base: &Path) -> bool {
+        use std::path::Component;
+
+        let mut path_components = path.components();
+        for base_component in base.components() {
+            let Some(path_component) = path_components.next() else {
+                return false;
+            };
+
+            let base_str = base_component.as_os_str().to_string_lossy();
+            let path_str = path_component.as_os_str().to_string_lossy();
+
+            // Compare case-insensitively for Windows. Use a component-wise comparison to avoid
+            // prefix bugs like allowing `C:\root_evil` when `C:\root` is the allowed root.
+            //
+            // NOTE: `Component` does not expose a stable structural equality that is
+            // case-insensitive, so we normalize to lowercase strings for safety.
+            if base_str.to_ascii_lowercase() != path_str.to_ascii_lowercase() {
+                return false;
+            }
+
+            // If the base is `RootDir` but the path isn't, we'll have returned false above.
+            // For prefix components (drive letters), the string normalization above suffices.
+            if matches!(base_component, Component::CurDir | Component::ParentDir) {
+                // Canonical paths should not contain these, but treat them defensively.
+                return false;
+            }
+        }
+        true
+    }
+
+    // Avoid side-effects outside allowed roots: verify scope *before* creating parent directories.
+    let is_allowed_lexical = allowed_roots.iter().any(|root| {
+        #[cfg(windows)]
+        {
+            starts_with_path_case_insensitive(parent, root)
+        }
+
+        #[cfg(not(windows))]
+        {
+            parent.starts_with(root)
+        }
+    });
+
+    if !is_allowed_lexical {
+        let roots = allowed_roots
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "{label} must be within an allowed directory. Allowed roots: {roots}. Got: {}",
+            pb.display()
+        ));
+    }
+
+    // At this point, `parent` is lexically under an allowed root, so creating it is safe.
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("Failed to create output directory: {e}"))?;
+
     let parent_canon = std::fs::canonicalize(parent)
         .map_err(|e| format!("Failed to resolve {label} parent directory: {e}"))?;
 
-    let is_allowed = allowed_roots.iter().any(|root| {
+    // Post-creation canonical check to defend against symlink and case/normalization surprises.
+    let is_allowed_canon = allowed_roots.iter().any(|root| {
         let root_canon = std::fs::canonicalize(root).unwrap_or_else(|_| (*root).to_path_buf());
 
         #[cfg(windows)]
         {
-            let root_s = root_canon.to_string_lossy().to_ascii_lowercase();
-            let parent_s = parent_canon.to_string_lossy().to_ascii_lowercase();
-            parent_s.starts_with(&root_s)
+            starts_with_path_case_insensitive(&parent_canon, &root_canon)
         }
 
         #[cfg(not(windows))]
@@ -294,7 +387,7 @@ pub fn validate_scoped_output_path(
         }
     });
 
-    if !is_allowed {
+    if !is_allowed_canon {
         let roots = allowed_roots
             .iter()
             .map(|p| p.display().to_string())
@@ -629,6 +722,24 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_scoped_output_path_does_not_create_dirs_outside_root() {
+        let allowed_root = TempDir::new().unwrap();
+        let outside_root = TempDir::new().unwrap();
+
+        let outside_parent = outside_root.path().join("will_not_be_created");
+        let out = outside_parent.join("out.png");
+        let out_str = out.to_string_lossy().to_string();
+
+        assert!(!outside_parent.exists());
+        let result = validate_scoped_output_path(&out_str, "outputPath", &[allowed_root.path()]);
+        assert!(result.is_err());
+        assert!(
+            !outside_parent.exists(),
+            "validate_scoped_output_path must not create directories outside allowed roots"
+        );
+    }
+
+    #[test]
     fn test_validate_scoped_output_path_allows_multiple_roots() {
         let root_a = TempDir::new().unwrap();
         let root_b = TempDir::new().unwrap();
@@ -639,6 +750,45 @@ mod tests {
         let result =
             validate_scoped_output_path(&out_str, "outputPath", &[root_a.path(), root_b.path()]);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_scoped_output_path_rejects_dotdot_segments() {
+        let root = TempDir::new().unwrap();
+        let out = root
+            .path()
+            .join("frames")
+            .join("..")
+            .join("evil")
+            .join("out.png");
+        let out_str = out.to_string_lossy().to_string();
+
+        let result = validate_scoped_output_path(&out_str, "outputPath", &[root.path()]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must not contain '.' or '..'"));
+    }
+
+    #[test]
+    fn test_validate_scoped_output_path_rejects_prefix_sibling_dir() {
+        // Regression test: string-prefix checks can incorrectly allow paths like:
+        // allowed root:   C:\...\root
+        // output parent:  C:\...\root_evil
+        // This must be rejected.
+        let base = TempDir::new().unwrap();
+
+        let allowed_root = base.path().join("root");
+        let sibling = base.path().join("root_evil");
+        std::fs::create_dir_all(&allowed_root).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+
+        let out = sibling.join("out.png");
+        let out_str = out.to_string_lossy().to_string();
+
+        let result = validate_scoped_output_path(&out_str, "outputPath", &[&allowed_root]);
+        assert!(
+            result.is_err(),
+            "expected output in prefix-sibling dir to be rejected"
+        );
     }
 
     #[tokio::test]
