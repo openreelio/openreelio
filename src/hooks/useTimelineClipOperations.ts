@@ -10,6 +10,7 @@ import type { Sequence, Clip, TrackKind } from '@/types';
 import type { ClipMoveData, ClipTrimData } from '@/components/timeline/types';
 import type { ClipDragData, DragPreviewPosition } from '@/components/timeline/Clip';
 import type { DragPreviewState } from '@/components/timeline/DragPreviewLayer';
+import { useToastStore } from '@/hooks/useToast';
 
 // =============================================================================
 // Helper Functions
@@ -40,6 +41,9 @@ function isTrackKindCompatible(sourceKind: TrackKind, targetKind: TrackKind): bo
 
 /** Default track height in pixels */
 const DEFAULT_TRACK_HEIGHT = 64;
+
+/** Maximum timeline position in seconds (24 hours) */
+const MAX_TIMELINE_POSITION = 86400;
 
 // =============================================================================
 // Types
@@ -232,6 +236,7 @@ export function useTimelineClipOperations({
       if (data.type === 'move' && onClipMove) {
         const sourceTrackIndex = sequence.tracks.findIndex((t) => t.id === trackId);
         const sourceTrack = sequence.tracks[sourceTrackIndex];
+        const addToast = useToastStore.getState().addToast;
 
         // Determine if we're moving to a different track
         let newTrackId: string | undefined;
@@ -242,6 +247,15 @@ export function useTimelineClipOperations({
           // Only set newTrackId if target track exists and is compatible
           if (targetTrack && isTrackKindCompatible(sourceTrack?.kind ?? 'video', targetTrack.kind)) {
             newTrackId = targetTrack.id;
+          } else if (targetTrack) {
+            // Show feedback when cross-track drop is rejected due to incompatibility
+            const sourceKindLabel = sourceTrack?.kind ?? 'video';
+            const targetKindLabel = targetTrack.kind;
+            addToast({
+              message: `Cannot move ${sourceKindLabel} clip to ${targetKindLabel} track`,
+              variant: 'warning',
+              duration: 3000,
+            });
           }
         }
 
@@ -249,7 +263,7 @@ export function useTimelineClipOperations({
           sequenceId: sequence.id,
           trackId,
           clipId: data.clipId,
-          newTimelineIn: Math.max(0, finalPosition.timelineIn),
+          newTimelineIn: Math.min(MAX_TIMELINE_POSITION, Math.max(0, finalPosition.timelineIn)),
         };
 
         // Only include newTrackId if it's defined (cross-track move)
@@ -265,7 +279,7 @@ export function useTimelineClipOperations({
             trackId,
             clipId: data.clipId,
             newSourceIn: Math.max(0, finalPosition.sourceIn),
-            newTimelineIn: Math.max(0, finalPosition.timelineIn),
+            newTimelineIn: Math.min(MAX_TIMELINE_POSITION, Math.max(0, finalPosition.timelineIn)),
           });
         } else {
           onClipTrim({
@@ -305,12 +319,22 @@ export function useTimelineClipOperations({
       // Determine target track for cross-track moves
       const sourceTrackIndex = sequence.tracks.findIndex((t) => t.id === trackId);
       const sourceTrack = sequence.tracks[sourceTrackIndex];
+      const addToast = useToastStore.getState().addToast;
       let newTrackId: string | undefined;
 
       if (targetTrackIndex !== undefined && targetTrackIndex !== sourceTrackIndex) {
         const targetTrack = sequence.tracks[targetTrackIndex];
         if (targetTrack && isTrackKindCompatible(sourceTrack?.kind ?? 'video', targetTrack.kind)) {
           newTrackId = targetTrack.id;
+        } else if (targetTrack) {
+          // Show feedback when cross-track drop is rejected due to incompatibility
+          const sourceKindLabel = sourceTrack?.kind ?? 'video';
+          const targetKindLabel = targetTrack.kind;
+          addToast({
+            message: `Cannot move ${sourceKindLabel} clips to ${targetKindLabel} track`,
+            variant: 'warning',
+            duration: 3000,
+          });
         }
       }
 
@@ -321,7 +345,7 @@ export function useTimelineClipOperations({
 
         // Calculate new position based on offset
         const currentTimelineIn = clipInfo.clip.place.timelineInSec;
-        const newTimelineIn = Math.max(0, currentTimelineIn + offset);
+        const newTimelineIn = Math.min(MAX_TIMELINE_POSITION, Math.max(0, currentTimelineIn + offset));
 
         const moveData: ClipMoveData = {
           sequenceId: sequence.id,

@@ -1,11 +1,11 @@
 /**
  * TimelineToolbar Component
  *
- * Toolbar for timeline with zoom controls, snap toggle, and fit to window.
+ * Toolbar for timeline with zoom controls, snap toggle, fit to window, and add text.
  */
 
 import { useCallback, type KeyboardEvent } from 'react';
-import { ZoomIn, ZoomOut, Maximize2, Magnet } from 'lucide-react';
+import { ZoomIn, ZoomOut, Maximize2, Magnet, Type } from 'lucide-react';
 import { useTimelineStore } from '@/stores/timelineStore';
 
 // =============================================================================
@@ -15,6 +15,10 @@ import { useTimelineStore } from '@/stores/timelineStore';
 export interface TimelineToolbarProps {
   /** Callback when fit to window is clicked */
   onFitToWindow?: () => void;
+  /** Callback when add text is clicked */
+  onAddText?: () => void;
+  /** Whether there's an active sequence (enables add text button) */
+  hasActiveSequence?: boolean;
 }
 
 // =============================================================================
@@ -28,7 +32,11 @@ const MAX_ZOOM = 500;
 // Component
 // =============================================================================
 
-export function TimelineToolbar({ onFitToWindow }: TimelineToolbarProps) {
+export function TimelineToolbar({
+  onFitToWindow,
+  onAddText,
+  hasActiveSequence = false,
+}: TimelineToolbarProps) {
   const { zoom, snapEnabled, setZoom, zoomIn, zoomOut, toggleSnap } = useTimelineStore();
 
   // ===========================================================================
@@ -57,6 +65,10 @@ export function TimelineToolbar({ onFitToWindow }: TimelineToolbarProps) {
   const handleSnapToggle = useCallback(() => {
     toggleSnap();
   }, [toggleSnap]);
+
+  const handleAddText = useCallback(() => {
+    onAddText?.();
+  }, [onAddText]);
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
@@ -100,6 +112,21 @@ export function TimelineToolbar({ onFitToWindow }: TimelineToolbarProps) {
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
+      {/* Add Text Button */}
+      <button
+        data-testid="add-text-button"
+        type="button"
+        className="p-1.5 rounded text-teal-400 hover:bg-teal-600/20 hover:text-teal-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        onClick={handleAddText}
+        disabled={!hasActiveSequence}
+        title="Add text (T)"
+      >
+        <Type className="w-4 h-4" />
+      </button>
+
+      {/* Divider */}
+      <div className="w-px h-4 bg-editor-border" />
+
       {/* Snap Toggle */}
       <button
         data-testid="snap-toggle-button"

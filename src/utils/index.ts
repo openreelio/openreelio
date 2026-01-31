@@ -174,3 +174,45 @@ export {
   type BezierPoints,
   type EasingFn,
 } from './bezierCurve';
+
+export {
+  buildBinTree,
+  flattenBinTree,
+  getBinPath,
+  getBinAncestors,
+  getBinDescendants,
+  getBinChildren,
+  getAssetsInBin,
+  canMoveBinTo,
+  sortBins,
+  generateUniqueBinName,
+  getDefaultBinColor,
+  BIN_COLORS,
+  BIN_COLOR_CLASSES,
+  type BinTreeNode,
+} from './binUtils';
+
+export {
+  parseKeySignature,
+  buildKeySignature,
+  normalizeKeySignature,
+  isValidKeySignature,
+  keyEventToSignature,
+  signatureToDisplayString,
+  compareSignatures,
+  type KeySignature,
+} from './shortcutUtils';
+
+export {
+  SHORTCUT_ACTIONS,
+  DEFAULT_SHORTCUTS,
+  getShortcutAction,
+  getActionByShortcut,
+  getShortcutForAction,
+  getAllShortcuts,
+  getShortcutsByCategory,
+  type ShortcutAction,
+  type ShortcutCategory,
+  type ShortcutEntry,
+  type CustomShortcuts,
+} from './shortcutActions';

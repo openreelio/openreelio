@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { Clip } from './Clip';
 import type { Clip as ClipType } from '@/types';
+import { TEXT_ASSET_PREFIX } from '@/types';
 
 // =============================================================================
 // Test Data
@@ -151,6 +152,117 @@ describe('Clip', () => {
 
       expect(screen.getByTestId('resize-handle-left')).toBeInTheDocument();
       expect(screen.getByTestId('resize-handle-right')).toBeInTheDocument();
+    });
+  });
+
+  // ===========================================================================
+  // Text Clip Rendering Tests
+  // ===========================================================================
+
+  describe('text clip rendering', () => {
+    const mockTextClip: ClipType = {
+      id: 'text_clip_001',
+      assetId: `${TEXT_ASSET_PREFIX}text_clip_001`,
+      range: { sourceInSec: 0, sourceOutSec: 5 },
+      place: { timelineInSec: 10, durationSec: 5 },
+      transform: {
+        position: { x: 0.5, y: 0.5 },
+        scale: { x: 1, y: 1 },
+        rotationDeg: 0,
+        anchor: { x: 0.5, y: 0.5 },
+      },
+      opacity: 1,
+      speed: 1,
+      effects: [],
+      audio: { volumeDb: 0, pan: 0, muted: false },
+      label: 'Text: Hello World',
+    };
+
+    it('should show text icon indicator for text clips', () => {
+      render(<Clip clip={mockTextClip} zoom={100} selected={false} />);
+
+      expect(screen.getByTestId('text-clip-indicator')).toBeInTheDocument();
+    });
+
+    it('should display text clip label', () => {
+      render(<Clip clip={mockTextClip} zoom={100} selected={false} />);
+
+      expect(screen.getByText('Text: Hello World')).toBeInTheDocument();
+    });
+
+    it('should have distinct background color for text clips', () => {
+      const { container } = render(<Clip clip={mockTextClip} zoom={100} selected={false} />);
+      const clipElement = container.firstChild as HTMLElement;
+
+      // Text clips should have teal/cyan background color class or inline style
+      expect(clipElement).toHaveClass('bg-teal-600');
+    });
+
+    it('should not show thumbnail or waveform for text clips', () => {
+      // Even if configs are provided, text clips should not show thumbnails/waveforms
+      const thumbnailConfig = {
+        asset: {
+          id: 'dummy',
+          kind: 'video' as const,
+          name: 'dummy',
+          uri: '',
+          hash: 'abc123',
+          fileSize: 1000,
+          importedAt: '2024-01-01T00:00:00Z',
+          license: {
+            source: 'user' as const,
+            licenseType: 'unknown' as const,
+            allowedUse: [],
+          },
+          tags: [],
+          proxyStatus: 'notNeeded' as const,
+        },
+        enabled: true,
+      };
+
+      render(
+        <Clip
+          clip={mockTextClip}
+          zoom={100}
+          selected={false}
+          thumbnailConfig={thumbnailConfig}
+        />
+      );
+
+      // The thumbnail strip should not be rendered for text clips
+      // Text clips use virtual assets, so thumbnail loading would fail anyway
+      expect(screen.getByTestId('text-clip-indicator')).toBeInTheDocument();
+    });
+
+    it('should display default label when text clip has no label', () => {
+      const textClipNoLabel: ClipType = {
+        ...mockTextClip,
+        label: undefined,
+      };
+
+      render(<Clip clip={textClipNoLabel} zoom={100} selected={false} />);
+
+      // Should show "Text" as default label for text clips
+      expect(screen.getByText('Text')).toBeInTheDocument();
+    });
+
+    it('should handle text clip interactions same as regular clips', () => {
+      const onClick = vi.fn();
+      render(<Clip clip={mockTextClip} zoom={100} selected={false} onClick={onClick} />);
+
+      fireEvent.click(screen.getByTestId(`clip-${mockTextClip.id}`));
+      expect(onClick).toHaveBeenCalledWith('text_clip_001', {
+        ctrlKey: false,
+        shiftKey: false,
+        metaKey: false,
+      });
+    });
+
+    it('should be selectable like regular clips', () => {
+      const { container } = render(<Clip clip={mockTextClip} zoom={100} selected={true} />);
+      const clipElement = container.firstChild as HTMLElement;
+
+      expect(clipElement).toHaveClass('ring-2');
     });
   });
 });

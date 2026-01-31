@@ -139,6 +139,8 @@ export interface TimelineProps {
   onTrackLockToggle?: (data: TrackControlData) => void;
   /** Callback when track visibility is toggled */
   onTrackVisibilityToggle?: (data: TrackControlData) => void;
+  /** Callback when Add Text button is clicked */
+  onAddText?: () => void;
 }
 
 // =============================================================================

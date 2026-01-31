@@ -14,6 +14,8 @@ export { useJobsStore } from './jobsStore';
 export { usePlaybackStore } from './playbackStore';
 export { useWaveformCacheStore, createWaveformCacheKey } from './waveformCacheStore';
 export { useSettingsStore } from './settingsStore';
+export { useBinStore } from './binStore';
+export type { BinState, BinActions, BinStore } from './binStore';
 export {
   useAnnotationStore,
   selectShots,
@@ -66,6 +68,7 @@ import { usePlaybackStore } from './playbackStore';
 import { useWaveformCacheStore } from './waveformCacheStore';
 import { useAIStore } from './aiStore';
 import { useAnnotationStore } from './annotationStore';
+import { useBinStore } from './binStore';
 
 /**
  * Reset all project-related stores to their initial state.
@@ -80,6 +83,7 @@ export function resetProjectStores(): void {
   useWaveformCacheStore.getState().clearCache();
   useAIStore.getState().clearChatHistory();
   useAnnotationStore.getState().reset();
+  useBinStore.getState().reset();
 
   logger.info('All project stores reset');
 }

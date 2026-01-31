@@ -32,6 +32,9 @@ export type JobId = string;
 /** Sequence unique identifier (ULID) */
 export type SequenceId = string;
 
+/** Bin/Folder unique identifier (ULID) */
+export type BinId = string;
+
 // =============================================================================
 // Time Types
 // =============================================================================
@@ -172,6 +175,42 @@ export interface Asset {
   proxyStatus: ProxyStatus;
   /** Proxy video URL for preview playback */
   proxyUrl?: string;
+  /** ID of the bin/folder this asset belongs to (null = root) */
+  binId?: BinId | null;
+}
+
+// =============================================================================
+// Bin/Folder Types
+// =============================================================================
+
+/** Color for bin visual identification */
+export type BinColor =
+  | 'gray'
+  | 'red'
+  | 'orange'
+  | 'yellow'
+  | 'green'
+  | 'blue'
+  | 'purple'
+  | 'pink';
+
+/**
+ * Bin (Folder) for organizing assets in the Project Explorer.
+ * Bins can be nested to create a hierarchical structure.
+ */
+export interface Bin {
+  /** Unique identifier */
+  id: BinId;
+  /** Display name */
+  name: string;
+  /** Parent bin ID (null = root level) */
+  parentId: BinId | null;
+  /** Visual color for identification */
+  color: BinColor;
+  /** When the bin was created */
+  createdAt: string;
+  /** Whether the bin is expanded in the UI */
+  expanded?: boolean;
 }
 
 /** Check if an asset requires proxy generation based on video dimensions */
@@ -361,6 +400,230 @@ export const DEFAULT_CAPTION_POSITION: CaptionPosition = {
 };
 
 // =============================================================================
+// Text Clip Types
+// =============================================================================
+
+/**
+ * Text alignment for text clips.
+ * Note: Using string union instead of TextAlignment from Caption to keep
+ * text clip system independent.
+ */
+export type TextClipAlignment = 'left' | 'center' | 'right';
+
+/**
+ * Text styling options for text clips.
+ * Matches the Rust TextStyle struct.
+ */
+export interface TextStyle {
+  /** Font family name (e.g., "Arial", "Helvetica") */
+  fontFamily: string;
+  /** Font size in points */
+  fontSize: number;
+  /** Text color as hex string (e.g., "#FFFFFF") */
+  color: string;
+  /** Optional background color as hex string */
+  backgroundColor?: string;
+  /** Background padding in pixels */
+  backgroundPadding: number;
+  /** Text alignment */
+  alignment: TextClipAlignment;
+  /** Bold weight */
+  bold: boolean;
+  /** Italic style */
+  italic: boolean;
+  /** Underline decoration */
+  underline: boolean;
+  /** Line height multiplier (1.0 = normal) */
+  lineHeight: number;
+  /** Letter spacing in pixels */
+  letterSpacing: number;
+}
+
+/**
+ * Shadow effect for text clips.
+ */
+export interface TextShadow {
+  /** Shadow color as hex string */
+  color: string;
+  /** Horizontal offset in pixels */
+  offsetX: number;
+  /** Vertical offset in pixels */
+  offsetY: number;
+  /** Blur radius in pixels */
+  blur: number;
+}
+
+/**
+ * Outline/stroke effect for text clips.
+ */
+export interface TextOutline {
+  /** Outline color as hex string */
+  color: string;
+  /** Outline width in pixels */
+  width: number;
+}
+
+/**
+ * Normalized position for text clips.
+ * Values are between 0.0 and 1.0 representing percentage of canvas.
+ */
+export interface TextPosition {
+  /** Horizontal position (0.0 = left, 0.5 = center, 1.0 = right) */
+  x: number;
+  /** Vertical position (0.0 = top, 0.5 = center, 1.0 = bottom) */
+  y: number;
+}
+
+/**
+ * Complete text clip data including content, styling, and position.
+ * Matches the Rust TextClipData struct.
+ */
+export interface TextClipData {
+  /** Text content to display */
+  content: string;
+  /** Text styling options */
+  style: TextStyle;
+  /** Position on canvas (normalized 0.0-1.0) */
+  position: TextPosition;
+  /** Optional drop shadow */
+  shadow?: TextShadow;
+  /** Optional text outline/stroke */
+  outline?: TextOutline;
+  /** Rotation angle in degrees (-180 to 180) */
+  rotation: number;
+  /** Opacity (0.0 to 1.0) */
+  opacity: number;
+}
+
+/**
+ * Default text style matching Rust defaults.
+ */
+export const DEFAULT_TEXT_STYLE: TextStyle = {
+  fontFamily: 'Arial',
+  fontSize: 48,
+  color: '#FFFFFF',
+  backgroundPadding: 10,
+  alignment: 'center',
+  bold: false,
+  italic: false,
+  underline: false,
+  lineHeight: 1.2,
+  letterSpacing: 0,
+};
+
+/**
+ * Default text position (centered).
+ */
+export const DEFAULT_TEXT_POSITION: TextPosition = {
+  x: 0.5,
+  y: 0.5,
+};
+
+/**
+ * Default text shadow.
+ */
+export const DEFAULT_TEXT_SHADOW: TextShadow = {
+  color: '#000000',
+  offsetX: 2,
+  offsetY: 2,
+  blur: 0,
+};
+
+/**
+ * Default text outline.
+ */
+export const DEFAULT_TEXT_OUTLINE: TextOutline = {
+  color: '#000000',
+  width: 2,
+};
+
+/**
+ * Creates default TextClipData with the given content.
+ */
+export function createTextClipData(content: string): TextClipData {
+  return {
+    content,
+    style: { ...DEFAULT_TEXT_STYLE },
+    position: { ...DEFAULT_TEXT_POSITION },
+    rotation: 0,
+    opacity: 1.0,
+  };
+}
+
+/**
+ * Creates a title-style TextClipData.
+ */
+export function createTitleTextClipData(content: string): TextClipData {
+  return {
+    content,
+    style: {
+      ...DEFAULT_TEXT_STYLE,
+      fontSize: 72,
+      bold: true,
+    },
+    position: { x: 0.5, y: 0.5 },
+    shadow: { ...DEFAULT_TEXT_SHADOW },
+    rotation: 0,
+    opacity: 1.0,
+  };
+}
+
+/**
+ * Creates a lower-third style TextClipData.
+ */
+export function createLowerThirdTextClipData(content: string): TextClipData {
+  return {
+    content,
+    style: {
+      ...DEFAULT_TEXT_STYLE,
+      fontSize: 36,
+      alignment: 'left',
+      backgroundColor: '#000000',
+    },
+    position: { x: 0.1, y: 0.85 },
+    rotation: 0,
+    opacity: 0.9,
+  };
+}
+
+/**
+ * Creates a subtitle-style TextClipData.
+ */
+export function createSubtitleTextClipData(content: string): TextClipData {
+  return {
+    content,
+    style: {
+      ...DEFAULT_TEXT_STYLE,
+      fontSize: 32,
+    },
+    position: { x: 0.5, y: 0.9 },
+    outline: { color: '#000000', width: 2 },
+    rotation: 0,
+    opacity: 1.0,
+  };
+}
+
+/**
+ * Virtual asset prefix for text clips.
+ * Text clips use asset IDs starting with this prefix.
+ */
+export const TEXT_ASSET_PREFIX = '__text__';
+
+/**
+ * Checks if a clip is a text clip based on its asset ID.
+ */
+export function isTextClip(assetId: string): boolean {
+  return assetId.startsWith(TEXT_ASSET_PREFIX);
+}
+
+/**
+ * Validates a hex color string.
+ */
+export function isValidHexColor(color: string): boolean {
+  return /^#([A-Fa-f0-9]{3}|[A-Fa-f0-9]{4}|[A-Fa-f0-9]{6}|[A-Fa-f0-9]{8})$/.test(color);
+}
+
+// =============================================================================
 // Command Types
 // =============================================================================
 
@@ -384,7 +647,11 @@ export type CommandType =
   | 'DeleteTrack'
   | 'ToggleTrackMute'
   | 'ToggleTrackLock'
-  | 'ToggleTrackVisibility';
+  | 'ToggleTrackVisibility'
+  // Text clip commands
+  | 'AddTextClip'
+  | 'UpdateTextClip'
+  | 'RemoveTextClip';
 
 export interface Command {
   type: CommandType;
@@ -605,6 +872,7 @@ export type EffectType =
   | 'saturation'
   | 'hue'
   | 'color_balance'
+  | 'color_wheels' // Lift/Gamma/Gain (3-way color corrector)
   | 'gamma'
   | 'levels'
   | 'curves'
@@ -850,6 +1118,7 @@ export const EFFECT_TYPE_LABELS: Partial<Record<string, string>> = {
   saturation: 'Saturation',
   hue: 'Hue',
   color_balance: 'Color Balance',
+  color_wheels: 'Color Wheels',
   gamma: 'Gamma',
   levels: 'Levels',
   curves: 'Curves',

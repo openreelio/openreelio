@@ -88,7 +88,15 @@ export class TimelineEngine {
   // ---------------------------------------------------------------------------
 
   private _animationFrameId: number | null = null;
-  private _lastTickTime: number = 0;
+
+  // ---------------------------------------------------------------------------
+  // Absolute Time Tracking (prevents floating-point drift)
+  // ---------------------------------------------------------------------------
+
+  /** Timestamp (performance.now) when playback started */
+  private _playStartTime: number = 0;
+  /** Timeline position when playback started */
+  private _playStartPosition: number = 0;
 
   // ---------------------------------------------------------------------------
   // Event System
@@ -155,7 +163,9 @@ export class TimelineEngine {
     if (this._currentTime >= this._duration) return;
 
     this._isPlaying = true;
-    this._lastTickTime = performance.now();
+    // Record playback start point for absolute time calculation
+    this._playStartTime = performance.now();
+    this._playStartPosition = this._currentTime;
     this._startAnimationLoop();
     this._emit('play');
     this._syncedStore?.setIsPlaying(true);
@@ -191,6 +201,12 @@ export class TimelineEngine {
 
     this._currentTime = clampedTime;
     this._syncedStore?.setCurrentTime(clampedTime);
+
+    // Reset start point if playing to maintain accurate absolute time tracking
+    if (this._isPlaying) {
+      this._playStartTime = performance.now();
+      this._playStartPosition = clampedTime;
+    }
 
     this._emit('afterSetTime', { time: clampedTime });
 
@@ -252,6 +268,12 @@ export class TimelineEngine {
   setPlaybackRate(rate: number): void {
     if (this._isDisposed) return;
 
+    // Reset start point when rate changes to prevent time jump
+    if (this._isPlaying) {
+      this._playStartTime = performance.now();
+      this._playStartPosition = this._currentTime;
+    }
+
     this._playbackRate = this._clampPlaybackRate(rate);
     this._emit('playbackRateChange', { rate: this._playbackRate });
   }
@@ -296,13 +318,41 @@ export class TimelineEngine {
 
   /** Internal tick method - exposed for testing */
   _tick(timestamp: number): void {
-    const elapsed = timestamp - this._lastTickTime;
-    this._lastTickTime = timestamp;
+    if (!this._isPlaying) return;
 
-    this._updateTime(elapsed);
+    // Use absolute time calculation to prevent floating-point drift.
+    // Instead of accumulating elapsed time each frame (which causes drift),
+    // we calculate time directly from the playback start point.
+    const elapsedSinceStart = timestamp - this._playStartTime;
+    const elapsedSeconds = (elapsedSinceStart / 1000) * this._playbackRate;
+    let newTime = this._playStartPosition + elapsedSeconds;
+
+    // Handle end of playback
+    if (newTime >= this._duration) {
+      if (this._loop) {
+        // Reset start point for loop to prevent drift accumulation
+        const loopedTime = newTime % this._duration;
+        this._playStartTime = timestamp;
+        this._playStartPosition = loopedTime;
+        newTime = loopedTime;
+      } else {
+        // Stop at end
+        newTime = this._duration;
+        this._currentTime = newTime;
+        this._syncedStore?.setCurrentTime(newTime);
+        this._emit('timeUpdate', { time: newTime });
+        this.pause();
+        this._emit('ended');
+        return;
+      }
+    }
+
+    this._currentTime = newTime;
+    this._syncedStore?.setCurrentTime(newTime);
+    this._emit('timeUpdate', { time: newTime });
   }
 
-  /** Internal time update - exposed for testing */
+  /** Internal time update - exposed for testing (legacy cumulative method) */
   _updateTime(elapsedMs: number): void {
     if (!this._isPlaying) return;
 
