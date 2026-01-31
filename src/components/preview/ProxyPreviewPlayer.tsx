@@ -195,8 +195,11 @@ export function ProxyPreviewPlayer({
       // Sync playback rate
       video.playbackRate = playbackRate * clip.speed;
 
-      // Sync volume
-      video.volume = isMuted ? 0 : volume * (clip.audio?.volumeDb ? Math.pow(10, clip.audio.volumeDb / 20) : 1);
+      // Sync volume - Convert dB to linear scale
+      // Note: Use nullish coalescing (??) not truthy check because volumeDb=0 is valid (unity gain)
+      const clipVolumeDb = clip.audio?.volumeDb ?? 0;
+      const clipLinearVolume = Math.pow(10, clipVolumeDb / 20);
+      video.volume = isMuted ? 0 : volume * clipLinearVolume;
 
       // Sync play state
       if (isPlaying && video.paused) {
