@@ -2,14 +2,20 @@
 
 language: "en-US"
 
+# Early access features
+early_access: false
+
 reviews:
+  # Use "chill" for balanced reviews - not too strict, not too lenient
   profile: chill
   high_level_summary: true
   poem: false
   review_status: true
   collapse_walkthrough: true
+  # Don't auto-request changes - let maintainers decide
   request_changes_workflow: false
 
+  # Files to exclude from review
   path_filters:
     - "!**/package-lock.json"
     - "!**/Cargo.lock"
@@ -18,16 +24,61 @@ reviews:
     - "!**/node_modules/**"
     - "!**/*.tsbuildinfo"
     - "!**/bindings.ts"
+    # Exclude generated files
+    - "!**/generated/**"
 
+  # Path-specific instructions for focused reviews
   path_instructions:
     - path: "**/*.rs"
-      instructions: "Ensure proper error handling. Avoid unwrap() in production code."
+      instructions: |
+        Focus on:
+        - Proper error handling (avoid unwrap() in production)
+        - Memory safety and ownership patterns
+        - Async/await correctness
+        - Thread safety for shared state
+
+    - path: "src-tauri/src/core/**/*.rs"
+      instructions: |
+        This is core business logic. Pay extra attention to:
+        - Event sourcing correctness
+        - Command/operation atomicity
+        - State consistency
 
     - path: "**/*.tsx"
-      instructions: "Check for React best practices and accessibility."
+      instructions: |
+        Focus on:
+        - React hooks rules and dependencies
+        - Component performance (memo, useMemo, useCallback)
+        - Prop types and interfaces
+        Skip minor accessibility suggestions unless they affect core functionality.
+
+    - path: "src/services/**/*.ts"
+      instructions: |
+        These are critical service modules. Focus on:
+        - Singleton pattern correctness
+        - State management consistency
+        - Memory leaks in subscriptions
+        - Proper cleanup in hooks
+
+    - path: "src/hooks/**/*.ts"
+      instructions: |
+        Focus on:
+        - React hooks rules compliance
+        - Dependency array correctness
+        - Cleanup functions in useEffect
+        - Performance implications
 
     - path: "**/*.test.{ts,tsx}"
-      instructions: "Verify adequate test coverage and edge cases."
+      instructions: |
+        Focus on:
+        - Test coverage for edge cases
+        - Proper mocking and cleanup
+        - Assertion quality
+
+    - path: "docs/**/*.md"
+      instructions: |
+        Focus on content accuracy only.
+        Skip markdown style/formatting issues (MD060, MD034, etc.)
 
   auto_review:
     enabled: true
@@ -37,6 +88,16 @@ reviews:
     ignore_title_keywords:
       - "WIP"
       - "DO NOT MERGE"
+      - "[skip ci]"
+
+  # Tool configurations
+  tools:
+    # Disable markdownlint for docs to reduce noise
+    markdownlint-cli2:
+      enabled: true
+    # Enable shellcheck for bash scripts
+    shellcheck:
+      enabled: true
 
 chat:
   auto_reply: true
