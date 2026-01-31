@@ -8,7 +8,6 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
-use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::core::{CoreResult, OpId};
@@ -206,7 +205,25 @@ impl OpsLog {
             .write(true)
             .truncate(false)
             .open(lock_path)?;
-        file.lock_exclusive()?;
+        // Use UFCS to avoid accidentally picking up newer std methods and violating MSRV.
+        fs2::FileExt::lock_exclusive(&file)?;
+        Ok(OpsLogLock(file))
+    }
+
+    fn lock_shared(&self) -> CoreResult<OpsLogLock> {
+        let lock_path = self.lock_path();
+        if let Some(parent) = lock_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)?;
+        // Use UFCS to avoid accidentally picking up newer std methods and violating MSRV.
+        fs2::FileExt::lock_shared(&file)?;
         Ok(OpsLogLock(file))
     }
 
@@ -224,6 +241,7 @@ impl OpsLog {
 
     /// Appends a single operation to the log
     pub fn append(&self, op: &Operation) -> CoreResult<()> {
+        tracing::debug!(op_id = %op.id, op_kind = ?op.kind, "Appending operation to ops log");
         let _lock = self.lock_exclusive()?;
         let file = OpenOptions::new()
             .create(true)
@@ -245,6 +263,10 @@ impl OpsLog {
 
     /// Appends multiple operations to the log atomically
     pub fn append_batch(&self, ops: &[Operation]) -> CoreResult<()> {
+        tracing::debug!(
+            op_count = ops.len(),
+            "Appending batch operations to ops log"
+        );
         let _lock = self.lock_exclusive()?;
         let file = OpenOptions::new()
             .create(true)
@@ -266,6 +288,22 @@ impl OpsLog {
 
     /// Reads all operations from the log, handling corrupted lines gracefully
     pub fn read_all(&self) -> CoreResult<ReadResult> {
+        // Prevent races with writers:
+        // - Without a lock, a reader can observe a partially written JSON line (no trailing '\n')
+        //   and treat it as corrupted.
+        // - That creates false-positive "corruption" reports and can trigger unnecessary compaction.
+        let _lock = self.lock_shared()?;
+        let result = self.read_all_unlocked()?;
+        if !result.errors.is_empty() {
+            tracing::warn!(
+                error_count = result.errors.len(),
+                "Encountered parse/IO errors while reading ops log"
+            );
+        }
+        Ok(result)
+    }
+
+    fn read_all_unlocked(&self) -> CoreResult<ReadResult> {
         if !self.exists() {
             return Ok(ReadResult {
                 operations: vec![],
@@ -332,6 +370,7 @@ impl OpsLog {
 
     /// Counts the total number of operations in the log
     pub fn count(&self) -> CoreResult<usize> {
+        let _lock = self.lock_shared()?;
         if !self.exists() {
             return Ok(0);
         }
@@ -363,7 +402,7 @@ impl OpsLog {
     /// Returns the number of removed (corrupted) lines
     pub fn compact(&self) -> CoreResult<usize> {
         let _lock = self.lock_exclusive()?;
-        let read_result = self.read_all()?;
+        let read_result = self.read_all_unlocked()?;
         let error_count = read_result.errors.len();
 
         if error_count == 0 {
@@ -398,7 +437,7 @@ impl OpsLog {
     /// The number of operations archived
     pub fn compact_after_snapshot(&self, snapshot_op_id: &str) -> CoreResult<usize> {
         let _lock = self.lock_exclusive()?;
-        let read_result = self.read_all()?;
+        let read_result = self.read_all_unlocked()?;
 
         // Find the index of the snapshot operation
         let snapshot_index = read_result
@@ -546,6 +585,7 @@ impl OpsLog {
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
     use tempfile::TempDir;
 
     fn create_test_ops_log() -> (OpsLog, TempDir) {
@@ -588,6 +628,53 @@ mod tests {
         let result = ops_log.read_all().unwrap();
         assert!(result.errors.is_empty(), "expected no parse errors");
         assert_eq!(result.operations.len(), threads * per_thread);
+    }
+
+    #[test]
+    fn test_ops_log_read_blocks_during_exclusive_write() {
+        // Deterministic race test:
+        // Hold the ops log lock while writing a partial JSON line, then complete it.
+        // `read_all()` must not observe the partial line as corruption.
+        let (ops_log, _temp_dir) = create_test_ops_log();
+        ops_log.create_if_not_exists().unwrap();
+
+        let path = ops_log.path().to_path_buf();
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+
+        let writer = std::thread::spawn(move || {
+            let log = OpsLog::new(&path);
+            let _lock = log.lock_exclusive().unwrap();
+
+            let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+
+            // Write a partial JSON line without a newline and keep the lock held.
+            // If the reader isn't locked, it will likely treat this as a corrupted line.
+            write!(file, "{{\"id\":\"op_partial\",\"kind\":\"asset_import\",\"timestamp\":\"2024-01-01T00:00:00Z\",\"payload\":{{}}").unwrap();
+            file.flush().unwrap();
+            started_tx.send(()).unwrap();
+
+            // Give the reader a window to attempt a read.
+            std::thread::sleep(std::time::Duration::from_millis(200));
+
+            // Complete the JSON and terminate the line.
+            writeln!(file, "}}").unwrap();
+            file.flush().unwrap();
+        });
+
+        // Wait until the writer has written a partial line and is holding the exclusive lock.
+        started_rx.recv().unwrap();
+
+        // This should block until the writer releases the lock, then read a valid line.
+        let result = ops_log.read_all().unwrap();
+        assert!(
+            result.errors.is_empty(),
+            "expected no errors, got: {:?}",
+            result.errors
+        );
+        assert_eq!(result.operations.len(), 1);
+        assert_eq!(result.operations[0].id, "op_partial");
+
+        writer.join().unwrap();
     }
 
     #[test]
