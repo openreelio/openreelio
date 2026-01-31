@@ -2,13 +2,28 @@
  * usePlayheadDrag Hook
  *
  * Handles direct playhead dragging interactions on the timeline.
- * Supports snapping, playback state preservation, and proper cleanup.
+ * Supports snapping, playback state preservation, edge auto-scroll, and proper cleanup.
+ *
+ * Performance optimizations:
+ * - Direct DOM manipulation during drag (bypasses React re-renders)
+ * - Uses requestAnimationFrame for smooth 60fps updates
+ * - GPU-accelerated positioning via CSS transform
+ * - Coordinated drag lock via PlaybackController to prevent conflicts
+ *
+ * Features (inspired by OpenCut):
+ * - Edge auto-scroll when dragging near timeline edges
+ * - Frame-accurate seeking option
+ * - Smooth 60fps updates
  *
  * @module hooks/usePlayheadDrag
  */
 
 import { useState, useCallback, useRef, useEffect, type RefObject } from 'react';
 import type { SnapPoint, TimeSec } from '@/types';
+import type { PlayheadHandle } from '@/components/timeline/Playhead';
+import { snapTimeToFrame } from '@/constants/precision';
+import { useEdgeAutoScroll } from './useEdgeAutoScroll';
+import { playbackController } from '@/services/PlaybackController';
 
 // =============================================================================
 // Types
@@ -20,6 +35,8 @@ import type { SnapPoint, TimeSec } from '@/types';
 export interface UsePlayheadDragOptions {
   /** Reference to the container element (tracks area) */
   containerRef: RefObject<HTMLElement | null>;
+  /** Reference to the Playhead component for direct DOM manipulation */
+  playheadRef?: RefObject<PlayheadHandle | null>;
   /** Current zoom level (pixels per second) */
   zoom: number;
   /** Current horizontal scroll offset */
@@ -42,6 +59,14 @@ export interface UsePlayheadDragOptions {
   snapThreshold: number;
   /** Callback when snapping state changes */
   onSnapChange?: (snapPoint: SnapPoint | null) => void;
+  /** Reference to the scrollable container for edge auto-scroll */
+  scrollContainerRef?: RefObject<HTMLElement | null>;
+  /** Callback when scroll position changes (for edge auto-scroll) */
+  onScrollChange?: (scrollX: number) => void;
+  /** Whether to enable frame-accurate seeking (snaps to frame boundaries) */
+  frameAccurateSeeking?: boolean;
+  /** Frames per second for frame-accurate seeking */
+  fps?: number;
 }
 
 /**
@@ -66,20 +91,26 @@ interface DragState {
   startClientX: number;
   /** Initial playhead time when drag started */
   startTime: TimeSec;
+  /** Current time during drag (for final sync) */
+  currentTime: TimeSec;
+  /** Animation frame ID for cleanup */
+  rafId: number | null;
+  /** Pending mouse position for next rAF */
+  pendingClientX: number | null;
 }
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-/** Throttle interval for drag updates (ms) for 60fps */
-const DRAG_THROTTLE_MS = 16;
-
 /**
  * Minimum zoom value to prevent division by zero and numerical instability.
  * A zoom of 0.1 means 0.1 pixels per second (1 pixel = 10 seconds).
  */
 const MIN_ZOOM = 0.1;
+
+// Removed SEEK_THROTTLE_MS - we now call seek() on every frame for better preview sync
+// This matches OpenCut's approach where seek is called on every mousemove
 
 // =============================================================================
 // Utility Functions
@@ -260,6 +291,7 @@ function calculateTimeFromEvent(
  */
 export function usePlayheadDrag({
   containerRef,
+  playheadRef,
   zoom,
   scrollX,
   duration,
@@ -271,6 +303,10 @@ export function usePlayheadDrag({
   snapPoints,
   snapThreshold,
   onSnapChange,
+  scrollContainerRef,
+  onScrollChange,
+  frameAccurateSeeking = false,
+  fps = 30,
 }: UsePlayheadDragOptions): UsePlayheadDragResult {
   // Track dragging state
   const [isDragging, setIsDragging] = useState(false);
@@ -289,9 +325,6 @@ export function usePlayheadDrag({
     blur: null,
   });
 
-  // Throttle ref for drag updates
-  const lastUpdateTimeRef = useRef<number>(0);
-
   // Store latest values in refs for stable event handler access
   const latestValuesRef = useRef({
     zoom,
@@ -302,6 +335,23 @@ export function usePlayheadDrag({
     snapPoints,
     snapThreshold,
     isPlaying,
+    frameAccurateSeeking,
+    fps,
+  });
+
+  // Track mouse position for edge auto-scroll
+  const lastMouseXRef = useRef<number>(0);
+
+  // Callback to get current mouse position for edge auto-scroll
+  const getMouseClientX = useCallback(() => lastMouseXRef.current, []);
+
+  // Edge auto-scroll during drag
+  useEdgeAutoScroll({
+    isActive: isDragging && !!scrollContainerRef?.current,
+    getMouseClientX,
+    scrollContainerRef: scrollContainerRef || { current: null },
+    contentWidth: duration * zoom,
+    onScrollChange,
   });
 
   // Update latest values ref when props change
@@ -315,8 +365,10 @@ export function usePlayheadDrag({
       snapPoints,
       snapThreshold,
       isPlaying,
+      frameAccurateSeeking,
+      fps,
     };
-  }, [zoom, scrollX, duration, trackHeaderWidth, snapEnabled, snapPoints, snapThreshold, isPlaying]);
+  }, [zoom, scrollX, duration, trackHeaderWidth, snapEnabled, snapPoints, snapThreshold, isPlaying, frameAccurateSeeking, fps]);
 
   /**
    * Cleanup function to remove document event listeners.
@@ -351,12 +403,104 @@ export function usePlayheadDrag({
   }, [cleanup]);
 
   /**
+   * Calculate pixel position from time for direct DOM updates.
+   */
+  const timeToPixel = useCallback(
+    (time: TimeSec): number => {
+      const { zoom: z, scrollX: sx, trackHeaderWidth: thw } = latestValuesRef.current;
+      return time * z + thw - sx;
+    },
+    []
+  );
+
+  /**
+   * Update playhead position directly via DOM for smooth dragging.
+   * Falls back to React state if playheadRef is not available.
+   */
+  const updatePlayheadDirect = useCallback(
+    (time: TimeSec) => {
+      if (playheadRef?.current) {
+        const pixelX = timeToPixel(time);
+        playheadRef.current.setPixelPosition(pixelX);
+      }
+    },
+    [playheadRef, timeToPixel]
+  );
+
+  /**
+   * Process pending mouse position in rAF callback.
+   * This ensures smooth 60fps updates synchronized with display refresh.
+   *
+   * Updates two things:
+   * 1. Playhead visual position (direct DOM, every frame for smoothness)
+   * 2. Playback store via seek (every frame, for preview sync - matches OpenCut's approach)
+   */
+  const processFrame = useCallback(() => {
+    const dragState = dragStateRef.current;
+    if (!dragState || dragState.pendingClientX === null || !containerRef.current) {
+      return;
+    }
+
+    const rect = containerRef.current.getBoundingClientRect();
+    const {
+      zoom: z,
+      scrollX: sx,
+      duration: d,
+      trackHeaderWidth: thw,
+      snapEnabled: se,
+      snapPoints: sp,
+      snapThreshold: st,
+      frameAccurateSeeking: fas,
+      fps: f,
+    } = latestValuesRef.current;
+
+    // Calculate time from current position
+    let time = calculateTimeFromEvent(dragState.pendingClientX, rect, thw, sx, z, d);
+
+    // Apply snapping if enabled
+    let activeSnapPoint: SnapPoint | null = null;
+    if (se && sp.length > 0) {
+      const snapResult = findNearestSnapPoint(time, sp, st);
+      if (snapResult.snapped) {
+        time = snapResult.time;
+        activeSnapPoint = snapResult.snapPoint;
+      }
+    }
+
+    // Apply frame-accurate seeking if enabled and not snapped
+    if (fas && !activeSnapPoint) {
+      time = snapTimeToFrame(time, f);
+    }
+
+    // Store current time for final sync
+    dragState.currentTime = time;
+
+    // Update playhead position directly via DOM (every frame for smoothness)
+    updatePlayheadDirect(time);
+
+    // Update playback store for preview sync (every frame - no throttling)
+    // This matches OpenCut's approach where seek() is called on every mousemove
+    seek(time);
+
+    // Notify snap change
+    onSnapChange?.(activeSnapPoint);
+
+    // Clear pending position
+    dragState.pendingClientX = null;
+  }, [containerRef, updatePlayheadDirect, onSnapChange, seek]);
+
+  /**
    * Core drag start logic shared between mouse and pointer events.
    */
   const startDrag = useCallback(
     (clientX: number, isPointerEvent: boolean = false) => {
       // Prevent double-triggering from both mouse and pointer events
       if (dragStateRef.current || !containerRef.current) return;
+
+      // Attempt to acquire drag lock - prevents conflicts with scrubbing
+      if (!playbackController.acquireDragLock('playhead')) {
+        return;
+      }
 
       const containerRect = containerRef.current.getBoundingClientRect();
       const {
@@ -382,6 +526,8 @@ export function usePlayheadDrag({
         snapEnabled: se,
         snapPoints: sp,
         snapThreshold: st,
+        frameAccurateSeeking: fas,
+        fps: f,
       } = latestValuesRef.current;
 
       let initialSnapPoint: SnapPoint | null = null;
@@ -393,11 +539,22 @@ export function usePlayheadDrag({
         }
       }
 
+      // Apply frame-accurate seeking if enabled and not snapped
+      if (fas && !initialSnapPoint) {
+        startTime = snapTimeToFrame(startTime, f);
+      }
+
+      // Track mouse position for edge auto-scroll
+      lastMouseXRef.current = clientX;
+
       // Store initial drag state
       dragStateRef.current = {
         wasPlaying: currentIsPlaying,
         startClientX: clientX,
         startTime,
+        currentTime: startTime,
+        rafId: null,
+        pendingClientX: null,
       };
 
       // Pause playback during drag
@@ -405,7 +562,10 @@ export function usePlayheadDrag({
         togglePlayback();
       }
 
-      // Initial seek to click position (with snapping applied)
+      // Initial position update - direct DOM for immediate response
+      updatePlayheadDirect(startTime);
+
+      // Also update React state for initial position (will be used after drag ends)
       seek(startTime);
 
       // Notify snap change for initial position
@@ -413,59 +573,61 @@ export function usePlayheadDrag({
 
       // Set dragging state
       setIsDragging(true);
-      lastUpdateTimeRef.current = performance.now();
 
-      // Define move handler
+      // Apply grabbing cursor to entire document during drag
+      document.body.style.cursor = 'grabbing';
+      document.body.style.userSelect = 'none';
+
+      // Define move handler with rAF scheduling
       const handleMove = (e: MouseEvent | PointerEvent) => {
-        if (!containerRef.current || !dragStateRef.current) return;
+        const dragState = dragStateRef.current;
+        if (!containerRef.current || !dragState) return;
 
-        // Throttle updates for performance
-        const now = performance.now();
-        if (now - lastUpdateTimeRef.current < DRAG_THROTTLE_MS) return;
-        lastUpdateTimeRef.current = now;
+        // Store pending position for next rAF
+        dragState.pendingClientX = e.clientX;
 
-        const rect = containerRef.current.getBoundingClientRect();
-        const {
-          zoom: z,
-          scrollX: sx,
-          duration: d,
-          trackHeaderWidth: thw,
-          snapEnabled: se,
-          snapPoints: sp,
-          snapThreshold: st,
-        } = latestValuesRef.current;
+        // Track mouse position for edge auto-scroll
+        lastMouseXRef.current = e.clientX;
 
-        // Calculate time from current position
-        let time = calculateTimeFromEvent(e.clientX, rect, thw, sx, z, d);
-
-        // Apply snapping if enabled
-        let activeSnapPoint: SnapPoint | null = null;
-        if (se && sp.length > 0) {
-          const snapResult = findNearestSnapPoint(time, sp, st);
-          if (snapResult.snapped) {
-            time = snapResult.time;
-            activeSnapPoint = snapResult.snapPoint;
-          }
+        // Schedule rAF if not already scheduled
+        if (dragState.rafId === null) {
+          dragState.rafId = requestAnimationFrame(() => {
+            if (dragStateRef.current) {
+              dragStateRef.current.rafId = null;
+              processFrame();
+            }
+          });
         }
-
-        // Update playhead position
-        seek(time);
-
-        // Notify snap change
-        onSnapChange?.(activeSnapPoint);
       };
 
       // Define up/end handler
       const handleUp = () => {
         const dragState = dragStateRef.current;
 
+        // Cancel any pending animation frame
+        if (dragState && dragState.rafId !== null) {
+          cancelAnimationFrame(dragState.rafId);
+        }
+
         // Clear snap indicator
         onSnapChange?.(null);
 
-        // Restore playback if it was playing before drag
-        if (dragState?.wasPlaying) {
-          togglePlayback();
+        // Sync final position to React state (for playback engine)
+        if (dragState) {
+          seek(dragState.currentTime);
+
+          // Restore playback if it was playing before drag
+          if (dragState.wasPlaying) {
+            togglePlayback();
+          }
         }
+
+        // Restore cursor and user-select
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+
+        // Release drag lock
+        playbackController.releaseDragLock('playhead');
 
         // Reset drag state
         dragStateRef.current = null;
@@ -488,16 +650,16 @@ export function usePlayheadDrag({
 
       // Add document-level listeners
       if (isPointerEvent) {
-        document.addEventListener('pointermove', handleMove);
+        document.addEventListener('pointermove', handleMove, { passive: true });
         document.addEventListener('pointerup', handleUp);
         document.addEventListener('pointercancel', handleUp);
       } else {
-        document.addEventListener('mousemove', handleMove);
+        document.addEventListener('mousemove', handleMove, { passive: true });
         document.addEventListener('mouseup', handleUp);
       }
       window.addEventListener('blur', handleBlur);
     },
-    [containerRef, togglePlayback, seek, onSnapChange, cleanup]
+    [containerRef, togglePlayback, seek, onSnapChange, cleanup, updatePlayheadDirect, processFrame]
   );
 
   /**

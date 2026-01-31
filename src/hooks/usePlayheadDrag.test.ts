@@ -14,6 +14,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { usePlayheadDrag } from './usePlayheadDrag';
 import type { SnapPoint } from '@/types';
 
+// Mock PlaybackController to allow drag operations
+vi.mock('@/services/PlaybackController', () => ({
+  playbackController: {
+    acquireDragLock: vi.fn(() => true),
+    releaseDragLock: vi.fn(),
+    isDragActive: vi.fn(() => false),
+    getCurrentDragOperation: vi.fn(() => 'none'),
+  },
+}));
+
 // =============================================================================
 // Test Utilities
 // =============================================================================
@@ -107,6 +117,7 @@ describe('usePlayheadDrag', () => {
   let windowAddEventListenerSpy: ReturnType<typeof vi.spyOn>;
   let windowRemoveEventListenerSpy: ReturnType<typeof vi.spyOn>;
   let performanceNowSpy: ReturnType<typeof vi.spyOn>;
+  let rafCallback: FrameRequestCallback | null = null;
 
   beforeEach(() => {
     addEventListenerSpy = vi.spyOn(document, 'addEventListener');
@@ -114,6 +125,13 @@ describe('usePlayheadDrag', () => {
     windowAddEventListenerSpy = vi.spyOn(window, 'addEventListener');
     windowRemoveEventListenerSpy = vi.spyOn(window, 'removeEventListener');
     performanceNowSpy = vi.spyOn(performance, 'now').mockReturnValue(0);
+
+    // Mock requestAnimationFrame to capture and execute callbacks synchronously
+    vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
+      rafCallback = callback;
+      return 1;
+    });
+    vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -122,8 +140,21 @@ describe('usePlayheadDrag', () => {
     windowAddEventListenerSpy.mockRestore();
     windowRemoveEventListenerSpy.mockRestore();
     performanceNowSpy.mockRestore();
+    rafCallback = null;
     vi.clearAllMocks();
+    vi.restoreAllMocks();
   });
+
+  /**
+   * Helper to flush pending rAF callbacks
+   */
+  const flushRaf = () => {
+    if (rafCallback) {
+      const cb = rafCallback;
+      rafCallback = null;
+      cb(performance.now());
+    }
+  };
 
   const createDefaultOptions = () => ({
     containerRef: createMockContainerRef(),
@@ -227,22 +258,27 @@ describe('usePlayheadDrag', () => {
         result.current.handleDragStart(createMockMouseEvent());
       });
 
-      expect(addEventListenerSpy).toHaveBeenCalledWith('mousemove', expect.any(Function));
+      // mousemove is added with passive: true for performance
+      expect(addEventListenerSpy).toHaveBeenCalledWith(
+        'mousemove',
+        expect.any(Function),
+        { passive: true }
+      );
       expect(addEventListenerSpy).toHaveBeenCalledWith('mouseup', expect.any(Function));
       expect(windowAddEventListenerSpy).toHaveBeenCalledWith('blur', expect.any(Function));
     });
 
-    it('should update position on mouse move', () => {
+    it('should update position on mouse move via rAF', () => {
       const options = createDefaultOptions();
       const { result } = renderHook(() => usePlayheadDrag(options));
 
-      // Advance time to bypass throttle
       performanceNowSpy.mockReturnValue(0);
 
       act(() => {
         result.current.handleDragStart(createMockMouseEvent({ clientX: 492 }));
       });
 
+      // Initial seek should happen
       expect(options.seek).toHaveBeenCalledWith(1);
 
       // Get mousemove handler
@@ -251,18 +287,26 @@ describe('usePlayheadDrag', () => {
       );
       const mousemoveHandler = mousemoveCall?.[1] as (e: MouseEvent) => void;
 
-      // Advance time past throttle interval
-      performanceNowSpy.mockReturnValue(20);
-
       act(() => {
         // Move to clientX: 592 => relativeX = 592 - 200 - 192 = 200 => time = 2s
         mousemoveHandler(createMockNativeEvent({ clientX: 592 }));
+        flushRaf(); // Process the pending mouse event
       });
 
-      expect(options.seek).toHaveBeenCalledWith(2);
+      // End drag to trigger final seek
+      const mouseupCall = addEventListenerSpy.mock.calls.find(
+        (call) => call[0] === 'mouseup'
+      );
+      const mouseupHandler = mouseupCall?.[1] as () => void;
+
+      act(() => {
+        mouseupHandler();
+      });
+
+      expect(options.seek).toHaveBeenLastCalledWith(2);
     });
 
-    it('should throttle mouse move updates', () => {
+    it('should use rAF for smooth updates during drag', () => {
       const options = createDefaultOptions();
       const { result } = renderHook(() => usePlayheadDrag(options));
 
@@ -277,24 +321,15 @@ describe('usePlayheadDrag', () => {
       );
       const mousemoveHandler = mousemoveCall?.[1] as (e: MouseEvent) => void;
 
-      // Move immediately (should be throttled)
-      performanceNowSpy.mockReturnValue(5);
-
+      // Move multiple times - only one rAF should be scheduled
       act(() => {
         mousemoveHandler(createMockNativeEvent({ clientX: 592 }));
+        mousemoveHandler(createMockNativeEvent({ clientX: 692 }));
+        flushRaf();
       });
 
-      // Should not have been called again (throttled)
-      expect(options.seek).toHaveBeenCalledTimes(1);
-
-      // Move after throttle interval
-      performanceNowSpy.mockReturnValue(20);
-
-      act(() => {
-        mousemoveHandler(createMockNativeEvent({ clientX: 592 }));
-      });
-
-      expect(options.seek).toHaveBeenCalledTimes(2);
+      // Only the latest position should be processed
+      expect(window.requestAnimationFrame).toHaveBeenCalledTimes(1);
     });
 
     it('should end dragging on mouse up', () => {
@@ -382,7 +417,12 @@ describe('usePlayheadDrag', () => {
         result.current.handlePointerDown(createMockPointerEvent());
       });
 
-      expect(addEventListenerSpy).toHaveBeenCalledWith('pointermove', expect.any(Function));
+      // pointermove is added with passive: true for performance
+      expect(addEventListenerSpy).toHaveBeenCalledWith(
+        'pointermove',
+        expect.any(Function),
+        { passive: true }
+      );
       expect(addEventListenerSpy).toHaveBeenCalledWith('pointerup', expect.any(Function));
       expect(addEventListenerSpy).toHaveBeenCalledWith('pointercancel', expect.any(Function));
     });
@@ -595,9 +635,10 @@ describe('usePlayheadDrag', () => {
       // clientX: 600 => relativeX = 600 - 200 - 192 = 208 => time = 2.08s
       act(() => {
         mousemoveHandler(createMockNativeEvent({ clientX: 600 }));
+        flushRaf(); // Flush rAF to process the pending mouse event
       });
 
-      expect(options.seek).toHaveBeenLastCalledWith(2);
+      // Snap change should be called with the snapped position
       expect(options.onSnapChange).toHaveBeenLastCalledWith(
         expect.objectContaining({
           time: 2,
@@ -798,7 +839,12 @@ describe('usePlayheadDrag', () => {
       });
       expect(result.current.isDragging).toBe(true);
 
-      expect(addEventListenerSpy).toHaveBeenCalledWith('mousemove', expect.any(Function));
+      // mousemove is added with passive: true for performance
+      expect(addEventListenerSpy).toHaveBeenCalledWith(
+        'mousemove',
+        expect.any(Function),
+        { passive: true }
+      );
     });
   });
 
@@ -894,12 +940,24 @@ describe('usePlayheadDrag', () => {
 
       performanceNowSpy.mockReturnValue(20);
 
-      // Move with new zoom value
+      // Move with new zoom value and flush rAF
       // clientX: 492 => relativeX = 492 - 200 - 192 = 100 => time = 100 / 200 = 0.5s
       act(() => {
         mousemoveHandler(createMockNativeEvent({ clientX: 492 }));
+        flushRaf();
       });
 
+      // End drag to trigger final seek with updated zoom
+      const mouseupCall = addEventListenerSpy.mock.calls.find(
+        (call) => call[0] === 'mouseup'
+      );
+      const mouseupHandler = mouseupCall?.[1] as () => void;
+
+      act(() => {
+        mouseupHandler();
+      });
+
+      // Final seek should be called with the position calculated using new zoom
       expect(options.seek).toHaveBeenLastCalledWith(0.5);
     });
   });

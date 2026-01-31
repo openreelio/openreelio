@@ -4,14 +4,34 @@
  * Handles playhead scrubbing interactions on the timeline.
  * Manages mouse events for scrubbing, playback state preservation,
  * and document-level event listeners.
+ *
+ * Performance optimizations:
+ * - Uses requestAnimationFrame for smooth 60fps updates
+ * - Optional direct DOM manipulation for immediate visual feedback
+ * - Coordinated drag lock via PlaybackController to prevent conflicts
  */
 
-import { useState, useCallback, useRef, useEffect, type MouseEvent } from 'react';
+import { useState, useCallback, useRef, useEffect, type MouseEvent, type RefObject } from 'react';
 import type { SnapPoint } from '@/types';
+import type { PlayheadHandle } from '@/components/timeline/Playhead';
+import { playbackController } from '@/services/PlaybackController';
 
 // =============================================================================
 // Types
 // =============================================================================
+
+// Removed SEEK_THROTTLE_MS - we now call seek() on every frame for better preview sync
+// This matches OpenCut's approach where seek is called on every mousemove
+
+/**
+ * Internal scrubbing state.
+ */
+interface ScrubState {
+  wasPlaying: boolean;
+  rafId: number | null;
+  pendingEvent: globalThis.MouseEvent | null;
+  currentTime: number;
+}
 
 export interface UseScrubbingOptions {
   /** Whether the timeline is currently playing */
@@ -27,6 +47,14 @@ export interface UseScrubbingOptions {
   ) => { time: number | null; snapPoint: SnapPoint | null };
   /** Callback when snapping state changes */
   onSnapChange?: (snapPoint: SnapPoint | null) => void;
+  /** Reference to playhead for direct DOM manipulation */
+  playheadRef?: RefObject<PlayheadHandle | null>;
+  /** Current zoom level for pixel calculation */
+  zoom?: number;
+  /** Current scroll offset for pixel calculation */
+  scrollX?: number;
+  /** Track header width for pixel calculation */
+  trackHeaderWidth?: number;
 }
 
 export interface UseScrubbingResult {
@@ -53,6 +81,10 @@ export interface UseScrubbingResult {
  *   togglePlayback,
  *   seek: setPlayhead,
  *   calculateTimeFromMouseEvent,
+ *   playheadRef,
+ *   zoom,
+ *   scrollX,
+ *   trackHeaderWidth,
  * });
  * ```
  */
@@ -62,9 +94,13 @@ export function useScrubbing({
   seek,
   calculateTimeFromMouseEvent,
   onSnapChange,
+  playheadRef,
+  zoom = 10,
+  scrollX = 0,
+  trackHeaderWidth = 192,
 }: UseScrubbingOptions): UseScrubbingResult {
   const [isScrubbing, setIsScrubbing] = useState(false);
-  const scrubStartRef = useRef<{ wasPlaying: boolean } | null>(null);
+  const scrubStateRef = useRef<ScrubState | null>(null);
 
   // Store event handlers in refs to allow cleanup on unmount
   const handlersRef = useRef<{
@@ -72,8 +108,70 @@ export function useScrubbing({
     up: (() => void) | null;
   }>({ move: null, up: null });
 
+  // Store latest values in refs for stable event handler access
+  const latestValuesRef = useRef({ zoom, scrollX, trackHeaderWidth });
+  useEffect(() => {
+    latestValuesRef.current = { zoom, scrollX, trackHeaderWidth };
+  }, [zoom, scrollX, trackHeaderWidth]);
+
+  /**
+   * Convert time to pixel position for direct DOM updates.
+   */
+  const timeToPixel = useCallback((time: number): number => {
+    const { zoom: z, scrollX: sx, trackHeaderWidth: thw } = latestValuesRef.current;
+    return time * z + thw - sx;
+  }, []);
+
+  /**
+   * Update playhead position directly via DOM.
+   */
+  const updatePlayheadDirect = useCallback(
+    (time: number) => {
+      if (playheadRef?.current) {
+        const pixelX = timeToPixel(time);
+        playheadRef.current.setPixelPosition(pixelX);
+      }
+    },
+    [playheadRef, timeToPixel]
+  );
+
+  /**
+   * Process pending mouse event in rAF callback.
+   * Updates both playhead visual (direct DOM) and playback store (throttled seek).
+   */
+  /**
+   * Process pending mouse event in rAF callback.
+   * Updates both playhead visual (direct DOM) and playback store (seek on every frame).
+   */
+  const processFrame = useCallback(() => {
+    const state = scrubStateRef.current;
+    if (!state || !state.pendingEvent) return;
+
+    const result = calculateTimeFromMouseEvent(state.pendingEvent, true);
+    if (result.time !== null) {
+      state.currentTime = result.time;
+
+      // Update playhead position directly (every frame for smoothness)
+      updatePlayheadDirect(result.time);
+
+      // Update playback store for preview sync (every frame - no throttling)
+      // This matches OpenCut's approach where seek() is called on every mousemove
+      seek(result.time);
+
+      onSnapChange?.(result.snapPoint);
+    }
+
+    state.pendingEvent = null;
+  }, [calculateTimeFromMouseEvent, updatePlayheadDirect, onSnapChange, seek]);
+
   // Cleanup function to remove event listeners
   const cleanup = useCallback(() => {
+    // Cancel any pending animation frame
+    const state = scrubStateRef.current;
+    if (state && state.rafId !== null) {
+      cancelAnimationFrame(state.rafId);
+    }
+
     if (handlersRef.current.move) {
       document.removeEventListener('mousemove', handlersRef.current.move);
       handlersRef.current.move = null;
@@ -88,12 +186,7 @@ export function useScrubbing({
   useEffect(() => {
     return () => {
       cleanup();
-      // Reset scrubbing state if unmounting during scrub
-      if (scrubStartRef.current?.wasPlaying) {
-        // Note: togglePlayback won't be called here as component is unmounting
-        // This is acceptable as the component is being removed
-      }
-      scrubStartRef.current = null;
+      scrubStateRef.current = null;
     };
   }, [cleanup]);
 
@@ -117,40 +210,87 @@ export function useScrubbing({
         return;
       }
 
+      // Attempt to acquire drag lock - prevents conflicts with playhead drag
+      if (!playbackController.acquireDragLock('scrubbing')) {
+        return;
+      }
+
       e.preventDefault();
       setIsScrubbing(true);
 
-      // Pause playback during scrubbing and remember state
-      scrubStartRef.current = { wasPlaying: isPlaying };
+      // Initialize scrub state
+      scrubStateRef.current = {
+        wasPlaying: isPlaying,
+        rafId: null,
+        pendingEvent: null,
+        currentTime: 0,
+      };
+
+      // Pause playback during scrubbing
       if (isPlaying) {
         togglePlayback();
       }
 
-      // Set initial position (with snapping)
+      // Set initial position (with snapping) - direct DOM update for immediate response
       const result = calculateTimeFromMouseEvent(e, true);
       if (result.time !== null) {
+        scrubStateRef.current.currentTime = result.time;
+        updatePlayheadDirect(result.time);
         seek(result.time);
         onSnapChange?.(result.snapPoint);
       }
 
-      // Define event handlers
+      // Apply ew-resize cursor to entire document during scrubbing
+      document.body.style.cursor = 'ew-resize';
+      document.body.style.userSelect = 'none';
+
+      // Define event handlers with rAF scheduling
       const handleMouseMove = (moveEvent: globalThis.MouseEvent) => {
-        const moveResult = calculateTimeFromMouseEvent(moveEvent, true);
-        if (moveResult.time !== null) {
-          seek(moveResult.time);
-          onSnapChange?.(moveResult.snapPoint);
+        const state = scrubStateRef.current;
+        if (!state) return;
+
+        // Store pending event for next rAF
+        state.pendingEvent = moveEvent;
+
+        // Schedule rAF if not already scheduled
+        if (state.rafId === null) {
+          state.rafId = requestAnimationFrame(() => {
+            if (scrubStateRef.current) {
+              scrubStateRef.current.rafId = null;
+              processFrame();
+            }
+          });
         }
       };
 
       const handleMouseUp = () => {
+        const state = scrubStateRef.current;
+
+        // Cancel any pending animation frame
+        if (state && state.rafId !== null) {
+          cancelAnimationFrame(state.rafId);
+        }
+
         setIsScrubbing(false);
         onSnapChange?.(null);
 
-        // Resume playback if it was playing before scrubbing
-        if (scrubStartRef.current?.wasPlaying) {
-          togglePlayback();
+        // Sync final position to React state and restore playback
+        if (state) {
+          seek(state.currentTime);
+
+          // Resume playback if it was playing before scrubbing
+          if (state.wasPlaying) {
+            togglePlayback();
+          }
         }
-        scrubStartRef.current = null;
+        scrubStateRef.current = null;
+
+        // Restore cursor and user-select
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+
+        // Release drag lock
+        playbackController.releaseDragLock('scrubbing');
 
         // Cleanup listeners
         cleanup();
@@ -160,11 +300,20 @@ export function useScrubbing({
       handlersRef.current.move = handleMouseMove;
       handlersRef.current.up = handleMouseUp;
 
-      // Add document-level listeners for mouse move and up
-      document.addEventListener('mousemove', handleMouseMove);
+      // Add document-level listeners for mouse move and up (passive for performance)
+      document.addEventListener('mousemove', handleMouseMove, { passive: true });
       document.addEventListener('mouseup', handleMouseUp);
     },
-    [isPlaying, togglePlayback, calculateTimeFromMouseEvent, seek, onSnapChange, cleanup]
+    [
+      isPlaying,
+      togglePlayback,
+      calculateTimeFromMouseEvent,
+      seek,
+      onSnapChange,
+      cleanup,
+      updatePlayheadDirect,
+      processFrame,
+    ]
   );
 
   return {

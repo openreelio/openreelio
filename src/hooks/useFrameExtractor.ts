@@ -702,7 +702,13 @@ export function useAssetFrameExtractor(
   );
 
   /**
-   * Prefetch frames in a time range
+   * Prefetch frames in a time range.
+   *
+   * Features:
+   * - Skips already cached frames
+   * - Skips frames with pending extractions (prevents duplicate IPC calls)
+   * - Staggered requests to avoid overwhelming FFmpeg
+   * - Cancellable via AbortController
    */
   const prefetchFrames = useCallback(
     (startTime: number, endTime: number): void => {
@@ -724,6 +730,9 @@ export function useAssetFrameExtractor(
 
       // Start prefetching in background
       (async () => {
+        let prefetchedCount = 0;
+        let skippedCount = 0;
+
         for (let t = startTime; t <= effectiveEnd; t += prefetchInterval) {
           if (abortController.signal.aborted) {
             break;
@@ -733,6 +742,13 @@ export function useAssetFrameExtractor(
 
           // Skip if already cached
           if (frameCache.has(cacheKey)) {
+            skippedCount++;
+            continue;
+          }
+
+          // Skip if extraction is already pending (prevents duplicate IPC calls)
+          if (pendingExtractions.current.has(cacheKey)) {
+            skippedCount++;
             continue;
           }
 
@@ -741,9 +757,21 @@ export function useAssetFrameExtractor(
             // Ignore prefetch errors
             logger.debug('Prefetch error (ignored)', { timestamp: t, error: err });
           });
+          prefetchedCount++;
 
           // Small delay between prefetch requests to avoid overwhelming FFmpeg
           await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+
+        // Log prefetch summary for performance monitoring
+        if (prefetchedCount > 0 || skippedCount > 0) {
+          logger.debug('Prefetch completed', {
+            assetId,
+            startTime: startTime.toFixed(2),
+            endTime: effectiveEnd.toFixed(2),
+            prefetched: prefetchedCount,
+            skipped: skippedCount,
+          });
         }
       })();
     },

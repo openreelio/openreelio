@@ -341,3 +341,9 @@ export { useShortcutSettings } from './useShortcutSettings';
 export type {
   UseShortcutSettingsReturn,
 } from './useShortcutSettings';
+
+export { useEdgeAutoScroll } from './useEdgeAutoScroll';
+export type {
+  UseEdgeAutoScrollOptions,
+  UseEdgeAutoScrollResult,
+} from './useEdgeAutoScroll';
