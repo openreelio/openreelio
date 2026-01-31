@@ -164,6 +164,7 @@ export function calculatePeak(data: Uint8Array): number {
  * @returns RMS level (0-1 linear)
  */
 export function calculateRms(data: Uint8Array): number {
+  if (data.length === 0) return 0;
   let sumSquares = 0;
   for (let i = 0; i < data.length; i++) {
     // Convert from 0-255 (centered at 128) to -1 to 1

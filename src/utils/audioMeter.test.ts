@@ -43,8 +43,9 @@ function createToneData(amplitude: number, length: number = 256): Uint8Array {
   const data = new Uint8Array(length);
   for (let i = 0; i < length; i++) {
     // Simple sine wave
+    // Use 127 instead of 128 to prevent overflow (128 + 1.0 * 128 = 256 wraps to 0)
     const sample = Math.sin((i / length) * Math.PI * 4) * amplitude;
-    data[i] = Math.round(128 + sample * 128);
+    data[i] = Math.round(128 + sample * 127);
   }
   return data;
 }

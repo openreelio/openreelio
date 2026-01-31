@@ -87,7 +87,7 @@ const ExposureIndicator = memo(function ExposureIndicator({ level }: ExposureInd
           <div
             className="h-full transition-all duration-200"
             style={{
-              width: `${Math.abs(level) * 50 + 50}%`,
+              width: `${Math.abs(level) * 50}%`,
               marginLeft: level < 0 ? `${50 - Math.abs(level) * 50}%` : '50%',
               backgroundColor: isBalanced
                 ? 'rgb(34, 197, 94)'

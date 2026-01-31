@@ -184,14 +184,31 @@ function NumberInput({
   unit,
   disabled = false,
 }: NumberInputProps): JSX.Element {
+  const [localValue, setLocalValue] = useState(value.toString());
+
+  useEffect(() => {
+    setLocalValue(value.toString());
+  }, [value]);
+
+  const handleChange = useCallback(
+    (newValue: string) => {
+      setLocalValue(newValue);
+      const parsed = parseFloat(newValue);
+      if (!isNaN(parsed)) {
+        onChange(parsed);
+      }
+    },
+    [onChange]
+  );
+
   return (
     <div className="flex items-center justify-between">
       <label className="text-xs text-editor-text-muted">{label}</label>
       <div className="flex items-center gap-1">
         <input
           type="number"
-          value={value}
-          onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
+          value={localValue}
+          onChange={(e) => handleChange(e.target.value)}
           min={min}
           max={max}
           step={step}

@@ -184,13 +184,13 @@ export function analyzeWaveform(
   const { data, width, height } = imageData;
   const columns: WaveformColumn[] = [];
 
-  // Calculate pixels per column in source image
-  const pixelsPerColumn = Math.max(1, Math.floor(width / targetWidth));
+  // Calculate actual width and use floating-point scaling to cover entire image
   const actualWidth = Math.min(targetWidth, width);
 
   for (let col = 0; col < actualWidth; col++) {
-    const startX = Math.floor(col * pixelsPerColumn);
-    const endX = Math.min(startX + pixelsPerColumn, width);
+    // Use floating-point scaling to ensure entire image width is covered evenly
+    const startX = Math.floor((col * width) / actualWidth);
+    const endX = Math.floor(((col + 1) * width) / actualWidth);
 
     let min = 255;
     let max = 0;
@@ -327,12 +327,13 @@ function analyzeChannelWaveform(
   const { data, width, height } = imageData;
   const columns: WaveformColumn[] = [];
 
-  const pixelsPerColumn = Math.max(1, Math.floor(width / targetWidth));
+  // Calculate actual width and use floating-point scaling to cover entire image
   const actualWidth = Math.min(targetWidth, width);
 
   for (let col = 0; col < actualWidth; col++) {
-    const startX = Math.floor(col * pixelsPerColumn);
-    const endX = Math.min(startX + pixelsPerColumn, width);
+    // Use floating-point scaling to ensure entire image width is covered evenly
+    const startX = Math.floor((col * width) / actualWidth);
+    const endX = Math.floor(((col + 1) * width) / actualWidth);
 
     let min = 255;
     let max = 0;

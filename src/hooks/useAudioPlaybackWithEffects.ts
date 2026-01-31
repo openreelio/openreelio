@@ -451,9 +451,10 @@ export function useAudioPlaybackWithEffects({
       source.playbackRate.value = playbackRate * clip.speed;
 
       // Create gain node for this clip
+      // Note: Global volume/mute is handled by masterGainRef, not here
       const gainNode = ctx.createGain();
       const clipVolume = calculateClipVolume(clip, trackVolume);
-      gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
+      gainNode.gain.value = clipVolume;
 
       // Create effect chain for this clip
       const effectNodes = createEffectChainForClip(clip, ctx);
@@ -506,12 +507,13 @@ export function useAudioPlaybackWithEffects({
       };
     }
 
-    // Update volume and playback rate on existing sources
+    // Update playback rate and clip volume on existing sources
+    // Note: Global volume/mute is handled by masterGainRef
     scheduledSourcesRef.current.forEach((scheduled) => {
       const clipData = audioClips.find((c) => c.clip.id === scheduled.clipId);
       if (clipData) {
         const clipVolume = calculateClipVolume(clipData.clip, clipData.trackVolume);
-        scheduled.gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
+        scheduled.gainNode.gain.value = clipVolume;
         scheduled.source.playbackRate.value = playbackRate * clipData.clip.speed;
       }
     });
@@ -519,8 +521,6 @@ export function useAudioPlaybackWithEffects({
     enabled,
     isPlaying,
     currentTime,
-    volume,
-    isMuted,
     playbackRate,
     getAudioClips,
     loadAudioBuffer,
