@@ -30,3 +30,10 @@ export type { KeyframeEditorProps } from './KeyframeEditor';
 
 export { CurveEditor } from './CurveEditor';
 export type { CurveEditorProps } from './CurveEditor';
+
+export { ColorWheelsPanel } from './ColorWheelsPanel';
+export type {
+  ColorWheelsPanelProps,
+  ColorWheelsValues,
+  ColorWheelsParamName,
+} from './ColorWheelsPanel';
