@@ -276,7 +276,7 @@ export function useRippleEdit(options: UseRippleEditOptions): UseRippleEditRetur
 
       return { affectedClips, totalDelta: -totalDelta };
     },
-    [sequence, rippleAllTracks, getClipsAfter, getAllClipsAfter]
+    [sequence, rippleAllTracks, getClipsAfter]
   );
 
   /**
