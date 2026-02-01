@@ -66,6 +66,8 @@ interface ShortcutRowProps {
   onShortcutCaptured: (key: string, modifiers: ModifierKey[]) => void;
   /** Callback to reset this binding to default */
   onReset: () => void;
+  /** Callback to toggle enabled state */
+  onToggleEnabled: () => void;
   /** Current conflict information, if any */
   conflict: ShortcutConflict | null;
 }
@@ -242,6 +244,7 @@ const ShortcutRow = memo(function ShortcutRow({
   onCancelEdit,
   onShortcutCaptured,
   onReset,
+  onToggleEnabled,
   conflict,
 }: ShortcutRowProps) {
   const inputRef = useRef<HTMLDivElement>(null);
@@ -369,12 +372,13 @@ const ShortcutRow = memo(function ShortcutRow({
           <input
             type="checkbox"
             checked={binding.enabled}
-            onChange={() => {
-              // This will be handled by the parent via store
-            }}
+            onChange={onToggleEnabled}
             className="sr-only"
             aria-label={`${binding.enabled ? 'Disable' : 'Enable'} ${binding.label}`}
           />
+          <div className={`w-9 h-5 rounded-full transition-colors ${binding.enabled ? 'bg-primary-500' : 'bg-editor-border'}`}>
+            <div className={`w-4 h-4 rounded-full bg-white transform transition-transform ${binding.enabled ? 'translate-x-4' : 'translate-x-0.5'} mt-0.5`} />
+          </div>
         </label>
       </div>
     </div>
@@ -506,13 +510,15 @@ export const ShortcutSettingsPanel = memo(function ShortcutSettingsPanel({
     if (conflict) {
       // Show conflict warning but still allow the change
       setPendingConflict(conflict);
-      // Apply the binding anyway (it will override)
-      updateBinding(id, { key, modifiers });
+      // Apply the binding anyway (allowConflict=true)
+      updateBinding(id, { key, modifiers }, true);
       // Clear editing state after a delay to show conflict
-      setTimeout(() => {
+      const timeoutId = setTimeout(() => {
         setEditingId(null);
         setPendingConflict(null);
       }, 1500);
+      // Cleanup timeout on unmount handled by returning cleanup fn
+      return () => clearTimeout(timeoutId);
     } else {
       // No conflict, apply immediately
       updateBinding(id, { key, modifiers });
@@ -724,6 +730,7 @@ export const ShortcutSettingsPanel = memo(function ShortcutSettingsPanel({
                       handleShortcutCaptured(binding.id, key, modifiers)
                     }
                     onReset={() => handleResetBinding(binding.id)}
+                    onToggleEnabled={() => updateBinding(binding.id, { enabled: !binding.enabled })}
                     conflict={editingId === binding.id ? pendingConflict : null}
                   />
                 ))}

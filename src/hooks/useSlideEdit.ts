@@ -148,8 +148,6 @@ export function useSlideEdit(options: UseSlideEditOptions = {}): UseSlideEditRet
     slideOffset: 0,
   });
 
-  const slidingClipDurationRef = useRef<number>(0);
-
   const isSlideToolActive = activeTool === 'slide';
 
   /**
@@ -209,8 +207,6 @@ export function useSlideEdit(options: UseSlideEditOptions = {}): UseSlideEditRet
     ) => {
       const previousClip = getPreviousClip();
       const nextClip = getNextClip();
-
-      slidingClipDurationRef.current = getClipDuration(clip);
 
       setSlideState({
         isSliding: true,

@@ -32,6 +32,7 @@ import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useEditorToolStore, TOOL_CONFIGS, type EditorTool } from '@/stores/editorToolStore';
 import { formatTimecode } from '@/utils/formatters';
+import { MIN_ZOOM, MAX_ZOOM } from './constants';
 
 // =============================================================================
 // Types
@@ -55,13 +56,6 @@ export interface EnhancedTimelineToolbarProps {
   /** Total duration in seconds */
   duration?: number;
 }
-
-// =============================================================================
-// Constants
-// =============================================================================
-
-const MIN_ZOOM = 10;
-const MAX_ZOOM = 500;
 
 // =============================================================================
 // Sub-Components

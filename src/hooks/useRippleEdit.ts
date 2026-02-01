@@ -214,10 +214,10 @@ export function useRippleEdit(options: UseRippleEditOptions): UseRippleEditRetur
         // Find the earliest delete position
         const earliestDeleteTime = deletedClips[0].place.timelineInSec;
 
-        // Get clips after the deletion point
-        const clipsToShift = rippleAllTracks
-          ? getAllClipsAfter(earliestDeleteTime, clipIds).filter(c => c.trackId === trackId)
-          : getClipsAfter(trackId, earliestDeleteTime, clipIds).map(c => ({ clip: c, trackId }));
+        // Get clips after the deletion point on this track
+        // Note: rippleAllTracks handling for other tracks is done separately below (line 241+)
+        const clipsToShift = getClipsAfter(trackId, earliestDeleteTime, clipIds)
+          .map(c => ({ clip: c, trackId }));
 
         // Calculate new positions
         for (const { clip } of clipsToShift) {

@@ -179,6 +179,16 @@ describe('useAudioMixer', () => {
     vi.clearAllMocks();
   });
 
+  afterEach(() => {
+    // Clean up stubbed globals to prevent leaking into other tests
+    vi.unstubAllGlobals();
+    // Re-stub for next test in this suite
+    vi.stubGlobal('AudioContext', vi.fn(() => {
+      mockAudioContext = new MockAudioContext();
+      return mockAudioContext;
+    }));
+  });
+
   describe('initialization', () => {
     it('should initialize without crashing', () => {
       const { result } = renderHook(() => useAudioMixer({
@@ -251,8 +261,11 @@ describe('useAudioMixer', () => {
         result.current.disconnectTrack('track-1');
       });
 
-      // Verify the track is disconnected (test passes if no error thrown)
-      expect(true).toBe(true);
+      // Verify audio nodes are cleared after disconnect
+      const gainNode = result.current.getTrackGainNode('track-1');
+      const pannerNode = result.current.getTrackPannerNode('track-1');
+      expect(gainNode).toBeNull();
+      expect(pannerNode).toBeNull();
     });
   });
 

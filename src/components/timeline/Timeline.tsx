@@ -414,28 +414,32 @@ export function Timeline({
   const { isSlideToolActive } = useSlideEdit({
     onSlideEnd: (result) => {
       if (!sequence || !onClipMove || !onClipTrim) return;
-      // Apply slide changes
-      for (const track of sequence.tracks) {
-        const clip = track.clips.find((c) => c.id === result.previousClipChange?.clipId || c.id === result.nextClipChange?.clipId);
-        if (clip) {
-          // Apply changes to adjacent clips
-          if (result.previousClipChange) {
+      // Apply changes to previous clip (find correct track)
+      if (result.previousClipChange) {
+        for (const track of sequence.tracks) {
+          if (track.clips.some((c) => c.id === result.previousClipChange!.clipId)) {
             onClipTrim({
               sequenceId: sequence.id,
               trackId: track.id,
               clipId: result.previousClipChange.clipId,
               newSourceOut: result.previousClipChange.sourceOut,
             });
+            break;
           }
-          if (result.nextClipChange) {
+        }
+      }
+      // Apply changes to next clip (find correct track)
+      if (result.nextClipChange) {
+        for (const track of sequence.tracks) {
+          if (track.clips.some((c) => c.id === result.nextClipChange!.clipId)) {
             onClipTrim({
               sequenceId: sequence.id,
               trackId: track.id,
               clipId: result.nextClipChange.clipId,
               newSourceIn: result.nextClipChange.sourceIn,
             });
+            break;
           }
-          break;
         }
       }
     },
@@ -446,7 +450,7 @@ export function Timeline({
       if (!sequence || !onClipTrim) return;
       // Apply roll changes to both clips
       for (const track of sequence.tracks) {
-        if (track.id === result.outgoingClipChange.clipId || track.clips.some((c) => c.id === result.outgoingClipChange.clipId)) {
+        if (track.clips.some((c) => c.id === result.outgoingClipChange.clipId || c.id === result.incomingClipChange.clipId)) {
           // Update outgoing clip
           onClipTrim({
             sequenceId: sequence.id,

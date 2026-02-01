@@ -38,7 +38,13 @@ use crate::{ActiveProject, AppState};
 
 /// Converts a floating-point FPS value to a Ratio (numerator, denominator).
 /// Handles common video frame rates including NTSC (23.976, 29.97, 59.94).
+/// Returns (0, 1) for invalid input (NaN, Infinity, zero, negative).
 fn fps_to_ratio(fps: f64) -> (i32, i32) {
+    // Guard against invalid FPS values from malformed media or FFprobe errors
+    if !fps.is_finite() || fps <= 0.0 {
+        return (0, 1);
+    }
+
     // Handle common NTSC frame rates
     const NTSC_TOLERANCE: f64 = 0.01;
 

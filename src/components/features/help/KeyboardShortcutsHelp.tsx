@@ -91,7 +91,7 @@ function KeyboardShortcutsHelpComponent({ isOpen, onClose }: KeyboardShortcutsHe
                 <div className="space-y-2">
                   {category.shortcuts.map((shortcut) => (
                     <div
-                      key={shortcut.key}
+                      key={`${category.category}-${shortcut.key}`}
                       className="flex items-center justify-between py-1.5"
                     >
                       <span className="text-sm text-editor-text-muted">

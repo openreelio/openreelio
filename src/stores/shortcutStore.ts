@@ -75,8 +75,8 @@ interface ShortcutState {
  * Shortcut store actions
  */
 interface ShortcutActions {
-  /** Update a specific shortcut binding */
-  updateBinding: (id: string, updates: Partial<Pick<ShortcutBinding, 'key' | 'modifiers' | 'enabled'>>) => ShortcutConflict | null;
+  /** Update a specific shortcut binding. Set allowConflict=true to apply even when conflict exists */
+  updateBinding: (id: string, updates: Partial<Pick<ShortcutBinding, 'key' | 'modifiers' | 'enabled'>>, allowConflict?: boolean) => ShortcutConflict | null;
   /** Reset a single binding to default */
   resetBinding: (id: string) => void;
   /** Reset all bindings to defaults */
@@ -238,17 +238,18 @@ export const useShortcutStore = create<ShortcutStore>()(
         activePreset: 'default',
         isPanelOpen: false,
 
-        updateBinding: (id, updates) => {
+        updateBinding: (id, updates, allowConflict = false) => {
           const state = get();
           const binding = state.bindings.find(b => b.id === id);
           if (!binding) return null;
 
           // Check for conflicts if key or modifiers are being changed
+          let conflict: ShortcutConflict | null = null;
           if (updates.key !== undefined || updates.modifiers !== undefined) {
             const newKey = updates.key ?? binding.key;
             const newModifiers = updates.modifiers ?? binding.modifiers;
-            const conflict = state.checkConflict(id, newKey, newModifiers);
-            if (conflict) return conflict;
+            conflict = state.checkConflict(id, newKey, newModifiers);
+            if (conflict && !allowConflict) return conflict;
           }
 
           set((draft) => {
@@ -262,7 +263,7 @@ export const useShortcutStore = create<ShortcutStore>()(
             }
           });
 
-          return null;
+          return conflict;
         },
 
         resetBinding: (id) => {
