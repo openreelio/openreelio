@@ -334,7 +334,8 @@ describe('Timeline', () => {
   describe('scroll and zoom', () => {
     it('should render timeline toolbar', () => {
       render(<Timeline sequence={mockSequence} />);
-      expect(screen.getByTestId('timeline-toolbar')).toBeInTheDocument();
+      // EnhancedTimelineToolbar uses 'enhanced-timeline-toolbar' as its test ID
+      expect(screen.getByTestId('enhanced-timeline-toolbar')).toBeInTheDocument();
     });
 
     it('should update scrollX on horizontal wheel with Shift', () => {

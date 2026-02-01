@@ -9,6 +9,7 @@ import { useState, useCallback, useRef, useMemo, useLayoutEffect, type MouseEven
 import type { PlayheadHandle } from './Playhead';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores/projectStore';
+import { useEditorToolStore } from '@/stores/editorToolStore';
 import { useTimelineEngine } from '@/hooks/useTimelineEngine';
 import { useScrubbing } from '@/hooks/useScrubbing';
 import { useTimelineCoordinates } from '@/hooks/useTimelineCoordinates';
@@ -20,11 +21,18 @@ import { useTimelineNavigation } from '@/hooks/useTimelineNavigation';
 import { useSelectionBox } from '@/hooks/useSelectionBox';
 import { useCaption } from '@/hooks/useCaption';
 import { useShotMarkers } from '@/hooks/useShotMarkers';
+import { useAutoFollow } from '@/hooks/useAutoFollow';
+import { useRazorTool } from '@/hooks/useRazorTool';
+import { useClipboard } from '@/hooks/useClipboard';
+import { useRippleEdit } from '@/hooks/useRippleEdit';
+import { useSlipEdit } from '@/hooks/useSlipEdit';
+import { useSlideEdit } from '@/hooks/useSlideEdit';
+import { useRollEdit } from '@/hooks/useRollEdit';
 import { TimeRuler } from './TimeRuler';
 import { Track } from './Track';
 import { CaptionTrack } from './CaptionTrack';
 import { Playhead } from './Playhead';
-import { TimelineToolbar } from './TimelineToolbar';
+import { EnhancedTimelineToolbar } from './EnhancedTimelineToolbar';
 import { DragPreviewLayer } from './DragPreviewLayer';
 import { SnapIndicator, type SnapPoint } from './SnapIndicator';
 import { SelectionBox } from './SelectionBox';
@@ -47,6 +55,8 @@ export type {
   ClipMoveData,
   ClipTrimData,
   ClipSplitData,
+  ClipDuplicateData,
+  ClipPasteData,
   TrackControlData,
   CaptionUpdateData,
 } from './types';
@@ -101,6 +111,8 @@ export function Timeline({
   onClipMove,
   onClipTrim,
   onClipSplit,
+  onClipDuplicate,
+  onClipPaste,
   onTrackMuteToggle,
   onTrackLockToggle,
   onTrackVisibilityToggle,
@@ -125,6 +137,10 @@ export function Timeline({
   } = useTimelineStore();
 
   const { assets } = useProjectStore();
+
+  // Editor tool store - for tool switching
+  const { setActiveTool } = useEditorToolStore();
+
 
   // ===========================================================================
   // Refs and Local State
@@ -339,9 +355,211 @@ export function Timeline({
   });
 
   // ===========================================================================
+  // Auto-Follow (scroll to playhead during playback)
+  // ===========================================================================
+  // Auto-follow hook handles auto-scrolling during playback
+  useAutoFollow({
+    viewportWidth,
+    trackHeaderWidth: TRACK_HEADER_WIDTH,
+    isScrubbing,
+    isDraggingPlayhead,
+  });
+
+  // ===========================================================================
+  // Razor Tool
+  // ===========================================================================
+  const {
+    isActive: isRazorActive,
+    getCursorStyle: getToolCursorStyle,
+    handleTimelineClick: handleRazorClick,
+  } = useRazorTool({
+    sequence,
+    zoom,
+    scrollX,
+    trackHeaderWidth: TRACK_HEADER_WIDTH,
+    trackHeight: TRACK_HEIGHT,
+    onSplit: onClipSplit,
+  });
+
+  // ===========================================================================
+  // Ripple Edit Mode (must be before delete handler)
+  // ===========================================================================
+  const { isRippleEnabled, calculateDeleteRipple, toggleRipple } = useRippleEdit({
+    sequence,
+  });
+
+  // ===========================================================================
+  // Advanced Edit Mode Hooks (Slip, Slide, Roll)
+  // ===========================================================================
+  const { isSlipToolActive } = useSlipEdit({
+    onSlipEnd: (clipId, sourceIn, sourceOut) => {
+      // Find clip and track, then apply trim
+      if (!sequence || !onClipTrim) return;
+      for (const track of sequence.tracks) {
+        const clip = track.clips.find((c) => c.id === clipId);
+        if (clip) {
+          onClipTrim({
+            sequenceId: sequence.id,
+            trackId: track.id,
+            clipId,
+            newSourceIn: sourceIn,
+            newSourceOut: sourceOut,
+          });
+          break;
+        }
+      }
+    },
+  });
+
+  const { isSlideToolActive } = useSlideEdit({
+    onSlideEnd: (result) => {
+      if (!sequence || !onClipMove || !onClipTrim) return;
+      // Apply changes to previous clip (find correct track)
+      if (result.previousClipChange) {
+        for (const track of sequence.tracks) {
+          if (track.clips.some((c) => c.id === result.previousClipChange!.clipId)) {
+            onClipTrim({
+              sequenceId: sequence.id,
+              trackId: track.id,
+              clipId: result.previousClipChange.clipId,
+              newSourceOut: result.previousClipChange.sourceOut,
+            });
+            break;
+          }
+        }
+      }
+      // Apply changes to next clip (find correct track)
+      if (result.nextClipChange) {
+        for (const track of sequence.tracks) {
+          if (track.clips.some((c) => c.id === result.nextClipChange!.clipId)) {
+            onClipTrim({
+              sequenceId: sequence.id,
+              trackId: track.id,
+              clipId: result.nextClipChange.clipId,
+              newSourceIn: result.nextClipChange.sourceIn,
+            });
+            break;
+          }
+        }
+      }
+    },
+  });
+
+  const { isRollToolActive } = useRollEdit({
+    onRollEnd: (result) => {
+      if (!sequence || !onClipTrim) return;
+      // Apply roll changes to both clips
+      for (const track of sequence.tracks) {
+        if (track.clips.some((c) => c.id === result.outgoingClipChange.clipId || c.id === result.incomingClipChange.clipId)) {
+          // Update outgoing clip
+          onClipTrim({
+            sequenceId: sequence.id,
+            trackId: track.id,
+            clipId: result.outgoingClipChange.clipId,
+            newSourceOut: result.outgoingClipChange.sourceOut,
+          });
+          // Update incoming clip
+          onClipTrim({
+            sequenceId: sequence.id,
+            trackId: track.id,
+            clipId: result.incomingClipChange.clipId,
+            newSourceIn: result.incomingClipChange.sourceIn,
+          });
+          break;
+        }
+      }
+    },
+  });
+
+  // ===========================================================================
+  // Clipboard Operations
+  // ===========================================================================
+  const {
+    copy,
+    cut,
+    paste,
+    duplicate,
+    canCopy,
+    canPaste,
+  } = useClipboard({
+    sequence,
+    selectedClipIds,
+    onDuplicate: onClipDuplicate
+      ? (clipIds: string[], targetTime: number) => {
+          if (sequence) {
+            // Duplicate each clip
+            for (const clipId of clipIds) {
+              for (const track of sequence.tracks) {
+                const clip = track.clips.find((c) => c.id === clipId);
+                if (clip) {
+                  onClipDuplicate({
+                    sequenceId: sequence.id,
+                    trackId: track.id,
+                    clipId,
+                    newTimelineIn: targetTime,
+                  });
+                  break;
+                }
+              }
+            }
+          }
+        }
+      : undefined,
+    onPaste: onClipPaste
+      ? (clips, targetTime, targetTrackId) => {
+          if (sequence && clips.length > 0) {
+            // Paste all items
+            for (const item of clips) {
+              onClipPaste({
+                sequenceId: sequence.id,
+                trackId: targetTrackId ?? item.trackId,
+                clipData: item.clipData,
+                pasteTime: targetTime,
+              });
+            }
+          }
+        }
+      : undefined,
+    onDelete: onDeleteClips,
+  });
+
+  // ===========================================================================
+  // Ripple-Aware Delete Handler (must be before keyboard shortcuts)
+  // ===========================================================================
+  const handleRippleDelete = useCallback(
+    (clipIdsToDelete: string[]) => {
+      if (clipIdsToDelete.length === 0 || !onDeleteClips) return;
+
+      // If ripple mode is enabled, apply ripple adjustments after delete
+      if (isRippleEnabled && sequence && onClipMove) {
+        // Calculate ripple adjustments before deleting
+        const rippleResult = calculateDeleteRipple(clipIdsToDelete);
+
+        // Delete the selected clips
+        onDeleteClips(clipIdsToDelete);
+
+        // Apply ripple adjustments to shift remaining clips
+        for (const adjustment of rippleResult.affectedClips) {
+          onClipMove({
+            sequenceId: sequence.id,
+            trackId: adjustment.trackId,
+            clipId: adjustment.clipId,
+            newTimelineIn: adjustment.newTime,
+            newTrackId: adjustment.trackId,
+          });
+        }
+      } else {
+        // Normal delete without ripple
+        onDeleteClips(clipIdsToDelete);
+      }
+    },
+    [onDeleteClips, isRippleEnabled, sequence, onClipMove, calculateDeleteRipple],
+  );
+
+  // ===========================================================================
   // Keyboard Shortcuts
   // ===========================================================================
-  const { handleKeyDown } = useTimelineKeyboard({
+  const { handleKeyDown: baseHandleKeyDown } = useTimelineKeyboard({
     sequence,
     selectedClipIds,
     playhead,
@@ -350,9 +568,99 @@ export function Timeline({
     stepBackward,
     clearClipSelection,
     selectClips,
-    onDeleteClips,
+    onDeleteClips: handleRippleDelete, // Use ripple-aware delete
     onClipSplit,
   });
+
+  // Enhanced keyboard handler with clipboard operations and tool switching
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      // Clipboard shortcuts (Ctrl/Cmd + key)
+      if (e.ctrlKey || e.metaKey) {
+        switch (e.key.toLowerCase()) {
+          case 'c':
+            if (canCopy) {
+              copy();
+              e.preventDefault();
+              return;
+            }
+            break;
+          case 'x':
+            if (canCopy) {
+              cut();
+              e.preventDefault();
+              return;
+            }
+            break;
+          case 'v':
+            if (canPaste) {
+              paste();
+              e.preventDefault();
+              return;
+            }
+            break;
+          case 'd':
+            if (canCopy) {
+              duplicate();
+              e.preventDefault();
+              return;
+            }
+            break;
+        }
+      }
+
+      // Tool switching shortcuts (no modifiers)
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        switch (e.key.toLowerCase()) {
+          case 'v':
+            setActiveTool('select');
+            e.preventDefault();
+            return;
+          case 'c':
+            setActiveTool('razor');
+            e.preventDefault();
+            return;
+          case 'b':
+            setActiveTool('razor');
+            e.preventDefault();
+            return;
+          case 'y':
+            setActiveTool('slip');
+            e.preventDefault();
+            return;
+          case 'u':
+            setActiveTool('slide');
+            e.preventDefault();
+            return;
+          case 'n':
+            setActiveTool('roll');
+            e.preventDefault();
+            return;
+          case 'h':
+            setActiveTool('hand');
+            e.preventDefault();
+            return;
+          case 'r':
+            // Toggle ripple mode
+            toggleRipple();
+            e.preventDefault();
+            return;
+          case 't':
+            // Add text clip
+            if (onAddText) {
+              onAddText();
+              e.preventDefault();
+              return;
+            }
+            break;
+        }
+      }
+
+      // Delegate to base keyboard handler
+      baseHandleKeyDown(e);
+    },
+    [baseHandleKeyDown, canCopy, canPaste, copy, cut, paste, duplicate, setActiveTool, toggleRipple, onAddText],
+  );
 
   // ===========================================================================
   // Clip Operations Hook
@@ -467,6 +775,16 @@ export function Timeline({
 
   const handleTracksAreaClick = useCallback(
     (e: MouseEvent) => {
+      // Handle razor tool click - split clip at click position
+      if (isRazorActive && tracksAreaRef.current) {
+        const containerRect = tracksAreaRef.current.getBoundingClientRect();
+        const handled = handleRazorClick(e.clientX, e.clientY, containerRect);
+        if (handled) {
+          // Razor tool handled the click, don't process further
+          return;
+        }
+      }
+
       // Don't clear selection if we were doing a selection box drag
       if (isSelecting) return;
 
@@ -474,7 +792,7 @@ export function Timeline({
         clearClipSelection();
       }
     },
-    [clearClipSelection, isSelecting],
+    [clearClipSelection, isSelecting, isRazorActive, handleRazorClick],
   );
 
   /**
@@ -484,6 +802,11 @@ export function Timeline({
    */
   const handleTracksAreaMouseDown = useCallback(
     (e: MouseEvent) => {
+      // If razor tool is active, don't start scrubbing or selection
+      if (isRazorActive) {
+        return;
+      }
+
       // Check if clicking on empty area (not on clips, buttons, or headers)
       const target = e.target as HTMLElement;
       const isEmptyAreaClick =
@@ -501,7 +824,7 @@ export function Timeline({
       // but scrubbing already handled the initial click
       handleSelectionMouseDown(e);
     },
-    [handleSelectionMouseDown, handleScrubStart],
+    [handleSelectionMouseDown, handleScrubStart, isRazorActive],
   );
 
   const createTrackHandler = useCallback(
@@ -607,6 +930,59 @@ export function Timeline({
   }, []);
 
   // ===========================================================================
+  // Toolbar Action Handlers (must be before conditional return for hook rules)
+  // ===========================================================================
+
+  const handleToolbarSplit = useCallback(() => {
+    if (selectedClipIds.length > 0 && sequence && onClipSplit) {
+      for (const clipId of selectedClipIds) {
+        for (const track of sequence.tracks) {
+          const clip = track.clips.find((c) => c.id === clipId);
+          if (clip) {
+            const clipEnd =
+              clip.place.timelineInSec +
+              (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+            if (playhead > clip.place.timelineInSec && playhead < clipEnd) {
+              onClipSplit({
+                sequenceId: sequence.id,
+                trackId: track.id,
+                clipId,
+                splitTime: playhead,
+              });
+            }
+            break;
+          }
+        }
+      }
+    }
+  }, [selectedClipIds, sequence, playhead, onClipSplit]);
+
+  const handleToolbarDuplicate = useCallback(() => {
+    if (selectedClipIds.length > 0 && sequence && onClipDuplicate) {
+      for (const clipId of selectedClipIds) {
+        for (const track of sequence.tracks) {
+          const clip = track.clips.find((c) => c.id === clipId);
+          if (clip) {
+            const clipDuration =
+              (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+            onClipDuplicate({
+              sequenceId: sequence.id,
+              trackId: track.id,
+              clipId,
+              newTimelineIn: clip.place.timelineInSec + clipDuration,
+            });
+            break;
+          }
+        }
+      }
+    }
+  }, [selectedClipIds, sequence, onClipDuplicate]);
+
+  const handleToolbarDelete = useCallback(() => {
+    handleRippleDelete(selectedClipIds);
+  }, [selectedClipIds, handleRippleDelete]);
+
+  // ===========================================================================
   // Render
   // ===========================================================================
   if (!sequence) {
@@ -623,6 +999,22 @@ export function Timeline({
   // Calculate playhead pixel position for rendering
   const playheadPixelPosition = playhead * zoom + TRACK_HEADER_WIDTH - scrollX;
 
+  // Determine cursor style based on active tool and interaction state
+  const getTracksAreaCursor = (): string => {
+    if (isScrubbing || isDraggingPlayhead) return 'cursor-ew-resize';
+    if (isSelecting) return 'cursor-crosshair';
+    // Advanced edit mode cursors
+    if (isSlipToolActive) return 'cursor-ew-resize';
+    if (isSlideToolActive) return 'cursor-move';
+    if (isRollToolActive) return 'cursor-col-resize';
+    // Tool-specific cursors from razor
+    const toolCursor = getToolCursorStyle();
+    if (toolCursor === 'crosshair') return 'cursor-crosshair';
+    if (toolCursor === 'grab') return 'cursor-grab';
+    if (toolCursor === 'ew-resize') return 'cursor-ew-resize';
+    return '';
+  };
+
   return (
     <div
       data-testid="timeline"
@@ -630,10 +1022,15 @@ export function Timeline({
       tabIndex={0}
       onKeyDown={handleKeyDown}
     >
-      <TimelineToolbar
+      <EnhancedTimelineToolbar
         onFitToWindow={handleFitToWindow}
         onAddText={onAddText}
+        onSplit={handleToolbarSplit}
+        onDuplicate={handleToolbarDuplicate}
+        onDelete={handleToolbarDelete}
         hasActiveSequence={sequence !== null}
+        fps={DEFAULT_FPS}
+        duration={duration}
       />
 
       {/* Main timeline area with ruler and tracks - relative container for playhead */}
@@ -653,7 +1050,7 @@ export function Timeline({
         <div
           ref={tracksAreaRef}
           data-testid="timeline-tracks-area"
-          className={`flex-1 overflow-hidden relative ${isScrubbing || isDraggingPlayhead ? 'cursor-ew-resize' : ''} ${isSelecting ? 'cursor-crosshair' : ''}`}
+          className={`flex-1 overflow-hidden relative ${getTracksAreaCursor()}`}
           onClick={handleTracksAreaClick}
           onMouseDown={handleTracksAreaMouseDown}
           onWheel={handleWheel}

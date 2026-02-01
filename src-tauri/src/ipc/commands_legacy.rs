@@ -10,14 +10,14 @@ use specta::Type;
 use tauri::{Manager, State};
 
 use crate::core::{
-    assets::{Asset, ProxyStatus},
+    assets::{Asset, AudioInfo, ProxyStatus, VideoInfo},
     commands::{
         AddEffectCommand, AddTextClipCommand, CreateSequenceCommand, ImportAssetCommand,
         InsertClipCommand, MoveClipCommand, RemoveAssetCommand, RemoveClipCommand,
         RemoveEffectCommand, RemoveTextClipCommand, SetClipTransformCommand, SplitClipCommand,
         TrimClipCommand, UpdateAssetCommand, UpdateEffectCommand, UpdateTextCommand,
     },
-    ffmpeg::FFmpegProgress,
+    ffmpeg::{FFmpegProgress, SharedFFmpegState},
     fs::{
         default_export_allowed_roots, validate_existing_project_dir, validate_local_input_path,
         validate_path_id_component, validate_scoped_output_path,
@@ -26,10 +26,48 @@ use crate::core::{
     performance::memory::{CacheStats, PoolStats},
     settings::{AppSettings, SettingsManager},
     timeline::Sequence,
-    CoreError,
+    CoreError, Ratio,
 };
 use crate::ipc::serialize_to_json_string;
 use crate::{ActiveProject, AppState};
+
+// =============================================================================
+// Helper Functions
+// =============================================================================
+
+/// Converts a floating-point FPS value to a Ratio (numerator, denominator).
+/// Handles common video frame rates including NTSC (23.976, 29.97, 59.94).
+/// Returns (0, 1) for invalid input (NaN, Infinity, zero, negative).
+fn fps_to_ratio(fps: f64) -> (i32, i32) {
+    // Guard against invalid FPS values from malformed media or FFprobe errors
+    if !fps.is_finite() || fps <= 0.0 {
+        return (0, 1);
+    }
+
+    // Handle common NTSC frame rates
+    const NTSC_TOLERANCE: f64 = 0.01;
+
+    if (fps - 23.976).abs() < NTSC_TOLERANCE {
+        return (24000, 1001);
+    }
+    if (fps - 29.97).abs() < NTSC_TOLERANCE {
+        return (30000, 1001);
+    }
+    if (fps - 59.94).abs() < NTSC_TOLERANCE {
+        return (60000, 1001);
+    }
+
+    // For standard frame rates (24, 25, 30, 50, 60, etc.)
+    let rounded = fps.round();
+    if (fps - rounded).abs() < 0.001 {
+        return (rounded as i32, 1);
+    }
+
+    // For other fractional frame rates, use a reasonable approximation
+    // Multiply by 1000 and use 1000 as denominator
+    let num = (fps * 1000.0).round() as i32;
+    (num, 1000)
+}
 
 // =============================================================================
 // App Lifecycle
@@ -544,12 +582,13 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<ProjectStat
 /// Returns the job_id if a proxy job was queued.
 #[tauri::command]
 #[specta::specta]
-#[tracing::instrument(skip(state), fields(uri = %uri))]
+#[tracing::instrument(skip(state, ffmpeg_state), fields(uri = %uri))]
 pub async fn import_asset(
     uri: String,
     state: State<'_, AppState>,
+    ffmpeg_state: State<'_, SharedFFmpegState>,
 ) -> Result<AssetImportResult, String> {
-    use crate::core::assets::{requires_proxy, ProxyStatus};
+    use crate::core::assets::requires_proxy;
 
     // Phase 1: Import asset (holds project lock)
     let (asset_id, name, op_id, needs_proxy) = {
@@ -566,7 +605,66 @@ pub async fn import_asset(
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_else(|| "Unknown".to_string());
 
-        let command = ImportAssetCommand::new(&name, &uri);
+        // Extract metadata using FFprobe (via shared FFmpeg state) for accurate duration
+        let mut command = ImportAssetCommand::new(&name, &uri);
+
+        // Get FFmpeg runner and probe the media file
+        let ffmpeg_guard = ffmpeg_state.read().await;
+        if let Some(runner) = ffmpeg_guard.runner() {
+            match runner.probe(&path).await {
+                Ok(media_info) => {
+                    tracing::debug!(
+                        "Extracted metadata for {}: duration={:.2}s, size={}",
+                        name,
+                        media_info.duration_sec,
+                        media_info.size_bytes
+                    );
+                    command = command
+                        .with_duration(media_info.duration_sec)
+                        .with_file_size(media_info.size_bytes);
+
+                    // Convert and apply video info if present
+                    if let Some(video_stream) = media_info.video {
+                        // Convert fps (f64) to Ratio
+                        let (fps_num, fps_den) = fps_to_ratio(video_stream.fps);
+                        let video_info = VideoInfo {
+                            width: video_stream.width,
+                            height: video_stream.height,
+                            fps: Ratio::new(fps_num, fps_den),
+                            codec: video_stream.codec,
+                            bitrate: video_stream.bitrate,
+                            has_alpha: false, // FFprobe doesn't easily expose this
+                        };
+                        command = command.with_video_info(video_info);
+                    }
+                    // Convert and apply audio info if present
+                    if let Some(audio_stream) = media_info.audio {
+                        let audio_info = AudioInfo {
+                            sample_rate: audio_stream.sample_rate,
+                            channels: audio_stream.channels,
+                            codec: audio_stream.codec,
+                            bitrate: audio_stream.bitrate,
+                        };
+                        command = command.with_audio_info(audio_info);
+                    }
+                }
+                Err(e) => {
+                    // Log warning but continue with import (metadata extraction is optional)
+                    tracing::warn!(
+                        "Failed to extract metadata for {}: {}. Using defaults.",
+                        name,
+                        e
+                    );
+                }
+            }
+        } else {
+            tracing::warn!(
+                "FFmpeg not available for metadata extraction of {}. Using defaults.",
+                name
+            );
+        }
+        drop(ffmpeg_guard); // Release FFmpeg lock before executing command
+
         let asset_id = command.asset_id().to_string();
 
         // Execute command
@@ -788,7 +886,8 @@ pub async fn generate_proxy_for_asset(
 
     // Create proxy directory
     let proxy_dir = project_path.join(".openreelio").join("proxy");
-    std::fs::create_dir_all(&proxy_dir)
+    tokio::fs::create_dir_all(&proxy_dir)
+        .await
         .map_err(|e| format!("Failed to create proxy directory: {}", e))?;
 
     // Output path for proxy
@@ -1034,7 +1133,8 @@ pub async fn generate_waveform_for_asset(
         .join(".openreelio")
         .join("cache")
         .join("waveforms");
-    std::fs::create_dir_all(&cache_dir)
+    tokio::fs::create_dir_all(&cache_dir)
+        .await
         .map_err(|e| format!("Failed to create waveform cache directory: {}", e))?;
 
     // Output path for waveform JSON
@@ -3028,7 +3128,9 @@ pub async fn transcribe_asset(
     let temp_dir = std::env::temp_dir()
         .join("openreelio")
         .join("transcription");
-    std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
+    tokio::fs::create_dir_all(&temp_dir)
+        .await
+        .map_err(|e| format!("Failed to create temp dir: {}", e))?;
     let audio_path = temp_dir.join(format!("{}.wav", asset_id));
 
     // RAII guard for temp file cleanup (ensures cleanup on both success and error)

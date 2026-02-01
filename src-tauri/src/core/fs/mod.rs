@@ -102,6 +102,17 @@ pub fn validate_local_input_path(path: &str, label: &str) -> Result<PathBuf, Str
         ));
     }
 
+    // Prevent traversal tricks in user-provided absolute paths.
+    // This is defense-in-depth for path-based allowlists (e.g. asset protocol scope).
+    if pb.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    }) {
+        return Err(format!("{label} must not contain '.' or '..' segments"));
+    }
+
     // Check file existence and type
     let meta =
         std::fs::metadata(&pb).map_err(|_| format!("{label} file not found: {}", pb.display()))?;
@@ -109,7 +120,9 @@ pub fn validate_local_input_path(path: &str, label: &str) -> Result<PathBuf, Str
         return Err(format!("{label} is not a file: {}", pb.display()));
     }
 
-    Ok(pb)
+    // Best-effort normalization. Canonicalization can fail on some special filesystems
+    // even when metadata succeeds; in that case we keep the validated absolute path.
+    Ok(std::fs::canonicalize(&pb).unwrap_or(pb))
 }
 
 /// Validates and canonicalizes a project directory path.
@@ -206,6 +219,15 @@ pub async fn validate_local_input_path_async(path: &str, label: &str) -> Result<
         ));
     }
 
+    if pb.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::CurDir | std::path::Component::ParentDir
+        )
+    }) {
+        return Err(format!("{label} must not contain '.' or '..' segments"));
+    }
+
     let meta = tokio::fs::metadata(&pb)
         .await
         .map_err(|_| format!("{label} file not found: {}", pb.display()))?;
@@ -213,7 +235,13 @@ pub async fn validate_local_input_path_async(path: &str, label: &str) -> Result<
         return Err(format!("{label} is not a file: {}", pb.display()));
     }
 
-    Ok(pb)
+    // Best-effort normalization.
+    let pb_clone = pb.clone();
+    Ok(
+        tokio::task::spawn_blocking(move || std::fs::canonicalize(&pb_clone).unwrap_or(pb_clone))
+            .await
+            .unwrap_or(pb),
+    )
 }
 
 /// Validates an output path for write operations.
@@ -641,7 +669,25 @@ mod tests {
         let path_str = file_path.to_string_lossy().to_string();
         let result = validate_local_input_path(&path_str, "inputPath");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), file_path);
+        let got = result.unwrap();
+        let expected = std::fs::canonicalize(&file_path).unwrap_or(file_path);
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn test_validate_local_input_path_rejects_dot_segments() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file_path = sub.join("file.txt");
+        std::fs::write(&file_path, "test").unwrap();
+
+        // Create an absolute path containing a parent-dir segment.
+        let dotty = sub.join("..").join("sub").join("file.txt");
+        let dotty_str = dotty.to_string_lossy().to_string();
+        let result = validate_local_input_path(&dotty_str, "inputPath");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("'.' or '..'"));
     }
 
     #[test]

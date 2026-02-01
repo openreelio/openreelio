@@ -68,7 +68,7 @@ impl ThumbnailService {
 
         // Create thumbnails directory if needed
         if let Some(parent) = thumb_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 ThumbnailError::IoError(format!("Failed to create thumbnails directory: {}", e))
             })?;
         }
@@ -100,7 +100,7 @@ impl ThumbnailService {
 
         // Create thumbnails directory if needed
         if let Some(parent) = thumb_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 ThumbnailError::IoError(format!("Failed to create thumbnails directory: {}", e))
             })?;
         }
@@ -151,7 +151,7 @@ impl ThumbnailService {
 
         // Create thumbnails directory if needed
         if let Some(parent) = thumb_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 ThumbnailError::IoError(format!("Failed to create thumbnails directory: {}", e))
             })?;
         }

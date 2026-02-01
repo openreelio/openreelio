@@ -12,40 +12,54 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 
+const flushPromises = async (): Promise<void> => {
+  await Promise.resolve();
+  await Promise.resolve();
+};
+
 // =============================================================================
 // Mocks
 // =============================================================================
 
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn().mockResolvedValue({
-    poolStats: {
-      totalBlocks: 10,
-      allocatedBlocks: 5,
-      totalSizeBytes: 1024 * 1024,
-      usedSizeBytes: 512 * 1024,
-      allocationCount: 100,
-      releaseCount: 95,
-      poolHits: 90,
-      poolMisses: 10,
-      hitRate: 0.9,
-    },
-    cacheStats: {
-      entryCount: 50,
-      totalSizeBytes: 10 * 1024,
-      hits: 200,
-      misses: 20,
-      evictions: 5,
-      hitRate: 0.91,
-    },
-    allocatedBytes: 1024 * 1024,
-    systemMemory: null,
-  }),
+  invoke: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/event', () => ({
   listen: vi.fn().mockResolvedValue(() => {}),
   emit: vi.fn().mockResolvedValue(undefined),
 }));
+
+import { invoke } from '@tauri-apps/api/core';
+const mockInvoke = vi.mocked(invoke);
+
+const defaultMemoryStats = {
+  poolStats: {
+    totalBlocks: 10,
+    allocatedBlocks: 5,
+    totalSizeBytes: 1024 * 1024,
+    usedSizeBytes: 512 * 1024,
+    allocationCount: 100,
+    releaseCount: 95,
+    poolHits: 90,
+    poolMisses: 10,
+    hitRate: 0.9,
+  },
+  cacheStats: {
+    entryCount: 50,
+    totalSizeBytes: 10 * 1024,
+    hits: 200,
+    misses: 20,
+    evictions: 5,
+    hitRate: 0.91,
+  },
+  allocatedBytes: 1024 * 1024,
+  systemMemory: null,
+};
+
+beforeEach(() => {
+  mockInvoke.mockResolvedValue(defaultMemoryStats);
+});
 
 // =============================================================================
 // Hook Leak Tests
@@ -269,9 +283,9 @@ describe('Timer Leak Tests', () => {
       useMemoryMonitor({ autoStart: true, intervalMs: 1000 })
     );
 
-    // Advance time to trigger a fetch using async timer methods
+    // Flush the initial fetch (autoStart triggers an immediate request).
     await act(async () => {
-      await vi.runAllTimersAsync();
+      await flushPromises();
     });
 
     // Should have fetched stats
@@ -283,6 +297,7 @@ describe('Timer Leak Tests', () => {
     // Advancing timers after unmount should not cause issues
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
+      await flushPromises();
     });
 
     // No errors means cleanup was successful
@@ -345,10 +360,16 @@ describe('Memory Stress Tests', () => {
       useMemoryMonitor({ autoStart: true, intervalMs: 50 })
     );
 
+    // Ensure the first fetch resolves before simulating a long-running session.
+    await act(async () => {
+      await flushPromises();
+    });
+
     // Simulate long running session using async timer methods
     for (let i = 0; i < 200; i++) {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(50);
+        await flushPromises();
       });
     }
 

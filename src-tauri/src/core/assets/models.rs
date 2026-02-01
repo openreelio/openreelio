@@ -406,6 +406,18 @@ impl Asset {
     pub fn mark_proxy_failed(&mut self) {
         self.proxy_status = ProxyStatus::Failed;
     }
+
+    /// Sets the video info (builder pattern)
+    pub fn with_video_info(mut self, video_info: VideoInfo) -> Self {
+        self.video = Some(video_info);
+        self
+    }
+
+    /// Sets the audio info (builder pattern)
+    pub fn with_audio_info(mut self, audio_info: AudioInfo) -> Self {
+        self.audio = Some(audio_info);
+        self
+    }
 }
 
 #[cfg(test)]

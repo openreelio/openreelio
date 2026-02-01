@@ -13,6 +13,8 @@ export type {
   ClipMoveData,
   ClipTrimData,
   ClipSplitData,
+  ClipDuplicateData,
+  ClipPasteData,
   TrackControlData,
   TimelineProps,
   ClipClickModifiers,
@@ -36,6 +38,8 @@ export type { ClickModifiers, ClipWaveformConfig } from './Clip';
 export { Playhead } from './Playhead';
 export { TimelineToolbar } from './TimelineToolbar';
 export type { TimelineToolbarProps } from './TimelineToolbar';
+export { EnhancedTimelineToolbar } from './EnhancedTimelineToolbar';
+export type { EnhancedTimelineToolbarProps } from './EnhancedTimelineToolbar';
 export { ThumbnailStrip } from './ThumbnailStrip';
 export type { ThumbnailStripProps } from './ThumbnailStrip';
 export { LazyThumbnailStrip } from './LazyThumbnailStrip';

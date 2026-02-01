@@ -286,7 +286,7 @@ impl FFmpegRunner {
 
         // Create output directory if needed
         if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 FFmpegError::OutputError(format!("Failed to create output directory: {}", e))
             })?;
         }
@@ -353,7 +353,7 @@ impl FFmpegRunner {
 
         // Create output directory if needed
         if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 FFmpegError::OutputError(format!("Failed to create output directory: {}", e))
             })?;
         }
@@ -428,7 +428,7 @@ impl FFmpegRunner {
 
         // Create output directory if needed
         if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 FFmpegError::OutputError(format!("Failed to create output directory: {}", e))
             })?;
         }
@@ -631,7 +631,7 @@ impl FFmpegRunner {
 
         // Create output directory if needed
         if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 FFmpegError::OutputError(format!("Failed to create output directory: {}", e))
             })?;
         }
@@ -702,7 +702,7 @@ impl FFmpegRunner {
 
         // Create output directory if needed
         if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
                 FFmpegError::OutputError(format!("Failed to create output directory: {}", e))
             })?;
         }

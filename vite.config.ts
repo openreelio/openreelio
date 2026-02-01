@@ -9,6 +9,7 @@ import { visualizer } from 'rollup-plugin-visualizer';
 const rootDir = fileURLToPath(new URL('.', import.meta.url));
 
 export default defineConfig(({ mode }) => {
+  const isStressRun = process.env.VITEST_STRESS === '1';
   const analyzePlugins =
     mode === 'analyze'
       ? [
@@ -35,7 +36,9 @@ export default defineConfig(({ mode }) => {
       environment: 'jsdom',
       setupFiles: ['./src/test/setup.ts'],
       include: ['src/**/*.{test,spec}.{ts,tsx}', 'scripts/**/*.test.ts'],
-      exclude: ['src/**/*.bench.test.{ts,tsx}', 'src/**/*.stress.test.{ts,tsx}'],
+      exclude: isStressRun
+        ? ['src/**/*.bench.test.{ts,tsx}']
+        : ['src/**/*.bench.test.{ts,tsx}', 'src/**/*.stress.test.{ts,tsx}'],
       coverage: {
         provider: 'v8',
         reporter: ['text', 'json', 'html'],

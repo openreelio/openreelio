@@ -27,12 +27,15 @@ import {
   useProjectStore,
   usePlaybackStore,
   useTimelineStore,
+  useAudioMixerStore,
 } from '@/stores';
 // Direct imports instead of barrel to avoid bundling all 100+ hooks
 import { useTimelineActions } from '@/hooks/useTimelineActions';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useAudioPlayback } from '@/hooks/useAudioPlayback';
 import { useTextClip } from '@/hooks/useTextClip';
+import { useAudioMixer } from '@/hooks/useAudioMixer';
+import { dbToLinear, linearToDb } from '@/utils/audioMeter';
 import { createLogger } from '@/services/logger';
 import { Terminal, Sliders } from 'lucide-react';
 import type { Sequence } from '@/types';
@@ -64,14 +67,54 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
   const [aiSidebarCollapsed, setAiSidebarCollapsed] = useState(false);
   const [aiSidebarWidth, setAiSidebarWidth] = useState(320);
 
-  // Audio Mixer state
-  const [soloedTrackIds, setSoloedTrackIds] = useState<Set<string>>(new Set());
-  const [trackPans, setTrackPans] = useState<Map<string, number>>(new Map());
-  const [masterMuted, setMasterMuted] = useState(false);
-  const [masterVolume, setMasterVolume] = useState(1.0);
-  // Audio levels would come from actual audio analysis - using mock for now
-  const [trackLevels] = useState<Map<string, ChannelLevels>>(new Map());
-  const [masterLevels] = useState<ChannelLevels>({ left: 0, right: 0 });
+  // Audio Mixer state from store
+  const mixerStore = useAudioMixerStore();
+  const {
+    trackStates: mixerTrackStates,
+    soloedTrackIds,
+    masterState: mixerMasterState,
+    initializeTrack,
+    setTrackVolume,
+    setTrackPan,
+    toggleMute: toggleTrackMute,
+    toggleSolo,
+    setMasterVolume: setMixerMasterVolume,
+    toggleMasterMute,
+  } = mixerStore;
+
+  // Audio mixer Web Audio integration
+  const {
+    isReady: isAudioMixerReady,
+    initialize: initAudioMixer,
+    connectTrack,
+    disconnectTrack,
+    startMetering,
+    stopMetering,
+  } = useAudioMixer({ enabled: true });
+
+  // Convert store state to props for AudioMixerPanel
+  const trackLevels = useMemo(() => {
+    const levels = new Map<string, ChannelLevels>();
+    for (const [trackId, state] of mixerTrackStates) {
+      levels.set(trackId, { left: state.levels.left, right: state.levels.right });
+    }
+    return levels;
+  }, [mixerTrackStates]);
+
+  const trackPans = useMemo(() => {
+    const pans = new Map<string, number>();
+    for (const [trackId, state] of mixerTrackStates) {
+      pans.set(trackId, state.pan);
+    }
+    return pans;
+  }, [mixerTrackStates]);
+
+  const masterVolume = dbToLinear(mixerMasterState.volumeDb);
+  const masterMuted = mixerMasterState.muted;
+  const masterLevels: ChannelLevels = {
+    left: mixerMasterState.levels.left,
+    right: mixerMasterState.levels.right,
+  };
 
   // Audio playback integration
   // The hook handles audio scheduling, volume control, and clip synchronization
@@ -90,6 +133,46 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
       void initAudio();
     }
   }, [isPlaying, isAudioReady, initAudio]);
+
+  // Initialize audio mixer on first play
+  useEffect(() => {
+    if (isPlaying && !isAudioMixerReady) {
+      void initAudioMixer();
+    }
+  }, [isPlaying, isAudioMixerReady, initAudioMixer]);
+
+  // Initialize mixer tracks when sequence changes
+  useEffect(() => {
+    if (!sequence) return;
+
+    // Initialize each track in the mixer store
+    for (const track of sequence.tracks) {
+      const volumeDb = linearToDb(track.volume);
+      initializeTrack(track.id, volumeDb, 0);
+
+      // Connect to audio mixer if ready
+      if (isAudioMixerReady) {
+        connectTrack(track.id);
+      }
+    }
+
+    // Cleanup: disconnect removed tracks
+    return () => {
+      if (!sequence) return;
+      for (const track of sequence.tracks) {
+        disconnectTrack(track.id);
+      }
+    };
+  }, [sequence, isAudioMixerReady, initializeTrack, connectTrack, disconnectTrack]);
+
+  // Start/stop metering based on playback state
+  useEffect(() => {
+    if (isPlaying && isAudioMixerReady) {
+      startMetering();
+    } else {
+      stopMetering();
+    }
+  }, [isPlaying, isAudioMixerReady, startMetering, stopMetering]);
 
   // Sync sequence duration to playback store
   // Calculate total duration from all clips across all tracks
@@ -272,42 +355,36 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
     [sequence, addTextClip]
   );
 
-  // Audio Mixer handlers
+  // Audio Mixer handlers - connected to store and Web Audio
   const handleMixerVolumeChange = useCallback((trackId: string, volumeDb: number) => {
-    // TODO: Connect to audio engine for actual volume control
+    setTrackVolume(trackId, volumeDb);
     logger.debug('Volume change', { trackId, volumeDb });
-  }, []);
+  }, [setTrackVolume]);
 
   const handleMixerPanChange = useCallback((trackId: string, pan: number) => {
-    setTrackPans((prev) => new Map(prev).set(trackId, pan));
-  }, []);
+    setTrackPan(trackId, pan);
+  }, [setTrackPan]);
 
   const handleMixerMuteToggle = useCallback((trackId: string) => {
-    if (!sequence) return;
-    handleTrackMuteToggle?.({ sequenceId: sequence.id, trackId });
-  }, [sequence, handleTrackMuteToggle]);
+    // Toggle mute in mixer store (affects audio output)
+    toggleTrackMute(trackId);
+    // Also toggle in timeline if we want visual feedback on track header
+    if (sequence && handleTrackMuteToggle) {
+      handleTrackMuteToggle({ sequenceId: sequence.id, trackId });
+    }
+  }, [sequence, handleTrackMuteToggle, toggleTrackMute]);
 
   const handleMixerSoloToggle = useCallback((trackId: string) => {
-    setSoloedTrackIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(trackId)) {
-        next.delete(trackId);
-      } else {
-        next.add(trackId);
-      }
-      return next;
-    });
-  }, []);
+    toggleSolo(trackId);
+  }, [toggleSolo]);
 
   const handleMasterVolumeChange = useCallback((volumeDb: number) => {
-    // Convert dB to linear: 0dB = 1.0, -6dB ≈ 0.5, +6dB ≈ 2.0
-    const linear = Math.pow(10, volumeDb / 20);
-    setMasterVolume(Math.max(0, Math.min(2, linear)));
-  }, []);
+    setMixerMasterVolume(volumeDb);
+  }, [setMixerMasterVolume]);
 
   const handleMasterMuteToggle = useCallback(() => {
-    setMasterMuted((prev) => !prev);
-  }, []);
+    toggleMasterMute();
+  }, [toggleMasterMute]);
 
   // Bottom panel tabs
   const bottomPanelTabs: BottomPanelTab[] = useMemo(() => [
