@@ -8,7 +8,7 @@
  * @module hooks/useSlideEdit
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { useEditorToolStore } from '@/stores/editorToolStore';
 import type { Clip, Track } from '@/types';
 import { MIN_CLIP_DURATION_SEC } from '@/constants/editing';

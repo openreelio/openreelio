@@ -18,7 +18,6 @@ use crate::core::{
         TrimClipCommand, UpdateAssetCommand, UpdateEffectCommand, UpdateTextCommand,
     },
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
-    Ratio,
     fs::{
         default_export_allowed_roots, validate_existing_project_dir, validate_local_input_path,
         validate_path_id_component, validate_scoped_output_path,
@@ -27,7 +26,7 @@ use crate::core::{
     performance::memory::{CacheStats, PoolStats},
     settings::{AppSettings, SettingsManager},
     timeline::Sequence,
-    CoreError,
+    CoreError, Ratio,
 };
 use crate::ipc::serialize_to_json_string;
 use crate::{ActiveProject, AppState};
