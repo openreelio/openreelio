@@ -347,3 +347,74 @@ export type {
   UseEdgeAutoScrollOptions,
   UseEdgeAutoScrollResult,
 } from './useEdgeAutoScroll';
+
+export { useAutoFollow } from './useAutoFollow';
+export type {
+  UseAutoFollowOptions,
+  UseAutoFollowReturn,
+} from './useAutoFollow';
+
+export { useRazorTool } from './useRazorTool';
+export type {
+  ClipAtPosition,
+  RazorSplitData,
+  UseRazorToolOptions,
+  UseRazorToolReturn,
+} from './useRazorTool';
+
+export {
+  useEnhancedKeyboardShortcuts,
+  ENHANCED_KEYBOARD_SHORTCUTS,
+} from './useEnhancedKeyboardShortcuts';
+export type {
+  ClipDuplicateData,
+  ClipPasteData,
+  UseEnhancedKeyboardShortcutsOptions,
+} from './useEnhancedKeyboardShortcuts';
+
+export { useClipboard } from './useClipboard';
+export type {
+  ClipboardOperationResult,
+  UseClipboardOptions,
+  UseClipboardReturn,
+} from './useClipboard';
+
+export { useRippleEdit } from './useRippleEdit';
+export type {
+  RippleOperation,
+  RippleResult,
+  UseRippleEditOptions,
+  UseRippleEditReturn,
+} from './useRippleEdit';
+
+export { useSlipEdit } from './useSlipEdit';
+export type {
+  SlipEditState,
+  SlipEditResult,
+  UseSlipEditOptions,
+  UseSlipEditReturn,
+} from './useSlipEdit';
+
+export { useSlideEdit } from './useSlideEdit';
+export type {
+  AdjacentClip,
+  SlideEditState,
+  SlideEditResult,
+  UseSlideEditOptions,
+  UseSlideEditReturn,
+} from './useSlideEdit';
+
+export { useRollEdit } from './useRollEdit';
+export type {
+  EditPoint,
+  RollEditState,
+  RollEditResult,
+  UseRollEditOptions,
+  UseRollEditReturn,
+} from './useRollEdit';
+
+export { useAudioMixer } from './useAudioMixer';
+export type {
+  UseAudioMixerOptions,
+  UseAudioMixerReturn,
+} from './useAudioMixer';
