@@ -74,25 +74,39 @@ describe('useClipDrag', () => {
   // ===========================================================================
 
   describe('move drag', () => {
-    it('starts drag on mousedown and ends on mouseup', () => {
+    it('enters pending drag on mousedown and starts actual drag after threshold exceeded', () => {
       const onDragStart = vi.fn();
       const onDragEnd = vi.fn();
       const { result } = renderHook(() =>
         useClipDrag({ ...defaultOptions, onDragStart, onDragEnd }),
       );
 
-      // Simulate mousedown
+      // Simulate mousedown - should enter pending drag state
       act(() => {
         const event = createMouseEvent('mousedown', 100);
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
       });
 
-      expect(result.current.isDragging).toBe(true);
+      // Should be in pending drag state, not actual drag
+      expect(result.current.isPendingDrag).toBe(true);
+      expect(result.current.isDragging).toBe(false);
       expect(result.current.dragType).toBe('move');
+      expect(onDragStart).not.toHaveBeenCalled(); // Not called until threshold exceeded
+
+      // Move mouse past threshold (5px)
+      act(() => {
+        const event = createMouseEvent('mousemove', 110); // 10px movement
+        document.dispatchEvent(event);
+      });
+
+      // Now should be in actual drag state
+      expect(result.current.isPendingDrag).toBe(false);
+      expect(result.current.isDragging).toBe(true);
       expect(onDragStart).toHaveBeenCalledWith({
         clipId: 'clip-1',
         type: 'move',
         startX: 100,
+        startY: 0,
         originalTimelineIn: 5,
         originalSourceIn: 0,
         originalSourceOut: 10,
@@ -109,6 +123,34 @@ describe('useClipDrag', () => {
       expect(onDragEnd).toHaveBeenCalled();
     });
 
+    it('treats click (no threshold exceeded) as no-op', () => {
+      const onDragStart = vi.fn();
+      const onDragEnd = vi.fn();
+      const { result } = renderHook(() =>
+        useClipDrag({ ...defaultOptions, onDragStart, onDragEnd }),
+      );
+
+      // Mousedown
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      expect(result.current.isPendingDrag).toBe(true);
+
+      // Mouseup without moving past threshold (click)
+      act(() => {
+        const event = createMouseEvent('mouseup', 102); // Only 2px movement
+        document.dispatchEvent(event);
+      });
+
+      // Should have reset without calling drag callbacks
+      expect(result.current.isPendingDrag).toBe(false);
+      expect(result.current.isDragging).toBe(false);
+      expect(onDragStart).not.toHaveBeenCalled();
+      expect(onDragEnd).not.toHaveBeenCalled();
+    });
+
     it('calculates preview position during drag', () => {
       const onDrag = vi.fn();
       const { result } = renderHook(() => useClipDrag({ ...defaultOptions, onDrag }));
@@ -117,6 +159,12 @@ describe('useClipDrag', () => {
       act(() => {
         const event = createMouseEvent('mousedown', 100);
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      // First move exceeds threshold and starts drag
+      act(() => {
+        const event = createMouseEvent('mousemove', 110); // 10px to exceed threshold
+        document.dispatchEvent(event);
       });
 
       // Move to x=200 (100px = 1 second at zoom 100)
@@ -147,6 +195,12 @@ describe('useClipDrag', () => {
       act(() => {
         const event = createMouseEvent('mousedown', 200);
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 190); // 10px to exceed threshold
+        document.dispatchEvent(event);
       });
 
       // Move left by 300px (3 seconds) - would go to -2 seconds
@@ -214,6 +268,12 @@ describe('useClipDrag', () => {
 
       expect(result.current.dragType).toBe('trim-left');
 
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 110);
+        document.dispatchEvent(event);
+      });
+
       // Move right by 100px (1 second) - trimming in
       act(() => {
         const event = createMouseEvent('mousemove', 200);
@@ -242,6 +302,12 @@ describe('useClipDrag', () => {
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'trim-left');
       });
 
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 110);
+        document.dispatchEvent(event);
+      });
+
       // Try to trim 1.5 seconds (would leave 0.5s, below min)
       act(() => {
         const event = createMouseEvent('mousemove', 250);
@@ -264,6 +330,12 @@ describe('useClipDrag', () => {
       act(() => {
         const event = createMouseEvent('mousedown', 200);
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'trim-left');
+      });
+
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 190);
+        document.dispatchEvent(event);
       });
 
       // Move left by 200px (2 seconds) - would go past source start
@@ -301,6 +373,12 @@ describe('useClipDrag', () => {
 
       expect(result.current.dragType).toBe('trim-right');
 
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 490);
+        document.dispatchEvent(event);
+      });
+
       // Move left by 200px (2 seconds) - trimming the end
       act(() => {
         const event = createMouseEvent('mousemove', 300);
@@ -328,6 +406,12 @@ describe('useClipDrag', () => {
       act(() => {
         const event = createMouseEvent('mousedown', 200);
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'trim-right');
+      });
+
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 190);
+        document.dispatchEvent(event);
       });
 
       // Try to trim 1.5 seconds
@@ -359,6 +443,12 @@ describe('useClipDrag', () => {
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
       });
 
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 510);
+        document.dispatchEvent(event);
+      });
+
       // Move by 150px (1.5 seconds)
       act(() => {
         const event = createMouseEvent('mousemove', 650);
@@ -384,6 +474,12 @@ describe('useClipDrag', () => {
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'trim-right');
       });
 
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 990);
+        document.dispatchEvent(event);
+      });
+
       // Trim by 150px (1.5 seconds)
       act(() => {
         const event = createMouseEvent('mousemove', 850);
@@ -405,17 +501,26 @@ describe('useClipDrag', () => {
       const removeEventListenerSpy = vi.spyOn(document, 'removeEventListener');
       const { result, unmount } = renderHook(() => useClipDrag(defaultOptions));
 
-      // Start drag
+      // Start pending drag
       act(() => {
         const event = createMouseEvent('mousedown', 100);
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
       });
 
-      // Unmount while dragging
+      // Unmount while in pending drag state
       unmount();
 
-      expect(removeEventListenerSpy).toHaveBeenCalledWith('mousemove', expect.any(Function));
-      expect(removeEventListenerSpy).toHaveBeenCalledWith('mouseup', expect.any(Function));
+      // Should remove listeners with capture: true option
+      expect(removeEventListenerSpy).toHaveBeenCalledWith(
+        'mousemove',
+        expect.any(Function),
+        expect.objectContaining({ capture: true }),
+      );
+      expect(removeEventListenerSpy).toHaveBeenCalledWith(
+        'mouseup',
+        expect.any(Function),
+        expect.objectContaining({ capture: true }),
+      );
     });
   });
 
@@ -439,7 +544,13 @@ describe('useClipDrag', () => {
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
       });
 
-      // Initial duration should account for speed
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 110);
+        document.dispatchEvent(event);
+      });
+
+      // Duration should account for speed (10 source seconds / 2x speed = 5 seconds)
       expect(result.current.previewPosition?.duration).toBe(5);
     });
   });
@@ -467,6 +578,12 @@ describe('useClipDrag', () => {
       act(() => {
         const event = createMouseEvent('mousedown', 500);
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 510);
+        document.dispatchEvent(event);
       });
 
       // Move to position that would be 9.9s (within 0.2s of 10s snap point)
@@ -499,6 +616,12 @@ describe('useClipDrag', () => {
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
       });
 
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 510);
+        document.dispatchEvent(event);
+      });
+
       // Move to position ~14.9s (within 0.15s of 15s playhead)
       act(() => {
         const event = createMouseEvent('mousemove', 1490);
@@ -528,6 +651,12 @@ describe('useClipDrag', () => {
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
       });
 
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 510);
+        document.dispatchEvent(event);
+      });
+
       // Move to 9.5s (0.5s away from 10s snap point, beyond threshold)
       act(() => {
         const event = createMouseEvent('mousemove', 950);
@@ -555,6 +684,12 @@ describe('useClipDrag', () => {
       act(() => {
         const event = createMouseEvent('mousedown', 500);
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 510);
+        document.dispatchEvent(event);
       });
 
       // Move to position that will snap to 10s
@@ -588,6 +723,12 @@ describe('useClipDrag', () => {
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
       });
 
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 510);
+        document.dispatchEvent(event);
+      });
+
       // Move to position outside snap threshold
       act(() => {
         const event = createMouseEvent('mousemove', 800);
@@ -617,6 +758,12 @@ describe('useClipDrag', () => {
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
       });
 
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 510);
+        document.dispatchEvent(event);
+      });
+
       // Move to snap at 10s
       act(() => {
         const event = createMouseEvent('mousemove', 1000);
@@ -639,6 +786,12 @@ describe('useClipDrag', () => {
       act(() => {
         const event = createMouseEvent('mousedown', 500);
         result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      // First move to exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousemove', 510);
+        document.dispatchEvent(event);
       });
 
       // Move by 150px (1.5 seconds)
