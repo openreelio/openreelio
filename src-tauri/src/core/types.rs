@@ -38,6 +38,9 @@ pub type SequenceId = String;
 /// Plugin unique identifier (ULID)
 pub type PluginId = String;
 
+/// Bin (folder) unique identifier (ULID)
+pub type BinId = String;
+
 // =============================================================================
 // Time Types
 // =============================================================================
