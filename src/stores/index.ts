@@ -16,6 +16,34 @@ export { useWaveformCacheStore, createWaveformCacheKey } from './waveformCacheSt
 export { useSettingsStore } from './settingsStore';
 export { useBinStore } from './binStore';
 export type { BinState, BinActions, BinStore } from './binStore';
+export { useEditorToolStore, TOOL_CONFIGS, getToolCursor } from './editorToolStore';
+export type {
+  EditorTool,
+  ToolConfig,
+  ClipboardItem,
+  EditorToolStore,
+} from './editorToolStore';
+
+export {
+  useShortcutStore,
+  formatShortcut,
+  DEFAULT_SHORTCUTS,
+  SHORTCUT_PRESETS,
+} from './shortcutStore';
+export type {
+  ShortcutBinding,
+  ShortcutPreset,
+  ShortcutConflict,
+  ShortcutStore,
+} from './shortcutStore';
+
+export { useAudioMixerStore } from './audioMixerStore';
+export type {
+  TrackMixerState,
+  MasterMixerState,
+  StereoLevels,
+  AudioMixerStore,
+} from './audioMixerStore';
 export {
   useAnnotationStore,
   selectShots,
@@ -69,6 +97,8 @@ import { useWaveformCacheStore } from './waveformCacheStore';
 import { useAIStore } from './aiStore';
 import { useAnnotationStore } from './annotationStore';
 import { useBinStore } from './binStore';
+import { useEditorToolStore } from './editorToolStore';
+import { useAudioMixerStore } from './audioMixerStore';
 
 /**
  * Reset all project-related stores to their initial state.
@@ -84,6 +114,8 @@ export function resetProjectStores(): void {
   useAIStore.getState().clearChatHistory();
   useAnnotationStore.getState().reset();
   useBinStore.getState().reset();
+  useEditorToolStore.getState().reset();
+  useAudioMixerStore.getState().reset();
 
   logger.info('All project stores reset');
 }
