@@ -138,6 +138,95 @@ pub struct AIGateway {
     status: Arc<RwLock<ProviderRuntimeStatus>>,
 }
 
+// =============================================================================
+// System Prompt Constants
+// =============================================================================
+
+/// Base system prompt for AI edit script generation
+const SYSTEM_PROMPT_BASE: &str = r#"You are an AI video editing assistant for OpenReelio. Generate valid EditScript JSON to accomplish editing tasks.
+
+## CRITICAL RULES
+
+1. **Only use IDs from context** - Never invent UUIDs. Only reference clipId, trackId, assetId values provided.
+2. **Time in seconds** - All time values are floating-point SECONDS, not frames. Example: 5.5 = 5.5 seconds
+3. **Command order matters** - Commands execute sequentially. Create before reference.
+4. **Minimal operations** - Use the fewest commands to achieve the goal.
+
+## EditScript Format
+
+```json
+{
+  "intent": "User's request",
+  "commands": [{ "commandType": "...", "params": {...} }],
+  "requires": [],
+  "qcRules": ["Verification steps"],
+  "risk": { "copyright": "none", "nsfw": "none" },
+  "explanation": "What this edit accomplishes"
+}
+```
+
+## Timeline Commands
+
+### InsertClip - Add asset to timeline
+{ "commandType": "InsertClip", "params": { "trackId": "required", "assetId": "required", "timelineStart": number, "sourceIn"?: number, "sourceOut"?: number }}
+
+### SplitClip - Split clip at time (creates {id}_split)
+{ "commandType": "SplitClip", "params": { "clipId": "required", "atTimelineSec": number }}
+
+### DeleteClip - Remove clip (leaves gap)
+{ "commandType": "DeleteClip", "params": { "clipId": "required" }}
+
+### RippleDelete - Delete and close gap
+{ "commandType": "RippleDelete", "params": { "clipId": "required", "affectAllTracks"?: boolean }}
+
+### TrimClip - Adjust in/out points
+{ "commandType": "TrimClip", "params": { "clipId": "required", "newSourceIn"?: number, "newSourceOut"?: number, "newTimelineIn"?: number }}
+
+### MoveClip - Reposition clip
+{ "commandType": "MoveClip", "params": { "clipId": "required", "newTimelineIn": number, "newTrackId"?: string }}
+
+### DuplicateClip - Clone clip
+{ "commandType": "DuplicateClip", "params": { "clipId": "required", "targetTrackId"?: string, "offset"?: number }}
+
+## Track Commands
+
+### AddTrack
+{ "commandType": "AddTrack", "params": { "type": "video|audio", "name"?: string }}
+
+### MuteTrack
+{ "commandType": "MuteTrack", "params": { "trackId": "required", "muted": boolean }}
+
+## Effect Commands
+
+### AddEffect
+{ "commandType": "AddEffect", "params": { "clipId": "required", "effectType": string, "params": object }}
+
+Effect types: brightness/contrast/saturation (-100 to 100), blur (radius: 0-100), opacity (0-100), fadeIn/fadeOut (duration: seconds), scale (x/y: %), rotate (angle: degrees)
+
+## Keyframe Commands (ALWAYS need 2+ keyframes for animation)
+
+### AddKeyframe
+{ "commandType": "AddKeyframe", "params": { "clipId": "required", "paramPath": "e.g. opacity", "time": number, "value": any, "easing"?: "linear|easeIn|easeOut|easeInOut" }}
+
+## Transition Commands (clips must be adjacent)
+
+### AddTransition
+{ "commandType": "AddTransition", "params": { "clipAId": "required", "clipBId": "required", "type": "crossfade|dissolve|wipe|fade", "duration": number }}
+
+## Common Patterns
+
+Remove section 10s-15s:
+[SplitClip at 10s] -> [SplitClip at 15s on _split] -> [RippleDelete _split]
+
+Fade in over 2s:
+[AddKeyframe opacity=0 at t=0] -> [AddKeyframe opacity=100 at t=2 easeOut]
+
+## FORBIDDEN
+- Inventing IDs not in context
+- Frame numbers (use seconds only)
+- Single keyframe for animation
+- Negative time values"#;
+
 impl AIGateway {
     /// Creates a new AI gateway with no provider
     pub fn new(config: AIGatewayConfig) -> Self {
@@ -328,10 +417,133 @@ Return JSON array of edit scripts."#;
                         },
                     }
                 }
-                "SplitClip" | "DeleteClip" | "TrimClip" | "MoveClip" => {
+                "SplitClip" => {
+                    if cmd.params.get("clipId").is_none() {
+                        issues.push(format!("SplitClip command {} missing clipId", i));
+                    }
+                    match cmd.params.get("atTimelineSec") {
+                        None => {
+                            issues.push(format!("SplitClip command {} missing atTimelineSec", i))
+                        }
+                        Some(v) => match v.as_f64() {
+                            Some(t) if t.is_finite() && t >= 0.0 => {}
+                            _ => issues
+                                .push(format!("SplitClip command {} invalid atTimelineSec", i)),
+                        },
+                    }
+                }
+                "DeleteClip" | "TrimClip" | "RippleDelete" | "DuplicateClip" => {
                     if cmd.params.get("clipId").is_none() {
                         issues.push(format!("{} command {} missing clipId", cmd.command_type, i));
                     }
+                }
+                "MoveClip" => {
+                    if cmd.params.get("clipId").is_none() {
+                        issues.push(format!("MoveClip command {} missing clipId", i));
+                    }
+                    match cmd.params.get("newTimelineIn") {
+                        None => {
+                            issues.push(format!("MoveClip command {} missing newTimelineIn", i))
+                        }
+                        Some(v) => match v.as_f64() {
+                            Some(t) if t.is_finite() && t >= 0.0 => {}
+                            _ => {
+                                issues.push(format!("MoveClip command {} invalid newTimelineIn", i))
+                            }
+                        },
+                    }
+                }
+                "AddTrack" => match cmd.params.get("type") {
+                    None => issues.push(format!("AddTrack command {} missing type", i)),
+                    Some(v) => match v.as_str() {
+                        Some("video") | Some("audio") => {}
+                        _ => issues.push(format!(
+                            "AddTrack command {} invalid type (must be 'video' or 'audio')",
+                            i
+                        )),
+                    },
+                },
+                "MuteTrack" => {
+                    if cmd.params.get("trackId").is_none() {
+                        issues.push(format!("MuteTrack command {} missing trackId", i));
+                    }
+                    match cmd.params.get("muted") {
+                        None => issues.push(format!("MuteTrack command {} missing muted", i)),
+                        Some(v) if !v.is_boolean() => {
+                            issues.push(format!(
+                                "MuteTrack command {} invalid muted (must be boolean)",
+                                i
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                "DeleteTrack" | "LockTrack" => {
+                    if cmd.params.get("trackId").is_none() {
+                        issues.push(format!(
+                            "{} command {} missing trackId",
+                            cmd.command_type, i
+                        ));
+                    }
+                }
+                "AddEffect" => {
+                    if cmd.params.get("clipId").is_none() {
+                        issues.push(format!("AddEffect command {} missing clipId", i));
+                    }
+                    if cmd.params.get("effectType").is_none() {
+                        issues.push(format!("AddEffect command {} missing effectType", i));
+                    }
+                    if cmd.params.get("params").is_none() {
+                        issues.push(format!("AddEffect command {} missing params", i));
+                    }
+                }
+                "AddKeyframe" => {
+                    if cmd.params.get("clipId").is_none() {
+                        issues.push(format!("AddKeyframe command {} missing clipId", i));
+                    }
+                    if cmd.params.get("paramPath").is_none() {
+                        issues.push(format!("AddKeyframe command {} missing paramPath", i));
+                    }
+                    match cmd.params.get("time") {
+                        None => issues.push(format!("AddKeyframe command {} missing time", i)),
+                        Some(v) => match v.as_f64() {
+                            Some(t) if t.is_finite() && t >= 0.0 => {}
+                            _ => issues.push(format!(
+                                "AddKeyframe command {} invalid time (must be non-negative number)",
+                                i
+                            )),
+                        },
+                    }
+                    if cmd.params.get("value").is_none() {
+                        issues.push(format!("AddKeyframe command {} missing value", i));
+                    }
+                }
+                "AddTransition" => {
+                    if cmd.params.get("clipAId").is_none() {
+                        issues.push(format!("AddTransition command {} missing clipAId", i));
+                    }
+                    if cmd.params.get("clipBId").is_none() {
+                        issues.push(format!("AddTransition command {} missing clipBId", i));
+                    }
+                    if cmd.params.get("type").is_none() {
+                        issues.push(format!("AddTransition command {} missing type", i));
+                    }
+                    match cmd.params.get("duration") {
+                        None => {
+                            issues.push(format!("AddTransition command {} missing duration", i))
+                        }
+                        Some(v) => match v.as_f64() {
+                            Some(d) if d.is_finite() && d > 0.0 => {}
+                            _ => issues.push(format!(
+                                "AddTransition command {} invalid duration (must be positive)",
+                                i
+                            )),
+                        },
+                    }
+                }
+                "UpdateEffect" | "RemoveEffect" | "UpdateKeyframe" | "DeleteKeyframe"
+                | "RemoveTransition" | "AddCaption" | "ExportVideo" => {
+                    // These commands have varying required params - basic validation only
                 }
                 _ => {
                     warnings.push(format!("Unknown command type: {}", cmd.command_type));
@@ -456,17 +668,29 @@ Return JSON array of edit scripts."#;
     }
 
     /// Builds the system prompt for edit script generation
-    fn build_system_prompt(&self, _context: &EditContext) -> String {
-        r#"You are an AI video editing assistant. Generate edit commands in JSON format.
-Available commands:
-- InsertClip: { "trackId": string, "assetId": string, "timelineStart": number }
-- SplitClip: { "clipId": string, "atTimelineSec": number }
-- DeleteClip: { "clipId": string }
-- TrimClip: { "clipId": string, "newStart"?: number, "newEnd"?: number }
-- MoveClip: { "clipId": string, "newStart": number, "newTrackId"?: string }
+    fn build_system_prompt(&self, context: &EditContext) -> String {
+        // Enhanced system prompt with comprehensive command reference
+        let mut prompt = String::from(SYSTEM_PROMPT_BASE);
 
-Return a valid EditScript JSON object with intent, commands, requires, qcRules, risk, and explanation."#
-            .to_string()
+        // Add dynamic context information
+        if !context.asset_ids.is_empty() {
+            prompt.push_str("\n\n## Available Assets\n");
+            for (i, id) in context.asset_ids.iter().take(20).enumerate() {
+                prompt.push_str(&format!("- Asset {}: `{}`\n", i + 1, id));
+            }
+            if context.asset_ids.len() > 20 {
+                prompt.push_str(&format!("... and {} more\n", context.asset_ids.len() - 20));
+            }
+        }
+
+        if !context.track_ids.is_empty() {
+            prompt.push_str("\n## Available Tracks\n");
+            for id in &context.track_ids {
+                prompt.push_str(&format!("- `{}`\n", id));
+            }
+        }
+
+        prompt
     }
 
     /// Builds the user prompt
@@ -853,5 +1077,211 @@ This will add the clip."#;
         let prompt = gateway.build_user_prompt("Summarize", &context);
 
         assert!(prompt.contains("Hello, welcome"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Enhanced Validation Tests
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_validate_add_track_valid() {
+        let gateway = AIGateway::with_defaults();
+        let script =
+            EditScript::new("Add track").add_command(EditCommand::add_track("video", Some("Main")));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_add_track_invalid_type() {
+        let gateway = AIGateway::with_defaults();
+        let mut script = EditScript::new("Test");
+        script.commands.push(EditCommand::new(
+            "AddTrack",
+            serde_json::json!({ "type": "invalid" }),
+        ));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(!result.is_valid);
+        assert!(result.issues.iter().any(|i| i.contains("invalid type")));
+    }
+
+    #[tokio::test]
+    async fn test_validate_mute_track_valid() {
+        let gateway = AIGateway::with_defaults();
+        let script =
+            EditScript::new("Mute track").add_command(EditCommand::mute_track("track_1", true));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_mute_track_missing_muted() {
+        let gateway = AIGateway::with_defaults();
+        let mut script = EditScript::new("Test");
+        script.commands.push(EditCommand::new(
+            "MuteTrack",
+            serde_json::json!({ "trackId": "track_1" }),
+        ));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(!result.is_valid);
+        assert!(result.issues.iter().any(|i| i.contains("missing muted")));
+    }
+
+    #[tokio::test]
+    async fn test_validate_add_effect_valid() {
+        let gateway = AIGateway::with_defaults();
+        let script = EditScript::new("Add effect").add_command(EditCommand::add_effect(
+            "clip_1",
+            "brightness",
+            serde_json::json!({ "value": 20 }),
+        ));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_add_effect_missing_params() {
+        let gateway = AIGateway::with_defaults();
+        let mut script = EditScript::new("Test");
+        script.commands.push(EditCommand::new(
+            "AddEffect",
+            serde_json::json!({ "clipId": "clip_1", "effectType": "brightness" }),
+        ));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(!result.is_valid);
+        assert!(result.issues.iter().any(|i| i.contains("missing params")));
+    }
+
+    #[tokio::test]
+    async fn test_validate_add_keyframe_valid() {
+        let gateway = AIGateway::with_defaults();
+        let script = EditScript::new("Add keyframe").add_command(EditCommand::add_keyframe(
+            "clip_1",
+            "opacity",
+            0.0,
+            serde_json::json!(0),
+            None,
+        ));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_add_keyframe_negative_time() {
+        let gateway = AIGateway::with_defaults();
+        let mut script = EditScript::new("Test");
+        script.commands.push(EditCommand::new(
+            "AddKeyframe",
+            serde_json::json!({
+                "clipId": "clip_1",
+                "paramPath": "opacity",
+                "time": -1.0,
+                "value": 100
+            }),
+        ));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(!result.is_valid);
+        assert!(result.issues.iter().any(|i| i.contains("invalid time")));
+    }
+
+    #[tokio::test]
+    async fn test_validate_add_transition_valid() {
+        let gateway = AIGateway::with_defaults();
+        let script = EditScript::new("Add transition").add_command(EditCommand::add_transition(
+            "clip_1",
+            "clip_2",
+            "crossfade",
+            1.0,
+        ));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_add_transition_zero_duration() {
+        let gateway = AIGateway::with_defaults();
+        let mut script = EditScript::new("Test");
+        script.commands.push(EditCommand::new(
+            "AddTransition",
+            serde_json::json!({
+                "clipAId": "clip_1",
+                "clipBId": "clip_2",
+                "type": "crossfade",
+                "duration": 0.0
+            }),
+        ));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(!result.is_valid);
+        assert!(result.issues.iter().any(|i| i.contains("invalid duration")));
+    }
+
+    #[tokio::test]
+    async fn test_validate_move_clip_valid() {
+        let gateway = AIGateway::with_defaults();
+        let script =
+            EditScript::new("Move clip").add_command(EditCommand::move_clip("clip_1", 10.0, None));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_split_clip_valid() {
+        let gateway = AIGateway::with_defaults();
+        let script =
+            EditScript::new("Split clip").add_command(EditCommand::split_clip("clip_1", 5.0));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_ripple_delete_valid() {
+        let gateway = AIGateway::with_defaults();
+        let script = EditScript::new("Ripple delete")
+            .add_command(EditCommand::ripple_delete("clip_1", true));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(result.is_valid);
+    }
+
+    #[test]
+    fn test_build_system_prompt_contains_commands() {
+        let gateway = AIGateway::with_defaults();
+        let context = EditContext::new();
+
+        let prompt = gateway.build_system_prompt(&context);
+
+        // Verify system prompt contains key command references
+        assert!(prompt.contains("InsertClip"));
+        assert!(prompt.contains("SplitClip"));
+        assert!(prompt.contains("RippleDelete"));
+        assert!(prompt.contains("AddKeyframe"));
+        assert!(prompt.contains("AddTransition"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_with_context() {
+        let gateway = AIGateway::with_defaults();
+        let context = EditContext::new()
+            .with_assets(vec!["asset_1".to_string(), "asset_2".to_string()])
+            .with_tracks(vec!["track_v1".to_string()]);
+
+        let prompt = gateway.build_system_prompt(&context);
+
+        // Verify context is included
+        assert!(prompt.contains("asset_1"));
+        assert!(prompt.contains("asset_2"));
+        assert!(prompt.contains("track_v1"));
     }
 }
