@@ -22,6 +22,9 @@ export type { UseToastReturn } from './useToast';
 export { useKeyboardShortcuts, KEYBOARD_SHORTCUTS } from './useKeyboardShortcuts';
 export type { UseKeyboardShortcutsOptions, KeyboardShortcut } from './useKeyboardShortcuts';
 
+export { useKeyboardShortcutsHelp } from './useKeyboardShortcutsHelp';
+export type { UseKeyboardShortcutsHelpReturn } from './useKeyboardShortcutsHelp';
+
 export { useTimelineActions } from './useTimelineActions';
 
 export { useAudioPlayback } from './useAudioPlayback';
@@ -125,6 +128,13 @@ export type {
   UseScrubbingOptions,
   UseScrubbingResult,
 } from './useScrubbing';
+
+export { useSnapDetection } from './useSnapDetection';
+export type {
+  ExtendedSnapPoint,
+  UseSnapDetectionOptions,
+  UseSnapDetectionReturn,
+} from './useSnapDetection';
 
 export { useTimelineCoordinates } from './useTimelineCoordinates';
 export type {
@@ -342,8 +352,13 @@ export type {
   UseShortcutSettingsReturn,
 } from './useShortcutSettings';
 
-export { useEdgeAutoScroll } from './useEdgeAutoScroll';
+export {
+  useEdgeAutoScroll,
+  getEdgeScrollIndicatorClass,
+  getEdgeScrollIndicatorState,
+} from './useEdgeAutoScroll';
 export type {
+  ScrollDirection,
   UseEdgeAutoScrollOptions,
   UseEdgeAutoScrollResult,
 } from './useEdgeAutoScroll';
@@ -418,3 +433,5 @@ export type {
   UseAudioMixerOptions,
   UseAudioMixerReturn,
 } from './useAudioMixer';
+
+export { useBinOperations } from './useBinOperations';
