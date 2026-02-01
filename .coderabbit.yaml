@@ -93,7 +93,7 @@ reviews:
   # Tool configurations
   tools:
     # Disable markdownlint for docs to reduce noise
-    markdownlint-cli2:
+    markdownlint:
       enabled: true
     # Enable shellcheck for bash scripts
     shellcheck:
