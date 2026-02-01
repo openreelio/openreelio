@@ -73,6 +73,47 @@ export interface ClipSplitData {
   clipId: string;
   /** Time position to split at */
   splitTime: number;
+  /** If true, keep only the left portion after split */
+  keepLeft?: boolean;
+  /** If true, keep only the right portion after split */
+  keepRight?: boolean;
+}
+
+/**
+ * Data for duplicating a clip.
+ */
+export interface ClipDuplicateData {
+  /** ID of the sequence containing the clip */
+  sequenceId: string;
+  /** ID of the track containing the clip */
+  trackId: string;
+  /** ID of the clip being duplicated */
+  clipId: string;
+  /** Timeline position for the duplicate */
+  newTimelineIn: number;
+}
+
+/**
+ * Data for pasting a clip from clipboard.
+ */
+export interface ClipPasteData {
+  /** ID of the target sequence */
+  sequenceId: string;
+  /** ID of the target track */
+  trackId: string;
+  /** Serialized clip data */
+  clipData: {
+    assetId: string;
+    label?: string;
+    timelineIn: number;
+    sourceIn: number;
+    sourceOut: number;
+    speed: number;
+    volume: number;
+    opacity: number;
+  };
+  /** Timeline position to paste at */
+  pasteTime: number;
 }
 
 /**
@@ -133,6 +174,10 @@ export interface TimelineProps {
   onClipTrim?: (data: ClipTrimData) => void;
   /** Callback when clip is split */
   onClipSplit?: (data: ClipSplitData) => void;
+  /** Callback when clip is duplicated */
+  onClipDuplicate?: (data: ClipDuplicateData) => void;
+  /** Callback when clip is pasted */
+  onClipPaste?: (data: ClipPasteData) => void;
   /** Callback when track mute is toggled */
   onTrackMuteToggle?: (data: TrackControlData) => void;
   /** Callback when track lock is toggled */
