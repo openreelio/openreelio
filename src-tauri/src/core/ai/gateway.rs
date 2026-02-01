@@ -432,9 +432,39 @@ Return JSON array of edit scripts."#;
                         },
                     }
                 }
-                "DeleteClip" | "TrimClip" | "RippleDelete" | "DuplicateClip" => {
+                "DeleteClip" | "RippleDelete" | "DuplicateClip" => {
                     if cmd.params.get("clipId").is_none() {
                         issues.push(format!("{} command {} missing clipId", cmd.command_type, i));
+                    }
+                }
+                "TrimClip" => {
+                    if cmd.params.get("clipId").is_none() {
+                        issues.push(format!("TrimClip command {} missing clipId", i));
+                    }
+
+                    // TrimClip must have at least one trim parameter
+                    let has_source_in = cmd.params.get("newSourceIn").is_some();
+                    let has_source_out = cmd.params.get("newSourceOut").is_some();
+                    let has_timeline_in = cmd.params.get("newTimelineIn").is_some();
+
+                    if !has_source_in && !has_source_out && !has_timeline_in {
+                        issues.push(format!(
+                            "TrimClip command {} must specify at least one of newSourceIn, newSourceOut, or newTimelineIn",
+                            i
+                        ));
+                    }
+
+                    // Validate numeric parameters if present
+                    for param_name in ["newSourceIn", "newSourceOut", "newTimelineIn"] {
+                        if let Some(v) = cmd.params.get(param_name) {
+                            match v.as_f64() {
+                                Some(t) if t.is_finite() && t >= 0.0 => {}
+                                _ => issues.push(format!(
+                                    "TrimClip command {} invalid {} (must be non-negative number)",
+                                    i, param_name
+                                )),
+                            }
+                        }
                     }
                 }
                 "MoveClip" => {

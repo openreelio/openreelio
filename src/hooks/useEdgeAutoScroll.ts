@@ -122,11 +122,11 @@ export function useEdgeAutoScroll({
 }: UseEdgeAutoScrollOptions): UseEdgeAutoScrollResult {
   const rafIdRef = useRef<number | null>(null);
   const lastTimeRef = useRef<number>(0);
-  const isAutoScrollingRef = useRef(false);
   const currentDirectionRef = useRef<ScrollDirection>(null);
   const currentVelocityRef = useRef<number>(0);
 
   // Reactive state for external consumers
+  const [isAutoScrolling, setIsAutoScrolling] = useState(false);
   const [scrollDirection, setScrollDirection] = useState<ScrollDirection>(null);
   const [scrollVelocity, setScrollVelocity] = useState<number>(0);
 
@@ -179,7 +179,7 @@ export function useEdgeAutoScroll({
   const tick = useCallback(
     (currentTime: number) => {
       if (!isActive) {
-        isAutoScrollingRef.current = false;
+        setIsAutoScrolling(false);
         currentDirectionRef.current = null;
         currentVelocityRef.current = 0;
         rafIdRef.current = null;
@@ -237,10 +237,10 @@ export function useEdgeAutoScroll({
           container.scrollLeft = newScrollLeft;
           onScrollChange?.(newScrollLeft);
           onScrollDelta?.(scrollDelta);
-          isAutoScrollingRef.current = true;
+          setIsAutoScrolling(true);
         }
       } else {
-        isAutoScrollingRef.current = false;
+        setIsAutoScrolling(false);
       }
 
       // Continue the loop while active
@@ -268,7 +268,7 @@ export function useEdgeAutoScroll({
         cancelAnimationFrame(rafIdRef.current);
         rafIdRef.current = null;
       }
-      isAutoScrollingRef.current = false;
+      setIsAutoScrolling(false);
 
       // Reset direction when deactivated
       if (currentDirectionRef.current !== null) {
@@ -289,7 +289,7 @@ export function useEdgeAutoScroll({
   }, [isActive, tick, onDirectionChange]);
 
   return {
-    isAutoScrolling: isAutoScrollingRef.current,
+    isAutoScrolling,
     scrollDirection,
     scrollVelocity,
   };
