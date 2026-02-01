@@ -62,7 +62,19 @@ export function loadRecentProjects(): RecentProject[] {
       .filter(isValidRecentProject)
       .sort((a, b) => new Date(b.lastOpened).getTime() - new Date(a.lastOpened).getTime());
 
-    return validProjects;
+    // Apply limit to prevent data accumulation
+    const limitedProjects = validProjects.slice(0, MAX_RECENT_PROJECTS);
+
+    // If there were excess projects, clean up storage
+    if (validProjects.length > MAX_RECENT_PROJECTS) {
+      logger.info('Cleaning up excess recent projects', {
+        before: validProjects.length,
+        after: limitedProjects.length,
+      });
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(limitedProjects));
+    }
+
+    return limitedProjects;
   } catch (error) {
     logger.error('Failed to load recent projects', { error });
     return [];

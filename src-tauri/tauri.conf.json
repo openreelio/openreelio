@@ -5,7 +5,7 @@
   "identifier": "dev.openreelio.app",
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMwNTI4Q0JDNjFEOTAxMUMKUldRY0FkbGh2SXhTTUdVYityV2x3d0lscGpKN0FuT1VjYnVFRFRhUmtaczJjODdFZmpzcjlKakcK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZBODhFQUEzRjk4REEyMEEKUldRS29vMzVvK3FJK3RIQnBFMnlhNkZmYnhIYUR3c09lSFJyYlNVL050Wk9TYmY1RjM0MTQrVTUK",
       "endpoints": [
         "https://github.com/openreelio/openreelio/releases/latest/download/latest.json"
       ],

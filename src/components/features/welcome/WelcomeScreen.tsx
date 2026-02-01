@@ -5,8 +5,8 @@
  * Provides options to create new project or open existing one.
  */
 
-import { useCallback } from 'react';
-import { FolderOpen, Plus, Clock, Film } from 'lucide-react';
+import { useCallback, useMemo } from 'react';
+import { FolderOpen, Plus, Clock, Film, Trash2 } from 'lucide-react';
 
 // =============================================================================
 // Types
@@ -24,6 +24,9 @@ export interface RecentProject {
   lastOpened: string;
 }
 
+/** Maximum number of recent projects to display in the UI */
+const MAX_DISPLAY_PROJECTS = 5;
+
 /** WelcomeScreen component props */
 export interface WelcomeScreenProps {
   /** Callback when user wants to create new project */
@@ -40,6 +43,8 @@ export interface WelcomeScreenProps {
   showDontShowOption?: boolean;
   /** Callback when user toggles "Don't show again" */
   onDontShowAgain?: (dontShow: boolean) => void;
+  /** Callback when user wants to clear all recent projects */
+  onClearRecentProjects?: () => void;
 }
 
 // =============================================================================
@@ -54,7 +59,20 @@ export function WelcomeScreen({
   version = '0.1.0',
   showDontShowOption = false,
   onDontShowAgain,
+  onClearRecentProjects,
 }: WelcomeScreenProps): JSX.Element {
+  // ===========================================================================
+  // Memoized Values
+  // ===========================================================================
+
+  // Limit displayed projects to prevent UI overflow
+  const displayedProjects = useMemo(
+    () => recentProjects.slice(0, MAX_DISPLAY_PROJECTS),
+    [recentProjects]
+  );
+
+  const hasMoreProjects = recentProjects.length > MAX_DISPLAY_PROJECTS;
+
   // ===========================================================================
   // Handlers
   // ===========================================================================
@@ -73,6 +91,10 @@ export function WelcomeScreen({
     },
     [onOpenProject]
   );
+
+  const handleClearRecentProjects = useCallback(() => {
+    onClearRecentProjects?.();
+  }, [onClearRecentProjects]);
 
   // ===========================================================================
   // Helpers
@@ -143,15 +165,29 @@ export function WelcomeScreen({
           data-testid="recent-projects-section"
           className="w-full max-w-md px-4 sm:px-0"
         >
-          <div className="flex items-center gap-2 mb-4 text-editor-text-muted">
-            <Clock className="w-4 h-4 flex-shrink-0" />
-            <h2 className="text-sm font-medium uppercase tracking-wide">
-              Recent Projects
-            </h2>
+          <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center gap-2 text-editor-text-muted">
+              <Clock className="w-4 h-4 flex-shrink-0" />
+              <h2 className="text-sm font-medium uppercase tracking-wide">
+                Recent Projects
+              </h2>
+            </div>
+            {onClearRecentProjects && (
+              <button
+                data-testid="clear-recent-projects-button"
+                onClick={handleClearRecentProjects}
+                disabled={isLoading}
+                className="flex items-center gap-1.5 px-2 py-1 text-xs text-editor-text-muted hover:text-red-400 transition-colors disabled:opacity-50"
+                title="Clear all recent projects"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Clear</span>
+              </button>
+            )}
           </div>
 
           <ul className="space-y-2">
-            {recentProjects.map((project) => (
+            {displayedProjects.map((project) => (
               <li key={project.id}>
                 <button
                   data-testid={`recent-project-${project.id}`}
@@ -177,6 +213,12 @@ export function WelcomeScreen({
               </li>
             ))}
           </ul>
+
+          {hasMoreProjects && (
+            <p className="mt-3 text-xs text-editor-text-muted text-center">
+              +{recentProjects.length - MAX_DISPLAY_PROJECTS} more project{recentProjects.length - MAX_DISPLAY_PROJECTS > 1 ? 's' : ''} (oldest auto-removed)
+            </p>
+          )}
         </div>
       )}
 

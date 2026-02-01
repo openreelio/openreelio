@@ -28,7 +28,7 @@ import {
 } from './hooks';
 import { UpdateBanner } from './components/features/update';
 import { createLogger, initializeLogger } from './services/logger';
-import { loadRecentProjects, type RecentProject } from './utils';
+import { loadRecentProjects, clearRecentProjects, type RecentProject } from './utils';
 import { updateService } from './services/updateService';
 import { isTauriRuntime } from './services/framePaths';
 
@@ -157,6 +157,12 @@ function App(): JSX.Element {
     [updateGeneral],
   );
 
+  // Handle clearing all recent projects
+  const handleClearRecentProjects = useCallback(() => {
+    clearRecentProjects();
+    setRecentProjects([]);
+  }, []);
+
   // Error handler for EditorView - shows toast and offers reload
   const handleEditorError = useCallback(
     (error: Error) => {
@@ -205,6 +211,7 @@ function App(): JSX.Element {
           version={appVersion}
           showDontShowOption={settingsLoaded}
           onDontShowAgain={handleDontShowWelcome}
+          onClearRecentProjects={handleClearRecentProjects}
         />
         <ProjectCreationDialog
           isOpen={showCreateDialog}
