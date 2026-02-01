@@ -29,7 +29,7 @@ function collectStressTests(rootDir: string): string[] {
 const stressTests = collectStressTests(join(process.cwd(), 'src'));
 if (stressTests.length === 0) {
   // Mirror Vitest's behavior (non-zero exit when no files are found).
-  // eslint-disable-next-line no-console
+   
   console.error('No stress test files found under src/');
   process.exit(1);
 }
