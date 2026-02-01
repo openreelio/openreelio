@@ -108,6 +108,18 @@ impl ImportAssetCommand {
         self.asset = self.asset.with_license(license);
         self
     }
+
+    /// Sets the video info (replaces default VideoInfo)
+    pub fn with_video_info(mut self, video_info: VideoInfo) -> Self {
+        self.asset = self.asset.with_video_info(video_info);
+        self
+    }
+
+    /// Sets the audio info
+    pub fn with_audio_info(mut self, audio_info: AudioInfo) -> Self {
+        self.asset = self.asset.with_audio_info(audio_info);
+        self
+    }
 }
 
 impl Command for ImportAssetCommand {
