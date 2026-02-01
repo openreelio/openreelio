@@ -6,3 +6,4 @@
 
 export * from './precision';
 export * from './preview';
+export * from './editing';
