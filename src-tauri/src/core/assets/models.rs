@@ -216,6 +216,9 @@ pub struct Asset {
     /// Proxy video URL for preview playback (via Tauri asset protocol)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
+    /// Bin (folder) ID for organizing the asset
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bin_id: Option<String>,
 }
 
 impl Asset {
@@ -259,6 +262,7 @@ impl Asset {
             thumbnail_url: None,
             proxy_status: ProxyStatus::NotNeeded,
             proxy_url: None,
+            bin_id: None,
         }
     }
 
@@ -280,6 +284,7 @@ impl Asset {
             thumbnail_url: None,
             proxy_status: ProxyStatus::NotNeeded,
             proxy_url: None,
+            bin_id: None,
         }
     }
 
@@ -317,6 +322,7 @@ impl Asset {
             thumbnail_url: None,
             proxy_status: ProxyStatus::NotNeeded,
             proxy_url: None,
+            bin_id: None,
         }
     }
 

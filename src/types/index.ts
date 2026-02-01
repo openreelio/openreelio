@@ -629,6 +629,13 @@ export function isValidHexColor(color: string): boolean {
 
 export type CommandType =
   | 'ImportAsset'
+  // Bin/Project explorer commands
+  | 'CreateBin'
+  | 'RemoveBin'
+  | 'RenameBin'
+  | 'MoveBin'
+  | 'SetBinColor'
+  | 'MoveAssetToBin'
   | 'InsertClip'
   | 'SetClipTransform'
   | 'SplitClip'

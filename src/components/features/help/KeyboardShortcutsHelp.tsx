@@ -7,7 +7,7 @@
  * @module components/features/help/KeyboardShortcutsHelp
  */
 
-import { memo, useCallback, useEffect, useState } from 'react';
+import { memo, useCallback, useEffect } from 'react';
 import { X, Keyboard } from 'lucide-react';
 import { ENHANCED_KEYBOARD_SHORTCUTS } from '@/hooks/useEnhancedKeyboardShortcuts';
 
@@ -126,51 +126,5 @@ function KeyboardShortcutsHelpComponent({ isOpen, onClose }: KeyboardShortcutsHe
 }
 
 export const KeyboardShortcutsHelp = memo(KeyboardShortcutsHelpComponent);
-
-// =============================================================================
-// Hook for Keyboard Shortcut Help Trigger
-// =============================================================================
-
-/**
- * Hook that manages the keyboard shortcuts help dialog visibility.
- * Opens on '?' key press.
- */
-export function useKeyboardShortcutsHelp() {
-  const [isOpen, setIsOpen] = useState(false);
-
-  const open = useCallback(() => setIsOpen(true), []);
-  const close = useCallback(() => setIsOpen(false), []);
-  const toggle = useCallback(() => setIsOpen((prev) => !prev), []);
-
-  // Listen for '?' key to toggle help
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Check if '?' is pressed (Shift + /)
-      if (e.key === '?' || (e.shiftKey && e.key === '/')) {
-        // Don't trigger when typing in input fields
-        const target = e.target as HTMLElement;
-        if (
-          target.tagName === 'INPUT' ||
-          target.tagName === 'TEXTAREA' ||
-          target.isContentEditable
-        ) {
-          return;
-        }
-        e.preventDefault();
-        toggle();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [toggle]);
-
-  return {
-    isOpen,
-    open,
-    close,
-    toggle,
-  };
-}
 
 export default KeyboardShortcutsHelp;

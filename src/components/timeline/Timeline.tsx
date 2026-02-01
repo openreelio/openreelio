@@ -28,6 +28,7 @@ import { useRippleEdit } from '@/hooks/useRippleEdit';
 import { useSlipEdit } from '@/hooks/useSlipEdit';
 import { useSlideEdit } from '@/hooks/useSlideEdit';
 import { useRollEdit } from '@/hooks/useRollEdit';
+import { useEdgeAutoScroll } from '@/hooks/useEdgeAutoScroll';
 import { TimeRuler } from './TimeRuler';
 import { Track } from './Track';
 import { CaptionTrack } from './CaptionTrack';
@@ -127,6 +128,7 @@ export function Timeline({
     scrollY,
     selectedClipIds,
     setScrollX,
+    setZoom,
     selectClip,
     selectClips,
     clearClipSelection,
@@ -147,8 +149,10 @@ export function Timeline({
   // ===========================================================================
   const tracksAreaRef = useRef<HTMLDivElement>(null);
   const playheadRef = useRef<PlayheadHandle>(null);
+  const clipDragMouseXRef = useRef<number>(0);
   const [activeSnapPoint, setActiveSnapPoint] = useState<SnapPoint | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
+  const [isClipDragging, setIsClipDragging] = useState(false);
 
   // Caption editing state
   const [editingCaption, setEditingCaption] = useState<{
@@ -665,23 +669,80 @@ export function Timeline({
   // ===========================================================================
   // Clip Operations Hook
   // ===========================================================================
-  const { dragPreview, getTrackClips, handleClipDragStart, handleClipDrag, handleClipDragEnd } =
-    useTimelineClipOperations({
-      sequence,
-      zoom,
-      onClipMove,
-      onClipTrim,
-      selectClip,
-    });
+  const {
+    dragPreview,
+    getTrackClips,
+    handleClipDragStart: baseHandleClipDragStart,
+    handleClipDrag: baseHandleClipDrag,
+    handleClipDragEnd: baseHandleClipDragEnd,
+  } = useTimelineClipOperations({
+    sequence,
+    zoom,
+    onClipMove,
+    onClipTrim,
+    selectClip,
+  });
+
+  // Wrapped clip drag handlers to track mouse position for edge auto-scroll
+  const handleClipDragStart: typeof baseHandleClipDragStart = useCallback(
+    (trackId, data) => {
+      setIsClipDragging(true);
+      clipDragMouseXRef.current = data.startX;
+      baseHandleClipDragStart(trackId, data);
+    },
+    [baseHandleClipDragStart],
+  );
+
+  const handleClipDrag: typeof baseHandleClipDrag = useCallback(
+    (trackId, data, previewPosition, targetTrackIndex) => {
+      // The clip drag hook doesn't expose current mouse position in callbacks,
+      // so we track it via a global mousemove listener when dragging (added below)
+      baseHandleClipDrag(trackId, data, previewPosition, targetTrackIndex);
+    },
+    [baseHandleClipDrag],
+  );
+
+  const handleClipDragEnd: typeof baseHandleClipDragEnd = useCallback(
+    (trackId, data, finalPosition, targetTrackIndex) => {
+      setIsClipDragging(false);
+      baseHandleClipDragEnd(trackId, data, finalPosition, targetTrackIndex);
+    },
+    [baseHandleClipDragEnd],
+  );
+
+  // Track mouse position during clip drag for edge auto-scroll
+  useLayoutEffect(() => {
+    if (!isClipDragging) return;
+
+    const handleMouseMove = (e: globalThis.MouseEvent) => {
+      clipDragMouseXRef.current = e.clientX;
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+    };
+  }, [isClipDragging]);
+
+  // Edge auto-scroll during clip drag
+  useEdgeAutoScroll({
+    isActive: isClipDragging && dragPreview !== null,
+    getMouseClientX: () => clipDragMouseXRef.current,
+    scrollContainerRef: tracksAreaRef,
+    contentWidth: duration * zoom + TRACK_HEADER_WIDTH,
+    onScrollChange: setScrollX,
+  });
 
   // ===========================================================================
   // Navigation Hook
   // ===========================================================================
   const { handleWheel, handleFitToWindow } = useTimelineNavigation({
     scrollX,
+    zoom,
     duration,
     zoomIn,
     zoomOut,
+    setZoom,
     setScrollX,
     fitToWindow,
     trackHeaderWidth: TRACK_HEADER_WIDTH,
@@ -1099,6 +1160,7 @@ export function Timeline({
                   onClipDragStart={handleClipDragStart}
                   onClipDrag={handleClipDrag}
                   onClipDragEnd={handleClipDragEnd}
+                  onSnapPointChange={setActiveSnapPoint}
                   onMuteToggle={createTrackHandler(onTrackMuteToggle)}
                   onLockToggle={createTrackHandler(onTrackLockToggle)}
                   onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
@@ -1114,7 +1176,7 @@ export function Timeline({
           />
           <SnapIndicator
             snapPoint={activeSnapPoint}
-            isActive={isScrubbing || isDraggingPlayhead}
+            isActive={isScrubbing || isDraggingPlayhead || isClipDragging}
             zoom={zoom}
             trackHeaderWidth={TRACK_HEADER_WIDTH}
             scrollX={scrollX}

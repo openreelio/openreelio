@@ -2,11 +2,21 @@
  * TimelineEngine
  *
  * Core playback engine for timeline synchronization.
- * Uses requestAnimationFrame for smooth, accurate timing.
+ * Uses requestAnimationFrame for smooth, accurate timing with automatic
+ * fallback to setTimeout when tab is backgrounded.
  *
- * Based on patterns from react-timeline-editor but adapted
- * for our architecture with Zustand store integration.
+ * Based on patterns from react-timeline-editor and Remotion's use-playback.ts.
+ *
+ * Key Features:
+ * - Absolute time tracking to prevent floating-point drift
+ * - Background tab handling (RAF throttles to ~1fps when backgrounded)
+ * - Frame-rate independent timing via delta time
+ * - Zustand store integration
  */
+
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('TimelineEngine');
 
 // =============================================================================
 // Types
@@ -20,7 +30,8 @@ export type TimelineEventType =
   | 'beforeSetTime'
   | 'afterSetTime'
   | 'durationChange'
-  | 'playbackRateChange';
+  | 'playbackRateChange'
+  | 'visibilityChange';
 
 export interface TimelineEngineEvents {
   play: () => void;
@@ -31,6 +42,7 @@ export interface TimelineEngineEvents {
   afterSetTime: (data: { time: number }) => void;
   durationChange: (data: { duration: number }) => void;
   playbackRateChange: (data: { rate: number }) => void;
+  visibilityChange: (data: { isBackgrounded: boolean }) => void;
 }
 
 export interface TimelineEngineConfig {
@@ -88,6 +100,8 @@ export class TimelineEngine {
   // ---------------------------------------------------------------------------
 
   private _animationFrameId: number | null = null;
+  /** setTimeout ID for background tab fallback */
+  private _timeoutId: ReturnType<typeof setTimeout> | null = null;
 
   // ---------------------------------------------------------------------------
   // Absolute Time Tracking (prevents floating-point drift)
@@ -97,6 +111,17 @@ export class TimelineEngine {
   private _playStartTime: number = 0;
   /** Timeline position when playback started */
   private _playStartPosition: number = 0;
+
+  // ---------------------------------------------------------------------------
+  // Background Tab Handling
+  // ---------------------------------------------------------------------------
+
+  /** Whether the tab is currently backgrounded */
+  private _isBackgrounded: boolean = false;
+  /** Bound visibility change handler for cleanup */
+  private _visibilityHandler: (() => void) | null = null;
+  /** Target frame time for background setTimeout (ms) */
+  private readonly _backgroundFrameTimeMs: number = 1000 / 60;
 
   // ---------------------------------------------------------------------------
   // Event System
@@ -126,6 +151,48 @@ export class TimelineEngine {
     if (config?.loop !== undefined) {
       this._loop = config.loop;
     }
+
+    // Initialize background tab handling
+    this._setupVisibilityHandling();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Background Tab Handling Setup
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Sets up visibility change detection for background tab handling.
+   * When tab is backgrounded, requestAnimationFrame is throttled to ~1fps,
+   * so we switch to setTimeout for consistent playback timing.
+   */
+  private _setupVisibilityHandling(): void {
+    if (typeof document === 'undefined') return;
+
+    this._isBackgrounded = document.hidden;
+
+    this._visibilityHandler = () => {
+      const wasBackgrounded = this._isBackgrounded;
+      this._isBackgrounded = document.hidden;
+
+      // Only act on change
+      if (wasBackgrounded !== this._isBackgrounded) {
+        logger.debug('Visibility changed', { isBackgrounded: this._isBackgrounded });
+        this._emit('visibilityChange', { isBackgrounded: this._isBackgrounded });
+
+        // Restart playback loop with appropriate scheduler if playing
+        if (this._isPlaying) {
+          this._stopAnimationLoop();
+
+          // Reset start time to prevent time jumps
+          this._playStartTime = performance.now();
+          this._playStartPosition = this._currentTime;
+
+          this._startAnimationLoop();
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', this._visibilityHandler);
   }
 
   // ---------------------------------------------------------------------------
@@ -295,24 +362,79 @@ export class TimelineEngine {
   }
 
   // ---------------------------------------------------------------------------
-  // Animation Loop
+  // Animation Loop with Background Tab Support
   // ---------------------------------------------------------------------------
 
+  /**
+   * Starts the playback animation loop.
+   * Uses requestAnimationFrame for active tabs, setTimeout for background tabs.
+   * This ensures consistent playback timing regardless of tab visibility.
+   */
   private _startAnimationLoop(): void {
+    if (this._isBackgrounded) {
+      // Use setTimeout in background (RAF is throttled to ~1fps)
+      this._startBackgroundLoop();
+    } else {
+      // Use RAF for smooth animation in foreground
+      this._startForegroundLoop();
+    }
+  }
+
+  /**
+   * Foreground loop using requestAnimationFrame for smooth 60fps playback.
+   */
+  private _startForegroundLoop(): void {
     const tick = (timestamp: number) => {
       if (!this._isPlaying) return;
 
       this._tick(timestamp);
-      this._animationFrameId = requestAnimationFrame(tick);
+
+      // Check if we should continue with RAF or switch to setTimeout
+      if (this._isBackgrounded) {
+        this._animationFrameId = null;
+        this._startBackgroundLoop();
+      } else {
+        this._animationFrameId = requestAnimationFrame(tick);
+      }
     };
 
     this._animationFrameId = requestAnimationFrame(tick);
   }
 
+  /**
+   * Background loop using setTimeout for consistent timing when tab is hidden.
+   * Browsers throttle RAF to ~1fps for hidden tabs, but setTimeout continues normally.
+   */
+  private _startBackgroundLoop(): void {
+    const tick = () => {
+      if (!this._isPlaying) return;
+
+      this._tick(performance.now());
+
+      // Check if we should continue with setTimeout or switch to RAF
+      if (!this._isBackgrounded) {
+        this._timeoutId = null;
+        this._startForegroundLoop();
+      } else {
+        this._timeoutId = setTimeout(tick, this._backgroundFrameTimeMs);
+      }
+    };
+
+    this._timeoutId = setTimeout(tick, this._backgroundFrameTimeMs);
+  }
+
+  /**
+   * Stops both RAF and setTimeout loops.
+   */
   private _stopAnimationLoop(): void {
     if (this._animationFrameId !== null) {
       cancelAnimationFrame(this._animationFrameId);
       this._animationFrameId = null;
+    }
+
+    if (this._timeoutId !== null) {
+      clearTimeout(this._timeoutId);
+      this._timeoutId = null;
     }
   }
 
@@ -448,9 +570,28 @@ export class TimelineEngine {
       this._emit('paused');
     }
 
+    // Remove visibility change listener
+    if (this._visibilityHandler && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this._visibilityHandler);
+      this._visibilityHandler = null;
+    }
+
     this._isDisposed = true;
     this._listeners.clear();
     this._syncedStore = null;
+
+    logger.debug('TimelineEngine disposed');
+  }
+
+  // ---------------------------------------------------------------------------
+  // Getters for Background State
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Returns whether the tab is currently backgrounded.
+   */
+  get isBackgrounded(): boolean {
+    return this._isBackgrounded;
   }
 
   // ---------------------------------------------------------------------------

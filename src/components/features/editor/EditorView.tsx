@@ -111,10 +111,13 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
 
   const masterVolume = dbToLinear(mixerMasterState.volumeDb);
   const masterMuted = mixerMasterState.muted;
-  const masterLevels: ChannelLevels = {
-    left: mixerMasterState.levels.left,
-    right: mixerMasterState.levels.right,
-  };
+  const masterLevels: ChannelLevels = useMemo(
+    () => ({
+      left: mixerMasterState.levels.left,
+      right: mixerMasterState.levels.right,
+    }),
+    [mixerMasterState.levels.left, mixerMasterState.levels.right],
+  );
 
   // Audio playback integration
   // The hook handles audio scheduling, volume control, and clip synchronization

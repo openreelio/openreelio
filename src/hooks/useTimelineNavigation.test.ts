@@ -40,6 +40,7 @@ describe('useTimelineNavigation', () => {
   let zoomOut: ReturnType<typeof vi.fn>;
   let setScrollX: ReturnType<typeof vi.fn>;
   let fitToWindow: ReturnType<typeof vi.fn>;
+  const zoom = 100;
 
   beforeEach(() => {
     zoomIn = vi.fn();
@@ -57,6 +58,7 @@ describe('useTimelineNavigation', () => {
       const { result } = renderHook(() =>
         useTimelineNavigation({
           scrollX: 0,
+          zoom,
           duration: 60,
           zoomIn,
           zoomOut,
@@ -81,6 +83,7 @@ describe('useTimelineNavigation', () => {
       const { result } = renderHook(() =>
         useTimelineNavigation({
           scrollX: 0,
+          zoom,
           duration: 60,
           zoomIn,
           zoomOut,
@@ -105,6 +108,7 @@ describe('useTimelineNavigation', () => {
       const { result } = renderHook(() =>
         useTimelineNavigation({
           scrollX: 0,
+          zoom,
           duration: 60,
           zoomIn,
           zoomOut,
@@ -134,6 +138,7 @@ describe('useTimelineNavigation', () => {
       const { result } = renderHook(() =>
         useTimelineNavigation({
           scrollX: 100,
+          zoom,
           duration: 60,
           zoomIn,
           zoomOut,
@@ -157,6 +162,7 @@ describe('useTimelineNavigation', () => {
       const { result } = renderHook(() =>
         useTimelineNavigation({
           scrollX: 100,
+          zoom,
           duration: 60,
           zoomIn,
           zoomOut,
@@ -180,6 +186,7 @@ describe('useTimelineNavigation', () => {
       const { result } = renderHook(() =>
         useTimelineNavigation({
           scrollX: 100,
+          zoom,
           duration: 60,
           zoomIn,
           zoomOut,
@@ -213,6 +220,7 @@ describe('useTimelineNavigation', () => {
       const { result } = renderHook(() =>
         useTimelineNavigation({
           scrollX: 0,
+          zoom,
           duration: 120,
           zoomIn,
           zoomOut,
@@ -237,6 +245,7 @@ describe('useTimelineNavigation', () => {
       const { result } = renderHook(() =>
         useTimelineNavigation({
           scrollX: 0,
+          zoom,
           duration: 120,
           zoomIn,
           zoomOut,
@@ -258,6 +267,7 @@ describe('useTimelineNavigation', () => {
       const { result } = renderHook(() =>
         useTimelineNavigation({
           scrollX: 0,
+          zoom,
           duration: 120,
           zoomIn,
           zoomOut,
@@ -280,6 +290,7 @@ describe('useTimelineNavigation', () => {
       const { result } = renderHook(() =>
         useTimelineNavigation({
           scrollX: 0,
+          zoom,
           duration: 60,
           zoomIn,
           zoomOut,
@@ -308,6 +319,7 @@ describe('useTimelineNavigation', () => {
       const { result } = renderHook(() =>
         useTimelineNavigation({
           scrollX: 0,
+          zoom,
           duration: 60,
           zoomIn,
           zoomOut,

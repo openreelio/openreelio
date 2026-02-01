@@ -5,7 +5,7 @@
  * Uses the useClipDrag hook for smooth drag operations with delta accumulation.
  */
 
-import { useMemo, type MouseEvent } from 'react';
+import { useMemo, useRef, useEffect, type MouseEvent } from 'react';
 import { Type } from 'lucide-react';
 import { useClipDrag, type DragPreviewPosition, type ClipDragData } from '@/hooks/useClipDrag';
 import { useWaveformPeaks } from '@/hooks/useWaveformPeaks';
@@ -84,6 +84,8 @@ interface ClipProps {
   onDrag?: (data: ClipDragData, previewPosition: DragPreviewPosition) => void;
   /** Drag end handler */
   onDragEnd?: (data: ClipDragData, finalPosition: DragPreviewPosition) => void;
+  /** Snap point change handler - called when snap point changes during drag */
+  onSnapPointChange?: (snapPoint: import('@/types').SnapPoint | null) => void;
 }
 
 // =============================================================================
@@ -106,9 +108,11 @@ export function Clip({
   onDragStart,
   onDrag,
   onDragEnd,
+  onSnapPointChange,
 }: ClipProps) {
   // Use the clip drag hook for smooth drag operations
-  const { isDragging, previewPosition, handleMouseDown } = useClipDrag({
+  // isPendingDrag indicates mouse is down but hasn't exceeded drag threshold yet
+  const { isDragging, isPendingDrag, previewPosition, activeSnapPoint, handleMouseDown } = useClipDrag({
     clipId: clip.id,
     initialTimelineIn: clip.place.timelineInSec,
     initialSourceIn: clip.range.sourceInSec,
@@ -124,6 +128,15 @@ export function Clip({
     onDrag,
     onDragEnd,
   });
+
+  // Notify parent when snap point changes during drag (via effect to avoid calling during render)
+  const prevSnapPointRef = useRef<import('@/types').SnapPoint | null>(null);
+  useEffect(() => {
+    if (activeSnapPoint !== prevSnapPointRef.current) {
+      prevSnapPointRef.current = activeSnapPoint;
+      onSnapPointChange?.(activeSnapPoint);
+    }
+  }, [activeSnapPoint, onSnapPointChange]);
 
   // Calculate display dimensions (use preview position during drag)
   const displayPosition = useMemo(() => {
@@ -151,12 +164,20 @@ export function Clip({
     return undefined;
   }, [clip.color]);
 
+  // Track if mousedown initiated a potential drag (set synchronously, cleared in click handler)
+  const hadMouseDownRef = useRef(false);
+
   // Handle click (differentiate from drag)
   const handleClick = (e: MouseEvent) => {
     e.stopPropagation();
 
-    // Don't trigger click if we were dragging
-    if (isDragging) return;
+    // Check if we had a mousedown that initiated drag handling
+    const hadDragMouseDown = hadMouseDownRef.current;
+    hadMouseDownRef.current = false; // Reset for next interaction
+
+    // Don't trigger click if we were dragging, in pending drag state,
+    // or had a mousedown that was captured for potential drag
+    if (isDragging || isPendingDrag || hadDragMouseDown) return;
 
     if (!disabled && onClick) {
       onClick(clip.id, {
@@ -177,18 +198,22 @@ export function Clip({
 
   // Handle mouse down on main clip area
   const handleClipMouseDown = (e: MouseEvent) => {
+    // Mark that mousedown started a potential drag - cleared in click handler
+    hadMouseDownRef.current = true;
     handleMouseDown(e, 'move');
   };
 
   // Handle mouse down on left trim handle
   const handleLeftTrimMouseDown = (e: MouseEvent) => {
     e.stopPropagation();
+    hadMouseDownRef.current = true;
     handleMouseDown(e, 'trim-left');
   };
 
   // Handle mouse down on right trim handle
   const handleRightTrimMouseDown = (e: MouseEvent) => {
     e.stopPropagation();
+    hadMouseDownRef.current = true;
     handleMouseDown(e, 'trim-right');
   };
 

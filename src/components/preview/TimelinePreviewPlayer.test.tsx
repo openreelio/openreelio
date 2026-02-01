@@ -27,7 +27,10 @@ vi.mock('@/utils/ffmpeg', () => ({
 vi.mock('@/services/frameCache', () => ({
   frameCache: {
     get: vi.fn().mockReturnValue(null),
+    has: vi.fn().mockReturnValue(false),
     set: vi.fn(),
+    delete: vi.fn(),
+    clear: vi.fn(),
     getStats: vi.fn().mockReturnValue({ entryCount: 0, totalSizeBytes: 0, hits: 0, misses: 0, hitRate: 0 }),
   },
 }));

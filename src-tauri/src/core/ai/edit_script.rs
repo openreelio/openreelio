@@ -156,24 +156,43 @@ impl EditCommand {
     }
 
     /// Creates a TrimClip command
-    pub fn trim_clip(clip_id: &str, new_start: Option<f64>, new_end: Option<f64>) -> Self {
+    ///
+    /// # Arguments
+    /// * `clip_id` - The ID of the clip to trim
+    /// * `new_source_in` - New source in point (start of the source media to use)
+    /// * `new_source_out` - New source out point (end of the source media to use)
+    /// * `new_timeline_in` - New timeline position for the clip
+    pub fn trim_clip(
+        clip_id: &str,
+        new_source_in: Option<f64>,
+        new_source_out: Option<f64>,
+        new_timeline_in: Option<f64>,
+    ) -> Self {
         let mut params = serde_json::json!({ "clipId": clip_id });
 
-        if let Some(start) = new_start {
-            params["newStart"] = serde_json::json!(start);
+        if let Some(source_in) = new_source_in {
+            params["newSourceIn"] = serde_json::json!(source_in);
         }
-        if let Some(end) = new_end {
-            params["newEnd"] = serde_json::json!(end);
+        if let Some(source_out) = new_source_out {
+            params["newSourceOut"] = serde_json::json!(source_out);
+        }
+        if let Some(timeline_in) = new_timeline_in {
+            params["newTimelineIn"] = serde_json::json!(timeline_in);
         }
 
         Self::new("TrimClip", params)
     }
 
     /// Creates a MoveClip command
-    pub fn move_clip(clip_id: &str, new_start: f64, new_track_id: Option<&str>) -> Self {
+    ///
+    /// # Arguments
+    /// * `clip_id` - The ID of the clip to move
+    /// * `new_timeline_in` - New timeline position in seconds
+    /// * `new_track_id` - Optional: move to a different track
+    pub fn move_clip(clip_id: &str, new_timeline_in: f64, new_track_id: Option<&str>) -> Self {
         let mut params = serde_json::json!({
             "clipId": clip_id,
-            "newStart": new_start
+            "newTimelineIn": new_timeline_in
         });
 
         if let Some(track_id) = new_track_id {
@@ -181,6 +200,109 @@ impl EditCommand {
         }
 
         Self::new("MoveClip", params)
+    }
+
+    /// Creates a RippleDelete command
+    pub fn ripple_delete(clip_id: &str, affect_all_tracks: bool) -> Self {
+        Self::new(
+            "RippleDelete",
+            serde_json::json!({
+                "clipId": clip_id,
+                "affectAllTracks": affect_all_tracks
+            }),
+        )
+    }
+
+    /// Creates a DuplicateClip command
+    pub fn duplicate_clip(
+        clip_id: &str,
+        target_track_id: Option<&str>,
+        offset: Option<f64>,
+    ) -> Self {
+        let mut params = serde_json::json!({ "clipId": clip_id });
+
+        if let Some(track_id) = target_track_id {
+            params["targetTrackId"] = serde_json::json!(track_id);
+        }
+        if let Some(off) = offset {
+            params["offset"] = serde_json::json!(off);
+        }
+
+        Self::new("DuplicateClip", params)
+    }
+
+    /// Creates an AddTrack command
+    pub fn add_track(track_type: &str, name: Option<&str>) -> Self {
+        let mut params = serde_json::json!({ "type": track_type });
+
+        if let Some(n) = name {
+            params["name"] = serde_json::json!(n);
+        }
+
+        Self::new("AddTrack", params)
+    }
+
+    /// Creates a MuteTrack command
+    pub fn mute_track(track_id: &str, muted: bool) -> Self {
+        Self::new(
+            "MuteTrack",
+            serde_json::json!({
+                "trackId": track_id,
+                "muted": muted
+            }),
+        )
+    }
+
+    /// Creates an AddEffect command
+    pub fn add_effect(clip_id: &str, effect_type: &str, params: serde_json::Value) -> Self {
+        Self::new(
+            "AddEffect",
+            serde_json::json!({
+                "clipId": clip_id,
+                "effectType": effect_type,
+                "params": params
+            }),
+        )
+    }
+
+    /// Creates an AddKeyframe command
+    pub fn add_keyframe(
+        clip_id: &str,
+        param_path: &str,
+        time: f64,
+        value: serde_json::Value,
+        easing: Option<&str>,
+    ) -> Self {
+        let mut params = serde_json::json!({
+            "clipId": clip_id,
+            "paramPath": param_path,
+            "time": time,
+            "value": value
+        });
+
+        if let Some(e) = easing {
+            params["easing"] = serde_json::json!(e);
+        }
+
+        Self::new("AddKeyframe", params)
+    }
+
+    /// Creates an AddTransition command
+    pub fn add_transition(
+        clip_a_id: &str,
+        clip_b_id: &str,
+        transition_type: &str,
+        duration: f64,
+    ) -> Self {
+        Self::new(
+            "AddTransition",
+            serde_json::json!({
+                "clipAId": clip_a_id,
+                "clipBId": clip_b_id,
+                "type": transition_type,
+                "duration": duration
+            }),
+        )
     }
 
     /// Sets the description
@@ -448,12 +570,24 @@ mod tests {
 
     #[test]
     fn test_edit_command_trim_clip() {
-        let cmd = EditCommand::trim_clip("clip_1", Some(1.0), Some(9.0));
+        let cmd = EditCommand::trim_clip("clip_1", Some(1.0), Some(9.0), None);
 
         assert_eq!(cmd.command_type, "TrimClip");
         assert_eq!(cmd.params["clipId"], "clip_1");
-        assert_eq!(cmd.params["newStart"], 1.0);
-        assert_eq!(cmd.params["newEnd"], 9.0);
+        assert_eq!(cmd.params["newSourceIn"], 1.0);
+        assert_eq!(cmd.params["newSourceOut"], 9.0);
+        assert!(cmd.params.get("newTimelineIn").is_none());
+    }
+
+    #[test]
+    fn test_edit_command_trim_clip_with_timeline() {
+        let cmd = EditCommand::trim_clip("clip_1", None, None, Some(5.0));
+
+        assert_eq!(cmd.command_type, "TrimClip");
+        assert_eq!(cmd.params["clipId"], "clip_1");
+        assert!(cmd.params.get("newSourceIn").is_none());
+        assert!(cmd.params.get("newSourceOut").is_none());
+        assert_eq!(cmd.params["newTimelineIn"], 5.0);
     }
 
     #[test]
@@ -462,8 +596,18 @@ mod tests {
 
         assert_eq!(cmd.command_type, "MoveClip");
         assert_eq!(cmd.params["clipId"], "clip_1");
-        assert_eq!(cmd.params["newStart"], 15.0);
+        assert_eq!(cmd.params["newTimelineIn"], 15.0);
         assert_eq!(cmd.params["newTrackId"], "track_2");
+    }
+
+    #[test]
+    fn test_edit_command_move_clip_same_track() {
+        let cmd = EditCommand::move_clip("clip_1", 20.0, None);
+
+        assert_eq!(cmd.command_type, "MoveClip");
+        assert_eq!(cmd.params["clipId"], "clip_1");
+        assert_eq!(cmd.params["newTimelineIn"], 20.0);
+        assert!(cmd.params.get("newTrackId").is_none());
     }
 
     #[test]
@@ -514,5 +658,132 @@ mod tests {
         assert_eq!(parsed.intent, script.intent);
         assert_eq!(parsed.commands.len(), script.commands.len());
         assert_eq!(parsed.explanation, script.explanation);
+    }
+
+    // -------------------------------------------------------------------------
+    // New Helper Method Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_edit_command_ripple_delete() {
+        let cmd = EditCommand::ripple_delete("clip_1", true);
+
+        assert_eq!(cmd.command_type, "RippleDelete");
+        assert_eq!(cmd.params["clipId"], "clip_1");
+        assert_eq!(cmd.params["affectAllTracks"], true);
+    }
+
+    #[test]
+    fn test_edit_command_ripple_delete_single_track() {
+        let cmd = EditCommand::ripple_delete("clip_2", false);
+
+        assert_eq!(cmd.command_type, "RippleDelete");
+        assert_eq!(cmd.params["clipId"], "clip_2");
+        assert_eq!(cmd.params["affectAllTracks"], false);
+    }
+
+    #[test]
+    fn test_edit_command_duplicate_clip() {
+        let cmd = EditCommand::duplicate_clip("clip_1", Some("track_2"), Some(10.0));
+
+        assert_eq!(cmd.command_type, "DuplicateClip");
+        assert_eq!(cmd.params["clipId"], "clip_1");
+        assert_eq!(cmd.params["targetTrackId"], "track_2");
+        assert_eq!(cmd.params["offset"], 10.0);
+    }
+
+    #[test]
+    fn test_edit_command_duplicate_clip_defaults() {
+        let cmd = EditCommand::duplicate_clip("clip_1", None, None);
+
+        assert_eq!(cmd.command_type, "DuplicateClip");
+        assert_eq!(cmd.params["clipId"], "clip_1");
+        assert!(cmd.params.get("targetTrackId").is_none());
+        assert!(cmd.params.get("offset").is_none());
+    }
+
+    #[test]
+    fn test_edit_command_add_track() {
+        let cmd = EditCommand::add_track("video", Some("Main Video"));
+
+        assert_eq!(cmd.command_type, "AddTrack");
+        assert_eq!(cmd.params["type"], "video");
+        assert_eq!(cmd.params["name"], "Main Video");
+    }
+
+    #[test]
+    fn test_edit_command_add_track_no_name() {
+        let cmd = EditCommand::add_track("audio", None);
+
+        assert_eq!(cmd.command_type, "AddTrack");
+        assert_eq!(cmd.params["type"], "audio");
+        assert!(cmd.params.get("name").is_none());
+    }
+
+    #[test]
+    fn test_edit_command_mute_track() {
+        let cmd = EditCommand::mute_track("track_1", true);
+
+        assert_eq!(cmd.command_type, "MuteTrack");
+        assert_eq!(cmd.params["trackId"], "track_1");
+        assert_eq!(cmd.params["muted"], true);
+    }
+
+    #[test]
+    fn test_edit_command_add_effect() {
+        let cmd =
+            EditCommand::add_effect("clip_1", "brightness", serde_json::json!({ "value": 20 }));
+
+        assert_eq!(cmd.command_type, "AddEffect");
+        assert_eq!(cmd.params["clipId"], "clip_1");
+        assert_eq!(cmd.params["effectType"], "brightness");
+        assert_eq!(cmd.params["params"]["value"], 20);
+    }
+
+    #[test]
+    fn test_edit_command_add_keyframe() {
+        let cmd = EditCommand::add_keyframe(
+            "clip_1",
+            "opacity",
+            0.0,
+            serde_json::json!(0),
+            Some("easeOut"),
+        );
+
+        assert_eq!(cmd.command_type, "AddKeyframe");
+        assert_eq!(cmd.params["clipId"], "clip_1");
+        assert_eq!(cmd.params["paramPath"], "opacity");
+        assert_eq!(cmd.params["time"], 0.0);
+        assert_eq!(cmd.params["value"], 0);
+        assert_eq!(cmd.params["easing"], "easeOut");
+    }
+
+    #[test]
+    fn test_edit_command_add_keyframe_no_easing() {
+        let cmd = EditCommand::add_keyframe("clip_1", "opacity", 2.0, serde_json::json!(100), None);
+
+        assert_eq!(cmd.command_type, "AddKeyframe");
+        assert_eq!(cmd.params["clipId"], "clip_1");
+        assert_eq!(cmd.params["time"], 2.0);
+        assert_eq!(cmd.params["value"], 100);
+        assert!(cmd.params.get("easing").is_none());
+    }
+
+    #[test]
+    fn test_edit_command_add_transition() {
+        let cmd = EditCommand::add_transition("clip_1", "clip_2", "crossfade", 1.5);
+
+        assert_eq!(cmd.command_type, "AddTransition");
+        assert_eq!(cmd.params["clipAId"], "clip_1");
+        assert_eq!(cmd.params["clipBId"], "clip_2");
+        assert_eq!(cmd.params["type"], "crossfade");
+        assert_eq!(cmd.params["duration"], 1.5);
+    }
+
+    #[test]
+    fn test_edit_command_with_description() {
+        let cmd = EditCommand::delete_clip("clip_1").with_description("Remove intro clip");
+
+        assert_eq!(cmd.description, Some("Remove intro clip".to_string()));
     }
 }

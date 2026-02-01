@@ -56,6 +56,13 @@ pub enum OpKind {
     ProjectCreate,
     ProjectSettings,
 
+    // Bin operations
+    BinCreate,
+    BinRemove,
+    BinRename,
+    BinMove,
+    BinUpdateColor,
+
     // Batch operations
     Batch,
 }

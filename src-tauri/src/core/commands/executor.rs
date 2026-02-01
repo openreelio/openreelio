@@ -522,6 +522,22 @@ impl CommandExecutor {
                 }))
             }
 
+            // Bin operations
+            OpKind::BinCreate => {
+                let bin_id = result.created_ids.first().ok_or_else(|| {
+                    CoreError::Internal("BinCreate missing createdId".to_string())
+                })?;
+                let bin = state.bins.get(bin_id).ok_or_else(|| {
+                    CoreError::Internal(format!("BinCreate could not find bin in state: {bin_id}"))
+                })?;
+                to_value(bin)
+            }
+
+            OpKind::BinRemove | OpKind::BinRename | OpKind::BinMove | OpKind::BinUpdateColor => {
+                // These operations store command data which is sufficient for replay
+                Ok(command_json)
+            }
+
             // For everything else, fall back to the command JSON.
             _ => Ok(command_json),
         }
@@ -646,6 +662,12 @@ impl CommandExecutor {
             "RemoveSequence" | "DeleteSequence" => OpKind::SequenceRemove,
             "CreateProject" => OpKind::ProjectCreate,
             "UpdateProjectSettings" => OpKind::ProjectSettings,
+            // Bin operations
+            "CreateBin" => OpKind::BinCreate,
+            "RemoveBin" => OpKind::BinRemove,
+            "RenameBin" => OpKind::BinRename,
+            "MoveBin" => OpKind::BinMove,
+            "SetBinColor" => OpKind::BinUpdateColor,
             _ => OpKind::Batch, // Default to batch for unknown types
         }
     }

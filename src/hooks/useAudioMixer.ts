@@ -390,6 +390,7 @@ export function useAudioMixer({
   // ==========================================================================
 
   useEffect(() => {
+    const trackChains = trackChainsRef.current;
     return () => {
       // Stop metering
       if (meteringIntervalRef.current) {
@@ -397,8 +398,8 @@ export function useAudioMixer({
       }
 
       // Disconnect all tracks
-      for (const trackId of trackChainsRef.current.keys()) {
-        const chain = trackChainsRef.current.get(trackId);
+      for (const trackId of trackChains.keys()) {
+        const chain = trackChains.get(trackId);
         if (chain) {
           try {
             chain.inputGain.disconnect();
@@ -412,7 +413,7 @@ export function useAudioMixer({
           }
         }
       }
-      trackChainsRef.current.clear();
+      trackChains.clear();
 
       // Disconnect master nodes
       try {

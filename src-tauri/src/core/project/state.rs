@@ -9,10 +9,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{
     assets::Asset,
+    bins::Bin,
     effects::Effect,
     project::{OpKind, Operation, OpsLog},
     timeline::{Clip, Sequence, Track},
-    AssetId, CoreError, CoreResult, EffectId, SequenceId,
+    AssetId, BinId, CoreError, CoreResult, EffectId, SequenceId,
 };
 
 // =============================================================================
@@ -82,6 +83,8 @@ pub struct ProjectState {
     pub sequences: HashMap<SequenceId, Sequence>,
     /// All effects indexed by ID
     pub effects: HashMap<EffectId, Effect>,
+    /// All bins (folders) indexed by ID
+    pub bins: HashMap<BinId, Bin>,
     /// Currently active sequence ID
     pub active_sequence_id: Option<SequenceId>,
     /// Last applied operation ID
@@ -118,6 +121,7 @@ impl ProjectState {
             assets: HashMap::new(),
             sequences,
             effects: HashMap::new(),
+            bins: HashMap::new(),
             active_sequence_id: Some(seq_id),
             last_op_id: None,
             op_count: 0,
@@ -132,6 +136,7 @@ impl ProjectState {
             assets: HashMap::new(),
             sequences: HashMap::new(),
             effects: HashMap::new(),
+            bins: HashMap::new(),
             active_sequence_id: None,
             last_op_id: None,
             op_count: 0,
@@ -146,6 +151,7 @@ impl ProjectState {
             assets: HashMap::new(),
             sequences: HashMap::new(),
             effects: HashMap::new(),
+            bins: HashMap::new(),
             active_sequence_id: None,
             last_op_id: None,
             op_count: 0,
@@ -198,6 +204,13 @@ impl ProjectState {
             // Project operations
             OpKind::ProjectCreate => self.apply_project_create(op)?,
             OpKind::ProjectSettings => self.apply_project_settings(op)?,
+
+            // Bin operations
+            OpKind::BinCreate => self.apply_bin_create(op)?,
+            OpKind::BinRemove => self.apply_bin_remove(op)?,
+            OpKind::BinRename => self.apply_bin_rename(op)?,
+            OpKind::BinMove => self.apply_bin_move(op)?,
+            OpKind::BinUpdateColor => self.apply_bin_update_color(op)?,
 
             // Batch operations
             OpKind::Batch => self.apply_batch(op)?,
@@ -976,6 +989,109 @@ impl ProjectState {
             self.meta.author = Some(author.to_string());
         }
         Ok(())
+    }
+
+    // =========================================================================
+    // Bin Operation Handlers
+    // =========================================================================
+
+    fn apply_bin_create(&mut self, op: &Operation) -> CoreResult<()> {
+        let bin: Bin = serde_json::from_value(op.payload.clone())
+            .map_err(|e| CoreError::InvalidCommand(format!("Invalid bin data: {}", e)))?;
+        self.bins.insert(bin.id.clone(), bin);
+        Ok(())
+    }
+
+    fn apply_bin_remove(&mut self, op: &Operation) -> CoreResult<()> {
+        let bin_id = op.payload["binId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing binId".to_string()))?;
+
+        // Get all descendants to remove recursively
+        let descendants = self.get_bin_descendants(bin_id);
+
+        // Remove bin and all descendants
+        self.bins.remove(bin_id);
+        for desc_id in &descendants {
+            self.bins.remove(desc_id);
+        }
+
+        // Update assets that were in removed bins - move them to root
+        for asset in self.assets.values_mut() {
+            if let Some(ref asset_bin_id) = asset.bin_id {
+                if asset_bin_id == bin_id || descendants.contains(asset_bin_id) {
+                    asset.bin_id = None;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_bin_rename(&mut self, op: &Operation) -> CoreResult<()> {
+        let bin_id = op.payload["binId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing binId".to_string()))?;
+        let new_name = op.payload["name"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing name".to_string()))?;
+
+        if let Some(bin) = self.bins.get_mut(bin_id) {
+            bin.rename(new_name);
+        }
+        Ok(())
+    }
+
+    fn apply_bin_move(&mut self, op: &Operation) -> CoreResult<()> {
+        let bin_id = op.payload["binId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing binId".to_string()))?;
+
+        let new_parent_id = op.payload["parentId"].as_str().map(|s| s.to_string());
+
+        // Check for circular reference
+        if crate::core::bins::would_create_cycle(bin_id, new_parent_id.as_deref(), &self.bins) {
+            return Err(CoreError::InvalidCommand(
+                "Cannot move bin: would create circular reference".to_string(),
+            ));
+        }
+
+        if let Some(bin) = self.bins.get_mut(bin_id) {
+            bin.move_to(new_parent_id);
+        }
+        Ok(())
+    }
+
+    fn apply_bin_update_color(&mut self, op: &Operation) -> CoreResult<()> {
+        let bin_id = op.payload["binId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing binId".to_string()))?;
+
+        let color: crate::core::bins::BinColor =
+            serde_json::from_value(op.payload["color"].clone())
+                .map_err(|e| CoreError::InvalidCommand(format!("Invalid color: {}", e)))?;
+
+        if let Some(bin) = self.bins.get_mut(bin_id) {
+            bin.color = color;
+        }
+        Ok(())
+    }
+
+    /// Gets all descendant bin IDs of a given bin
+    fn get_bin_descendants(&self, bin_id: &str) -> Vec<BinId> {
+        let mut descendants = Vec::new();
+        let mut to_check = vec![bin_id.to_string()];
+
+        while let Some(current_id) = to_check.pop() {
+            for (id, bin) in &self.bins {
+                if bin.parent_id.as_deref() == Some(&current_id) {
+                    descendants.push(id.clone());
+                    to_check.push(id.clone());
+                }
+            }
+        }
+
+        descendants
     }
 
     // =========================================================================

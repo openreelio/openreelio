@@ -12,9 +12,10 @@ use tauri::{Manager, State};
 use crate::core::{
     assets::{Asset, AudioInfo, ProxyStatus, VideoInfo},
     commands::{
-        AddEffectCommand, AddTextClipCommand, CreateSequenceCommand, ImportAssetCommand,
-        InsertClipCommand, MoveClipCommand, RemoveAssetCommand, RemoveClipCommand,
-        RemoveEffectCommand, RemoveTextClipCommand, SetClipTransformCommand, SplitClipCommand,
+        AddEffectCommand, AddTextClipCommand, CreateBinCommand, CreateSequenceCommand,
+        ImportAssetCommand, InsertClipCommand, MoveBinCommand, MoveClipCommand, RemoveAssetCommand,
+        RemoveBinCommand, RemoveClipCommand, RemoveEffectCommand, RemoveTextClipCommand,
+        RenameBinCommand, SetBinColorCommand, SetClipTransformCommand, SplitClipCommand,
         TrimClipCommand, UpdateAssetCommand, UpdateEffectCommand, UpdateTextCommand,
     },
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
@@ -567,6 +568,7 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<ProjectStat
         },
         assets: project.state.assets.values().cloned().collect(),
         sequences: project.state.sequences.values().cloned().collect(),
+        bins: project.state.bins.values().cloned().collect(),
         active_sequence_id: project.state.active_sequence_id.clone(),
         is_dirty: project.state.is_dirty,
     })
@@ -1410,6 +1412,32 @@ pub async fn execute_command(
             &p.track_id,
             &p.clip_id,
         )),
+        // Bin commands
+        CommandPayload::CreateBin(p) => Box::new(CreateBinCommand::new(
+            &p.name,
+            p.parent_id.as_deref(),
+            p.color
+                .as_ref()
+                .and_then(|c| serde_json::from_value(serde_json::json!(c.to_lowercase())).ok()),
+        )),
+        CommandPayload::RemoveBin(p) => Box::new(RemoveBinCommand::new(&p.bin_id)),
+        CommandPayload::RenameBin(p) => Box::new(RenameBinCommand::new(&p.bin_id, &p.name)),
+        CommandPayload::MoveBin(p) => {
+            Box::new(MoveBinCommand::new(&p.bin_id, p.parent_id.as_deref()))
+        }
+        CommandPayload::SetBinColor(p) => {
+            match SetBinColorCommand::from_string(&p.bin_id, &p.color) {
+                Ok(cmd) => Box::new(cmd),
+                Err(e) => return Err(e.to_ipc_error()),
+            }
+        }
+        CommandPayload::MoveAssetToBin(p) => {
+            // Handle asset-to-bin move as asset update
+            Box::new(UpdateAssetCommand::new_bin_update(
+                &p.asset_id,
+                p.bin_id.as_deref(),
+            ))
+        }
     };
 
     let result = project
@@ -2286,6 +2314,29 @@ pub async fn apply_edit_script(
                 &p.track_id,
                 &p.clip_id,
             )),
+            // Bin commands
+            CommandPayload::CreateBin(p) => {
+                let color = p.color.as_ref().and_then(|c| c.parse().ok());
+                Box::new(CreateBinCommand::new(
+                    &p.name,
+                    p.parent_id.as_deref(),
+                    color,
+                ))
+            }
+            CommandPayload::RemoveBin(p) => Box::new(RemoveBinCommand::new(&p.bin_id)),
+            CommandPayload::RenameBin(p) => Box::new(RenameBinCommand::new(&p.bin_id, &p.name)),
+            CommandPayload::MoveBin(p) => {
+                Box::new(MoveBinCommand::new(&p.bin_id, p.parent_id.as_deref()))
+            }
+            CommandPayload::SetBinColor(p) => {
+                let color: crate::core::bins::BinColor =
+                    p.color.parse().unwrap_or(crate::core::bins::BinColor::Gray);
+                Box::new(SetBinColorCommand::new(&p.bin_id, color))
+            }
+            CommandPayload::MoveAssetToBin(p) => Box::new(UpdateAssetCommand::new_bin_update(
+                &p.asset_id,
+                p.bin_id.as_deref(),
+            )),
         };
 
         match project.executor.execute(command, &mut project.state) {
@@ -2615,6 +2666,8 @@ pub struct ProjectStateDto {
     pub assets: Vec<crate::core::assets::Asset>,
     /// All sequences in the project
     pub sequences: Vec<crate::core::timeline::Sequence>,
+    /// All bins (folders) in the project
+    pub bins: Vec<crate::core::bins::Bin>,
     /// Currently active sequence ID
     pub active_sequence_id: Option<String>,
     /// Whether project has unsaved changes

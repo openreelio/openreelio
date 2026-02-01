@@ -77,12 +77,70 @@ export interface PlaybackActions {
 
 export type PlaybackStore = PlaybackState & PlaybackActions;
 
+/**
+ * Playback event detail type for seek events.
+ */
+export interface PlaybackSeekEventDetail {
+  time: number;
+}
+
+/**
+ * Playback event detail type for update events.
+ */
+export interface PlaybackUpdateEventDetail {
+  time: number;
+}
+
+/**
+ * Event names for playback events.
+ */
+export const PLAYBACK_EVENTS = {
+  SEEK: 'playback-seek',
+  UPDATE: 'playback-update',
+} as const;
+
 // =============================================================================
 // Constants
 // =============================================================================
 
 const MIN_PLAYBACK_RATE = 0.25;
 const MAX_PLAYBACK_RATE = 4;
+
+// =============================================================================
+// Playback Events
+// =============================================================================
+
+/**
+ * Dispatches a CustomEvent for playback seek operations.
+ * Allows external components to react to seek events without subscribing to the store.
+ *
+ * @param time - The new playback time in seconds
+ */
+function dispatchSeekEvent(time: number): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent('playback-seek', {
+        detail: { time },
+      }),
+    );
+  }
+}
+
+/**
+ * Dispatches a CustomEvent for regular playback time updates.
+ * Used during playback to notify external components of time changes.
+ *
+ * @param time - The current playback time in seconds
+ */
+function dispatchUpdateEvent(time: number): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent('playback-update', {
+        detail: { time },
+      }),
+    );
+  }
+}
 
 // =============================================================================
 // Initial State
@@ -140,53 +198,67 @@ export const usePlaybackStore = create<PlaybackStore>()(
     // =========================================================================
 
     seek: (time: number) => {
+      const { duration } = get();
+      const newTime = Math.max(0, Math.min(duration, time));
       set((state) => {
-        state.currentTime = Math.max(0, Math.min(state.duration, time));
+        state.currentTime = newTime;
       });
+      dispatchSeekEvent(newTime);
     },
 
     seekForward: (amount: number) => {
       const { currentTime, duration } = get();
+      const newTime = Math.min(duration, currentTime + amount);
       set((state) => {
-        state.currentTime = Math.min(duration, currentTime + amount);
+        state.currentTime = newTime;
       });
+      dispatchSeekEvent(newTime);
     },
 
     seekBackward: (amount: number) => {
       const { currentTime } = get();
+      const newTime = Math.max(0, currentTime - amount);
       set((state) => {
-        state.currentTime = Math.max(0, currentTime - amount);
+        state.currentTime = newTime;
       });
+      dispatchSeekEvent(newTime);
     },
 
     goToStart: () => {
       set((state) => {
         state.currentTime = 0;
       });
+      dispatchSeekEvent(0);
     },
 
     goToEnd: () => {
+      const { duration } = get();
       set((state) => {
         state.currentTime = state.duration;
       });
+      dispatchSeekEvent(duration);
     },
 
     stepForward: (fps: number) => {
       if (fps <= 0) return; // Guard against invalid fps
       const frameTime = 1 / fps;
       const { currentTime, duration } = get();
+      const newTime = Math.min(duration, currentTime + frameTime);
       set((state) => {
-        state.currentTime = Math.min(duration, currentTime + frameTime);
+        state.currentTime = newTime;
       });
+      dispatchSeekEvent(newTime);
     },
 
     stepBackward: (fps: number) => {
       if (fps <= 0) return; // Guard against invalid fps
       const frameTime = 1 / fps;
       const { currentTime } = get();
+      const newTime = Math.max(0, currentTime - frameTime);
       set((state) => {
-        state.currentTime = Math.max(0, currentTime - frameTime);
+        state.currentTime = newTime;
       });
+      dispatchSeekEvent(newTime);
     },
 
     // =========================================================================
@@ -197,6 +269,9 @@ export const usePlaybackStore = create<PlaybackStore>()(
       set((state) => {
         state.currentTime = time;
       });
+      // Use update event for regular time updates (during playback)
+      // This is different from seek which is user-initiated
+      dispatchUpdateEvent(time);
     },
 
     setDuration: (duration: number) => {

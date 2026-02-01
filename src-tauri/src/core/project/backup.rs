@@ -435,6 +435,7 @@ mod tests {
             sequences: HashMap::new(),
             active_sequence_id: None,
             effects: HashMap::new(),
+            bins: HashMap::new(),
             last_op_id: None,
             op_count: 0,
             is_dirty: false,

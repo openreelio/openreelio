@@ -27,6 +27,7 @@ import {
   _resetDeduplicatorForTesting as resetDeduplicator,
 } from '@/utils/requestDeduplicator';
 import { refreshProjectState, applyProjectState } from '@/utils/stateRefreshHelper';
+import { useBinStore } from '@/stores/binStore';
 
 const logger = createLogger('ProjectStore');
 
@@ -146,12 +147,8 @@ export const useProjectStore = create<ProjectState>()(
       try {
         const projectInfo = await invoke<ProjectMeta>('open_project', { path });
 
-        // Load full project state including assets and sequences
-        const projectState = await invoke<{
-          assets: Asset[];
-          sequences: Sequence[];
-          activeSequenceId: string | null;
-        }>('get_project_state');
+        // Load full project state including assets, sequences, and bins
+        const projectState = await refreshProjectState();
 
         set((state) => {
           state.isLoaded = true;
@@ -161,20 +158,17 @@ export const useProjectStore = create<ProjectState>()(
           state.selectedAssetId = null;
 
           // Populate assets
-          state.assets = new Map();
-          for (const asset of projectState.assets) {
-            state.assets.set(asset.id, asset);
-          }
+          state.assets = projectState.assets;
 
           // Populate sequences
-          state.sequences = new Map();
-          for (const sequence of projectState.sequences) {
-            state.sequences.set(sequence.id, sequence);
-          }
+          state.sequences = projectState.sequences;
 
           // Set active sequence
           state.activeSequenceId = projectState.activeSequenceId;
         });
+
+        // Sync bins to bin store
+        useBinStore.getState().setBins(projectState.bins);
       } catch (error) {
         set((state) => {
           state.isLoading = false;
@@ -197,11 +191,7 @@ export const useProjectStore = create<ProjectState>()(
 
         // Load full project state to get default sequence and tracks
         // This is a single atomic operation - if it fails, the project creation is considered failed
-        const projectState = await invoke<{
-          assets: Asset[];
-          sequences: Sequence[];
-          activeSequenceId: string | null;
-        }>('get_project_state');
+        const projectState = await refreshProjectState();
 
         // Only update store if both operations succeeded
         set((state) => {
@@ -212,20 +202,17 @@ export const useProjectStore = create<ProjectState>()(
           state.isDirty = false;
 
           // Populate assets (empty for new project)
-          state.assets = new Map();
-          for (const asset of projectState.assets) {
-            state.assets.set(asset.id, asset);
-          }
+          state.assets = projectState.assets;
 
           // Populate sequences (includes default sequence with tracks)
-          state.sequences = new Map();
-          for (const sequence of projectState.sequences) {
-            state.sequences.set(sequence.id, sequence);
-          }
+          state.sequences = projectState.sequences;
 
           // Set active sequence
           state.activeSequenceId = projectState.activeSequenceId;
         });
+
+        // Sync bins to bin store (empty for new project)
+        useBinStore.getState().setBins(projectState.bins);
       } catch (error) {
         // Reset to clean state on any failure
         set((state) => {
@@ -237,6 +224,8 @@ export const useProjectStore = create<ProjectState>()(
           state.activeSequenceId = null;
           state.error = error instanceof Error ? error.message : String(error);
         });
+        // Also reset bin store
+        useBinStore.getState().reset();
         throw error;
       }
     },
@@ -483,6 +472,9 @@ export const useProjectStore = create<ProjectState>()(
               applyProjectState(state, freshState);
             });
 
+            // Sync bins to bin store (outside Immer draft)
+            useBinStore.getState().setBins(freshState.bins);
+
             if (concurrentModificationDetected) {
               throw new Error(
                 `Concurrent modification detected during command execution. ` +
@@ -529,6 +521,9 @@ export const useProjectStore = create<ProjectState>()(
             applyProjectState(state, freshState);
           });
 
+          // Sync bins to bin store
+          useBinStore.getState().setBins(freshState.bins);
+
           logger.debug('Undo completed', { newVersion: get().stateVersion });
           return result;
         } catch (error) {
@@ -562,6 +557,9 @@ export const useProjectStore = create<ProjectState>()(
             state.error = null;
             applyProjectState(state, freshState);
           });
+
+          // Sync bins to bin store
+          useBinStore.getState().setBins(freshState.bins);
 
           logger.debug('Redo completed', { newVersion: get().stateVersion });
           return result;
