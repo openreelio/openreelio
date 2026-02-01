@@ -52,8 +52,14 @@ const createMockContainerRef = (
 describe('useEdgeAutoScroll', () => {
   let rafCallback: FrameRequestCallback | null = null;
   let rafId = 0;
+  let mockTime = 0;
 
   beforeEach(() => {
+    mockTime = 1000; // Start at 1000ms to avoid edge cases
+
+    // Mock performance.now to control time
+    vi.spyOn(performance, 'now').mockImplementation(() => mockTime);
+
     // Mock requestAnimationFrame
     vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback) => {
       rafCallback = callback;
@@ -67,15 +73,18 @@ describe('useEdgeAutoScroll', () => {
   afterEach(() => {
     rafCallback = null;
     rafId = 0;
+    mockTime = 0;
     vi.clearAllMocks();
     vi.restoreAllMocks();
   });
 
-  const flushRaf = () => {
+  const flushRaf = (deltaMs: number = 16) => {
     if (rafCallback) {
       const cb = rafCallback;
       rafCallback = null;
-      cb(performance.now());
+      // Advance time before calling callback to ensure proper delta time calculation
+      mockTime += deltaMs;
+      cb(mockTime);
     }
   };
 
