@@ -24,6 +24,14 @@ vi.mock('@/stores', () => ({
 
 vi.mock('@/hooks', () => ({
   useAssetImport: () => mockUseAssetImport(),
+  useBinOperations: () => ({
+    createBin: vi.fn(),
+    renameBin: vi.fn(),
+    deleteBin: vi.fn(),
+    moveBin: vi.fn(),
+    setBinColor: vi.fn(),
+    moveAssetToBin: vi.fn(),
+  }),
   useTranscriptionWithIndexing: () => ({
     transcribeAndIndex: vi.fn(),
     transcriptionState: {

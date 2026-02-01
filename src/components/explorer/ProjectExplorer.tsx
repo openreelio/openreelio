@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useProjectStore, useBinStore } from '@/stores';
-import { useAssetImport, useTranscriptionWithIndexing } from '@/hooks';
+import { useAssetImport, useTranscriptionWithIndexing, useBinOperations } from '@/hooks';
 import { BinTree } from './BinTree';
 import { AssetList, type Asset, type ViewMode } from './AssetList';
 import type { AssetKind, AssetData } from './AssetItem';
@@ -53,17 +53,23 @@ export function ProjectExplorer() {
   const { assets, isLoading, selectedAssetId, selectAsset, removeAsset } =
     useProjectStore();
 
-  // Bin Store
+  // Bin Store (UI state only)
   const {
     selectedBinId,
     editingBinId,
     selectBin,
-    createBin,
-    renameBin,
     toggleExpand,
     cancelEditing,
     getBinsArray,
   } = useBinStore();
+
+  // Bin Operations (persisted to backend)
+  const {
+    createBin: createBinAsync,
+    renameBin: renameBinAsync,
+    moveBin: moveBinAsync,
+    moveAssetToBin: moveAssetToBinAsync,
+  } = useBinOperations();
 
   // Bin tree visibility state
   const [showBinTree, setShowBinTree] = useState(true);
@@ -315,12 +321,30 @@ export function ProjectExplorer() {
   }, [selectBin]);
 
   const handleCreateBin = useCallback((parentId: string | null) => {
-    createBin('New Folder', parentId);
-  }, [createBin]);
+    // Fire and forget - backend handles persistence, state syncs automatically
+    createBinAsync('New Folder', parentId).catch((error) => {
+      console.error('Failed to create bin:', error);
+    });
+  }, [createBinAsync]);
 
   const handleRenameBin = useCallback((binId: string, newName: string) => {
-    renameBin(binId, newName);
-  }, [renameBin]);
+    // Fire and forget - backend handles persistence, state syncs automatically
+    renameBinAsync(binId, newName).catch((error) => {
+      console.error('Failed to rename bin:', error);
+    });
+  }, [renameBinAsync]);
+
+  const handleMoveBin = useCallback((binId: string, newParentId: string | null) => {
+    moveBinAsync(binId, newParentId).catch((error) => {
+      console.error('Failed to move bin:', error);
+    });
+  }, [moveBinAsync]);
+
+  const handleMoveAssetToBin = useCallback((assetId: string, binId: string | null) => {
+    moveAssetToBinAsync(assetId, binId).catch((error) => {
+      console.error('Failed to move asset to bin:', error);
+    });
+  }, [moveAssetToBinAsync]);
 
   const handleToggleBinTree = useCallback(() => {
     setShowBinTree((prev) => !prev);
@@ -496,6 +520,8 @@ export function ProjectExplorer() {
               onCreateBin={handleCreateBin}
               onRenameBin={handleRenameBin}
               onCancelEdit={cancelEditing}
+              onMoveBin={handleMoveBin}
+              onMoveAssetToBin={handleMoveAssetToBin}
             />
           </div>
         )}

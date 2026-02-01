@@ -1062,7 +1062,11 @@ proxyStatus?: ProxyStatus;
 /**
  * Proxy video URL for preview playback (via Tauri asset protocol)
  */
-proxyUrl?: string | null }
+proxyUrl?: string | null; 
+/**
+ * Bin (folder) ID for organizing the asset
+ */
+binId?: string | null }
 /**
  * Complete annotation data for an asset
  */
@@ -1208,6 +1212,38 @@ codec: string;
  */
 bitrate: number | null }
 export type AutoSaveSettingsDto = { enabled: boolean; intervalSeconds: number; backupCount: number }
+/**
+ * A bin (folder) for organizing media assets
+ */
+export type Bin = { 
+/**
+ * Unique bin identifier
+ */
+id: string; 
+/**
+ * Bin name (display name)
+ */
+name: string; 
+/**
+ * Parent bin ID (None for root-level bins)
+ */
+parentId?: string | null; 
+/**
+ * Visual color for the bin
+ */
+color?: BinColor; 
+/**
+ * Creation timestamp (ISO 8601)
+ */
+createdAt: string; 
+/**
+ * Whether the bin is expanded in the UI
+ */
+expanded?: boolean }
+/**
+ * Available colors for bin visual identification
+ */
+export type BinColor = "gray" | "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "pink"
 /**
  * Blend mode for video tracks
  */
@@ -1979,6 +2015,10 @@ assets: Asset[];
  */
 sequences: Sequence[]; 
 /**
+ * All bins (folders) in the project
+ */
+bins: Bin[]; 
+/**
  * Currently active sequence ID
  */
 activeSequenceId: string | null; 
@@ -2425,9 +2465,17 @@ export type StateChange =
  */
 { type: "captionDeleted"; caption_id: string } | 
 /**
- * An effect was applied to a clip
+ * An effect was applied to a clip (legacy alias for EffectAdded)
  */
 { type: "effectApplied"; effect_id: string } | 
+/**
+ * A new effect was added to a clip
+ */
+{ type: "effectAdded"; effect_id: string; clip_id: string } | 
+/**
+ * An effect was updated
+ */
+{ type: "effectUpdated"; effect_id: string } | 
 /**
  * An effect was removed from a clip
  */
