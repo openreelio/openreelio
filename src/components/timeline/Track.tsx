@@ -72,6 +72,8 @@ interface TrackProps {
   onClipDrag?: (trackId: string, data: ClipDragData, previewPosition: DragPreviewPosition) => void;
   /** Clip drag end handler */
   onClipDragEnd?: (trackId: string, data: ClipDragData, finalPosition: DragPreviewPosition) => void;
+  /** Snap point change handler - called when snap point changes during clip drag */
+  onSnapPointChange?: (snapPoint: import('@/types').SnapPoint | null) => void;
   /** Whether to show transition zones between adjacent clips */
   showTransitionZones?: boolean;
   /** Transition zone click handler */
@@ -129,6 +131,7 @@ export function Track({
   onClipDragStart,
   onClipDrag,
   onClipDragEnd,
+  onSnapPointChange,
   showTransitionZones = false,
   onTransitionZoneClick,
 }: TrackProps) {
@@ -274,6 +277,7 @@ export function Track({
               onDragStart={(data) => onClipDragStart?.(track.id, data)}
               onDrag={(data, previewPosition) => onClipDrag?.(track.id, data, previewPosition)}
               onDragEnd={(data, finalPosition) => onClipDragEnd?.(track.id, data, finalPosition)}
+              onSnapPointChange={onSnapPointChange}
             />
           ))}
 
