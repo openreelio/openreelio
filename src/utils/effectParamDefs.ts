@@ -623,6 +623,54 @@ export const VIDEO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
       step: 0.01,
     },
   ],
+
+  // ===========================================================================
+  // Keying Effects
+  // ===========================================================================
+
+  chroma_key: [
+    {
+      name: 'key_color',
+      label: 'Key Color',
+      default: { type: 'string', value: '#00FF00' },
+      inputType: 'color',
+    },
+    {
+      name: 'similarity',
+      label: 'Similarity',
+      default: { type: 'float', value: 0.3 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'blend',
+      label: 'Edge Blend',
+      default: { type: 'float', value: 0.1 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+  ],
+
+  luma_key: [
+    {
+      name: 'threshold',
+      label: 'Threshold',
+      default: { type: 'float', value: 0.1 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'tolerance',
+      label: 'Tolerance',
+      default: { type: 'float', value: 0.1 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+  ],
 };
 
 // =============================================================================

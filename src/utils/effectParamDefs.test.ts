@@ -196,6 +196,83 @@ describe('Video Effect Parameters', () => {
       expect(angle).toBeDefined();
     });
   });
+
+  // ===========================================================================
+  // Keying Effects
+  // ===========================================================================
+
+  describe('chroma_key', () => {
+    it('should define key_color, similarity, and blend parameters', () => {
+      const params = VIDEO_EFFECT_PARAM_DEFS.chroma_key;
+      expect(params).toBeDefined();
+      expect(params).toHaveLength(3);
+
+      expect(params.find((p) => p.name === 'key_color')).toBeDefined();
+      expect(params.find((p) => p.name === 'similarity')).toBeDefined();
+      expect(params.find((p) => p.name === 'blend')).toBeDefined();
+    });
+
+    it('should have color inputType for key_color', () => {
+      const params = VIDEO_EFFECT_PARAM_DEFS.chroma_key;
+      const keyColor = params.find((p) => p.name === 'key_color');
+
+      expect(keyColor).toBeDefined();
+      expect(keyColor!.inputType).toBe('color');
+      expect(keyColor!.default.type).toBe('string');
+      expect(keyColor!.default.value).toBe('#00FF00'); // Default green
+    });
+
+    it('should have proper ranges for similarity parameter', () => {
+      const params = VIDEO_EFFECT_PARAM_DEFS.chroma_key;
+      const similarity = params.find((p) => p.name === 'similarity');
+
+      expect(similarity).toBeDefined();
+      expect(similarity!.min).toBe(0);
+      expect(similarity!.max).toBe(1);
+      expect(similarity!.default.value).toBe(0.3);
+    });
+
+    it('should have proper ranges for blend parameter', () => {
+      const params = VIDEO_EFFECT_PARAM_DEFS.chroma_key;
+      const blend = params.find((p) => p.name === 'blend');
+
+      expect(blend).toBeDefined();
+      expect(blend!.min).toBe(0);
+      expect(blend!.max).toBe(1);
+      expect(blend!.default.value).toBe(0.1);
+    });
+  });
+
+  describe('luma_key', () => {
+    it('should define threshold and tolerance parameters', () => {
+      const params = VIDEO_EFFECT_PARAM_DEFS.luma_key;
+      expect(params).toBeDefined();
+      expect(params).toHaveLength(2);
+
+      expect(params.find((p) => p.name === 'threshold')).toBeDefined();
+      expect(params.find((p) => p.name === 'tolerance')).toBeDefined();
+    });
+
+    it('should have proper ranges for threshold', () => {
+      const params = VIDEO_EFFECT_PARAM_DEFS.luma_key;
+      const threshold = params.find((p) => p.name === 'threshold');
+
+      expect(threshold).toBeDefined();
+      expect(threshold!.min).toBe(0);
+      expect(threshold!.max).toBe(1);
+      expect(threshold!.default.value).toBe(0.1);
+    });
+
+    it('should have proper ranges for tolerance', () => {
+      const params = VIDEO_EFFECT_PARAM_DEFS.luma_key;
+      const tolerance = params.find((p) => p.name === 'tolerance');
+
+      expect(tolerance).toBeDefined();
+      expect(tolerance!.min).toBe(0);
+      expect(tolerance!.max).toBe(1);
+      expect(tolerance!.default.value).toBe(0.1);
+    });
+  });
 });
 
 // =============================================================================
