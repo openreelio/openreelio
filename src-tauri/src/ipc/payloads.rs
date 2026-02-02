@@ -1,6 +1,6 @@
 use crate::core::effects::{EffectType, ParamValue};
 use crate::core::text::TextClipData;
-use crate::core::timeline::Transform;
+use crate::core::timeline::{BlendMode, Transform};
 use crate::core::{AssetId, BinId, ClipId, EffectId, SequenceId, TimeSec, TrackId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -44,6 +44,14 @@ pub struct MoveClipPayload {
     pub new_timeline_in: TimeSec,
     #[serde(alias = "newTrackId")]
     pub new_track_id: Option<TrackId>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetTrackBlendModePayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub blend_mode: BlendMode,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -334,6 +342,9 @@ pub enum CommandPayload {
     #[serde(alias = "setClipTransform", alias = "SetClipTransform")]
     SetClipTransform(SetClipTransformPayload),
 
+    #[serde(alias = "setTrackBlendMode", alias = "SetTrackBlendMode")]
+    SetTrackBlendMode(SetTrackBlendModePayload),
+
     #[serde(alias = "importAsset", alias = "ImportAsset")]
     ImportAsset(ImportAssetPayload),
 
@@ -471,6 +482,34 @@ mod tests {
             parsed.is_ok(),
             "expected SetClipTransform to parse, got: {parsed:?}"
         );
+    }
+
+    #[test]
+    fn parse_set_track_blend_mode_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "blendMode": "multiply",
+        });
+
+        let parsed = CommandPayload::parse("SetTrackBlendMode".to_string(), payload);
+        assert!(
+            matches!(parsed, Ok(CommandPayload::SetTrackBlendMode(_))),
+            "expected SetTrackBlendMode to parse, got: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_set_track_blend_mode_rejects_unknown_fields() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "blendMode": "multiply",
+            "__proto__": { "pollute": true }
+        });
+
+        let parsed = CommandPayload::parse("SetTrackBlendMode".to_string(), payload);
+        assert!(parsed.is_err());
     }
 
     #[test]

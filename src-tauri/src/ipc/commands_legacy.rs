@@ -15,8 +15,9 @@ use crate::core::{
         AddEffectCommand, AddTextClipCommand, CreateBinCommand, CreateSequenceCommand,
         ImportAssetCommand, InsertClipCommand, MoveBinCommand, MoveClipCommand, RemoveAssetCommand,
         RemoveBinCommand, RemoveClipCommand, RemoveEffectCommand, RemoveTextClipCommand,
-        RenameBinCommand, SetBinColorCommand, SetClipTransformCommand, SplitClipCommand,
-        TrimClipCommand, UpdateAssetCommand, UpdateEffectCommand, UpdateTextCommand,
+        RenameBinCommand, SetBinColorCommand, SetClipTransformCommand, SetTrackBlendModeCommand,
+        SplitClipCommand, TrimClipCommand, UpdateAssetCommand, UpdateEffectCommand,
+        UpdateTextCommand,
     },
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
     fs::{
@@ -1357,6 +1358,11 @@ pub async fn execute_command(
             &p.clip_id,
             p.transform,
         )),
+        CommandPayload::SetTrackBlendMode(p) => Box::new(SetTrackBlendModeCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            p.blend_mode,
+        )),
         CommandPayload::UpdateCaption(p) => Box::new(
             crate::core::commands::UpdateCaptionCommand::new(
                 &p.sequence_id,
@@ -2252,6 +2258,11 @@ pub async fn apply_edit_script(
                 &p.track_id,
                 &p.clip_id,
                 p.transform,
+            )),
+            CommandPayload::SetTrackBlendMode(p) => Box::new(SetTrackBlendModeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.blend_mode,
             )),
             CommandPayload::ImportAsset(p) => Box::new(ImportAssetCommand::new(&p.name, &p.uri)),
             CommandPayload::RemoveAsset(p) => Box::new(RemoveAssetCommand::new(&p.asset_id)),
