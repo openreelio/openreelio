@@ -339,22 +339,12 @@ export function ErrorOverlay({
   const titleId = useId();
   const descId = useId();
 
-  // Early return if no error
-  if (!error) {
-    return null;
-  }
-
-  // Categorize error
-  const category = categorizeError(error);
-  const displayTitle = title ?? getErrorTitle(category);
-  const suggestion = getRecoverySuggestion(category);
-
   // Critical errors cannot be dismissed
-  const canDismiss = severity !== 'critical' && onDismiss;
+  const canDismiss = severity !== 'critical' && !!onDismiss;
 
-  // Handle escape key
+  // Handle escape key - must be before early return to satisfy React hook rules
   useEffect(() => {
-    if (!canDismiss) return;
+    if (!error || !canDismiss) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -364,12 +354,22 @@ export function ErrorOverlay({
 
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [canDismiss, onDismiss]);
+  }, [error, canDismiss, onDismiss]);
 
-  // Handle reload for critical errors
+  // Handle reload for critical errors - must be before early return
   const handleReload = useCallback(() => {
     window.location.reload();
   }, []);
+
+  // Early return if no error
+  if (!error) {
+    return null;
+  }
+
+  // Categorize error
+  const category = categorizeError(error);
+  const displayTitle = title ?? getErrorTitle(category);
+  const suggestion = getRecoverySuggestion(category);
 
   return (
     <div style={styles.overlay}>
