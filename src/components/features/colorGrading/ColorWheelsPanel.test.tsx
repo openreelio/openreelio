@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ColorWheelsPanel } from './ColorWheelsPanel';
 import type { LiftGammaGain } from '@/utils/colorWheel';
@@ -93,15 +93,36 @@ describe('ColorWheelsPanel', () => {
       const onChange = vi.fn();
       render(<ColorWheelsPanel {...defaultProps} onChange={onChange} />);
 
-      // The panel should handle individual wheel changes
-      // by updating only the relevant part of the LGG object
-      const liftResetButton = screen
-        .getAllByRole('button', { name: /reset/i })
-        .find((btn) => btn.closest('[class*="flex-col"]')?.textContent?.includes('Lift'));
+      const rectSpy = vi
+        .spyOn(HTMLCanvasElement.prototype, 'getBoundingClientRect')
+        .mockReturnValue({
+          left: 0,
+          top: 0,
+          width: 150,
+          height: 150,
+          right: 150,
+          bottom: 150,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        } as DOMRect);
 
-      // Verify lift wheel exists
-      expect(screen.getByText('Lift')).toBeInTheDocument();
-      expect(liftResetButton).toBeDefined();
+      try {
+        const liftCanvas = screen.getByLabelText('Lift color wheel');
+
+        // Click near the right edge of the wheel (should produce a non-neutral offset)
+        fireEvent.mouseDown(liftCanvas, { clientX: 140, clientY: 75 });
+
+        expect(onChange).toHaveBeenCalled();
+        const [nextLGG] = onChange.mock.calls[0] as [LiftGammaGain];
+
+        // Only lift should change; gamma and gain should remain the same references.
+        expect(nextLGG.lift).not.toBe(defaultLGG.lift);
+        expect(nextLGG.gamma).toBe(defaultLGG.gamma);
+        expect(nextLGG.gain).toBe(defaultLGG.gain);
+      } finally {
+        rectSpy.mockRestore();
+      }
     });
   });
 
