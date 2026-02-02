@@ -16,7 +16,7 @@ export default defineConfig(({ mode }) => {
   );
   const vitestMaxOldSpaceSizeMb = Math.max(
     1024,
-    Number(process.env.VITEST_MAX_OLD_SPACE_SIZE ?? '8192')
+    Number(process.env.VITEST_MAX_OLD_SPACE_SIZE ?? '4096')
   );
   const analyzePlugins =
     mode === 'analyze'
@@ -46,6 +46,9 @@ export default defineConfig(({ mode }) => {
       // Ensure each test file has an isolated module graph so long-running runs
       // don't retain module-level caches indefinitely.
       isolate: true,
+      // Timeout settings to prevent CI hangs
+      testTimeout: 30000, // 30 seconds per test
+      hookTimeout: 30000, // 30 seconds for hooks
       setupFiles: ['./src/test/setup.ts'],
       include: ['src/**/*.{test,spec}.{ts,tsx}', 'scripts/**/*.test.ts'],
       // Large jsdom-heavy test suites can exceed the default Node heap
