@@ -388,7 +388,7 @@ export const useRenderQueueStore = create<RenderQueueStore>()(
 
           // Remove jobs older than max age
           const recentFinished = finishedJobs.filter(
-            (j) => !j.completedAt || now - j.completedAt < COMPLETED_JOB_MAX_AGE_MS
+            (j) => j.completedAt && now - j.completedAt < COMPLETED_JOB_MAX_AGE_MS
           );
 
           // Keep only the most recent completed jobs
