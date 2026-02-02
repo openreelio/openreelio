@@ -435,3 +435,46 @@ export type {
 } from './useAudioMixer';
 
 export { useBinOperations } from './useBinOperations';
+
+export {
+  KeyboardScopeProvider,
+  useKeyboardScope,
+  useRegisterShortcuts,
+  useScopedKeyHandler,
+  useIsShortcutsActive,
+  useCurrentScopeId,
+  SCOPE_PRIORITY,
+} from './useKeyboardScope';
+export type {
+  ShortcutHandler,
+  KeyboardScope,
+  ShortcutOptions,
+  ScopePriorityLevel,
+  KeyboardScopeContextValue,
+} from './useKeyboardScope';
+
+export { useModalKeyboardScope } from './useModalKeyboardScope';
+export type {
+  UseModalKeyboardScopeOptions,
+  UseModalKeyboardScopeReturn,
+} from './useModalKeyboardScope';
+
+export { useColorWheels } from './useColorWheels';
+export type {
+  WheelLuminance,
+  UseColorWheelsOptions,
+  UseColorWheelsReturn,
+} from './useColorWheels';
+
+export { useMulticam } from './useMulticam';
+export type {
+  GridLayout,
+  UseMulticamOptions,
+  UseMulticamReturn,
+} from './useMulticam';
+
+export { useBlendMode } from './useBlendMode';
+export type {
+  VideoTrackInfo,
+  UseBlendModeReturn,
+} from './useBlendMode';

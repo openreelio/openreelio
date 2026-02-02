@@ -21,3 +21,16 @@ export {
   SearchErrorBoundary,
   ExportErrorBoundary,
 } from './FeatureErrorBoundaries';
+
+export {
+  ErrorOverlay,
+  useErrorOverlay,
+  categorizeError,
+} from './ErrorOverlay';
+export type {
+  ErrorSeverity,
+  ErrorCategory,
+  ErrorOverlayProps,
+  UseErrorOverlayOptions,
+  ErrorState,
+} from './ErrorOverlay';

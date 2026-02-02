@@ -85,6 +85,41 @@ export type {
   AIContext,
 } from './aiStore';
 
+export {
+  useModalStore,
+  isModalType,
+  getModalPayload,
+  getModalInfo,
+  useOpenModal,
+  useCloseModal,
+  useIsModalOpen,
+  useCurrentModal,
+} from './modalStore';
+export type {
+  ModalState,
+  OpenableModal,
+  ModalStore,
+} from './modalStore';
+
+export {
+  useRenderQueueStore,
+  usePendingRenderJobs,
+  useActiveRenderJobs,
+  useRenderQueueStats,
+  useRenderJob,
+} from './renderQueueStore';
+export type {
+  RenderJobType,
+  RenderJobStatus,
+  RenderPhase,
+  RenderPriority,
+  RenderProgress,
+  RenderResult,
+  RenderJob,
+  QueueStats,
+  RenderQueueStore,
+} from './renderQueueStore';
+
 // =============================================================================
 // Global Store Reset
 // =============================================================================
@@ -99,6 +134,8 @@ import { useAnnotationStore } from './annotationStore';
 import { useBinStore } from './binStore';
 import { useEditorToolStore } from './editorToolStore';
 import { useAudioMixerStore } from './audioMixerStore';
+import { useModalStore } from './modalStore';
+import { useRenderQueueStore } from './renderQueueStore';
 
 /**
  * Reset all project-related stores to their initial state.
@@ -116,6 +153,8 @@ export function resetProjectStores(): void {
   useBinStore.getState().reset();
   useEditorToolStore.getState().reset();
   useAudioMixerStore.getState().reset();
+  useModalStore.getState().closeModal();
+  useRenderQueueStore.getState().clearAll();
 
   logger.info('All project stores reset');
 }
