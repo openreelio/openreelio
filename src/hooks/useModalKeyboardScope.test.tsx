@@ -12,11 +12,7 @@ import { useModalStore } from '@/stores/modalStore';
 import { useModalKeyboardScope } from './useModalKeyboardScope';
 
 // Test component that uses both modal store and keyboard scope
-function TestComponent({
-  onEscape,
-}: {
-  onEscape?: () => void;
-}) {
+function TestComponent({ onEscape }: { onEscape?: () => void }) {
   useModalKeyboardScope({ onEscape });
 
   return (
@@ -221,3 +217,4 @@ describe('useModalKeyboardScope', () => {
     });
   });
 });
+

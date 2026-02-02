@@ -19,6 +19,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -220,12 +221,15 @@ export function KeyboardScopeProvider({ children }: { children: ReactNode }) {
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [getActiveScope]);
 
-  const contextValue: KeyboardScopeContextValue = {
-    registerScope,
-    unregisterScope,
-    getActiveScope,
-    _forceUpdate: forceUpdate,
-  };
+  const contextValue: KeyboardScopeContextValue = useMemo(
+    () => ({
+      registerScope,
+      unregisterScope,
+      getActiveScope,
+      _forceUpdate: forceUpdate,
+    }),
+    [forceUpdate, getActiveScope, registerScope, unregisterScope]
+  );
 
   return (
     <KeyboardScopeContext.Provider value={contextValue}>
