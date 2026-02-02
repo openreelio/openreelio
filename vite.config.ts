@@ -55,6 +55,7 @@ export default defineConfig(({ mode }) => {
       // Timeout settings to prevent CI hangs
       testTimeout: 30000, // 30 seconds per test
       hookTimeout: 30000, // 30 seconds for hooks
+      teardownTimeout: 10000, // 10 seconds for teardown - prevents hangs during cleanup
       setupFiles: ['./src/test/setup.ts'],
       include: ['src/**/*.{test,spec}.{ts,tsx}', 'scripts/**/*.test.ts'],
       // Large jsdom-heavy test suites can exceed the default Node heap

@@ -6,6 +6,7 @@
 
 import { vi, beforeEach, afterEach } from 'vitest';
 import '@testing-library/jest-dom';
+import { cleanup } from '@testing-library/react';
 
 // =============================================================================
 // Tauri API Mocks
@@ -33,7 +34,10 @@ beforeEach(() => {
 
 // Clean up after each test
 afterEach(() => {
+  cleanup();
   vi.restoreAllMocks();
+  // Ensure real timers are restored to prevent timer-related hangs
+  vi.useRealTimers();
 });
 
 // =============================================================================
