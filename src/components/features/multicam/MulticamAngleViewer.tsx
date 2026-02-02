@@ -118,7 +118,9 @@ export function MulticamAngleViewer({
     );
   }
 
-  const maxAngles = gridLayout.rows * gridLayout.cols;
+  const safeRows = Math.max(1, gridLayout.rows);
+  const safeCols = Math.max(1, gridLayout.cols);
+  const maxAngles = safeRows * safeCols;
   const visibleAngles = group.angles.slice(0, maxAngles);
 
   return (
@@ -144,10 +146,10 @@ export function MulticamAngleViewer({
       {/* Angle grid */}
       <div
         data-testid="multicam-grid"
-        className={`grid gap-1 h-full grid-cols-${gridLayout.cols} grid-rows-${gridLayout.rows}`}
+        className="grid gap-1 h-full"
         style={{
-          gridTemplateColumns: `repeat(${gridLayout.cols}, 1fr)`,
-          gridTemplateRows: `repeat(${gridLayout.rows}, 1fr)`,
+          gridTemplateColumns: `repeat(${safeCols}, 1fr)`,
+          gridTemplateRows: `repeat(${safeRows}, 1fr)`,
         }}
       >
         {visibleAngles.map((angle, index) => {

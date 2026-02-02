@@ -72,8 +72,10 @@ describe('MulticamAngleViewer', () => {
       render(<MulticamAngleViewer {...defaultProps} />);
 
       const grid = screen.getByTestId('multicam-grid');
-      expect(grid).toHaveClass('grid-cols-2');
-      expect(grid).toHaveClass('grid-rows-2');
+      expect(grid).toHaveStyle({
+        gridTemplateColumns: 'repeat(2, 1fr)',
+        gridTemplateRows: 'repeat(2, 1fr)',
+      });
     });
 
     it('should render with custom grid layout', () => {
@@ -85,8 +87,29 @@ describe('MulticamAngleViewer', () => {
       );
 
       const grid = screen.getByTestId('multicam-grid');
-      expect(grid).toHaveClass('grid-cols-4');
-      expect(grid).toHaveClass('grid-rows-1');
+      expect(grid).toHaveStyle({
+        gridTemplateColumns: 'repeat(4, 1fr)',
+        gridTemplateRows: 'repeat(1, 1fr)',
+      });
+    });
+
+    it('should clamp invalid grid dimensions to minimum 1x1', () => {
+      render(
+        <MulticamAngleViewer
+          {...defaultProps}
+          gridLayout={{ rows: 0, cols: 0 }}
+        />
+      );
+
+      // With 1x1 clamping, only the first angle should be visible.
+      expect(screen.getByText('Camera 1')).toBeInTheDocument();
+      expect(screen.queryByText('Camera 2')).not.toBeInTheDocument();
+
+      const grid = screen.getByTestId('multicam-grid');
+      expect(grid).toHaveStyle({
+        gridTemplateColumns: 'repeat(1, 1fr)',
+        gridTemplateRows: 'repeat(1, 1fr)',
+      });
     });
   });
 
