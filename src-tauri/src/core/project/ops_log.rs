@@ -36,6 +36,7 @@ pub enum OpKind {
     TrackAdd,
     TrackRemove,
     TrackReorder,
+    TrackUpdate,
 
     // Effect operations
     EffectAdd,

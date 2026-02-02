@@ -305,6 +305,55 @@ impl CommandExecutor {
                 }))
             }
 
+            OpKind::TrackUpdate => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("TrackUpdate payload missing sequenceId".to_string())
+                })?;
+                let track_id = get_str(&command_json, "trackId").ok_or_else(|| {
+                    CoreError::Internal("TrackUpdate payload missing trackId".to_string())
+                })?;
+
+                // Normalize rename payload to a stable key ("name"). Older commands may use "newName".
+                let name = command_json
+                    .get("name")
+                    .cloned()
+                    .or_else(|| command_json.get("newName").cloned())
+                    .unwrap_or(serde_json::Value::Null);
+
+                // Optional track properties. Keep them present as Null for forward-compatible no-ops.
+                let blend_mode = command_json
+                    .get("blendMode")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let muted = command_json
+                    .get("muted")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let locked = command_json
+                    .get("locked")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let visible = command_json
+                    .get("visible")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+                let volume = command_json
+                    .get("volume")
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "name": name,
+                    "blendMode": blend_mode,
+                    "muted": muted,
+                    "locked": locked,
+                    "visible": visible,
+                    "volume": volume,
+                }))
+            }
+
             OpKind::ClipAdd => {
                 let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
                     CoreError::Internal("ClipAdd payload missing sequenceId".to_string())
@@ -646,6 +695,7 @@ impl CommandExecutor {
             "AddTrack" | "InsertTrack" => OpKind::TrackAdd,
             "RemoveTrack" | "DeleteTrack" => OpKind::TrackRemove,
             "ReorderTracks" => OpKind::TrackReorder,
+            "RenameTrack" | "SetTrackBlendMode" | "UpdateTrack" => OpKind::TrackUpdate,
             "ImportAsset" | "AddAsset" => OpKind::AssetImport,
             "RemoveAsset" | "DeleteAsset" => OpKind::AssetRemove,
             "UpdateAsset" => OpKind::AssetUpdate,
@@ -689,11 +739,11 @@ mod tests {
     use crate::core::assets::{Asset, VideoInfo};
     use crate::core::commands::{
         AddEffectCommand, CreateSequenceCommand, ImportAssetCommand, InsertClipCommand,
-        MoveClipCommand, SplitClipCommand, StateChange, TrimClipCommand,
+        MoveClipCommand, SetTrackBlendModeCommand, SplitClipCommand, StateChange, TrimClipCommand,
     };
     use crate::core::effects::{EffectType, ParamValue};
     use crate::core::project::{OpKind, Operation, OpsLog, ProjectMeta, ProjectState};
-    use crate::core::timeline::{Clip, Sequence, SequenceFormat, Track, TrackKind};
+    use crate::core::timeline::{BlendMode, Clip, Sequence, SequenceFormat, Track, TrackKind};
     use tempfile::TempDir;
 
     // Test command implementation
@@ -907,6 +957,37 @@ mod tests {
         assert_eq!(clip.effects[1], blur_id);
         assert!(replayed.effects.contains_key(&brightness_id));
         assert!(replayed.effects.contains_key(&blur_id));
+    }
+
+    #[test]
+    fn test_executor_persists_track_blend_mode_update_is_replayable() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        // Create a sequence with default tracks via Command (replayable).
+        let create_seq = CreateSequenceCommand::new("Sequence", "1080p");
+        let seq_result = executor.execute(Box::new(create_seq), &mut state).unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].blend_mode,
+            BlendMode::Normal
+        );
+
+        // Apply blend mode update and persist it.
+        let set_blend = SetTrackBlendModeCommand::new(&seq_id, &track_id, BlendMode::Multiply);
+        executor.execute(Box::new(set_blend), &mut state).unwrap();
+
+        // Replay ops log and ensure the track state matches.
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_track = &replayed.sequences[&seq_id].tracks[0];
+        assert_eq!(replayed_track.blend_mode, BlendMode::Multiply);
     }
 
     #[test]
