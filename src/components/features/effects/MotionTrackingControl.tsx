@@ -313,9 +313,10 @@ export function MotionTrackingControl({
             </div>
             <button
               type="button"
-              onClick={onStopTracking}
+              onClick={onStopTracking ? onStopTracking : undefined}
               aria-label="Stop"
-              className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-red-600 hover:bg-red-700 rounded text-sm text-white transition-colors"
+              disabled={!onStopTracking}
+              className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-red-600 hover:bg-red-700 rounded text-sm text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Square size={14} />
               Stop

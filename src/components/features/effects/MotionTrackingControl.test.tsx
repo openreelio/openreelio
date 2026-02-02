@@ -215,6 +215,30 @@ describe('MotionTrackingControl', () => {
 
       expect(screen.getByRole('button', { name: /stop/i })).toBeInTheDocument();
     });
+
+    it('should disable stop button when onStopTracking is not provided', () => {
+      render(<MotionTrackingControl {...defaultProps} isTracking />);
+
+      const stopButton = screen.getByRole('button', { name: /stop/i });
+      expect(stopButton).toBeDisabled();
+    });
+
+    it('should call onStopTracking when stop button is clicked', async () => {
+      const onStopTracking = vi.fn();
+      render(
+        <MotionTrackingControl
+          {...defaultProps}
+          isTracking
+          onStopTracking={onStopTracking}
+        />
+      );
+
+      const stopButton = screen.getByRole('button', { name: /stop/i });
+      expect(stopButton).not.toBeDisabled();
+
+      await userEvent.click(stopButton);
+      expect(onStopTracking).toHaveBeenCalled();
+    });
   });
 
   describe('settings panel', () => {
