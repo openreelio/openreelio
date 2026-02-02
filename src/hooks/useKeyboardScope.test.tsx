@@ -4,7 +4,7 @@
  * Tests for the keyboard scope system with z-index awareness.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { buildKeySignature } from './useKeyboardScope';
 
 // Helper to create keyboard events

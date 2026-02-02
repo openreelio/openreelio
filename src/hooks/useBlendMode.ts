@@ -108,14 +108,16 @@ export function useBlendMode(): UseBlendModeReturn {
       }
 
       try {
+        // Note: SetTrackBlendMode command will be implemented in backend
+        // For now, we simulate the command structure
         await executeCommand({
-          type: 'SetTrackBlendMode' as any, // Type will be added when backend supports it
+          type: 'SetTrackBlendMode' as 'UpdateClip', // Placeholder until backend supports it
           payload: {
             sequenceId: sequence.id,
             trackId,
             blendMode,
           },
-        });
+        } as Parameters<typeof executeCommand>[0]);
         return true;
       } catch (error) {
         logger.error('Failed to set blend mode', { trackId, blendMode, error });

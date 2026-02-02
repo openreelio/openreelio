@@ -50,7 +50,8 @@ export interface MulticamAngleViewerProps {
 
 export function MulticamAngleViewer({
   group,
-  currentTimeSec: _currentTimeSec,
+  // currentTimeSec is received for future thumbnail frame selection
+  currentTimeSec: _currentTimeSec = 0,
   onAngleSwitch,
   gridLayout = { rows: 2, cols: 2 },
   disabled = false,
@@ -58,6 +59,8 @@ export function MulticamAngleViewer({
   renderThumbnail,
   className = '',
 }: MulticamAngleViewerProps) {
+  // Suppress unused variable warning - will be used for frame-accurate thumbnails
+  void _currentTimeSec;
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
 
   // Handle angle click
