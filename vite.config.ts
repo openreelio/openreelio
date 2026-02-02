@@ -10,6 +10,14 @@ const rootDir = fileURLToPath(new URL('.', import.meta.url));
 
 export default defineConfig(({ mode }) => {
   const isStressRun = process.env.VITEST_STRESS === '1';
+  const vitestMaxThreads = Math.max(
+    1,
+    Number(process.env.VITEST_MAX_THREADS ?? '2')
+  );
+  const vitestMaxOldSpaceSizeMb = Math.max(
+    1024,
+    Number(process.env.VITEST_MAX_OLD_SPACE_SIZE ?? '8192')
+  );
   const analyzePlugins =
     mode === 'analyze'
       ? [
@@ -34,8 +42,22 @@ export default defineConfig(({ mode }) => {
     test: {
       globals: true,
       environment: 'jsdom',
+      pool: 'forks',
+      // Ensure each test file has an isolated module graph so long-running runs
+      // don't retain module-level caches indefinitely.
+      isolate: true,
       setupFiles: ['./src/test/setup.ts'],
       include: ['src/**/*.{test,spec}.{ts,tsx}', 'scripts/**/*.test.ts'],
+      // Large jsdom-heavy test suites can exceed the default Node heap
+      // when executed with many parallel workers. Keep the default conservative
+      // and allow overriding via VITEST_MAX_THREADS.
+      poolOptions: {
+        forks: {
+          minForks: 1,
+          maxForks: vitestMaxThreads,
+          execArgv: [`--max-old-space-size=${vitestMaxOldSpaceSizeMb}`],
+        },
+      },
       exclude: isStressRun
         ? ['src/**/*.bench.test.{ts,tsx}']
         : ['src/**/*.bench.test.{ts,tsx}', 'src/**/*.stress.test.{ts,tsx}'],
