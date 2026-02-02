@@ -45,21 +45,30 @@ export default defineConfig(({ mode }) => {
     // Vitest configuration
     test: {
       globals: true,
-      environment: 'jsdom',
+      // Use happy-dom in CI (5-10x faster, much lower memory), jsdom locally for compatibility
+      environment: isCI ? 'happy-dom' : 'jsdom',
       pool: 'forks',
       // Ensure each test file has an isolated module graph so long-running runs
       // don't retain module-level caches indefinitely.
       isolate: true,
       // Disable file parallelism in CI to reduce memory pressure
       fileParallelism: !isCI,
+      // Run tests sequentially in CI to prevent memory accumulation
+      sequence: {
+        concurrent: !isCI,
+      },
+      // Aggressively clean up mocks to prevent memory leaks
+      restoreMocks: true,
+      clearMocks: true,
+      unstubEnvs: true,
+      unstubGlobals: true,
       // Timeout settings to prevent CI hangs
       testTimeout: 30000, // 30 seconds per test
       hookTimeout: 30000, // 30 seconds for hooks
       setupFiles: ['./src/test/setup.ts'],
       include: ['src/**/*.{test,spec}.{ts,tsx}', 'scripts/**/*.test.ts'],
-      // Large jsdom-heavy test suites can exceed the default Node heap
-      // when executed with many parallel workers. Keep the default conservative
-      // and allow overriding via VITEST_MAX_THREADS.
+      // Large test suites can exceed the default Node heap
+      // when executed with many parallel workers.
       poolOptions: {
         forks: {
           minForks: 1,

@@ -53,6 +53,7 @@
     "eslint": "^9.0.0",
     "eslint-plugin-react-hooks": "^5.0.0",
     "eslint-plugin-react-refresh": "^0.4.0",
+    "happy-dom": "^17.4.4",
     "husky": "^9.1.7",
     "jsdom": "^27.4.0",
     "postcss": "^8.4.0",
