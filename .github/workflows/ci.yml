@@ -90,14 +90,7 @@ jobs:
         run: npm ci
 
       - name: Run tests (shard ${{ matrix.shard }}/12)
-        run: npm test -- run --reporter=verbose --shard=${{ matrix.shard }}/12
-
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        if: always()
-        with:
-          flags: frontend-shard-${{ matrix.shard }}
-          fail_ci_if_error: false
+        run: npm test -- run --reporter=verbose --shard=${{ matrix.shard }}/12 --no-coverage
 
   # ==========================================================================
   # Rust Tests
