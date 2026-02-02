@@ -50,6 +50,8 @@ export default defineConfig(({ mode }) => {
       // Ensure each test file has an isolated module graph so long-running runs
       // don't retain module-level caches indefinitely.
       isolate: true,
+      // Disable file parallelism in CI to reduce memory pressure
+      fileParallelism: !isCI,
       // Timeout settings to prevent CI hangs
       testTimeout: 30000, // 30 seconds per test
       hookTimeout: 30000, // 30 seconds for hooks

@@ -64,11 +64,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
 
     env:
-      # Single fork with 3GB heap to stay within runner's 7GB RAM limit
-      NODE_OPTIONS: '--max-old-space-size=3072'
+      # Single fork with 2GB heap - conservative for CI stability
+      NODE_OPTIONS: '--max-old-space-size=2048'
       VITEST_MAX_FORKS: '1'
 
     steps:
@@ -84,8 +84,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Run tests (shard ${{ matrix.shard }}/8)
-        run: npm test -- run --reporter=verbose --shard=${{ matrix.shard }}/8
+      - name: Run tests (shard ${{ matrix.shard }}/12)
+        run: npm test -- run --reporter=verbose --shard=${{ matrix.shard }}/12
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
