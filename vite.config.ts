@@ -11,14 +11,16 @@ const rootDir = fileURLToPath(new URL('.', import.meta.url));
 export default defineConfig(({ mode }) => {
   const isStressRun = process.env.VITEST_STRESS === '1';
   const isCI = process.env.CI === 'true';
-  // Use fewer threads and less memory in CI to prevent OOM
-  const vitestMaxThreads = Math.max(
+  // CI runners (GitHub Actions ubuntu-latest) have ~7GB RAM.
+  // Using multiple forks with large heaps causes OOM.
+  // Strategy: CI uses single fork with moderate heap, local dev uses 2 forks.
+  const vitestMaxForks = Math.max(
     1,
-    Number(process.env.VITEST_MAX_THREADS ?? (isCI ? '1' : '2'))
+    Number(process.env.VITEST_MAX_FORKS ?? (isCI ? '1' : '2'))
   );
   const vitestMaxOldSpaceSizeMb = Math.max(
     1024,
-    Number(process.env.VITEST_MAX_OLD_SPACE_SIZE ?? (isCI ? '2048' : '4096'))
+    Number(process.env.VITEST_MAX_OLD_SPACE_SIZE ?? (isCI ? '3072' : '4096'))
   );
   const analyzePlugins =
     mode === 'analyze'
@@ -59,7 +61,7 @@ export default defineConfig(({ mode }) => {
       poolOptions: {
         forks: {
           minForks: 1,
-          maxForks: vitestMaxThreads,
+          maxForks: vitestMaxForks,
           execArgv: [`--max-old-space-size=${vitestMaxOldSpaceSizeMb}`],
         },
       },
