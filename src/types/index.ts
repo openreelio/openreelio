@@ -652,6 +652,7 @@ export type CommandType =
   | 'SetSequenceFormat'
   | 'CreateTrack'
   | 'DeleteTrack'
+  | 'SetTrackBlendMode'
   | 'ToggleTrackMute'
   | 'ToggleTrackLock'
   | 'ToggleTrackVisibility'

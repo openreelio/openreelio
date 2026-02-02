@@ -24,7 +24,6 @@ vi.mock('@/stores/projectStore', () => ({
             kind: 'video',
             name: 'Video 1',
             clips: [],
-            blendMode: 'normal',
             muted: false,
             locked: false,
             visible: true,

@@ -60,7 +60,7 @@ export function useBlendMode(): UseBlendModeReturn {
     (trackId: string): Track | undefined => {
       return tracks.find((track) => track.id === trackId);
     },
-    [tracks]
+    [tracks],
   );
 
   // Get the blend mode for a track
@@ -69,7 +69,7 @@ export function useBlendMode(): UseBlendModeReturn {
       const track = getTrack(trackId);
       return track?.blendMode ?? DEFAULT_BLEND_MODE;
     },
-    [getTrack]
+    [getTrack],
   );
 
   // Check if a track is a video track
@@ -78,7 +78,7 @@ export function useBlendMode(): UseBlendModeReturn {
       const track = getTrack(trackId);
       return track?.kind === 'video' || track?.kind === 'overlay';
     },
-    [getTrack]
+    [getTrack],
   );
 
   // Check if blend mode can be changed
@@ -89,7 +89,7 @@ export function useBlendMode(): UseBlendModeReturn {
       if (track.locked) return false;
       return track.kind === 'video' || track.kind === 'overlay';
     },
-    [getTrack]
+    [getTrack],
   );
 
   // Set the blend mode for a track
@@ -108,23 +108,21 @@ export function useBlendMode(): UseBlendModeReturn {
       }
 
       try {
-        // Note: SetTrackBlendMode command will be implemented in backend
-        // For now, we simulate the command structure
         await executeCommand({
-          type: 'SetTrackBlendMode' as 'UpdateClip', // Placeholder until backend supports it
+          type: 'SetTrackBlendMode',
           payload: {
             sequenceId: sequence.id,
             trackId,
             blendMode,
           },
-        } as Parameters<typeof executeCommand>[0]);
+        });
         return true;
       } catch (error) {
         logger.error('Failed to set blend mode', { trackId, blendMode, error });
         return false;
       }
     },
-    [executeCommand, getActiveSequence, getBlendMode]
+    [executeCommand, getActiveSequence, getBlendMode],
   );
 
   // Reset blend mode to default
@@ -132,7 +130,7 @@ export function useBlendMode(): UseBlendModeReturn {
     async (trackId: string): Promise<boolean> => {
       return setBlendMode(trackId, DEFAULT_BLEND_MODE);
     },
-    [setBlendMode]
+    [setBlendMode],
   );
 
   // Get all video tracks with their blend modes
@@ -142,7 +140,7 @@ export function useBlendMode(): UseBlendModeReturn {
       .map((track) => ({
         id: track.id,
         name: track.name,
-        blendMode: track.blendMode,
+        blendMode: track.blendMode ?? DEFAULT_BLEND_MODE,
         locked: track.locked,
       }));
   }, [tracks]);
