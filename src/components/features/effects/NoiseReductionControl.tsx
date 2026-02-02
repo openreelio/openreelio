@@ -181,13 +181,14 @@ export function NoiseReductionControl({
               className="absolute z-50 mt-1 w-full bg-zinc-800 border border-zinc-600 rounded shadow-lg py-1"
             >
               {ALL_NOISE_REDUCTION_ALGORITHMS.map((algo) => (
-                <div
+                <button
                   key={algo}
+                  type="button"
                   role="option"
                   aria-selected={settings.algorithm === algo}
                   onClick={() => handleAlgorithmChange(algo)}
                   className={`
-                    px-3 py-1.5 text-sm cursor-pointer
+                    w-full text-left px-3 py-1.5 text-sm cursor-pointer
                     ${settings.algorithm === algo
                       ? 'bg-blue-600 text-white'
                       : 'text-zinc-200 hover:bg-zinc-700'}
@@ -195,7 +196,7 @@ export function NoiseReductionControl({
                   `}
                 >
                   {getNoiseReductionAlgorithmLabel(algo)}
-                </div>
+                </button>
               ))}
             </div>
           )}
