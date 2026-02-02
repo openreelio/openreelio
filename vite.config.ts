@@ -10,13 +10,15 @@ const rootDir = fileURLToPath(new URL('.', import.meta.url));
 
 export default defineConfig(({ mode }) => {
   const isStressRun = process.env.VITEST_STRESS === '1';
+  const isCI = process.env.CI === 'true';
+  // Use fewer threads and less memory in CI to prevent OOM
   const vitestMaxThreads = Math.max(
     1,
-    Number(process.env.VITEST_MAX_THREADS ?? '2')
+    Number(process.env.VITEST_MAX_THREADS ?? (isCI ? '1' : '2'))
   );
   const vitestMaxOldSpaceSizeMb = Math.max(
     1024,
-    Number(process.env.VITEST_MAX_OLD_SPACE_SIZE ?? '4096')
+    Number(process.env.VITEST_MAX_OLD_SPACE_SIZE ?? (isCI ? '2048' : '4096'))
   );
   const analyzePlugins =
     mode === 'analyze'
