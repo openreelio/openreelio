@@ -53,7 +53,8 @@ describe('audioMixerStore', () => {
       expect(trackState?.volumeDb).toBe(0);
       expect(trackState?.pan).toBe(0);
       expect(trackState?.muted).toBe(false);
-      expect(trackState?.soloed).toBe(false);
+      // Solo state is tracked in soloedTrackIds Set, not in trackState
+      expect(useAudioMixerStore.getState().soloedTrackIds.has('track-1')).toBe(false);
       expect(trackState?.levels).toEqual({ left: -60, right: -60 });
     });
 
@@ -182,7 +183,6 @@ describe('audioMixerStore', () => {
 
       const state = useAudioMixerStore.getState();
       expect(state.soloedTrackIds.has('track-1')).toBe(true);
-      expect(state.trackStates.get('track-1')?.soloed).toBe(true);
     });
 
     it('should remove track from soloed set when toggled again', () => {
@@ -194,7 +194,6 @@ describe('audioMixerStore', () => {
 
       const state = useAudioMixerStore.getState();
       expect(state.soloedTrackIds.has('track-1')).toBe(false);
-      expect(state.trackStates.get('track-1')?.soloed).toBe(false);
     });
 
     it('should allow multiple soloed tracks (additive solo)', () => {
@@ -224,8 +223,8 @@ describe('audioMixerStore', () => {
 
       const state = useAudioMixerStore.getState();
       expect(state.soloedTrackIds.size).toBe(0);
-      expect(state.trackStates.get('track-1')?.soloed).toBe(false);
-      expect(state.trackStates.get('track-2')?.soloed).toBe(false);
+      expect(state.soloedTrackIds.has('track-1')).toBe(false);
+      expect(state.soloedTrackIds.has('track-2')).toBe(false);
     });
   });
 

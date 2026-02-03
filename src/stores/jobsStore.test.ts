@@ -6,7 +6,13 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { useJobsStore } from './jobsStore';
+import {
+  useJobsStore,
+  selectPendingJobs,
+  selectRunningJobs,
+  selectCompletedJobs,
+  selectFailedJobs,
+} from './jobsStore';
 
 // =============================================================================
 // Test Setup
@@ -594,40 +600,40 @@ describe('jobsStore', () => {
       updateJobStatus('failed_1', 'failed');
     });
 
-    describe('pendingJobs', () => {
+    describe('selectPendingJobs', () => {
       it('should return only pending jobs', () => {
-        const { pendingJobs } = useJobsStore.getState();
-        const pending = pendingJobs();
+        const state = useJobsStore.getState();
+        const pending = selectPendingJobs(state);
 
         expect(pending.length).toBe(2);
         expect(pending.every((j) => j.status === 'pending')).toBe(true);
       });
     });
 
-    describe('runningJobs', () => {
+    describe('selectRunningJobs', () => {
       it('should return only running jobs', () => {
-        const { runningJobs } = useJobsStore.getState();
-        const running = runningJobs();
+        const state = useJobsStore.getState();
+        const running = selectRunningJobs(state);
 
         expect(running.length).toBe(1);
         expect(running[0].id).toBe('running_1');
       });
     });
 
-    describe('completedJobs', () => {
+    describe('selectCompletedJobs', () => {
       it('should return only completed jobs', () => {
-        const { completedJobs } = useJobsStore.getState();
-        const completed = completedJobs();
+        const state = useJobsStore.getState();
+        const completed = selectCompletedJobs(state);
 
         expect(completed.length).toBe(1);
         expect(completed[0].id).toBe('completed_1');
       });
     });
 
-    describe('failedJobs', () => {
+    describe('selectFailedJobs', () => {
       it('should return only failed jobs', () => {
-        const { failedJobs } = useJobsStore.getState();
-        const failed = failedJobs();
+        const state = useJobsStore.getState();
+        const failed = selectFailedJobs(state);
 
         expect(failed.length).toBe(1);
         expect(failed[0].id).toBe('failed_1');
