@@ -182,7 +182,7 @@ describe('useTimelineNavigation', () => {
       expect(setScrollX).toHaveBeenCalledWith(120); // 100 + 20 (deltaY only)
     });
 
-    it('should not trigger zoom or scroll without modifier keys', () => {
+    it('should scroll horizontally without modifier keys', () => {
       const { result } = renderHook(() =>
         useTimelineNavigation({
           scrollX: 100,
@@ -202,10 +202,10 @@ describe('useTimelineNavigation', () => {
         result.current.handleWheel(event);
       });
 
-      expect(event.preventDefault).not.toHaveBeenCalled();
+      expect(event.preventDefault).toHaveBeenCalled();
       expect(zoomIn).not.toHaveBeenCalled();
       expect(zoomOut).not.toHaveBeenCalled();
-      expect(setScrollX).not.toHaveBeenCalled();
+      expect(setScrollX).toHaveBeenCalledWith(150);
     });
   });
 
