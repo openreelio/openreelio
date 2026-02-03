@@ -398,7 +398,6 @@ describe('TrackMixerState type', () => {
       volumeDb: 0,
       pan: 0,
       muted: false,
-      soloed: false,
       levels: { left: -60, right: -60 },
     };
 

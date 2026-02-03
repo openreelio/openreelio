@@ -96,6 +96,26 @@ export interface UseMaskResult {
 // Shape Factories
 // =============================================================================
 
+// =============================================================================
+// Specific Shape Types (for factory return types)
+// =============================================================================
+
+/** Rectangle mask shape with type discriminant */
+export type RectangleMaskShape = Extract<MaskShape, { type: 'rectangle' }>;
+
+/** Ellipse mask shape with type discriminant */
+export type EllipseMaskShape = Extract<MaskShape, { type: 'ellipse' }>;
+
+/** Polygon mask shape with type discriminant */
+export type PolygonMaskShape = Extract<MaskShape, { type: 'polygon' }>;
+
+/** Bezier mask shape with type discriminant */
+export type BezierMaskShape = Extract<MaskShape, { type: 'bezier' }>;
+
+// =============================================================================
+// Shape Factory Functions
+// =============================================================================
+
 /**
  * Creates a rectangle mask shape with default or custom values.
  */
@@ -104,7 +124,7 @@ export function createRectangleMask(
   y = DEFAULT_CENTER_Y,
   width = DEFAULT_RECT_WIDTH,
   height = DEFAULT_RECT_HEIGHT
-): MaskShape {
+): RectangleMaskShape {
   return {
     type: 'rectangle',
     x,
@@ -124,7 +144,7 @@ export function createEllipseMask(
   y = DEFAULT_CENTER_Y,
   radiusX = DEFAULT_ELLIPSE_RADIUS_X,
   radiusY = DEFAULT_ELLIPSE_RADIUS_Y
-): MaskShape {
+): EllipseMaskShape {
   return {
     type: 'ellipse',
     x,
@@ -139,7 +159,7 @@ export function createEllipseMask(
  * Creates a polygon mask shape with provided points.
  * If no points provided, creates a default centered triangle.
  */
-export function createPolygonMask(points?: Point2D[]): MaskShape {
+export function createPolygonMask(points?: Point2D[]): PolygonMaskShape {
   const defaultTriangle: Point2D[] = [
     { x: 0.5, y: 0.3 },
     { x: 0.7, y: 0.7 },
@@ -159,7 +179,7 @@ export function createPolygonMask(points?: Point2D[]): MaskShape {
 export function createBezierMask(
   points?: BezierPoint[],
   closed = true
-): MaskShape {
+): BezierMaskShape {
   const defaultCurve: BezierPoint[] = [
     { anchor: { x: 0.3, y: 0.5 }, handleOut: { x: 0.4, y: 0.2 } },
     { anchor: { x: 0.7, y: 0.5 }, handleIn: { x: 0.6, y: 0.2 } },

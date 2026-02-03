@@ -99,9 +99,6 @@ describe('Timeline', () => {
 
     // Reset timeline store before each test
     useTimelineStore.setState({
-      playhead: 0,
-      isPlaying: false,
-      playbackRate: 1,
       selectedClipIds: [],
       selectedTrackIds: [],
       zoom: 100,

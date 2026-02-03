@@ -49,6 +49,7 @@ interface CategoryDefinition {
 
 const CATEGORY_ICONS: Record<EffectCategory, ReactNode> = {
   color: <Palette className="w-4 h-4" />,
+  advanced_color: <Palette className="w-4 h-4" />,
   transform: <Zap className="w-4 h-4" />,
   blur_sharpen: <Focus className="w-4 h-4" />,
   stylize: <Sparkles className="w-4 h-4" />,
