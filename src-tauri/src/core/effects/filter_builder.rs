@@ -838,135 +838,63 @@ impl Effect {
     // Advanced Color Grading Effect Builders
     // -------------------------------------------------------------------------
 
-    /// Builds FFmpeg filter for HSL-based color adjustment.
+    /// Builds FFmpeg filter for HSL-based selective color correction.
     ///
-    /// **Current Implementation**: Global color adjustment using FFmpeg's `hue` filter.
-    /// The hue_center/hue_width and sat/lum range parameters are stored for future
-    /// selective color implementation but currently do not mask the adjustment.
+    /// This implements true selective color correction where adjustments are
+    /// applied only to pixels matching the HSL qualifier criteria.
     ///
-    /// **Limitation**: True selective color correction (like DaVinci Resolve's Qualifier)
-    /// requires complex filter graphs with `geq` or split/overlay which is planned for
-    /// a future version. The current implementation applies adjustments globally.
+    /// # Selection Parameters
     ///
-    /// # Current Behavior
+    /// - `hue_center`: Center hue in degrees (0-360)
+    /// - `hue_width`: Hue range width in degrees (1-180)
+    /// - `sat_min`/`sat_max`: Saturation range (0.0-1.0)
+    /// - `lum_min`/`lum_max`: Luminance range (0.0-1.0)
+    /// - `softness`: Edge softness (0.0-1.0)
+    /// - `invert`: Invert the selection
     ///
-    /// - `hue_shift`: Rotates all hues by the specified degrees
-    /// - `sat_adjust`: Multiplies saturation globally (1.0 + sat_adjust)
-    /// - `lum_adjust`: Adjusts brightness globally
+    /// # Adjustment Parameters
     ///
-    /// # Future Enhancement (Reserved Parameters)
+    /// - `hue_shift`: Hue rotation to apply (-180 to 180)
+    /// - `sat_adjust`: Saturation adjustment (-1.0 to 1.0)
+    /// - `lum_adjust`: Luminance adjustment (-1.0 to 1.0)
     ///
-    /// The following parameters are stored but not yet used for masking:
-    /// - `hue_center`/`hue_width`: Will define the target hue range
-    /// - `sat_min`/`sat_max`: Will define the saturation qualifier
-    /// - `lum_min`/`lum_max`: Will define the luminance qualifier
-    /// - `softness`: Will control edge feathering
-    /// - `invert`: Will invert the selection mask
+    /// # Implementation
     ///
-    /// # Parameters
-    ///
-    /// - `hue_center`: Center hue in degrees (0-360) - reserved for future
-    /// - `hue_width`: Hue range width in degrees - reserved for future
-    /// - `sat_min`/`sat_max`: Saturation range (0.0-1.0) - reserved for future
-    /// - `lum_min`/`lum_max`: Luminance range (0.0-1.0) - reserved for future
-    /// - `softness`: Edge softness (0.0-1.0) - reserved for future
-    /// - `hue_shift`: Hue rotation to apply (-180 to 180) - **active**
-    /// - `sat_adjust`: Saturation adjustment (-1.0 to 1.0) - **active**
-    /// - `lum_adjust`: Luminance adjustment (-1.0 to 1.0) - **active**
-    /// - `invert`: Invert the selection - reserved for future
+    /// Uses FFmpeg's geq filter to create a per-pixel selection mask based on
+    /// HSL values, then applies adjustments only to selected pixels via overlay.
     fn build_hsl_qualifier_filter(&self) -> String {
-        // Get parameters
-        let hue_center = self
-            .get_float("hue_center")
-            .unwrap_or(120.0)
-            .rem_euclid(360.0);
-        let hue_width = self
-            .get_float("hue_width")
-            .unwrap_or(30.0)
-            .clamp(1.0, 180.0);
-        let sat_min = self.get_float("sat_min").unwrap_or(0.2).clamp(0.0, 1.0);
-        let sat_max = self.get_float("sat_max").unwrap_or(1.0).clamp(0.0, 1.0);
-        let _lum_min = self.get_float("lum_min").unwrap_or(0.0).clamp(0.0, 1.0);
-        let _lum_max = self.get_float("lum_max").unwrap_or(1.0).clamp(0.0, 1.0);
-        let softness = self.get_float("softness").unwrap_or(0.1).clamp(0.0, 1.0);
-        let hue_shift = self
-            .get_float("hue_shift")
-            .unwrap_or(0.0)
-            .clamp(-180.0, 180.0);
-        let sat_adjust = self.get_float("sat_adjust").unwrap_or(0.0).clamp(-1.0, 1.0);
-        let lum_adjust = self.get_float("lum_adjust").unwrap_or(0.0).clamp(-1.0, 1.0);
-        let invert = self.get_bool("invert").unwrap_or(false);
-
-        // If no adjustments, return null filter
-        if hue_shift.abs() < 0.001 && sat_adjust.abs() < 0.001 && lum_adjust.abs() < 0.001 {
-            return "null".to_string();
-        }
-
-        // Calculate hue range bounds
-        let hue_min = (hue_center - hue_width / 2.0).rem_euclid(360.0);
-        let hue_max = (hue_center + hue_width / 2.0).rem_euclid(360.0);
-
-        // Softness factor for smooth transitions (0.0 = hard, 1.0 = very soft)
-        // Reserved for future advanced HSL qualifying with geq filter
-        let _soft_factor = softness * hue_width / 2.0;
-
-        // Build the filter using hue filter with expressions
-        // The hue filter uses h for hue shift (in degrees) and s for saturation multiplier
-        // We use expressions that evaluate based on input hue
-
-        // For wrap-around hue ranges (e.g., 350-10 degrees includes red)
-        // Reserved for future advanced HSL qualifying with enable expressions
-        let _hue_condition = if hue_min > hue_max {
-            // Wrap-around case (e.g., red hues around 0/360)
-            format!(
-                "if(gte(H,{:.1})*lte(H,360)+gte(H,0)*lte(H,{:.1}),1,0)",
-                hue_min, hue_max
-            )
-        } else {
-            // Normal case
-            format!("if(gte(H,{:.1})*lte(H,{:.1}),1,0)", hue_min, hue_max)
+        use crate::core::effects::qualifier_filters::{
+            build_qualifier_filter, ColorAdjustments, QualifierParams,
         };
 
-        // Build saturation condition (S is 0-1 in hue filter)
-        // Reserved for future advanced HSL qualifying with enable expressions
-        let _sat_condition = format!("if(gte(S,{:.3})*lte(S,{:.3}),1,0)", sat_min, sat_max);
+        // Build qualifier parameters from effect params
+        let params = QualifierParams {
+            hue_center: self.get_float("hue_center").unwrap_or(120.0),
+            hue_width: self
+                .get_float("hue_width")
+                .unwrap_or(30.0)
+                .clamp(1.0, 180.0),
+            sat_min: self.get_float("sat_min").unwrap_or(0.2).clamp(0.0, 1.0),
+            sat_max: self.get_float("sat_max").unwrap_or(1.0).clamp(0.0, 1.0),
+            lum_min: self.get_float("lum_min").unwrap_or(0.0).clamp(0.0, 1.0),
+            lum_max: self.get_float("lum_max").unwrap_or(1.0).clamp(0.0, 1.0),
+            softness: self.get_float("softness").unwrap_or(0.1).clamp(0.0, 1.0),
+            invert: self.get_bool("invert").unwrap_or(false),
+        };
 
-        // For brightness/luminance, we use the brightness parameter
-        // Note: hue filter doesn't have direct luminance access, so we approximate
-        let brightness_adjust = lum_adjust;
+        // Build color adjustments from effect params
+        let adjustments = ColorAdjustments {
+            hue_shift: self
+                .get_float("hue_shift")
+                .unwrap_or(0.0)
+                .clamp(-180.0, 180.0),
+            sat_adjust: self.get_float("sat_adjust").unwrap_or(0.0).clamp(-1.0, 1.0),
+            lum_adjust: self.get_float("lum_adjust").unwrap_or(0.0).clamp(-1.0, 1.0),
+        };
 
-        // Invert logic
-        let invert_factor = if invert { -1.0 } else { 1.0 };
-
-        // Build the filter string
-        // Using hue filter: h=hue_shift, s=saturation_multiplier, b=brightness
-        let h_value = hue_shift * invert_factor;
-        let s_value = 1.0 + (sat_adjust * invert_factor);
-        let b_value = brightness_adjust * invert_factor;
-
-        // Simple approach: apply adjustments globally based on range
-        // For precise HSL qualifying, a more complex filter graph would be needed
-        let mut parts = Vec::new();
-
-        if h_value.abs() > 0.001 {
-            parts.push(format!("h={:.2}", h_value));
-        }
-        if (s_value - 1.0).abs() > 0.001 {
-            parts.push(format!("s={:.4}", s_value.max(0.0)));
-        }
-        if b_value.abs() > 0.001 {
-            parts.push(format!("b={:.4}", b_value));
-        }
-
-        if parts.is_empty() {
-            return "null".to_string();
-        }
-
-        // Use selectivecolor for more precise color range selection if needed
-        // For now, use hue filter with simple adjustments
-        // Future: Use enable expression for hue range: 'between(t,0,999999)'
-
-        format!("hue={}", parts.join(":"))
+        // Use the qualifier filter builder
+        // Note: width/height are not strictly needed for qualifier-only mode
+        build_qualifier_filter(&params, &adjustments, 1920, 1080)
     }
 
     // -------------------------------------------------------------------------
