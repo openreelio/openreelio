@@ -97,7 +97,7 @@ export const GRID_INTERVALS = {
  *
  * @param time - Time in seconds
  * @param scale - Timeline scale configuration
- * @returns Pixel position (viewport-relative when scrollX > 0)
+ * @returns Pixel position (viewport-relative when scrollX > 0), or 0 if inputs are invalid
  *
  * @example
  * ```ts
@@ -106,7 +106,12 @@ export const GRID_INTERVALS = {
  * ```
  */
 export function timeToPixel(time: number, scale: TimelineScale): number {
-  return time * scale.zoom - scale.scrollX;
+  // Guard against NaN/Infinity inputs
+  if (!Number.isFinite(time) || !Number.isFinite(scale.zoom) || !Number.isFinite(scale.scrollX)) {
+    return 0;
+  }
+  const result = time * scale.zoom - scale.scrollX;
+  return Number.isFinite(result) ? result : 0;
 }
 
 /**
@@ -114,7 +119,7 @@ export function timeToPixel(time: number, scale: TimelineScale): number {
  *
  * @param pixel - Pixel position (viewport-relative)
  * @param scale - Timeline scale configuration
- * @returns Time in seconds
+ * @returns Time in seconds, or 0 if zoom is invalid
  *
  * @example
  * ```ts
@@ -123,7 +128,13 @@ export function timeToPixel(time: number, scale: TimelineScale): number {
  * ```
  */
 export function pixelToTime(pixel: number, scale: TimelineScale): number {
-  return (pixel + scale.scrollX) / scale.zoom;
+  // Guard against division by zero and invalid zoom values
+  if (!scale.zoom || scale.zoom <= 0 || !Number.isFinite(scale.zoom)) {
+    return 0;
+  }
+  const result = (pixel + scale.scrollX) / scale.zoom;
+  // Guard against NaN/Infinity results
+  return Number.isFinite(result) ? result : 0;
 }
 
 // =============================================================================
@@ -217,12 +228,19 @@ export function calculateClipBounds(params: ClipBoundsParams): ClipBounds {
     minClipDuration = MIN_CLIP_DURATION,
   } = params;
 
+  // Validate inputs - clamp to safe values
+  const safeClipDuration = Math.max(0, Number.isFinite(clipDuration) ? clipDuration : 0);
+  const safeTimelineDuration = Math.max(0, Number.isFinite(timelineDuration) ? timelineDuration : 0);
+  const safeSourceDuration = Math.max(0, Number.isFinite(sourceDuration) ? sourceDuration : 0);
+  const safeSourceIn = Math.max(0, Number.isFinite(sourceIn) ? sourceIn : 0);
+  const safeMinClipDuration = Math.max(0, Number.isFinite(minClipDuration) ? minClipDuration : MIN_CLIP_DURATION);
+
   return {
     minTimelineIn: 0,
-    maxTimelineIn: Math.max(0, timelineDuration - clipDuration),
-    maxExtendLeft: sourceIn,
-    maxExtendRight: Math.max(0, sourceDuration - sourceIn - clipDuration),
-    minClipDuration,
+    maxTimelineIn: Math.max(0, safeTimelineDuration - safeClipDuration),
+    maxExtendLeft: safeSourceIn,
+    maxExtendRight: Math.max(0, safeSourceDuration - safeSourceIn - safeClipDuration),
+    minClipDuration: safeMinClipDuration,
   };
 }
 
@@ -259,8 +277,17 @@ export function calculateDragDelta(
   currentAccumulated: number,
   threshold: number
 ): DragDeltaResult {
-  // No threshold = immediate update
-  if (threshold <= 0) {
+  // Guard against NaN/Infinity inputs - return safe defaults
+  if (!Number.isFinite(newDelta) || !Number.isFinite(currentAccumulated)) {
+    return {
+      shouldUpdate: false,
+      snappedDelta: 0,
+      accumulatedDelta: Number.isFinite(currentAccumulated) ? currentAccumulated : 0,
+    };
+  }
+
+  // No threshold or invalid threshold = immediate update
+  if (!Number.isFinite(threshold) || threshold <= 0) {
     return {
       shouldUpdate: true,
       snappedDelta: newDelta,
@@ -335,6 +362,18 @@ export function isTimeWithinClip(
 }
 
 /**
+ * Result of snap point search
+ */
+export interface SnapPointResult {
+  /** The resulting time (either snapped or original) */
+  time: number;
+  /** Whether snapping occurred */
+  snapped: boolean;
+  /** Index of the snap point used, or -1 if not snapped */
+  snapIndex: number;
+}
+
+/**
  * Finds the best snap point from a list of candidates
  *
  * @param time - Current time position
@@ -347,16 +386,59 @@ export function findNearestSnapPoint(
   snapPoints: number[],
   threshold: number
 ): number {
-  let nearestPoint = time;
-  let nearestDistance = threshold;
+  const result = findNearestSnapPointWithInfo(time, snapPoints, threshold);
+  return result.time;
+}
 
-  for (const point of snapPoints) {
+/**
+ * Finds the best snap point from a list of candidates with additional info
+ *
+ * @param time - Current time position
+ * @param snapPoints - Array of potential snap points
+ * @param threshold - Maximum distance to snap (in seconds)
+ * @returns SnapPointResult with time, snapped flag, and snap index
+ */
+export function findNearestSnapPointWithInfo(
+  time: number,
+  snapPoints: number[],
+  threshold: number
+): SnapPointResult {
+  // Guard against invalid inputs
+  if (!Number.isFinite(time) || !Number.isFinite(threshold) || threshold <= 0) {
+    return { time, snapped: false, snapIndex: -1 };
+  }
+
+  if (!snapPoints || snapPoints.length === 0) {
+    return { time, snapped: false, snapIndex: -1 };
+  }
+
+  let nearestDistance = threshold;
+  let nearestIndex = -1;
+
+  for (let i = 0; i < snapPoints.length; i++) {
+    const point = snapPoints[i];
+    if (!Number.isFinite(point)) continue;
+
     const distance = Math.abs(time - point);
+
+    // Early exit: exact match
+    if (distance === 0) {
+      return { time: point, snapped: true, snapIndex: i };
+    }
+
     if (distance < nearestDistance) {
       nearestDistance = distance;
-      nearestPoint = point;
+      nearestIndex = i;
     }
   }
 
-  return nearestPoint;
+  if (nearestIndex >= 0) {
+    return {
+      time: snapPoints[nearestIndex],
+      snapped: true,
+      snapIndex: nearestIndex,
+    };
+  }
+
+  return { time, snapped: false, snapIndex: -1 };
 }

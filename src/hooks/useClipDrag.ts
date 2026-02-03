@@ -184,8 +184,25 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
       origSourceOut: number,
     ): DragPreviewPosition => {
       const opts = optionsRef.current;
-      const deltaTime = deltaX / opts.zoom;
-      const clipSpeed = opts.speed ?? 1;
+
+      // Validate inputs - return safe defaults for invalid values
+      if (!Number.isFinite(deltaX) || !Number.isFinite(origTimelineIn) ||
+          !Number.isFinite(origSourceIn) || !Number.isFinite(origSourceOut)) {
+        logger.warn('Invalid input values in calculatePreviewPosition', {
+          deltaX, origTimelineIn, origSourceIn, origSourceOut
+        });
+        return {
+          timelineIn: Math.max(0, origTimelineIn || 0),
+          sourceIn: Math.max(0, origSourceIn || 0),
+          sourceOut: Math.max(0, origSourceOut || 0),
+          duration: Math.max(0, (origSourceOut || 0) - (origSourceIn || 0)),
+        };
+      }
+
+      // Guard against division by zero for zoom
+      const safeZoom = opts.zoom > 0 ? opts.zoom : 100;
+      const deltaTime = deltaX / safeZoom;
+      const clipSpeed = opts.speed && opts.speed > 0 ? opts.speed : 1;
       const clipGridInterval = opts.gridInterval ?? 0;
       const clipMinDuration = opts.minDuration ?? MIN_CLIP_DURATION;
       const clipMaxSourceDuration = opts.maxSourceDuration;
@@ -322,6 +339,9 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
     // Only set up listeners when actively engaged in drag operation
     if (!isPendingDrag && !isDragging) return;
 
+    // Capture current mount state for cleanup validation
+    const mountedAtSetup = isMountedRef.current;
+
     const handleMouseMove = (e: MouseEvent) => {
       // Use refs for current state (avoids stale closure issues during state transitions)
       const isPending = isPendingDragRef.current;
@@ -425,9 +445,37 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
     document.addEventListener('mousemove', handleMouseMove, { capture: true });
     document.addEventListener('mouseup', handleMouseUp, { capture: true });
 
+    // Handle escape key to cancel drag
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        endDrag(false); // Cancel without committing
+      }
+    };
+
+    // Handle window blur (e.g., alt-tab) to prevent stuck drag state
+    const handleWindowBlur = () => {
+      if (isDraggingRef.current || isPendingDragRef.current) {
+        endDrag(false);
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown, { capture: true });
+    window.addEventListener('blur', handleWindowBlur);
+
     return () => {
       document.removeEventListener('mousemove', handleMouseMove, { capture: true });
       document.removeEventListener('mouseup', handleMouseUp, { capture: true });
+      document.removeEventListener('keydown', handleKeyDown, { capture: true });
+      window.removeEventListener('blur', handleWindowBlur);
+
+      // Clean up any pending state if component unmounts during drag
+      if (!mountedAtSetup) {
+        pendingDragRef.current = null;
+        dragDataRef.current = null;
+        previewPositionRef.current = null;
+        isPendingDragRef.current = false;
+        isDraggingRef.current = false;
+      }
     };
   }, [isPendingDrag, isDragging, calculatePreviewPosition, startDrag, endDrag]);
 
