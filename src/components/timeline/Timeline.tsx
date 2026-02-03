@@ -388,8 +388,7 @@ export function Timeline({
   const maxScrollY = Math.max(0, (sequence?.tracks.length ?? 0) * TRACK_HEIGHT - 300);
   const isHandToolActive = activeTool === 'hand';
 
-  const { isPanning, handleMouseDown: handlePanMouseDown, panCursor } = useTimelinePan({
-    containerRef: tracksAreaRef,
+  const { isPanning, handleMouseDown: handlePanMouseDown } = useTimelinePan({
     scrollX,
     scrollY,
     setScrollX,
@@ -1077,6 +1076,22 @@ export function Timeline({
   }, [selectedClipIds, handleRippleDelete]);
 
   // ===========================================================================
+  // Combined Mouse Down Handler
+  // ===========================================================================
+  // Must be defined before early return to satisfy React hooks rules
+  const handleTracksAreaMouseDownCombined = useCallback(
+    (e: MouseEvent<HTMLDivElement>) => {
+      // Try panning first (middle mouse or hand tool)
+      handlePanMouseDown(e);
+      // Then fall through to existing handler if not handled
+      if (!isPanning && !isHandToolActive) {
+        handleTracksAreaMouseDown(e);
+      }
+    },
+    [handlePanMouseDown, isPanning, isHandToolActive, handleTracksAreaMouseDown]
+  );
+
+  // ===========================================================================
   // Timeline Operations Context
   // ===========================================================================
   // Memoize operations object to prevent unnecessary re-renders of context consumers
@@ -1160,19 +1175,6 @@ export function Timeline({
     if (toolCursor === 'ew-resize') return 'cursor-ew-resize';
     return '';
   };
-
-  // Combined mouse down handler for tracks area
-  const handleTracksAreaMouseDownCombined = useCallback(
-    (e: MouseEvent<HTMLDivElement>) => {
-      // Try panning first (middle mouse or hand tool)
-      handlePanMouseDown(e);
-      // Then fall through to existing handler if not handled
-      if (!isPanning && !isHandToolActive) {
-        handleTracksAreaMouseDown(e);
-      }
-    },
-    [handlePanMouseDown, isPanning, isHandToolActive, handleTracksAreaMouseDown]
-  );
 
   return (
     <TimelineOperationsProvider operations={timelineOperations}>

@@ -9,15 +9,13 @@
  * @module hooks/useTimelinePan
  */
 
-import { useState, useCallback, useRef, useEffect, type RefObject } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 
 // =============================================================================
 // Types
 // =============================================================================
 
 export interface UseTimelinePanOptions {
-  /** Reference to the scrollable container element */
-  containerRef: RefObject<HTMLElement | null>;
   /** Current horizontal scroll position */
   scrollX: number;
   /** Current vertical scroll position */
@@ -50,7 +48,6 @@ export interface UseTimelinePanResult {
 // =============================================================================
 
 export function useTimelinePan({
-  containerRef,
   scrollX,
   scrollY,
   setScrollX,
@@ -144,6 +141,17 @@ export function useTimelinePan({
   }, []);
 
   /**
+   * Handle mouse up to end panning
+   * Note: Defined before handleMouseDown to satisfy dependency order
+   */
+  const handleMouseUp = useCallback(() => {
+    endPan();
+    document.removeEventListener('mousemove', handleMouseMove);
+    // Self-reference is safe here as we're removing the listener
+    document.removeEventListener('mouseup', handleMouseUp);
+  }, [endPan, handleMouseMove]);
+
+  /**
    * Handle mouse down on the timeline
    */
   const handleMouseDown = useCallback(
@@ -167,17 +175,8 @@ export function useTimelinePan({
         document.addEventListener('mouseup', handleMouseUp);
       }
     },
-    [enabled, isHandToolActive, startPan, handleMouseMove]
+    [enabled, isHandToolActive, startPan, handleMouseMove, handleMouseUp]
   );
-
-  /**
-   * Handle mouse up to end panning
-   */
-  const handleMouseUp = useCallback(() => {
-    endPan();
-    document.removeEventListener('mousemove', handleMouseMove);
-    document.removeEventListener('mouseup', handleMouseUp);
-  }, [endPan, handleMouseMove]);
 
   // Cleanup on unmount
   useEffect(() => {

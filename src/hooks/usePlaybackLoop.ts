@@ -340,7 +340,8 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       // - Normal playback timing variations
       // - React batching delays
       // - Frame drops
-      const expectedMaxProgression = (1 / (PLAYBACK.TARGET_FPS || 30)) * 3;
+      const fps = Number.isFinite(targetFps) && targetFps > 0 ? targetFps : PLAYBACK.TARGET_FPS;
+      const expectedMaxProgression = (1 / fps) * 3;
       const timeDiff = Math.abs(currentTime - lastPlaybackTimeRef.current);
 
       if (timeDiff > expectedMaxProgression) {
@@ -353,7 +354,7 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
         lastFrameTimeRef.current = performance.now();
       }
     }
-  }, [currentTime, isPlaying]);
+  }, [currentTime, isPlaying, targetFps]);
 
   // Cleanup on unmount
   useEffect(() => {
