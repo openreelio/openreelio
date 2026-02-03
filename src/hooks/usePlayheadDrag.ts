@@ -45,6 +45,22 @@ export interface UsePlayheadDragOptions {
   duration: TimeSec;
   /** Track header width offset in pixels */
   trackHeaderWidth: number;
+  /**
+   * Track header width used for playhead *visual* positioning.
+   *
+   * Why this exists:
+   * - `trackHeaderWidth` is used to convert `clientX` -> timeline time (because the
+   *   tracks area includes the header column).
+   * - The playhead itself may be rendered inside a clipped container that is
+   *   already offset by the header width (so its local X=0 is the start of the
+   *   timeline content area).
+   *
+   * In that case, pass `0` here to prevent double-offsetting the playhead during
+   * direct DOM updates while dragging.
+   *
+   * Defaults to `trackHeaderWidth` for backwards compatibility.
+   */
+  playheadTrackHeaderWidth?: number;
   /** Whether the timeline is currently playing */
   isPlaying: boolean;
   /** Function to toggle playback state */
@@ -296,6 +312,7 @@ export function usePlayheadDrag({
   scrollX,
   duration,
   trackHeaderWidth,
+  playheadTrackHeaderWidth,
   isPlaying,
   togglePlayback,
   seek,
@@ -331,6 +348,7 @@ export function usePlayheadDrag({
     scrollX,
     duration,
     trackHeaderWidth,
+    playheadTrackHeaderWidth: playheadTrackHeaderWidth ?? trackHeaderWidth,
     snapEnabled,
     snapPoints,
     snapThreshold,
@@ -345,13 +363,28 @@ export function usePlayheadDrag({
   // Callback to get current mouse position for edge auto-scroll
   const getMouseClientX = useCallback(() => lastMouseXRef.current, []);
 
+  // Virtual scroll integration: useEdgeAutoScroll expects get/set of scrollLeft.
+  // For timelines that use store-based scroll (`scrollX`) + transforms, we provide
+  // the current value via a ref and forward updates via `onScrollChange`.
+  const getScrollLeft = useCallback(() => latestValuesRef.current.scrollX, []);
+
+  const setScrollLeft = useCallback(
+    (nextScrollLeft: number) => {
+      // Keep the ref in sync immediately to avoid one-frame lag in calculations.
+      latestValuesRef.current.scrollX = nextScrollLeft;
+      onScrollChange?.(nextScrollLeft);
+    },
+    [onScrollChange]
+  );
+
   // Edge auto-scroll during drag
   useEdgeAutoScroll({
-    isActive: isDragging && !!scrollContainerRef?.current,
+    isActive: isDragging && !!scrollContainerRef?.current && typeof onScrollChange === 'function',
     getMouseClientX,
     scrollContainerRef: scrollContainerRef || { current: null },
     contentWidth: duration * zoom,
-    onScrollChange,
+    getScrollLeft,
+    setScrollLeft,
   });
 
   // Update latest values ref when props change
@@ -361,6 +394,7 @@ export function usePlayheadDrag({
       scrollX,
       duration,
       trackHeaderWidth,
+      playheadTrackHeaderWidth: playheadTrackHeaderWidth ?? trackHeaderWidth,
       snapEnabled,
       snapPoints,
       snapThreshold,
@@ -368,7 +402,19 @@ export function usePlayheadDrag({
       frameAccurateSeeking,
       fps,
     };
-  }, [zoom, scrollX, duration, trackHeaderWidth, snapEnabled, snapPoints, snapThreshold, isPlaying, frameAccurateSeeking, fps]);
+  }, [
+    zoom,
+    scrollX,
+    duration,
+    trackHeaderWidth,
+    playheadTrackHeaderWidth,
+    snapEnabled,
+    snapPoints,
+    snapThreshold,
+    isPlaying,
+    frameAccurateSeeking,
+    fps,
+  ]);
 
   /**
    * Cleanup function to remove document event listeners.
@@ -407,8 +453,8 @@ export function usePlayheadDrag({
    */
   const timeToPixel = useCallback(
     (time: TimeSec): number => {
-      const { zoom: z, scrollX: sx, trackHeaderWidth: thw } = latestValuesRef.current;
-      return time * z + thw - sx;
+      const { zoom: z, scrollX: sx, playheadTrackHeaderWidth: pthw } = latestValuesRef.current;
+      return time * z + pthw - sx;
     },
     []
   );

@@ -37,6 +37,23 @@ export interface UseEdgeAutoScrollOptions {
   scrollContainerRef: React.RefObject<HTMLElement | null>;
   /** Total content width in pixels */
   contentWidth: number;
+  /**
+   * Optional getter for the current scroll position (in pixels).
+   *
+   * When provided, the hook will treat scrolling as "virtual" and will not rely
+   * on `scrollContainerRef.current.scrollLeft` as the source of truth.
+   *
+   * This is useful for timelines that implement scrolling via transforms and a
+   * state store (e.g., `scrollX`) instead of native DOM scrolling.
+   */
+  getScrollLeft?: () => number;
+  /**
+   * Optional setter for the scroll position (in pixels).
+   *
+   * When provided, the hook will call this instead of mutating
+   * `scrollContainerRef.current.scrollLeft`.
+   */
+  setScrollLeft?: (scrollLeft: number) => void;
   /** Callback when scroll position changes (receives new absolute position) */
   onScrollChange?: (scrollLeft: number) => void;
   /** Callback when scroll position changes (receives delta) - alternative API */
@@ -113,6 +130,8 @@ export function useEdgeAutoScroll({
   getMouseClientX,
   scrollContainerRef,
   contentWidth,
+  getScrollLeft,
+  setScrollLeft,
   onScrollChange,
   onScrollDelta,
   onDirectionChange,
@@ -143,7 +162,11 @@ export function useEdgeAutoScroll({
       const rect = container.getBoundingClientRect();
       const viewportWidth = rect.width;
       const maxScroll = Math.max(0, contentWidth - viewportWidth);
-      const currentScroll = container.scrollLeft;
+      const currentScrollRaw =
+        typeof getScrollLeft === 'function' ? getScrollLeft() : container.scrollLeft;
+      const currentScroll = Number.isFinite(currentScrollRaw)
+        ? Math.max(0, Math.min(maxScroll, currentScrollRaw))
+        : 0;
 
       // Check left edge
       const distanceFromLeft = mouseClientX - rect.left;
@@ -169,7 +192,7 @@ export function useEdgeAutoScroll({
 
       return { direction: null, velocity: 0 };
     },
-    [scrollContainerRef, contentWidth, edgeZonePx, baseSpeedPxPerSec, maxSpeedPxPerSec]
+    [scrollContainerRef, contentWidth, edgeZonePx, baseSpeedPxPerSec, maxSpeedPxPerSec, getScrollLeft]
   );
 
   /**
@@ -228,13 +251,23 @@ export function useEdgeAutoScroll({
         const scrollDelta = velocity * deltaTime;
         const viewportWidth = container.clientWidth;
         const maxScroll = Math.max(0, contentWidth - viewportWidth);
+        const currentScrollRaw =
+          typeof getScrollLeft === 'function' ? getScrollLeft() : container.scrollLeft;
+        const currentScrollLeft = Number.isFinite(currentScrollRaw)
+          ? Math.max(0, Math.min(maxScroll, currentScrollRaw))
+          : 0;
+
         const newScrollLeft = Math.max(
           0,
-          Math.min(maxScroll, container.scrollLeft + scrollDelta)
+          Math.min(maxScroll, currentScrollLeft + scrollDelta)
         );
 
-        if (Math.abs(newScrollLeft - container.scrollLeft) > 0.5) {
-          container.scrollLeft = newScrollLeft;
+        if (Math.abs(newScrollLeft - currentScrollLeft) > 0.5) {
+          if (typeof setScrollLeft === 'function') {
+            setScrollLeft(newScrollLeft);
+          } else {
+            container.scrollLeft = newScrollLeft;
+          }
           onScrollChange?.(newScrollLeft);
           onScrollDelta?.(scrollDelta);
           setIsAutoScrolling(true);
@@ -252,6 +285,8 @@ export function useEdgeAutoScroll({
       getMouseClientX,
       calculateVelocity,
       contentWidth,
+      getScrollLeft,
+      setScrollLeft,
       onScrollChange,
       onScrollDelta,
       onDirectionChange,

@@ -346,6 +346,37 @@ describe('useEdgeAutoScroll', () => {
   // ===========================================================================
 
   describe('edge cases', () => {
+    it('should support virtual scrolling via getScrollLeft/setScrollLeft', () => {
+      const scrollState = { scrollLeft: 0 };
+      const containerRef = createMockContainerRef({}, scrollState);
+
+      let virtualScrollLeft = 500;
+      const setScrollLeft = vi.fn((next: number) => {
+        virtualScrollLeft = next;
+      });
+
+      const options = createDefaultOptions({
+        isActive: true,
+        // Near the right edge
+        getMouseClientX: vi.fn().mockReturnValue(1080),
+        scrollContainerRef: containerRef,
+        contentWidth: 2000,
+        getScrollLeft: () => virtualScrollLeft,
+        setScrollLeft,
+      });
+
+      renderHook(() => useEdgeAutoScroll(options));
+
+      act(() => {
+        flushRaf();
+      });
+
+      expect(setScrollLeft).toHaveBeenCalled();
+      expect(virtualScrollLeft).toBeGreaterThan(500);
+      // Ensure we did not rely on native scrollLeft mutation when setScrollLeft is provided
+      expect(scrollState.scrollLeft).toBe(0);
+    });
+
     it('should handle content width smaller than viewport', () => {
       const scrollState = { scrollLeft: 0 };
       const containerRef = createMockContainerRef({}, scrollState);
