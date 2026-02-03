@@ -13,6 +13,11 @@ import {
   clampTime,
   calculateClipBounds,
   calculateDragDelta,
+  findNearestSnapPoint,
+  findNearestSnapPointWithInfo,
+  calculateClipDuration,
+  calculateClipEndTime,
+  isTimeWithinClip,
   type TimelineScale,
 } from './timeline';
 
@@ -281,5 +286,326 @@ describe('timeline utils integration', () => {
     const newStart = snapToGrid(clipStart + dragDeltaTime, 1);
 
     expect(newStart).toBe(7); // 5 + 1.5 snapped to 7
+  });
+});
+
+// =============================================================================
+// Edge Case / Defensive Tests
+// =============================================================================
+
+describe('defensive: timeToPixel edge cases', () => {
+  it('handles NaN inputs gracefully', () => {
+    const scale: TimelineScale = { zoom: 100, scrollX: 0 };
+    expect(timeToPixel(NaN, scale)).toBe(0);
+    expect(timeToPixel(5, { zoom: NaN, scrollX: 0 })).toBe(0);
+    expect(timeToPixel(5, { zoom: 100, scrollX: NaN })).toBe(0);
+  });
+
+  it('handles Infinity inputs gracefully', () => {
+    const scale: TimelineScale = { zoom: 100, scrollX: 0 };
+    expect(timeToPixel(Infinity, scale)).toBe(0);
+    expect(timeToPixel(-Infinity, scale)).toBe(0);
+    expect(timeToPixel(5, { zoom: Infinity, scrollX: 0 })).toBe(0);
+  });
+
+  it('handles very large numbers without overflow', () => {
+    const scale: TimelineScale = { zoom: 100, scrollX: 0 };
+    const result = timeToPixel(1e15, scale);
+    expect(Number.isFinite(result)).toBe(true);
+  });
+});
+
+describe('defensive: pixelToTime edge cases', () => {
+  it('handles zero zoom (division by zero)', () => {
+    expect(pixelToTime(500, { zoom: 0, scrollX: 0 })).toBe(0);
+  });
+
+  it('handles negative zoom', () => {
+    expect(pixelToTime(500, { zoom: -100, scrollX: 0 })).toBe(0);
+  });
+
+  it('handles NaN inputs gracefully', () => {
+    expect(pixelToTime(NaN, { zoom: 100, scrollX: 0 })).toBe(0);
+    expect(pixelToTime(500, { zoom: NaN, scrollX: 0 })).toBe(0);
+  });
+
+  it('handles Infinity inputs gracefully', () => {
+    expect(pixelToTime(Infinity, { zoom: 100, scrollX: 0 })).toBe(0);
+  });
+});
+
+describe('defensive: snapToGrid edge cases', () => {
+  it('handles NaN time', () => {
+    const result = snapToGrid(NaN, 1);
+    expect(Number.isNaN(result)).toBe(true); // NaN propagates
+  });
+
+  it('handles negative grid interval', () => {
+    expect(snapToGrid(5.5, -1)).toBe(5.5); // Returns original
+  });
+
+  it('handles very small grid intervals', () => {
+    const result = snapToGrid(1.00001, 0.0001);
+    expect(result).toBeCloseTo(1.0, 4);
+  });
+});
+
+describe('defensive: calculateClipBounds edge cases', () => {
+  it('handles NaN inputs', () => {
+    const bounds = calculateClipBounds({
+      clipDuration: NaN,
+      timelineStart: 0,
+      timelineDuration: 60,
+      sourceDuration: 30,
+      sourceIn: 0,
+    });
+
+    expect(bounds.minTimelineIn).toBe(0);
+    expect(bounds.maxTimelineIn).toBe(60); // 60 - 0 (NaN clamped to 0)
+    expect(Number.isFinite(bounds.maxExtendRight)).toBe(true);
+  });
+
+  it('handles negative durations', () => {
+    const bounds = calculateClipBounds({
+      clipDuration: -5,
+      timelineStart: 0,
+      timelineDuration: 60,
+      sourceDuration: 30,
+      sourceIn: 0,
+    });
+
+    expect(bounds.maxTimelineIn).toBe(60); // Clamped to 0 then subtracted
+    expect(bounds.maxExtendRight).toBe(30); // 30 - 0 - 0
+  });
+
+  it('handles clip duration exceeding timeline duration', () => {
+    const bounds = calculateClipBounds({
+      clipDuration: 100,
+      timelineStart: 0,
+      timelineDuration: 60,
+      sourceDuration: 100,
+      sourceIn: 0,
+    });
+
+    expect(bounds.maxTimelineIn).toBe(0); // Can't move clip
+    expect(bounds.maxExtendRight).toBe(0); // Already at max
+  });
+});
+
+describe('defensive: calculateDragDelta edge cases', () => {
+  it('handles NaN delta', () => {
+    const result = calculateDragDelta(NaN, 0, 5);
+    // NaN + 0 = NaN, abs(NaN) = NaN, which is not < threshold
+    expect(result.shouldUpdate).toBe(false);
+  });
+
+  it('handles negative threshold', () => {
+    const result = calculateDragDelta(3, 0, -5);
+    // Negative threshold treated as 0
+    expect(result.shouldUpdate).toBe(true);
+    expect(result.snappedDelta).toBe(3);
+  });
+
+  it('handles very large accumulated delta', () => {
+    const result = calculateDragDelta(1, 1e10, 5);
+    expect(result.shouldUpdate).toBe(true);
+    expect(Number.isFinite(result.snappedDelta)).toBe(true);
+  });
+});
+
+// =============================================================================
+// Snap Point Tests
+// =============================================================================
+
+describe('findNearestSnapPoint', () => {
+  it('finds nearest snap point within threshold', () => {
+    const snapPoints = [0, 5, 10, 15, 20];
+    expect(findNearestSnapPoint(4.8, snapPoints, 0.5)).toBe(5);
+    expect(findNearestSnapPoint(4.4, snapPoints, 0.5)).toBe(4.4); // No snap
+  });
+
+  it('returns original time when no points are close', () => {
+    const snapPoints = [0, 10, 20];
+    expect(findNearestSnapPoint(5, snapPoints, 0.1)).toBe(5);
+  });
+
+  it('handles empty snap points array', () => {
+    expect(findNearestSnapPoint(5, [], 1)).toBe(5);
+  });
+
+  it('handles exact match', () => {
+    const snapPoints = [0, 5, 10];
+    expect(findNearestSnapPoint(5, snapPoints, 0.1)).toBe(5);
+  });
+});
+
+describe('findNearestSnapPointWithInfo', () => {
+  it('returns detailed info for snapped point', () => {
+    const snapPoints = [0, 5, 10];
+    const result = findNearestSnapPointWithInfo(4.9, snapPoints, 0.2);
+
+    expect(result.snapped).toBe(true);
+    expect(result.time).toBe(5);
+    expect(result.snapIndex).toBe(1);
+  });
+
+  it('returns snapped=false when no snap occurs', () => {
+    const snapPoints = [0, 10];
+    const result = findNearestSnapPointWithInfo(5, snapPoints, 0.1);
+
+    expect(result.snapped).toBe(false);
+    expect(result.time).toBe(5);
+    expect(result.snapIndex).toBe(-1);
+  });
+
+  it('handles invalid threshold', () => {
+    const result = findNearestSnapPointWithInfo(5, [0, 10], 0);
+    expect(result.snapped).toBe(false);
+
+    const result2 = findNearestSnapPointWithInfo(5, [0, 10], -1);
+    expect(result2.snapped).toBe(false);
+  });
+
+  it('handles NaN in snap points array', () => {
+    const snapPoints = [0, NaN, 5, 10];
+    const result = findNearestSnapPointWithInfo(4.9, snapPoints, 0.2);
+
+    expect(result.snapped).toBe(true);
+    expect(result.time).toBe(5);
+    expect(result.snapIndex).toBe(2); // Skips NaN at index 1
+  });
+});
+
+// =============================================================================
+// Clip Duration and Position Tests
+// =============================================================================
+
+describe('calculateClipDuration', () => {
+  it('calculates duration at normal speed', () => {
+    expect(calculateClipDuration(0, 10)).toBe(10);
+    expect(calculateClipDuration(5, 15)).toBe(10);
+  });
+
+  it('calculates duration with speed multiplier', () => {
+    expect(calculateClipDuration(0, 10, 2)).toBe(5); // 2x speed = half duration
+    expect(calculateClipDuration(0, 10, 0.5)).toBe(20); // 0.5x speed = double duration
+  });
+
+  it('handles zero speed (edge case)', () => {
+    const result = calculateClipDuration(0, 10, 0);
+    expect(result).toBe(Infinity); // Division by zero
+  });
+});
+
+describe('calculateClipEndTime', () => {
+  it('calculates end time correctly', () => {
+    expect(calculateClipEndTime(0, 0, 10)).toBe(10);
+    expect(calculateClipEndTime(5, 0, 10)).toBe(15); // 5 + 10
+    expect(calculateClipEndTime(5, 5, 15)).toBe(15); // 5 + (15-5)/1
+  });
+
+  it('calculates end time with speed', () => {
+    expect(calculateClipEndTime(0, 0, 10, 2)).toBe(5); // 0 + 10/2
+    expect(calculateClipEndTime(5, 0, 10, 0.5)).toBe(25); // 5 + 10/0.5
+  });
+});
+
+describe('isTimeWithinClip', () => {
+  it('returns true for times within clip (half-open interval)', () => {
+    expect(isTimeWithinClip(0, 0, 0, 10)).toBe(true); // Start
+    expect(isTimeWithinClip(5, 0, 0, 10)).toBe(true); // Middle
+    expect(isTimeWithinClip(9.999, 0, 0, 10)).toBe(true); // Just before end
+  });
+
+  it('returns false for times outside clip', () => {
+    expect(isTimeWithinClip(-1, 0, 0, 10)).toBe(false); // Before start
+    expect(isTimeWithinClip(10, 0, 0, 10)).toBe(false); // At end (exclusive)
+    expect(isTimeWithinClip(11, 0, 0, 10)).toBe(false); // After end
+  });
+
+  it('handles offset clips', () => {
+    // Clip from timeline 5-15
+    expect(isTimeWithinClip(4, 5, 0, 10)).toBe(false);
+    expect(isTimeWithinClip(5, 5, 0, 10)).toBe(true);
+    expect(isTimeWithinClip(10, 5, 0, 10)).toBe(true);
+    expect(isTimeWithinClip(15, 5, 0, 10)).toBe(false);
+  });
+
+  it('handles speed changes', () => {
+    // Clip at 0, source 0-10, 2x speed = timeline duration 5
+    expect(isTimeWithinClip(0, 0, 0, 10, 2)).toBe(true);
+    expect(isTimeWithinClip(4, 0, 0, 10, 2)).toBe(true);
+    expect(isTimeWithinClip(5, 0, 0, 10, 2)).toBe(false); // End at 5
+  });
+});
+
+// =============================================================================
+// Concurrency / Race Condition Simulation Tests
+// =============================================================================
+
+describe('concurrent operations simulation', () => {
+  it('handles rapid successive conversions', () => {
+    const scale: TimelineScale = { zoom: 100, scrollX: 50 };
+    const results: number[] = [];
+
+    // Simulate rapid conversions
+    for (let i = 0; i < 1000; i++) {
+      const time = i * 0.1;
+      const pixel = timeToPixel(time, scale);
+      const backToTime = pixelToTime(pixel, scale);
+      results.push(backToTime);
+    }
+
+    // Verify all roundtrips are accurate
+    for (let i = 0; i < 1000; i++) {
+      expect(results[i]).toBeCloseTo(i * 0.1, 10);
+    }
+  });
+
+  it('handles alternating zoom levels', () => {
+    const zooms = [10, 50, 100, 200, 500];
+    const time = 5;
+
+    for (const zoom of zooms) {
+      const scale: TimelineScale = { zoom, scrollX: 0 };
+      const pixel = timeToPixel(time, scale);
+      const backToTime = pixelToTime(pixel, scale);
+      expect(backToTime).toBeCloseTo(time, 10);
+    }
+  });
+});
+
+// =============================================================================
+// Performance / Stress Tests
+// =============================================================================
+
+describe('performance stress tests', () => {
+  it('handles large snap point arrays efficiently', () => {
+    // Create large snap point array
+    const snapPoints = Array.from({ length: 10000 }, (_, i) => i * 0.1);
+
+    const start = performance.now();
+    for (let i = 0; i < 100; i++) {
+      findNearestSnapPoint(500.05, snapPoints, 0.1);
+    }
+    const elapsed = performance.now() - start;
+
+    // Should complete in reasonable time (< 100ms for 100 iterations)
+    expect(elapsed).toBeLessThan(100);
+  });
+
+  it('handles many drag delta calculations', () => {
+    let accumulated = 0;
+    const threshold = 5;
+
+    const start = performance.now();
+    for (let i = 0; i < 10000; i++) {
+      const result = calculateDragDelta(Math.random() * 2, accumulated, threshold);
+      accumulated = result.accumulatedDelta;
+    }
+    const elapsed = performance.now() - start;
+
+    // Should complete in reasonable time (< 50ms)
+    expect(elapsed).toBeLessThan(50);
   });
 });
