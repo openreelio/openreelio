@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 
+use crate::core::masks::MaskGroup;
 use crate::core::EffectId;
 
 // =============================================================================
@@ -408,6 +409,9 @@ pub struct Effect {
     pub keyframes: HashMap<String, Vec<Keyframe>>,
     /// Effect order/priority (lower = first)
     pub order: u32,
+    /// Masks (Power Windows) for selective effect application
+    #[serde(default, skip_serializing_if = "MaskGroup::is_empty")]
+    pub masks: MaskGroup,
 }
 
 impl Effect {
@@ -421,6 +425,7 @@ impl Effect {
             params,
             keyframes: HashMap::new(),
             order: 0,
+            masks: MaskGroup::new(),
         }
     }
 
@@ -434,6 +439,7 @@ impl Effect {
             params,
             keyframes: HashMap::new(),
             order: 0,
+            masks: MaskGroup::new(),
         }
     }
 

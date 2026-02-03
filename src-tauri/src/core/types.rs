@@ -41,6 +41,9 @@ pub type PluginId = String;
 /// Bin (folder) unique identifier (ULID)
 pub type BinId = String;
 
+/// Mask unique identifier (ULID)
+pub type MaskId = String;
+
 // =============================================================================
 // Time Types
 // =============================================================================
