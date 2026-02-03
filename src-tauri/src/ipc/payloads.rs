@@ -1,7 +1,8 @@
 use crate::core::effects::{EffectType, ParamValue};
+use crate::core::masks::{MaskBlendMode, MaskShape};
 use crate::core::text::TextClipData;
 use crate::core::timeline::{BlendMode, Transform};
-use crate::core::{AssetId, BinId, ClipId, EffectId, SequenceId, TimeSec, TrackId};
+use crate::core::{AssetId, BinId, ClipId, EffectId, MaskId, SequenceId, TimeSec, TrackId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -163,6 +164,122 @@ pub struct UpdateEffectPayload {
     pub params: HashMap<String, ParamValue>,
     /// Optional - toggle effect enabled state
     pub enabled: Option<bool>,
+}
+
+// =============================================================================
+// Mask Payloads
+// =============================================================================
+
+/// Payload for adding a mask to an effect.
+///
+/// Masks enable selective effect application through shape-based regions.
+///
+/// # Example
+///
+/// ```json
+/// {
+///     "sequenceId": "seq_001",
+///     "trackId": "video_001",
+///     "clipId": "clip_001",
+///     "effectId": "eff_001",
+///     "shape": {
+///         "type": "rectangle",
+///         "x": 0.5,
+///         "y": 0.5,
+///         "width": 0.5,
+///         "height": 0.5,
+///         "cornerRadius": 0.0,
+///         "rotation": 0.0
+///     },
+///     "name": "Vignette Mask",
+///     "feather": 0.1,
+///     "inverted": false
+/// }
+/// ```
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AddMaskPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub effect_id: EffectId,
+    /// Mask shape (rectangle, ellipse, polygon, or bezier)
+    pub shape: MaskShape,
+    /// Optional mask name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Feather amount (0.0-1.0 for edge softness)
+    #[serde(default)]
+    pub feather: f64,
+    /// Whether the mask is inverted
+    #[serde(default)]
+    pub inverted: bool,
+}
+
+/// Payload for updating a mask's properties.
+///
+/// All fields except `effectId` and `maskId` are optional.
+/// Only provided fields will be updated.
+///
+/// # Example
+///
+/// ```json
+/// {
+///     "effectId": "eff_001",
+///     "maskId": "mask_001",
+///     "feather": 0.2,
+///     "opacity": 0.8
+/// }
+/// ```
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UpdateMaskPayload {
+    pub effect_id: EffectId,
+    pub mask_id: MaskId,
+    /// New mask shape
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shape: Option<MaskShape>,
+    /// New mask name
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// New feather amount (0.0-1.0)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feather: Option<f64>,
+    /// New opacity (0.0-1.0)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub opacity: Option<f64>,
+    /// New expansion value (-1.0 to 1.0)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expansion: Option<f64>,
+    /// Toggle mask inversion
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inverted: Option<bool>,
+    /// New blend mode
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blend_mode: Option<MaskBlendMode>,
+    /// Toggle mask enabled state
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// Toggle mask locked state
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locked: Option<bool>,
+}
+
+/// Payload for removing a mask from an effect.
+///
+/// # Example
+///
+/// ```json
+/// {
+///     "effectId": "eff_001",
+///     "maskId": "mask_001"
+/// }
+/// ```
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveMaskPayload {
+    pub effect_id: EffectId,
+    pub mask_id: MaskId,
 }
 
 // =============================================================================
@@ -365,6 +482,21 @@ pub enum CommandPayload {
 
     #[serde(alias = "updateEffect", alias = "UpdateEffect")]
     UpdateEffect(UpdateEffectPayload),
+
+    // Mask commands
+    #[serde(alias = "addMask", alias = "AddMask")]
+    AddMask(AddMaskPayload),
+
+    #[serde(alias = "updateMask", alias = "UpdateMask")]
+    UpdateMask(UpdateMaskPayload),
+
+    #[serde(
+        alias = "removeMask",
+        alias = "RemoveMask",
+        alias = "deleteMask",
+        alias = "DeleteMask"
+    )]
+    RemoveMask(RemoveMaskPayload),
 
     // Text clip commands
     #[serde(alias = "addTextClip", alias = "AddTextClip")]
@@ -784,5 +916,155 @@ mod tests {
         if let Ok(CommandPayload::AddTextClip(p)) = parsed {
             assert!((p.timeline_in - 10.0).abs() < 0.001);
         }
+    }
+
+    // =========================================================================
+    // Mask Payload Tests
+    // =========================================================================
+
+    #[test]
+    fn parse_add_mask_payload_rectangle() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "video_001",
+            "clipId": "clip_001",
+            "effectId": "eff_001",
+            "shape": {
+                "type": "rectangle",
+                "x": 0.5,
+                "y": 0.5,
+                "width": 0.4,
+                "height": 0.3,
+                "cornerRadius": 0.0,
+                "rotation": 0.0
+            },
+            "name": "Center Mask",
+            "feather": 0.1,
+            "inverted": false
+        });
+
+        let parsed = CommandPayload::parse("AddMask".to_string(), payload);
+        assert!(parsed.is_ok(), "expected AddMask to parse, got: {parsed:?}");
+
+        if let Ok(CommandPayload::AddMask(p)) = parsed {
+            assert_eq!(p.sequence_id, "seq_001");
+            assert_eq!(p.effect_id, "eff_001");
+            assert_eq!(p.name, Some("Center Mask".to_string()));
+            assert!((p.feather - 0.1).abs() < 0.001);
+        }
+    }
+
+    #[test]
+    fn parse_add_mask_payload_ellipse() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "video_001",
+            "clipId": "clip_001",
+            "effectId": "eff_001",
+            "shape": {
+                "type": "ellipse",
+                "x": 0.5,
+                "y": 0.5,
+                "radiusX": 0.25,
+                "radiusY": 0.25,
+                "rotation": 0.0
+            }
+        });
+
+        let parsed = CommandPayload::parse("AddMask".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected AddMask with ellipse to parse, got: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_update_mask_payload() {
+        let payload = serde_json::json!({
+            "effectId": "eff_001",
+            "maskId": "mask_001",
+            "feather": 0.2,
+            "opacity": 0.8,
+            "inverted": true,
+            "enabled": true
+        });
+
+        let parsed = CommandPayload::parse("UpdateMask".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected UpdateMask to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::UpdateMask(p)) = parsed {
+            assert_eq!(p.effect_id, "eff_001");
+            assert_eq!(p.mask_id, "mask_001");
+            assert_eq!(p.feather, Some(0.2));
+            assert_eq!(p.opacity, Some(0.8));
+            assert_eq!(p.inverted, Some(true));
+        }
+    }
+
+    #[test]
+    fn parse_update_mask_with_blend_mode() {
+        let payload = serde_json::json!({
+            "effectId": "eff_001",
+            "maskId": "mask_001",
+            "blendMode": "subtract"
+        });
+
+        let parsed = CommandPayload::parse("UpdateMask".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected UpdateMask with blend mode to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::UpdateMask(p)) = parsed {
+            assert!(p.blend_mode.is_some());
+        }
+    }
+
+    #[test]
+    fn parse_remove_mask_payload() {
+        let payload = serde_json::json!({
+            "effectId": "eff_001",
+            "maskId": "mask_001"
+        });
+
+        let parsed = CommandPayload::parse("RemoveMask".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected RemoveMask to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::RemoveMask(p)) = parsed {
+            assert_eq!(p.effect_id, "eff_001");
+            assert_eq!(p.mask_id, "mask_001");
+        }
+    }
+
+    #[test]
+    fn parse_add_mask_rejects_unknown_fields() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "video_001",
+            "clipId": "clip_001",
+            "effectId": "eff_001",
+            "shape": {
+                "type": "rectangle",
+                "x": 0.5,
+                "y": 0.5,
+                "width": 0.4,
+                "height": 0.3
+            },
+            "unknownField": "should_fail"
+        });
+
+        let parsed = CommandPayload::parse("AddMask".to_string(), payload);
+        assert!(parsed.is_err());
+        let err = parsed.unwrap_err();
+        assert!(
+            err.contains("unknown field"),
+            "expected unknown-field rejection, got: {err}"
+        );
     }
 }

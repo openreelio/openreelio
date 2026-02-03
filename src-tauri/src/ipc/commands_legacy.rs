@@ -12,11 +12,12 @@ use tauri::{Manager, State};
 use crate::core::{
     assets::{Asset, AudioInfo, ProxyStatus, VideoInfo},
     commands::{
-        AddEffectCommand, AddTextClipCommand, CreateBinCommand, CreateSequenceCommand,
-        ImportAssetCommand, InsertClipCommand, MoveBinCommand, MoveClipCommand, RemoveAssetCommand,
-        RemoveBinCommand, RemoveClipCommand, RemoveEffectCommand, RemoveTextClipCommand,
-        RenameBinCommand, SetBinColorCommand, SetClipTransformCommand, SetTrackBlendModeCommand,
-        SplitClipCommand, TrimClipCommand, UpdateAssetCommand, UpdateEffectCommand,
+        AddEffectCommand, AddMaskCommand, AddTextClipCommand, CreateBinCommand,
+        CreateSequenceCommand, ImportAssetCommand, InsertClipCommand, MoveBinCommand,
+        MoveClipCommand, RemoveAssetCommand, RemoveBinCommand, RemoveClipCommand,
+        RemoveEffectCommand, RemoveMaskCommand, RemoveTextClipCommand, RenameBinCommand,
+        SetBinColorCommand, SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand,
+        TrimClipCommand, UpdateAssetCommand, UpdateEffectCommand, UpdateMaskCommand,
         UpdateTextCommand,
     },
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
@@ -1399,6 +1400,58 @@ pub async fn execute_command(
             }
             Box::new(cmd)
         }
+        // Mask commands
+        CommandPayload::AddMask(p) => {
+            let mut cmd = AddMaskCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                &p.effect_id,
+                p.shape,
+            );
+            if let Some(name) = p.name {
+                cmd = cmd.with_name(name);
+            }
+            if p.feather > 0.0 {
+                cmd = cmd.with_feather(p.feather);
+            }
+            if p.inverted {
+                cmd = cmd.inverted();
+            }
+            Box::new(cmd)
+        }
+        CommandPayload::UpdateMask(p) => {
+            let mut cmd = UpdateMaskCommand::new(&p.effect_id, &p.mask_id);
+            if let Some(shape) = p.shape {
+                cmd = cmd.with_shape(shape);
+            }
+            if let Some(name) = p.name {
+                cmd = cmd.with_name(name);
+            }
+            if let Some(feather) = p.feather {
+                cmd = cmd.with_feather(feather);
+            }
+            if let Some(opacity) = p.opacity {
+                cmd = cmd.with_opacity(opacity);
+            }
+            if let Some(expansion) = p.expansion {
+                cmd = cmd.with_expansion(expansion);
+            }
+            if let Some(inverted) = p.inverted {
+                cmd = cmd.with_inverted(inverted);
+            }
+            if let Some(blend_mode) = p.blend_mode {
+                cmd = cmd.with_blend_mode(blend_mode);
+            }
+            if let Some(enabled) = p.enabled {
+                cmd = cmd.with_enabled(enabled);
+            }
+            if let Some(locked) = p.locked {
+                cmd = cmd.with_locked(locked);
+            }
+            Box::new(cmd)
+        }
+        CommandPayload::RemoveMask(p) => Box::new(RemoveMaskCommand::new(&p.effect_id, &p.mask_id)),
         // Text clip commands
         CommandPayload::AddTextClip(p) => Box::new(AddTextClipCommand::new(
             &p.sequence_id,
@@ -2305,6 +2358,60 @@ pub async fn apply_edit_script(
                     cmd = cmd.set_enabled(enabled);
                 }
                 Box::new(cmd)
+            }
+            // Mask commands
+            CommandPayload::AddMask(p) => {
+                let mut cmd = AddMaskCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    &p.effect_id,
+                    p.shape,
+                );
+                if let Some(name) = p.name {
+                    cmd = cmd.with_name(name);
+                }
+                if p.feather > 0.0 {
+                    cmd = cmd.with_feather(p.feather);
+                }
+                if p.inverted {
+                    cmd = cmd.inverted();
+                }
+                Box::new(cmd)
+            }
+            CommandPayload::UpdateMask(p) => {
+                let mut cmd = UpdateMaskCommand::new(&p.effect_id, &p.mask_id);
+                if let Some(shape) = p.shape {
+                    cmd = cmd.with_shape(shape);
+                }
+                if let Some(name) = p.name {
+                    cmd = cmd.with_name(name);
+                }
+                if let Some(feather) = p.feather {
+                    cmd = cmd.with_feather(feather);
+                }
+                if let Some(opacity) = p.opacity {
+                    cmd = cmd.with_opacity(opacity);
+                }
+                if let Some(expansion) = p.expansion {
+                    cmd = cmd.with_expansion(expansion);
+                }
+                if let Some(inverted) = p.inverted {
+                    cmd = cmd.with_inverted(inverted);
+                }
+                if let Some(blend_mode) = p.blend_mode {
+                    cmd = cmd.with_blend_mode(blend_mode);
+                }
+                if let Some(enabled) = p.enabled {
+                    cmd = cmd.with_enabled(enabled);
+                }
+                if let Some(locked) = p.locked {
+                    cmd = cmd.with_locked(locked);
+                }
+                Box::new(cmd)
+            }
+            CommandPayload::RemoveMask(p) => {
+                Box::new(RemoveMaskCommand::new(&p.effect_id, &p.mask_id))
             }
             // Text clip commands
             CommandPayload::AddTextClip(p) => Box::new(AddTextClipCommand::new(

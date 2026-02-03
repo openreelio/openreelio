@@ -49,11 +49,15 @@ describe('useModalKeyboardScope', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     // Reset modal store
-    useModalStore.getState().closeModal();
+    act(() => {
+      useModalStore.getState().closeModal();
+    });
   });
 
   afterEach(() => {
-    useModalStore.getState().closeModal();
+    act(() => {
+      useModalStore.getState().closeModal();
+    });
   });
 
   describe('escape key handling', () => {
@@ -65,11 +69,15 @@ describe('useModalKeyboardScope', () => {
       );
 
       // Open a modal
-      fireEvent.click(screen.getByTestId('open-settings'));
+      act(() => {
+        fireEvent.click(screen.getByTestId('open-settings'));
+      });
       expect(useModalStore.getState().modal.type).toBe('settings');
 
       // Press Escape
-      fireEvent.keyDown(document, { key: 'Escape' });
+      act(() => {
+        fireEvent.keyDown(document, { key: 'Escape' });
+      });
 
       // Modal should be closed
       expect(useModalStore.getState().modal.type).toBe('none');
@@ -84,10 +92,14 @@ describe('useModalKeyboardScope', () => {
       );
 
       // Open a modal
-      fireEvent.click(screen.getByTestId('open-settings'));
+      act(() => {
+        fireEvent.click(screen.getByTestId('open-settings'));
+      });
 
       // Press Escape
-      fireEvent.keyDown(document, { key: 'Escape' });
+      act(() => {
+        fireEvent.keyDown(document, { key: 'Escape' });
+      });
 
       // Callback should be called
       expect(onEscape).toHaveBeenCalledTimes(1);
@@ -102,10 +114,14 @@ describe('useModalKeyboardScope', () => {
       );
 
       // Open a modal
-      fireEvent.click(screen.getByTestId('open-settings'));
+      act(() => {
+        fireEvent.click(screen.getByTestId('open-settings'));
+      });
 
       // Press Escape
-      fireEvent.keyDown(document, { key: 'Escape' });
+      act(() => {
+        fireEvent.keyDown(document, { key: 'Escape' });
+      });
 
       // Modal should still be open
       expect(useModalStore.getState().modal.type).toBe('settings');
@@ -123,7 +139,9 @@ describe('useModalKeyboardScope', () => {
       expect(useModalStore.getState().modal.type).toBe('none');
 
       // Press Escape
-      fireEvent.keyDown(document, { key: 'Escape' });
+      act(() => {
+        fireEvent.keyDown(document, { key: 'Escape' });
+      });
 
       // Callback should not be called (no modal to close)
       expect(onEscape).not.toHaveBeenCalled();
@@ -139,7 +157,9 @@ describe('useModalKeyboardScope', () => {
       );
 
       // Open settings modal
-      fireEvent.click(screen.getByTestId('open-settings'));
+      act(() => {
+        fireEvent.click(screen.getByTestId('open-settings'));
+      });
 
       // Modal scope should be registered at MODAL priority
       // This test verifies the modal keyboard scope is active
@@ -176,7 +196,9 @@ describe('useModalKeyboardScope', () => {
       );
 
       // Open first modal
-      fireEvent.click(screen.getByTestId('open-settings'));
+      act(() => {
+        fireEvent.click(screen.getByTestId('open-settings'));
+      });
       expect(useModalStore.getState().modal.type).toBe('settings');
 
       // Push second modal
@@ -187,12 +209,16 @@ describe('useModalKeyboardScope', () => {
       expect(useModalStore.getState().stack.length).toBe(2);
 
       // Press Escape - should pop to first modal
-      fireEvent.keyDown(document, { key: 'Escape' });
+      act(() => {
+        fireEvent.keyDown(document, { key: 'Escape' });
+      });
       expect(useModalStore.getState().modal.type).toBe('settings');
       expect(useModalStore.getState().stack.length).toBe(1);
 
       // Press Escape again - should close completely
-      fireEvent.keyDown(document, { key: 'Escape' });
+      act(() => {
+        fireEvent.keyDown(document, { key: 'Escape' });
+      });
       expect(useModalStore.getState().modal.type).toBe('none');
     });
   });
@@ -206,13 +232,17 @@ describe('useModalKeyboardScope', () => {
       );
 
       // Open modal
-      fireEvent.click(screen.getByTestId('open-settings'));
+      act(() => {
+        fireEvent.click(screen.getByTestId('open-settings'));
+      });
 
       // Unmount component
       unmount();
 
       // Close modal via store directly (cleanup should have happened)
-      useModalStore.getState().closeModal();
+      act(() => {
+        useModalStore.getState().closeModal();
+      });
       expect(useModalStore.getState().modal.type).toBe('none');
     });
   });

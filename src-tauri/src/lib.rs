@@ -476,7 +476,7 @@ mod tauri_app {
             builder
         };
 
-        builder.setup(move |app| {
+        let result = builder.setup(move |app| {
             // Initialize logging (safe to call multiple times).
             init_logging(app.handle());
 
@@ -745,8 +745,12 @@ mod tauri_app {
             ipc::relaunch_app,
             ipc::download_and_install_update,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .run(tauri::generate_context!());
+
+        if let Err(e) = result {
+            tracing::error!("Error while running tauri application: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
@@ -812,7 +816,16 @@ mod tests {
         let project_path = temp_dir.path().join("test_project");
 
         let mut project = ActiveProject::create("Test Project", project_path.clone()).unwrap();
-        project.state.meta.name = "Updated Name".to_string();
+        project
+            .executor
+            .execute(
+                Box::new(
+                    crate::core::commands::UpdateProjectSettingsCommand::new()
+                        .with_name("Updated Name"),
+                ),
+                &mut project.state,
+            )
+            .unwrap();
         project.save().unwrap();
 
         // Reopen and verify
@@ -827,8 +840,17 @@ mod tests {
 
         let mut project = ActiveProject::create("Test Project", project_path.clone()).unwrap();
 
-        // Mark as dirty (simulating a command execution)
-        project.state.is_dirty = true;
+        // Execute a command to mark the project dirty.
+        project
+            .executor
+            .execute(
+                Box::new(
+                    crate::core::commands::UpdateProjectSettingsCommand::new()
+                        .with_name("Updated Name"),
+                ),
+                &mut project.state,
+            )
+            .unwrap();
         assert!(project.state.is_dirty);
 
         // Save should reset the dirty flag
