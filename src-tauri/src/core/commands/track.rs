@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
     project::ProjectState,
-    timeline::{Track, TrackKind},
+    timeline::{BlendMode, Track, TrackKind},
     CoreError, CoreResult, SequenceId, TrackId,
 };
 
@@ -352,13 +352,98 @@ impl Command for RenameTrackCommand {
 }
 
 // =============================================================================
+// SetTrackBlendModeCommand
+// =============================================================================
+
+/// Command to set a track blend mode.
+///
+/// Blend modes are only supported for video/overlay tracks.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTrackBlendModeCommand {
+    /// Target sequence ID
+    pub sequence_id: SequenceId,
+    /// Target track ID
+    pub track_id: TrackId,
+    /// Desired blend mode
+    pub blend_mode: BlendMode,
+    /// Original blend mode (for undo)
+    #[serde(skip)]
+    original_blend_mode: Option<BlendMode>,
+}
+
+impl SetTrackBlendModeCommand {
+    /// Creates a new set track blend mode command.
+    pub fn new(sequence_id: &str, track_id: &str, blend_mode: BlendMode) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            blend_mode,
+            original_blend_mode: None,
+        }
+    }
+}
+
+impl Command for SetTrackBlendModeCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        if !track.is_video() {
+            return Err(CoreError::NotSupported(
+                "Blend mode is only supported for video tracks".to_string(),
+            ));
+        }
+
+        self.original_blend_mode = Some(track.blend_mode.clone());
+        track.blend_mode = self.blend_mode.clone();
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::TrackModified {
+                track_id: self.track_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(original_blend_mode) = &self.original_blend_mode else {
+            return Ok(());
+        };
+
+        if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) {
+                track.blend_mode = original_blend_mode.clone();
+            }
+        }
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetTrackBlendMode"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::timeline::{Sequence, SequenceFormat};
+    use crate::core::timeline::{BlendMode, Sequence, SequenceFormat};
 
     fn create_test_state() -> ProjectState {
         let mut state = ProjectState::new("Test Project");
@@ -482,5 +567,44 @@ mod tests {
         let result = cmd.execute(&mut state);
 
         assert!(matches!(result, Err(CoreError::TrackNotFound(_))));
+    }
+
+    #[test]
+    fn test_set_track_blend_mode_command() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+
+        // Add track
+        let mut add_cmd = AddTrackCommand::new(&seq_id, "Video 1", TrackKind::Video);
+        let result = add_cmd.execute(&mut state).unwrap();
+        let track_id = &result.created_ids[0];
+
+        // Set blend mode
+        let mut set_cmd = SetTrackBlendModeCommand::new(&seq_id, track_id, BlendMode::Multiply);
+        set_cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.blend_mode, BlendMode::Multiply);
+
+        // Undo should restore original (Normal)
+        set_cmd.undo(&mut state).unwrap();
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.blend_mode, BlendMode::Normal);
+    }
+
+    #[test]
+    fn test_set_track_blend_mode_rejects_audio_tracks() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+
+        // Add audio track
+        let mut add_cmd = AddTrackCommand::new(&seq_id, "Audio 1", TrackKind::Audio);
+        let result = add_cmd.execute(&mut state).unwrap();
+        let track_id = &result.created_ids[0];
+
+        // Blend modes should not apply to audio tracks
+        let mut set_cmd = SetTrackBlendModeCommand::new(&seq_id, track_id, BlendMode::Multiply);
+        let result = set_cmd.execute(&mut state);
+        assert!(matches!(result, Err(CoreError::NotSupported(_))));
     }
 }

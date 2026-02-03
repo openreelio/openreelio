@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest",
+    "test:run": "vitest run",
     "test:ui": "vitest --ui",
     "test:bench": "vitest run src/benchmarks/**/*.bench.test.ts",
     "test:stress": "tsx scripts/run-stress-tests.ts",
@@ -30,9 +31,11 @@
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "immer": "^10.1.1",
     "lucide-react": "^0.562.0",
+    "nanoid": "^3.3.11",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.12.0",
+    "zod": "^4.3.6",
     "zustand": "^5.0.9"
   },
   "devDependencies": {

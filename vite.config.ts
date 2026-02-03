@@ -10,6 +10,18 @@ const rootDir = fileURLToPath(new URL('.', import.meta.url));
 
 export default defineConfig(({ mode }) => {
   const isStressRun = process.env.VITEST_STRESS === '1';
+  const isCI = process.env.CI === 'true';
+  // CI runners (GitHub Actions ubuntu-latest) have ~7GB RAM.
+  // Using multiple forks with large heaps causes OOM.
+  // Strategy: CI uses single fork with moderate heap, local dev uses 2 forks.
+  const vitestMaxForks = Math.max(
+    1,
+    Number(process.env.VITEST_MAX_FORKS ?? (isCI ? '1' : '2'))
+  );
+  const vitestMaxOldSpaceSizeMb = Math.max(
+    1024,
+    Number(process.env.VITEST_MAX_OLD_SPACE_SIZE ?? (isCI ? '3072' : '4096'))
+  );
   const analyzePlugins =
     mode === 'analyze'
       ? [
@@ -34,8 +46,28 @@ export default defineConfig(({ mode }) => {
     test: {
       globals: true,
       environment: 'jsdom',
+      pool: 'forks',
+      // Ensure each test file has an isolated module graph so long-running runs
+      // don't retain module-level caches indefinitely.
+      isolate: true,
+      // Disable file parallelism in CI to reduce memory pressure
+      fileParallelism: !isCI,
+      // Timeout settings to prevent CI hangs
+      testTimeout: 30000, // 30 seconds per test
+      hookTimeout: 30000, // 30 seconds for hooks
+      teardownTimeout: 10000, // 10 seconds for teardown - prevents hangs during cleanup
       setupFiles: ['./src/test/setup.ts'],
       include: ['src/**/*.{test,spec}.{ts,tsx}', 'scripts/**/*.test.ts'],
+      // Large jsdom-heavy test suites can exceed the default Node heap
+      // when executed with many parallel workers. Keep the default conservative
+      // and allow overriding via VITEST_MAX_THREADS.
+      poolOptions: {
+        forks: {
+          minForks: 1,
+          maxForks: vitestMaxForks,
+          execArgv: [`--max-old-space-size=${vitestMaxOldSpaceSizeMb}`],
+        },
+      },
       exclude: isStressRun
         ? ['src/**/*.bench.test.{ts,tsx}']
         : ['src/**/*.bench.test.{ts,tsx}', 'src/**/*.stress.test.{ts,tsx}'],

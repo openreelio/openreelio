@@ -22,10 +22,10 @@ env:
 
 jobs:
   # ==========================================================================
-  # Frontend Tests
+  # Frontend Lint & Type Check
   # ==========================================================================
-  frontend-test:
-    name: Frontend Tests
+  frontend-lint:
+    name: Frontend Lint
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
 
@@ -52,15 +52,46 @@ jobs:
         run: npm run type-check
         continue-on-error: true
 
-      - name: Run tests
-        run: npm test -- run --reporter=verbose
+  # ==========================================================================
+  # Frontend Tests (Sharded)
+  # ==========================================================================
+  frontend-test:
+    name: Frontend Tests (shard ${{ matrix.shard }})
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    needs: [frontend-lint]
 
-      - name: Upload coverage
-        uses: codecov/codecov-action@v4
-        if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+
+    env:
+      # Single fork with 2GB heap - conservative for CI stability
+      NODE_OPTIONS: '--max-old-space-size=2048'
+      VITEST_MAX_FORKS: '1'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup swap space
+        uses: pierotofy/set-swap-space@master
         with:
-          flags: frontend
-          fail_ci_if_error: false
+          swap-size-gb: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests (shard ${{ matrix.shard }}/16)
+        run: npm test -- run --reporter=verbose --shard=${{ matrix.shard }}/16 --no-coverage
+        timeout-minutes: 10
 
   # ==========================================================================
   # Rust Tests
@@ -119,7 +150,7 @@ jobs:
     name: Build Check
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    needs: [frontend-test, rust-test]
+    needs: [frontend-lint, frontend-test, rust-test]
 
     steps:
       - name: Checkout repository
@@ -246,7 +277,7 @@ jobs:
     name: E2E Tests
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    needs: [frontend-test]
+    needs: [frontend-lint, frontend-test]
 
     steps:
       - name: Checkout repository

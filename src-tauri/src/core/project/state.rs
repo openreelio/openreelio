@@ -12,7 +12,7 @@ use crate::core::{
     bins::Bin,
     effects::Effect,
     project::{OpKind, Operation, OpsLog},
-    timeline::{Clip, Sequence, Track},
+    timeline::{BlendMode, Clip, Sequence, Track},
     AssetId, BinId, CoreError, CoreResult, EffectId, SequenceId,
 };
 
@@ -183,6 +183,7 @@ impl ProjectState {
             OpKind::TrackAdd => self.apply_track_add(op)?,
             OpKind::TrackRemove => self.apply_track_remove(op)?,
             OpKind::TrackReorder => self.apply_track_reorder(op)?,
+            OpKind::TrackUpdate => self.apply_track_update(op)?,
 
             // Clip operations
             OpKind::ClipAdd => self.apply_clip_add(op)?,
@@ -420,6 +421,118 @@ impl ProjectState {
                 a_idx.cmp(&b_idx)
             });
         }
+        Ok(())
+    }
+
+    fn apply_track_update(&mut self, op: &Operation) -> CoreResult<()> {
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let track_id = op.payload["trackId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing trackId".to_string()))?;
+
+        let sequence = self
+            .sequences
+            .get_mut(seq_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Sequence not found: {}", seq_id)))?;
+        let track = sequence
+            .get_track_mut(track_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Track not found: {}", track_id)))?;
+
+        // Name update
+        if let Some(name_value) = op.payload.get("name") {
+            if name_value.is_null() {
+                // no-op
+            } else if let Some(name) = name_value.as_str() {
+                track.name = name.to_string();
+            } else {
+                return Err(CoreError::InvalidCommand(
+                    "Invalid name value (expected string)".to_string(),
+                ));
+            }
+        }
+
+        // Blend mode update (video tracks only)
+        if let Some(blend_value) = op.payload.get("blendMode") {
+            if blend_value.is_null() {
+                // no-op
+            } else {
+                if !track.is_video() {
+                    return Err(CoreError::ValidationError(format!(
+                        "Blend mode is only supported for video tracks: {}",
+                        track_id
+                    )));
+                }
+                let blend_mode: BlendMode = serde_json::from_value(blend_value.clone())
+                    .map_err(|e| CoreError::InvalidCommand(format!("Invalid blendMode: {}", e)))?;
+                track.blend_mode = blend_mode;
+            }
+        }
+
+        // Muted update
+        if let Some(muted_value) = op.payload.get("muted") {
+            if muted_value.is_null() {
+                // no-op
+            } else if let Some(muted) = muted_value.as_bool() {
+                track.muted = muted;
+            } else {
+                return Err(CoreError::InvalidCommand(
+                    "Invalid muted value (expected boolean)".to_string(),
+                ));
+            }
+        }
+
+        // Locked update
+        if let Some(locked_value) = op.payload.get("locked") {
+            if locked_value.is_null() {
+                // no-op
+            } else if let Some(locked) = locked_value.as_bool() {
+                track.locked = locked;
+            } else {
+                return Err(CoreError::InvalidCommand(
+                    "Invalid locked value (expected boolean)".to_string(),
+                ));
+            }
+        }
+
+        // Visible update
+        if let Some(visible_value) = op.payload.get("visible") {
+            if visible_value.is_null() {
+                // no-op
+            } else if let Some(visible) = visible_value.as_bool() {
+                track.visible = visible;
+            } else {
+                return Err(CoreError::InvalidCommand(
+                    "Invalid visible value (expected boolean)".to_string(),
+                ));
+            }
+        }
+
+        // Volume update (audio tracks only)
+        if let Some(volume_value) = op.payload.get("volume") {
+            if volume_value.is_null() {
+                // no-op
+            } else if let Some(volume) = volume_value.as_f64() {
+                if !track.is_audio() {
+                    return Err(CoreError::ValidationError(format!(
+                        "Volume is only supported for audio tracks: {}",
+                        track_id
+                    )));
+                }
+                if !volume.is_finite() || !(0.0..=2.0).contains(&volume) {
+                    return Err(CoreError::InvalidCommand(
+                        "Invalid volume value (expected 0.0 - 2.0)".to_string(),
+                    ));
+                }
+                track.volume = volume as f32;
+            } else {
+                return Err(CoreError::InvalidCommand(
+                    "Invalid volume value (expected number)".to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -2322,5 +2435,101 @@ mod tests {
         ));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_track_update_blend_mode_on_audio_track_fails() {
+        let mut state = ProjectState::new("Test Project");
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let audio_track_id = state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.is_audio())
+            .unwrap()
+            .id
+            .clone();
+
+        let result = state.apply_operation(&Operation::new(
+            OpKind::TrackUpdate,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "trackId": audio_track_id,
+                "blendMode": "multiply",
+            }),
+        ));
+
+        assert!(matches!(result, Err(CoreError::ValidationError(_))));
+    }
+
+    #[test]
+    fn test_track_update_invalid_blend_mode_fails() {
+        let mut state = ProjectState::new("Test Project");
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let video_track_id = state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.is_video())
+            .unwrap()
+            .id
+            .clone();
+
+        let result = state.apply_operation(&Operation::new(
+            OpKind::TrackUpdate,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "trackId": video_track_id,
+                "blendMode": "not-a-real-mode",
+            }),
+        ));
+
+        assert!(matches!(result, Err(CoreError::InvalidCommand(_))));
+    }
+
+    #[test]
+    fn test_track_update_volume_on_video_track_fails() {
+        let mut state = ProjectState::new("Test Project");
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let video_track_id = state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.is_video())
+            .unwrap()
+            .id
+            .clone();
+
+        let result = state.apply_operation(&Operation::new(
+            OpKind::TrackUpdate,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "trackId": video_track_id,
+                "volume": 1.5,
+            }),
+        ));
+
+        assert!(matches!(result, Err(CoreError::ValidationError(_))));
+    }
+
+    #[test]
+    fn test_track_update_volume_out_of_range_fails() {
+        let mut state = ProjectState::new("Test Project");
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let audio_track_id = state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.is_audio())
+            .unwrap()
+            .id
+            .clone();
+
+        let result = state.apply_operation(&Operation::new(
+            OpKind::TrackUpdate,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "trackId": audio_track_id,
+                "volume": 5.0,
+            }),
+        ));
+
+        assert!(matches!(result, Err(CoreError::InvalidCommand(_))));
     }
 }

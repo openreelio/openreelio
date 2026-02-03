@@ -95,7 +95,8 @@ pub fn parse_srt(content: &str) -> Result<Vec<Caption>, ParseError> {
             if line.trim().is_empty() {
                 break;
             }
-            text_lines.push(lines.next().unwrap().to_string());
+            let next_line = lines.next().ok_or(ParseError::UnexpectedEnd)?;
+            text_lines.push(next_line.to_string());
         }
 
         if text_lines.is_empty() {
@@ -249,7 +250,8 @@ pub fn parse_vtt(content: &str) -> Result<Vec<Caption>, ParseError> {
             if line.trim().is_empty() {
                 break;
             }
-            text_lines.push(lines.next().unwrap().to_string());
+            let next_line = lines.next().ok_or(ParseError::UnexpectedEnd)?;
+            text_lines.push(next_line.to_string());
         }
 
         if text_lines.is_empty() {
@@ -360,7 +362,10 @@ fn parse_vtt_tags(text: &str) -> VttTagParseResult {
                     chars.next(); // consume '>'
                     break;
                 }
-                tag_content.push(chars.next().unwrap());
+                let Some(content_char) = chars.next() else {
+                    break;
+                };
+                tag_content.push(content_char);
             }
 
             // Check for voice/speaker tag: <v Speaker Name> or <v.class Speaker Name>
@@ -777,5 +782,27 @@ Line two</v>
         assert_eq!(captions.len(), 1);
         assert_eq!(captions[0].speaker, Some("Narrator".to_string()));
         assert_eq!(captions[0].text, "Line one\nLine two");
+    }
+
+    #[test]
+    fn test_parse_srt_truncated_returns_error() {
+        let srt = "1\n";
+        let result = parse_srt(srt);
+        assert!(matches!(result, Err(ParseError::UnexpectedEnd)));
+    }
+
+    #[test]
+    fn test_parse_vtt_missing_header_returns_error() {
+        let vtt = r#"00:00:01.000 --> 00:00:04.000
+Hello
+"#;
+        let result = parse_vtt(vtt);
+        assert!(matches!(result, Err(ParseError::InvalidFormat(_))));
+    }
+
+    #[test]
+    fn test_parse_vtt_tags_unterminated_does_not_panic() {
+        let result = parse_vtt_tags("<v Alice Hello");
+        assert!(result.speaker.is_some());
     }
 }

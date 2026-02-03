@@ -350,8 +350,8 @@ impl PluginHost {
             .func_wrap("env", "host_time_now", || -> i64 {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as i64
+                    .map(|duration| duration.as_millis() as i64)
+                    .unwrap_or(0)
             })
             .map_err(|e| CoreError::PluginError(format!("Failed to add host_time_now: {}", e)))?;
 

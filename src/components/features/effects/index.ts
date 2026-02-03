@@ -37,3 +37,15 @@ export type {
   ColorWheelsValues,
   ColorWheelsParamName,
 } from './ColorWheelsPanel';
+
+export { ChromaKeyControl } from './ChromaKeyControl';
+export type { ChromaKeyControlProps } from './ChromaKeyControl';
+
+export { BlendModePicker } from './BlendModePicker';
+export type { BlendModePickerProps } from './BlendModePicker';
+
+export { NoiseReductionControl } from './NoiseReductionControl';
+export type { NoiseReductionControlProps } from './NoiseReductionControl';
+
+export { MotionTrackingControl } from './MotionTrackingControl';
+export type { MotionTrackingControlProps } from './MotionTrackingControl';
