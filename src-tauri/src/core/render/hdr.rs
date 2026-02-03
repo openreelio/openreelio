@@ -338,16 +338,16 @@ impl MasteringDisplayInfo {
 
         format!(
             "G({},{})B({},{})R({},{})WP({},{})L({},{})",
-            (self.green_x * CHROMA_SCALE) as i64,
-            (self.green_y * CHROMA_SCALE) as i64,
-            (self.blue_x * CHROMA_SCALE) as i64,
-            (self.blue_y * CHROMA_SCALE) as i64,
-            (self.red_x * CHROMA_SCALE) as i64,
-            (self.red_y * CHROMA_SCALE) as i64,
-            (self.white_x * CHROMA_SCALE) as i64,
-            (self.white_y * CHROMA_SCALE) as i64,
-            (self.max_luminance * LUM_SCALE) as i64,
-            (self.min_luminance * LUM_SCALE) as i64
+            (self.green_x * CHROMA_SCALE).round() as i64,
+            (self.green_y * CHROMA_SCALE).round() as i64,
+            (self.blue_x * CHROMA_SCALE).round() as i64,
+            (self.blue_y * CHROMA_SCALE).round() as i64,
+            (self.red_x * CHROMA_SCALE).round() as i64,
+            (self.red_y * CHROMA_SCALE).round() as i64,
+            (self.white_x * CHROMA_SCALE).round() as i64,
+            (self.white_y * CHROMA_SCALE).round() as i64,
+            (self.max_luminance * LUM_SCALE).round() as i64,
+            (self.min_luminance * LUM_SCALE).round() as i64
         )
     }
 }
@@ -592,7 +592,8 @@ pub fn build_tonemap_filter(params: &TonemapParams, metadata: &HdrMetadata) -> S
         return String::new();
     }
 
-    let source_peak = metadata.max_cll.unwrap_or(1000) as f64;
+    // Guard against division by zero: max_cll could be Some(0)
+    let source_peak = metadata.max_cll.unwrap_or(1000).max(1) as f64;
     let target_peak = params.target_peak;
 
     // Build the filter chain
@@ -1007,6 +1008,23 @@ mod tests {
 
         assert!(!filter.is_empty());
         assert!(filter.contains("tonemap"));
+    }
+
+    #[test]
+    fn test_build_tonemap_filter_zero_max_cll() {
+        // Regression test: max_cll = 0 should not cause division by zero
+        let params = TonemapParams::default();
+        let meta = HdrMetadata {
+            color_space: ColorSpace::hdr10(),
+            max_cll: Some(0), // Edge case: zero max_cll
+            max_fall: Some(0),
+            mastering_display: Some(MasteringDisplayInfo::bt2020_pq_1000()),
+        };
+
+        // Should not panic and should produce valid filter
+        let filter = build_tonemap_filter(&params, &meta);
+        assert!(!filter.is_empty());
+        assert!(filter.contains("tonemap=reinhard"));
     }
 
     // =========================================================================
