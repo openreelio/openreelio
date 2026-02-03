@@ -189,6 +189,37 @@ describe('useScrubbing', () => {
       expect(event.preventDefault).toHaveBeenCalled();
     });
 
+    it('should use playheadTrackHeaderWidth for direct DOM updates', () => {
+      const setPixelPosition = vi.fn();
+
+      const options = {
+        ...createDefaultOptions(),
+        zoom: 100,
+        scrollX: 0,
+        trackHeaderWidth: 192,
+        playheadTrackHeaderWidth: 0,
+        playheadRef: {
+          current: {
+            setPixelPosition,
+            getElement: () => null,
+          },
+        },
+      };
+
+      const { result } = renderHook(() => useScrubbing(options));
+
+      const target = document.createElement('div');
+      target.setAttribute('data-testid', 'timeline-tracks-area');
+      const event = createMockMouseEvent(target);
+
+      act(() => {
+        result.current.handleScrubStart(event);
+      });
+
+      // With zoom=100, time=5s (mocked), scrollX=0, playheadTrackHeaderWidth=0 => 500px
+      expect(setPixelPosition).toHaveBeenCalledWith(500);
+    });
+
     it('should start scrubbing when clicking on track-content', () => {
       const options = createDefaultOptions();
       const { result } = renderHook(() => useScrubbing(options));

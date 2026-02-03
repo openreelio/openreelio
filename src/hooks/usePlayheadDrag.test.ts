@@ -238,6 +238,36 @@ describe('usePlayheadDrag', () => {
       expect(options.seek).toHaveBeenCalledWith(1);
     });
 
+    it('should use playheadTrackHeaderWidth for direct DOM updates', () => {
+      const options = createDefaultOptions();
+      const setPixelPosition = vi.fn();
+
+      const playheadRef = {
+        current: {
+          setPixelPosition,
+          getElement: () => null,
+        },
+      };
+
+      // Simulate playhead being rendered in a container already offset by the header
+      // so the playhead's local coordinate system starts at the content area (X=0).
+      const { result } = renderHook(() =>
+        usePlayheadDrag({
+          ...options,
+          playheadRef,
+          playheadTrackHeaderWidth: 0,
+        }),
+      );
+
+      // Same time calculation as the previous test: startTime = 1s
+      act(() => {
+        result.current.handleDragStart(createMockMouseEvent({ clientX: 492 }));
+      });
+
+      // With zoom=100, scrollX=0, playheadTrackHeaderWidth=0 => pixelX = 1 * 100 = 100
+      expect(setPixelPosition).toHaveBeenCalledWith(100);
+    });
+
     it('should clamp time to valid range', () => {
       const options = createDefaultOptions();
       const { result } = renderHook(() => usePlayheadDrag(options));

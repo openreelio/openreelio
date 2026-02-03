@@ -42,12 +42,6 @@ interface JobsState {
   jobs: Job[];
   activeJobId: string | null;
 
-  // Computed-like getters
-  pendingJobs: () => Job[];
-  runningJobs: () => Job[];
-  completedJobs: () => Job[];
-  failedJobs: () => Job[];
-
   // Actions
   addJob: (job: Omit<Job, 'createdAt' | 'progress' | 'status'>) => void;
   updateJobStatus: (jobId: string, status: JobStatus) => void;
@@ -62,6 +56,34 @@ interface JobsState {
 }
 
 // =============================================================================
+// Selectors - Use these with useJobsStore(selector) to avoid unnecessary re-renders
+// =============================================================================
+
+/** Select pending jobs - use with useJobsStore(selectPendingJobs) */
+export const selectPendingJobs = (state: JobsState): Job[] =>
+  state.jobs.filter((j) => j.status === 'pending');
+
+/** Select running jobs - use with useJobsStore(selectRunningJobs) */
+export const selectRunningJobs = (state: JobsState): Job[] =>
+  state.jobs.filter((j) => j.status === 'running');
+
+/** Select completed jobs - use with useJobsStore(selectCompletedJobs) */
+export const selectCompletedJobs = (state: JobsState): Job[] =>
+  state.jobs.filter((j) => j.status === 'completed');
+
+/** Select failed jobs - use with useJobsStore(selectFailedJobs) */
+export const selectFailedJobs = (state: JobsState): Job[] =>
+  state.jobs.filter((j) => j.status === 'failed');
+
+/** Select active jobs (pending + running) */
+export const selectActiveJobs = (state: JobsState): Job[] =>
+  state.jobs.filter((j) => j.status === 'pending' || j.status === 'running');
+
+/** Select job by ID - usage: useJobsStore(state => selectJobById(state, jobId)) */
+export const selectJobById = (state: JobsState, jobId: string): Job | undefined =>
+  state.jobs.find((j) => j.id === jobId);
+
+// =============================================================================
 // Store
 // =============================================================================
 
@@ -70,12 +92,6 @@ export const useJobsStore = create<JobsState>()(
     // Initial state
     jobs: [],
     activeJobId: null,
-
-    // Computed getters
-    pendingJobs: () => get().jobs.filter((j) => j.status === 'pending'),
-    runningJobs: () => get().jobs.filter((j) => j.status === 'running'),
-    completedJobs: () => get().jobs.filter((j) => j.status === 'completed'),
-    failedJobs: () => get().jobs.filter((j) => j.status === 'failed'),
 
     // Actions
     addJob: (jobData) => {

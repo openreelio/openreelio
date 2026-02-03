@@ -109,7 +109,7 @@ export function useTimelineNavigation({
   const getViewportState = useCallback((): ViewportState | null => {
     if (!tracksAreaRef?.current) return null;
 
-    const viewportWidth = tracksAreaRef.current.clientWidth - trackHeaderWidth;
+    const viewportWidth = Math.max(0, tracksAreaRef.current.clientWidth - trackHeaderWidth);
     return {
       scrollX,
       zoom,
@@ -168,11 +168,26 @@ export function useTimelineNavigation({
         return;
       }
 
-      // Shift key: horizontal scroll (use deltaY only for consistent behavior)
-      if (e.shiftKey) {
-        e.preventDefault();
-        setScrollX(Math.max(0, scrollX + e.deltaY));
-      }
+      // Timeline default: treat wheel as horizontal scroll (NLE behavior).
+      // Trackpads may provide deltaX directly; mouse wheels typically provide deltaY.
+      //
+      // Shift + wheel: also horizontal scroll (kept for compatibility).
+      // Shift+wheel uses deltaY for consistent cross-device behavior.
+      const delta = e.shiftKey
+        ? e.deltaY
+        : (Math.abs(e.deltaX) > 0 ? e.deltaX : e.deltaY);
+
+      // No-op if there's no meaningful delta.
+      if (!Number.isFinite(delta) || delta === 0) return;
+
+      e.preventDefault();
+
+      // Clamp scroll to content bounds (prevents infinite blank scrolling).
+      const viewportState = getViewportState();
+      const viewportWidth = viewportState?.viewportWidth ?? 0;
+      const maxScrollX = Math.max(0, duration * zoom - viewportWidth);
+
+      setScrollX(Math.max(0, Math.min(maxScrollX, scrollX + delta)));
     },
     [
       zoom,
@@ -188,6 +203,7 @@ export function useTimelineNavigation({
       trackHeaderWidth,
       tracksAreaRef,
       getViewportState,
+      duration,
     ]
   );
 

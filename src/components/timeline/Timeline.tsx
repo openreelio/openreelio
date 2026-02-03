@@ -29,6 +29,7 @@ import { useSlipEdit } from '@/hooks/useSlipEdit';
 import { useSlideEdit } from '@/hooks/useSlideEdit';
 import { useRollEdit } from '@/hooks/useRollEdit';
 import { useEdgeAutoScroll } from '@/hooks/useEdgeAutoScroll';
+import { useTimelinePan } from '@/hooks/useTimelinePan';
 import { TimeRuler } from './TimeRuler';
 import { Track } from './Track';
 import { CaptionTrack } from './CaptionTrack';
@@ -40,6 +41,10 @@ import { SelectionBox } from './SelectionBox';
 import { ShotMarkers } from './ShotMarkers';
 import { CaptionEditor } from '@/components/features/captions';
 import { CaptionExportDialog } from '@/components/features/export/CaptionExportDialog';
+import {
+  TimelineOperationsProvider,
+  type TimelineOperations,
+} from './TimelineOperationsContext';
 import type { ClipWaveformConfig, ClipThumbnailConfig } from './Clip';
 import type { TimelineProps } from './types';
 import type { CaptionTrack as CaptionTrackType, Caption } from '@/types';
@@ -120,34 +125,37 @@ export function Timeline({
   onAddText,
 }: TimelineProps) {
   // ===========================================================================
-  // Store State
+  // Store State - Using targeted selectors to minimize re-renders
   // ===========================================================================
-  const {
-    zoom,
-    scrollX,
-    scrollY,
-    selectedClipIds,
-    setScrollX,
-    setZoom,
-    selectClip,
-    selectClips,
-    clearClipSelection,
-    zoomIn,
-    zoomOut,
-    fitToWindow,
-    snapEnabled,
-  } = useTimelineStore();
+  // State values - only subscribe to what's needed for render
+  const zoom = useTimelineStore((state) => state.zoom);
+  const scrollX = useTimelineStore((state) => state.scrollX);
+  const scrollY = useTimelineStore((state) => state.scrollY);
+  const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
+  const snapEnabled = useTimelineStore((state) => state.snapEnabled);
 
-  const { assets } = useProjectStore();
+  // Actions - stable references, don't cause re-renders
+  const setScrollX = useTimelineStore((state) => state.setScrollX);
+  const setZoom = useTimelineStore((state) => state.setZoom);
+  const selectClip = useTimelineStore((state) => state.selectClip);
+  const selectClips = useTimelineStore((state) => state.selectClips);
+  const clearClipSelection = useTimelineStore((state) => state.clearClipSelection);
+  const zoomIn = useTimelineStore((state) => state.zoomIn);
+  const zoomOut = useTimelineStore((state) => state.zoomOut);
+  const fitToWindow = useTimelineStore((state) => state.fitToWindow);
+
+  const assets = useProjectStore((state) => state.assets);
 
   // Editor tool store - for tool switching
-  const { setActiveTool } = useEditorToolStore();
+  const setActiveTool = useEditorToolStore((state) => state.setActiveTool);
+  const activeTool = useEditorToolStore((state) => state.activeTool);
 
 
   // ===========================================================================
   // Refs and Local State
   // ===========================================================================
   const tracksAreaRef = useRef<HTMLDivElement>(null);
+  const playheadViewportRef = useRef<HTMLDivElement>(null);
   const playheadRef = useRef<PlayheadHandle>(null);
   const clipDragMouseXRef = useRef<number>(0);
   const [activeSnapPoint, setActiveSnapPoint] = useState<SnapPoint | null>(null);
@@ -333,6 +341,7 @@ export function Timeline({
     zoom,
     scrollX,
     trackHeaderWidth: TRACK_HEADER_WIDTH,
+    playheadTrackHeaderWidth: 0, // Playhead is rendered inside a clipped container offset by the header
   });
 
   // ===========================================================================
@@ -349,6 +358,7 @@ export function Timeline({
     scrollX,
     duration,
     trackHeaderWidth: TRACK_HEADER_WIDTH,
+    playheadTrackHeaderWidth: 0, // Playhead is rendered inside a clipped container offset by the header
     isPlaying,
     togglePlayback,
     seek: setPlayhead,
@@ -356,6 +366,8 @@ export function Timeline({
     snapPoints,
     snapThreshold,
     onSnapChange: setActiveSnapPoint,
+    scrollContainerRef: playheadViewportRef,
+    onScrollChange: setScrollX,
   });
 
   // ===========================================================================
@@ -367,6 +379,24 @@ export function Timeline({
     trackHeaderWidth: TRACK_HEADER_WIDTH,
     isScrubbing,
     isDraggingPlayhead,
+  });
+
+  // ===========================================================================
+  // Timeline Panning (Hand Tool / Middle Mouse)
+  // ===========================================================================
+  const maxScrollX = Math.max(0, duration * zoom - viewportWidth + TRACK_HEADER_WIDTH);
+  const maxScrollY = Math.max(0, (sequence?.tracks.length ?? 0) * TRACK_HEIGHT - 300);
+  const isHandToolActive = activeTool === 'hand';
+
+  const { isPanning, handleMouseDown: handlePanMouseDown } = useTimelinePan({
+    scrollX,
+    scrollY,
+    setScrollX,
+    setScrollY: useTimelineStore.getState().setScrollY,
+    maxScrollX,
+    maxScrollY,
+    isHandToolActive,
+    enabled: true,
   });
 
   // ===========================================================================
@@ -730,7 +760,9 @@ export function Timeline({
     getMouseClientX: () => clipDragMouseXRef.current,
     scrollContainerRef: tracksAreaRef,
     contentWidth: duration * zoom + TRACK_HEADER_WIDTH,
-    onScrollChange: setScrollX,
+    // Timeline uses virtual scrolling via Zustand (`scrollX`) + transforms (not native scrollLeft).
+    getScrollLeft: () => useTimelineStore.getState().scrollX,
+    setScrollLeft: setScrollX,
   });
 
   // ===========================================================================
@@ -1044,24 +1076,89 @@ export function Timeline({
   }, [selectedClipIds, handleRippleDelete]);
 
   // ===========================================================================
+  // Combined Mouse Down Handler
+  // ===========================================================================
+  // Must be defined before early return to satisfy React hooks rules
+  const handleTracksAreaMouseDownCombined = useCallback(
+    (e: MouseEvent<HTMLDivElement>) => {
+      // Try panning first (middle mouse or hand tool)
+      handlePanMouseDown(e);
+      // Then fall through to existing handler if not handled
+      if (!isPanning && !isHandToolActive) {
+        handleTracksAreaMouseDown(e);
+      }
+    },
+    [handlePanMouseDown, isPanning, isHandToolActive, handleTracksAreaMouseDown]
+  );
+
+  // ===========================================================================
+  // Timeline Operations Context
+  // ===========================================================================
+  // Memoize operations object to prevent unnecessary re-renders of context consumers
+  const timelineOperations = useMemo<TimelineOperations>(
+    () => ({
+      onDeleteClips,
+      onAssetDrop,
+      onClipMove,
+      onClipTrim,
+      onClipSplit,
+      onClipDuplicate,
+      onClipPaste,
+      onTrackMuteToggle,
+      onTrackLockToggle,
+      onTrackVisibilityToggle,
+      onAddText,
+    }),
+    [
+      onDeleteClips,
+      onAssetDrop,
+      onClipMove,
+      onClipTrim,
+      onClipSplit,
+      onClipDuplicate,
+      onClipPaste,
+      onTrackMuteToggle,
+      onTrackLockToggle,
+      onTrackVisibilityToggle,
+      onAddText,
+    ]
+  );
+
+  // ===========================================================================
   // Render
   // ===========================================================================
   if (!sequence) {
     return (
       <div
         data-testid="timeline"
-        className="h-full flex items-center justify-center text-editor-text-muted"
+        className="h-full flex flex-col items-center justify-center text-editor-text-muted bg-editor-panel"
       >
-        No sequence loaded
+        <svg
+          className="w-16 h-16 mb-4 text-editor-text-muted/50"
+          fill="none"
+          stroke="currentColor"
+          viewBox="0 0 24 24"
+        >
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={1.5}
+            d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z"
+          />
+        </svg>
+        <p className="text-lg font-medium mb-1">No sequence loaded</p>
+        <p className="text-sm text-editor-text-muted/70">
+          Import media or create a new sequence to start editing
+        </p>
       </div>
     );
   }
 
-  // Calculate playhead pixel position for rendering
-  const playheadPixelPosition = playhead * zoom + TRACK_HEADER_WIDTH - scrollX;
-
   // Determine cursor style based on active tool and interaction state
   const getTracksAreaCursor = (): string => {
+    // Panning cursor takes priority
+    if (isPanning) return 'cursor-grabbing';
+    if (isHandToolActive) return 'cursor-grab';
     if (isScrubbing || isDraggingPlayhead) return 'cursor-ew-resize';
     if (isSelecting) return 'cursor-crosshair';
     // Advanced edit mode cursors
@@ -1077,167 +1174,182 @@ export function Timeline({
   };
 
   return (
-    <div
-      data-testid="timeline"
-      className="h-full flex flex-col bg-editor-panel overflow-hidden focus:outline-none"
-      tabIndex={0}
-      onKeyDown={handleKeyDown}
-    >
-      <EnhancedTimelineToolbar
-        onFitToWindow={handleFitToWindow}
-        onAddText={onAddText}
-        onSplit={handleToolbarSplit}
-        onDuplicate={handleToolbarDuplicate}
-        onDelete={handleToolbarDelete}
-        hasActiveSequence={sequence !== null}
-        fps={DEFAULT_FPS}
-        duration={duration}
-      />
+    <TimelineOperationsProvider operations={timelineOperations}>
+      <div
+        data-testid="timeline"
+        className="h-full flex flex-col bg-editor-panel overflow-hidden focus:outline-none"
+        tabIndex={0}
+        onKeyDown={handleKeyDown}
+      >
+        <EnhancedTimelineToolbar
+          onFitToWindow={handleFitToWindow}
+          onAddText={onAddText}
+          onSplit={handleToolbarSplit}
+          onDuplicate={handleToolbarDuplicate}
+          onDelete={handleToolbarDelete}
+          hasActiveSequence={sequence !== null}
+          fps={DEFAULT_FPS}
+          duration={duration}
+        />
 
-      {/* Main timeline area with ruler and tracks - relative container for playhead */}
-      {/* isolation: isolate creates a stacking context so playhead z-index doesn't escape to overlap modals */}
-      <div className="flex-1 flex flex-col relative isolate">
-        {/* Ruler row */}
-        <div className="flex border-b border-editor-border flex-shrink-0">
-          <div className="w-48 flex-shrink-0 bg-editor-sidebar border-r border-editor-border" />
-          <div className="flex-1 overflow-hidden">
-            <div style={{ transform: `translateX(-${scrollX}px)` }}>
-              <TimeRuler duration={duration} zoom={zoom} scrollX={scrollX} onSeek={handleSeek} />
+        {/* Main timeline area with ruler and tracks - relative container for playhead */}
+        {/* isolation: isolate creates a stacking context so playhead z-index doesn't escape to overlap modals */}
+        <div className="flex-1 flex flex-col relative isolate">
+          {/* Ruler row */}
+          <div className="flex border-b border-editor-border flex-shrink-0">
+            {/* Track header area label */}
+            <div className="w-48 flex-shrink-0 bg-editor-sidebar border-r border-editor-border flex items-center justify-center">
+              <span className="text-xs text-editor-text-muted font-medium uppercase tracking-wider select-none">
+                Tracks
+              </span>
+            </div>
+            <div className="flex-1 overflow-hidden" onWheel={handleWheel}>
+              <div style={{ transform: `translateX(-${scrollX}px)` }}>
+                <TimeRuler duration={duration} zoom={zoom} scrollX={scrollX} onSeek={handleSeek} />
+              </div>
             </div>
           </div>
-        </div>
 
-        {/* Tracks area */}
-        <div
-          ref={tracksAreaRef}
-          data-testid="timeline-tracks-area"
-          className={`flex-1 overflow-hidden relative ${getTracksAreaCursor()}`}
-          onClick={handleTracksAreaClick}
-          onMouseDown={handleTracksAreaMouseDown}
-          onWheel={handleWheel}
-          onDragEnter={handleDragEnter}
-          onDragOver={handleDragOver}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-        >
-          <div style={{ transform: `translateY(-${scrollY}px)` }}>
-            {sequence.tracks.map((track) => {
-              if (track.kind === 'caption') {
-                const captionTrack = adaptTrackToCaptionTrack(track);
+          {/* Tracks area */}
+          <div
+            ref={tracksAreaRef}
+            data-testid="timeline-tracks-area"
+            className={`flex-1 overflow-hidden relative ${getTracksAreaCursor()}`}
+            onClick={handleTracksAreaClick}
+            onMouseDown={handleTracksAreaMouseDownCombined}
+            onWheel={handleWheel}
+            onDragEnter={handleDragEnter}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+          >
+            <div style={{ transform: `translateY(-${scrollY}px)` }}>
+              {sequence.tracks.map((track) => {
+                if (track.kind === 'caption') {
+                  const captionTrack = adaptTrackToCaptionTrack(track);
+                  return (
+                    <CaptionTrack
+                      key={track.id}
+                      track={captionTrack}
+                      zoom={zoom}
+                      scrollX={scrollX}
+                      duration={duration}
+                      viewportWidth={viewportWidth}
+                      selectedCaptionIds={selectedClipIds}
+                      onLockToggle={createTrackHandler(onTrackLockToggle)}
+                      onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
+                      onCaptionClick={handleClipClick}
+                      onCaptionDoubleClick={createCaptionDoubleClickHandler(track.id)}
+                      onExportClick={handleCaptionExportClick}
+                    />
+                  );
+                }
+
                 return (
-                  <CaptionTrack
+                  <Track
                     key={track.id}
-                    track={captionTrack}
+                    track={track}
+                    clips={getTrackClips(track.id)}
                     zoom={zoom}
                     scrollX={scrollX}
                     duration={duration}
                     viewportWidth={viewportWidth}
-                    selectedCaptionIds={selectedClipIds}
+                    selectedClipIds={selectedClipIds}
+                    getClipWaveformConfig={getClipWaveformConfig}
+                    getClipThumbnailConfig={getClipThumbnailConfig}
+                    snapPoints={snapEnabled ? snapPoints : []}
+                    snapThreshold={snapEnabled ? snapThreshold : 0}
+                    onClipClick={handleClipClick}
+                    onClipDragStart={handleClipDragStart}
+                    onClipDrag={handleClipDrag}
+                    onClipDragEnd={handleClipDragEnd}
+                    onSnapPointChange={setActiveSnapPoint}
+                    onMuteToggle={createTrackHandler(onTrackMuteToggle)}
                     onLockToggle={createTrackHandler(onTrackLockToggle)}
                     onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
-                    onCaptionClick={handleClipClick}
-                    onCaptionDoubleClick={createCaptionDoubleClickHandler(track.id)}
-                    onExportClick={handleCaptionExportClick}
                   />
                 );
-              }
-
-              return (
-                <Track
-                  key={track.id}
-                  track={track}
-                  clips={getTrackClips(track.id)}
-                  zoom={zoom}
-                  scrollX={scrollX}
-                  duration={duration}
-                  viewportWidth={viewportWidth}
-                  selectedClipIds={selectedClipIds}
-                  getClipWaveformConfig={getClipWaveformConfig}
-                  getClipThumbnailConfig={getClipThumbnailConfig}
-                  snapPoints={snapEnabled ? snapPoints : []}
-                  snapThreshold={snapEnabled ? snapThreshold : 0}
-                  onClipClick={handleClipClick}
-                  onClipDragStart={handleClipDragStart}
-                  onClipDrag={handleClipDrag}
-                  onClipDragEnd={handleClipDragEnd}
-                  onSnapPointChange={setActiveSnapPoint}
-                  onMuteToggle={createTrackHandler(onTrackMuteToggle)}
-                  onLockToggle={createTrackHandler(onTrackLockToggle)}
-                  onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
-                />
-              );
-            })}
+              })}
+            </div>
+            <DragPreviewLayer
+              dragPreview={dragPreview}
+              trackHeaderWidth={TRACK_HEADER_WIDTH}
+              trackHeight={TRACK_HEIGHT}
+              scrollX={scrollX}
+            />
+            <SnapIndicator
+              snapPoint={activeSnapPoint}
+              isActive={isScrubbing || isDraggingPlayhead || isClipDragging}
+              zoom={zoom}
+              trackHeaderWidth={TRACK_HEADER_WIDTH}
+              scrollX={scrollX}
+            />
+            {/* Shot Markers - show detected shot boundaries for selected video clip */}
+            {shotMarkers.length > 0 && (
+              <ShotMarkers
+                shots={shotMarkers}
+                zoom={zoom}
+                scrollX={scrollX}
+                viewportWidth={viewportWidth}
+                duration={duration}
+                trackHeaderWidth={TRACK_HEADER_WIDTH}
+                onSeek={setPlayhead}
+              />
+            )}
+            {isDraggingOver && (
+              <div
+                data-testid="drop-indicator"
+                className="absolute inset-0 bg-primary-500/10 border-2 border-dashed border-primary-500 pointer-events-none flex items-center justify-center"
+              >
+                <div className="text-primary-400 text-sm font-medium">Drop asset here</div>
+              </div>
+            )}
+            <SelectionBox rect={selectionRect} isActive={isSelecting} />
           </div>
-          <DragPreviewLayer
-            dragPreview={dragPreview}
-            trackHeaderWidth={TRACK_HEADER_WIDTH}
-            trackHeight={TRACK_HEIGHT}
-            scrollX={scrollX}
-          />
-          <SnapIndicator
-            snapPoint={activeSnapPoint}
-            isActive={isScrubbing || isDraggingPlayhead || isClipDragging}
-            zoom={zoom}
-            trackHeaderWidth={TRACK_HEADER_WIDTH}
-            scrollX={scrollX}
-          />
-          {/* Shot Markers - show detected shot boundaries for selected video clip */}
-          {shotMarkers.length > 0 && (
-            <ShotMarkers
-              shots={shotMarkers}
+
+          {/* Playhead container - clips playhead to timeline area (not track header) */}
+          <div
+            ref={playheadViewportRef}
+            className="absolute top-0 bottom-0 overflow-hidden pointer-events-none"
+            style={{
+              left: `${TRACK_HEADER_WIDTH}px`,
+              right: 0,
+            }}
+          >
+            {/* Playhead - repositioned relative to clipping container */}
+            <Playhead
+              ref={playheadRef}
+              position={playhead}
               zoom={zoom}
               scrollX={scrollX}
-              viewportWidth={viewportWidth}
-              duration={duration}
-              trackHeaderWidth={TRACK_HEADER_WIDTH}
-              onSeek={setPlayhead}
+              trackHeaderWidth={0} // No offset needed - container handles it
+              isPlaying={isPlaying}
+              isDragging={isDraggingPlayhead}
+              onDragStart={handlePlayheadDragStart}
+              onPointerDown={handlePlayheadPointerDown}
             />
-          )}
-          {isDraggingOver && (
-            <div
-              data-testid="drop-indicator"
-              className="absolute inset-0 bg-primary-500/10 border-2 border-dashed border-primary-500 pointer-events-none flex items-center justify-center"
-            >
-              <div className="text-primary-400 text-sm font-medium">Drop asset here</div>
-            </div>
-          )}
-          <SelectionBox rect={selectionRect} isActive={isSelecting} />
+          </div>
         </div>
 
-        {/* Playhead - spans ruler and tracks, positioned outside overflow-hidden areas */}
-        {playheadPixelPosition >= TRACK_HEADER_WIDTH - 20 && (
-          <Playhead
-            ref={playheadRef}
-            position={playhead}
-            zoom={zoom}
-            scrollX={scrollX}
-            trackHeaderWidth={TRACK_HEADER_WIDTH}
-            isPlaying={isPlaying}
-            isDragging={isDraggingPlayhead}
-            onDragStart={handlePlayheadDragStart}
-            onPointerDown={handlePlayheadPointerDown}
+        {/* Caption Editor Modal */}
+        {editingCaption && (
+          <CaptionEditor
+            caption={editingCaption.caption}
+            isOpen={true}
+            onSave={handleCaptionSave}
+            onCancel={handleCaptionEditCancel}
+            onDelete={handleCaptionDelete}
           />
         )}
-      </div>
 
-      {/* Caption Editor Modal */}
-      {editingCaption && (
-        <CaptionEditor
-          caption={editingCaption.caption}
-          isOpen={true}
-          onSave={handleCaptionSave}
-          onCancel={handleCaptionEditCancel}
-          onDelete={handleCaptionDelete}
+        {/* Caption Export Dialog */}
+        <CaptionExportDialog
+          isOpen={exportCaptions !== null}
+          onClose={handleExportDialogClose}
+          captions={exportCaptions?.captions ?? []}
+          defaultName={exportCaptions?.trackName}
         />
-      )}
-
-      {/* Caption Export Dialog */}
-      <CaptionExportDialog
-        isOpen={exportCaptions !== null}
-        onClose={handleExportDialogClose}
-        captions={exportCaptions?.captions ?? []}
-        defaultName={exportCaptions?.trackName}
-      />
-    </div>
+      </div>
+    </TimelineOperationsProvider>
   );
 }

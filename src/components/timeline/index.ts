@@ -7,6 +7,13 @@
 // Main components
 export { Timeline } from './Timeline';
 
+// Context
+export {
+  TimelineOperationsProvider,
+  useTimelineOperations,
+  type TimelineOperations,
+} from './TimelineOperationsContext';
+
 // Types (now from dedicated types file)
 export type {
   AssetDropData,

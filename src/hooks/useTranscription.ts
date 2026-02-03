@@ -5,7 +5,7 @@
  * Handles API calls, progress tracking, and result caching.
  */
 
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { createLogger } from '@/services/logger';
 
@@ -108,6 +108,16 @@ export function useTranscription(
     result: null,
   });
 
+  // Mounted ref to prevent setState after unmount (memory leak prevention)
+  const isMountedRef = useRef(true);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   // Cache
   const cacheRef = useRef<Map<string, TranscriptionResult>>(new Map());
   const [cacheSize, setCacheSize] = useState(0);
@@ -134,7 +144,9 @@ export function useTranscription(
   // Clear cache
   const clearCache = useCallback(() => {
     cacheRef.current.clear();
-    setCacheSize(0);
+    if (isMountedRef.current) {
+      setCacheSize(0);
+    }
   }, []);
 
   // Add to cache with LRU eviction
@@ -153,7 +165,9 @@ export function useTranscription(
       }
 
       cache.set(assetId, result);
-      setCacheSize(cache.size);
+      if (isMountedRef.current) {
+        setCacheSize(cache.size);
+      }
     },
     [cacheResults, maxCacheSize]
   );
@@ -173,18 +187,22 @@ export function useTranscription(
           cacheRef.current.set(assetId, cached);
 
           logger.debug('Returning cached transcription', { assetId });
-          setState((prev) => ({ ...prev, result: cached }));
+          if (isMountedRef.current) {
+            setState((prev) => ({ ...prev, result: cached }));
+          }
           return cached;
         }
       }
 
       // Start transcription
-      setState({
-        isTranscribing: true,
-        progress: 0,
-        error: null,
-        result: null,
-      });
+      if (isMountedRef.current) {
+        setState({
+          isTranscribing: true,
+          progress: 0,
+          error: null,
+          result: null,
+        });
+      }
 
       try {
         logger.info('Starting transcription', { assetId, options: transcriptionOptions });
@@ -200,15 +218,17 @@ export function useTranscription(
           duration: result.duration,
         });
 
-        // Cache result
+        // Cache result (safe to call even if unmounted)
         addToCache(assetId, result);
 
-        setState({
-          isTranscribing: false,
-          progress: 1,
-          error: null,
-          result,
-        });
+        if (isMountedRef.current) {
+          setState({
+            isTranscribing: false,
+            progress: 1,
+            error: null,
+            result,
+          });
+        }
 
         return result;
       } catch (error) {
@@ -216,12 +236,14 @@ export function useTranscription(
           error instanceof Error ? error.message : String(error);
         logger.error('Transcription failed', { assetId, error: errorMessage });
 
-        setState({
-          isTranscribing: false,
-          progress: 0,
-          error: errorMessage,
-          result: null,
-        });
+        if (isMountedRef.current) {
+          setState({
+            isTranscribing: false,
+            progress: 0,
+            error: errorMessage,
+            result: null,
+          });
+        }
 
         return null;
       }

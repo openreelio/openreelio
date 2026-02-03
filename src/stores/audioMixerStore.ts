@@ -35,8 +35,6 @@ export interface TrackMixerState {
   pan: number;
   /** Whether the track is muted */
   muted: boolean;
-  /** Whether the track is soloed */
-  soloed: boolean;
   /** Current audio levels (updated in real-time during playback) */
   levels: StereoLevels;
 }
@@ -111,7 +109,6 @@ const DEFAULT_TRACK_STATE: TrackMixerState = {
   volumeDb: 0,
   pan: 0,
   muted: false,
-  soloed: false,
   levels: { left: SILENCE_DB, right: SILENCE_DB },
 };
 
@@ -186,7 +183,6 @@ export const useAudioMixerStore = create<AudioMixerStore>()(
           volumeDb: clampVolume(volumeDb),
           pan: clampPan(pan),
           muted: false,
-          soloed: false,
           levels: { left: SILENCE_DB, right: SILENCE_DB },
         });
       });
@@ -233,15 +229,14 @@ export const useAudioMixerStore = create<AudioMixerStore>()(
 
     toggleSolo: (trackId: string) => {
       set((state) => {
-        const trackState = getOrCreateTrackState(state.trackStates, trackId);
+        // Ensure track exists
+        getOrCreateTrackState(state.trackStates, trackId);
 
-        if (trackState.soloed) {
+        if (state.soloedTrackIds.has(trackId)) {
           // Un-solo
-          trackState.soloed = false;
           state.soloedTrackIds.delete(trackId);
         } else {
           // Solo (additive - doesn't clear other solos)
-          trackState.soloed = true;
           state.soloedTrackIds.add(trackId);
         }
       });
@@ -249,9 +244,6 @@ export const useAudioMixerStore = create<AudioMixerStore>()(
 
     clearAllSolos: () => {
       set((state) => {
-        for (const trackState of state.trackStates.values()) {
-          trackState.soloed = false;
-        }
         state.soloedTrackIds.clear();
       });
     },
@@ -309,7 +301,7 @@ export const useAudioMixerStore = create<AudioMixerStore>()(
       }
 
       // Check solo logic: if any track is soloed, non-soloed tracks are silenced
-      if (state.soloedTrackIds.size > 0 && !trackState.soloed) {
+      if (state.soloedTrackIds.size > 0 && !state.soloedTrackIds.has(trackId)) {
         return SILENCE_DB;
       }
 
@@ -335,7 +327,7 @@ export const useAudioMixerStore = create<AudioMixerStore>()(
       }
 
       // Solo logic: if any track is soloed, only soloed tracks are audible
-      if (state.soloedTrackIds.size > 0 && !trackState.soloed) {
+      if (state.soloedTrackIds.size > 0 && !state.soloedTrackIds.has(trackId)) {
         return false;
       }
 
@@ -355,3 +347,30 @@ export const useAudioMixerStore = create<AudioMixerStore>()(
     },
   }))
 );
+
+// =============================================================================
+// Selectors - Use these with useAudioMixerStore(selector) to avoid re-renders
+// =============================================================================
+
+/** Check if a specific track is soloed */
+export const selectIsTrackSoloed = (state: AudioMixerState, trackId: string): boolean =>
+  state.soloedTrackIds.has(trackId);
+
+/** Check if any track is soloed (for determining if solo mode is active) */
+export const selectHasAnySolo = (state: AudioMixerState): boolean =>
+  state.soloedTrackIds.size > 0;
+
+/** Get the count of soloed tracks */
+export const selectSoloedCount = (state: AudioMixerState): number =>
+  state.soloedTrackIds.size;
+
+/** Get track mixer state by ID */
+export const selectTrackState = (
+  state: AudioMixerState,
+  trackId: string
+): TrackMixerState | undefined =>
+  state.trackStates.get(trackId);
+
+/** Select master state */
+export const selectMasterState = (state: AudioMixerState): MasterMixerState =>
+  state.masterState;

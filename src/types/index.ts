@@ -35,6 +35,9 @@ export type SequenceId = string;
 /** Bin/Folder unique identifier (ULID) */
 export type BinId = string;
 
+/** Mask unique identifier (ULID) */
+export type MaskId = string;
+
 // =============================================================================
 // Time Types
 // =============================================================================
@@ -79,6 +82,76 @@ export interface Color {
 export interface TimeRange {
   startSec: TimeSec;
   endSec: TimeSec;
+}
+
+// =============================================================================
+// Mask Types (Power Windows)
+// =============================================================================
+
+/** Rectangle mask shape */
+export interface RectMask {
+  x: number;           // Center X (0.0-1.0 normalized)
+  y: number;           // Center Y (0.0-1.0 normalized)
+  width: number;       // Width (0.0-2.0 normalized)
+  height: number;      // Height (0.0-2.0 normalized)
+  cornerRadius: number; // Rounded corners (0.0-1.0)
+  rotation: number;    // Rotation in degrees
+}
+
+/** Ellipse mask shape */
+export interface EllipseMask {
+  x: number;           // Center X (0.0-1.0)
+  y: number;           // Center Y (0.0-1.0)
+  radiusX: number;     // Horizontal radius
+  radiusY: number;     // Vertical radius
+  rotation: number;    // Rotation in degrees
+}
+
+/** Polygon mask shape */
+export interface PolygonMask {
+  points: Point2D[];   // Polygon vertices (min 3)
+}
+
+/** Bezier control point */
+export interface BezierPoint {
+  anchor: Point2D;           // Anchor point
+  handleIn?: Point2D | null; // Incoming control handle
+  handleOut?: Point2D | null; // Outgoing control handle
+}
+
+/** Bezier curve mask shape */
+export interface BezierMask {
+  points: BezierPoint[];  // Control points (min 2)
+  closed: boolean;        // Open or closed path
+}
+
+/** Discriminated union for mask shapes */
+export type MaskShape =
+  | { type: 'rectangle' } & RectMask
+  | { type: 'ellipse' } & EllipseMask
+  | { type: 'polygon'; points: Point2D[] }
+  | { type: 'bezier'; points: BezierPoint[]; closed: boolean };
+
+/** Mask blend mode for combining multiple masks */
+export type MaskBlendMode = 'add' | 'subtract' | 'intersect' | 'difference';
+
+/** Complete mask definition */
+export interface Mask {
+  id: MaskId;
+  name: string;
+  shape: MaskShape;
+  inverted: boolean;
+  feather: number;      // Edge softness (0.0-1.0)
+  opacity: number;      // Mask opacity (0.0-1.0)
+  expansion: number;    // Expand/contract (-1.0 to 1.0)
+  blendMode: MaskBlendMode;
+  enabled: boolean;
+  locked: boolean;
+}
+
+/** Group of masks applied to an effect */
+export interface MaskGroup {
+  masks: Mask[];
 }
 
 // =============================================================================
@@ -616,16 +689,10 @@ export function isTextClip(assetId: string): boolean {
   return assetId.startsWith(TEXT_ASSET_PREFIX);
 }
 
-/**
- * Validates a hex color string.
- */
-export function isValidHexColor(color: string): boolean {
-  return /^#([A-Fa-f0-9]{3}|[A-Fa-f0-9]{4}|[A-Fa-f0-9]{6}|[A-Fa-f0-9]{8})$/.test(color);
-}
-
 // =============================================================================
 // Command Types
 // =============================================================================
+// Note: isValidHexColor is exported from './shapes'
 
 export type CommandType =
   | 'ImportAsset'
@@ -659,7 +726,12 @@ export type CommandType =
   // Text clip commands
   | 'AddTextClip'
   | 'UpdateTextClip'
-  | 'RemoveTextClip';
+  | 'RemoveTextClip'
+  // Mask (Power Windows) commands
+  | 'AddMask'
+  | 'UpdateMask'
+  | 'RemoveMask'
+  | 'ReorderMask';
 
 export interface Command {
   type: CommandType;
@@ -863,6 +935,7 @@ export interface ExportError {
 /** Categories of effects */
 export type EffectCategory =
   | 'color'
+  | 'advanced_color'
   | 'transform'
   | 'blur_sharpen'
   | 'stylize'
@@ -928,6 +1001,9 @@ export type EffectType =
   | 'auto_reframe'
   | 'face_blur'
   | 'object_tracking'
+  // Keying/Compositing
+  | 'chroma_key'
+  | 'hsl_qualifier'
   // Custom
   | { custom: string };
 
@@ -1008,6 +1084,8 @@ export interface Effect {
   keyframes: Record<string, Keyframe[]>;
   /** Effect order/priority (lower = first) */
   order: number;
+  /** Masks (Power Windows) applied to this effect */
+  masks?: MaskGroup;
 }
 
 /** Effect library entry for browsing available effects */
@@ -1044,7 +1122,12 @@ export function getEffectCategory(effectType: EffectType): EffectCategory {
     case 'levels':
     case 'curves':
     case 'lut':
+    case 'chroma_key':
       return 'color';
+
+    case 'color_wheels':
+    case 'hsl_qualifier':
+      return 'advanced_color';
 
     case 'crop':
     case 'flip':
@@ -1109,6 +1192,7 @@ export function isAudioEffect(effectType: EffectType): boolean {
 /** Human-readable category names */
 export const EFFECT_CATEGORY_LABELS: Record<EffectCategory, string> = {
   color: 'Color',
+  advanced_color: 'Advanced Color',
   transform: 'Transform',
   blur_sharpen: 'Blur & Sharpen',
   stylize: 'Stylize',
@@ -1167,6 +1251,8 @@ export const EFFECT_TYPE_LABELS: Partial<Record<string, string>> = {
   auto_reframe: 'Auto Reframe',
   face_blur: 'Face Blur',
   object_tracking: 'Object Tracking',
+  chroma_key: 'Chroma Key',
+  hsl_qualifier: 'HSL Qualifier',
 };
 
 // =============================================================================
@@ -1192,3 +1278,27 @@ export interface SnapPoint {
   /** Associated marker ID (for marker snap points) */
   markerId?: string;
 }
+
+// =============================================================================
+// HDR Types (re-export)
+// =============================================================================
+
+export * from './hdr';
+
+// =============================================================================
+// Qualifier Types (re-export)
+// =============================================================================
+
+export * from './qualifier';
+
+// =============================================================================
+// Shape Types (re-export)
+// =============================================================================
+
+export * from './shapes';
+
+// =============================================================================
+// Template Types (re-export)
+// =============================================================================
+
+export * from './templates';

@@ -99,9 +99,6 @@ describe('Timeline', () => {
 
     // Reset timeline store before each test
     useTimelineStore.setState({
-      playhead: 0,
-      isPlaying: false,
-      playbackRate: 1,
       selectedClipIds: [],
       selectedTrackIds: [],
       zoom: 100,
@@ -239,9 +236,13 @@ describe('Timeline', () => {
       render(<Timeline sequence={mockSequence} />);
 
       const playhead = screen.getByTestId('playhead');
-      // At 5 seconds with zoom 100px/sec + trackHeaderWidth(192) = 692px
-      // Playhead now uses CSS transform for GPU-accelerated positioning
-      expect(playhead.style.transform).toBe('translateX(692px)');
+      // Playhead is rendered inside a clipped container that is already offset by the track header.
+      // Local X=0 maps to the start of the timeline content area.
+      expect(playhead.style.transform).toBe('translateX(500px)');
+
+      const playheadContainer = playhead.parentElement as HTMLElement | null;
+      expect(playheadContainer).not.toBeNull();
+      expect(playheadContainer!.style.left).toBe('192px');
     });
 
     // TODO: This test requires TimelineEngine to be properly synced with playbackStore.
@@ -336,6 +337,24 @@ describe('Timeline', () => {
       render(<Timeline sequence={mockSequence} />);
       // EnhancedTimelineToolbar uses 'enhanced-timeline-toolbar' as its test ID
       expect(screen.getByTestId('enhanced-timeline-toolbar')).toBeInTheDocument();
+    });
+
+    it('should scroll horizontally on wheel without Shift', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      fireEvent.wheel(tracksArea, { deltaY: 100 });
+
+      expect(useTimelineStore.getState().scrollX).toBeGreaterThan(0);
+    });
+
+    it('should scroll horizontally when wheeling over the time ruler', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      const ruler = screen.getByTestId('time-ruler');
+      fireEvent.wheel(ruler, { deltaY: 100 });
+
+      expect(useTimelineStore.getState().scrollX).toBeGreaterThan(0);
     });
 
     it('should update scrollX on horizontal wheel with Shift', () => {

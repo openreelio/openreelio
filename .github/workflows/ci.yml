@@ -90,7 +90,7 @@ jobs:
         run: npm ci
 
       - name: Run tests (shard ${{ matrix.shard }}/16)
-        run: npm test -- run --reporter=verbose --shard=${{ matrix.shard }}/16 --no-coverage
+        run: npm test -- run --reporter=verbose --shard=${{ matrix.shard }}/16 --no-coverage --passWithNoTests
         timeout-minutes: 10
 
   # ==========================================================================

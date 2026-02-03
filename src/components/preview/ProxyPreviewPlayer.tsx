@@ -38,7 +38,9 @@ interface ActiveClip {
 // =============================================================================
 
 const FRAME_INTERVAL = 1000 / 30; // 30fps for animation frame updates
-const SEEK_TOLERANCE = 0.05; // Seek tolerance in seconds (50ms for responsive scrubbing)
+// Reduced seek tolerance for more responsive scrubbing (was 0.05)
+// Lower value = more responsive but more seeks
+const SEEK_TOLERANCE = 0.016; // ~1 frame at 60fps for immediate response
 
 // =============================================================================
 // Component
@@ -54,6 +56,8 @@ export function ProxyPreviewPlayer({
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const animationFrameRef = useRef<number | null>(null);
   const lastUpdateTimeRef = useRef<number>(0);
+  // Track previous time for external seek detection
+  const prevTimeRef = useRef<number>(0);
 
   // Playback state from store
   const {
@@ -279,6 +283,34 @@ export function ProxyPreviewPlayer({
   useEffect(() => {
     syncVideos();
   }, [syncVideos]);
+
+  // Explicit video seek when currentTime changes externally (timeline scrubbing)
+  // This ensures immediate response to timeline playhead dragging
+  useEffect(() => {
+    // Skip if time hasn't changed significantly (avoids redundant seeks)
+    const timeDiff = Math.abs(currentTime - prevTimeRef.current);
+    if (timeDiff < 0.001) return; // 1ms threshold
+    prevTimeRef.current = currentTime;
+
+    // Force sync all videos to new time position
+    activeClips.forEach(({ clip }) => {
+      const video = videoRefs.current.get(clip.id);
+      if (!video) return;
+
+      // Calculate source time from timeline time
+      const offsetInClip = currentTime - clip.place.timelineInSec;
+      const sourceTime = clip.range.sourceInSec + (offsetInClip * clip.speed);
+      const clampedTime = Math.max(
+        clip.range.sourceInSec,
+        Math.min(clip.range.sourceOutSec, sourceTime)
+      );
+
+      // Always update video time for responsive scrubbing
+      if (Math.abs(video.currentTime - clampedTime) > SEEK_TOLERANCE) {
+        video.currentTime = clampedTime;
+      }
+    });
+  }, [currentTime, activeClips]);
 
   // Clean up stale video refs
   useEffect(() => {

@@ -55,6 +55,17 @@ export interface UseScrubbingOptions {
   scrollX?: number;
   /** Track header width for pixel calculation */
   trackHeaderWidth?: number;
+  /**
+   * Track header width used for playhead *visual* positioning.
+   *
+   * Use this when the playhead is rendered inside a container that is already
+   * offset by the track header width (e.g., a clipped overlay that starts at
+   * the content area). In that case pass `0` to avoid double-offsetting the
+   * playhead during direct DOM updates.
+   *
+   * Defaults to `trackHeaderWidth` for backwards compatibility.
+   */
+  playheadTrackHeaderWidth?: number;
 }
 
 export interface UseScrubbingResult {
@@ -98,6 +109,7 @@ export function useScrubbing({
   zoom = 10,
   scrollX = 0,
   trackHeaderWidth = 192,
+  playheadTrackHeaderWidth,
 }: UseScrubbingOptions): UseScrubbingResult {
   const [isScrubbing, setIsScrubbing] = useState(false);
   const scrubStateRef = useRef<ScrubState | null>(null);
@@ -109,17 +121,27 @@ export function useScrubbing({
   }>({ move: null, up: null });
 
   // Store latest values in refs for stable event handler access
-  const latestValuesRef = useRef({ zoom, scrollX, trackHeaderWidth });
+  const latestValuesRef = useRef({
+    zoom,
+    scrollX,
+    trackHeaderWidth,
+    playheadTrackHeaderWidth: playheadTrackHeaderWidth ?? trackHeaderWidth,
+  });
   useEffect(() => {
-    latestValuesRef.current = { zoom, scrollX, trackHeaderWidth };
-  }, [zoom, scrollX, trackHeaderWidth]);
+    latestValuesRef.current = {
+      zoom,
+      scrollX,
+      trackHeaderWidth,
+      playheadTrackHeaderWidth: playheadTrackHeaderWidth ?? trackHeaderWidth,
+    };
+  }, [zoom, scrollX, trackHeaderWidth, playheadTrackHeaderWidth]);
 
   /**
    * Convert time to pixel position for direct DOM updates.
    */
   const timeToPixel = useCallback((time: number): number => {
-    const { zoom: z, scrollX: sx, trackHeaderWidth: thw } = latestValuesRef.current;
-    return time * z + thw - sx;
+    const { zoom: z, scrollX: sx, playheadTrackHeaderWidth: pthw } = latestValuesRef.current;
+    return time * z + pthw - sx;
   }, []);
 
   /**

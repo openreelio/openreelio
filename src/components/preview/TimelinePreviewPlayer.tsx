@@ -110,6 +110,9 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   // Track component mount state to prevent state updates after unmount
   const isMountedRef = useRef(true);
 
+  // Ref to track last seek render time (for avoiding duplicate renders)
+  const lastSeekRenderTimeRef = useRef<number>(-1);
+
   // Store state
   const {
     isPlaying,
@@ -117,7 +120,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     duration,
     play,
     pause,
-    setCurrentTime,
+    seek,
   } = usePlaybackStore();
 
   const activeSequenceId = useProjectStore((state) => state.activeSequenceId);
@@ -483,12 +486,24 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     onEnded: handleEnded,
   });
 
-  // Render frame when currentTime changes (for scrubbing)
+  // Render frame when currentTime changes (for scrubbing/seeking)
   useEffect(() => {
-    if (!isPlaying) {
+    // Always render frame when currentTime changes significantly
+    // This handles:
+    // 1. Timeline playhead dragging (bidirectional sync)
+    // 2. Preview SeekBar scrubbing
+    // 3. External seeks from keyboard shortcuts, markers, etc.
+    //
+    // Skip if this exact time was already rendered to avoid duplicates
+    // (usePlaybackLoop handles continuous playback rendering)
+    const timeDiff = Math.abs(currentTime - lastSeekRenderTimeRef.current);
+    const isSignificantChange = timeDiff > 0.001; // 1ms threshold
+
+    if (isSignificantChange) {
+      lastSeekRenderTimeRef.current = currentTime;
       void renderFrame(currentTime);
     }
-  }, [currentTime, isPlaying, renderFrame]);
+  }, [currentTime, renderFrame]);
 
   // Prefetch frames ahead during playback (throttled to avoid thrashing)
   useEffect(() => {
@@ -531,14 +546,15 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
   /**
    * Handle seek from the SeekBar component.
-   * Clamps time to valid range and updates store.
+   * Uses seek() instead of setCurrentTime() to ensure proper synchronization
+   * with TimelineEngine and trigger seek events.
    */
   const handleSeek = useCallback(
     (time: number) => {
-      const clampedTime = Math.max(0, Math.min(duration, time));
-      setCurrentTime(clampedTime);
+      // seek() already clamps to [0, duration] and dispatches seek event
+      seek(time);
     },
-    [duration, setCurrentTime]
+    [seek]
   );
 
   // ===========================================================================
