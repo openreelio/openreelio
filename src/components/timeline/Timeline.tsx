@@ -1154,9 +1154,6 @@ export function Timeline({
     );
   }
 
-  // Calculate playhead pixel position for rendering
-  const playheadPixelPosition = playhead * zoom + TRACK_HEADER_WIDTH - scrollX;
-
   // Determine cursor style based on active tool and interaction state
   const getTracksAreaCursor = (): string => {
     // Panning cursor takes priority
