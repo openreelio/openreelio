@@ -127,6 +127,9 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
   const frameTimesRef = useRef<number[]>([]);
   const isMountedRef = useRef(true);
 
+  // Ref for tracking previous currentTime (used in external seek detection)
+  const prevCurrentTimeRef = useRef<number>(currentTime);
+
   // Stable ref for onFrame callback (prevents playbackLoop recreation on every render)
   const onFrameRef = useRef(onFrame);
   useEffect(() => {
@@ -317,10 +320,38 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
 
   // Sync with external seek
   useEffect(() => {
+    // Skip if currentTime hasn't actually changed (prevents unnecessary processing)
+    if (prevCurrentTimeRef.current === currentTime) {
+      return;
+    }
+    prevCurrentTimeRef.current = currentTime;
+
     // Update lastPlaybackTimeRef when currentTime changes externally
-    // (e.g., user scrubbing timeline)
+    // (e.g., user scrubbing timeline or preview player seek bar)
     if (!isPlaying) {
+      // When paused, always sync to external currentTime
       lastPlaybackTimeRef.current = currentTime;
+    } else {
+      // When playing, detect external seeks by checking time difference
+      // If the difference is larger than expected playback progression,
+      // it's likely an external seek that should be synced
+      //
+      // Use 3 frames worth (~100ms at 30fps) to avoid false positives from:
+      // - Normal playback timing variations
+      // - React batching delays
+      // - Frame drops
+      const expectedMaxProgression = (1 / (PLAYBACK.TARGET_FPS || 30)) * 3;
+      const timeDiff = Math.abs(currentTime - lastPlaybackTimeRef.current);
+
+      if (timeDiff > expectedMaxProgression) {
+        // External seek detected during playback - sync to new position
+        lastPlaybackTimeRef.current = currentTime;
+
+        // CRITICAL: Also reset frame time reference to prevent time jump
+        // Without this, the next frame would calculate deltaMs from the old
+        // lastFrameTimeRef, causing incorrect time progression
+        lastFrameTimeRef.current = performance.now();
+      }
     }
   }, [currentTime, isPlaying]);
 

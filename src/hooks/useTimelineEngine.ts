@@ -8,7 +8,7 @@
 import { useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { TimelineEngine } from '@/core/TimelineEngine';
 import { usePlaybackStore } from '@/stores/playbackStore';
-import { PRECISION, isApproximatelyEqual } from '@/constants/precision';
+import { PRECISION, getExternalSeekThreshold, isApproximatelyEqual } from '@/constants/precision';
 
 // =============================================================================
 // Types
@@ -95,9 +95,8 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
    * Threshold for detecting external seeks (vs normal playback progression).
    * If the time difference between store and engine is larger than this,
    * it's likely an external seek that should be synced.
-   * At 30fps with 2x playback, frames are ~67ms apart, so 100ms is safe.
    */
-  const SEEK_DETECTION_THRESHOLD_SEC = 0.1;
+  const externalSeekThresholdSec = useMemo(() => getExternalSeekThreshold(fps), [fps]);
 
   // Create engine instance (stable reference)
   const engineRef = useRef<TimelineEngine | null>(null);
@@ -219,15 +218,24 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
         Number.isFinite(next.currentTime) &&
         Number.isFinite(engine.currentTime)
       ) {
-        // Check if this is an external seek (not from normal playback progression)
-        // Compare store's currentTime with the last time the ENGINE set
+        // Compare store's currentTime with the last time the ENGINE set.
+        // This prevents echo loops without requiring timestamp-based guards.
         const timeDiffFromLastEngineSet = Math.abs(next.currentTime - lastEngineTimeRef.current);
         const timeDiffFromEngineNow = Math.abs(next.currentTime - engine.currentTime);
 
-        // If the store's time differs significantly from what engine last set,
-        // AND differs from engine's current time, it's likely an external seek
-        const isExternalSeek = timeDiffFromLastEngineSet > SEEK_DETECTION_THRESHOLD_SEC &&
-                               timeDiffFromEngineNow > PRECISION.TIME_EPSILON;
+        const isPaused = typeof next.isPlaying === 'boolean' ? !next.isPlaying : !engine.isPlaying;
+
+        // When paused: always sync (above epsilon) so small seeks/steps are reflected.
+        // When playing: require a larger delta to avoid false positives from playback jitter.
+        const requiredDeltaFromLastEngineSet = isPaused
+          ? PRECISION.TIME_EPSILON
+          : externalSeekThresholdSec;
+
+        // If the store's time differs from what the engine last set (by the required delta)
+        // AND differs from the engine's current time, treat it as an external seek.
+        const isExternalSeek =
+          timeDiffFromLastEngineSet > requiredDeltaFromLastEngineSet &&
+          timeDiffFromEngineNow > PRECISION.TIME_EPSILON;
 
         if (isExternalSeek) {
           // Update our tracking ref to prevent echo
@@ -258,7 +266,7 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
         unsubscribe();
       }
     };
-  }, [engine]);
+  }, [engine, externalSeekThresholdSec]);
 
   // Update duration when it changes
   useEffect(() => {

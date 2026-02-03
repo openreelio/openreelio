@@ -97,7 +97,9 @@ export const SYNC_THRESHOLDS = {
   /**
    * Threshold for external seek detection (in seconds).
    * Used to distinguish user seeks from playback progression.
-   * Should be larger than 2 frames at slowest supported playback rate.
+   *
+   * Default is 100ms, which is ~3 frames at 30fps.
+   * Use `getExternalSeekThreshold(fps)` for FPS-aware threshold.
    */
   EXTERNAL_SEEK_THRESHOLD: 0.1,
 } as const;
