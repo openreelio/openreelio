@@ -4,9 +4,8 @@
  * Manages timeline view state including selection, zoom, scroll, and snap settings.
  * Uses Zustand with Immer for immutable state updates.
  *
- * IMPORTANT: Playback state (playhead, isPlaying, playbackRate) has been moved
- * to PlaybackStore as the single source of truth. The properties here are
- * maintained for backward compatibility but delegate to PlaybackStore.
+ * NOTE: Playback state (currentTime, isPlaying, playbackRate) is managed by
+ * PlaybackStore - use usePlaybackStore() for playback-related operations.
  *
  * @see PlaybackStore for playback state management
  */
@@ -35,34 +34,6 @@ interface TimelineState {
   snapToClips: boolean;
   snapToMarkers: boolean;
   snapToPlayhead: boolean;
-
-  // =========================================================================
-  // DEPRECATED: Playback state and actions
-  // These are maintained for backward compatibility but delegate to PlaybackStore.
-  // Use PlaybackStore directly for new code.
-  // =========================================================================
-
-  /** @deprecated Use usePlaybackStore().currentTime instead */
-  readonly playhead: TimeSec;
-  /** @deprecated Use usePlaybackStore().isPlaying instead */
-  readonly isPlaying: boolean;
-  /** @deprecated Use usePlaybackStore().playbackRate instead */
-  readonly playbackRate: number;
-
-  /** @deprecated Use usePlaybackStore().setCurrentTime instead */
-  setPlayhead: (time: TimeSec) => void;
-  /** @deprecated Use usePlaybackStore().play instead */
-  play: () => void;
-  /** @deprecated Use usePlaybackStore().pause instead */
-  pause: () => void;
-  /** @deprecated Use usePlaybackStore().togglePlayback instead */
-  togglePlayback: () => void;
-  /** @deprecated Use usePlaybackStore().setPlaybackRate instead */
-  setPlaybackRate: (rate: number) => void;
-  /** @deprecated Use usePlaybackStore().seekForward instead */
-  seekForward: (seconds: number) => void;
-  /** @deprecated Use usePlaybackStore().seekBackward instead */
-  seekBackward: (seconds: number) => void;
 
   // Actions - Selection
   selectClip: (clipId: string, addToSelection?: boolean) => void;
@@ -123,64 +94,6 @@ export const useTimelineStore = create<TimelineState>()(
     snapToClips: true,
     snapToMarkers: true,
     snapToPlayhead: true,
-
-    // =========================================================================
-    // DEPRECATED: Playback state getters (delegate to PlaybackStore)
-    // =========================================================================
-
-    /** @deprecated Use usePlaybackStore().currentTime instead */
-    get playhead(): TimeSec {
-      return usePlaybackStore.getState().currentTime;
-    },
-
-    /** @deprecated Use usePlaybackStore().isPlaying instead */
-    get isPlaying(): boolean {
-      return usePlaybackStore.getState().isPlaying;
-    },
-
-    /** @deprecated Use usePlaybackStore().playbackRate instead */
-    get playbackRate(): number {
-      return usePlaybackStore.getState().playbackRate;
-    },
-
-    // =========================================================================
-    // DEPRECATED: Playback actions (delegate to PlaybackStore)
-    // =========================================================================
-
-    /** @deprecated Use usePlaybackStore().setCurrentTime instead */
-    setPlayhead: (time: TimeSec) => {
-      usePlaybackStore.getState().setCurrentTime(Math.max(0, time));
-    },
-
-    /** @deprecated Use usePlaybackStore().play instead */
-    play: () => {
-      usePlaybackStore.getState().play();
-    },
-
-    /** @deprecated Use usePlaybackStore().pause instead */
-    pause: () => {
-      usePlaybackStore.getState().pause();
-    },
-
-    /** @deprecated Use usePlaybackStore().togglePlayback instead */
-    togglePlayback: () => {
-      usePlaybackStore.getState().togglePlayback();
-    },
-
-    /** @deprecated Use usePlaybackStore().setPlaybackRate instead */
-    setPlaybackRate: (rate: number) => {
-      usePlaybackStore.getState().setPlaybackRate(rate);
-    },
-
-    /** @deprecated Use usePlaybackStore().seekForward instead */
-    seekForward: (seconds: number) => {
-      usePlaybackStore.getState().seekForward(seconds);
-    },
-
-    /** @deprecated Use usePlaybackStore().seekBackward instead */
-    seekBackward: (seconds: number) => {
-      usePlaybackStore.getState().seekBackward(seconds);
-    },
 
     // Selection actions - consistently use array reassignment pattern
     selectClip: (clipId: string, addToSelection = false) => {

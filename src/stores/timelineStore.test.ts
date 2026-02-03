@@ -2,7 +2,10 @@
  * Timeline Store Tests
  *
  * Tests for Zustand timeline store using TDD methodology.
- * Tests cover playback, selection, view controls, and snap settings.
+ * Tests cover selection, view controls, and snap settings.
+ *
+ * NOTE: Playback state (currentTime, isPlaying, playbackRate) is tested in
+ * playbackStore.test.ts since PlaybackStore is the source of truth.
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -19,8 +22,7 @@ describe('timelineStore', () => {
     // Reset timeline store (which also resets PlaybackStore internally)
     useTimelineStore.getState().reset();
 
-    // Set duration after reset - this is critical for seek operations to work
-    // (seek clamps to duration, so if duration is 0, seek will always result in 0)
+    // Set duration for scrollToPlayhead tests that require seeking
     usePlaybackStore.getState().setDuration(60);
   });
 
@@ -31,12 +33,6 @@ describe('timelineStore', () => {
   describe('initial state', () => {
     it('should have correct initial state', () => {
       const state = useTimelineStore.getState();
-      const playbackState = usePlaybackStore.getState();
-
-      // Playback state is in PlaybackStore (the source of truth)
-      expect(playbackState.currentTime).toBe(0);
-      expect(playbackState.isPlaying).toBe(false);
-      expect(playbackState.playbackRate).toBe(1);
 
       // View/selection state is in TimelineStore
       expect(state.selectedClipIds).toEqual([]);
@@ -45,144 +41,6 @@ describe('timelineStore', () => {
       expect(state.scrollX).toBe(0);
       expect(state.scrollY).toBe(0);
       expect(state.snapEnabled).toBe(true);
-    });
-  });
-
-  // ===========================================================================
-  // Playback Tests
-  // ===========================================================================
-
-  describe('playback', () => {
-    describe('setPlayhead', () => {
-      it('should set playhead to specified time', () => {
-        const { setPlayhead } = useTimelineStore.getState();
-        setPlayhead(10.5);
-
-        // Verify via PlaybackStore (the source of truth)
-        expect(usePlaybackStore.getState().currentTime).toBe(10.5);
-      });
-
-      it('should not allow negative playhead', () => {
-        const { setPlayhead } = useTimelineStore.getState();
-        setPlayhead(-5);
-
-        // Verify via PlaybackStore (the source of truth)
-        expect(usePlaybackStore.getState().currentTime).toBe(0);
-      });
-
-      it('should handle zero playhead', () => {
-        const { setPlayhead } = useTimelineStore.getState();
-        setPlayhead(10);
-        setPlayhead(0);
-
-        // Verify via PlaybackStore (the source of truth)
-        expect(usePlaybackStore.getState().currentTime).toBe(0);
-      });
-    });
-
-    describe('play', () => {
-      it('should set isPlaying to true', () => {
-        const { play } = useTimelineStore.getState();
-        play();
-
-        // Verify via PlaybackStore (the source of truth)
-        expect(usePlaybackStore.getState().isPlaying).toBe(true);
-      });
-    });
-
-    describe('pause', () => {
-      it('should set isPlaying to false', () => {
-        usePlaybackStore.getState().play();
-
-        const { pause } = useTimelineStore.getState();
-        pause();
-
-        // Verify via PlaybackStore (the source of truth)
-        expect(usePlaybackStore.getState().isPlaying).toBe(false);
-      });
-    });
-
-    describe('togglePlayback', () => {
-      it('should toggle from paused to playing', () => {
-        const { togglePlayback } = useTimelineStore.getState();
-        togglePlayback();
-
-        // Verify via PlaybackStore (the source of truth)
-        expect(usePlaybackStore.getState().isPlaying).toBe(true);
-      });
-
-      it('should toggle from playing to paused', () => {
-        usePlaybackStore.getState().play();
-
-        const { togglePlayback } = useTimelineStore.getState();
-        togglePlayback();
-
-        // Verify via PlaybackStore (the source of truth)
-        expect(usePlaybackStore.getState().isPlaying).toBe(false);
-      });
-    });
-
-    describe('setPlaybackRate', () => {
-      it('should set playback rate', () => {
-        const { setPlaybackRate } = useTimelineStore.getState();
-        setPlaybackRate(2);
-
-        // Verify via PlaybackStore (the source of truth)
-        expect(usePlaybackStore.getState().playbackRate).toBe(2);
-      });
-
-      it('should clamp playback rate to minimum 0.1', () => {
-        const { setPlaybackRate } = useTimelineStore.getState();
-        setPlaybackRate(0.05);
-
-        // PlaybackStore has MIN of 0.25, not 0.1 (that was old TimelineStore logic)
-        expect(usePlaybackStore.getState().playbackRate).toBe(0.25);
-      });
-
-      it('should clamp playback rate to maximum 4', () => {
-        const { setPlaybackRate } = useTimelineStore.getState();
-        setPlaybackRate(8);
-
-        // Verify via PlaybackStore (the source of truth)
-        expect(usePlaybackStore.getState().playbackRate).toBe(4);
-      });
-    });
-
-    describe('seekForward', () => {
-      it('should move playhead forward', () => {
-        // Use seek action to set initial position
-        usePlaybackStore.getState().seek(5);
-
-        const { seekForward } = useTimelineStore.getState();
-        seekForward(3);
-
-        // Verify via PlaybackStore (the source of truth)
-        expect(usePlaybackStore.getState().currentTime).toBe(8);
-      });
-    });
-
-    describe('seekBackward', () => {
-      it('should move playhead backward', () => {
-        // Use seek action to set initial position
-        usePlaybackStore.getState().seek(10);
-
-        const { seekBackward } = useTimelineStore.getState();
-        seekBackward(3);
-
-        // Verify via PlaybackStore (the source of truth)
-        expect(usePlaybackStore.getState().currentTime).toBe(7);
-      });
-
-      it('should not go below zero', () => {
-        // Use seek action to set initial position
-        usePlaybackStore.getState().seek(2);
-
-        const { seekBackward } = useTimelineStore.getState();
-        seekBackward(5);
-
-        // Verify via PlaybackStore (the source of truth)
-        expect(usePlaybackStore.getState().currentTime).toBe(0);
-      });
     });
   });
 
