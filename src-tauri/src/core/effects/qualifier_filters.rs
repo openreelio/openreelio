@@ -374,13 +374,11 @@ pub fn build_qualifier_alpha_expression(params: &QualifierParams) -> String {
     );
 
     // Apply inversion if needed
-    let alpha_expr = if params.invert {
+    if params.invert {
         format!("if({},0,255)", combined)
     } else {
         format!("if({},255,0)", combined)
-    };
-
-    alpha_expr
+    }
 }
 
 /// Builds a complete FFmpeg filter for HSL-based selective color correction
