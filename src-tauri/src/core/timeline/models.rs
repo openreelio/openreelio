@@ -116,9 +116,18 @@ impl Canvas {
         Self { width, height }
     }
 
-    /// Returns the aspect ratio as a float
+    /// Returns the aspect ratio as a float.
+    /// Returns 0.0 if height is zero to prevent division by zero.
     pub fn aspect_ratio(&self) -> f64 {
+        if self.height == 0 {
+            return 0.0;
+        }
         self.width as f64 / self.height as f64
+    }
+
+    /// Returns true if dimensions are valid (non-zero width and height)
+    pub fn is_valid(&self) -> bool {
+        self.width > 0 && self.height > 0
     }
 }
 
@@ -424,8 +433,16 @@ impl ClipPlace {
             && self.timeline_out_sec() > other.timeline_in_sec
     }
 
-    /// Checks if a time point is within this placement
+    /// Checks if a time point is within this placement.
+    /// Uses half-open interval [start, end) semantics - includes start, excludes end.
+    /// For inclusive end checking, use `contains_inclusive()`.
     pub fn contains(&self, time_sec: TimeSec) -> bool {
+        time_sec >= self.timeline_in_sec && time_sec < self.timeline_out_sec()
+    }
+
+    /// Checks if a time point is within this placement (inclusive end).
+    /// Uses closed interval [start, end] semantics.
+    pub fn contains_inclusive(&self, time_sec: TimeSec) -> bool {
         time_sec >= self.timeline_in_sec && time_sec <= self.timeline_out_sec()
     }
 }
@@ -599,9 +616,16 @@ impl Clip {
         self.place.timeline_out_sec()
     }
 
-    /// Checks if this clip contains the given timeline position
+    /// Checks if this clip contains the given timeline position.
+    /// Uses half-open interval [start, end) - includes start, excludes exact end.
     pub fn contains_time(&self, time_sec: TimeSec) -> bool {
         self.place.contains(time_sec)
+    }
+
+    /// Checks if this clip contains the given timeline position (inclusive end).
+    /// Uses closed interval [start, end] semantics.
+    pub fn contains_time_inclusive(&self, time_sec: TimeSec) -> bool {
+        self.place.contains_inclusive(time_sec)
     }
 
     /// Converts a timeline time to source time
@@ -747,10 +771,18 @@ mod tests {
             .with_source_range(0.0, 10.0)
             .place_at(0.0);
 
+        // Half-open interval [0, 10) - includes start, excludes end
         assert!(clip.contains_time(0.0));
         assert!(clip.contains_time(5.0));
-        assert!(clip.contains_time(10.0));
+        assert!(clip.contains_time(9.999)); // Just before end
+        assert!(!clip.contains_time(10.0)); // Exact end is excluded
         assert!(!clip.contains_time(11.0));
+
+        // Closed interval [0, 10] - includes both ends
+        assert!(clip.contains_time_inclusive(0.0));
+        assert!(clip.contains_time_inclusive(5.0));
+        assert!(clip.contains_time_inclusive(10.0)); // End is included
+        assert!(!clip.contains_time_inclusive(10.001));
     }
 
     #[test]
@@ -831,5 +863,167 @@ mod tests {
 
         let canvas_9_16 = Canvas::new(1080, 1920);
         assert!((canvas_9_16.aspect_ratio() - 9.0 / 16.0).abs() < 0.001);
+    }
+
+    // =========================================================================
+    // Edge Case / Defensive Tests
+    // =========================================================================
+
+    #[test]
+    fn test_canvas_aspect_ratio_zero_height() {
+        // Division by zero protection
+        let canvas = Canvas::new(1920, 0);
+        assert_eq!(canvas.aspect_ratio(), 0.0);
+        assert!(!canvas.is_valid());
+    }
+
+    #[test]
+    fn test_canvas_aspect_ratio_zero_width() {
+        let canvas = Canvas::new(0, 1080);
+        assert_eq!(canvas.aspect_ratio(), 0.0);
+        assert!(!canvas.is_valid());
+    }
+
+    #[test]
+    fn test_canvas_is_valid() {
+        assert!(Canvas::new(1920, 1080).is_valid());
+        assert!(!Canvas::new(0, 1080).is_valid());
+        assert!(!Canvas::new(1920, 0).is_valid());
+        assert!(!Canvas::new(0, 0).is_valid());
+    }
+
+    #[test]
+    fn test_clip_place_overlap_edge_cases() {
+        // Adjacent clips (touching but not overlapping)
+        // [0, 10) and [10, 20) - these share a boundary but don't overlap
+        let place1 = ClipPlace::new(0.0, 10.0);
+        let place2 = ClipPlace::new(10.0, 10.0);
+        assert!(
+            !place1.overlaps(&place2),
+            "Adjacent clips should not overlap"
+        );
+        assert!(
+            !place2.overlaps(&place1),
+            "Adjacent clips should not overlap (reverse)"
+        );
+
+        // Zero duration clip at a point INSIDE another clip's interval - does overlap
+        // Point at 5.0 overlaps with interval [0, 10) because 5.0 < 10.0 AND 5.0 > 0.0
+        let zero_inside = ClipPlace::new(5.0, 0.0);
+        let normal = ClipPlace::new(0.0, 10.0);
+        assert!(
+            zero_inside.overlaps(&normal),
+            "Zero duration clip inside interval overlaps"
+        );
+
+        // Zero duration clip at the END boundary - does NOT overlap
+        // Point at 10.0 with interval [0, 10): 10.0 < 10.0 = false, so no overlap
+        let zero_at_end = ClipPlace::new(10.0, 0.0);
+        assert!(
+            !zero_at_end.overlaps(&normal),
+            "Zero duration clip at end boundary does not overlap"
+        );
+
+        // Zero duration clip at the START boundary - does NOT overlap
+        // Point at 0.0 with interval [0, 10): 0.0 > 0.0 = false, so no overlap
+        let zero_at_start = ClipPlace::new(0.0, 0.0);
+        assert!(
+            !zero_at_start.overlaps(&normal),
+            "Zero duration clip at start boundary does not overlap"
+        );
+
+        // Two zero duration clips at same position - do NOT overlap
+        // Both at 5.0: 5.0 < 5.0 = false, so no overlap
+        let zero_a = ClipPlace::new(5.0, 0.0);
+        let zero_b = ClipPlace::new(5.0, 0.0);
+        assert!(
+            !zero_a.overlaps(&zero_b),
+            "Two zero duration clips at same point do not overlap"
+        );
+    }
+
+    #[test]
+    fn test_clip_range_duration_edge_cases() {
+        // Normal range
+        let range = ClipRange::new(5.0, 15.0);
+        assert_eq!(range.duration(), 10.0);
+
+        // Zero duration
+        let zero_range = ClipRange::new(5.0, 5.0);
+        assert_eq!(zero_range.duration(), 0.0);
+
+        // Inverted range (source_out < source_in) - caller should prevent this
+        let inverted = ClipRange::new(15.0, 5.0);
+        assert_eq!(inverted.duration(), -10.0); // Negative duration indicates invalid state
+    }
+
+    #[test]
+    fn test_clip_with_range_swaps_inverted() {
+        // Clip::with_range should swap source_in > source_out
+        let clip = Clip::with_range("asset", 15.0, 5.0);
+        assert_eq!(clip.range.source_in_sec, 5.0);
+        assert_eq!(clip.range.source_out_sec, 15.0);
+    }
+
+    #[test]
+    fn test_clip_with_range_clamps_negative() {
+        // Clip::with_range should clamp negative values to 0
+        let clip = Clip::with_range("asset", -5.0, 10.0);
+        assert_eq!(clip.range.source_in_sec, 0.0);
+        assert_eq!(clip.range.source_out_sec, 10.0);
+    }
+
+    #[test]
+    fn test_clip_timeline_to_source_with_speed() {
+        // Test with 2x speed - source advances faster than timeline
+        let mut clip = Clip::with_range("asset", 0.0, 20.0).place_at(0.0);
+        clip.speed = 2.0;
+
+        // At timeline 0, source is 0
+        assert_eq!(clip.timeline_to_source(0.0), 0.0);
+        // At timeline 5 with 2x speed, source is 10
+        assert_eq!(clip.timeline_to_source(5.0), 10.0);
+
+        // Test with 0.5x speed - source advances slower
+        clip.speed = 0.5;
+        // At timeline 10 with 0.5x speed, source is 5
+        assert_eq!(clip.timeline_to_source(10.0), 5.0);
+    }
+
+    #[test]
+    fn test_sequence_duration_empty() {
+        let seq = Sequence::new("Empty", SequenceFormat::youtube_1080());
+        assert_eq!(seq.duration(), 0.0);
+    }
+
+    #[test]
+    fn test_sequence_duration_empty_tracks() {
+        let mut seq = Sequence::new("WithTracks", SequenceFormat::youtube_1080());
+        seq.add_track(Track::new_video("Video 1"));
+        seq.add_track(Track::new_audio("Audio 1"));
+        assert_eq!(seq.duration(), 0.0);
+    }
+
+    #[test]
+    fn test_track_remove_nonexistent_clip() {
+        let mut track = Track::new_video("Video 1");
+        let result = track.remove_clip(&"nonexistent".to_string());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_sequence_remove_nonexistent_track() {
+        let mut seq = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let result = seq.remove_track(&"nonexistent".to_string());
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_marker_creation() {
+        let marker = Marker::new(5.0, "Test Marker");
+        assert!(!marker.id.is_empty());
+        assert_eq!(marker.time_sec, 5.0);
+        assert_eq!(marker.label, "Test Marker");
+        assert_eq!(marker.marker_type, MarkerType::Generic);
     }
 }
