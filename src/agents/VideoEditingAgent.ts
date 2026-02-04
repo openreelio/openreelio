@@ -1,6 +1,15 @@
 /**
  * Video Editing Agent
  *
+ * @deprecated This class is part of the LEGACY agent system.
+ * Use the new Agentic Engine instead:
+ * - Enable via feature flag: setFeatureFlag('USE_AGENTIC_ENGINE', true)
+ * - New implementation: AgenticEngine with Think-Plan-Act-Observe loop
+ * - Location: src/agents/engine/
+ *
+ * This file will be removed after full migration to the agentic loop.
+ * See docs/AGENT_IMPLEMENTATION_MASTER_PLAN.md for migration details.
+ *
  * An AI-powered agent specialized for video editing operations.
  * Processes user intents and generates edit scripts using the AI backend.
  */
