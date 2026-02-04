@@ -4631,7 +4631,9 @@ pub async fn sync_ai_from_vault(
                 is_available: false,
                 current_model: Some(model),
                 available_models: vec![],
-                error_message: Some("No API key configured. Please set your API key in Settings.".to_string()),
+                error_message: Some(
+                    "No API key configured. Please set your API key in Settings.".to_string(),
+                ),
             });
         }
 
@@ -4655,7 +4657,9 @@ pub async fn sync_ai_from_vault(
                 is_available: false,
                 current_model: Some(model),
                 available_models: vec![],
-                error_message: Some("No API key configured. Please set your API key in Settings.".to_string()),
+                error_message: Some(
+                    "No API key configured. Please set your API key in Settings.".to_string(),
+                ),
             });
         }
 

@@ -8,7 +8,9 @@ use tokio::sync::RwLock;
 
 use super::{
     edit_script::EditScript,
-    provider::{AIProvider, AIResponse, CompletionRequest, CompletionResponse, ConversationMessage},
+    provider::{
+        AIProvider, AIResponse, CompletionRequest, CompletionResponse, ConversationMessage,
+    },
 };
 use crate::core::{CoreError, CoreResult};
 
@@ -511,7 +513,14 @@ impl AIGateway {
 
         if !context.asset_ids.is_empty() {
             let assets: Vec<_> = context.asset_ids.iter().take(10).collect();
-            prompt.push_str(&format!("Available Assets: {}\n", assets.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+            prompt.push_str(&format!(
+                "Available Assets: {}\n",
+                assets
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
         }
 
         if !context.track_ids.is_empty() {
