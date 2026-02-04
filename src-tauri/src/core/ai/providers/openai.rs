@@ -201,18 +201,36 @@ impl AIProvider for OpenAIProvider {
     async fn complete(&self, request: CompletionRequest) -> CoreResult<CompletionResponse> {
         let model = request.model.unwrap_or_else(|| self.default_model.clone());
 
-        // Build messages
+        // Build messages - support both single-turn and multi-turn modes
         let mut messages = Vec::new();
+
+        // Add system message if provided
         if let Some(system) = &request.system {
             messages.push(ChatMessage {
                 role: "system".to_string(),
                 content: system.clone(),
             });
         }
-        messages.push(ChatMessage {
-            role: "user".to_string(),
-            content: request.prompt.clone(),
-        });
+
+        // Check if we have conversation history
+        if let Some(conversation_messages) = &request.messages {
+            // Multi-turn conversation mode
+            for msg in conversation_messages {
+                // Skip system messages (already added above)
+                if msg.role != "system" {
+                    messages.push(ChatMessage {
+                        role: msg.role.clone(),
+                        content: msg.content.clone(),
+                    });
+                }
+            }
+        } else {
+            // Single-turn mode (backward compatible)
+            messages.push(ChatMessage {
+                role: "user".to_string(),
+                content: request.prompt.clone(),
+            });
+        }
 
         // Build request
         let api_request = ChatCompletionRequest {

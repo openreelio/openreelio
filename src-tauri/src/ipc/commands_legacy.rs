@@ -4572,6 +4572,422 @@ pub async fn clear_ai_provider(state: State<'_, AppState>) -> Result<(), String>
     Ok(())
 }
 
+/// Syncs AI provider configuration from settings and encrypted vault
+///
+/// This command:
+/// 1. Reads the primary provider from settings
+/// 2. Retrieves the corresponding API key from the encrypted credential vault
+/// 3. Configures the AI provider with these credentials
+///
+/// The API key never leaves the backend, maintaining security.
+#[tauri::command]
+#[specta::specta]
+pub async fn sync_ai_from_vault(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ProviderStatusDto, String> {
+    use crate::core::ai::{create_provider, ProviderConfig, ProviderRuntimeStatus, ProviderType};
+    use crate::core::credentials::CredentialType;
+
+    // Load settings to get the configured provider
+    let app_data_dir = get_app_data_dir(&app)?;
+    let settings_manager = SettingsManager::new(app_data_dir.clone());
+    let settings = settings_manager.load();
+
+    let provider_type = settings.ai.primary_provider;
+    let model = settings.ai.primary_model.clone();
+
+    tracing::info!(
+        "Syncing AI provider from vault: {:?} with model {}",
+        provider_type,
+        model
+    );
+
+    // Get credential type for this provider
+    let credential_type = match provider_type {
+        crate::core::settings::ProviderType::OpenAI => Some(CredentialType::OpenaiApiKey),
+        crate::core::settings::ProviderType::Anthropic => Some(CredentialType::AnthropicApiKey),
+        crate::core::settings::ProviderType::Gemini => Some(CredentialType::GoogleApiKey),
+        crate::core::settings::ProviderType::Local => None,
+    };
+
+    // Convert settings ProviderType to AI ProviderType
+    let ai_provider_type = match provider_type {
+        crate::core::settings::ProviderType::OpenAI => ProviderType::OpenAI,
+        crate::core::settings::ProviderType::Anthropic => ProviderType::Anthropic,
+        crate::core::settings::ProviderType::Gemini => ProviderType::Gemini,
+        crate::core::settings::ProviderType::Local => ProviderType::Local,
+    };
+
+    // Get API key from vault (if needed)
+    let api_key = if let Some(cred_type) = credential_type {
+        let vault_path = app_data_dir.join("credentials.vault");
+
+        if !vault_path.exists() {
+            tracing::warn!("Credential vault does not exist, provider not configured");
+            return Ok(ProviderStatusDto {
+                provider_type: Some(ai_provider_type.to_string()),
+                is_configured: false,
+                is_available: false,
+                current_model: Some(model),
+                available_models: vec![],
+                error_message: Some("No API key configured. Please set your API key in Settings.".to_string()),
+            });
+        }
+
+        let mut guard = state.credential_vault.lock().await;
+        if guard.is_none() {
+            *guard = Some(
+                crate::core::credentials::CredentialVault::new(vault_path)
+                    .map_err(|e| format!("Failed to initialize credential vault: {}", e))?,
+            );
+        }
+        let vault = guard
+            .as_ref()
+            .ok_or_else(|| "Credential vault unavailable".to_string())?;
+
+        // Check if credential exists
+        if !vault.exists(cred_type).await {
+            tracing::warn!("No API key found in vault for provider {:?}", provider_type);
+            return Ok(ProviderStatusDto {
+                provider_type: Some(ai_provider_type.to_string()),
+                is_configured: false,
+                is_available: false,
+                current_model: Some(model),
+                available_models: vec![],
+                error_message: Some("No API key configured. Please set your API key in Settings.".to_string()),
+            });
+        }
+
+        // Retrieve the API key
+        Some(
+            vault
+                .retrieve(cred_type)
+                .await
+                .map_err(|e| format!("Failed to retrieve credential: {}", e))?,
+        )
+    } else {
+        None
+    };
+
+    // Build provider config
+    let provider_config = match ai_provider_type {
+        ProviderType::OpenAI => {
+            let key = api_key.ok_or_else(|| "API key required for OpenAI".to_string())?;
+            ProviderConfig::openai(&key).with_model(&model)
+        }
+        ProviderType::Anthropic => {
+            let key = api_key.ok_or_else(|| "API key required for Anthropic".to_string())?;
+            ProviderConfig::anthropic(&key).with_model(&model)
+        }
+        ProviderType::Gemini => {
+            let key = api_key.ok_or_else(|| "API key required for Gemini".to_string())?;
+            ProviderConfig::gemini(&key).with_model(&model)
+        }
+        ProviderType::Local => {
+            let base_url = settings
+                .ai
+                .ollama_url
+                .as_deref()
+                .unwrap_or("http://localhost:11434");
+            ProviderConfig::local(Some(base_url)).with_model(&model)
+        }
+    };
+
+    // Create the provider
+    let provider = create_provider(provider_config).map_err(|e| e.to_ipc_error())?;
+
+    // Run a real connectivity/auth check
+    let provider_name = provider.name().to_string();
+    let is_configured = provider.is_available();
+    let (is_available, error_message) = match provider.health_check().await {
+        Ok(()) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    };
+
+    // Get available models based on provider type
+    let available_models = match ai_provider_type {
+        ProviderType::OpenAI => crate::core::ai::OpenAIProvider::available_models(),
+        ProviderType::Anthropic => crate::core::ai::AnthropicProvider::available_models(),
+        ProviderType::Gemini => crate::core::ai::GeminiProvider::available_models(),
+        ProviderType::Local => crate::core::ai::LocalProvider::common_models(),
+    };
+
+    // Set the provider on the gateway with cached status
+    let gateway = state.ai_gateway.lock().await;
+    gateway
+        .set_provider_boxed_with_status(
+            provider,
+            ProviderRuntimeStatus {
+                provider_type: Some(ai_provider_type.to_string()),
+                is_configured,
+                is_available,
+                current_model: Some(model.clone()),
+                available_models: available_models.clone(),
+                error_message: error_message.clone(),
+            },
+        )
+        .await;
+
+    tracing::info!(
+        "Synced AI provider from vault: {} (configured: {}, available: {})",
+        provider_name,
+        is_configured,
+        is_available
+    );
+
+    Ok(ProviderStatusDto {
+        provider_type: Some(ai_provider_type.to_string()),
+        is_configured,
+        is_available,
+        current_model: Some(model),
+        available_models,
+        error_message,
+    })
+}
+
+// =============================================================================
+// Unified Agent Chat
+// =============================================================================
+
+/// Message for conversation history
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationMessageDto {
+    /// Role: user, assistant, or system
+    pub role: String,
+    /// Message content
+    pub content: String,
+}
+
+/// AI response with optional actions
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AIResponseDto {
+    /// Conversational response text
+    pub message: String,
+    /// Edit actions to execute (if any)
+    pub actions: Option<Vec<EditActionDto>>,
+    /// Whether user confirmation is needed
+    pub needs_confirmation: Option<bool>,
+    /// AI's understanding of the intent
+    pub intent: Option<AIIntentDto>,
+}
+
+/// Edit action from AI
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct EditActionDto {
+    /// Command type
+    pub command_type: String,
+    /// Command parameters as JSON
+    pub params: serde_json::Value,
+    /// Human-readable description
+    pub description: Option<String>,
+}
+
+/// AI intent classification
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AIIntentDto {
+    /// Intent type: chat, edit, query, clarify
+    #[serde(rename = "type")]
+    pub intent_type: String,
+    /// Confidence score
+    pub confidence: f32,
+}
+
+/// Chat with AI using conversation history (unified agent mode)
+///
+/// This endpoint supports natural conversation and optional edit commands.
+/// The AI will decide whether to respond conversationally or execute edits.
+#[tauri::command]
+#[specta::specta]
+pub async fn chat_with_ai(
+    messages: Vec<ConversationMessageDto>,
+    context: AIContextDto,
+    state: State<'_, AppState>,
+) -> Result<AIResponseDto, String> {
+    use crate::core::ai::{ConversationMessage, EditContext};
+
+    let gateway = state.ai_gateway.lock().await;
+
+    if !gateway.is_configured().await {
+        return Err("No AI provider configured. Configure an AI provider in Settings.".to_string());
+    }
+
+    // Convert DTOs to internal types
+    let conversation_messages: Vec<ConversationMessage> = messages
+        .into_iter()
+        .map(|m| ConversationMessage {
+            role: m.role,
+            content: m.content,
+        })
+        .collect();
+
+    // Build edit context
+    let edit_context = EditContext::new()
+        .with_duration(context.timeline_duration.unwrap_or(0.0))
+        .with_assets(context.asset_ids.clone())
+        .with_tracks(context.track_ids.clone())
+        .with_selection(context.selected_clips.clone())
+        .with_playhead(context.playhead_position);
+
+    // Chat with AI
+    let response = gateway
+        .chat(conversation_messages, &edit_context)
+        .await
+        .map_err(|e| e.to_ipc_error())?;
+
+    // Convert to DTO
+    Ok(AIResponseDto {
+        message: response.message,
+        actions: response.actions.map(|actions| {
+            actions
+                .into_iter()
+                .map(|a| EditActionDto {
+                    command_type: a.command_type,
+                    params: a.params,
+                    description: a.description,
+                })
+                .collect()
+        }),
+        needs_confirmation: response.needs_confirmation,
+        intent: response.intent.map(|i| AIIntentDto {
+            intent_type: match i.intent_type {
+                crate::core::ai::AIIntentType::Chat => "chat".to_string(),
+                crate::core::ai::AIIntentType::Edit => "edit".to_string(),
+                crate::core::ai::AIIntentType::Query => "query".to_string(),
+                crate::core::ai::AIIntentType::Clarify => "clarify".to_string(),
+            },
+            confidence: i.confidence,
+        }),
+    })
+}
+
+/// Options for raw AI completion (no AIResponse parsing).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AICompletionOptionsDto {
+    /// System prompt override
+    pub system_prompt: Option<String>,
+    /// Model override
+    pub model: Option<String>,
+    /// Max tokens
+    pub max_tokens: Option<u32>,
+    /// Temperature
+    pub temperature: Option<f32>,
+    /// Whether to enable JSON mode (provider-dependent)
+    pub json_mode: Option<bool>,
+}
+
+/// Token usage for a raw completion.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AICompletionUsageDto {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+
+/// Raw completion response from the configured provider.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AICompletionResponseDto {
+    pub text: String,
+    pub model: String,
+    pub usage: AICompletionUsageDto,
+    pub finish_reason: String,
+}
+
+/// Perform a raw completion using the configured AI provider.
+///
+/// Unlike `chat_with_ai`, this does not apply the unified-agent system prompt and does not parse
+/// the output into an `AIResponse`. This is intended for the frontend agentic engine, which
+/// supplies its own prompts and schemas.
+#[tauri::command]
+#[specta::specta]
+pub async fn complete_with_ai_raw(
+    messages: Vec<ConversationMessageDto>,
+    options: Option<AICompletionOptionsDto>,
+    state: State<'_, AppState>,
+) -> Result<AICompletionResponseDto, String> {
+    use crate::core::ai::provider::{CompletionRequest, ConversationMessage, FinishReason};
+
+    let gateway = state.ai_gateway.lock().await;
+
+    if !gateway.is_configured().await {
+        return Err("No AI provider configured. Configure an AI provider in Settings.".to_string());
+    }
+
+    if messages.is_empty() {
+        return Err("At least one message is required.".to_string());
+    }
+
+    let mut system_parts: Vec<String> = Vec::new();
+    let mut conversation_messages: Vec<ConversationMessage> = Vec::new();
+
+    for msg in messages {
+        if msg.role.to_lowercase() == "system" {
+            system_parts.push(msg.content);
+        } else {
+            conversation_messages.push(ConversationMessage {
+                role: msg.role,
+                content: msg.content,
+            });
+        }
+    }
+
+    if conversation_messages.is_empty() {
+        return Err("At least one non-system message is required.".to_string());
+    }
+
+    let mut request = CompletionRequest::with_conversation(conversation_messages);
+
+    if let Some(opts) = options {
+        if let Some(system_prompt) = opts.system_prompt {
+            system_parts.insert(0, system_prompt);
+        }
+        if let Some(model) = opts.model {
+            request = request.with_model(&model);
+        }
+        if let Some(max_tokens) = opts.max_tokens {
+            request = request.with_max_tokens(max_tokens);
+        }
+        if let Some(temperature) = opts.temperature {
+            request = request.with_temperature(temperature);
+        }
+        if opts.json_mode.unwrap_or(false) {
+            request = request.with_json_mode();
+        }
+    }
+
+    if !system_parts.is_empty() {
+        request = request.with_system(&system_parts.join("\n\n"));
+    }
+
+    let response = gateway
+        .complete_raw(request)
+        .await
+        .map_err(|e| e.to_ipc_error())?;
+
+    Ok(AICompletionResponseDto {
+        text: response.text,
+        model: response.model,
+        usage: AICompletionUsageDto {
+            prompt_tokens: response.usage.prompt_tokens,
+            completion_tokens: response.usage.completion_tokens,
+            total_tokens: response.usage.total_tokens,
+        },
+        finish_reason: match response.finish_reason {
+            FinishReason::Stop => "stop".to_string(),
+            FinishReason::Length => "length".to_string(),
+            FinishReason::ContentFilter => "content_filter".to_string(),
+            FinishReason::ToolCalls => "tool_calls".to_string(),
+        },
+    })
+}
+
 /// Error codes for connection test failures
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
 #[serde(rename_all = "snake_case")]

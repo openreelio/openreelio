@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 use super::{
     edit_script::EditScript,
-    provider::{AIProvider, CompletionRequest, CompletionResponse},
+    provider::{AIProvider, AIResponse, CompletionRequest, CompletionResponse, ConversationMessage},
 };
 use crate::core::{CoreError, CoreResult};
 
@@ -227,6 +227,126 @@ Fade in over 2s:
 - Single keyframe for animation
 - Negative time values"#;
 
+/// Conversation-aware system prompt for unified agent
+const CONVERSATION_SYSTEM_PROMPT: &str = r#"You are an AI video editing assistant for OpenReelio. You can have natural conversations AND execute video edits when requested.
+
+## YOUR ROLE
+- Have friendly, natural conversations with users
+- Help with video editing tasks when requested
+- Ask clarifying questions when requests are ambiguous
+- Provide information about the timeline and project when asked
+- Execute edits only when the user clearly requests them
+
+## RESPONSE FORMAT
+Always respond with valid JSON in this exact format:
+```json
+{
+  "message": "Your conversational response to the user",
+  "actions": [...],
+  "needsConfirmation": true,
+  "intent": { "type": "chat|edit|query|clarify", "confidence": 0.95 }
+}
+```
+
+### Fields:
+- **message** (required): Your natural language response. Always be helpful and conversational.
+- **actions** (optional): Array of edit commands. Only include when user requests edits.
+- **needsConfirmation** (optional): Set to true when actions require user approval.
+- **intent.type**: "chat" for general conversation, "edit" for edit requests, "query" for questions about timeline, "clarify" when you need more info.
+
+## WHEN TO INCLUDE ACTIONS
+Include "actions" array ONLY when:
+- User explicitly requests an edit (e.g., "cut this clip", "split at 5 seconds", "delete the selection")
+- User asks you to do something to the timeline
+
+Do NOT include actions for:
+- Greetings ("안녕", "hello", "hi")
+- General questions ("what can you do?", "how does this work?")
+- Questions about the timeline ("what clips are there?", "how long is the video?")
+- Ambiguous requests (ask for clarification instead)
+
+## EDIT COMMAND FORMAT
+When actions are needed, use this format:
+```json
+{
+  "commandType": "SplitClip|MoveClip|DeleteClip|TrimClip|...",
+  "params": { ... },
+  "description": "Human-readable description"
+}
+```
+
+## AVAILABLE COMMANDS
+- **SplitClip**: { "clipId": "required", "splitTime": seconds }
+- **MoveClip**: { "clipId": "required", "newTimelineIn": seconds }
+- **DeleteClip**: { "clipId": "required" }
+- **TrimClip**: { "clipId": "required", "newSourceIn"?: seconds, "newSourceOut"?: seconds }
+- **InsertClip**: { "assetId": "required", "trackId": "required", "timelineIn": seconds }
+- **AddTrack**: { "type": "video|audio", "name"?: string }
+- **MuteTrack**: { "trackId": "required", "muted": boolean }
+- **AddEffect**: { "clipId": "required", "effectType": string, "params": object }
+
+## CRITICAL RULES
+1. **Only use IDs from context** - Never invent UUIDs. Only reference IDs provided.
+2. **Time in seconds** - All time values are floating-point seconds. Example: 5.5 = 5.5 seconds
+3. **Ask before destructive edits** - If an edit might lose content, confirm with the user first.
+4. **Be conversational** - Don't just output commands. Explain what you're doing.
+
+## EXAMPLES
+
+### Example 1: Greeting (no actions)
+User: "안녕"
+Response:
+```json
+{
+  "message": "안녕하세요! 영상 편집을 도와드릴게요. 무엇을 도와드릴까요?",
+  "intent": { "type": "chat", "confidence": 1.0 }
+}
+```
+
+### Example 2: Question about timeline (no actions)
+User: "지금 타임라인에 뭐가 있어?"
+Response:
+```json
+{
+  "message": "현재 타임라인에는 2개의 트랙이 있습니다:\n- Video 1: intro.mp4 (0:00-0:10), main.mp4 (0:10-1:30)\n- Audio 1: bgm.mp3 (0:00-1:30)\n\n총 길이는 1분 30초입니다.",
+  "intent": { "type": "query", "confidence": 0.95 }
+}
+```
+
+### Example 3: Edit request (with actions)
+User: "선택된 클립을 5초 지점에서 잘라줘"
+Response:
+```json
+{
+  "message": "네, 선택된 클립을 5초 지점에서 분할하겠습니다.",
+  "actions": [
+    {
+      "commandType": "SplitClip",
+      "params": { "clipId": "clip-123", "splitTime": 5.0 },
+      "description": "클립을 5초 지점에서 분할"
+    }
+  ],
+  "needsConfirmation": true,
+  "intent": { "type": "edit", "confidence": 0.98 }
+}
+```
+
+### Example 4: Ambiguous request (clarification needed)
+User: "이거 좀 고쳐줘"
+Response:
+```json
+{
+  "message": "어떤 부분을 수정하고 싶으신가요? 예를 들어:\n- 특정 클립을 자르거나 이동\n- 효과 추가\n- 오디오 조정\n\n좀 더 구체적으로 말씀해주시면 도와드릴게요!",
+  "intent": { "type": "clarify", "confidence": 0.7 }
+}
+```
+
+## FORBIDDEN
+- Inventing IDs not in the provided context
+- Executing edits without user's explicit request
+- Frame numbers (use seconds only)
+- Responding without JSON format"#;
+
 impl AIGateway {
     /// Creates a new AI gateway with no provider
     pub fn new(config: AIGatewayConfig) -> Self {
@@ -317,6 +437,119 @@ impl AIGateway {
         let mut status = self.status.write().await;
         status.is_available = is_available;
         status.error_message = error_message;
+    }
+
+    // =========================================================================
+    // Conversation Mode (Unified Agent)
+    // =========================================================================
+
+    /// Chat with AI using conversation history
+    ///
+    /// This method supports natural conversation and optional edit commands.
+    /// The AI will decide whether to respond conversationally or execute edits.
+    pub async fn chat(
+        &self,
+        messages: Vec<ConversationMessage>,
+        context: &EditContext,
+    ) -> CoreResult<AIResponse> {
+        let provider = self.get_provider().await?;
+
+        // Build conversation-aware system prompt with context
+        let system_prompt = self.build_conversation_system_prompt(context);
+
+        // Create completion request with full conversation history
+        let request = CompletionRequest::with_conversation(messages)
+            .with_system(&system_prompt)
+            .with_max_tokens(self.config.max_script_tokens)
+            .with_temperature(0.7) // Slightly higher for natural conversation
+            .with_json_mode();
+
+        // Get completion from provider
+        let response = provider.complete(request).await?;
+
+        // Parse AI response
+        self.parse_ai_response(&response.text)
+    }
+
+    /// Perform a raw completion request without parsing into `AIResponse`.
+    ///
+    /// This is used by the frontend agentic engine which supplies its own
+    /// prompts (Think/Plan/Observe) and expects plain text or JSON output.
+    pub async fn complete_raw(&self, request: CompletionRequest) -> CoreResult<CompletionResponse> {
+        let provider = self.get_provider().await?;
+        self.complete_with_retry(provider.as_ref(), request).await
+    }
+
+    /// Builds the conversation-aware system prompt with context
+    fn build_conversation_system_prompt(&self, context: &EditContext) -> String {
+        let mut prompt = CONVERSATION_SYSTEM_PROMPT.to_string();
+
+        // Add current context
+        prompt.push_str("\n\n## CURRENT CONTEXT\n");
+
+        if let Some(project_name) = &context.project_name {
+            prompt.push_str(&format!("Project: {}\n", project_name));
+        }
+
+        prompt.push_str(&format!(
+            "Timeline Duration: {:.2} seconds\n",
+            context.timeline_duration
+        ));
+        prompt.push_str(&format!(
+            "Playhead Position: {:.2} seconds\n",
+            context.playhead_position
+        ));
+
+        if !context.selected_clips.is_empty() {
+            prompt.push_str(&format!(
+                "Selected Clips: {}\n",
+                context.selected_clips.join(", ")
+            ));
+        } else {
+            prompt.push_str("Selected Clips: None\n");
+        }
+
+        if !context.asset_ids.is_empty() {
+            let assets: Vec<_> = context.asset_ids.iter().take(10).collect();
+            prompt.push_str(&format!("Available Assets: {}\n", assets.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")));
+        }
+
+        if !context.track_ids.is_empty() {
+            prompt.push_str(&format!(
+                "Available Tracks: {}\n",
+                context.track_ids.join(", ")
+            ));
+        }
+
+        if let Some(transcript) = &context.transcript_context {
+            prompt.push_str(&format!("\nTranscript Context:\n{}\n", transcript));
+        }
+
+        prompt
+    }
+
+    /// Parses AI response JSON into AIResponse struct
+    fn parse_ai_response(&self, text: &str) -> CoreResult<AIResponse> {
+        // Try direct JSON parse
+        if let Ok(response) = serde_json::from_str::<AIResponse>(text) {
+            return Ok(response);
+        }
+
+        // Try extracting from markdown code block
+        let json_pattern = regex::Regex::new(r"```(?:json)?\s*\n?([\s\S]*?)\n?```")
+            .map_err(|e| CoreError::Internal(format!("Regex error: {}", e)))?;
+
+        if let Some(captures) = json_pattern.captures(text) {
+            if let Some(json_str) = captures.get(1) {
+                if let Ok(response) = serde_json::from_str::<AIResponse>(json_str.as_str()) {
+                    return Ok(response);
+                }
+            }
+        }
+
+        // Fallback: treat entire response as a chat message
+        tracing::warn!("Could not parse AI response as JSON, treating as plain text");
+        Ok(AIResponse::chat(text))
     }
 
     // =========================================================================
