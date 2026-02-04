@@ -330,6 +330,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   }, []);
 
   const rejectPlan = useCallback((_reason?: string) => {
+    void _reason; // Reserved for future use (e.g., logging rejection reason)
     approvalResolverRef.current?.resolve(false);
     approvalResolverRef.current = null;
   }, []);

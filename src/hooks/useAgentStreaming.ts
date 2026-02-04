@@ -97,6 +97,7 @@ export const useAgentStreamingStore = create<StreamingStore>()(
     },
 
     abortStreaming: (_reason?: string) => {
+      void _reason; // Reserved for future use (e.g., logging abort reason)
       set((state) => {
         state.isStreaming = false;
         state.isAborted = true;
