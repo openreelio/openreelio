@@ -9,7 +9,7 @@ import { UndoRedoButtons } from '@/components/ui';
 import { SearchPanel } from '@/components/features/search';
 import { SettingsDialog } from '@/components/features/settings';
 import { ShortcutsDialog } from '@/components/features/help';
-import { useProjectStore } from '@/stores';
+import { useProjectStore, useUIStore } from '@/stores';
 import { useCallback, useState, useEffect, useRef } from 'react';
 import { createLogger } from '@/services/logger';
 import { updateService } from '@/services/updateService';
@@ -55,9 +55,13 @@ export function Header({
   // Derived state for backward compatibility
   const isSaving = saveStatus === 'saving';
   const [showSearch, setShowSearch] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [displayVersion, setDisplayVersion] = useState(version);
+
+  // Global settings dialog state
+  const isSettingsOpen = useUIStore((state) => state.isSettingsOpen);
+  const openSettings = useUIStore((state) => state.openSettings);
+  const closeSettings = useUIStore((state) => state.closeSettings);
 
   // Fetch actual version from backend on mount
   useEffect(() => {
@@ -87,7 +91,7 @@ export function Header({
       }
       if ((e.ctrlKey || e.metaKey) && e.key === ',') {
         e.preventDefault();
-        setShowSettings(true);
+        openSettings();
       }
       // "?" key for shortcuts (Shift + /)
       if (e.key === '?') {
@@ -98,7 +102,7 @@ export function Header({
 
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [openSettings]);
 
   const handleSearchClose = useCallback(() => {
     setShowSearch(false);
@@ -288,7 +292,7 @@ export function Header({
 
           {/* Settings Button */}
           <button
-            onClick={() => setShowSettings(true)}
+            onClick={() => openSettings()}
             className="p-1.5 rounded hover:bg-editor-bg transition-colors text-editor-text-muted hover:text-editor-text"
             title="Settings (Ctrl+,)"
           >
@@ -372,8 +376,8 @@ export function Header({
 
       {/* Settings Dialog */}
       <SettingsDialog
-        isOpen={showSettings}
-        onClose={() => setShowSettings(false)}
+        isOpen={isSettingsOpen}
+        onClose={closeSettings}
       />
 
       {/* Shortcuts Dialog */}

@@ -15,6 +15,7 @@ import { useState, useCallback, useEffect } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { createLogger } from '@/services/logger';
 import { invalidateModelCache } from './useAIModels';
+import { useAIStore } from '@/stores/aiStore';
 
 const logger = createLogger('useCredentials');
 
@@ -150,6 +151,16 @@ export function useCredentials(): UseCredentialsReturn {
 
         // Refresh status after storing
         await refreshStatus();
+
+        // Sync AI provider to use the new credential
+        // This re-configures the AI provider with the newly stored API key
+        try {
+          await useAIStore.getState().syncFromSettings();
+          logger.info('AI provider synced after credential update', { provider });
+        } catch (syncError) {
+          // Log but don't throw - credential was stored successfully
+          logger.warn('Failed to sync AI provider after credential update', { syncError });
+        }
 
         logger.info('Credential stored successfully', { provider });
       } catch (err) {

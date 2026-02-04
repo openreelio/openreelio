@@ -5,16 +5,17 @@
  * Includes toggle, resize, keyboard shortcuts, and provider status.
  */
 
-import { useEffect, useCallback, useRef, useState } from 'react';
-import { Bot, Settings, ChevronRight, ChevronLeft, X } from 'lucide-react';
+import { useEffect, useCallback, useRef } from 'react';
+import { Bot, Settings, ChevronRight, ChevronLeft, Plus, Zap } from 'lucide-react';
 import { useAIStore } from '@/stores/aiStore';
-import { useProjectStore } from '@/stores';
+import { useProjectStore, useUIStore } from '@/stores';
 import { AIErrorBoundary } from '@/components/shared/FeatureErrorBoundaries';
 import { ChatHistory } from './ChatHistory';
 import { ChatInput } from './ChatInput';
 import { ContextPanel } from './ContextPanel';
 import { QuickActionsBar } from './QuickActionsBar';
-import { AISettingsPanel } from '../settings/AISettingsPanel';
+import { AgenticSidebarContent } from '@/components/features/agent';
+import { isAgenticEngineEnabled } from '@/config/featureFlags';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('AISidebar');
@@ -55,16 +56,31 @@ export function AISidebar({
   const resizeHandleRef = useRef<HTMLDivElement>(null);
   const isResizingRef = useRef(false);
 
-  // Settings dialog state
-  const [showSettings, setShowSettings] = useState(false);
+  // Global settings dialog
+  const openSettings = useUIStore((state) => state.openSettings);
 
   // Get provider status from store
   const providerStatus = useAIStore((state) => state.providerStatus);
   const loadChatHistoryForProject = useAIStore((state) => state.loadChatHistoryForProject);
   const currentProjectId = useAIStore((state) => state.currentProjectId);
+  const syncFromSettings = useAIStore((state) => state.syncFromSettings);
+  const clearChatHistory = useAIStore((state) => state.clearChatHistory);
+  const chatMessages = useAIStore((state) => state.chatMessages);
+  const isGenerating = useAIStore((state) => state.isGenerating);
 
   // Get active sequence ID to use as project identifier for chat persistence
   const activeSequenceId = useProjectStore((state) => state.activeSequenceId);
+
+  // Sync provider from global settings on mount
+  // Always sync because backend AIGateway is reset on app restart
+  // but frontend persist state may still show isConfigured=true
+  useEffect(() => {
+    syncFromSettings().catch((error) => {
+      logger.warn('Failed to sync AI provider from global settings', { error });
+    });
+    // Only run on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load chat history when project changes
   useEffect(() => {
@@ -124,21 +140,6 @@ export function AISidebar({
     [width, onWidthChange]
   );
 
-  // Handle Escape key to close settings dialog
-  useEffect(() => {
-    if (!showSettings) return;
-
-    const handleEscapeKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        setShowSettings(false);
-      }
-    };
-
-    document.addEventListener('keydown', handleEscapeKey);
-    return () => document.removeEventListener('keydown', handleEscapeKey);
-  }, [showSettings]);
-
   // Determine provider status indicator color
   const getProviderStatusColor = () => {
     if (!providerStatus.isConfigured) return 'bg-gray-500';
@@ -151,16 +152,17 @@ export function AISidebar({
       data-testid="ai-sidebar"
       aria-label="AI Assistant Sidebar"
       className={`flex flex-col bg-editor-bg border-l border-editor-border transition-all duration-200 ease-in-out relative ${
-        collapsed ? 'w-0 overflow-hidden' : ''
+        collapsed ? 'w-0' : ''
       }`}
-      style={collapsed ? undefined : { width: `${width}px` }}
+      style={collapsed ? { overflow: 'visible' } : { width: `${width}px` }}
     >
       {/* Expand button - visible when collapsed */}
       {collapsed && (
         <button
           type="button"
           onClick={onToggle}
-          className="absolute right-full top-1/2 -translate-y-1/2 flex items-center gap-1.5 px-2 py-3 bg-editor-surface border border-editor-border border-r-0 rounded-l-lg hover:bg-primary-500/10 hover:border-primary-500/50 transition-all group shadow-lg z-10"
+          className="absolute right-0 top-1/2 -translate-y-1/2 translate-x-0 flex items-center gap-1.5 px-2 py-3 bg-editor-surface border border-editor-border border-r-0 rounded-l-lg hover:bg-primary-500/10 hover:border-primary-500/50 transition-all group shadow-lg z-30"
+          style={{ transform: 'translateY(-50%) translateX(-100%)' }}
           aria-label="Open AI Assistant"
           title="Open AI Assistant (Ctrl+/)"
         >
@@ -183,6 +185,17 @@ export function AISidebar({
         <div className="flex items-center gap-2">
           <Bot className="w-5 h-5 text-purple-400" />
           <h2 className="text-sm font-medium text-editor-text">AI Assistant</h2>
+          {/* Agentic mode indicator */}
+          {isAgenticEngineEnabled() && (
+            <span
+              data-testid="agentic-mode-indicator"
+              className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium bg-purple-500/20 text-purple-300 rounded"
+              title="Agentic Engine Mode (Think-Plan-Act-Observe)"
+            >
+              <Zap className="w-2.5 h-2.5" />
+              Agent
+            </span>
+          )}
           {/* Provider status indicator */}
           <div
             data-testid="provider-status"
@@ -199,10 +212,22 @@ export function AISidebar({
 
         {/* Actions */}
         <div className="flex items-center gap-0.5">
-          {/* Settings button */}
+          {/* New chat button */}
           <button
             type="button"
-            onClick={() => setShowSettings(true)}
+            onClick={clearChatHistory}
+            disabled={chatMessages.length === 0 || isGenerating}
+            className="p-1.5 rounded-md hover:bg-editor-surface transition-colors text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
+            aria-label="New conversation"
+            title="New conversation"
+          >
+            <Plus className="w-4 h-4" />
+          </button>
+
+          {/* Settings button - opens global settings with AI tab */}
+          <button
+            type="button"
+            onClick={() => openSettings('ai')}
             className="p-1.5 rounded-md hover:bg-editor-surface transition-colors text-editor-text-muted hover:text-editor-text"
             aria-label="AI settings"
             title="AI Settings"
@@ -231,61 +256,31 @@ export function AISidebar({
             logger.error('AI Sidebar error caught by boundary', { error });
           }}
         >
-          {/* Chat history - takes remaining space */}
-          <ChatHistory />
+          {/* Conditionally render Agentic or Legacy chat based on feature flag */}
+          {isAgenticEngineEnabled() ? (
+            <>
+              {/* Agentic Engine Mode */}
+              <AgenticSidebarContent className="flex-1" />
+            </>
+          ) : (
+            <>
+              {/* Legacy Chat Mode */}
+              {/* Chat history - takes remaining space */}
+              <ChatHistory />
 
-          {/* Context panel */}
-          <ContextPanel />
+              {/* Context panel */}
+              <ContextPanel />
 
-          {/* Quick actions */}
-          <QuickActionsBar />
+              {/* Quick actions */}
+              <QuickActionsBar />
 
-          {/* Chat input */}
-          <ChatInput />
+              {/* Chat input */}
+              <ChatInput />
+            </>
+          )}
         </AIErrorBoundary>
       )}
 
-      {/* Settings Dialog - z-[60] to be above toast level */}
-      {showSettings && (
-        <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 backdrop-blur-sm"
-          onClick={(e) => {
-            // Close on backdrop click
-            if (e.target === e.currentTarget) {
-              setShowSettings(false);
-            }
-          }}
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="settings-dialog-title"
-        >
-          <div className="w-full max-w-lg mx-4">
-            <div className="bg-editor-bg rounded-lg border border-editor-border shadow-xl">
-              {/* Dialog header */}
-              <div className="flex items-center justify-between px-4 py-3 border-b border-editor-border">
-                <h2 id="settings-dialog-title" className="text-lg font-semibold text-editor-text">
-                  AI Settings
-                </h2>
-                <button
-                  type="button"
-                  onClick={() => setShowSettings(false)}
-                  className="p-1.5 rounded-md hover:bg-editor-surface transition-colors text-editor-text-muted hover:text-editor-text"
-                  aria-label="Close settings"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              {/* Dialog content */}
-              <div className="p-4">
-                <AISettingsPanel
-                  onSaved={() => setShowSettings(false)}
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
     </aside>
   );
 }
