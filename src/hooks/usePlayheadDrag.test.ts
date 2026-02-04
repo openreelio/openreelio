@@ -12,6 +12,7 @@
 import { renderHook, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { usePlayheadDrag } from './usePlayheadDrag';
+import { playbackController } from '@/services/PlaybackController';
 import type { SnapPoint } from '@/types';
 
 // Mock PlaybackController to allow drag operations
@@ -803,6 +804,24 @@ describe('usePlayheadDrag', () => {
       expect(removeEventListenerSpy).toHaveBeenCalledWith('mousemove', expect.any(Function));
       expect(removeEventListenerSpy).toHaveBeenCalledWith('mouseup', expect.any(Function));
       expect(windowRemoveEventListenerSpy).toHaveBeenCalledWith('blur', expect.any(Function));
+    });
+
+    it('should release drag lock and restore cursor on unmount during active drag', () => {
+      const options = createDefaultOptions();
+      const { result, unmount } = renderHook(() => usePlayheadDrag(options));
+
+      act(() => {
+        result.current.handleDragStart(createMockMouseEvent());
+      });
+
+      expect(document.body.style.cursor).toBe('grabbing');
+      expect(document.body.style.userSelect).toBe('none');
+
+      unmount();
+
+      expect(playbackController.releaseDragLock).toHaveBeenCalledWith('playhead');
+      expect(document.body.style.cursor).toBe('');
+      expect(document.body.style.userSelect).toBe('');
     });
 
     it('should not throw on unmount when not dragging', () => {

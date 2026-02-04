@@ -245,26 +245,55 @@ describe('Timeline', () => {
       expect(playheadContainer!.style.left).toBe('192px');
     });
 
-    // TODO: This test requires TimelineEngine to be properly synced with playbackStore.
-    // In the test environment, the useEffect that sets up syncWithStore may not run
-    // before the mouseDown event. This needs a more sophisticated test setup.
-    it.skip('should update playhead when seeking via ruler mousedown', async () => {
+    it('should update playhead when seeking via ruler mousedown', async () => {
       render(<Timeline sequence={mockSequence} />);
-
-      // Wait for useEffect to sync engine with store
-      await act(async () => {
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      });
 
       const ruler = screen.getByTestId('time-ruler');
       // Simulate mouseDown at a position (ruler now uses mouseDown for scrubbing)
       await act(async () => {
         fireEvent.mouseDown(ruler, { clientX: 300 });
-        await new Promise((resolve) => setTimeout(resolve, 10));
       });
 
       // Playhead should update (exact position depends on implementation)
       expect(usePlaybackStore.getState().currentTime).toBeGreaterThan(0);
+    });
+
+    it('should seek when clicking empty tracks area', async () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      await act(async () => {
+        fireEvent.mouseDown(tracksArea, { clientX: 300, clientY: 40, button: 0 });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBeGreaterThan(0);
+
+      // Ensure scrubbing cleans up global cursor state
+      await act(async () => {
+        fireEvent.mouseUp(document);
+      });
+      expect(document.body.style.cursor).toBe('');
+    });
+
+    it('should allow dragging playhead head to seek', async () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      const head = screen.getByTestId('playhead-head');
+
+      await act(async () => {
+        // Container left: 0, trackHeaderWidth: 192, zoom: 100
+        // 492px => (492 - 192) / 100 = 3s
+        fireEvent.mouseDown(head, { clientX: 492, button: 0 });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBeCloseTo(3, 3);
+      expect(screen.getByTestId('playhead')).toHaveAttribute('data-dragging', 'true');
+
+      await act(async () => {
+        fireEvent.mouseUp(document);
+      });
+
+      expect(screen.getByTestId('playhead')).toHaveAttribute('data-dragging', 'false');
     });
   });
 
@@ -292,24 +321,13 @@ describe('Timeline', () => {
   // ===========================================================================
 
   describe('keyboard shortcuts', () => {
-    // TODO: This test requires TimelineEngine to be properly synced with playbackStore.
-    // In the test environment, the useEffect that sets up syncWithStore may not run
-    // before the keyDown event. This needs a more sophisticated test setup.
-    it.skip('should toggle playback on space key', async () => {
+    it('should toggle playback on space key', () => {
       render(<Timeline sequence={mockSequence} />);
 
       const timeline = screen.getByTestId('timeline');
 
-      // First ensure the component is fully mounted and effects have run
-      await act(async () => {
-        // Small delay to allow useEffect to sync engine with store
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      });
-
-      await act(async () => {
+      act(() => {
         fireEvent.keyDown(timeline, { key: ' ' });
-        // Allow state update to propagate
-        await new Promise((resolve) => setTimeout(resolve, 10));
       });
 
       expect(usePlaybackStore.getState().isPlaying).toBe(true);

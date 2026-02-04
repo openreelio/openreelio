@@ -330,6 +330,7 @@ export function usePlayheadDrag({
 
   // Store drag state in ref for event handlers
   const dragStateRef = useRef<DragState | null>(null);
+  const onSnapChangeRef = useRef(onSnapChange);
 
   // Store event handler refs for cleanup
   const handlersRef = useRef<{
@@ -416,6 +417,11 @@ export function usePlayheadDrag({
     fps,
   ]);
 
+  // Keep callback stable for unmount cleanup without forcing effect re-runs.
+  useEffect(() => {
+    onSnapChangeRef.current = onSnapChange;
+  }, [onSnapChange]);
+
   /**
    * Cleanup function to remove document event listeners.
    */
@@ -442,6 +448,22 @@ export function usePlayheadDrag({
    */
   useEffect(() => {
     return () => {
+      const dragState = dragStateRef.current;
+      if (dragState) {
+        // Cancel any pending animation frame to prevent post-unmount work.
+        if (dragState.rafId !== null) {
+          cancelAnimationFrame(dragState.rafId);
+        }
+
+        // Clear snap indicator and restore global UI state.
+        onSnapChangeRef.current?.(null);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+
+        // Defensive: ensure drag lock is released even if the drag was interrupted.
+        playbackController.releaseDragLock('playhead');
+      }
+
       cleanup();
       // Reset drag state on unmount
       dragStateRef.current = null;

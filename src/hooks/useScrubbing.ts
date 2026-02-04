@@ -113,6 +113,7 @@ export function useScrubbing({
 }: UseScrubbingOptions): UseScrubbingResult {
   const [isScrubbing, setIsScrubbing] = useState(false);
   const scrubStateRef = useRef<ScrubState | null>(null);
+  const onSnapChangeRef = useRef(onSnapChange);
 
   // Store event handlers in refs to allow cleanup on unmount
   const handlersRef = useRef<{
@@ -135,6 +136,11 @@ export function useScrubbing({
       playheadTrackHeaderWidth: playheadTrackHeaderWidth ?? trackHeaderWidth,
     };
   }, [zoom, scrollX, trackHeaderWidth, playheadTrackHeaderWidth]);
+
+  // Keep callback stable for unmount cleanup without forcing effect re-runs.
+  useEffect(() => {
+    onSnapChangeRef.current = onSnapChange;
+  }, [onSnapChange]);
 
   /**
    * Convert time to pixel position for direct DOM updates.
@@ -207,13 +213,29 @@ export function useScrubbing({
   // Cleanup on unmount to prevent memory leaks
   useEffect(() => {
     return () => {
+      const wasScrubbing = scrubStateRef.current !== null;
+
       cleanup();
       scrubStateRef.current = null;
+
+      // Defensive: If unmounted mid-scrub (route change, error boundary, etc),
+      // release the global drag lock and restore global cursor state. Without this
+      // the timeline can become permanently non-interactive until reload.
+      if (wasScrubbing) {
+        onSnapChangeRef.current?.(null);
+        document.body.style.cursor = '';
+        document.body.style.userSelect = '';
+        playbackController.releaseDragLock('scrubbing');
+      }
     };
   }, [cleanup]);
 
   const handleScrubStart = useCallback(
     (e: MouseEvent) => {
+      // Only start scrubbing on primary (left) button.
+      // Prevents accidental lock acquisition on middle/right click (e.g., panning/context menu).
+      if (e.button !== 0) return;
+
       // Don't start scrubbing if clicking on clips, buttons, or interactive elements
       const target = e.target as HTMLElement;
 
