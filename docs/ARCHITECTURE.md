@@ -151,24 +151,65 @@ snapshot.json is a cached state for faster startup, rebuilt from ops.jsonl.
 
 ## AI Agent System
 
-### Agent Architecture
+> **✅ AGENTIC ENGINE IMPLEMENTED**: The new agentic loop architecture is implemented and available via feature flag. Enable with `setFeatureFlag('USE_AGENTIC_ENGINE', true)` or `VITE_FF_USE_AGENTIC_ENGINE=true`.
 
-1. **Intent Analyzer** - Analyze user prompt intent
-2. **Task Planner** - Create DAG of tasks
-3. **Parallel Execution** - Search Assets, Analyze Context, Generate Proposal
-4. **EditScript Generation** - Create executable edit commands
-5. **QC Validation** - Quality check before proposal
-6. **Proposal Creation** - Present to user for approval
+### Architecture Overview
 
-### Task Types
+OpenReelio supports two AI modes controlled by feature flag:
 
-- Index: Asset indexing
-- Transcribe: Speech recognition
-- SearchAssets: Asset search
-- GenerateMedia: Video/image generation
-- ComposeEdit: Edit script composition
-- QualityCheck: Quality check
-- RenderPreview: Preview rendering
+1. **Legacy Mode** (default): Simple request-response chat interface
+2. **Agentic Mode**: Full Think → Plan → Act → Observe (TPAO) loop
+
+### Agentic Architecture (NEW)
+
+The new architecture implements the **Think → Plan → Act → Observe (TPAO)** cycle:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     AgentEngine (Orchestrator)                  │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│   ┌─────────┐    ┌─────────┐    ┌─────────┐    ┌─────────┐    │
+│   │  THINK  │ → │  PLAN   │ → │   ACT   │ → │ OBSERVE │    │
+│   │ Analyze │    │ Strategy│    │ Execute │    │ Verify  │    │
+│   └─────────┘    └─────────┘    └─────────┘    └─────────┘    │
+│        ↑                                            │          │
+│        └────────────── Continue if needed ──────────┘          │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│  Ports (Abstractions)           Adapters (Implementations)      │
+│  ├─ LLMPort                     ├─ AnthropicAdapter             │
+│  ├─ ToolPort                    ├─ OpenAIAdapter                │
+│  └─ ApprovalPort                └─ LocalLLMAdapter              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Key Components (Implemented)
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| **AgenticEngine** | `src/agents/engine/AgenticEngine.ts` | Orchestrates the TPAO loop, manages turns and state |
+| **Thinker** | `src/agents/engine/phases/Thinker.ts` | Analyzes user intent and requirements |
+| **Planner** | `src/agents/engine/phases/Planner.ts` | Generates execution plans with risk assessment |
+| **Executor** | `src/agents/engine/phases/Executor.ts` | Executes tools with checkpointing |
+| **Observer** | `src/agents/engine/phases/Observer.ts` | Evaluates results and determines next steps |
+| **ILLMClient** | `src/agents/engine/ports/ILLMClient.ts` | Abstract interface for LLM providers |
+| **TauriLLMAdapter** | `src/agents/engine/adapters/llm/TauriLLMAdapter.ts` | Bridges to Tauri backend AI providers |
+| **ToolRegistryAdapter** | `src/agents/engine/adapters/tools/ToolRegistryAdapter.ts` | Bridges to existing tool registry |
+| **useAgenticLoop** | `src/hooks/useAgenticLoop.ts` | React hook for agentic loop integration |
+| **AgenticChat** | `src/components/features/agent/AgenticChat.tsx` | Main chat UI component |
+| **ThinkingIndicator** | `src/components/features/agent/ThinkingIndicator.tsx` | Shows AI thinking process |
+| **PlanViewer** | `src/components/features/agent/PlanViewer.tsx` | Displays and approves plans |
+| **ActionFeed** | `src/components/features/agent/ActionFeed.tsx` | Real-time action progress |
+
+### Tool Categories
+
+1. **Timeline Tools**: move_clip, trim_clip, split_clip, delete_clip, insert_clip
+2. **Effect Tools**: add_effect, remove_effect, update_effect_params
+3. **Analysis Tools**: analyze_clip, get_clip_info, get_timeline_state
+4. **Audio Tools**: adjust_volume, add_audio_effect
+5. **Caption Tools**: add_caption, edit_caption, sync_captions
+6. **Transition Tools**: add_transition, update_transition
 
 ### Project Memory
 
@@ -217,19 +258,30 @@ pub struct PluginPermissions {
 7. Zustand Store update - Update state
 8. React re-render - Update UI
 
-### AI Edit Flow
+### AI Edit Flow (Agentic Mode)
 
-1. Frontend (PromptBar.tsx) - User prompt
-2. IPC ai_request - Send to core
-3. Core AIAgent.process() - Process with AI
-4. AI Gateway + Search - Get results
-5. EditScript generation - Create commands
-6. Proposal creation - Package for review
-7. IPC proposal_ready - Notify frontend
-8. Frontend (ProposalDialog.tsx) - Show to user
-9. User Apply - Confirm changes
-10. Execute commands - Apply to state
-11. Update UI
+1. Frontend (AgenticChat.tsx) - User prompt
+2. useAgenticLoop.run() - Start agentic session
+3. **THINK**: Thinker analyzes intent via LLM
+4. **PLAN**: Planner generates steps with risk levels
+5. ApprovalGate (if high risk) - User confirms plan
+6. **ACT**: Executor runs tools via ToolRegistryAdapter
+7. **OBSERVE**: Observer evaluates results
+8. Loop back to THINK if needed
+9. Session complete - Update UI with results
+
+### AI Edit Flow (Legacy Mode)
+
+1. Frontend (ChatInput.tsx) - User prompt
+2. IPC chat_with_ai - Send to core
+3. Core AI Gateway - Process with LLM
+4. EditScript generation - Create commands
+5. Proposal creation - Package for review
+6. IPC proposal_ready - Notify frontend
+7. Frontend (ProposalCard.tsx) - Show to user
+8. User Apply - Confirm changes
+9. Execute commands - Apply to state
+10. Update UI
 
 ---
 

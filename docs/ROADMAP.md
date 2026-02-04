@@ -188,6 +188,8 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 **Goal**: Enable AI-powered editing with automatic transcription, smart search, and shot detection.
 
 > **Status**: 98% Complete - Full AI chat interface, agent framework, and editing tools implemented
+>
+> **🚧 AGENT SYSTEM REWRITE IN PROGRESS**: The current request-response AI system is being replaced with a native agentic loop (Think → Plan → Act → Observe). See [AGENT_IMPLEMENTATION_MASTER_PLAN.md](./AGENT_IMPLEMENTATION_MASTER_PLAN.md) for the complete implementation plan.
 
 ### Current Progress (as of 2026-01-27)
 
@@ -218,8 +220,29 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
   - ✅ Agent base class with event emitter and tool execution
   - ✅ ToolRegistry for registering and executing tools
   - ✅ ContextBuilder for building agent context
-  - ✅ VideoEditingAgent for AI-powered video editing
+  - ✅ VideoEditingAgent for AI-powered video editing (LEGACY)
   - ✅ MockAgent for testing
+- ✅ **Agentic Engine** (src/agents/engine/) - NEW Think-Plan-Act-Observe loop
+  - ✅ AgenticEngine orchestrator with iteration control
+  - ✅ Thinker phase (intent analysis via LLM)
+  - ✅ Planner phase (step generation with risk assessment)
+  - ✅ Executor phase (tool execution with checkpoints)
+  - ✅ Observer phase (result evaluation and iteration)
+  - ✅ Port/Adapter architecture (ILLMClient, IToolExecutor)
+  - ✅ TauriLLMAdapter (bridges to backend providers)
+  - ✅ ToolRegistryAdapter (bridges to existing tools)
+  - ✅ Feature flag controlled (USE_AGENTIC_ENGINE)
+- ✅ **Agentic UI Components** (src/components/features/agent/)
+  - ✅ AgenticChat - Main chat interface with loop integration
+  - ✅ ThinkingIndicator - Shows AI thinking process
+  - ✅ PlanViewer - Displays plans with approval controls
+  - ✅ ActionFeed - Real-time action progress
+  - ✅ AgenticSidebarContent - Integration wrapper
+- ✅ **React Hooks** (src/hooks/)
+  - ✅ useAgenticLoop - Main hook for engine orchestration
+  - ✅ useAgentApproval - Human-in-the-loop approval
+  - ✅ useAgentStreaming - Token streaming support
+  - ✅ useAgentWorkflow - Workflow state management
 - ✅ **Editing Tools** (src/agents/tools/editingTools.ts)
   - ✅ move_clip, trim_clip, split_clip, delete_clip, insert_clip
   - ✅ Full IPC integration with validation
