@@ -279,7 +279,21 @@ export class AgenticEngine {
           state.phase = 'awaiting_approval';
 
           this.emitEvent(onEvent, { type: 'approval_required', plan, timestamp: Date.now() });
-          const approved = await this.approvalHandler(plan);
+
+          let approved: boolean;
+          try {
+            approved = await this.approvalHandler(plan);
+          } catch (error) {
+            const err = error instanceof Error ? error : new Error(String(error));
+            state.error = err;
+            state = this.finalizeState(state, 'failed');
+            this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
+            logger.error('Approval phase failed', { sessionId: executionContext.sessionId, error: err.message });
+            return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
+              error: err,
+              finalState: state,
+            });
+          }
 
           this.emitEvent(onEvent, {
             type: 'approval_response',

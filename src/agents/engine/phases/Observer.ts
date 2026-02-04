@@ -158,6 +158,11 @@ export class Observer {
         onProgress(chunk);
       }
 
+      // Check abort before making additional LLM call
+      if (this.abortController?.signal.aborted) {
+        throw new ObservationError('Observation aborted');
+      }
+
       // Get the structured result
       const schema = this.buildObservationSchema();
       const observation = await this.llm.generateStructured<Observation>(

@@ -105,7 +105,8 @@ export class UndoRegistry {
   private maxHistory: number;
 
   constructor(config: UndoRegistryConfig = {}) {
-    this.maxHistory = config.maxHistory ?? 100;
+    const configured = config.maxHistory ?? 100;
+    this.maxHistory = Math.max(0, configured);
   }
 
   // ===========================================================================

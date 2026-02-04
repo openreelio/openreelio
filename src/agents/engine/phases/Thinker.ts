@@ -294,6 +294,11 @@ export class Thinker {
         reject(new ThinkingTimeoutError(timeout));
       }, timeout);
 
+      const abortHandler = () => {
+        clearTimeout(timeoutId);
+        reject(new ThinkingTimeoutError(timeout));
+      };
+
       // Check if already aborted
       if (this.abortController?.signal.aborted) {
         clearTimeout(timeoutId);
@@ -301,21 +306,28 @@ export class Thinker {
         return;
       }
 
+      const signal = this.abortController?.signal;
+      if (signal) {
+        signal.addEventListener('abort', abortHandler);
+      }
+
+      const cleanup = () => {
+        if (signal) {
+          signal.removeEventListener('abort', abortHandler);
+        }
+      };
+
       operation()
         .then((result) => {
           clearTimeout(timeoutId);
+          cleanup();
           resolve(result);
         })
         .catch((error) => {
           clearTimeout(timeoutId);
+          cleanup();
           reject(error);
         });
-
-      // Listen for abort
-      this.abortController?.signal.addEventListener('abort', () => {
-        clearTimeout(timeoutId);
-        reject(new ThinkingTimeoutError(timeout));
-      });
     });
   }
 

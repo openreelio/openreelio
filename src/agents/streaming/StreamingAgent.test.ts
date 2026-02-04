@@ -41,6 +41,8 @@ class TestStreamingAgent extends StreamingAgent {
     _input: string,
     _context: AgentContext
   ): AsyncGenerator<string> {
+    void _input;
+    void _context;
     if (this.mockError) {
       throw this.mockError;
     }

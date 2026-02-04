@@ -320,6 +320,7 @@ export abstract class StreamingAgent extends Agent {
     tool: AgentTool,
     _args: Record<string, unknown>
   ): Promise<AgentToolResult> {
+    void _args;
     return {
       success: false,
       error: `Tool execution not implemented for streaming agent: ${tool.name}`,

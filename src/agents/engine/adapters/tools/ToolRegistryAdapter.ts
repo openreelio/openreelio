@@ -101,8 +101,19 @@ export class ToolRegistryAdapter implements IToolExecutor {
       playheadPosition: 0,
     };
 
-    // Execute through registry
-    const result = await this.registry.execute(toolName, args, legacyContext);
+    // Execute through registry with error handling
+    let result;
+    try {
+      result = await this.registry.execute(toolName, args, legacyContext);
+    } catch (error) {
+      const duration = performance.now() - startTime;
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+        duration,
+        undoable: false,
+      };
+    }
     const duration = performance.now() - startTime;
 
     if (!result.success) {

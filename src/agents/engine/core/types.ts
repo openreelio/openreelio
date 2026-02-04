@@ -543,6 +543,7 @@ export const DEFAULT_ENGINE_CONFIG: AgenticEngineConfig = {
   approvalThreshold: 'high',
   autoRetryOnFailure: true,
   maxRetries: 2,
+  stopOnError: true,
 };
 
 // =============================================================================

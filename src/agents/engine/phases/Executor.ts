@@ -387,13 +387,23 @@ export class Executor {
         }
       };
 
-      this.abortController?.signal.addEventListener('abort', handleAbort);
+      const signal = this.abortController?.signal;
+      if (signal) {
+        signal.addEventListener('abort', handleAbort);
+      }
+
+      const cleanup = () => {
+        if (signal) {
+          signal.removeEventListener('abort', handleAbort);
+        }
+      };
 
       operation()
         .then((result) => {
           if (!settled) {
             settled = true;
             clearTimeout(timeoutId);
+            cleanup();
             resolve(result);
           }
         })
@@ -401,6 +411,7 @@ export class Executor {
           if (!settled) {
             settled = true;
             clearTimeout(timeoutId);
+            cleanup();
             reject(error);
           }
         });
@@ -494,6 +505,14 @@ export class Executor {
           queue.push(depId);
         }
       }
+    }
+
+    // Detect cycles - if not all steps were processed, there's a cycle
+    if (result.length !== steps.length) {
+      const remaining = steps
+        .filter((s) => !result.some((r) => r.id === s.id))
+        .map((s) => s.id);
+      throw new DependencyError(remaining[0] ?? 'unknown', remaining);
     }
 
     return result;

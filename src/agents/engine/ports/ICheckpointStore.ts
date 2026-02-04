@@ -289,10 +289,35 @@ export function createCheckpointFromState(
 }
 
 /**
- * Deep clone agent state
+ * Deep clone agent state, preserving Error objects
  */
 export function deepCloneState(state: AgentState): AgentState {
-  return JSON.parse(JSON.stringify(state));
+  // Use structuredClone if available (modern browsers/Node.js 17+)
+  if (typeof structuredClone === 'function') {
+    return structuredClone(state);
+  }
+
+  // Fallback: Custom serialization that preserves Error objects
+  const cloned = JSON.parse(
+    JSON.stringify(state, (_key, value) =>
+      value instanceof Error
+        ? { __isError: true, name: value.name, message: value.message, stack: value.stack }
+        : value
+    )
+  ) as AgentState;
+
+  // Reconstruct Error object if present
+  if (state.error instanceof Error && cloned.error) {
+    const errorData = cloned.error as unknown as { __isError?: boolean; name: string; message: string; stack?: string };
+    if (errorData.__isError) {
+      const err = new Error(errorData.message);
+      err.name = errorData.name;
+      err.stack = errorData.stack;
+      cloned.error = err;
+    }
+  }
+
+  return cloned;
 }
 
 function sortObjectKeys(value: unknown): unknown {

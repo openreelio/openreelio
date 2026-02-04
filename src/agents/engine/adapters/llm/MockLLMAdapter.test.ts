@@ -38,8 +38,8 @@ describe('MockLLMAdapter', () => {
     it('should capture request', async () => {
       adapter.setStreamResponse({ content: 'Test' });
 
-      for await (const _ of adapter.generateStream(testMessages)) {
-        // consume
+      for await (const chunk of adapter.generateStream(testMessages)) {
+        void chunk;
       }
 
       const request = adapter.getLastRequest();
@@ -53,8 +53,8 @@ describe('MockLLMAdapter', () => {
       adapter.setStreamResponse({ error });
 
       await expect(async () => {
-        for await (const _ of adapter.generateStream(testMessages)) {
-          // consume
+        for await (const chunk of adapter.generateStream(testMessages)) {
+          void chunk;
         }
       }).rejects.toThrow('API Error');
     });
@@ -81,7 +81,8 @@ describe('MockLLMAdapter', () => {
       expect(adapter.isGenerating()).toBe(false);
 
       const promise = (async () => {
-        for await (const _ of adapter.generateStream(testMessages)) {
+        for await (const chunk of adapter.generateStream(testMessages)) {
+          void chunk;
           expect(adapter.isGenerating()).toBe(true);
         }
       })();
@@ -192,8 +193,8 @@ describe('MockLLMAdapter', () => {
       adapter.setStreamResponse({ content: 'a' });
       adapter.setCompleteResponse({ content: 'b' });
 
-      for await (const _ of adapter.generateStream(testMessages)) {
-        // consume
+      for await (const chunk of adapter.generateStream(testMessages)) {
+        void chunk;
       }
       await adapter.complete(testMessages);
 
@@ -203,8 +204,8 @@ describe('MockLLMAdapter', () => {
     it('should clear requests', async () => {
       adapter.setStreamResponse({ content: 'a' });
 
-      for await (const _ of adapter.generateStream(testMessages)) {
-        // consume
+      for await (const chunk of adapter.generateStream(testMessages)) {
+        void chunk;
       }
 
       adapter.clearRequests();
@@ -228,8 +229,8 @@ describe('MockLLMAdapter', () => {
     it('should reset all state', async () => {
       adapter.setStreamResponse({ content: 'test' });
 
-      for await (const _ of adapter.generateStream(testMessages)) {
-        // consume
+      for await (const chunk of adapter.generateStream(testMessages)) {
+        void chunk;
       }
 
       adapter.reset();

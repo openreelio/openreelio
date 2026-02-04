@@ -155,6 +155,11 @@ export class Planner {
         onProgress(chunk);
       }
 
+      // Check abort before making additional LLM call
+      if (this.abortController?.signal.aborted) {
+        throw new PlanValidationError('Planning aborted', []);
+      }
+
       // Get the structured result
       const schema = this.buildPlanSchema();
       const plan = await this.llm.generateStructured<Plan>(messages, schema);
