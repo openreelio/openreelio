@@ -41,7 +41,7 @@ export function useAISettings() {
     model: providerStatus.currentModel ?? '',
   });
 
-  const [availableModels, setAvailableModels] = useState<string[]>(providerStatus.availableModels);
+  const [availableModels, setAvailableModels] = useState<string[]>(providerStatus.availableModels ?? []);
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
 
   // Update provider type and fetch models

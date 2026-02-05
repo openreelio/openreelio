@@ -13,14 +13,20 @@ import { ChatInput } from './ChatInput';
 // Mocks
 // =============================================================================
 
-const mockGenerateEditScript = vi.fn();
+const mockSendMessage = vi.fn();
+const mockCancelGeneration = vi.fn();
+const mockClearChatHistory = vi.fn();
+const mockAddChatMessage = vi.fn();
 let mockIsGenerating = false;
 
 vi.mock('@/stores/aiStore', () => ({
   useAIStore: (selector: (state: unknown) => unknown) => {
     const state = {
       isGenerating: mockIsGenerating,
-      generateEditScript: mockGenerateEditScript,
+      sendMessage: mockSendMessage,
+      cancelGeneration: mockCancelGeneration,
+      clearChatHistory: mockClearChatHistory,
+      addChatMessage: mockAddChatMessage,
     };
     return selector(state);
   },
@@ -50,7 +56,7 @@ describe('ChatInput', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockIsGenerating = false;
-    mockGenerateEditScript.mockResolvedValue({});
+    mockSendMessage.mockResolvedValue({});
   });
 
   describe('Rendering', () => {
@@ -62,7 +68,7 @@ describe('ChatInput', () => {
     it('renders textarea with placeholder', () => {
       render(<ChatInput />);
       expect(
-        screen.getByPlaceholderText(/Ask AI to edit your video/i)
+        screen.getByPlaceholderText(/Message AI.*commands/i)
       ).toBeInTheDocument();
     });
 
@@ -85,7 +91,7 @@ describe('ChatInput', () => {
       const user = userEvent.setup();
       render(<ChatInput />);
 
-      const input = screen.getByPlaceholderText(/Ask AI to edit your video/i);
+      const input = screen.getByPlaceholderText(/Message AI.*commands/i);
       await user.type(input, 'Test message');
 
       expect(input).toHaveValue('Test message');
@@ -101,7 +107,7 @@ describe('ChatInput', () => {
       const user = userEvent.setup();
       render(<ChatInput />);
 
-      const input = screen.getByPlaceholderText(/Ask AI to edit your video/i);
+      const input = screen.getByPlaceholderText(/Message AI.*commands/i);
       await user.type(input, 'Test message');
 
       const sendButton = screen.getByRole('button', { name: /send message/i });
@@ -110,50 +116,50 @@ describe('ChatInput', () => {
   });
 
   describe('Submission', () => {
-    it('calls generateEditScript when send button clicked', async () => {
+    it('calls sendMessage when send button clicked', async () => {
       const user = userEvent.setup();
       render(<ChatInput />);
 
-      const input = screen.getByPlaceholderText(/Ask AI to edit your video/i);
+      const input = screen.getByPlaceholderText(/Message AI.*commands/i);
       await user.type(input, 'Test command');
 
       const sendButton = screen.getByRole('button', { name: /send message/i });
       await user.click(sendButton);
 
-      expect(mockGenerateEditScript).toHaveBeenCalledWith('Test command', {
+      expect(mockSendMessage).toHaveBeenCalledWith('Test command', {
         playheadPosition: 5.5,
         selectedClips: ['clip_001'],
         selectedTracks: ['track_001'],
       });
     });
 
-    it('calls generateEditScript when Enter pressed', async () => {
+    it('calls sendMessage when Enter pressed', async () => {
       const user = userEvent.setup();
       render(<ChatInput />);
 
-      const input = screen.getByPlaceholderText(/Ask AI to edit your video/i);
+      const input = screen.getByPlaceholderText(/Message AI.*commands/i);
       await user.type(input, 'Test command');
       await user.keyboard('{Enter}');
 
-      expect(mockGenerateEditScript).toHaveBeenCalled();
+      expect(mockSendMessage).toHaveBeenCalled();
     });
 
     it('does not submit on Shift+Enter', async () => {
       const user = userEvent.setup();
       render(<ChatInput />);
 
-      const input = screen.getByPlaceholderText(/Ask AI to edit your video/i);
+      const input = screen.getByPlaceholderText(/Message AI.*commands/i);
       await user.type(input, 'Test command');
       await user.keyboard('{Shift>}{Enter}{/Shift}');
 
-      expect(mockGenerateEditScript).not.toHaveBeenCalled();
+      expect(mockSendMessage).not.toHaveBeenCalled();
     });
 
     it('clears input after successful submission', async () => {
       const user = userEvent.setup();
       render(<ChatInput />);
 
-      const input = screen.getByPlaceholderText(/Ask AI to edit your video/i);
+      const input = screen.getByPlaceholderText(/Message AI.*commands/i);
       await user.type(input, 'Test command');
       await user.click(screen.getByRole('button', { name: /send message/i }));
 
@@ -167,7 +173,7 @@ describe('ChatInput', () => {
       const onSend = vi.fn();
       render(<ChatInput onSend={onSend} />);
 
-      const input = screen.getByPlaceholderText(/Ask AI to edit your video/i);
+      const input = screen.getByPlaceholderText(/Message AI.*commands/i);
       await user.type(input, 'Test message');
       await user.click(screen.getByRole('button', { name: /send message/i }));
 
@@ -189,7 +195,7 @@ describe('ChatInput', () => {
       mockIsGenerating = true;
       render(<ChatInput />);
 
-      const input = screen.getByPlaceholderText(/Ask AI to edit your video/i);
+      const input = screen.getByPlaceholderText(/Message AI.*commands/i);
       expect(input).toBeDisabled();
     });
   });

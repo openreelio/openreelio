@@ -40,9 +40,15 @@ vi.mock('@/stores/aiStore', () => ({
       generateEditScript: vi.fn(),
       clearChatHistory: vi.fn(),
       loadChatHistoryForProject: mockLoadChatHistoryForProject,
+      syncFromSettings: vi.fn().mockResolvedValue(undefined),
     };
     return selector(state);
   },
+}));
+
+// Mock feature flags - default to legacy mode for existing tests
+vi.mock('@/config/featureFlags', () => ({
+  isAgenticEngineEnabled: vi.fn(() => false),
 }));
 
 // Mock stores
@@ -78,6 +84,37 @@ vi.mock('@/stores', () => ({
     const state = {
       sequences: sequencesMap,
       activeSequenceId: 'seq_001',
+      assets: [],
+    };
+    return selector(state);
+  },
+  useUIStore: (selector: (state: unknown) => unknown) => {
+    const state = {
+      openSettings: vi.fn(),
+      closeSettings: vi.fn(),
+    };
+    return selector(state);
+  },
+  useSettingsStore: (selector: (state: unknown) => unknown) => {
+    const state = {
+      settings: {
+        ai: {
+          provider: 'openai',
+          model: 'gpt-4',
+          apiKey: 'test-key',
+          currentMonthUsageCents: 0,
+          monthlyBudgetCents: 5000,
+        },
+      },
+      getSettings: vi.fn().mockReturnValue({
+        ai: {
+          provider: 'openai',
+          model: 'gpt-4',
+          apiKey: 'test-key',
+          currentMonthUsageCents: 0,
+          monthlyBudgetCents: 5000,
+        },
+      }),
     };
     return selector(state);
   },

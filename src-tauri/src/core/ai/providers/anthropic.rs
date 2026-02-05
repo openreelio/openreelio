@@ -172,11 +172,24 @@ impl AIProvider for AnthropicProvider {
     async fn complete(&self, request: CompletionRequest) -> CoreResult<CompletionResponse> {
         let model = request.model.unwrap_or_else(|| self.default_model.clone());
 
-        // Build messages (Anthropic uses separate system parameter)
-        let messages = vec![Message {
-            role: "user".to_string(),
-            content: request.prompt.clone(),
-        }];
+        // Build messages - support both single-turn and multi-turn modes
+        let messages = if let Some(conversation_messages) = &request.messages {
+            // Multi-turn conversation mode
+            conversation_messages
+                .iter()
+                .filter(|m| m.role != "system") // System messages go in separate field
+                .map(|m| Message {
+                    role: m.role.clone(),
+                    content: m.content.clone(),
+                })
+                .collect()
+        } else {
+            // Single-turn mode (backward compatible)
+            vec![Message {
+                role: "user".to_string(),
+                content: request.prompt.clone(),
+            }]
+        };
 
         // Set max_tokens (required for Anthropic)
         let max_tokens = request.max_tokens.unwrap_or(4096);

@@ -49,6 +49,18 @@ vi.mock('@/stores', () => ({
     };
     return selector(state);
   },
+  useSettingsStore: (selector: (state: unknown) => unknown) => {
+    const state = {
+      settings: {
+        ai: {
+          currentMonthUsageCents: 250, // $2.50 usage
+          monthlyBudgetCents: 1000, // $10.00 budget
+          perRequestLimitCents: 100,
+        },
+      },
+    };
+    return selector(state);
+  },
 }));
 
 // =============================================================================
@@ -136,6 +148,25 @@ describe('ContextPanel', () => {
       render(<ContextPanel className="custom-class" />);
       const container = screen.getByTestId('context-panel');
       expect(container).toHaveClass('custom-class');
+    });
+  });
+
+  describe('API Usage Display', () => {
+    it('displays API Usage label', () => {
+      render(<ContextPanel />);
+      expect(screen.getByText('API Usage')).toBeInTheDocument();
+    });
+
+    it('displays current usage in dollars', () => {
+      render(<ContextPanel />);
+      // $2.50 current usage
+      expect(screen.getByText(/\$2\.50/)).toBeInTheDocument();
+    });
+
+    it('displays budget when set', () => {
+      render(<ContextPanel />);
+      // $10.00 budget
+      expect(screen.getByText(/\$10\.00/)).toBeInTheDocument();
     });
   });
 });

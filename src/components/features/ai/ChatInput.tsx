@@ -46,8 +46,10 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
 
   // Get store state and actions
   const isGenerating = useAIStore((state) => state.isGenerating);
-  const generateEditScript = useAIStore((state) => state.generateEditScript);
+  const sendMessage = useAIStore((state) => state.sendMessage);
   const cancelGeneration = useAIStore((state) => state.cancelGeneration);
+  const clearChatHistory = useAIStore((state) => state.clearChatHistory);
+  const addChatMessage = useAIStore((state) => state.addChatMessage);
 
   // Get playhead from PlaybackStore (single source of truth)
   const playhead = usePlaybackStore((state) => state.currentTime);
@@ -94,16 +96,54 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
     [input, isGenerating]
   );
 
+  // Handle slash commands
+  const handleCommand = useCallback((command: string): boolean => {
+    const cmd = command.toLowerCase();
+
+    if (cmd === '/new' || cmd === '/clear') {
+      clearChatHistory();
+      addChatMessage('system', 'Started a new conversation.');
+      return true;
+    }
+
+    if (cmd === '/help' || cmd === '/?') {
+      addChatMessage('system', `**Available Commands:**
+• /new or /clear - Start a new conversation
+• /help or /? - Show this help message
+
+**Tips:**
+• Just type naturally to chat with the AI
+• Ask for edits like "split clip at 5 seconds"
+• Ask questions like "what clips are in the timeline?"
+• The AI will ask for clarification if needed`);
+      return true;
+    }
+
+    return false;
+  }, [clearChatHistory, addChatMessage]);
+
   // Handle submit
   const handleSubmit = useCallback(() => {
     const trimmedInput = input.trim();
     if (!trimmedInput || isGenerating) return;
 
+    // Check for slash commands
+    if (trimmedInput.startsWith('/')) {
+      if (handleCommand(trimmedInput)) {
+        setInput('');
+        return;
+      }
+      // Unknown command - show help
+      addChatMessage('system', `Unknown command: ${trimmedInput}. Type /help for available commands.`);
+      setInput('');
+      return;
+    }
+
     // Call onSend callback if provided
     onSend?.(trimmedInput);
 
-    // Generate edit script
-    generateEditScript(trimmedInput, {
+    // Send message using unified agent (conversation mode)
+    sendMessage(trimmedInput, {
       playheadPosition: playhead,
       selectedClips: selectedClipIds,
       selectedTracks: selectedTrackIds,
@@ -114,8 +154,10 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
   }, [
     input,
     isGenerating,
+    handleCommand,
+    addChatMessage,
     onSend,
-    generateEditScript,
+    sendMessage,
     playhead,
     selectedClipIds,
     selectedTrackIds,
@@ -140,7 +182,7 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
           value={input}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          placeholder="Ask AI to edit your video..."
+          placeholder="Message AI or type /help for commands..."
           disabled={isGenerating}
           rows={MIN_ROWS}
           className="w-full resize-none rounded-lg bg-editor-surface border border-editor-border px-3 py-2 pr-12 text-sm text-editor-text placeholder:text-editor-text-secondary focus:outline-none focus:border-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"

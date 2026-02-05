@@ -101,6 +101,42 @@ export interface EditScript {
   };
 }
 
+// =============================================================================
+// Unified Agent Types (Conversation Mode)
+// =============================================================================
+
+/** Intent type detected by AI */
+export type AIIntentType = 'chat' | 'edit' | 'query' | 'clarify';
+
+/** Unified AI response supporting both conversation and editing */
+export interface AIResponse {
+  /** Conversational response text - always present */
+  message: string;
+  /** Edit actions to execute - only present when user requests edits */
+  actions?: EditCommand[];
+  /** Whether user confirmation is needed before applying actions */
+  needsConfirmation?: boolean;
+  /** AI's understanding of the user's intent */
+  intent?: {
+    type: AIIntentType;
+    confidence: number;
+  };
+  /** Risk assessment if actions are present */
+  risk?: RiskAssessment;
+  /** Clarifying questions if AI needs more info */
+  clarifyingQuestions?: string[];
+}
+
+/** Message format for conversation history sent to AI */
+export interface ConversationMessage {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  /** Timestamp for context */
+  timestamp?: string;
+  /** Actions that were approved/applied (for assistant messages) */
+  appliedActions?: EditCommand[];
+}
+
 /** AI proposal status */
 export type ProposalStatus = 'pending' | 'reviewing' | 'approved' | 'rejected' | 'applied' | 'failed';
 
@@ -152,6 +188,8 @@ interface AIState {
 
   // Actions - AI Generation
   generateEditScript: (intent: string, context?: AIContext) => Promise<EditScript>;
+  /** Send a message to AI using conversation mode (unified agent) */
+  sendMessage: (message: string, context?: AIContext) => Promise<AIResponse>;
   applyEditScript: (editScript: EditScript) => Promise<{ success: boolean; appliedOpIds: string[]; errors: string[] }>;
   cancelGeneration: () => void;
 
@@ -170,6 +208,9 @@ interface AIState {
   // Actions - Error handling
   setError: (error: string | null) => void;
   clearError: () => void;
+
+  // Actions - Settings Sync
+  syncFromSettings: () => Promise<void>;
 }
 
 /** Context for AI intent analysis */
@@ -233,6 +274,43 @@ export const useAIStore = create<AIState>()(
           });
 
           logger.info('AI provider configured', { providerType: config.providerType });
+
+          // Sync to global settings (bidirectional sync)
+          try {
+            const { useSettingsStore } = await import('@/stores/settingsStore');
+            const updateSettings = useSettingsStore.getState().updateSettings;
+
+            // Build settings update based on provider type
+            const settingsUpdate: Record<string, unknown> = {
+              primaryProvider: config.providerType,
+              primaryModel: config.model ?? status.currentModel,
+            };
+
+            // Update the appropriate API key field
+            if (config.apiKey) {
+              switch (config.providerType) {
+                case 'openai':
+                  settingsUpdate.openaiApiKey = config.apiKey;
+                  break;
+                case 'anthropic':
+                  settingsUpdate.anthropicApiKey = config.apiKey;
+                  break;
+                case 'gemini':
+                  settingsUpdate.googleApiKey = config.apiKey;
+                  break;
+              }
+            }
+
+            if (config.providerType === 'local' && config.baseUrl) {
+              settingsUpdate.ollamaUrl = config.baseUrl;
+            }
+
+            await updateSettings('ai', settingsUpdate);
+            logger.debug('AI settings synced to global settings');
+          } catch (syncError) {
+            // Don't fail the main operation if sync fails
+            logger.warn('Failed to sync AI settings to global settings', { error: syncError });
+          }
         } catch (error) {
           set((state) => {
             state.isConfiguring = false;
@@ -458,6 +536,138 @@ export const useAIStore = create<AIState>()(
         }
       },
 
+      // Send message using conversation mode (unified agent)
+      sendMessage: async (message: string, context?: AIContext) => {
+        // Check if provider is configured, if not try to sync from settings first
+        const currentStatus = get().providerStatus;
+        if (!currentStatus.isConfigured) {
+          logger.info('Provider not configured, attempting to sync from settings...');
+          try {
+            await get().syncFromSettings();
+          } catch (syncError) {
+            logger.warn('Failed to auto-sync provider', { error: syncError });
+          }
+
+          // Re-check after sync attempt
+          const updatedStatus = get().providerStatus;
+          if (!updatedStatus.isConfigured) {
+            const errorMsg = 'No AI provider configured. Please configure an API key in Settings.';
+            get().addChatMessage('user', message);
+            get().addChatMessage('system', errorMsg);
+            throw new Error(errorMsg);
+          }
+        }
+
+        set((state) => {
+          state.isGenerating = true;
+          state.isCancelled = false;
+          state.error = null;
+        });
+
+        // Add user message to chat
+        get().addChatMessage('user', message);
+
+        try {
+          // Build conversation history from chat messages
+          const chatHistory = get().chatMessages;
+          const conversationMessages: ConversationMessage[] = chatHistory
+            .filter((msg) => msg.role !== 'system') // Exclude system messages
+            .map((msg) => ({
+              role: msg.role,
+              content: msg.content,
+              timestamp: msg.timestamp,
+              // Include applied actions for context
+              appliedActions: msg.proposal?.status === 'applied'
+                ? msg.proposal.editScript.commands.map((cmd) => ({
+                    commandType: cmd.commandType,
+                    params: cmd.params,
+                    description: cmd.description,
+                  }))
+                : undefined,
+            }));
+
+          // Call unified agent chat endpoint
+          const response = await invoke<AIResponse>('chat_with_ai', {
+            messages: conversationMessages.map((m) => ({
+              role: m.role,
+              content: m.content,
+            })),
+            context: {
+              playheadPosition: context?.playheadPosition ?? 0,
+              selectedClips: context?.selectedClips ?? [],
+              selectedTracks: context?.selectedTracks ?? [],
+              timelineDuration: context?.timelineDuration,
+              assetIds: context?.assetIds ?? [],
+              trackIds: context?.trackIds ?? [],
+            },
+          });
+
+          // Check if cancelled during generation
+          if (get().isCancelled) {
+            set((state) => {
+              state.isCancelled = false;
+              state.isGenerating = false;
+            });
+            get().addChatMessage('system', 'Generation cancelled.');
+            throw new Error('Generation cancelled');
+          }
+
+          set((state) => {
+            state.isGenerating = false;
+          });
+
+          // If response has actions, create a proposal
+          if (response.actions && response.actions.length > 0) {
+            const editScript: EditScript = {
+              intent: message,
+              commands: response.actions.map((a) => ({
+                commandType: a.commandType,
+                params: a.params as Record<string, unknown>,
+                description: a.description,
+              })),
+              requires: [],
+              qcRules: [],
+              risk: response.risk ?? { copyright: 'none', nsfw: 'none' },
+              explanation: response.message,
+            };
+
+            get().createProposal(editScript);
+            get().addChatMessage('assistant', response.message, get().currentProposal ?? undefined);
+          } else {
+            // Pure conversation response (no actions)
+            get().addChatMessage('assistant', response.message);
+          }
+
+          return response;
+        } catch (error) {
+          // Check if it was a cancellation
+          if (get().isCancelled || (error instanceof Error && error.message === 'Generation cancelled')) {
+            set((state) => {
+              state.isCancelled = false;
+              state.isGenerating = false;
+            });
+            throw new Error('Generation cancelled');
+          }
+
+          const errorMessage = error instanceof Error ? error.message : String(error);
+
+          set((state) => {
+            state.isGenerating = false;
+            state.error = errorMessage;
+          });
+
+          logger.error('AI chat failed', { error: errorMessage });
+
+          // Add error message to chat
+          get().addChatMessage(
+            'assistant',
+            `I encountered an error: ${errorMessage}`
+          );
+
+          throw error;
+        }
+      },
+
       // Apply edit script
       applyEditScript: async (editScript: EditScript) => {
         try {
@@ -615,17 +825,60 @@ export const useAIStore = create<AIState>()(
           state.error = null;
         });
       },
+
+      // Sync AI provider from settings and encrypted vault
+      // This calls a backend command that securely retrieves the API key
+      // from the encrypted vault and configures the AI provider
+      syncFromSettings: async () => {
+        try {
+          logger.info('Syncing AI provider from vault...');
+
+          // Call backend to sync from vault - the API key never leaves the backend
+          const status = await invoke<ProviderStatus>('sync_ai_from_vault');
+
+          // Update local state with the result
+          set((state) => {
+            state.providerStatus = status;
+          });
+
+          if (status.isConfigured && status.isAvailable) {
+            logger.info('AI provider synced successfully from vault', {
+              provider: status.providerType,
+              model: status.currentModel,
+            });
+          } else if (status.isConfigured && !status.isAvailable) {
+            logger.warn('AI provider configured but not available', {
+              provider: status.providerType,
+              error: status.errorMessage,
+            });
+          } else {
+            logger.info('AI provider not configured', {
+              provider: status.providerType,
+              message: status.errorMessage,
+            });
+          }
+        } catch (error) {
+          logger.error('Failed to sync AI provider from vault', { error });
+          // Don't throw - just log the error and leave provider unconfigured
+          set((state) => {
+            state.providerStatus = {
+              providerType: null,
+              isConfigured: false,
+              isAvailable: false,
+              currentModel: null,
+              availableModels: [],
+              errorMessage: error instanceof Error ? error.message : String(error),
+            };
+          });
+        }
+      },
     })),
       {
         name: 'openreelio-ai-store',
-        // Only persist certain fields
-        partialize: (state) => ({
-          providerStatus: {
-            providerType: state.providerStatus.providerType,
-            currentModel: state.providerStatus.currentModel,
-            isConfigured: state.providerStatus.isConfigured,
-          },
-        }),
+        // Don't persist providerStatus - it will be synced from settingsStore on load
+        // This prevents stale state issues where frontend thinks provider is configured
+        // but backend (which resets on restart) doesn't have the provider
+        partialize: () => ({}),
       }
     )
   )
@@ -649,6 +902,79 @@ useAIStore.subscribe(
 // Cleanup old histories on module load
 if (typeof window !== 'undefined') {
   cleanupOldHistories();
+}
+
+// =============================================================================
+// Settings Sync Subscription
+// =============================================================================
+
+// Flag to prevent re-entrant sync
+let isSyncingFromSettings = false;
+
+/**
+ * Subscribe to SettingsStore AI settings changes and auto-sync to AIStore.
+ * This ensures changes in global settings are reflected in the AI sidebar.
+ */
+async function setupSettingsSyncSubscription(): Promise<void> {
+  try {
+    // Dynamically import to avoid circular dependency
+    const { useSettingsStore } = await import('@/stores/settingsStore');
+
+    // Subscribe to AI settings changes
+    useSettingsStore.subscribe((state, prevState) => {
+      // Skip if we're already syncing (prevent loops)
+      if (isSyncingFromSettings) return;
+
+      const aiSettings = state.settings.ai;
+      const prevAiSettings = prevState.settings.ai;
+
+      // Check if relevant settings changed
+      const providerChanged = aiSettings.primaryProvider !== prevAiSettings.primaryProvider;
+      const modelChanged = aiSettings.primaryModel !== prevAiSettings.primaryModel;
+      const openaiKeyChanged = aiSettings.openaiApiKey !== prevAiSettings.openaiApiKey;
+      const anthropicKeyChanged = aiSettings.anthropicApiKey !== prevAiSettings.anthropicApiKey;
+      const googleKeyChanged = aiSettings.googleApiKey !== prevAiSettings.googleApiKey;
+      const ollamaUrlChanged = aiSettings.ollamaUrl !== prevAiSettings.ollamaUrl;
+
+      const hasRelevantChange =
+        providerChanged ||
+        modelChanged ||
+        openaiKeyChanged ||
+        anthropicKeyChanged ||
+        googleKeyChanged ||
+        ollamaUrlChanged;
+
+      if (!hasRelevantChange) return;
+
+      logger.info('AI settings changed in global settings, syncing to AI provider', {
+        providerChanged,
+        modelChanged,
+      });
+
+      void (async () => {
+        isSyncingFromSettings = true;
+        try {
+          await useAIStore.getState().syncFromSettings();
+        } finally {
+          isSyncingFromSettings = false;
+        }
+      })();
+    });
+
+    logger.debug('Settings sync subscription established');
+  } catch (error) {
+    logger.error('Failed to setup settings sync subscription', { error });
+  }
+}
+
+// Setup subscription on module load (browser only)
+if (typeof window !== 'undefined') {
+  // Delay slightly to ensure stores are initialized
+  setTimeout(() => {
+    setupSettingsSyncSubscription().catch((error) => {
+      logger.warn('Settings sync subscription setup failed', { error });
+    });
+  }, 100);
 }
 
 // =============================================================================

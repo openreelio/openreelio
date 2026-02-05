@@ -20,7 +20,11 @@ pub use gateway::{
     AIGateway, AIGatewayConfig, EditContext, KeyMoment, ProviderRuntimeStatus, ValidationResult,
 };
 pub use proposal::{Proposal, ProposalManager, ProposalStatus};
-pub use provider::{AIProvider, CompletionRequest, CompletionResponse, FinishReason, TokenUsage};
+pub use provider::{
+    AIIntent, AIIntentType, AIProvider, AIResponse, CompletionRequest, CompletionResponse,
+    ConversationMessage, EditAction, FinishReason, RiskAssessment as ProviderRiskAssessment,
+    TokenUsage,
+};
 pub use providers::{
     create_provider, AnthropicProvider, GeminiProvider, LocalProvider, OpenAIProvider,
     ProviderConfig, ProviderStatus, ProviderType,

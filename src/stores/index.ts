@@ -120,6 +120,9 @@ export type {
   RenderQueueStore,
 } from './renderQueueStore';
 
+export { useUIStore } from './uiStore';
+export type { SettingsTab } from './uiStore';
+
 // =============================================================================
 // Global Store Reset
 // =============================================================================

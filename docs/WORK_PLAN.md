@@ -14,7 +14,7 @@ This document provides actionable task breakdowns for immediate development work
 | Version | Status | Progress | Notes |
 |---------|--------|----------|-------|
 | v0.1.0 MVP | ✅ READY | **99%** | All P2 issues resolved |
-| v0.2.0 AI | ✅ READY | **98%** | AI proposal flow fixed, tests added |
+| v0.2.0 AI | 🚧 REWRITE | **98%** | **Agent system rewrite in progress** - see [AGENT_IMPLEMENTATION_MASTER_PLAN.md](./AGENT_IMPLEMENTATION_MASTER_PLAN.md) |
 | v0.3.0 Effects | ✅ READY | **90%** | Export integration complete |
 | v0.4.0 Plugins | 📋 PLANNED | **60%** | WASM host exists |
 | **v0.5.0 Pro Foundation** | 📋 **NEW** | **0%** | Critical gaps identified |

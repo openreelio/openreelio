@@ -404,8 +404,11 @@ mod tauri_app {
                 $crate::ipc::configure_ai_provider,
                 $crate::ipc::get_ai_provider_status,
                 $crate::ipc::clear_ai_provider,
+                $crate::ipc::sync_ai_from_vault,
                 $crate::ipc::test_ai_connection,
                 $crate::ipc::generate_edit_script_with_ai,
+                $crate::ipc::complete_with_ai_raw,
+                $crate::ipc::chat_with_ai,
                 $crate::ipc::get_available_ai_models,
                 // FFmpeg commands
                 $crate::core::ffmpeg::check_ffmpeg,
@@ -691,8 +694,11 @@ mod tauri_app {
             ipc::configure_ai_provider,
             ipc::get_ai_provider_status,
             ipc::clear_ai_provider,
+            ipc::sync_ai_from_vault,
             ipc::test_ai_connection,
             ipc::generate_edit_script_with_ai,
+            ipc::complete_with_ai_raw,
+            ipc::chat_with_ai,
             ipc::get_available_ai_models,
             // FFmpeg commands
             crate::core::ffmpeg::check_ffmpeg,

@@ -36,6 +36,43 @@ pub trait AIProvider: Send + Sync {
 }
 
 // =============================================================================
+// Conversation Message
+// =============================================================================
+
+/// A single message in a conversation
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationMessage {
+    /// Role: user, assistant, or system
+    pub role: String,
+    /// Message content
+    pub content: String,
+}
+
+impl ConversationMessage {
+    pub fn user(content: &str) -> Self {
+        Self {
+            role: "user".to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    pub fn assistant(content: &str) -> Self {
+        Self {
+            role: "assistant".to_string(),
+            content: content.to_string(),
+        }
+    }
+
+    pub fn system(content: &str) -> Self {
+        Self {
+            role: "system".to_string(),
+            content: content.to_string(),
+        }
+    }
+}
+
+// =============================================================================
 // Completion Request
 // =============================================================================
 
@@ -45,8 +82,11 @@ pub trait AIProvider: Send + Sync {
 pub struct CompletionRequest {
     /// System prompt/instructions
     pub system: Option<String>,
-    /// User prompt
+    /// User prompt (for single-turn mode)
     pub prompt: String,
+    /// Conversation history (for multi-turn mode)
+    /// If provided, this takes precedence over `prompt`
+    pub messages: Option<Vec<ConversationMessage>>,
     /// Maximum tokens to generate
     pub max_tokens: Option<u32>,
     /// Temperature (0.0 - 2.0)
@@ -58,11 +98,25 @@ pub struct CompletionRequest {
 }
 
 impl CompletionRequest {
-    /// Creates a new completion request
+    /// Creates a new completion request (single-turn mode)
     pub fn new(prompt: &str) -> Self {
         Self {
             system: None,
             prompt: prompt.to_string(),
+            messages: None,
+            max_tokens: None,
+            temperature: None,
+            model: None,
+            json_mode: false,
+        }
+    }
+
+    /// Creates a new completion request with conversation history (multi-turn mode)
+    pub fn with_conversation(messages: Vec<ConversationMessage>) -> Self {
+        Self {
+            system: None,
+            prompt: String::new(),
+            messages: Some(messages),
             max_tokens: None,
             temperature: None,
             model: None,
@@ -73,6 +127,12 @@ impl CompletionRequest {
     /// Sets the system prompt
     pub fn with_system(mut self, system: &str) -> Self {
         self.system = Some(system.to_string());
+        self
+    }
+
+    /// Sets conversation messages (enables multi-turn mode)
+    pub fn with_messages(mut self, messages: Vec<ConversationMessage>) -> Self {
+        self.messages = Some(messages);
         self
     }
 
@@ -98,6 +158,11 @@ impl CompletionRequest {
     pub fn with_json_mode(mut self) -> Self {
         self.json_mode = true;
         self
+    }
+
+    /// Returns whether this request is in conversation mode
+    pub fn is_conversation_mode(&self) -> bool {
+        self.messages.is_some() && !self.messages.as_ref().unwrap().is_empty()
     }
 }
 
@@ -127,6 +192,128 @@ impl CompletionResponse {
             model: model.to_string(),
             usage: TokenUsage::default(),
             finish_reason: FinishReason::Stop,
+        }
+    }
+}
+
+// =============================================================================
+// AI Response (Unified Agent)
+// =============================================================================
+
+/// Intent type detected by AI
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AIIntentType {
+    /// General conversation
+    #[default]
+    Chat,
+    /// Edit request
+    Edit,
+    /// Information query
+    Query,
+    /// Needs clarification
+    Clarify,
+}
+
+/// AI's understanding of user intent
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AIIntent {
+    /// Type of intent
+    #[serde(rename = "type")]
+    pub intent_type: AIIntentType,
+    /// Confidence score (0.0 - 1.0)
+    pub confidence: f32,
+}
+
+/// Edit command for timeline operations
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditAction {
+    /// Command type (e.g., "SplitClip", "MoveClip")
+    pub command_type: String,
+    /// Command parameters
+    pub params: serde_json::Value,
+    /// Human-readable description
+    pub description: Option<String>,
+}
+
+/// Risk assessment for edit actions
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RiskAssessment {
+    /// Copyright risk level
+    pub copyright: String,
+    /// NSFW risk level
+    pub nsfw: String,
+}
+
+/// Unified AI response supporting conversation and editing
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AIResponse {
+    /// Conversational response text - always present
+    pub message: String,
+    /// Edit actions to execute - only when user requests edits
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<EditAction>>,
+    /// Whether user confirmation is needed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_confirmation: Option<bool>,
+    /// AI's understanding of the intent
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intent: Option<AIIntent>,
+    /// Risk assessment if actions are present
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub risk: Option<RiskAssessment>,
+    /// Clarifying questions if AI needs more info
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clarifying_questions: Option<Vec<String>>,
+}
+
+impl AIResponse {
+    /// Creates a simple chat response
+    pub fn chat(message: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            actions: None,
+            needs_confirmation: None,
+            intent: Some(AIIntent {
+                intent_type: AIIntentType::Chat,
+                confidence: 1.0,
+            }),
+            risk: None,
+            clarifying_questions: None,
+        }
+    }
+
+    /// Creates an edit response with actions
+    pub fn edit(message: &str, actions: Vec<EditAction>) -> Self {
+        Self {
+            message: message.to_string(),
+            actions: Some(actions),
+            needs_confirmation: Some(true),
+            intent: Some(AIIntent {
+                intent_type: AIIntentType::Edit,
+                confidence: 1.0,
+            }),
+            risk: Some(RiskAssessment::default()),
+            clarifying_questions: None,
+        }
+    }
+
+    /// Creates a clarification request
+    pub fn clarify(message: &str, questions: Vec<String>) -> Self {
+        Self {
+            message: message.to_string(),
+            actions: None,
+            needs_confirmation: None,
+            intent: Some(AIIntent {
+                intent_type: AIIntentType::Clarify,
+                confidence: 1.0,
+            }),
+            risk: None,
+            clarifying_questions: Some(questions),
         }
     }
 }

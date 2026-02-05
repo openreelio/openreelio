@@ -4,9 +4,10 @@
  * Modal dialog for application settings with tabbed navigation.
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
 import { X, Settings2, Palette, Keyboard, RotateCcw, Bot } from 'lucide-react';
 import { useSettings } from '@/hooks/useSettings';
+import { useUIStore } from '@/stores';
 import { GeneralSettings } from './sections/GeneralSettings';
 import { AppearanceSettings } from './sections/AppearanceSettings';
 import { ShortcutsSettings } from './sections/ShortcutsSettings';
@@ -45,7 +46,8 @@ const TABS: Tab[] = [
 // =============================================================================
 
 export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
-  const [activeTab, setActiveTab] = useState<TabId>('general');
+  const activeTab = useUIStore((state) => state.settingsActiveTab);
+  const setActiveTab = useUIStore((state) => state.setSettingsTab);
   const dialogRef = useRef<HTMLDivElement>(null);
 
   const {
@@ -68,10 +70,9 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
     }
   }, [isOpen]);
 
-  // Reset to first tab when dialog opens
+  // Clear error when dialog opens (tab is already set by openSettings)
   useEffect(() => {
     if (isOpen) {
-      setActiveTab('general');
       clearError();
     }
   }, [isOpen, clearError]);

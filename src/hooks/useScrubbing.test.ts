@@ -5,6 +5,7 @@
 import { renderHook, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { useScrubbing } from './useScrubbing';
+import { playbackController } from '@/services/PlaybackController';
 
 // Mock PlaybackController to allow drag operations
 vi.mock('@/services/PlaybackController', () => ({
@@ -25,6 +26,7 @@ const createMockMouseEvent = (
   options: Partial<{
     clientX: number;
     clientY: number;
+    button: number;
   }> = {}
 ): React.MouseEvent => {
   return {
@@ -32,6 +34,7 @@ const createMockMouseEvent = (
     target,
     clientX: options.clientX ?? 100,
     clientY: options.clientY ?? 50,
+    button: options.button ?? 0,
   } as unknown as React.MouseEvent;
 };
 
@@ -108,6 +111,22 @@ describe('useScrubbing', () => {
   });
 
   describe('handleScrubStart', () => {
+    it('should not start scrubbing on non-primary mouse buttons', () => {
+      const options = createDefaultOptions();
+      const { result } = renderHook(() => useScrubbing(options));
+
+      const target = document.createElement('div');
+      target.setAttribute('data-testid', 'timeline-tracks-area');
+      const event = createMockMouseEvent(target, { button: 1 });
+
+      act(() => {
+        result.current.handleScrubStart(event);
+      });
+
+      expect(result.current.isScrubbing).toBe(false);
+      expect(options.seek).not.toHaveBeenCalled();
+    });
+
     it('should not start scrubbing when clicking on clips', () => {
       const options = createDefaultOptions();
       const { result } = renderHook(() => useScrubbing(options));
@@ -510,6 +529,29 @@ describe('useScrubbing', () => {
         'mouseup',
         expect.any(Function)
       );
+    });
+
+    it('should release drag lock and restore cursor on unmount during active scrubbing', () => {
+      const options = createDefaultOptions();
+      const { result, unmount } = renderHook(() => useScrubbing(options));
+
+      const target = document.createElement('div');
+      target.setAttribute('data-testid', 'timeline-tracks-area');
+      const event = createMockMouseEvent(target);
+
+      act(() => {
+        result.current.handleScrubStart(event);
+      });
+
+      // Cursor is set globally during scrubbing
+      expect(document.body.style.cursor).toBe('ew-resize');
+      expect(document.body.style.userSelect).toBe('none');
+
+      unmount();
+
+      expect(playbackController.releaseDragLock).toHaveBeenCalledWith('scrubbing');
+      expect(document.body.style.cursor).toBe('');
+      expect(document.body.style.userSelect).toBe('');
     });
   });
 
