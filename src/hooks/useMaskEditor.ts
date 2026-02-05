@@ -159,6 +159,8 @@ export function useMaskEditor({
       return;
     }
 
+    let cancelled = false;
+
     const fetchMasks = async () => {
       setIsLoading(true);
       setError(null);
@@ -170,18 +172,26 @@ export function useMaskEditor({
           effectId,
         });
 
+        if (cancelled) return;
         setMasks(fetchedMasks);
         logger.info('Masks loaded', { effectId, count: fetchedMasks.length });
       } catch (err) {
+        if (cancelled) return;
         const errorMsg = err instanceof Error ? err.message : String(err);
         logger.error('Failed to fetch masks', { error: err, effectId });
         setError(errorMsg);
       } finally {
-        setIsLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+        }
       }
     };
 
     fetchMasks();
+
+    return () => {
+      cancelled = true;
+    };
   }, [effectId, fetchOnMount, initialMasks.length]);
 
   // ---------------------------------------------------------------------------
@@ -355,9 +365,7 @@ export function useMaskEditor({
         setMasks((prev) => prev.filter((m) => m.id !== id));
 
         // Clear selection if deleted mask was selected
-        if (selectedMaskId === id) {
-          setSelectedMaskId(null);
-        }
+        setSelectedMaskId((current) => (current === id ? null : current));
 
         logger.info('Mask deleted', { maskId: id });
         return true;
@@ -370,7 +378,7 @@ export function useMaskEditor({
         setIsOperating(false);
       }
     },
-    [masks, effectId, selectedMaskId]
+    [masks, effectId]
   );
 
   // ---------------------------------------------------------------------------

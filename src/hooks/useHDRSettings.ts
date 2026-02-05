@@ -165,6 +165,8 @@ export function useHDRSettings({
       return;
     }
 
+    let cancelled = false;
+
     const fetchSettings = async () => {
       setIsLoading(true);
       setError(null);
@@ -177,21 +179,30 @@ export function useHDRSettings({
           { sequenceId }
         );
 
+        if (cancelled) return;
+
         setSettings(fetchedSettings);
         setOriginalSettings(fetchedSettings);
 
         logger.info('HDR settings loaded', { sequenceId });
       } catch (err) {
+        if (cancelled) return;
         const errorMsg = err instanceof Error ? err.message : String(err);
         logger.error('Failed to fetch HDR settings', { error: err, sequenceId });
         setError(errorMsg);
         // Keep default settings on error
       } finally {
-        setIsLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+        }
       }
     };
 
     fetchSettings();
+
+    return () => {
+      cancelled = true;
+    };
   }, [sequenceId, fetchOnMount, initialSettings]);
 
   // ---------------------------------------------------------------------------

@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { MaskEditor } from './MaskEditor';
 import type { Mask } from '@/types';
 
@@ -250,12 +250,9 @@ describe('MaskEditor', () => {
       render(<MaskEditor {...defaultProps} initialMasks={initialMasks} />);
 
       // Toggle visibility via list
-      const visibilityButton = screen
-        .getByTestId('mask-item-mask-1')
-        .querySelector('[aria-label="Toggle visibility"]');
-      if (visibilityButton) {
-        fireEvent.click(visibilityButton);
-      }
+      const maskItem = screen.getByTestId('mask-item-mask-1');
+      const visibilityButton = within(maskItem).getByRole('button', { name: /toggle visibility/i });
+      fireEvent.click(visibilityButton);
 
       await waitFor(() => {
         expect(mockInvoke).toHaveBeenCalledWith('execute_command', {
@@ -274,12 +271,9 @@ describe('MaskEditor', () => {
       render(<MaskEditor {...defaultProps} initialMasks={initialMasks} />);
 
       // Toggle lock via list
-      const lockButton = screen
-        .getByTestId('mask-item-mask-1')
-        .querySelector('[aria-label="Toggle lock"]');
-      if (lockButton) {
-        fireEvent.click(lockButton);
-      }
+      const maskItem = screen.getByTestId('mask-item-mask-1');
+      const lockButton = within(maskItem).getByRole('button', { name: /toggle lock/i });
+      fireEvent.click(lockButton);
 
       await waitFor(() => {
         expect(mockInvoke).toHaveBeenCalledWith('execute_command', {

@@ -125,9 +125,9 @@ describe('TextPresetPicker', () => {
 
       const firstButton = screen.getAllByRole('button')[0];
 
-      // Use userEvent for proper keyboard interaction
-      // When a button is focused and Enter/Space is pressed, it triggers click
-      await userEvent.click(firstButton);
+      // Focus the button and press Enter for keyboard activation
+      firstButton.focus();
+      await userEvent.keyboard('{Enter}');
 
       expect(mockOnSelect).toHaveBeenCalledTimes(1);
     });

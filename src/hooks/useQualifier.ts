@@ -187,6 +187,8 @@ export function useQualifier({
       return; // No need to fetch if no effectId or initialValues provided
     }
 
+    let cancelled = false;
+
     const fetchParams = async () => {
       setIsLoading(true);
       setError(null);
@@ -197,6 +199,8 @@ export function useQualifier({
         const params = await invoke<Record<string, unknown>>('get_effect_params', {
           effectId,
         });
+
+        if (cancelled) return;
 
         const qualifierValues = paramsToQualifierValues(params);
         originalValuesRef.current = qualifierValues;
@@ -220,16 +224,23 @@ export function useQualifier({
 
         logger.info('Effect params loaded', { clipId, effectId });
       } catch (err) {
+        if (cancelled) return;
         const errorMsg = err instanceof Error ? err.message : String(err);
         logger.error('Failed to fetch effect params', { error: err, clipId, effectId });
         setError(errorMsg);
         // Keep default values on error
       } finally {
-        setIsLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+        }
       }
     };
 
     fetchParams();
+
+    return () => {
+      cancelled = true;
+    };
   }, [clipId, effectId, initialValues]);
 
   // ---------------------------------------------------------------------------

@@ -236,7 +236,8 @@ describe('MaskCanvas', () => {
       // When using a draw tool, clicking on existing mask should not select it
       // Instead, it should start drawing a new mask
       fireEvent.click(screen.getByTestId('mask-shape-mask-1'));
-      // In draw mode, click behavior is different
+      // In draw mode, clicking should not select the mask
+      expect(mockOnMaskSelect).not.toHaveBeenCalled();
     });
 
     it('should render selection handles for selected mask', () => {

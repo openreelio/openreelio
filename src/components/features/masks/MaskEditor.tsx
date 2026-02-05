@@ -139,7 +139,8 @@ export function MaskEditor({
       if (!disabled) {
         try {
           await updateMask(id, updates);
-          onMasksChange?.(masks);
+          // Use functional read of masks to avoid stale closure
+          onMasksChange?.(masks.map((m) => (m.id === id ? { ...m, ...updates } : m)));
         } catch (err) {
           console.error('MaskEditor: Failed to update mask', err);
         }
@@ -152,8 +153,9 @@ export function MaskEditor({
     async (id: MaskId) => {
       if (!disabled) {
         try {
+          const filtered = masks.filter((m) => m.id !== id);
           await deleteMask(id);
-          onMasksChange?.(masks.filter((m) => m.id !== id));
+          onMasksChange?.(filtered);
         } catch (err) {
           console.error('MaskEditor: Failed to delete mask', err);
         }

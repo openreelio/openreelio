@@ -329,11 +329,19 @@ describe('useQualifier', () => {
     });
 
     it('should handle IPC error during update', async () => {
-      mockInvoke.mockRejectedValueOnce(new Error('IPC failed'));
+      // First call (get_effect_params) succeeds, second call (execute_command) fails
+      mockInvoke
+        .mockResolvedValueOnce({})
+        .mockRejectedValueOnce(new Error('IPC failed'));
 
       const { result } = renderHook(() =>
         useQualifier({ clipId: mockClipId, effectId: mockEffectId })
       );
+
+      // Wait for initial fetch to complete
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false);
+      });
 
       act(() => {
         result.current.updateValue('hue_center', 200);
