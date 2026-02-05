@@ -91,6 +91,100 @@ impl GeminiProvider {
             .map(|s| s.to_string())
             .collect()
     }
+
+    fn build_generate_content_request(
+        &self,
+        request: &CompletionRequest,
+    ) -> CoreResult<GenerateContentRequest> {
+        let mut system_parts: Vec<String> = Vec::new();
+        if let Some(system) = &request.system {
+            if !system.trim().is_empty() {
+                system_parts.push(system.clone());
+            }
+        }
+
+        let contents = if let Some(conversation_messages) = &request.messages {
+            if conversation_messages.is_empty() {
+                return Err(CoreError::ValidationError(
+                    "Conversation request must include at least one message.".to_string(),
+                ));
+            }
+
+            let mut contents: Vec<Content> = Vec::new();
+
+            for msg in conversation_messages {
+                let role = msg.role.to_ascii_lowercase();
+                if role == "system" {
+                    if !msg.content.trim().is_empty() {
+                        system_parts.push(msg.content.clone());
+                    }
+                    continue;
+                }
+
+                let gemini_role = match role.as_str() {
+                    "assistant" | "model" => "model",
+                    "user" => "user",
+                    _ => {
+                        tracing::warn!(
+                            "Unknown conversation role for Gemini provider: {} (defaulting to user)",
+                            msg.role
+                        );
+                        "user"
+                    }
+                };
+
+                contents.push(Content {
+                    role: Some(gemini_role.to_string()),
+                    parts: vec![Part {
+                        text: msg.content.clone(),
+                    }],
+                });
+            }
+
+            if contents.is_empty() {
+                return Err(CoreError::ValidationError(
+                    "Conversation request must include at least one non-system message."
+                        .to_string(),
+                ));
+            }
+
+            contents
+        } else {
+            vec![Content {
+                role: Some("user".to_string()),
+                parts: vec![Part {
+                    text: request.prompt.clone(),
+                }],
+            }]
+        };
+
+        let system_instruction = if system_parts.is_empty() {
+            None
+        } else {
+            Some(Content {
+                role: None, // System instruction doesn't need a role
+                parts: vec![Part {
+                    text: system_parts.join("\n\n"),
+                }],
+            })
+        };
+
+        let generation_config = Some(GenerationConfig {
+            temperature: request.temperature,
+            max_output_tokens: request.max_tokens,
+            response_mime_type: if request.json_mode {
+                Some("application/json".to_string())
+            } else {
+                None
+            },
+        });
+
+        Ok(GenerateContentRequest {
+            contents,
+            system_instruction,
+            generation_config,
+        })
+    }
 }
 
 // =============================================================================
@@ -217,40 +311,13 @@ impl AIProvider for GeminiProvider {
 
     #[cfg(feature = "ai-providers")]
     async fn complete(&self, request: CompletionRequest) -> CoreResult<CompletionResponse> {
-        let model = request.model.unwrap_or_else(|| self.default_model.clone());
+        let model = request
+            .model
+            .as_deref()
+            .unwrap_or(self.default_model.as_str())
+            .to_string();
 
-        // Build contents
-        let contents = vec![Content {
-            role: Some("user".to_string()),
-            parts: vec![Part {
-                text: request.prompt.clone(),
-            }],
-        }];
-
-        // Build system instruction (if provided)
-        let system_instruction = request.system.as_ref().map(|system| Content {
-            role: None, // System instruction doesn't need a role
-            parts: vec![Part {
-                text: system.clone(),
-            }],
-        });
-
-        // Build generation config
-        let generation_config = Some(GenerationConfig {
-            temperature: request.temperature,
-            max_output_tokens: request.max_tokens,
-            response_mime_type: if request.json_mode {
-                Some("application/json".to_string())
-            } else {
-                None
-            },
-        });
-
-        let api_request = GenerateContentRequest {
-            contents,
-            system_instruction,
-            generation_config,
-        };
+        let api_request = self.build_generate_content_request(&request)?;
 
         // Build URL (API key is passed via header to avoid leaking it in logs).
         let url = format!("{}/models/{}:generateContent", self.base_url, model);
@@ -454,6 +521,7 @@ impl AIProvider for GeminiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::ai::provider::ConversationMessage;
 
     #[test]
     fn test_gemini_provider_creation() {
@@ -518,5 +586,92 @@ mod tests {
 
         // Gemini uses longer timeout (120s) for large context
         assert_eq!(provider.timeout_secs, 120);
+    }
+
+    #[test]
+    fn test_build_generate_content_request_single_turn() {
+        let config = ProviderConfig::gemini("test-key");
+        let provider = GeminiProvider::new(config).unwrap();
+
+        let request = CompletionRequest::new("Hello")
+            .with_system("You are a helpful assistant.")
+            .with_max_tokens(123)
+            .with_temperature(0.5)
+            .with_json_mode();
+
+        let api_request = provider.build_generate_content_request(&request).unwrap();
+
+        assert_eq!(api_request.contents.len(), 1);
+        assert_eq!(api_request.contents[0].role, Some("user".to_string()));
+        assert_eq!(api_request.contents[0].parts.len(), 1);
+        assert_eq!(api_request.contents[0].parts[0].text, "Hello");
+
+        let system_instruction = api_request.system_instruction.unwrap();
+        assert_eq!(system_instruction.parts.len(), 1);
+        assert_eq!(
+            system_instruction.parts[0].text,
+            "You are a helpful assistant."
+        );
+
+        let gen = api_request.generation_config.unwrap();
+        assert_eq!(gen.max_output_tokens, Some(123));
+        assert_eq!(gen.temperature, Some(0.5));
+        assert_eq!(gen.response_mime_type, Some("application/json".to_string()));
+    }
+
+    #[test]
+    fn test_build_generate_content_request_conversation_mode_uses_messages() {
+        let config = ProviderConfig::gemini("test-key");
+        let provider = GeminiProvider::new(config).unwrap();
+
+        let request = CompletionRequest::with_conversation(vec![
+            ConversationMessage::user("Hi"),
+            ConversationMessage::assistant("Hello!"),
+            ConversationMessage::user("Split the selected clip at 5 seconds."),
+        ])
+        .with_system("Return JSON only.")
+        .with_json_mode();
+
+        let api_request = provider.build_generate_content_request(&request).unwrap();
+
+        assert_eq!(api_request.contents.len(), 3);
+        assert_eq!(api_request.contents[0].role, Some("user".to_string()));
+        assert_eq!(api_request.contents[0].parts[0].text, "Hi");
+        assert_eq!(api_request.contents[1].role, Some("model".to_string()));
+        assert_eq!(api_request.contents[1].parts[0].text, "Hello!");
+        assert_eq!(api_request.contents[2].role, Some("user".to_string()));
+        assert_eq!(
+            api_request.contents[2].parts[0].text,
+            "Split the selected clip at 5 seconds."
+        );
+
+        let system_instruction = api_request.system_instruction.unwrap();
+        assert_eq!(system_instruction.parts.len(), 1);
+        assert_eq!(system_instruction.parts[0].text, "Return JSON only.");
+    }
+
+    #[test]
+    fn test_build_generate_content_request_merges_system_messages() {
+        let config = ProviderConfig::gemini("test-key");
+        let provider = GeminiProvider::new(config).unwrap();
+
+        let request = CompletionRequest::with_conversation(vec![
+            ConversationMessage::system("Extra system instruction."),
+            ConversationMessage::user("Hello"),
+        ])
+        .with_system("Base system instruction.");
+
+        let api_request = provider.build_generate_content_request(&request).unwrap();
+
+        assert_eq!(api_request.contents.len(), 1);
+        assert_eq!(api_request.contents[0].role, Some("user".to_string()));
+        assert_eq!(api_request.contents[0].parts[0].text, "Hello");
+
+        let system_instruction = api_request.system_instruction.unwrap();
+        assert_eq!(system_instruction.parts.len(), 1);
+        assert_eq!(
+            system_instruction.parts[0].text,
+            "Base system instruction.\n\nExtra system instruction."
+        );
     }
 }
