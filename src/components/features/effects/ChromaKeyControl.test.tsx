@@ -9,50 +9,52 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChromaKeyControl } from './ChromaKeyControl';
+import { DEFAULT_CHROMA_KEY_PARAMS } from '@/hooks/useChromaKey';
 
 describe('ChromaKeyControl', () => {
+  let user: ReturnType<typeof userEvent.setup>;
+
   const defaultProps = {
-    keyColor: '#00FF00',
-    similarity: 0.3,
-    blend: 0.1,
-    onKeyColorChange: vi.fn(),
-    onSimilarityChange: vi.fn(),
-    onBlendChange: vi.fn(),
+    initialParams: DEFAULT_CHROMA_KEY_PARAMS,
+    onChange: vi.fn(),
   };
 
   beforeEach(() => {
     vi.clearAllMocks();
+    user = userEvent.setup();
   });
 
   describe('rendering', () => {
     it('should render key color control', () => {
       render(<ChromaKeyControl {...defaultProps} />);
 
-      expect(screen.getByText(/key color/i)).toBeInTheDocument();
+      expect(screen.getByText(/^key color$/i)).toBeInTheDocument();
       expect(screen.getByTestId('color-swatch')).toBeInTheDocument();
     });
 
     it('should render similarity slider', () => {
       render(<ChromaKeyControl {...defaultProps} />);
 
-      expect(screen.getByText(/similarity/i)).toBeInTheDocument();
-      const slider = screen.getByRole('slider', { name: /similarity/i });
-      expect(slider).toBeInTheDocument();
+      expect(screen.getByText(/^similarity$/i)).toBeInTheDocument();
+      expect(screen.getByRole('slider', { name: /similarity/i })).toBeInTheDocument();
     });
 
-    it('should render blend slider', () => {
+    it('should render softness slider', () => {
       render(<ChromaKeyControl {...defaultProps} />);
 
-      expect(screen.getByText(/blend/i)).toBeInTheDocument();
-      const slider = screen.getByRole('slider', { name: /blend/i });
-      expect(slider).toBeInTheDocument();
+      expect(screen.getByText(/^softness$/i)).toBeInTheDocument();
+      expect(screen.getByRole('slider', { name: /softness/i })).toBeInTheDocument();
     });
 
     it('should show current color value', () => {
-      render(<ChromaKeyControl {...defaultProps} keyColor="#00FF00" />);
+      render(
+        <ChromaKeyControl
+          {...defaultProps}
+          initialParams={{ ...DEFAULT_CHROMA_KEY_PARAMS, keyColor: '#00FF00' }}
+        />
+      );
 
-      const swatch = screen.getByTestId('color-swatch');
-      expect(swatch).toHaveStyle({ backgroundColor: '#00FF00' });
+      expect(screen.getByTestId('color-input')).toHaveValue('#00ff00');
     });
 
     it('should show preset color buttons', () => {
@@ -64,83 +66,90 @@ describe('ChromaKeyControl', () => {
   });
 
   describe('color interaction', () => {
-    it('should call onKeyColorChange when preset is clicked', async () => {
-      const onKeyColorChange = vi.fn();
-      render(
-        <ChromaKeyControl {...defaultProps} onKeyColorChange={onKeyColorChange} />
+    it('should call onChange when preset is clicked', async () => {
+      const onChange = vi.fn();
+      render(<ChromaKeyControl {...defaultProps} onChange={onChange} />);
+
+      await user.click(screen.getByRole('button', { name: /blue/i }));
+
+      expect(onChange).toHaveBeenCalledWith(
+        expect.objectContaining({ keyColor: '#0000FF' })
       );
-
-      const blueButton = screen.getByRole('button', { name: /blue/i });
-      await userEvent.click(blueButton);
-
-      expect(onKeyColorChange).toHaveBeenCalledWith('#0000FF');
     });
 
-    it('should call onKeyColorChange when green preset is clicked', async () => {
-      const onKeyColorChange = vi.fn();
+    it('should call onChange when green preset is clicked', async () => {
+      const onChange = vi.fn();
       render(
         <ChromaKeyControl
           {...defaultProps}
-          keyColor="#0000FF"
-          onKeyColorChange={onKeyColorChange}
+          initialParams={{ ...DEFAULT_CHROMA_KEY_PARAMS, keyColor: '#0000FF' }}
+          onChange={onChange}
         />
       );
 
-      const greenButton = screen.getByRole('button', { name: /green/i });
-      await userEvent.click(greenButton);
+      await user.click(screen.getByRole('button', { name: /green/i }));
 
-      expect(onKeyColorChange).toHaveBeenCalledWith('#00FF00');
+      expect(onChange).toHaveBeenCalledWith(
+        expect.objectContaining({ keyColor: '#00FF00' })
+      );
     });
 
-    it('should allow custom color input', async () => {
-      const onKeyColorChange = vi.fn();
-      render(
-        <ChromaKeyControl {...defaultProps} onKeyColorChange={onKeyColorChange} />
-      );
+    it('should allow custom color input', () => {
+      const onChange = vi.fn();
+      render(<ChromaKeyControl {...defaultProps} onChange={onChange} />);
 
       const colorInput = screen.getByTestId('color-input');
       fireEvent.change(colorInput, { target: { value: '#FF00FF' } });
 
-      expect(onKeyColorChange).toHaveBeenCalledWith('#FF00FF');
+      expect(onChange).toHaveBeenCalledWith(
+        expect.objectContaining({ keyColor: '#FF00FF' })
+      );
     });
   });
 
   describe('slider interaction', () => {
-    it('should call onSimilarityChange when slider changes', () => {
-      const onSimilarityChange = vi.fn();
-      render(
-        <ChromaKeyControl
-          {...defaultProps}
-          onSimilarityChange={onSimilarityChange}
-        />
-      );
+    it('should call onChange when similarity slider changes', () => {
+      const onChange = vi.fn();
+      render(<ChromaKeyControl {...defaultProps} onChange={onChange} />);
 
       const slider = screen.getByRole('slider', { name: /similarity/i });
       fireEvent.change(slider, { target: { value: '0.5' } });
 
-      expect(onSimilarityChange).toHaveBeenCalledWith(0.5);
+      expect(onChange).toHaveBeenCalledWith(
+        expect.objectContaining({ similarity: 0.5 })
+      );
     });
 
-    it('should call onBlendChange when slider changes', () => {
-      const onBlendChange = vi.fn();
-      render(
-        <ChromaKeyControl {...defaultProps} onBlendChange={onBlendChange} />
-      );
+    it('should call onChange when softness slider changes', () => {
+      const onChange = vi.fn();
+      render(<ChromaKeyControl {...defaultProps} onChange={onChange} />);
 
-      const slider = screen.getByRole('slider', { name: /blend/i });
+      const slider = screen.getByRole('slider', { name: /softness/i });
       fireEvent.change(slider, { target: { value: '0.3' } });
 
-      expect(onBlendChange).toHaveBeenCalledWith(0.3);
+      expect(onChange).toHaveBeenCalledWith(
+        expect.objectContaining({ softness: 0.3 })
+      );
     });
 
     it('should display current similarity value', () => {
-      render(<ChromaKeyControl {...defaultProps} similarity={0.45} />);
+      render(
+        <ChromaKeyControl
+          {...defaultProps}
+          initialParams={{ ...DEFAULT_CHROMA_KEY_PARAMS, similarity: 0.45 }}
+        />
+      );
 
       expect(screen.getByText('45%')).toBeInTheDocument();
     });
 
-    it('should display current blend value', () => {
-      render(<ChromaKeyControl {...defaultProps} blend={0.25} />);
+    it('should display current softness value', () => {
+      render(
+        <ChromaKeyControl
+          {...defaultProps}
+          initialParams={{ ...DEFAULT_CHROMA_KEY_PARAMS, softness: 0.25 }}
+        />
+      );
 
       expect(screen.getByText('25%')).toBeInTheDocument();
     });
@@ -148,28 +157,24 @@ describe('ChromaKeyControl', () => {
 
   describe('reset functionality', () => {
     it('should reset all values when reset button is clicked', async () => {
-      const onKeyColorChange = vi.fn();
-      const onSimilarityChange = vi.fn();
-      const onBlendChange = vi.fn();
-
+      const onChange = vi.fn();
       render(
         <ChromaKeyControl
-          {...defaultProps}
-          keyColor="#FF0000"
-          similarity={0.8}
-          blend={0.6}
-          onKeyColorChange={onKeyColorChange}
-          onSimilarityChange={onSimilarityChange}
-          onBlendChange={onBlendChange}
+          initialParams={{
+            ...DEFAULT_CHROMA_KEY_PARAMS,
+            keyColor: '#FF0000',
+            similarity: 0.8,
+            softness: 0.6,
+            spillSuppression: 0.7,
+            edgeFeather: 5,
+          }}
+          onChange={onChange}
         />
       );
 
-      const resetButton = screen.getByRole('button', { name: /reset/i });
-      await userEvent.click(resetButton);
+      await user.click(screen.getByRole('button', { name: /reset chroma key/i }));
 
-      expect(onKeyColorChange).toHaveBeenCalledWith('#00FF00');
-      expect(onSimilarityChange).toHaveBeenCalledWith(0.3);
-      expect(onBlendChange).toHaveBeenCalledWith(0.1);
+      expect(onChange).toHaveBeenCalledWith(DEFAULT_CHROMA_KEY_PARAMS);
     });
   });
 
@@ -184,22 +189,20 @@ describe('ChromaKeyControl', () => {
       sliders.forEach((slider) => {
         expect(slider).toBeDisabled();
       });
+
+      expect(screen.getByTestId('color-input')).toBeDisabled();
+      expect(screen.getByRole('button', { name: /reset chroma key/i })).toBeDisabled();
     });
 
     it('should not respond to clicks when disabled', async () => {
-      const onKeyColorChange = vi.fn();
-      render(
-        <ChromaKeyControl
-          {...defaultProps}
-          disabled
-          onKeyColorChange={onKeyColorChange}
-        />
-      );
+      const onChange = vi.fn();
+      render(<ChromaKeyControl {...defaultProps} disabled onChange={onChange} />);
 
       const blueButton = screen.getByRole('button', { name: /blue/i });
-      await userEvent.click(blueButton);
+      expect(blueButton).toBeDisabled();
 
-      expect(onKeyColorChange).not.toHaveBeenCalled();
+      await user.click(blueButton);
+      expect(onChange).not.toHaveBeenCalled();
     });
   });
 
@@ -207,10 +210,8 @@ describe('ChromaKeyControl', () => {
     it('should have proper ARIA labels', () => {
       render(<ChromaKeyControl {...defaultProps} />);
 
-      expect(
-        screen.getByRole('slider', { name: /similarity/i })
-      ).toBeInTheDocument();
-      expect(screen.getByRole('slider', { name: /blend/i })).toBeInTheDocument();
+      expect(screen.getByRole('slider', { name: /similarity/i })).toBeInTheDocument();
+      expect(screen.getByRole('slider', { name: /softness/i })).toBeInTheDocument();
     });
 
     it('should have accessible color picker', () => {
@@ -223,14 +224,24 @@ describe('ChromaKeyControl', () => {
 
   describe('visual feedback', () => {
     it('should highlight active preset', () => {
-      render(<ChromaKeyControl {...defaultProps} keyColor="#00FF00" />);
+      render(
+        <ChromaKeyControl
+          {...defaultProps}
+          initialParams={{ ...DEFAULT_CHROMA_KEY_PARAMS, keyColor: '#00FF00' }}
+        />
+      );
 
       const greenButton = screen.getByRole('button', { name: /green/i });
       expect(greenButton).toHaveClass('ring-2');
     });
 
     it('should not highlight inactive preset', () => {
-      render(<ChromaKeyControl {...defaultProps} keyColor="#00FF00" />);
+      render(
+        <ChromaKeyControl
+          {...defaultProps}
+          initialParams={{ ...DEFAULT_CHROMA_KEY_PARAMS, keyColor: '#00FF00' }}
+        />
+      );
 
       const blueButton = screen.getByRole('button', { name: /blue/i });
       expect(blueButton).not.toHaveClass('ring-2');

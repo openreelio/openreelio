@@ -1,36 +1,32 @@
 /**
  * ChromaKeyControl Component
  *
- * A specialized control for chroma key (green screen) effect parameters.
+ * Enhanced control for chroma key (green screen) effect parameters.
  * Features:
- * - Color presets (green, blue)
+ * - Color presets (green, blue, magenta)
  * - Custom color picker
- * - Similarity and blend sliders
+ * - Eyedropper/sample from preview
+ * - Similarity, softness, spill suppression, edge feather sliders
  * - Reset to defaults
  *
  * @module components/features/effects/ChromaKeyControl
  */
 
-import React, { useCallback } from 'react';
-import { RotateCcw } from 'lucide-react';
+import { useCallback } from 'react';
+import { RotateCcw, Pipette, X } from 'lucide-react';
+import { useChromaKey, type ChromaKeyParams, type ChromaKeyPreset } from '@/hooks/useChromaKey';
 
 // =============================================================================
 // Types
 // =============================================================================
 
 export interface ChromaKeyControlProps {
-  /** Current key color (hex format) */
-  keyColor: string;
-  /** Similarity value (0-1) */
-  similarity: number;
-  /** Blend/edge feather value (0-1) */
-  blend: number;
-  /** Called when key color changes */
-  onKeyColorChange: (color: string) => void;
-  /** Called when similarity changes */
-  onSimilarityChange: (value: number) => void;
-  /** Called when blend changes */
-  onBlendChange: (value: number) => void;
+  /** Initial parameters */
+  initialParams?: Partial<ChromaKeyParams>;
+  /** Called when parameters change */
+  onChange?: (params: ChromaKeyParams) => void;
+  /** Called when user wants to sample color from preview */
+  onSampleFromPreview?: () => void;
   /** Whether the control is disabled */
   disabled?: boolean;
   /** Additional CSS class */
@@ -41,80 +37,128 @@ export interface ChromaKeyControlProps {
 // Constants
 // =============================================================================
 
-const PRESETS = [
-  { name: 'Green', color: '#00FF00', label: 'green' },
-  { name: 'Blue', color: '#0000FF', label: 'blue' },
-  { name: 'Magenta', color: '#FF00FF', label: 'magenta' },
-] as const;
+const PRESETS: Array<{ id: ChromaKeyPreset; name: string; color: string }> = [
+  { id: 'green', name: 'Green', color: '#00FF00' },
+  { id: 'blue', name: 'Blue', color: '#0000FF' },
+  { id: 'magenta', name: 'Magenta', color: '#FF00FF' },
+];
 
-const DEFAULTS = {
-  keyColor: '#00FF00',
-  similarity: 0.3,
-  blend: 0.1,
-};
+// =============================================================================
+// Slider Component
+// =============================================================================
+
+interface SliderProps {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+  min: number;
+  max: number;
+  step: number;
+  unit?: string;
+  description?: string;
+  disabled?: boolean;
+}
+
+function Slider({
+  label,
+  value,
+  onChange,
+  min,
+  max,
+  step,
+  unit = '%',
+  description,
+  disabled = false,
+}: SliderProps): JSX.Element {
+  const displayValue = unit === '%' ? Math.round(value * 100) : value.toFixed(1);
+  const sliderId = `slider-${label.toLowerCase().replace(/\s+/g, '-')}`;
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between">
+        <label htmlFor={sliderId} className="text-xs text-zinc-400">{label}</label>
+        <span className="text-xs text-zinc-500">
+          {displayValue}
+          {unit}
+        </span>
+      </div>
+      <input
+        id={sliderId}
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        disabled={disabled}
+        aria-label={label}
+        className="w-full h-2 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-green-500 disabled:opacity-50 disabled:cursor-not-allowed"
+      />
+      {description && <p className="text-xs text-zinc-500">{description}</p>}
+    </div>
+  );
+}
 
 // =============================================================================
 // Component
 // =============================================================================
 
 export function ChromaKeyControl({
-  keyColor,
-  similarity,
-  blend,
-  onKeyColorChange,
-  onSimilarityChange,
-  onBlendChange,
+  initialParams,
+  onChange,
+  onSampleFromPreview,
   disabled = false,
   className = '',
-}: ChromaKeyControlProps) {
-  // Check if current color matches a preset
-  const isPresetActive = useCallback(
-    (presetColor: string) => {
-      return keyColor.toUpperCase() === presetColor.toUpperCase();
-    },
-    [keyColor]
-  );
+}: ChromaKeyControlProps): JSX.Element {
+  const {
+    params,
+    updateParam,
+    reset,
+    applyPreset,
+    isSampling,
+    startSampling,
+    cancelSampling,
+  } = useChromaKey({ initialParams, onChange });
 
   // Handle preset click
   const handlePresetClick = useCallback(
-    (color: string) => {
+    (preset: ChromaKeyPreset) => {
       if (disabled) return;
-      onKeyColorChange(color);
+      applyPreset(preset);
     },
-    [disabled, onKeyColorChange]
+    [disabled, applyPreset]
   );
 
   // Handle color input change
   const handleColorInputChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
-      onKeyColorChange(e.target.value.toUpperCase());
+      updateParam('keyColor', e.target.value.toUpperCase());
     },
-    [onKeyColorChange]
+    [updateParam]
   );
 
-  // Handle similarity change
-  const handleSimilarityChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      onSimilarityChange(parseFloat(e.target.value));
-    },
-    [onSimilarityChange]
-  );
-
-  // Handle blend change
-  const handleBlendChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      onBlendChange(parseFloat(e.target.value));
-    },
-    [onBlendChange]
-  );
+  // Handle eyedropper click
+  const handleEyedropperClick = useCallback(() => {
+    if (disabled) return;
+    if (isSampling) {
+      cancelSampling();
+    } else {
+      startSampling();
+      onSampleFromPreview?.();
+    }
+  }, [disabled, isSampling, startSampling, cancelSampling, onSampleFromPreview]);
 
   // Handle reset
   const handleReset = useCallback(() => {
     if (disabled) return;
-    onKeyColorChange(DEFAULTS.keyColor);
-    onSimilarityChange(DEFAULTS.similarity);
-    onBlendChange(DEFAULTS.blend);
-  }, [disabled, onKeyColorChange, onSimilarityChange, onBlendChange]);
+    reset();
+  }, [disabled, reset]);
+
+  // Check if preset is active
+  const isPresetActive = useCallback(
+    (presetColor: string) => params.keyColor.toUpperCase() === presetColor.toUpperCase(),
+    [params.keyColor]
+  );
 
   return (
     <div
@@ -144,95 +188,118 @@ export function ChromaKeyControl({
             <div
               data-testid="color-swatch"
               className="w-8 h-8 rounded border border-zinc-600 cursor-pointer"
-              style={{ backgroundColor: keyColor }}
+              style={{ backgroundColor: params.keyColor }}
             />
             <input
               data-testid="color-input"
               type="color"
-              value={keyColor}
+              value={params.keyColor}
               onChange={handleColorInputChange}
               className="absolute inset-0 opacity-0 cursor-pointer"
               disabled={disabled}
             />
           </div>
 
+          {/* Eyedropper button */}
+          <button
+            type="button"
+            onClick={handleEyedropperClick}
+            className={`
+              p-2 rounded border transition-all
+              ${isSampling
+                ? 'bg-yellow-600 border-yellow-500 text-white'
+                : 'bg-zinc-700 border-zinc-600 text-zinc-300 hover:bg-zinc-600'}
+            `}
+            aria-label={isSampling ? 'Cancel sampling' : 'Sample from preview'}
+            title={isSampling ? 'Click to cancel' : 'Sample color from preview'}
+            disabled={disabled}
+          >
+            {isSampling ? <X size={14} /> : <Pipette size={14} />}
+          </button>
+
           {/* Preset buttons */}
-          <div className="flex gap-1">
+          <div className="flex gap-1 flex-1">
             {PRESETS.map((preset) => (
               <button
-                key={preset.label}
+                key={preset.id}
                 type="button"
-                onClick={() => handlePresetClick(preset.color)}
+                onClick={() => handlePresetClick(preset.id)}
                 className={`
-                  px-2 py-1 text-xs rounded
+                  flex-1 px-2 py-1 text-xs rounded transition-all
                   ${isPresetActive(preset.color)
                     ? 'ring-2 ring-yellow-400 bg-zinc-700'
                     : 'bg-zinc-700 hover:bg-zinc-600'}
-                  text-zinc-200 transition-all
+                  text-zinc-200
                 `}
                 aria-label={preset.name}
                 disabled={disabled}
               >
+                <span
+                  className="inline-block w-2 h-2 rounded-full mr-1"
+                  style={{ backgroundColor: preset.color }}
+                />
                 {preset.name}
               </button>
             ))}
           </div>
         </div>
+
+        {/* Sampling mode indicator */}
+        {isSampling && (
+          <p className="text-xs text-yellow-400 animate-pulse">
+            Click on the preview to sample a color...
+          </p>
+        )}
       </div>
 
       {/* Similarity Slider */}
-      <div className="space-y-1">
-        <div className="flex items-center justify-between">
-          <label htmlFor="similarity-slider" className="text-xs text-zinc-400">
-            Similarity
-          </label>
-          <span className="text-xs text-zinc-500">
-            {Math.round(similarity * 100)}%
-          </span>
-        </div>
-        <input
-          id="similarity-slider"
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          value={similarity}
-          onChange={handleSimilarityChange}
-          className="w-full h-2 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-green-500"
-          aria-label="Similarity"
-          disabled={disabled}
-        />
-        <p className="text-xs text-zinc-500">
-          Higher values select more similar colors
-        </p>
-      </div>
+      <Slider
+        label="Similarity"
+        value={params.similarity}
+        onChange={(v) => updateParam('similarity', v)}
+        min={0}
+        max={1}
+        step={0.01}
+        description="How closely colors must match the key color"
+        disabled={disabled}
+      />
 
-      {/* Blend Slider */}
-      <div className="space-y-1">
-        <div className="flex items-center justify-between">
-          <label htmlFor="blend-slider" className="text-xs text-zinc-400">
-            Edge Blend
-          </label>
-          <span className="text-xs text-zinc-500">
-            {Math.round(blend * 100)}%
-          </span>
-        </div>
-        <input
-          id="blend-slider"
-          type="range"
-          min="0"
-          max="1"
-          step="0.01"
-          value={blend}
-          onChange={handleBlendChange}
-          className="w-full h-2 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-green-500"
-          aria-label="Blend"
-          disabled={disabled}
-        />
-        <p className="text-xs text-zinc-500">
-          Softens the edges of the key
-        </p>
-      </div>
+      {/* Softness Slider */}
+      <Slider
+        label="Softness"
+        value={params.softness}
+        onChange={(v) => updateParam('softness', v)}
+        min={0}
+        max={1}
+        step={0.01}
+        description="Softens the edges of the key"
+        disabled={disabled}
+      />
+
+      {/* Spill Suppression Slider */}
+      <Slider
+        label="Spill Suppression"
+        value={params.spillSuppression}
+        onChange={(v) => updateParam('spillSuppression', v)}
+        min={0}
+        max={1}
+        step={0.01}
+        description="Reduces color spill on edges"
+        disabled={disabled}
+      />
+
+      {/* Edge Feather Slider */}
+      <Slider
+        label="Edge Feather"
+        value={params.edgeFeather}
+        onChange={(v) => updateParam('edgeFeather', v)}
+        min={0}
+        max={10}
+        step={0.1}
+        unit="px"
+        description="Blurs the edges of the key mask"
+        disabled={disabled}
+      />
     </div>
   );
 }
