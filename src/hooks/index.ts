@@ -473,8 +473,58 @@ export type {
   UseMulticamReturn,
 } from './useMulticam';
 
+export { useMulticamKeyboardShortcuts } from './useMulticamKeyboardShortcuts';
+export type {
+  MulticamShortcut,
+  UseMulticamKeyboardShortcutsOptions,
+  UseMulticamKeyboardShortcutsReturn,
+} from './useMulticamKeyboardShortcuts';
+
 export { useBlendMode } from './useBlendMode';
 export type {
   VideoTrackInfo,
   UseBlendModeReturn,
 } from './useBlendMode';
+
+// Mask (Power Windows) hooks
+export { useMask } from './useMask';
+export type {
+  AddMaskPayload,
+  UpdateMaskPayload,
+  RemoveMaskPayload,
+  UseMaskResult,
+} from './useMask';
+
+export { useMaskEditor } from './useMaskEditor';
+export type {
+  MaskTool,
+  UseMaskEditorOptions,
+  UseMaskEditorResult,
+} from './useMaskEditor';
+
+// HSL Qualifier hook
+export { useQualifier } from './useQualifier';
+export type {
+  UseQualifierOptions,
+  UseQualifierResult,
+} from './useQualifier';
+
+// HDR Settings hook
+export { useHDRSettings } from './useHDRSettings';
+export type {
+  HdrPreset,
+  UseHDRSettingsOptions,
+  UseHDRSettingsResult,
+} from './useHDRSettings';
+
+// Chroma Key hook
+export {
+  useChromaKey,
+  DEFAULT_CHROMA_KEY_PARAMS,
+} from './useChromaKey';
+export type {
+  ChromaKeyParams,
+  ChromaKeyPreset,
+  UseChromaKeyOptions,
+  UseChromaKeyReturn,
+} from './useChromaKey';
