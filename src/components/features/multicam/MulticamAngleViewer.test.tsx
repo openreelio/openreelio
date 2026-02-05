@@ -218,6 +218,106 @@ describe('MulticamAngleViewer', () => {
     });
   });
 
+  describe('keyboard shortcuts', () => {
+    it('should switch to angle 1 when pressing key 1', () => {
+      const onAngleSwitch = vi.fn();
+      // Start with angle 2 active so pressing 1 will trigger switch
+      const groupWithAngle2Active = { ...mockGroup, activeAngleIndex: 1 };
+      render(
+        <MulticamAngleViewer
+          {...defaultProps}
+          group={groupWithAngle2Active}
+          onAngleSwitch={onAngleSwitch}
+        />
+      );
+
+      const container = screen.getByTestId('multicam-viewer');
+      fireEvent.keyDown(container, { key: '1' });
+
+      expect(onAngleSwitch).toHaveBeenCalledWith(0);
+    });
+
+    it('should switch to angles 1-4 with corresponding number keys', () => {
+      const onAngleSwitch = vi.fn();
+      render(
+        <MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />
+      );
+
+      const container = screen.getByTestId('multicam-viewer');
+
+      // Press keys 2, 3, 4 (1 would be active already)
+      fireEvent.keyDown(container, { key: '2' });
+      expect(onAngleSwitch).toHaveBeenCalledWith(1);
+
+      fireEvent.keyDown(container, { key: '3' });
+      expect(onAngleSwitch).toHaveBeenCalledWith(2);
+
+      fireEvent.keyDown(container, { key: '4' });
+      expect(onAngleSwitch).toHaveBeenCalledWith(3);
+    });
+
+    it('should not switch when pressing key beyond available angles', () => {
+      const onAngleSwitch = vi.fn();
+      render(
+        <MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />
+      );
+
+      const container = screen.getByTestId('multicam-viewer');
+      fireEvent.keyDown(container, { key: '5' }); // Only 4 angles
+
+      expect(onAngleSwitch).not.toHaveBeenCalled();
+    });
+
+    it('should ignore non-number keys', () => {
+      const onAngleSwitch = vi.fn();
+      render(
+        <MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />
+      );
+
+      const container = screen.getByTestId('multicam-viewer');
+      fireEvent.keyDown(container, { key: 'a' });
+      fireEvent.keyDown(container, { key: 'Space' });
+      fireEvent.keyDown(container, { key: 'Enter' });
+
+      expect(onAngleSwitch).not.toHaveBeenCalled();
+    });
+
+    it('should not switch when pressing same angle as active', () => {
+      const onAngleSwitch = vi.fn();
+      render(
+        <MulticamAngleViewer {...defaultProps} onAngleSwitch={onAngleSwitch} />
+      );
+
+      const container = screen.getByTestId('multicam-viewer');
+      fireEvent.keyDown(container, { key: '1' }); // Already active
+
+      expect(onAngleSwitch).not.toHaveBeenCalled();
+    });
+
+    it('should not respond to keyboard when disabled', () => {
+      const onAngleSwitch = vi.fn();
+      render(
+        <MulticamAngleViewer
+          {...defaultProps}
+          onAngleSwitch={onAngleSwitch}
+          disabled
+        />
+      );
+
+      const container = screen.getByTestId('multicam-viewer');
+      fireEvent.keyDown(container, { key: '2' });
+
+      expect(onAngleSwitch).not.toHaveBeenCalled();
+    });
+
+    it('should be focusable for keyboard input', () => {
+      render(<MulticamAngleViewer {...defaultProps} />);
+
+      const container = screen.getByTestId('multicam-viewer');
+      expect(container).toHaveAttribute('tabIndex', '0');
+    });
+  });
+
   describe('accessibility', () => {
     it('should have proper ARIA labels', () => {
       render(<MulticamAngleViewer {...defaultProps} />);

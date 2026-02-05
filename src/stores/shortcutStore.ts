@@ -168,6 +168,17 @@ export const DEFAULT_SHORTCUTS: Omit<ShortcutBinding, 'customized' | 'enabled'>[
   { id: 'save-as', label: 'Save As', description: 'Save project as new file', key: 'KeyS', modifiers: ['ctrl', 'shift'], action: 'file.saveAs', category: 'file' },
   { id: 'export', label: 'Export', description: 'Export project', key: 'KeyE', modifiers: ['ctrl'], action: 'file.export', category: 'file' },
   { id: 'shortcuts-help', label: 'Keyboard Shortcuts', description: 'Show keyboard shortcuts', key: 'Slash', modifiers: ['ctrl'], action: 'file.showShortcuts', category: 'file' },
+
+  // Multicam (active only when in multicam editing mode)
+  { id: 'multicam-angle-1', label: 'Multicam Angle 1', description: 'Switch to angle 1', key: 'Digit1', modifiers: [], action: 'multicam.switchAngle1', category: 'multicam' },
+  { id: 'multicam-angle-2', label: 'Multicam Angle 2', description: 'Switch to angle 2', key: 'Digit2', modifiers: [], action: 'multicam.switchAngle2', category: 'multicam' },
+  { id: 'multicam-angle-3', label: 'Multicam Angle 3', description: 'Switch to angle 3', key: 'Digit3', modifiers: [], action: 'multicam.switchAngle3', category: 'multicam' },
+  { id: 'multicam-angle-4', label: 'Multicam Angle 4', description: 'Switch to angle 4', key: 'Digit4', modifiers: [], action: 'multicam.switchAngle4', category: 'multicam' },
+  { id: 'multicam-angle-5', label: 'Multicam Angle 5', description: 'Switch to angle 5', key: 'Digit5', modifiers: [], action: 'multicam.switchAngle5', category: 'multicam' },
+  { id: 'multicam-angle-6', label: 'Multicam Angle 6', description: 'Switch to angle 6', key: 'Digit6', modifiers: [], action: 'multicam.switchAngle6', category: 'multicam' },
+  { id: 'multicam-angle-7', label: 'Multicam Angle 7', description: 'Switch to angle 7', key: 'Digit7', modifiers: [], action: 'multicam.switchAngle7', category: 'multicam' },
+  { id: 'multicam-angle-8', label: 'Multicam Angle 8', description: 'Switch to angle 8', key: 'Digit8', modifiers: [], action: 'multicam.switchAngle8', category: 'multicam' },
+  { id: 'multicam-angle-9', label: 'Multicam Angle 9', description: 'Switch to angle 9', key: 'Digit9', modifiers: [], action: 'multicam.switchAngle9', category: 'multicam' },
 ];
 
 // =============================================================================

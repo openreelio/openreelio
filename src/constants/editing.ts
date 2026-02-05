@@ -81,6 +81,7 @@ export const SHORTCUT_CATEGORIES = [
   'selection',
   'view',
   'file',
+  'multicam',
 ] as const;
 export type ShortcutCategory = (typeof SHORTCUT_CATEGORIES)[number];
 

@@ -38,6 +38,8 @@ import {
   DEFAULT_TEXT_OUTLINE,
   isValidHexColor,
 } from '@/types';
+import { TextPresetPicker } from '@/components/features/text';
+import type { TextPreset } from '@/data/textPresets';
 
 // =============================================================================
 // Types
@@ -389,6 +391,27 @@ export function TextInspector({
   }, [localTextData.content, selectedTextClip.id, onTextDataChange]);
 
   // ===========================================================================
+  // Preset Handler
+  // ===========================================================================
+
+  const handlePresetSelect = useCallback(
+    (preset: TextPreset) => {
+      const newTextData: TextClipData = {
+        content: localTextData.content, // Keep existing content
+        style: { ...preset.style },
+        position: { ...preset.position },
+        shadow: preset.shadow ? { ...preset.shadow } : undefined,
+        outline: preset.outline ? { ...preset.outline } : undefined,
+        rotation: preset.rotation,
+        opacity: preset.opacity,
+      };
+      setLocalTextData(newTextData);
+      onTextDataChange(selectedTextClip.id, newTextData);
+    },
+    [localTextData.content, selectedTextClip.id, onTextDataChange]
+  );
+
+  // ===========================================================================
   // Render
   // ===========================================================================
 
@@ -425,6 +448,15 @@ export function TextInspector({
           disabled={readOnly}
           className="w-full h-24 px-3 py-2 bg-editor-input border border-editor-border rounded text-sm text-editor-text placeholder-editor-text-muted focus:border-primary-500 focus:outline-none resize-none disabled:opacity-50"
           data-testid="text-content-input"
+        />
+      </Section>
+
+      {/* Presets Section */}
+      <Section title="Style Presets" icon={<Palette className="w-4 h-4" />} defaultExpanded={false}>
+        <TextPresetPicker
+          onSelect={handlePresetSelect}
+          disabled={readOnly}
+          compact
         />
       </Section>
 

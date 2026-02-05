@@ -97,6 +97,7 @@ const CATEGORY_CONFIG: Record<ShortcutCategory, { label: string; order: number }
   selection: { label: 'Selection', order: 5 },
   view: { label: 'View', order: 6 },
   file: { label: 'File', order: 7 },
+  multicam: { label: 'Multicam', order: 8 },
 };
 
 /** All categories in display order */
@@ -105,6 +106,7 @@ const CATEGORY_ORDER: ShortcutCategory[] = [
   'navigation',
   'tools',
   'editing',
+  'multicam',
   'selection',
   'view',
   'file',
@@ -448,6 +450,7 @@ export const ShortcutSettingsPanel = memo(function ShortcutSettingsPanel({
       navigation: [],
       tools: [],
       editing: [],
+      multicam: [],
       selection: [],
       view: [],
       file: [],
@@ -470,6 +473,7 @@ export const ShortcutSettingsPanel = memo(function ShortcutSettingsPanel({
       navigation: [],
       tools: [],
       editing: [],
+      multicam: [],
       selection: [],
       view: [],
       file: [],
