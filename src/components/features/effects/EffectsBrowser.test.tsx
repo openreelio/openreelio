@@ -74,6 +74,40 @@ describe('EffectsBrowser', () => {
 
       expect(screen.getByText('Stylize')).toBeInTheDocument();
     });
+
+    it('should render Keying category', () => {
+      render(<EffectsBrowser />);
+
+      expect(screen.getByText('Keying')).toBeInTheDocument();
+    });
+  });
+
+  // ===========================================================================
+  // Keying Effects Tests
+  // ===========================================================================
+
+  describe('keying effects', () => {
+    it('should display Chroma Key effect', () => {
+      render(<EffectsBrowser />);
+
+      expect(screen.getByText('Chroma Key')).toBeInTheDocument();
+    });
+
+    it('should display Luma Key effect', () => {
+      render(<EffectsBrowser />);
+
+      expect(screen.getByText('Luma Key')).toBeInTheDocument();
+    });
+
+    it('should find chroma key when searching', () => {
+      render(<EffectsBrowser />);
+
+      const searchInput = screen.getByPlaceholderText('Search effects...');
+      fireEvent.change(searchInput, { target: { value: 'chroma' } });
+
+      expect(screen.getByText('Chroma Key')).toBeInTheDocument();
+      expect(screen.queryByText('Brightness')).not.toBeInTheDocument();
+    });
   });
 
   // ===========================================================================

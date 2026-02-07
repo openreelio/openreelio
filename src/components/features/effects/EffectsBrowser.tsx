@@ -17,6 +17,7 @@ import {
   Type,
   Bot,
   Search,
+  Scissors,
 } from 'lucide-react';
 import type { EffectCategory, EffectType } from '@/types';
 import { EFFECT_CATEGORY_LABELS, EFFECT_TYPE_LABELS } from '@/types';
@@ -57,6 +58,7 @@ const CATEGORY_ICONS: Record<EffectCategory, ReactNode> = {
   audio: <Volume2 className="w-4 h-4" />,
   text: <Type className="w-4 h-4" />,
   ai: <Bot className="w-4 h-4" />,
+  keying: <Scissors className="w-4 h-4" />,
   custom: <Wand2 className="w-4 h-4" />,
 };
 
@@ -163,6 +165,14 @@ const EFFECT_CATEGORIES: CategoryDefinition[] = [
       { type: 'auto_reframe', label: EFFECT_TYPE_LABELS.auto_reframe ?? 'Auto Reframe' },
       { type: 'face_blur', label: EFFECT_TYPE_LABELS.face_blur ?? 'Face Blur' },
       { type: 'object_tracking', label: EFFECT_TYPE_LABELS.object_tracking ?? 'Object Tracking' },
+    ],
+  },
+  {
+    id: 'keying',
+    icon: CATEGORY_ICONS.keying,
+    effects: [
+      { type: 'chroma_key', label: EFFECT_TYPE_LABELS.chroma_key ?? 'Chroma Key' },
+      { type: 'luma_key', label: EFFECT_TYPE_LABELS.luma_key ?? 'Luma Key' },
     ],
   },
 ];
