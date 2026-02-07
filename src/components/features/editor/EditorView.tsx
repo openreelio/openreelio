@@ -54,7 +54,6 @@ export interface EditorViewProps {
 export function EditorView({ sequence }: EditorViewProps): JSX.Element {
   const { selectedAssetId, assets } = useProjectStore();
   const currentTime = usePlaybackStore((state) => state.currentTime);
-  const setDuration = usePlaybackStore((state) => state.setDuration);
   const { selectedClipIds } = useTimelineStore();
 
   // Export dialog state
@@ -177,27 +176,10 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
     }
   }, [isPlaying, isAudioMixerReady, startMetering, stopMetering]);
 
-  // Sync sequence duration to playback store
-  // Calculate total duration from all clips across all tracks
-  useEffect(() => {
-    if (!sequence) {
-      setDuration(0);
-      return;
-    }
-
-    let maxEndTime = 0;
-    for (const track of sequence.tracks) {
-      for (const clip of track.clips) {
-        const clipEnd = clip.place.timelineInSec + clip.place.durationSec;
-        if (clipEnd > maxEndTime) {
-          maxEndTime = clipEnd;
-        }
-      }
-    }
-
-    // Set at least 10 seconds for empty sequences to allow playback testing
-    setDuration(Math.max(maxEndTime, 10));
-  }, [sequence, setDuration]);
+  // NOTE: Playback duration is set by useTimelineEngine (inside Timeline component)
+  // with proper padding. Do NOT set duration here — it would overwrite the padded
+  // value and cause the SeekBar and Timeline playhead to use different ranges,
+  // breaking bidirectional position sync.
 
   // Timeline action callbacks
   const {

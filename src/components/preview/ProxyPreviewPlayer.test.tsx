@@ -201,7 +201,9 @@ describe('ProxyPreviewPlayer', () => {
   });
 
   describe('Duration Calculation', () => {
-    it('sets duration based on sequence clips', () => {
+    it('does not set duration directly (managed by useTimelineEngine)', () => {
+      // Duration is now set exclusively by useTimelineEngine (via Timeline component)
+      // to prevent competing writers from desynchronizing SeekBar and Timeline ranges.
       const clip1 = createMockClip({
         id: 'clip-1',
         range: { sourceInSec: 0, sourceOutSec: 10 },
@@ -220,26 +222,8 @@ describe('ProxyPreviewPlayer', () => {
 
       render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
 
-      // Duration should be 15 (clip1: 0-10, clip2: 10-15)
-      expect(mockPlaybackStore.setDuration).toHaveBeenCalledWith(15);
-    });
-
-    it('accounts for clip speed in duration calculation', () => {
-      const clip = createMockClip({
-        range: { sourceInSec: 0, sourceOutSec: 10 },
-        place: { timelineInSec: 0, durationSec: 10 },
-        speed: 2, // 2x speed = 5 second duration on timeline
-      });
-      const sequence = createMockSequence({
-        tracks: [createMockTrack({ clips: [clip] })],
-      });
-      const asset = createMockAsset();
-      const assets = new Map<string, Asset>([[asset.id, asset]]);
-
-      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
-
-      // Duration should be 5 (10 seconds source / 2x speed)
-      expect(mockPlaybackStore.setDuration).toHaveBeenCalledWith(5);
+      // ProxyPreviewPlayer must NOT call setDuration — useTimelineEngine owns it
+      expect(mockPlaybackStore.setDuration).not.toHaveBeenCalled();
     });
   });
 

@@ -72,7 +72,6 @@ export function ProxyPreviewPlayer({
     seek,
     setCurrentTime,
     setIsPlaying,
-    setDuration,
     togglePlayback,
     setVolume,
     toggleMute,
@@ -84,22 +83,9 @@ export function ProxyPreviewPlayer({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [videoErrors, setVideoErrors] = useState<Map<string, string>>(new Map());
 
-  // Calculate sequence duration
-  const sequenceDuration = useMemo(() => {
-    if (!sequence) return 0;
-
-    let maxEnd = 0;
-    for (const track of sequence.tracks) {
-      for (const clip of track.clips) {
-        const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
-        const clipEnd = clip.place.timelineInSec + clipDuration;
-        if (clipEnd > maxEnd) {
-          maxEnd = clipEnd;
-        }
-      }
-    }
-    return maxEnd;
-  }, [sequence]);
+  // NOTE: Playback duration is managed by useTimelineEngine (Timeline component).
+  // Do NOT compute or set it here — competing setDuration calls cause the SeekBar
+  // and Timeline to use different duration ranges, breaking positional sync.
 
   // Calculate sequence FPS
   const sequenceFps = useMemo(() => {
@@ -107,13 +93,6 @@ export function ProxyPreviewPlayer({
     const { num, den } = sequence.format.fps;
     return den > 0 ? num / den : 30;
   }, [sequence]);
-
-  // Update store duration when sequence changes
-  useEffect(() => {
-    if (sequenceDuration > 0) {
-      setDuration(sequenceDuration);
-    }
-  }, [sequenceDuration, setDuration]);
 
   // Find active clips at current time (sorted by layer/track)
   const activeClips = useMemo((): ActiveClip[] => {
