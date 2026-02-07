@@ -202,14 +202,16 @@ describe('Video Effect Parameters', () => {
   // ===========================================================================
 
   describe('chroma_key', () => {
-    it('should define key_color, similarity, and blend parameters', () => {
+    it('should define key_color, similarity, blend, spill_suppression, and edge_feather parameters', () => {
       const params = VIDEO_EFFECT_PARAM_DEFS.chroma_key;
       expect(params).toBeDefined();
-      expect(params).toHaveLength(3);
+      expect(params).toHaveLength(5);
 
       expect(params.find((p) => p.name === 'key_color')).toBeDefined();
       expect(params.find((p) => p.name === 'similarity')).toBeDefined();
       expect(params.find((p) => p.name === 'blend')).toBeDefined();
+      expect(params.find((p) => p.name === 'spill_suppression')).toBeDefined();
+      expect(params.find((p) => p.name === 'edge_feather')).toBeDefined();
     });
 
     it('should have color inputType for key_color', () => {

@@ -223,6 +223,66 @@ describe('TextPresetPicker', () => {
   });
 
   // ===========================================================================
+  // Category Filter Tests
+  // ===========================================================================
+
+  describe('category filtering', () => {
+    it('should render category tabs when showCategories=true', () => {
+      render(<TextPresetPicker onSelect={mockOnSelect} showCategories />);
+
+      expect(screen.getByTestId('category-tabs')).toBeInTheDocument();
+      expect(screen.getByTestId('category-tab-all')).toBeInTheDocument();
+      expect(screen.getByTestId('category-tab-title')).toBeInTheDocument();
+      expect(screen.getByTestId('category-tab-lower-third')).toBeInTheDocument();
+    });
+
+    it('should not render category tabs by default', () => {
+      render(<TextPresetPicker onSelect={mockOnSelect} />);
+
+      expect(screen.queryByTestId('category-tabs')).not.toBeInTheDocument();
+    });
+
+    it('should have All tab selected by default', () => {
+      render(<TextPresetPicker onSelect={mockOnSelect} showCategories />);
+
+      const allTab = screen.getByTestId('category-tab-all');
+      expect(allTab).toHaveClass('bg-primary-500/20');
+    });
+
+    it('should filter presets on category click', async () => {
+      render(<TextPresetPicker onSelect={mockOnSelect} showCategories />);
+
+      // Click the Title category tab
+      const titleTab = screen.getByTestId('category-tab-title');
+      await userEvent.click(titleTab);
+
+      // Should show title presets
+      expect(screen.getByTestId('preset-button-centered-title')).toBeInTheDocument();
+      expect(screen.getByTestId('preset-button-epic-title')).toBeInTheDocument();
+
+      // Should not show non-title presets
+      expect(screen.queryByTestId('preset-button-lower-third')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('preset-button-subtitle')).not.toBeInTheDocument();
+    });
+
+    it('should show all presets when All tab is clicked back', async () => {
+      render(<TextPresetPicker onSelect={mockOnSelect} showCategories />);
+
+      // Click a category first
+      await userEvent.click(screen.getByTestId('category-tab-title'));
+
+      // Then click All
+      await userEvent.click(screen.getByTestId('category-tab-all'));
+
+      // Should show all presets again
+      const presetButtons = screen.getAllByRole('button').filter(
+        (btn) => btn.getAttribute('data-testid')?.startsWith('preset-button-')
+      );
+      expect(presetButtons.length).toBe(TEXT_PRESETS.length);
+    });
+  });
+
+  // ===========================================================================
   // Selected State Tests
   // ===========================================================================
 

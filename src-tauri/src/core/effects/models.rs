@@ -500,6 +500,10 @@ impl Effect {
                 ); // Green screen default
                 params.insert("similarity".to_string(), ParamValue::Float(0.3)); // Color similarity threshold (0.0-1.0)
                 params.insert("blend".to_string(), ParamValue::Float(0.1)); // Blend/feather amount (0.0-1.0)
+                params.insert("spill_suppression".to_string(), ParamValue::Float(0.0));
+                // Spill suppression (0.0-1.0)
+                params.insert("edge_feather".to_string(), ParamValue::Float(0.0));
+                // Edge feather in pixels (0.0-10.0)
             }
             EffectType::LumaKey => {
                 // lumakey filter params
@@ -602,6 +606,8 @@ impl Effect {
                 ParamDef::string("key_color", "Key Color", "#00FF00"),
                 ParamDef::float("similarity", "Similarity", 0.3, 0.0, 1.0),
                 ParamDef::float("blend", "Blend", 0.1, 0.0, 1.0),
+                ParamDef::float("spill_suppression", "Spill Suppression", 0.0, 0.0, 1.0),
+                ParamDef::float("edge_feather", "Edge Feather", 0.0, 0.0, 10.0),
             ],
             EffectType::LumaKey => vec![
                 // lumakey parameters

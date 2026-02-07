@@ -651,6 +651,22 @@ export const VIDEO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
       max: 1,
       step: 0.01,
     },
+    {
+      name: 'spill_suppression',
+      label: 'Spill Suppression',
+      default: { type: 'float', value: 0.0 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'edge_feather',
+      label: 'Edge Feather',
+      default: { type: 'float', value: 0.0 },
+      min: 0,
+      max: 10,
+      step: 0.1,
+    },
   ],
 
   luma_key: [

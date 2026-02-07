@@ -7,11 +7,14 @@
  * @module data/textPresets
  */
 
-import type { TextStyle, TextPosition, TextShadow, TextOutline } from '@/types';
+import type { TextStyle, TextPosition, TextShadow, TextOutline, TextClipData } from '@/types';
 
 // =============================================================================
 // Types
 // =============================================================================
+
+/** Categories for grouping text presets */
+export type TextPresetCategory = 'lower-third' | 'title' | 'subtitle' | 'callout' | 'creative';
 
 export interface TextPreset {
   /** Unique identifier */
@@ -20,6 +23,8 @@ export interface TextPreset {
   name: string;
   /** Description */
   description: string;
+  /** Category for filtering */
+  category: TextPresetCategory;
   /** Text styling */
   style: TextStyle;
   /** Position on canvas */
@@ -46,6 +51,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     id: 'lower-third',
     name: 'Lower Third',
     description: 'Classic lower third for names and titles',
+    category: 'lower-third',
     style: {
       fontSize: 42,
       fontFamily: 'Arial',
@@ -73,6 +79,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     id: 'lower-third-minimal',
     name: 'Lower Third Minimal',
     description: 'Clean minimal lower third',
+    category: 'lower-third',
     style: {
       fontSize: 36,
       fontFamily: 'Helvetica',
@@ -101,6 +108,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     id: 'centered-title',
     name: 'Centered Title',
     description: 'Bold centered title for intros',
+    category: 'title',
     style: {
       fontSize: 72,
       fontFamily: 'Arial',
@@ -127,6 +135,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     id: 'epic-title',
     name: 'Epic Title',
     description: 'Large dramatic title for impact',
+    category: 'title',
     style: {
       fontSize: 96,
       fontFamily: 'Impact',
@@ -161,6 +170,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     id: 'subtitle',
     name: 'Subtitle',
     description: 'Standard subtitle/caption style',
+    category: 'subtitle',
     style: {
       fontSize: 32,
       fontFamily: 'Arial',
@@ -182,6 +192,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     id: 'subtitle-outline',
     name: 'Subtitle Outline',
     description: 'Subtitle with outline (no background)',
+    category: 'subtitle',
     style: {
       fontSize: 34,
       fontFamily: 'Arial',
@@ -210,6 +221,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     id: 'callout',
     name: 'Callout',
     description: 'Attention-grabbing callout text',
+    category: 'callout',
     style: {
       fontSize: 48,
       fontFamily: 'Arial',
@@ -240,6 +252,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     id: 'label',
     name: 'Label',
     description: 'Simple label for annotations',
+    category: 'lower-third',
     style: {
       fontSize: 24,
       fontFamily: 'Arial',
@@ -265,6 +278,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     id: 'quote',
     name: 'Quote',
     description: 'Elegant quote style with italics',
+    category: 'creative',
     style: {
       fontSize: 42,
       fontFamily: 'Georgia',
@@ -291,6 +305,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     id: 'tech-style',
     name: 'Tech Style',
     description: 'Modern monospace tech aesthetic',
+    category: 'creative',
     style: {
       fontSize: 36,
       fontFamily: 'Courier New',
@@ -312,6 +327,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     id: 'watermark',
     name: 'Watermark',
     description: 'Subtle watermark/branding text',
+    category: 'creative',
     style: {
       fontSize: 24,
       fontFamily: 'Arial',
@@ -332,6 +348,7 @@ export const TEXT_PRESETS: TextPreset[] = [
     id: 'countdown',
     name: 'Countdown',
     description: 'Bold countdown/timer style',
+    category: 'callout',
     style: {
       fontSize: 120,
       fontFamily: 'Impact',
@@ -372,23 +389,25 @@ export function getPresetById(id: string): TextPreset | undefined {
 }
 
 /**
- * Get presets by category (based on name patterns).
+ * Get presets by category.
  */
-export function getPresetsByCategory(
-  category: 'lower-third' | 'title' | 'subtitle' | 'callout' | 'creative'
-): TextPreset[] {
-  const categoryPatterns: Record<string, string[]> = {
-    'lower-third': ['lower-third', 'label'],
-    title: ['title', 'epic'],
-    subtitle: ['subtitle'],
-    callout: ['callout', 'countdown'],
-    creative: ['quote', 'tech', 'watermark'],
-  };
+export function getPresetsByCategory(category: TextPresetCategory): TextPreset[] {
+  return TEXT_PRESETS.filter((p) => p.category === category);
+}
 
-  const patterns = categoryPatterns[category] || [];
-  return TEXT_PRESETS.filter((p) =>
-    patterns.some((pattern) => p.id.toLowerCase().includes(pattern))
-  );
+/**
+ * Convert a TextPreset to TextClipData with provided content.
+ */
+export function presetToTextClipData(preset: TextPreset, content: string): TextClipData {
+  return {
+    content,
+    style: preset.style,
+    position: preset.position,
+    shadow: preset.shadow,
+    outline: preset.outline,
+    rotation: preset.rotation,
+    opacity: preset.opacity,
+  };
 }
 
 export default TEXT_PRESETS;

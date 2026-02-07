@@ -9,19 +9,8 @@
 import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { X, Type } from 'lucide-react';
 import type { Track, TextClipData, TrackKind } from '@/types';
-import {
-  createTextClipData,
-  createTitleTextClipData,
-  createLowerThirdTextClipData,
-  createSubtitleTextClipData,
-} from '@/types';
-
-// =============================================================================
-// Types
-// =============================================================================
-
-/** Preset type for text styling */
-type TextPreset = 'default' | 'title' | 'lowerThird' | 'subtitle';
+import { TextPresetPicker } from './TextPresetPicker';
+import { getPresetById, presetToTextClipData, type TextPreset } from '@/data/textPresets';
 
 /** Payload for adding a text clip */
 export interface AddTextPayload {
@@ -53,6 +42,20 @@ const MAX_DURATION = 300;
 const DEFAULT_DURATION = 3;
 const DEFAULT_TEXT = 'Text';
 
+/** Fallback style when no preset is selected */
+const DEFAULT_TEXT_STYLE: TextClipData['style'] = {
+  fontSize: 42,
+  fontFamily: 'Arial',
+  color: '#FFFFFF',
+  bold: false,
+  italic: false,
+  underline: false,
+  alignment: 'center',
+  lineHeight: 1.2,
+  letterSpacing: 0,
+  backgroundPadding: 0,
+};
+
 /** Track kinds that support text clips */
 const TEXT_SUPPORTED_TRACK_KINDS: TrackKind[] = ['video', 'overlay'];
 
@@ -74,7 +77,9 @@ export function AddTextDialog({
   const [content, setContent] = useState(DEFAULT_TEXT);
   const [duration, setDuration] = useState(DEFAULT_DURATION);
   const [selectedTrackId, setSelectedTrackId] = useState<string>('');
-  const [selectedPreset, setSelectedPreset] = useState<TextPreset>('default');
+  const [selectedPreset, setSelectedPreset] = useState<TextPreset | null>(
+    () => getPresetById('centered-title') ?? null
+  );
 
   const textInputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -116,12 +121,10 @@ export function AddTextDialog({
     if (isOpen) {
       setContent(DEFAULT_TEXT);
       setDuration(DEFAULT_DURATION);
-      setSelectedPreset('default');
-      if (availableTracks.length > 0) {
-        setSelectedTrackId(availableTracks[0].id);
-      }
+      setSelectedPreset(getPresetById('centered-title') ?? null);
     }
-  }, [isOpen, availableTracks]);
+   
+  }, [isOpen]);
 
   // ===========================================================================
   // Handlers
@@ -164,7 +167,7 @@ export function AddTextDialog({
     []
   );
 
-  const handlePresetClick = useCallback((preset: TextPreset) => {
+  const handlePresetSelect = useCallback((preset: TextPreset) => {
     setSelectedPreset(preset);
   }, []);
 
@@ -174,21 +177,10 @@ export function AddTextDialog({
     // Clamp duration to valid range
     const clampedDuration = Math.max(MIN_DURATION, Math.min(MAX_DURATION, duration));
 
-    // Create text data based on selected preset
-    let textData: TextClipData;
-    switch (selectedPreset) {
-      case 'title':
-        textData = createTitleTextClipData(content);
-        break;
-      case 'lowerThird':
-        textData = createLowerThirdTextClipData(content);
-        break;
-      case 'subtitle':
-        textData = createSubtitleTextClipData(content);
-        break;
-      default:
-        textData = createTextClipData(content);
-    }
+    // Create text data from selected preset
+    const textData: TextClipData = selectedPreset
+      ? presetToTextClipData(selectedPreset, content)
+      : { content, style: DEFAULT_TEXT_STYLE, position: { x: 0.5, y: 0.5 }, rotation: 0, opacity: 1.0 };
 
     onAdd({
       trackId: selectedTrackId,
@@ -261,52 +253,12 @@ export function AddTextDialog({
             <label className="block text-sm font-medium text-editor-text">
               Style Preset
             </label>
-            <div className="flex gap-2">
-              <button
-                type="button"
-                className={`flex-1 px-3 py-2 text-sm rounded border transition-colors ${
-                  selectedPreset === 'default'
-                    ? 'bg-primary-500/20 border-primary-500 text-primary-400'
-                    : 'bg-editor-input border-editor-border text-editor-text-muted hover:text-editor-text hover:border-editor-text-muted'
-                }`}
-                onClick={() => handlePresetClick('default')}
-              >
-                Default
-              </button>
-              <button
-                type="button"
-                className={`flex-1 px-3 py-2 text-sm rounded border transition-colors ${
-                  selectedPreset === 'title'
-                    ? 'bg-primary-500/20 border-primary-500 text-primary-400'
-                    : 'bg-editor-input border-editor-border text-editor-text-muted hover:text-editor-text hover:border-editor-text-muted'
-                }`}
-                onClick={() => handlePresetClick('title')}
-              >
-                Title
-              </button>
-              <button
-                type="button"
-                className={`flex-1 px-3 py-2 text-sm rounded border transition-colors ${
-                  selectedPreset === 'lowerThird'
-                    ? 'bg-primary-500/20 border-primary-500 text-primary-400'
-                    : 'bg-editor-input border-editor-border text-editor-text-muted hover:text-editor-text hover:border-editor-text-muted'
-                }`}
-                onClick={() => handlePresetClick('lowerThird')}
-              >
-                Lower Third
-              </button>
-              <button
-                type="button"
-                className={`flex-1 px-3 py-2 text-sm rounded border transition-colors ${
-                  selectedPreset === 'subtitle'
-                    ? 'bg-primary-500/20 border-primary-500 text-primary-400'
-                    : 'bg-editor-input border-editor-border text-editor-text-muted hover:text-editor-text hover:border-editor-text-muted'
-                }`}
-                onClick={() => handlePresetClick('subtitle')}
-              >
-                Subtitle
-              </button>
-            </div>
+            <TextPresetPicker
+              onSelect={handlePresetSelect}
+              selectedPresetId={selectedPreset?.id}
+              compact
+              showCategories
+            />
           </div>
 
           {/* Track Selection */}

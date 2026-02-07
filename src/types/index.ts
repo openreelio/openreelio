@@ -943,6 +943,7 @@ export type EffectCategory =
   | 'audio'
   | 'text'
   | 'ai'
+  | 'keying'
   | 'custom';
 
 /** Predefined effect types - matches backend EffectType enum */
@@ -1003,6 +1004,7 @@ export type EffectType =
   | 'object_tracking'
   // Keying/Compositing
   | 'chroma_key'
+  | 'luma_key'
   | 'hsl_qualifier'
   // Custom
   | { custom: string };
@@ -1122,8 +1124,11 @@ export function getEffectCategory(effectType: EffectType): EffectCategory {
     case 'levels':
     case 'curves':
     case 'lut':
-    case 'chroma_key':
       return 'color';
+
+    case 'chroma_key':
+    case 'luma_key':
+      return 'keying';
 
     case 'color_wheels':
     case 'hsl_qualifier':
@@ -1200,6 +1205,7 @@ export const EFFECT_CATEGORY_LABELS: Record<EffectCategory, string> = {
   audio: 'Audio',
   text: 'Text',
   ai: 'AI',
+  keying: 'Keying',
   custom: 'Custom',
 };
 
@@ -1252,6 +1258,7 @@ export const EFFECT_TYPE_LABELS: Partial<Record<string, string>> = {
   face_blur: 'Face Blur',
   object_tracking: 'Object Tracking',
   chroma_key: 'Chroma Key',
+  luma_key: 'Luma Key',
   hsl_qualifier: 'HSL Qualifier',
 };
 

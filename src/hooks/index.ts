@@ -480,6 +480,12 @@ export type {
   UseMulticamKeyboardShortcutsReturn,
 } from './useMulticamKeyboardShortcuts';
 
+export { useMulticamSession } from './useMulticamSession';
+export type {
+  UseMulticamSessionOptions,
+  UseMulticamSessionReturn,
+} from './useMulticamSession';
+
 export { useBlendMode } from './useBlendMode';
 export type {
   VideoTrackInfo,

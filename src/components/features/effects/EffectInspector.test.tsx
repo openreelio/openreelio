@@ -11,6 +11,41 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { EffectInspector } from './EffectInspector';
 import type { Effect, ParamDef, ParamValue } from '@/types';
 
+// Mock useChromaKey hook (used by ChromaKeyControl)
+vi.mock('@/hooks/useChromaKey', () => ({
+  useChromaKey: ({ initialParams, onChange }: { initialParams?: Record<string, unknown>; onChange?: (p: Record<string, unknown>) => void }) => ({
+    params: {
+      keyColor: initialParams?.keyColor ?? '#00FF00',
+      similarity: initialParams?.similarity ?? 0.3,
+      softness: initialParams?.softness ?? 0.1,
+      spillSuppression: initialParams?.spillSuppression ?? 0,
+      edgeFeather: initialParams?.edgeFeather ?? 0,
+    },
+    updateParam: vi.fn((key: string, value: unknown) => {
+      onChange?.({
+        keyColor: initialParams?.keyColor ?? '#00FF00',
+        similarity: initialParams?.similarity ?? 0.3,
+        softness: initialParams?.softness ?? 0.1,
+        spillSuppression: initialParams?.spillSuppression ?? 0,
+        edgeFeather: initialParams?.edgeFeather ?? 0,
+        [key]: value,
+      });
+    }),
+    reset: vi.fn(),
+    applyPreset: vi.fn(),
+    isSampling: false,
+    startSampling: vi.fn(),
+    cancelSampling: vi.fn(),
+  }),
+  DEFAULT_CHROMA_KEY_PARAMS: {
+    keyColor: '#00FF00',
+    similarity: 0.3,
+    softness: 0.1,
+    spillSuppression: 0,
+    edgeFeather: 0,
+  },
+}));
+
 // =============================================================================
 // Test Data
 // =============================================================================
@@ -573,6 +608,71 @@ describe('EffectInspector', () => {
       // Keyframe editor should be visible but read-only
       expect(screen.getByTestId('keyframe-editor')).toBeInTheDocument();
       expect(screen.queryByRole('button', { name: /add keyframe/i })).not.toBeInTheDocument();
+    });
+  });
+
+  // ===========================================================================
+  // ChromaKey Integration Tests
+  // ===========================================================================
+
+  describe('chroma key integration', () => {
+    const mockChromaKeyEffect: Effect = {
+      id: 'effect_chroma_001',
+      effectType: 'chroma_key',
+      enabled: true,
+      params: {
+        key_color: '#00FF00',
+        similarity: 0.3,
+        blend: 0.1,
+      },
+      keyframes: {},
+      order: 0,
+    };
+
+    const mockChromaKeyParamDefs: ParamDef[] = [
+      createParamDef('key_color', 'Key Color', { type: 'string', value: '#00FF00' }),
+      createParamDef('similarity', 'Similarity', { type: 'float', value: 0.3 }, { min: 0, max: 1, step: 0.01 }),
+      createParamDef('blend', 'Blend', { type: 'float', value: 0.1 }, { min: 0, max: 1, step: 0.01 }),
+    ];
+
+    it('should render ChromaKeyControl for chroma_key effect', () => {
+      render(
+        <EffectInspector
+          effect={mockChromaKeyEffect}
+          paramDefs={mockChromaKeyParamDefs}
+          onChange={vi.fn()}
+        />
+      );
+
+      expect(screen.getByTestId('chroma-key-control')).toBeInTheDocument();
+    });
+
+    it('should NOT render generic ParameterEditor for chroma_key effect', () => {
+      render(
+        <EffectInspector
+          effect={mockChromaKeyEffect}
+          paramDefs={mockChromaKeyParamDefs}
+          onChange={vi.fn()}
+        />
+      );
+
+      // ChromaKeyControl uses its own sliders, not ParameterEditor
+      expect(screen.getByTestId('chroma-key-control')).toBeInTheDocument();
+      // ParameterEditor renders param-editor-{name} test IDs
+      expect(screen.queryByTestId('param-editor-key_color')).not.toBeInTheDocument();
+    });
+
+    it('should show the effect name for chroma_key', () => {
+      render(
+        <EffectInspector
+          effect={mockChromaKeyEffect}
+          paramDefs={mockChromaKeyParamDefs}
+          onChange={vi.fn()}
+        />
+      );
+
+      // The header shows the effect type label; ChromaKeyControl also has its own heading
+      expect(screen.getAllByText('Chroma Key').length).toBeGreaterThanOrEqual(1);
     });
   });
 });

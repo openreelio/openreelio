@@ -726,12 +726,22 @@ impl Effect {
     /// - `key_color`: Color to key out in hex format (default: "#00FF00" green)
     /// - `similarity`: Color similarity threshold 0.0-1.0 (default: 0.3)
     /// - `blend`: Edge blend/feather amount 0.0-1.0 (default: 0.1)
+    /// - `spill_suppression`: Reduces color spill on edges 0.0-1.0 (default: 0.0)
+    /// - `edge_feather`: Blurs the key mask edges 0.0-10.0 pixels (default: 0.0)
     fn build_chromakey_filter(&self) -> String {
         let key_color = self
             .get_string("key_color")
             .unwrap_or_else(|| "#00FF00".to_string());
         let similarity = self.get_float("similarity").unwrap_or(0.3).clamp(0.0, 1.0);
         let blend = self.get_float("blend").unwrap_or(0.1).clamp(0.0, 1.0);
+        let spill_suppression = self
+            .get_float("spill_suppression")
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        let edge_feather = self
+            .get_float("edge_feather")
+            .unwrap_or(0.0)
+            .clamp(0.0, 10.0);
 
         // Convert hex color to FFmpeg format (0xRRGGBB)
         let ffmpeg_color = if let Some(stripped) = key_color.strip_prefix('#') {
@@ -740,10 +750,23 @@ impl Effect {
             key_color
         };
 
-        format!(
+        let mut filter = format!(
             "chromakey=color={}:similarity={}:blend={}",
             ffmpeg_color, similarity, blend
-        )
+        );
+
+        // Append spill suppression as colorbalance filter
+        if spill_suppression > 0.0 {
+            filter = format!("{},colorbalance=gm=-{}", filter, spill_suppression);
+        }
+
+        // Append edge feather targeting alpha channel only
+        // boxblur=luma_r:luma_p:chroma_r:chroma_p:alpha_r:alpha_p
+        if edge_feather > 0.0 {
+            filter = format!("{},boxblur=0:1:0:1:{}:1", filter, edge_feather);
+        }
+
+        filter
     }
 
     /// Builds FFmpeg lumakey filter for luminance-based keying.
@@ -2858,6 +2881,50 @@ mod tests {
             effect.category(),
             super::super::EffectCategory::Keying,
             "ChromaKey should be in Keying category"
+        );
+    }
+
+    #[test]
+    fn test_chromakey_with_spill_suppression() {
+        let mut effect = Effect::new(EffectType::ChromaKey);
+        effect.set_param("spill_suppression", ParamValue::Float(0.5));
+
+        let filter = effect.to_filter_string("0:v", "vout");
+        assert!(
+            filter.contains("colorbalance=gm=-0.5"),
+            "Filter should contain colorbalance for spill suppression, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_chromakey_with_edge_feather() {
+        let mut effect = Effect::new(EffectType::ChromaKey);
+        effect.set_param("edge_feather", ParamValue::Float(2.5));
+
+        let filter = effect.to_filter_string("0:v", "vout");
+        assert!(
+            filter.contains("boxblur=0:1:0:1:2.5:1"),
+            "Filter should contain alpha-only boxblur for edge feather, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_chromakey_defaults_unchanged() {
+        let effect = Effect::new(EffectType::ChromaKey);
+
+        let filter = effect.to_filter_string("0:v", "vout");
+        // Default spill_suppression=0 and edge_feather=0 should not add extra filters
+        assert!(
+            !filter.contains("colorbalance"),
+            "Default filter should not contain colorbalance, got: {}",
+            filter
+        );
+        assert!(
+            !filter.contains("boxblur"),
+            "Default filter should not contain boxblur, got: {}",
+            filter
         );
     }
 

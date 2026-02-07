@@ -7,9 +7,9 @@
  * @module components/features/text/TextPresetPicker
  */
 
-import { useCallback, useMemo } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Palette } from 'lucide-react';
-import { TEXT_PRESETS, type TextPreset } from '@/data/textPresets';
+import { TEXT_PRESETS, getPresetsByCategory, type TextPreset, type TextPresetCategory } from '@/data/textPresets';
 
 // =============================================================================
 // Types
@@ -24,6 +24,8 @@ export interface TextPresetPickerProps {
   disabled?: boolean;
   /** Compact mode with smaller previews */
   compact?: boolean;
+  /** Show category filter tabs */
+  showCategories?: boolean;
   /** Additional CSS classes */
   className?: string;
 }
@@ -104,13 +106,35 @@ function PresetPreview({ preset, compact = false }: PresetPreviewProps): JSX.Ele
 // Main Component
 // =============================================================================
 
+/** Category tab labels */
+const CATEGORY_LABELS: Record<TextPresetCategory | 'all', string> = {
+  all: 'All',
+  'lower-third': 'Lower Third',
+  title: 'Title',
+  subtitle: 'Subtitle',
+  callout: 'Callout',
+  creative: 'Creative',
+};
+
+const CATEGORY_TABS: Array<TextPresetCategory | 'all'> = [
+  'all',
+  'lower-third',
+  'title',
+  'subtitle',
+  'callout',
+  'creative',
+];
+
 export function TextPresetPicker({
   onSelect,
   selectedPresetId,
   disabled = false,
   compact = false,
+  showCategories = false,
   className = '',
 }: TextPresetPickerProps): JSX.Element {
+  const [activeCategory, setActiveCategory] = useState<TextPresetCategory | 'all'>('all');
+
   const handlePresetClick = useCallback(
     (preset: TextPreset) => {
       if (!disabled) {
@@ -119,6 +143,11 @@ export function TextPresetPicker({
     },
     [disabled, onSelect]
   );
+
+  const filteredPresets = useMemo(() => {
+    if (activeCategory === 'all') return TEXT_PRESETS;
+    return getPresetsByCategory(activeCategory);
+  }, [activeCategory]);
 
   const containerClasses = useMemo(
     () =>
@@ -150,12 +179,35 @@ export function TextPresetPicker({
         <span>Presets</span>
       </div>
 
+      {/* Category Tabs */}
+      {showCategories && (
+        <div data-testid="category-tabs" className="flex flex-wrap gap-1">
+          {CATEGORY_TABS.map((cat) => (
+            <button
+              key={cat}
+              type="button"
+              data-testid={`category-tab-${cat}`}
+              onClick={() => setActiveCategory(cat)}
+              className={`
+                px-2 py-0.5 text-xs rounded-full border transition-colors
+                ${activeCategory === cat
+                  ? 'bg-primary-500/20 border-primary-500 text-primary-400'
+                  : 'border-editor-border text-editor-text-muted hover:text-editor-text hover:border-editor-text-muted'
+                }
+              `}
+            >
+              {CATEGORY_LABELS[cat]}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* Preset Grid */}
       <div
         data-testid="preset-grid"
         className={gridClasses}
       >
-        {TEXT_PRESETS.map((preset) => {
+        {filteredPresets.map((preset) => {
           const isSelected = selectedPresetId === preset.id;
 
           return (
