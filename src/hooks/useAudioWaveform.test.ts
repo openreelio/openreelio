@@ -79,6 +79,26 @@ describe('useAudioWaveform', () => {
       });
     });
 
+    it('should sanitize non-integer dimensions before invoking backend', async () => {
+      const { result } = renderHook(() => useAudioWaveform());
+
+      await act(async () => {
+        await result.current.getWaveform(
+          'asset_float_dimensions',
+          '/path/to/audio.mp3',
+          2538.2000000000003,
+          64.7
+        );
+      });
+
+      expect(mockInvoke).toHaveBeenCalledWith('generate_waveform', {
+        inputPath: '/path/to/audio.mp3',
+        outputPath: expect.stringContaining('2538x65'),
+        width: 2538,
+        height: 65,
+      });
+    });
+
     it('should cache waveform and return cached on subsequent calls', async () => {
       const { result } = renderHook(() => useAudioWaveform());
 

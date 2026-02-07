@@ -166,7 +166,7 @@ export function useEnhancedKeyboardShortcuts(
   // Store state
   const {
     togglePlayback,
-    setCurrentTime,
+    seek,
     currentTime,
     duration,
     setPlaybackRate,
@@ -453,14 +453,14 @@ export function useEnhancedKeyboardShortcuts(
       // Home - Go to start
       if (key === 'Home') {
         e.preventDefault();
-        setCurrentTime(0);
+        seek(0);
         return;
       }
 
       // End - Go to end
       if (key === 'End') {
         e.preventDefault();
-        setCurrentTime(duration);
+        seek(duration);
         return;
       }
 
@@ -619,7 +619,7 @@ export function useEnhancedKeyboardShortcuts(
     [
       enabled,
       togglePlayback,
-      setCurrentTime,
+      seek,
       duration,
       setPlaybackRate,
       play,

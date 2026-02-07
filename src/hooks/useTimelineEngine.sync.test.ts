@@ -212,6 +212,77 @@ describe('useTimelineEngine (store sync)', () => {
       });
     });
 
+    it('should immediately apply fine-grained seek updates while playing', async () => {
+      let hookResult: {
+        result: { current: ReturnType<typeof useTimelineEngine> };
+        unmount: () => void;
+      } | null = null;
+      await act(async () => {
+        hookResult = renderHook(() => useTimelineEngine({ duration: 60 })) as unknown as {
+          result: { current: ReturnType<typeof useTimelineEngine> };
+          unmount: () => void;
+        };
+      });
+      const { result } = hookResult!;
+
+      act(() => {
+        usePlaybackStore.getState().setIsPlaying(true);
+      });
+
+      act(() => {
+        usePlaybackStore.getState().seek(0.04);
+      });
+      expect(result.current.engine.currentTime).toBeCloseTo(0.04, 3);
+
+      act(() => {
+        usePlaybackStore.getState().seek(0.08);
+      });
+      expect(result.current.engine.currentTime).toBeCloseTo(0.08, 3);
+
+      await act(async () => {
+        hookResult?.unmount();
+      });
+    });
+
+    it('should ignore direct time-update writes during playback and follow explicit seek events', async () => {
+      let hookResult: {
+        result: { current: ReturnType<typeof useTimelineEngine> };
+        unmount: () => void;
+      } | null = null;
+      await act(async () => {
+        hookResult = renderHook(() => useTimelineEngine({ duration: 60 })) as unknown as {
+          result: { current: ReturnType<typeof useTimelineEngine> };
+          unmount: () => void;
+        };
+      });
+      const { result } = hookResult!;
+
+      act(() => {
+        result.current.seek(1);
+      });
+      expect(result.current.engine.currentTime).toBeCloseTo(1, 3);
+
+      act(() => {
+        usePlaybackStore.getState().setIsPlaying(true);
+      });
+
+      // Simulate non-authoritative preview tick write.
+      act(() => {
+        usePlaybackStore.getState().setCurrentTime(20, 'proxy-preview-tick');
+      });
+      expect(result.current.engine.currentTime).toBeCloseTo(1, 3);
+
+      // Explicit seek intent must still be applied immediately.
+      act(() => {
+        usePlaybackStore.getState().seek(20, 'timeline-test-seek');
+      });
+      expect(result.current.engine.currentTime).toBeCloseTo(20, 3);
+
+      await act(async () => {
+        hookResult?.unmount();
+      });
+    });
+
     it('should go to start and end correctly', async () => {
       let hookResult: {
         result: { current: ReturnType<typeof useTimelineEngine> };

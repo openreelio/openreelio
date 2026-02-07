@@ -7,8 +7,12 @@
 
 import { useEffect, useLayoutEffect, useRef, useMemo, useCallback } from 'react';
 import { TimelineEngine } from '@/core/TimelineEngine';
-import { usePlaybackStore } from '@/stores/playbackStore';
-import { PRECISION, getExternalSeekThreshold, isApproximatelyEqual } from '@/constants/precision';
+import {
+  PLAYBACK_EVENTS,
+  type PlaybackSeekEventDetail,
+  usePlaybackStore,
+} from '@/stores/playbackStore';
+import { PRECISION, isApproximatelyEqual } from '@/constants/precision';
 
 // =============================================================================
 // Types
@@ -41,7 +45,7 @@ export interface UseTimelineEngineReturn {
   /** Toggle play/pause */
   togglePlayback: () => void;
   /** Seek to specific time */
-  seek: (time: number) => void;
+  seek: (time: number, source?: string) => void;
   /** Seek forward by amount */
   seekForward: (amount: number) => void;
   /** Seek backward by amount */
@@ -71,6 +75,7 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
   const playbackStore = usePlaybackStore();
   const { currentTime, isPlaying, playbackRate, loop } = playbackStore;
   const { setCurrentTime, setIsPlaying, setDuration } = playbackStore;
+  const pendingTimeSourceRef = useRef<string | null>(null);
 
   /**
    * Track the last time value that the engine explicitly set.
@@ -90,13 +95,6 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
    * 50ms is enough for React's batching to complete.
    */
   const STATE_UPDATE_GRACE_MS = 50;
-
-  /**
-   * Threshold for detecting external seeks (vs normal playback progression).
-   * If the time difference between store and engine is larger than this,
-   * it's likely an external seek that should be synced.
-   */
-  const externalSeekThresholdSec = useMemo(() => getExternalSeekThreshold(fps), [fps]);
 
   // Create engine instance (stable reference)
   const engineRef = useRef<TimelineEngine | null>(null);
@@ -145,7 +143,9 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
         }
         // Track the time value that engine set (for external seek detection)
         lastEngineTimeRef.current = time;
-        setCurrentTime(time);
+        const source = pendingTimeSourceRef.current ?? (engine.isPlaying ? 'engine-tick' : 'engine-sync');
+        pendingTimeSourceRef.current = null;
+        setCurrentTime(time, source);
       },
       setIsPlaying: (playing) => {
         if (getState) {
@@ -155,7 +155,7 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
           }
         }
         markEngineStateUpdate();
-        setIsPlaying(playing);
+        setIsPlaying(playing, 'engine-play-state');
       },
       setDuration: (nextDuration) => {
         // Guard against NaN/Infinity values from engine
@@ -218,29 +218,35 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
         Number.isFinite(next.currentTime) &&
         Number.isFinite(engine.currentTime)
       ) {
-        // Compare store's currentTime with the last time the ENGINE set.
-        // This prevents echo loops without requiring timestamp-based guards.
-        const timeDiffFromLastEngineSet = Math.abs(next.currentTime - lastEngineTimeRef.current);
-        const timeDiffFromEngineNow = Math.abs(next.currentTime - engine.currentTime);
-
         const isPaused = typeof next.isPlaying === 'boolean' ? !next.isPlaying : !engine.isPlaying;
 
-        // When paused: always sync (above epsilon) so small seeks/steps are reflected.
-        // When playing: require a larger delta to avoid false positives from playback jitter.
-        const requiredDeltaFromLastEngineSet = isPaused
-          ? PRECISION.TIME_EPSILON
-          : externalSeekThresholdSec;
+        // During active playback, explicit user-intent seeks are applied via PLAYBACK_EVENTS.SEEK.
+        // Ignoring generic time-update writes here prevents non-authoritative preview loops
+        // from forcing engine seeks and causing playhead jitter/snap-back.
+        if (isPaused) {
+          // Compare store's currentTime with the last time the ENGINE set.
+          // This prevents echo loops without requiring timestamp-based guards.
+          const timeDiffFromLastEngineSet = Math.abs(next.currentTime - lastEngineTimeRef.current);
+          const timeDiffFromEngineNow = Math.abs(next.currentTime - engine.currentTime);
 
-        // If the store's time differs from what the engine last set (by the required delta)
-        // AND differs from the engine's current time, treat it as an external seek.
-        const isExternalSeek =
-          timeDiffFromLastEngineSet > requiredDeltaFromLastEngineSet &&
-          timeDiffFromEngineNow > PRECISION.TIME_EPSILON;
+          // When paused: always sync (above epsilon) so small seeks/steps are reflected.
+          const requiredDeltaFromLastEngineSet = PRECISION.TIME_EPSILON;
 
-        if (isExternalSeek) {
-          // Update our tracking ref to prevent echo
-          lastEngineTimeRef.current = next.currentTime;
-          engine.seek(next.currentTime);
+          // If the store's time differs from what the engine last set (by the required delta)
+          // AND differs from the engine's current time, treat it as an external seek.
+          const isExternalSeek =
+            timeDiffFromLastEngineSet > requiredDeltaFromLastEngineSet &&
+            timeDiffFromEngineNow > PRECISION.TIME_EPSILON;
+
+          if (isExternalSeek) {
+            // Update our tracking ref to prevent echo
+            lastEngineTimeRef.current = next.currentTime;
+            pendingTimeSourceRef.current = 'store-external-seek';
+            engine.seek(next.currentTime);
+            if (pendingTimeSourceRef.current === 'store-external-seek') {
+              pendingTimeSourceRef.current = null;
+            }
+          }
         }
       }
 
@@ -266,7 +272,42 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
         unsubscribe();
       }
     };
-  }, [engine, externalSeekThresholdSec]);
+  }, [engine]);
+
+  // Handle explicit seek events from PlaybackStore.seek* actions.
+  // These represent user-intent seeks (scrubbing, seek bar drag, keyboard jump)
+  // and must be applied immediately even during active playback.
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const handleSeek = (event: Event) => {
+      const customEvent = event as CustomEvent<PlaybackSeekEventDetail>;
+      const targetTime = customEvent.detail?.time;
+      const source = customEvent.detail?.source ?? 'playback-seek-event';
+
+      if (!Number.isFinite(targetTime) || !Number.isFinite(engine.currentTime)) {
+        return;
+      }
+
+      if (isApproximatelyEqual(engine.currentTime, targetTime, PRECISION.TIME_EPSILON)) {
+        return;
+      }
+
+      lastEngineTimeRef.current = targetTime;
+      pendingTimeSourceRef.current = `seek-event:${source}`;
+      engine.seek(targetTime);
+      if (pendingTimeSourceRef.current === `seek-event:${source}`) {
+        pendingTimeSourceRef.current = null;
+      }
+    };
+
+    window.addEventListener(PLAYBACK_EVENTS.SEEK, handleSeek);
+    return () => {
+      window.removeEventListener(PLAYBACK_EVENTS.SEEK, handleSeek);
+    };
+  }, [engine]);
 
   // Update duration when it changes
   useEffect(() => {
@@ -290,8 +331,12 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
   }, [engine]);
 
   const seek = useCallback(
-    (time: number) => {
+    (time: number, source: string = 'timeline-engine-api') => {
+      pendingTimeSourceRef.current = source;
       engine.seek(time);
+      if (pendingTimeSourceRef.current === source) {
+        pendingTimeSourceRef.current = null;
+      }
     },
     [engine],
   );

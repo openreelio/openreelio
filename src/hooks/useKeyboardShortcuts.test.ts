@@ -81,6 +81,7 @@ const createContentEditableElement = (): HTMLElement => {
 
 describe('useKeyboardShortcuts', () => {
   const mockTogglePlayback = vi.fn();
+  const mockSeek = vi.fn();
   const mockSetCurrentTime = vi.fn();
   const mockSetPlaybackRate = vi.fn();
   const mockPlay = vi.fn();
@@ -96,6 +97,7 @@ describe('useKeyboardShortcuts', () => {
 
   const defaultPlaybackStore = {
     togglePlayback: mockTogglePlayback,
+    seek: mockSeek,
     setCurrentTime: mockSetCurrentTime,
     currentTime: 5,
     duration: 60,
@@ -200,7 +202,7 @@ describe('useKeyboardShortcuts', () => {
         window.dispatchEvent(createKeyboardEvent('Home'));
       });
 
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(0);
+      expect(mockSeek).toHaveBeenCalledWith(0);
     });
 
     it('should jump to end on End key', () => {
@@ -210,7 +212,7 @@ describe('useKeyboardShortcuts', () => {
         window.dispatchEvent(createKeyboardEvent('End'));
       });
 
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(60);
+      expect(mockSeek).toHaveBeenCalledWith(60);
     });
   });
 

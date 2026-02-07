@@ -112,6 +112,18 @@ describe('usePlaybackLoop', () => {
 
       expect(onFrame).toHaveBeenCalled();
     });
+
+    it('should stay passive when disabled', () => {
+      const onFrame = vi.fn();
+      renderHook(() => usePlaybackLoop({ enabled: false, onFrame, duration: 10 }));
+
+      act(() => {
+        usePlaybackStore.getState().play();
+      });
+
+      expect(mockRaf).not.toHaveBeenCalled();
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+    });
   });
 
   // ===========================================================================

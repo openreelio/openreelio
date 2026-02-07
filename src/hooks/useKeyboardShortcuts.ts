@@ -77,7 +77,7 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
   // Store actions - Zustand store functions are stable and don't change
   const {
     togglePlayback,
-    setCurrentTime,
+    seek,
     duration,
     setPlaybackRate,
     play,
@@ -199,13 +199,13 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
 
       if (key === 'Home') {
         e.preventDefault();
-        setCurrentTime(0);
+        seek(0);
         return;
       }
 
       if (key === 'End') {
         e.preventDefault();
-        setCurrentTime(durationRef.current);
+        seek(durationRef.current);
         return;
       }
 
@@ -291,7 +291,7 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
     [
       enabled,
       togglePlayback,
-      setCurrentTime,
+      seek,
       setPlaybackRate,
       play,
       pause,

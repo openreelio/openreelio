@@ -304,6 +304,26 @@ export function Timeline({
     stepBackward,
   } = useTimelineEngine({ duration, fps: DEFAULT_FPS });
 
+  const seekFromTimelineClick = useCallback(
+    (time: number) => setPlayhead(time, 'timeline-click-capture'),
+    [setPlayhead],
+  );
+
+  const seekFromTimelineScrub = useCallback(
+    (time: number) => setPlayhead(time, 'timeline-scrub'),
+    [setPlayhead],
+  );
+
+  const seekFromPlayheadDrag = useCallback(
+    (time: number) => setPlayhead(time, 'timeline-playhead-drag'),
+    [setPlayhead],
+  );
+
+  const seekFromTimeRuler = useCallback(
+    (time: number) => setPlayhead(time, 'timeline-ruler'),
+    [setPlayhead],
+  );
+
   // ===========================================================================
   // Shot Markers
   // ===========================================================================
@@ -311,7 +331,7 @@ export function Timeline({
     assetId: selectedAssetInfo?.assetId ?? null,
     videoPath: selectedAssetInfo?.videoPath ?? null,
     autoLoad: true,
-    onSeek: setPlayhead,
+    onSeek: (time) => setPlayhead(time, 'timeline-shot-marker'),
   });
 
   // ===========================================================================
@@ -334,7 +354,7 @@ export function Timeline({
   const { isScrubbing, handleScrubStart } = useScrubbing({
     isPlaying,
     togglePlayback,
-    seek: setPlayhead,
+    seek: seekFromTimelineScrub,
     calculateTimeFromMouseEvent,
     onSnapChange: setActiveSnapPoint,
     playheadRef,
@@ -361,7 +381,7 @@ export function Timeline({
     playheadTrackHeaderWidth: 0, // Playhead is rendered inside a clipped container offset by the header
     isPlaying,
     togglePlayback,
-    seek: setPlayhead,
+    seek: seekFromPlayheadDrag,
     snapEnabled,
     snapPoints,
     snapThreshold,
@@ -849,7 +869,7 @@ export function Timeline({
     [assets],
   );
 
-  const handleSeek = useCallback((time: number) => setPlayhead(time), [setPlayhead]);
+  const handleSeek = useCallback((time: number) => seekFromTimeRuler(time), [seekFromTimeRuler]);
 
   const handleClipClick = useCallback(
     (clipId: string, modifiers: { ctrlKey: boolean; shiftKey: boolean; metaKey: boolean }) => {
@@ -886,6 +906,30 @@ export function Timeline({
       }
     },
     [clearClipSelection, isSelecting, isRazorActive, handleRazorClick],
+  );
+
+  /**
+   * Ensure primary clicks anywhere in the editable tracks content
+   * immediately move the playhead, even when the target clip consumes
+   * bubbling mouse events for drag/trim interactions.
+   */
+  const handleTracksAreaMouseDownCapture = useCallback(
+    (e: MouseEvent<HTMLDivElement>) => {
+      if (e.button !== 0 || isRazorActive) return;
+
+      const target = e.target as HTMLElement;
+
+      // Keep interactive controls behavior untouched.
+      if (target.closest('button')) {
+        return;
+      }
+
+      const { time } = calculateTimeFromMouseEvent(e, true);
+      if (time !== null) {
+        seekFromTimelineClick(time);
+      }
+    },
+    [calculateTimeFromMouseEvent, isRazorActive, seekFromTimelineClick],
   );
 
   /**
@@ -1216,6 +1260,7 @@ export function Timeline({
             data-testid="timeline-tracks-area"
             className={`flex-1 overflow-hidden relative ${getTracksAreaCursor()}`}
             onClick={handleTracksAreaClick}
+            onMouseDownCapture={handleTracksAreaMouseDownCapture}
             onMouseDown={handleTracksAreaMouseDownCombined}
             onWheel={handleWheel}
             onDragEnter={handleDragEnter}

@@ -295,6 +295,75 @@ describe('Timeline', () => {
 
       expect(screen.getByTestId('playhead')).toHaveAttribute('data-dragging', 'false');
     });
+
+    it('should seek when clicking directly on a clip body', async () => {
+      const sequenceWithClip: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            clips: [
+              {
+                id: 'clip_seek_click',
+                assetId: 'asset_001',
+                range: { sourceInSec: 0, sourceOutSec: 10 },
+                place: { timelineInSec: 0, durationSec: 10 },
+                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+          mockSequence.tracks[1],
+        ],
+      };
+
+      render(<Timeline sequence={sequenceWithClip} />);
+
+      const clip = screen.getByTestId('clip-clip_seek_click');
+      await act(async () => {
+        // Container left=0, header=192, zoom=100 => (300-192)/100 = 1.08s
+        fireEvent.mouseDown(clip, { clientX: 300, clientY: 40, button: 0 });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBeGreaterThan(0);
+      expect(usePlaybackStore.getState().currentTime).toBeLessThan(2);
+
+      await act(async () => {
+        fireEvent.mouseUp(document);
+      });
+    });
+
+    it('should seek when clicking on track header body (non-button area)', async () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      const header = screen.getAllByTestId('track-header')[0];
+      await act(async () => {
+        // Container left=0, header width=192, zoom=100 => (260-192)/100 = 0.68s
+        fireEvent.mouseDown(header, { clientX: 260, clientY: 40, button: 0 });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBeGreaterThan(0);
+
+      await act(async () => {
+        fireEvent.mouseUp(document);
+      });
+    });
+
+    it('should not seek when clicking track header control buttons', async () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+
+      const muteButton = screen.getAllByTestId('mute-button')[0];
+      await act(async () => {
+        fireEvent.mouseDown(muteButton, { clientX: 40, clientY: 40, button: 0 });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+    });
   });
 
   // ===========================================================================

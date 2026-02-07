@@ -20,6 +20,7 @@ vi.mock('@/stores/playbackStore', () => ({
       isMuted: false,
       loop: false,
       syncWithTimeline: true,
+      seek: vi.fn(),
       setCurrentTime: vi.fn(),
       setIsPlaying: vi.fn(),
     })),
@@ -42,6 +43,7 @@ function createMockState(overrides: Partial<{
   duration: number;
   isPlaying: boolean;
   playbackRate: number;
+  seek: ReturnType<typeof vi.fn>;
   setCurrentTime: ReturnType<typeof vi.fn>;
   setIsPlaying: ReturnType<typeof vi.fn>;
 }> = {}) {
@@ -54,6 +56,7 @@ function createMockState(overrides: Partial<{
     isMuted: false,
     loop: false,
     syncWithTimeline: true,
+    seek: vi.fn(),
     setCurrentTime: vi.fn(),
     setIsPlaying: vi.fn(),
     ...overrides,
@@ -62,13 +65,15 @@ function createMockState(overrides: Partial<{
 
 describe('PlaybackController', () => {
   let controller: PlaybackController;
+  let mockSeek: ReturnType<typeof vi.fn>;
   let mockSetCurrentTime: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     controller = new PlaybackController({ fps: 30 });
+    mockSeek = vi.fn();
     mockSetCurrentTime = vi.fn();
     vi.mocked(usePlaybackStore.getState).mockReturnValue(
-      createMockState({ setCurrentTime: mockSetCurrentTime }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+      createMockState({ seek: mockSeek, setCurrentTime: mockSetCurrentTime }) as unknown as ReturnType<typeof usePlaybackStore.getState>
     );
   });
 
@@ -132,21 +137,21 @@ describe('PlaybackController', () => {
     it('should perform seek and update store', () => {
       const result = controller.seek(5.0);
       expect(result).toBe(true);
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(5.0);
+      expect(mockSeek).toHaveBeenCalledWith(5.0, 'playback-controller:unknown');
     });
 
     it('should clamp seek to valid range', () => {
       controller.seek(100); // Beyond duration (60)
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(60);
+      expect(mockSeek).toHaveBeenCalledWith(60, 'playback-controller:unknown');
 
       controller.seek(-5); // Before start
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(0);
+      expect(mockSeek).toHaveBeenCalledWith(0, 'playback-controller:unknown');
     });
 
     it('should apply frame-accurate seeking', () => {
       controller.seek(1.033, { frameAccurate: true });
       // At 30fps, should snap to nearest frame (1.0333...)
-      const callArg = mockSetCurrentTime.mock.calls[0][0];
+      const callArg = mockSeek.mock.calls[0][0];
       expect(Math.round(callArg * 30)).toBe(31); // Frame 31
     });
 
@@ -155,13 +160,13 @@ describe('PlaybackController', () => {
       controller.seek(5.0);
       controller.seek(5.0);
       // First seek should go through, subsequent should be deduplicated
-      expect(mockSetCurrentTime).toHaveBeenCalledTimes(1);
+      expect(mockSeek).toHaveBeenCalledTimes(1);
     });
 
     it('should not deduplicate when forceUpdate is true', () => {
       controller.seek(5.0);
       controller.seek(5.0, { forceUpdate: true });
-      expect(mockSetCurrentTime).toHaveBeenCalledTimes(2);
+      expect(mockSeek).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -170,12 +175,13 @@ describe('PlaybackController', () => {
       vi.mocked(usePlaybackStore.getState).mockReturnValue(
         createMockState({
           currentTime: 1.0,
+          seek: mockSeek,
           setCurrentTime: mockSetCurrentTime,
         }) as unknown as ReturnType<typeof usePlaybackStore.getState>
       );
 
       controller.stepForward();
-      const callArg = mockSetCurrentTime.mock.calls[0][0];
+      const callArg = mockSeek.mock.calls[0][0];
       expect(callArg).toBeCloseTo(1.0 + 1 / 30, 6);
     });
 
@@ -183,12 +189,13 @@ describe('PlaybackController', () => {
       vi.mocked(usePlaybackStore.getState).mockReturnValue(
         createMockState({
           currentTime: 1.0,
+          seek: mockSeek,
           setCurrentTime: mockSetCurrentTime,
         }) as unknown as ReturnType<typeof usePlaybackStore.getState>
       );
 
       controller.stepBackward();
-      const callArg = mockSetCurrentTime.mock.calls[0][0];
+      const callArg = mockSeek.mock.calls[0][0];
       expect(callArg).toBeCloseTo(1.0 - 1 / 30, 6);
     });
 
@@ -196,12 +203,13 @@ describe('PlaybackController', () => {
       vi.mocked(usePlaybackStore.getState).mockReturnValue(
         createMockState({
           currentTime: 0,
+          seek: mockSeek,
           setCurrentTime: mockSetCurrentTime,
         }) as unknown as ReturnType<typeof usePlaybackStore.getState>
       );
 
       controller.stepBackward();
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(0);
+      expect(mockSeek).toHaveBeenCalledWith(0, 'playback-controller:step');
     });
   });
 

@@ -44,6 +44,7 @@ vi.mock('@/stores', () => {
 
 describe('useTimeline', () => {
   // PlaybackStore mocks
+  const mockSeek = vi.fn();
   const mockSetCurrentTime = vi.fn();
   const mockPlay = vi.fn();
   const mockPause = vi.fn();
@@ -68,6 +69,7 @@ describe('useTimeline', () => {
     volume: 1,
     isMuted: false,
     syncWithTimeline: true,
+    seek: mockSeek,
     setCurrentTime: mockSetCurrentTime,
     play: mockPlay,
     pause: mockPause,
@@ -184,7 +186,7 @@ describe('useTimeline', () => {
         result.current.seek(10);
       });
 
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(10);
+      expect(mockSeek).toHaveBeenCalledWith(10);
     });
 
     it('should clamp seek time to minimum 0', () => {
@@ -194,7 +196,7 @@ describe('useTimeline', () => {
         result.current.seek(-5);
       });
 
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(0);
+      expect(mockSeek).toHaveBeenCalledWith(0);
     });
 
     it('should step forward by calling PlaybackStore stepForward', () => {
@@ -215,11 +217,11 @@ describe('useTimeline', () => {
         result.current.stepForward(5);
       });
 
-      // Multi-frame steps use setCurrentTime for batch operation (performance optimization)
+      // Multi-frame steps use seek for batch operation (performance optimization)
       // 5 frames at 30fps = 5 * (1/30) = 0.166... seconds
       // currentTime (5) + 0.166... = 5.166...
       const expectedTime = 5 + 5 * (1 / 30);
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(expectedTime);
+      expect(mockSeek).toHaveBeenCalledWith(expectedTime);
     });
 
     it('should step backward by calling PlaybackStore stepBackward', () => {
@@ -240,8 +242,8 @@ describe('useTimeline', () => {
         result.current.stepBackward(3);
       });
 
-      // Multi-frame steps use setCurrentTime for batch operation
-      expect(mockSetCurrentTime).toHaveBeenCalled();
+      // Multi-frame steps use seek for batch operation
+      expect(mockSeek).toHaveBeenCalled();
     });
 
     it('should handle negative frame count in stepForward', () => {
@@ -252,7 +254,7 @@ describe('useTimeline', () => {
       });
 
       // Should treat negative as positive (absolute value)
-      expect(mockSetCurrentTime).toHaveBeenCalled();
+      expect(mockSeek).toHaveBeenCalled();
     });
 
     it('should handle fractional frame count in stepBackward', () => {
@@ -263,7 +265,7 @@ describe('useTimeline', () => {
       });
 
       // Should floor fractional frames
-      expect(mockSetCurrentTime).toHaveBeenCalled();
+      expect(mockSeek).toHaveBeenCalled();
     });
   });
 

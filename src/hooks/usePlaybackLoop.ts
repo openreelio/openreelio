@@ -20,6 +20,12 @@ import { playbackMonitor } from '@/services/playbackMonitor';
 
 export interface UsePlaybackLoopOptions {
   /**
+   * Whether the internal RAF-driven time progression is enabled.
+   * When false, the hook is passive and never mutates playback time.
+   */
+  enabled?: boolean;
+
+  /**
    * Callback invoked on each frame with current playback time.
    */
   onFrame: (currentTime: number) => void;
@@ -97,6 +103,7 @@ const FPS_SAMPLE_SIZE = 30; // Frames to average for FPS calculation
  */
 export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoopReturn {
   const {
+    enabled = true,
     onFrame,
     duration,
     targetFps = PLAYBACK.TARGET_FPS,
@@ -168,6 +175,7 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
   const playbackLoop = useCallback(
     (timestamp: number) => {
       if (!isMountedRef.current) return;
+      if (!enabled) return;
 
       // First frame initialization
       if (lastFrameTimeRef.current === 0) {
@@ -260,6 +268,7 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       rafIdRef.current = requestAnimationFrame(playbackLoop);
     },
     [
+      enabled,
       frameIntervalMs,
       playbackRate,
       duration,
@@ -307,7 +316,7 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
 
   // Respond to play/pause changes
   useEffect(() => {
-    if (isPlaying) {
+    if (enabled && isPlaying) {
       startLoop();
     } else {
       stopLoop();
@@ -316,7 +325,7 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
     return () => {
       stopLoop();
     };
-  }, [isPlaying, startLoop, stopLoop]);
+  }, [enabled, isPlaying, startLoop, stopLoop]);
 
   // Sync with external seek
   useEffect(() => {

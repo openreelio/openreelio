@@ -87,7 +87,7 @@ export function useTimeline(): UseTimelineReturn {
   const isPlaying = usePlaybackStore((state) => state.isPlaying);
 
   // Playback actions from PlaybackStore
-  const setCurrentTime = usePlaybackStore((state) => state.setCurrentTime);
+  const storeSeek = usePlaybackStore((state) => state.seek);
   const storePlay = usePlaybackStore((state) => state.play);
   const storePause = usePlaybackStore((state) => state.pause);
   const storeTogglePlayback = usePlaybackStore((state) => state.togglePlayback);
@@ -128,9 +128,9 @@ export function useTimeline(): UseTimelineReturn {
 
   const seek = useCallback(
     (time: number) => {
-      setCurrentTime(Math.max(0, time));
+      storeSeek(Math.max(0, time));
     },
-    [setCurrentTime]
+    [storeSeek]
   );
 
   const stepForward = useCallback(
@@ -145,10 +145,10 @@ export function useTimeline(): UseTimelineReturn {
         storeStepForward(DEFAULT_FPS);
       } else {
         const currentTime = usePlaybackStore.getState().currentTime;
-        setCurrentTime(currentTime + totalDelta);
+        storeSeek(currentTime + totalDelta);
       }
     },
-    [storeStepForward, setCurrentTime]
+    [storeStepForward, storeSeek]
   );
 
   const stepBackward = useCallback(
@@ -163,10 +163,10 @@ export function useTimeline(): UseTimelineReturn {
         storeStepBackward(DEFAULT_FPS);
       } else {
         const currentTime = usePlaybackStore.getState().currentTime;
-        setCurrentTime(Math.max(0, currentTime - totalDelta));
+        storeSeek(Math.max(0, currentTime - totalDelta));
       }
     },
-    [storeStepBackward, setCurrentTime]
+    [storeStepBackward, storeSeek]
   );
 
   // Selection actions
