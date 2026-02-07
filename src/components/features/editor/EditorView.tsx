@@ -35,10 +35,12 @@ import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useAudioPlayback } from '@/hooks/useAudioPlayback';
 import { useTextClip } from '@/hooks/useTextClip';
 import { useAudioMixer } from '@/hooks/useAudioMixer';
+import { useMulticamSession } from '@/hooks/useMulticamSession';
 import { dbToLinear, linearToDb } from '@/utils/audioMeter';
 import { createLogger } from '@/services/logger';
 import { Terminal, Sliders } from 'lucide-react';
 import type { Sequence } from '@/types';
+import type { MulticamGroup } from '@/utils/multicam';
 
 const logger = createLogger('EditorView');
 
@@ -65,6 +67,15 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
   // AI Sidebar state
   const [aiSidebarCollapsed, setAiSidebarCollapsed] = useState(false);
   const [aiSidebarWidth, setAiSidebarWidth] = useState(320);
+
+  // Multicam session state
+  const [multicamGroup, setMulticamGroup] = useState<MulticamGroup | null>(null);
+  const [multicamMode] = useState<'view' | 'record'>('view');
+  useMulticamSession({
+    group: multicamGroup,
+    mode: multicamMode,
+    onChange: setMulticamGroup,
+  });
 
   // Audio Mixer state from store
   const mixerStore = useAudioMixerStore();
