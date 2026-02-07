@@ -16,6 +16,8 @@ import { EFFECT_TYPE_LABELS, isAudioEffect } from '@/types';
 import { ParameterEditor } from './ParameterEditor';
 import { KeyframeEditor } from './KeyframeEditor';
 import { ColorWheelsPanel, type ColorWheelsValues, type ColorWheelsParamName } from './ColorWheelsPanel';
+import { ChromaKeyControl } from './ChromaKeyControl';
+import type { ChromaKeyParams } from '@/hooks/useChromaKey';
 
 // =============================================================================
 // Constants
@@ -173,6 +175,35 @@ function paramsToColorWheelsValues(
  */
 function isColorWheelsEffect(effectType: Effect['effectType']): boolean {
   return effectType === 'color_wheels';
+}
+
+// =============================================================================
+// ChromaKey Helpers
+// =============================================================================
+
+/**
+ * Check if an effect is a ChromaKey effect.
+ */
+function isChromaKeyEffect(effectType: Effect['effectType']): boolean {
+  return effectType === 'chroma_key';
+}
+
+/**
+ * Converts effect params to ChromaKeyParams for the ChromaKeyControl.
+ * Maps backend param names (key_color, similarity, blend) to frontend names.
+ */
+function paramsToChromaKeyParams(
+  params: Record<string, SimpleParamValue> | undefined
+): Partial<ChromaKeyParams> {
+  if (!params) return {};
+
+  return {
+    keyColor: typeof params.key_color === 'string' ? params.key_color : '#00FF00',
+    similarity: typeof params.similarity === 'number' ? params.similarity : 0.3,
+    softness: typeof params.blend === 'number' ? params.blend : 0.1,
+    spillSuppression: typeof params.spill_suppression === 'number' ? params.spill_suppression : 0,
+    edgeFeather: typeof params.edge_feather === 'number' ? params.edge_feather : 0,
+  };
 }
 
 // =============================================================================
@@ -382,6 +413,19 @@ export const EffectInspector = memo(function EffectInspector({
             }}
             onReset={handleReset}
             readOnly={readOnly}
+          />
+        ) : isChromaKeyEffect(effect.effectType) ? (
+          <ChromaKeyControl
+            initialParams={paramsToChromaKeyParams(effectParams)}
+            onChange={(chromaParams: ChromaKeyParams) => {
+              // Route through handleParamChange for consistent debouncing
+              handleParamChange('key_color', chromaParams.keyColor);
+              handleParamChange('similarity', chromaParams.similarity);
+              handleParamChange('blend', chromaParams.softness);
+              handleParamChange('spill_suppression', chromaParams.spillSuppression);
+              handleParamChange('edge_feather', chromaParams.edgeFeather);
+            }}
+            disabled={readOnly}
           />
         ) : paramDefs.length === 0 ? (
           <p className="text-sm text-editor-text-muted text-center py-4">
