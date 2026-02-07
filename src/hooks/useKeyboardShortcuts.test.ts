@@ -559,6 +559,33 @@ describe('useKeyboardShortcuts', () => {
 
       expect(mockTogglePlayback).not.toHaveBeenCalled();
     });
+
+    it('should not handle shortcuts when event was already handled', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      const handledEvent = createKeyboardEvent(' ');
+      handledEvent.preventDefault();
+
+      act(() => {
+        window.dispatchEvent(handledEvent);
+      });
+
+      expect(mockTogglePlayback).not.toHaveBeenCalled();
+    });
+
+    it('should reset playback rate for handled Space events without double-toggle', () => {
+      renderHook(() => useKeyboardShortcuts());
+
+      const handledEvent = createKeyboardEvent(' ');
+      handledEvent.preventDefault();
+
+      act(() => {
+        window.dispatchEvent(handledEvent);
+      });
+
+      expect(mockTogglePlayback).not.toHaveBeenCalled();
+      expect(mockSetPlaybackRate).toHaveBeenCalledWith(1);
+    });
   });
 
   // ===========================================================================

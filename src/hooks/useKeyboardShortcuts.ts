@@ -120,6 +120,18 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
     (e: KeyboardEvent) => {
       // 1. Safety Checks
       if (!enabled || isInputElement(e.target)) return;
+      // Respect handlers on focused feature surfaces (timeline, preview, etc.)
+      // to avoid duplicate execution from the global listener.
+      if (e.defaultPrevented) {
+        // Timeline handles Space locally via TimelineEngine. Keep global shuttle
+        // speed normalization to avoid stale non-1x playback rates after focus
+        // transitions, but do not toggle playback again.
+        if (!e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && e.key === ' ') {
+          shuttleIndexRef.current = STOP_INDEX;
+          setPlaybackRate(1);
+        }
+        return;
+      }
       if (e.repeat) return; // Prevent holding key down from triggering logic repeatedly (optional)
 
       const { key, ctrlKey, metaKey, shiftKey } = e;
