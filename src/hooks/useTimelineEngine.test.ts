@@ -232,7 +232,7 @@ describe('useTimelineEngine', () => {
       });
 
       expect(result.current.engine.currentTime).toBe(30);
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(30);
+      expect(mockSetCurrentTime).toHaveBeenCalledWith(30, 'timeline-engine-api');
     });
 
     it('should clamp seek time to duration', () => {
