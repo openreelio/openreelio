@@ -16,6 +16,11 @@ import type { Asset } from './AssetList';
 const mockUseProjectStore = vi.fn();
 const mockUseBinStore = vi.fn();
 const mockUseAssetImport = vi.fn();
+const mockConvertFileSrc = vi.fn((path: string) => `asset://${path}`);
+
+vi.mock('@tauri-apps/api/core', () => ({
+  convertFileSrc: (path: string) => mockConvertFileSrc(path),
+}));
 
 vi.mock('@/stores', () => ({
   useProjectStore: (...args: unknown[]) => mockUseProjectStore(...args),
@@ -129,6 +134,67 @@ describe('ProjectExplorer', () => {
     it('should render asset list', () => {
       render(<ProjectExplorer />);
       expect(screen.getByTestId('asset-list')).toBeInTheDocument();
+    });
+
+    it('should not reconvert asset:// thumbnail URLs', () => {
+      const assets = new Map([
+        [
+          'asset_001',
+          {
+            id: 'asset_001',
+            name: 'video1.mp4',
+            kind: 'video',
+            uri: '/path/to/video1.mp4',
+            durationSec: 120,
+            thumbnailUrl: 'asset://localhost/C%3A%5Cthumbs%5C001.jpg',
+          },
+        ],
+      ]);
+
+      mockUseProjectStore.mockReturnValue({
+        assets,
+        isLoading: false,
+        selectedAssetId: null,
+        selectAsset: vi.fn(),
+        removeAsset: vi.fn(),
+      });
+
+      render(<ProjectExplorer />);
+
+      const thumbnail = screen.getByTestId('asset-thumbnail');
+      expect(thumbnail).toHaveAttribute('src', 'asset://localhost/C%3A%5Cthumbs%5C001.jpg');
+      expect(mockConvertFileSrc).not.toHaveBeenCalled();
+    });
+
+    it('should decode encoded local thumbnail paths before conversion', () => {
+      const assets = new Map([
+        [
+          'asset_001',
+          {
+            id: 'asset_001',
+            name: 'video1.mp4',
+            kind: 'video',
+            uri: '/path/to/video1.mp4',
+            durationSec: 120,
+            thumbnailUrl: 'C%3A%5Cthumbs%5C001.jpg',
+          },
+        ],
+      ]);
+
+      mockUseProjectStore.mockReturnValue({
+        assets,
+        isLoading: false,
+        selectedAssetId: null,
+        selectAsset: vi.fn(),
+        removeAsset: vi.fn(),
+      });
+
+      render(<ProjectExplorer />);
+
+      expect(mockConvertFileSrc).toHaveBeenCalled();
+      const convertedInput = mockConvertFileSrc.mock.calls[0][0] as string;
+      expect(convertedInput.includes('%')).toBe(false);
+      expect(convertedInput.includes('thumbs')).toBe(true);
     });
   });
 

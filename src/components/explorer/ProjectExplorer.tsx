@@ -23,6 +23,7 @@ import {
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { useProjectStore, useBinStore } from '@/stores';
 import { useAssetImport, useTranscriptionWithIndexing, useBinOperations } from '@/hooks';
+import { normalizeFileUriToPath } from '@/utils/uri';
 import { BinTree } from './BinTree';
 import { AssetList, type Asset, type ViewMode } from './AssetList';
 import type { AssetKind, AssetData } from './AssetItem';
@@ -40,6 +41,30 @@ interface FilterTab {
   key: FilterType;
   label: string;
   icon?: React.ReactNode;
+}
+
+function safeDecodeURIComponent(input: string): string {
+  try {
+    return decodeURIComponent(input);
+  } catch {
+    return input;
+  }
+}
+
+function toTauriAssetUrl(pathOrUrl: string): string {
+  if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) {
+    return pathOrUrl;
+  }
+
+  if (pathOrUrl.startsWith('asset://')) {
+    return pathOrUrl;
+  }
+
+  if (pathOrUrl.startsWith('file://')) {
+    return convertFileSrc(normalizeFileUriToPath(pathOrUrl));
+  }
+
+  return convertFileSrc(safeDecodeURIComponent(pathOrUrl));
 }
 
 // =============================================================================
@@ -122,12 +147,7 @@ export function ProjectExplorer() {
         // Backend now returns raw file paths for local assets
         let thumbnail: string | undefined;
         if (asset.thumbnailUrl) {
-          if (asset.thumbnailUrl.startsWith('http://') || asset.thumbnailUrl.startsWith('https://')) {
-            thumbnail = asset.thumbnailUrl;
-          } else {
-            // Raw file path - convert to Tauri asset protocol
-            thumbnail = convertFileSrc(asset.thumbnailUrl);
-          }
+          thumbnail = toTauriAssetUrl(asset.thumbnailUrl);
         }
 
         return {
