@@ -269,7 +269,7 @@ export class PlaybackController {
     // Perform seek
     this.lastSeekTime = now;
     this.lastSeekValue = targetTime;
-    store.setCurrentTime(targetTime);
+    store.seek(targetTime, `playback-controller:${source}`);
 
     // Update sync state
     this.syncState.videoTime = targetTime;
