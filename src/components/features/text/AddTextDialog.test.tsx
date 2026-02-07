@@ -128,13 +128,10 @@ describe('AddTextDialog', () => {
       expect(durationInput).toHaveValue(3); // Default 3 seconds
     });
 
-    it('should show preset buttons', () => {
+    it('should show TextPresetPicker', () => {
       render(<AddTextDialog {...defaultProps} />);
 
-      // Use exact name to avoid matching "Subtitle" when looking for "Title"
-      expect(screen.getByRole('button', { name: 'Title' })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Lower Third' })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Subtitle' })).toBeInTheDocument();
+      expect(screen.getByTestId('text-preset-picker')).toBeInTheDocument();
     });
   });
 
@@ -200,14 +197,14 @@ describe('AddTextDialog', () => {
       );
     });
 
-    it('should apply preset when preset button is clicked', async () => {
+    it('should apply preset when preset is selected from picker', async () => {
       const user = userEvent.setup();
       const onAdd = vi.fn();
 
       render(<AddTextDialog {...defaultProps} onAdd={onAdd} />);
 
-      // Click Title preset (use exact name)
-      await user.click(screen.getByRole('button', { name: 'Title' }));
+      // Click the epic-title preset in TextPresetPicker
+      await user.click(screen.getByTestId('preset-button-epic-title'));
 
       // Add text
       const textInput = screen.getByLabelText(/text content/i);
@@ -221,7 +218,7 @@ describe('AddTextDialog', () => {
           textData: expect.objectContaining({
             content: 'My Title',
             style: expect.objectContaining({
-              fontSize: 72, // Title preset uses 72pt
+              fontSize: 96, // Epic Title preset uses 96pt
               bold: true,
             }),
           }),
