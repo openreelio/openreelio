@@ -56,20 +56,22 @@ export function useMulticamSession(
     onChange,
   });
 
+  const { switchAngle, switchAngleAt } = multicam;
+
   // Angle switch callback for keyboard shortcuts (view mode)
   const handleSwitchAngle = useCallback(
     (angleIndex: number) => {
-      multicam.switchAngle(angleIndex);
+      switchAngle(angleIndex);
     },
-    [multicam]
+    [switchAngle]
   );
 
   // Angle switch callback for keyboard shortcuts (record mode)
   const handleSwitchAngleAt = useCallback(
     (angleIndex: number, timeSec: number) => {
-      multicam.switchAngleAt(angleIndex, timeSec);
+      switchAngleAt(angleIndex, timeSec);
     },
-    [multicam]
+    [switchAngleAt]
   );
 
   // Global keyboard shortcuts (1-9 for angle switching)

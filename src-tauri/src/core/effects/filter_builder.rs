@@ -734,8 +734,14 @@ impl Effect {
             .unwrap_or_else(|| "#00FF00".to_string());
         let similarity = self.get_float("similarity").unwrap_or(0.3).clamp(0.0, 1.0);
         let blend = self.get_float("blend").unwrap_or(0.1).clamp(0.0, 1.0);
-        let spill_suppression = self.get_float("spill_suppression").unwrap_or(0.0).clamp(0.0, 1.0);
-        let edge_feather = self.get_float("edge_feather").unwrap_or(0.0).clamp(0.0, 10.0);
+        let spill_suppression = self
+            .get_float("spill_suppression")
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        let edge_feather = self
+            .get_float("edge_feather")
+            .unwrap_or(0.0)
+            .clamp(0.0, 10.0);
 
         // Convert hex color to FFmpeg format (0xRRGGBB)
         let ffmpeg_color = if let Some(stripped) = key_color.strip_prefix('#') {
@@ -754,9 +760,10 @@ impl Effect {
             filter = format!("{},colorbalance=gm=-{}", filter, spill_suppression);
         }
 
-        // Append edge feather as boxblur filter
+        // Append edge feather targeting alpha channel only
+        // boxblur=luma_r:luma_p:chroma_r:chroma_p:alpha_r:alpha_p
         if edge_feather > 0.0 {
-            filter = format!("{},boxblur={}", filter, edge_feather);
+            filter = format!("{},boxblur=0:1:0:1:{}:1", filter, edge_feather);
         }
 
         filter
@@ -2897,8 +2904,8 @@ mod tests {
 
         let filter = effect.to_filter_string("0:v", "vout");
         assert!(
-            filter.contains("boxblur=2.5"),
-            "Filter should contain boxblur for edge feather, got: {}",
+            filter.contains("boxblur=0:1:0:1:2.5:1"),
+            "Filter should contain alpha-only boxblur for edge feather, got: {}",
             filter
         );
     }

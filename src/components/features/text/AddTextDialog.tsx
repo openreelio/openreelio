@@ -42,6 +42,20 @@ const MAX_DURATION = 300;
 const DEFAULT_DURATION = 3;
 const DEFAULT_TEXT = 'Text';
 
+/** Fallback style when no preset is selected */
+const DEFAULT_TEXT_STYLE: TextClipData['style'] = {
+  fontSize: 42,
+  fontFamily: 'Arial',
+  color: '#FFFFFF',
+  bold: false,
+  italic: false,
+  underline: false,
+  alignment: 'center',
+  lineHeight: 1.2,
+  letterSpacing: 0,
+  backgroundPadding: 0,
+};
+
 /** Track kinds that support text clips */
 const TEXT_SUPPORTED_TRACK_KINDS: TrackKind[] = ['video', 'overlay'];
 
@@ -166,7 +180,7 @@ export function AddTextDialog({
     // Create text data from selected preset
     const textData: TextClipData = selectedPreset
       ? presetToTextClipData(selectedPreset, content)
-      : { content, style: { fontSize: 42, fontFamily: 'Arial', color: '#FFFFFF', bold: false, italic: false, underline: false, alignment: 'center', lineHeight: 1.2, letterSpacing: 0, backgroundPadding: 0 }, position: { x: 0.5, y: 0.5 }, rotation: 0, opacity: 1.0 };
+      : { content, style: DEFAULT_TEXT_STYLE, position: { x: 0.5, y: 0.5 }, rotation: 0, opacity: 1.0 };
 
     onAdd({
       trackId: selectedTrackId,

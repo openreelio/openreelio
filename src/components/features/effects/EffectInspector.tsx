@@ -418,12 +418,18 @@ export const EffectInspector = memo(function EffectInspector({
           <ChromaKeyControl
             initialParams={paramsToChromaKeyParams(effectParams)}
             onChange={(chromaParams: ChromaKeyParams) => {
-              // Route through handleParamChange for consistent debouncing
-              handleParamChange('key_color', chromaParams.keyColor);
-              handleParamChange('similarity', chromaParams.similarity);
-              handleParamChange('blend', chromaParams.softness);
-              handleParamChange('spill_suppression', chromaParams.spillSuppression);
-              handleParamChange('edge_feather', chromaParams.edgeFeather);
+              // Only update params that actually changed to avoid redundant store writes
+              const current = paramsToChromaKeyParams(effectParams);
+              if (chromaParams.keyColor !== current.keyColor)
+                handleParamChange('key_color', chromaParams.keyColor);
+              if (chromaParams.similarity !== current.similarity)
+                handleParamChange('similarity', chromaParams.similarity);
+              if (chromaParams.softness !== current.softness)
+                handleParamChange('blend', chromaParams.softness);
+              if (chromaParams.spillSuppression !== current.spillSuppression)
+                handleParamChange('spill_suppression', chromaParams.spillSuppression);
+              if (chromaParams.edgeFeather !== current.edgeFeather)
+                handleParamChange('edge_feather', chromaParams.edgeFeather);
             }}
             disabled={readOnly}
           />

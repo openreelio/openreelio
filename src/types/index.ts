@@ -1124,8 +1124,11 @@ export function getEffectCategory(effectType: EffectType): EffectCategory {
     case 'levels':
     case 'curves':
     case 'lut':
-    case 'chroma_key':
       return 'color';
+
+    case 'chroma_key':
+    case 'luma_key':
+      return 'keying';
 
     case 'color_wheels':
     case 'hsl_qualifier':
