@@ -6,6 +6,7 @@
 
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
+import { recordPlaybackTrace } from '@/services/playbackTrace';
 
 // =============================================================================
 // Types
@@ -38,23 +39,23 @@ export interface PlaybackActions {
   /** Toggle play/pause */
   togglePlayback: () => void;
   /** Set playing state directly */
-  setIsPlaying: (isPlaying: boolean) => void;
+  setIsPlaying: (isPlaying: boolean, source?: string) => void;
   /** Seek to specific time */
-  seek: (time: number) => void;
+  seek: (time: number, source?: string) => void;
   /** Seek forward by amount */
-  seekForward: (amount: number) => void;
+  seekForward: (amount: number, source?: string) => void;
   /** Seek backward by amount */
-  seekBackward: (amount: number) => void;
+  seekBackward: (amount: number, source?: string) => void;
   /** Jump to start */
-  goToStart: () => void;
+  goToStart: (source?: string) => void;
   /** Jump to end */
-  goToEnd: () => void;
+  goToEnd: (source?: string) => void;
   /** Step forward one frame */
-  stepForward: (fps: number) => void;
+  stepForward: (fps: number, source?: string) => void;
   /** Step backward one frame */
-  stepBackward: (fps: number) => void;
+  stepBackward: (fps: number, source?: string) => void;
   /** Set current time (for external updates) */
-  setCurrentTime: (time: number) => void;
+  setCurrentTime: (time: number, source?: string) => void;
   /** Set duration */
   setDuration: (duration: number) => void;
   /** Set volume */
@@ -82,6 +83,7 @@ export type PlaybackStore = PlaybackState & PlaybackActions;
  */
 export interface PlaybackSeekEventDetail {
   time: number;
+  source?: string;
 }
 
 /**
@@ -89,6 +91,7 @@ export interface PlaybackSeekEventDetail {
  */
 export interface PlaybackUpdateEventDetail {
   time: number;
+  source?: string;
 }
 
 /**
@@ -116,11 +119,11 @@ const MAX_PLAYBACK_RATE = 4;
  *
  * @param time - The new playback time in seconds
  */
-function dispatchSeekEvent(time: number): void {
+function dispatchSeekEvent(time: number, source?: string): void {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
       new CustomEvent('playback-seek', {
-        detail: { time },
+        detail: { time, source },
       }),
     );
   }
@@ -132,11 +135,11 @@ function dispatchSeekEvent(time: number): void {
  *
  * @param time - The current playback time in seconds
  */
-function dispatchUpdateEvent(time: number): void {
+function dispatchUpdateEvent(time: number, source?: string): void {
   if (typeof window !== 'undefined') {
     window.dispatchEvent(
       new CustomEvent('playback-update', {
-        detail: { time },
+        detail: { time, source },
       }),
     );
   }
@@ -187,91 +190,111 @@ export const usePlaybackStore = create<PlaybackStore>()(
       });
     },
 
-    setIsPlaying: (isPlaying: boolean) => {
+    setIsPlaying: (isPlaying: boolean, source = 'set-is-playing') => {
+      const { isPlaying: prevIsPlaying, currentTime } = get();
       set((state) => {
         state.isPlaying = isPlaying;
       });
+      if (prevIsPlaying !== isPlaying) {
+        recordPlaybackTrace(
+          'play-state',
+          source,
+          currentTime,
+          currentTime,
+          isPlaying,
+        );
+      }
     },
 
     // =========================================================================
     // Seeking
     // =========================================================================
 
-    seek: (time: number) => {
-      const { duration } = get();
+    seek: (time: number, source = 'seek') => {
+      const { duration, currentTime, isPlaying } = get();
       const newTime = Math.max(0, Math.min(duration, time));
       set((state) => {
         state.currentTime = newTime;
       });
-      dispatchSeekEvent(newTime);
+      dispatchSeekEvent(newTime, source);
+      recordPlaybackTrace('seek', source, currentTime, newTime, isPlaying);
     },
 
-    seekForward: (amount: number) => {
-      const { currentTime, duration } = get();
+    seekForward: (amount: number, source = 'seek-forward') => {
+      const { currentTime, duration, isPlaying } = get();
       const newTime = Math.min(duration, currentTime + amount);
       set((state) => {
         state.currentTime = newTime;
       });
-      dispatchSeekEvent(newTime);
+      dispatchSeekEvent(newTime, source);
+      recordPlaybackTrace('seek', source, currentTime, newTime, isPlaying);
     },
 
-    seekBackward: (amount: number) => {
-      const { currentTime } = get();
+    seekBackward: (amount: number, source = 'seek-backward') => {
+      const { currentTime, isPlaying } = get();
       const newTime = Math.max(0, currentTime - amount);
       set((state) => {
         state.currentTime = newTime;
       });
-      dispatchSeekEvent(newTime);
+      dispatchSeekEvent(newTime, source);
+      recordPlaybackTrace('seek', source, currentTime, newTime, isPlaying);
     },
 
-    goToStart: () => {
+    goToStart: (source = 'go-to-start') => {
+      const { currentTime, isPlaying } = get();
       set((state) => {
         state.currentTime = 0;
       });
-      dispatchSeekEvent(0);
+      dispatchSeekEvent(0, source);
+      recordPlaybackTrace('seek', source, currentTime, 0, isPlaying);
     },
 
-    goToEnd: () => {
-      const { duration } = get();
+    goToEnd: (source = 'go-to-end') => {
+      const { duration, currentTime, isPlaying } = get();
       set((state) => {
         state.currentTime = state.duration;
       });
-      dispatchSeekEvent(duration);
+      dispatchSeekEvent(duration, source);
+      recordPlaybackTrace('seek', source, currentTime, duration, isPlaying);
     },
 
-    stepForward: (fps: number) => {
+    stepForward: (fps: number, source = 'step-forward') => {
       if (fps <= 0) return; // Guard against invalid fps
       const frameTime = 1 / fps;
-      const { currentTime, duration } = get();
+      const { currentTime, duration, isPlaying } = get();
       const newTime = Math.min(duration, currentTime + frameTime);
       set((state) => {
         state.currentTime = newTime;
       });
-      dispatchSeekEvent(newTime);
+      dispatchSeekEvent(newTime, source);
+      recordPlaybackTrace('seek', source, currentTime, newTime, isPlaying);
     },
 
-    stepBackward: (fps: number) => {
+    stepBackward: (fps: number, source = 'step-backward') => {
       if (fps <= 0) return; // Guard against invalid fps
       const frameTime = 1 / fps;
-      const { currentTime } = get();
+      const { currentTime, isPlaying } = get();
       const newTime = Math.max(0, currentTime - frameTime);
       set((state) => {
         state.currentTime = newTime;
       });
-      dispatchSeekEvent(newTime);
+      dispatchSeekEvent(newTime, source);
+      recordPlaybackTrace('seek', source, currentTime, newTime, isPlaying);
     },
 
     // =========================================================================
     // Time Updates
     // =========================================================================
 
-    setCurrentTime: (time: number) => {
+    setCurrentTime: (time: number, source = 'time-update') => {
+      const { currentTime, isPlaying } = get();
       set((state) => {
         state.currentTime = time;
       });
       // Use update event for regular time updates (during playback)
       // This is different from seek which is user-initiated
-      dispatchUpdateEvent(time);
+      dispatchUpdateEvent(time, source);
+      recordPlaybackTrace('time-update', source, currentTime, time, isPlaying);
     },
 
     setDuration: (duration: number) => {
