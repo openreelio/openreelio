@@ -9,6 +9,7 @@ import { useRef, useMemo, useCallback, useEffect, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { PlayerControls } from './PlayerControls';
+import { normalizeFileUriToPath } from '@/utils/uri';
 import type { Sequence, Asset, Clip } from '@/types';
 
 // =============================================================================
@@ -63,10 +64,12 @@ export function ProxyPreviewPlayer({
   const {
     currentTime,
     isPlaying,
+    syncWithTimeline = true,
     duration,
     volume,
     isMuted,
     playbackRate,
+    seek,
     setCurrentTime,
     setIsPlaying,
     setDuration,
@@ -147,6 +150,14 @@ export function ProxyPreviewPlayer({
   // Get video source URL for an asset
   // Prioritizes proxy URL when proxy is ready, falls back to original
   const getVideoSrc = useCallback((asset: Asset): string | null => {
+    const safeDecodeURIComponent = (input: string): string => {
+      try {
+        return decodeURIComponent(input);
+      } catch {
+        return input;
+      }
+    };
+
     // Use proxy URL only when proxy generation is complete
     const useProxy = asset.proxyStatus === 'ready' && asset.proxyUrl;
     const url = useProxy ? asset.proxyUrl : asset.uri;
@@ -165,20 +176,20 @@ export function ProxyPreviewPlayer({
       // Format might be: asset://localhost/C:/path/to/file
       const pathMatch = url.match(/^asset:\/\/localhost\/(.+)$/);
       if (pathMatch) {
-        return convertFileSrc(pathMatch[1]);
+        return convertFileSrc(safeDecodeURIComponent(pathMatch[1]));
       }
       return url;
     }
 
     // Convert file:// URL to Tauri asset protocol
     if (url.startsWith('file://')) {
-      const path = url.replace('file://', '');
+      const path = normalizeFileUriToPath(url);
       return convertFileSrc(path);
     }
 
     // Handle all other paths (Windows: C:\path, Unix: /path)
     // convertFileSrc handles both formats correctly
-    return convertFileSrc(url);
+    return convertFileSrc(safeDecodeURIComponent(url));
   }, []);
 
   // Sync video elements to timeline position
@@ -265,7 +276,10 @@ export function ProxyPreviewPlayer({
 
   // Start/stop animation frame loop
   useEffect(() => {
-    if (isPlaying) {
+    // TimelineEngine is the authoritative playback clock in editor mode.
+    // Keep this fallback loop disabled while timeline sync is enabled to avoid
+    // competing currentTime writers and playhead snap-back during scrubbing.
+    if (isPlaying && !syncWithTimeline) {
       animationFrameRef.current = requestAnimationFrame(updatePlayback);
     } else if (animationFrameRef.current) {
       cancelAnimationFrame(animationFrameRef.current);
@@ -277,7 +291,7 @@ export function ProxyPreviewPlayer({
         cancelAnimationFrame(animationFrameRef.current);
       }
     };
-  }, [isPlaying, updatePlayback]);
+  }, [isPlaying, syncWithTimeline, updatePlayback]);
 
   // Sync videos when state changes
   useEffect(() => {
@@ -392,9 +406,12 @@ export function ProxyPreviewPlayer({
     togglePlayback();
   }, [togglePlayback]);
 
-  const handleSeek = useCallback((time: number) => {
-    setCurrentTime(Math.max(0, Math.min(duration, time)));
-  }, [setCurrentTime, duration]);
+  const handleSeek = useCallback(
+    (time: number) => {
+      seek(Math.max(0, Math.min(duration, time)));
+    },
+    [seek, duration]
+  );
 
   const handleVolumeChange = useCallback((newVolume: number) => {
     setVolume(newVolume);
@@ -436,11 +453,11 @@ export function ProxyPreviewPlayer({
 
   // Handle playback end
   useEffect(() => {
-    if (isPlaying && currentTime >= duration && duration > 0) {
+    if (!syncWithTimeline && isPlaying && currentTime >= duration && duration > 0) {
       setIsPlaying(false);
       setCurrentTime(duration);
     }
-  }, [currentTime, duration, isPlaying, setIsPlaying, setCurrentTime]);
+  }, [syncWithTimeline, currentTime, duration, isPlaying, setIsPlaying, setCurrentTime]);
 
   // Keyboard shortcuts
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {

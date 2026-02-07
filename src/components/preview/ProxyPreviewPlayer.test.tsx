@@ -2,7 +2,7 @@
  * ProxyPreviewPlayer Component Tests
  */
 
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ProxyPreviewPlayer } from './ProxyPreviewPlayer';
 import type { Sequence, Asset, Track, Clip } from '@/types';
@@ -16,10 +16,12 @@ vi.mock('@tauri-apps/api/core', () => ({
 const mockPlaybackStore = {
   currentTime: 0,
   isPlaying: false,
+  syncWithTimeline: true,
   duration: 0,
   volume: 1,
   isMuted: false,
   playbackRate: 1,
+  seek: vi.fn(),
   setCurrentTime: vi.fn(),
   setIsPlaying: vi.fn(),
   setDuration: vi.fn(),
@@ -119,6 +121,7 @@ describe('ProxyPreviewPlayer', () => {
     vi.clearAllMocks();
     mockPlaybackStore.currentTime = 0;
     mockPlaybackStore.isPlaying = false;
+    mockPlaybackStore.syncWithTimeline = true;
     mockPlaybackStore.duration = 0;
   });
 
@@ -263,6 +266,41 @@ describe('ProxyPreviewPlayer', () => {
       // The player-controls component won't be rendered
       const controlsWrapper = container.querySelector('.absolute.bottom-0');
       expect(controlsWrapper).not.toBeInTheDocument();
+    });
+
+    it('uses seek action for control-based seeking', () => {
+      const sequence = createMockSequence();
+      const asset = createMockAsset();
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      mockPlaybackStore.currentTime = 5;
+      mockPlaybackStore.duration = 20;
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      fireEvent.click(screen.getByTestId('skip-forward-button'));
+
+      expect(mockPlaybackStore.seek).toHaveBeenCalledWith(15);
+      expect(mockPlaybackStore.setCurrentTime).not.toHaveBeenCalledWith(15);
+    });
+
+    it('does not start internal playback timer when timeline sync is enabled', () => {
+      const requestAnimationFrameSpy = vi
+        .spyOn(window, 'requestAnimationFrame')
+        .mockImplementation(() => 1 as unknown as number);
+
+      const sequence = createMockSequence();
+      const asset = createMockAsset();
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      mockPlaybackStore.isPlaying = true;
+      mockPlaybackStore.syncWithTimeline = true;
+      mockPlaybackStore.currentTime = 20; // Keep outside clip range to avoid HTMLMediaElement.play() in jsdom
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
+      requestAnimationFrameSpy.mockRestore();
     });
   });
 

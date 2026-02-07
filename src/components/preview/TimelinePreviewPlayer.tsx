@@ -118,6 +118,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     isPlaying,
     currentTime,
     duration,
+    syncWithTimeline,
     play,
     pause,
     seek,
@@ -481,6 +482,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   }, [onEnded]);
 
   const { isActive, frameCount, actualFps, droppedFrames } = usePlaybackLoop({
+    enabled: !syncWithTimeline,
     onFrame: handleFrame,
     duration,
     onEnded: handleEnded,
