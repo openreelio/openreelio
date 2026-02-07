@@ -58,6 +58,11 @@ const DEFAULT_CACHE_DIR = '.openreelio/waveforms';
 const DEFAULT_WAVEFORM_WIDTH = 1920;
 const DEFAULT_WAVEFORM_HEIGHT = 100;
 
+function sanitizeDimension(value: number, fallback: number): number {
+  const normalized = Number.isFinite(value) && value > 0 ? Math.round(value) : Math.round(fallback);
+  return Math.max(1, normalized);
+}
+
 // =============================================================================
 // Hook
 // =============================================================================
@@ -147,7 +152,9 @@ export function useAudioWaveform(
       width: number = defaultWidth,
       height: number = defaultHeight
     ): Promise<string | null> => {
-      const cacheKey = getCacheKey(assetId, width, height);
+      const safeWidth = sanitizeDimension(width, defaultWidth);
+      const safeHeight = sanitizeDimension(height, defaultHeight);
+      const cacheKey = getCacheKey(assetId, safeWidth, safeHeight);
 
       // Check cache first
       const cached = waveformCache.current.get(cacheKey);
@@ -170,7 +177,7 @@ export function useAudioWaveform(
         setError(null);
 
         try {
-          const outputPath = getOutputPath(assetId, width, height);
+          const outputPath = getOutputPath(assetId, safeWidth, safeHeight);
 
           // Handle file:// URI prefix
           let cleanInputPath = inputPath;
@@ -181,15 +188,15 @@ export function useAudioWaveform(
           await invoke('generate_waveform', {
             inputPath: cleanInputPath,
             outputPath,
-            width,
-            height,
+            width: safeWidth,
+            height: safeHeight,
           });
 
           // Add to cache
           waveformCache.current.set(cacheKey, {
             imagePath: outputPath,
-            width,
-            height,
+            width: safeWidth,
+            height: safeHeight,
             timestamp: Date.now(),
           });
 
