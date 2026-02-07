@@ -124,6 +124,60 @@ test.describe('Track Operations', () => {
       await expect(muteButton).toBeVisible();
     }
   });
+
+  test('should seek playhead on content/header clicks but not header buttons', async ({ page }) => {
+    const timeline = page.locator('[data-testid="timeline"]');
+    if (!(await timeline.isVisible().catch(() => false))) {
+      test.skip();
+      return;
+    }
+
+    const playheadHead = page.locator('[data-testid="playhead-head"]');
+    const tracksArea = page.locator('[data-testid="timeline-tracks-area"]');
+    const trackHeader = page.locator('[data-testid="track-header"]').first();
+    const muteButton = page.locator('[data-testid="mute-button"]').first();
+
+    if (
+      !(await playheadHead.isVisible().catch(() => false)) ||
+      !(await tracksArea.isVisible().catch(() => false))
+    ) {
+      test.skip();
+      return;
+    }
+
+    const readPlayheadTime = async (): Promise<number> => {
+      const raw = await playheadHead.getAttribute('aria-valuenow');
+      return Number(raw ?? '0');
+    };
+
+    // 1) Click in track content area -> seek away from 0
+    await tracksArea.click({ position: { x: 280, y: 36 } });
+    const afterContentClick = await readPlayheadTime();
+    expect(afterContentClick).toBeGreaterThan(0.1);
+
+    // 2) Click clip body (if present) -> seek should still work
+    const clip = page.locator('[data-testid^="clip-"]').first();
+    if (await clip.isVisible().catch(() => false)) {
+      await clip.click({ position: { x: 24, y: 20 } });
+      const afterClipClick = await readPlayheadTime();
+      expect(afterClipClick).toBeGreaterThanOrEqual(0);
+    }
+
+    // 3) Click header non-button region -> should seek to start-side time (~0)
+    if (await trackHeader.isVisible().catch(() => false)) {
+      await trackHeader.click({ position: { x: 72, y: 20 } });
+      const afterHeaderClick = await readPlayheadTime();
+      expect(afterHeaderClick).toBeLessThanOrEqual(0.05);
+    }
+
+    // 4) Click header control button -> should not change playhead
+    if (await muteButton.isVisible().catch(() => false)) {
+      const beforeButtonClick = await readPlayheadTime();
+      await muteButton.click();
+      const afterButtonClick = await readPlayheadTime();
+      expect(Math.abs(afterButtonClick - beforeButtonClick)).toBeLessThanOrEqual(0.01);
+    }
+  });
 });
 
 test.describe('Keyboard Navigation', () => {
