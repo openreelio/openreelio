@@ -85,14 +85,15 @@ export class Thinker {
    *
    * @param input - User's natural language input
    * @param context - Current agent context
+   * @param history - Optional conversation history for multi-turn context
    * @returns Structured thought with understanding, requirements, and approach
    * @throws ThinkingTimeoutError if operation times out
    * @throws UnderstandingError if LLM fails or returns invalid response
    */
-  async think(input: string, context: AgentContext): Promise<Thought> {
+  async think(input: string, context: AgentContext, history?: LLMMessage[]): Promise<Thought> {
     this.abortController = new AbortController();
 
-    const messages = this.buildMessages(input, context);
+    const messages = this.buildMessages(input, context, history);
     const schema = this.buildThoughtSchema();
 
     try {
@@ -130,11 +131,12 @@ export class Thinker {
   async thinkWithStreaming(
     input: string,
     context: AgentContext,
-    onProgress: (chunk: string) => void
+    onProgress: (chunk: string) => void,
+    history?: LLMMessage[]
   ): Promise<Thought> {
     this.abortController = new AbortController();
 
-    const messages = this.buildMessages(input, context);
+    const messages = this.buildMessages(input, context, history);
 
     try {
       // First, stream the thinking process for UI feedback
@@ -179,15 +181,21 @@ export class Thinker {
   // ===========================================================================
 
   /**
-   * Build messages for LLM including system prompt and user input
+   * Build messages for LLM including system prompt, optional history, and user input
    */
-  private buildMessages(input: string, context: AgentContext): LLMMessage[] {
+  private buildMessages(input: string, context: AgentContext, history?: LLMMessage[]): LLMMessage[] {
     const systemPrompt = this.buildSystemPrompt(context);
-
-    return [
+    const messages: LLMMessage[] = [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: input },
     ];
+
+    // Insert conversation history between system prompt and current input
+    if (history && history.length > 0) {
+      messages.push(...history);
+    }
+
+    messages.push({ role: 'user', content: input });
+    return messages;
   }
 
   /**

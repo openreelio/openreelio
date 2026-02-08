@@ -272,6 +272,76 @@ describe('Thinker', () => {
     });
   });
 
+  describe('conversation history', () => {
+    it('should include history messages between system prompt and user input', async () => {
+      mockLLM.setStructuredResponse({
+        structured: {
+          understanding: 'Follow-up to previous request',
+          requirements: [],
+          uncertainties: [],
+          approach: 'Continue previous work',
+          needsMoreInfo: false,
+        } as Thought,
+      });
+
+      const history = [
+        { role: 'user' as const, content: 'Split the clip at 5 seconds' },
+        { role: 'assistant' as const, content: 'Done! I split clip_001 at 5s.' },
+      ];
+
+      await thinker.think('Now move the second half to the end', context, history);
+
+      const request = mockLLM.getLastRequest();
+      expect(request).toBeDefined();
+      const messages = request!.messages;
+
+      // System prompt first
+      expect(messages[0].role).toBe('system');
+      // Then history
+      expect(messages[1].role).toBe('user');
+      expect(messages[1].content).toBe('Split the clip at 5 seconds');
+      expect(messages[2].role).toBe('assistant');
+      expect(messages[2].content).toBe('Done! I split clip_001 at 5s.');
+      // Then current input
+      expect(messages[3].role).toBe('user');
+      expect(messages[3].content).toBe('Now move the second half to the end');
+    });
+
+    it('should work without history (backward compatible)', async () => {
+      mockLLM.setStructuredResponse({
+        structured: {
+          understanding: 'test',
+          requirements: [],
+          uncertainties: [],
+          approach: 'test',
+          needsMoreInfo: false,
+        } as Thought,
+      });
+
+      await thinker.think('test', context);
+
+      const request = mockLLM.getLastRequest();
+      expect(request!.messages).toHaveLength(2); // system + user
+    });
+
+    it('should handle empty history array', async () => {
+      mockLLM.setStructuredResponse({
+        structured: {
+          understanding: 'test',
+          requirements: [],
+          uncertainties: [],
+          approach: 'test',
+          needsMoreInfo: false,
+        } as Thought,
+      });
+
+      await thinker.think('test', context, []);
+
+      const request = mockLLM.getLastRequest();
+      expect(request!.messages).toHaveLength(2); // system + user
+    });
+  });
+
   describe('thought validation', () => {
     it('should validate thought has required fields', async () => {
       mockLLM.setStructuredResponse({

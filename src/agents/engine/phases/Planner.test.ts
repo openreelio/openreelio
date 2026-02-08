@@ -397,6 +397,66 @@ describe('Planner', () => {
     });
   });
 
+  describe('conversation history', () => {
+    it('should include history messages between system prompt and user input', async () => {
+      const mockPlan: Plan = {
+        goal: 'Move second half to end',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'move_clip',
+            args: { clipId: 'clip_002', position: 30 },
+            description: 'Move clip to end',
+            riskLevel: 'low',
+            estimatedDuration: 1000,
+          },
+        ],
+        estimatedTotalDuration: 1000,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo move',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      const history = [
+        { role: 'user' as const, content: 'Split the clip at 5 seconds' },
+        { role: 'assistant' as const, content: 'Done! Split clip_001 at 5s.' },
+      ];
+
+      await planner.plan(sampleThought, context, history);
+
+      const request = mockLLM.getLastRequest();
+      expect(request).toBeDefined();
+      const messages = request!.messages;
+
+      // System prompt first
+      expect(messages[0].role).toBe('system');
+      // Then history
+      expect(messages[1].role).toBe('user');
+      expect(messages[1].content).toBe('Split the clip at 5 seconds');
+      expect(messages[2].role).toBe('assistant');
+      expect(messages[2].content).toBe('Done! Split clip_001 at 5s.');
+      // Then current planning input (the thought prompt)
+      expect(messages[3].role).toBe('user');
+    });
+
+    it('should work without history (backward compatible)', async () => {
+      const mockPlan: Plan = {
+        goal: 'Test',
+        steps: [],
+        estimatedTotalDuration: 0,
+        requiresApproval: false,
+        rollbackStrategy: 'None',
+      };
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await planner.plan(sampleThought, context);
+
+      const request = mockLLM.getLastRequest();
+      expect(request!.messages).toHaveLength(2); // system + user
+    });
+  });
+
   describe('error handling', () => {
     it('should throw PlanningTimeoutError on timeout', async () => {
       const shortTimeoutPlanner = createPlanner(mockLLM, mockToolExecutor, {
