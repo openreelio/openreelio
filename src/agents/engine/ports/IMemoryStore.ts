@@ -24,7 +24,7 @@ export interface ConversationMemory {
   /** Project identifier */
   projectId: string;
   /** Conversation messages */
-  messages: ConversationMessage[];
+  messages: MemoryConversationMessage[];
   /** Context at conversation start */
   initialContext: AgentContext;
   /** When conversation started */
@@ -36,9 +36,11 @@ export interface ConversationMemory {
 }
 
 /**
- * A message in conversation memory
+ * A message in conversation memory (legacy memory-layer type).
+ * Not to be confused with ConversationMessage in core/conversation.ts
+ * which is the unified multi-part message model.
  */
-export interface ConversationMessage {
+export interface MemoryConversationMessage {
   /** Message role */
   role: 'user' | 'assistant' | 'system';
   /** Message content */

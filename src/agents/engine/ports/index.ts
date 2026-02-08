@@ -42,7 +42,7 @@ export {
 export {
   type IMemoryStore,
   type ConversationMemory,
-  type ConversationMessage,
+  type MemoryConversationMessage,
   type UserPreferences,
   type ProjectMemory,
   type MemoryQueryOptions,
