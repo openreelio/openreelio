@@ -18,6 +18,7 @@ import {
   cleanupOldHistories,
 } from '@/services/chatStorage';
 import { registerEditingTools, globalToolRegistry } from '@/agents';
+import { useConversationStore } from './conversationStore';
 
 const logger = createLogger('AIStore');
 
@@ -761,7 +762,7 @@ export const useAIStore = create<AIState>()(
         });
       },
 
-      // Add chat message
+      // Add chat message (bridges to conversationStore for unified storage)
       addChatMessage: (role: 'user' | 'assistant' | 'system', content: string, proposal?: AIProposal) => {
         const message: ChatMessage = {
           id: crypto.randomUUID(),
@@ -778,6 +779,25 @@ export const useAIStore = create<AIState>()(
             state.chatMessages = state.chatMessages.slice(-100);
           }
         });
+
+        // Bridge: also write to conversationStore for unified access
+        try {
+          const convStore = useConversationStore.getState();
+          if (convStore.activeConversation) {
+            if (role === 'user') {
+              convStore.addUserMessage(content);
+            } else if (role === 'system') {
+              convStore.addSystemMessage(content);
+            } else {
+              // For assistant messages, create a complete message with text
+              const msgId = convStore.startAssistantMessage();
+              convStore.appendPart(msgId, { type: 'text', content });
+              convStore.finalizeMessage(msgId);
+            }
+          }
+        } catch {
+          // Silently ignore bridge errors to preserve backward compatibility
+        }
       },
 
       // Clear chat history
@@ -803,6 +823,13 @@ export const useAIStore = create<AIState>()(
           projectId,
           messageCount: messages.length,
         });
+
+        // Bridge: also load conversation for the project
+        try {
+          useConversationStore.getState().loadForProject(projectId);
+        } catch {
+          // Silently ignore bridge errors
+        }
       },
 
       // Set current project ID (without loading history)

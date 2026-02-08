@@ -23,7 +23,9 @@ import {
   ToolExecutionError,
   ExecutionTimeoutError,
   DependencyError,
+  DoomLoopError,
 } from '../core/errors';
+import { DoomLoopDetector } from '../core/DoomLoopDetector';
 
 // =============================================================================
 // Types
@@ -130,12 +132,14 @@ export interface ExecutionResult {
 export class Executor {
   private readonly toolExecutor: IToolExecutor;
   private readonly config: Required<ExecutorConfig>;
+  private readonly doomLoopDetector: DoomLoopDetector;
   private abortController: AbortController | null = null;
   private isAborted = false;
 
   constructor(toolExecutor: IToolExecutor, config: ExecutorConfig = {}) {
     this.toolExecutor = toolExecutor;
     this.config = { ...DEFAULT_CONFIG, ...config };
+    this.doomLoopDetector = new DoomLoopDetector(3);
   }
 
   // ===========================================================================
@@ -157,6 +161,7 @@ export class Executor {
   ): Promise<ExecutionResult> {
     this.abortController = new AbortController();
     this.isAborted = false;
+    this.doomLoopDetector.reset();
 
     const startTime = Date.now();
     const completedSteps: StepExecutionRecord[] = [];
@@ -198,6 +203,11 @@ export class Executor {
           failedCount: failedSteps.length,
           message: step.description,
         });
+
+        // Check for doom loop before execution
+        if (this.doomLoopDetector.check(step.tool, step.args)) {
+          throw new DoomLoopError(step.tool, 3);
+        }
 
         // Execute the step
         const record = await this.executeStep(step, context);

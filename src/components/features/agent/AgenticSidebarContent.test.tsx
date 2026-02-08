@@ -2,9 +2,10 @@
  * AgenticSidebarContent Tests
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { AgenticSidebarContent } from './AgenticSidebarContent';
+import { useConversationStore } from '@/stores/conversationStore';
 
 // Mock feature flags
 vi.mock('@/config/featureFlags', () => ({
@@ -101,6 +102,11 @@ vi.mock('@/stores', () => ({
 describe('AgenticSidebarContent', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    useConversationStore.getState().loadForProject('test-project');
+  });
+
+  afterEach(() => {
+    useConversationStore.getState().clearConversation();
   });
 
   describe('rendering', () => {

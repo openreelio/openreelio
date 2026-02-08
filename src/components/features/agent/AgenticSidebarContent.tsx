@@ -2,17 +2,15 @@
  * AgenticSidebarContent Component
  *
  * Content for the AI sidebar when the agentic engine is enabled.
- * Provides the full Think-Plan-Act-Observe loop experience.
+ * Uses useAgenticLoopWithStores for real store integration.
  */
 
 import { useMemo, useCallback } from 'react';
 import { AgenticChat } from './AgenticChat';
 import { createTauriLLMAdapter } from '@/agents/engine/adapters/llm/TauriLLMAdapter';
 import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRegistryAdapter';
-import type { AgentContext } from '@/agents/engine';
 import { globalToolRegistry } from '@/agents';
 import { initializeAgentSystem } from '@/stores/aiStore';
-import { useProjectStore } from '@/stores';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('AgenticSidebarContent');
@@ -43,68 +41,16 @@ export function AgenticSidebarContent({
   // Adapters
   // ===========================================================================
 
-  // Create LLM adapter (memoized to prevent recreation)
   const llmClient = useMemo(() => {
     logger.info('Creating TauriLLMAdapter');
     return createTauriLLMAdapter();
   }, []);
 
-  // Create tool executor adapter (memoized)
   const toolExecutor = useMemo(() => {
     logger.info('Creating ToolRegistryAdapter');
     initializeAgentSystem();
     return createToolRegistryAdapter(globalToolRegistry);
   }, []);
-
-  // ===========================================================================
-  // Context
-  // ===========================================================================
-
-  // Get project context from stores
-  const activeSequenceId = useProjectStore((state) => state.activeSequenceId);
-  const sequences = useProjectStore((state) => state.sequences);
-  const assets = useProjectStore((state) => state.assets);
-
-  // Build context for the agentic loop
-  const context = useMemo((): Partial<AgentContext> => {
-    const activeSequence = activeSequenceId ? sequences.get(activeSequenceId) : undefined;
-
-    const timelineDuration = (() => {
-      if (!activeSequence) return 0;
-      let maxEnd = 0;
-      for (const track of activeSequence.tracks) {
-        for (const clip of track.clips) {
-          maxEnd = Math.max(maxEnd, clip.place.timelineInSec + clip.place.durationSec);
-        }
-      }
-      return maxEnd;
-    })();
-
-    return {
-      projectId: 'current', // TODO: Get from project store when available
-      sequenceId: activeSequenceId ?? undefined,
-      playheadPosition: 0, // TODO: Get from timeline store
-      timelineDuration,
-      availableAssets: Array.from(assets.values())
-        .filter(
-          (asset) =>
-            asset.kind === 'video' || asset.kind === 'audio' || asset.kind === 'image'
-        )
-        .map((asset) => ({
-          id: asset.id,
-          name: asset.name,
-          type: asset.kind as 'video' | 'audio' | 'image',
-          duration: asset.durationSec,
-        })),
-      availableTracks: activeSequence?.tracks.map((track) => ({
-        id: track.id,
-        name: track.name || `Track ${track.id}`,
-        type: track.kind === 'audio' ? 'audio' : 'video',
-        clipCount: track.clips.length,
-      })) ?? [],
-      availableTools: globalToolRegistry.listAll().map((t) => t.name),
-    };
-  }, [activeSequenceId, sequences, assets]);
 
   // ===========================================================================
   // Handlers
@@ -142,13 +88,9 @@ export function AgenticSidebarContent({
       <AgenticChat
         llmClient={llmClient}
         toolExecutor={toolExecutor}
-        context={context}
         onSubmit={handleSubmit}
         onComplete={handleComplete}
         onError={handleError}
-        showThinking={true}
-        showPlan={true}
-        showActions={true}
         placeholder="Describe what you want to edit..."
         className="flex-1"
       />

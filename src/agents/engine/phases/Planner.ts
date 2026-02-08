@@ -93,14 +93,15 @@ export class Planner {
    *
    * @param thought - Analyzed thought from Thinker phase
    * @param context - Current agent context
+   * @param history - Optional conversation history for multi-turn context
    * @returns Validated execution plan
    * @throws PlanningTimeoutError if operation times out
    * @throws PlanValidationError if plan is invalid
    */
-  async plan(thought: Thought, context: AgentContext): Promise<Plan> {
+  async plan(thought: Thought, context: AgentContext, history?: LLMMessage[]): Promise<Plan> {
     this.abortController = new AbortController();
 
-    const messages = this.buildMessages(thought, context);
+    const messages = this.buildMessages(thought, context, history);
     const schema = this.buildPlanSchema();
 
     try {
@@ -140,11 +141,12 @@ export class Planner {
   async planWithStreaming(
     thought: Thought,
     context: AgentContext,
-    onProgress: (chunk: string) => void
+    onProgress: (chunk: string) => void,
+    history?: LLMMessage[]
   ): Promise<Plan> {
     this.abortController = new AbortController();
 
-    const messages = this.buildMessages(thought, context);
+    const messages = this.buildMessages(thought, context, history);
 
     try {
       // Stream the planning process for UI feedback
@@ -191,16 +193,22 @@ export class Planner {
   // ===========================================================================
 
   /**
-   * Build messages for LLM including system prompt and thought context
+   * Build messages for LLM including system prompt, optional history, and thought context
    */
-  private buildMessages(thought: Thought, context: AgentContext): LLMMessage[] {
+  private buildMessages(thought: Thought, context: AgentContext, history?: LLMMessage[]): LLMMessage[] {
     const systemPrompt = this.buildSystemPrompt(context);
     const userPrompt = this.buildUserPrompt(thought);
-
-    return [
+    const messages: LLMMessage[] = [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt },
     ];
+
+    // Insert conversation history between system prompt and current input
+    if (history && history.length > 0) {
+      messages.push(...history);
+    }
+
+    messages.push({ role: 'user', content: userPrompt });
+    return messages;
   }
 
   /**

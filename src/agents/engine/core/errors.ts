@@ -445,6 +445,37 @@ export class DependencyError extends AgentError {
 }
 
 // =============================================================================
+// Doom Loop Error
+// =============================================================================
+
+/**
+ * Agent is stuck in a repetitive loop calling the same tool
+ */
+export class DoomLoopError extends AgentError {
+  readonly code = 'DOOM_LOOP_DETECTED';
+  readonly phase: AgentPhase = 'executing';
+  readonly recoverable = false;
+  readonly tool: string;
+  readonly consecutiveCalls: number;
+
+  constructor(tool: string, consecutiveCalls: number) {
+    super(
+      `Doom loop detected: tool '${tool}' called ${consecutiveCalls} consecutive times with identical arguments`
+    );
+    this.tool = tool;
+    this.consecutiveCalls = consecutiveCalls;
+  }
+
+  toJSON(): Record<string, unknown> {
+    return {
+      ...super.toJSON(),
+      tool: this.tool,
+      consecutiveCalls: this.consecutiveCalls,
+    };
+  }
+}
+
+// =============================================================================
 // Observation Errors
 // =============================================================================
 

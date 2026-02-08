@@ -97,6 +97,9 @@ export {
   ObservationError,
   MaxIterationsError,
 
+  // Doom loop
+  DoomLoopError,
+
   // LLM errors
   LLMError,
   RateLimitError,
@@ -136,7 +139,7 @@ export {
 export {
   type IMemoryStore,
   type ConversationMemory,
-  type ConversationMessage,
+  type MemoryConversationMessage,
   type UserPreferences,
   type ProjectMemory,
   type MemoryQueryOptions,
@@ -155,6 +158,46 @@ export {
   deepCloneState,
   calculateCheckpointDiff,
 } from './ports/ICheckpointStore';
+
+// =============================================================================
+// Conversation Model
+// =============================================================================
+export {
+  // Types
+  type MessagePart,
+  type TextPart,
+  type ThinkingPart,
+  type PlanPart,
+  type ToolCallPart,
+  type ToolResultPart,
+  type ErrorPart,
+  type ApprovalPart,
+  type ConversationRole,
+  type TokenUsage,
+  type ConversationMessage,
+  type Conversation,
+
+  // Factories
+  createConversation,
+  createUserMessage,
+  createAssistantMessage,
+  createSystemMessage,
+  createTextPart,
+  createThinkingPart,
+  createPlanPart,
+  createToolCallPart,
+  createToolResultPart,
+  createErrorPart,
+  createApprovalPart,
+
+  // Conversion
+  toSimpleLLMMessage,
+  toSimpleLLMMessages,
+
+  // Validation
+  isValidMessagePart,
+  isValidConversationMessage,
+} from './core/conversation';
 
 // =============================================================================
 // Phase Implementations
