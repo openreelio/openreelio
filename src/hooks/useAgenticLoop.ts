@@ -25,7 +25,7 @@
  * ```
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   createAgenticEngine,
   createEmptyContext,
@@ -36,13 +36,20 @@ import {
   type IToolExecutor,
   type AgentPhase,
   type AgentContext,
+  type LLMMessage,
   type Thought,
   type Plan,
 } from '@/agents/engine';
 import { isAgenticEngineEnabled } from '@/config/featureFlags';
+import { useConversationStore } from '@/stores/conversationStore';
+import { usePlaybackStore } from '@/stores/playbackStore';
+import { useTimelineStore } from '@/stores/timelineStore';
+import { useProjectStore } from '@/stores';
+import { globalToolRegistry } from '@/agents';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('useAgenticLoop');
+const CONTEXT_HISTORY_LIMIT = 30;
 
 // =============================================================================
 // Types
@@ -105,6 +112,8 @@ export interface UseAgenticLoopReturn {
   approvePlan: () => void;
   /** Reject pending plan */
   rejectPlan: (reason?: string) => void;
+  /** Retry with last user input */
+  retry: () => Promise<AgentRunResult | null>;
 
   // Feature flag
   /** Whether the agentic engine is enabled */
@@ -274,8 +283,14 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       });
       engineRef.current = engine;
 
-      // Run engine
-      const result = await engine.run(input, context, executionContext, handleEvent);
+      // Get conversation history for multi-turn context
+      const rawHistory = useConversationStore
+        .getState()
+        .getMessagesForContext(CONTEXT_HISTORY_LIMIT);
+      const conversationHistory = trimDuplicatedTailUserMessageForContext(rawHistory, input);
+
+      // Run engine with conversation history
+      const result = await engine.run(input, context, executionContext, handleEvent, conversationHistory);
 
       if (!abortedRef.current) {
         setPhase(result.finalState.phase);
@@ -335,6 +350,16 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     approvalResolverRef.current = null;
   }, []);
 
+  // Retry with last user input
+  const retry = useCallback(async (): Promise<AgentRunResult | null> => {
+    const lastInput = useConversationStore.getState().getLastUserInput();
+    if (!lastInput) {
+      logger.warn('No previous input to retry');
+      return null;
+    }
+    return run(lastInput);
+  }, [run]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -360,6 +385,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     reset,
     approvePlan,
     rejectPlan,
+    retry,
 
     // Feature flag
     isEnabled,
@@ -372,12 +398,82 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
 
 /**
  * Extended hook that integrates with global stores.
- * Use this when you want automatic context from stores.
+ * Reads playbackStore, timelineStore, projectStore to build real AgentContext.
  */
 export function useAgenticLoopWithStores(
-  options: Omit<UseAgenticLoopOptions, 'context'>
+  options: Omit<UseAgenticLoopOptions, 'context'> & { context?: Partial<AgentContext> }
 ): UseAgenticLoopReturn {
-  // This would integrate with stores like useProjectStore, useTimelineStore, etc.
-  // For now, just pass through to the base hook
-  return useAgenticLoop(options);
+  const externalContext = options.context;
+  // Read from stores
+  const currentTime = usePlaybackStore((s) => s.currentTime);
+  const duration = usePlaybackStore((s) => s.duration);
+  const selectedClipIds = useTimelineStore((s) => s.selectedClipIds);
+  const selectedTrackIds = useTimelineStore((s) => s.selectedTrackIds);
+  const activeSequenceId = useProjectStore((s) => s.activeSequenceId);
+  const sequences = useProjectStore((s) => s.sequences);
+  const assets = useProjectStore((s) => s.assets);
+
+  // Build real context from stores
+  const context = useMemo((): Partial<AgentContext> => {
+    const activeSequence = activeSequenceId ? sequences.get(activeSequenceId) : undefined;
+
+    const storeContext: Partial<AgentContext> = {
+      projectId: 'current',
+      sequenceId: activeSequenceId ?? undefined,
+      playheadPosition: currentTime,
+      timelineDuration: duration,
+      selectedClips: selectedClipIds,
+      selectedTracks: selectedTrackIds,
+      availableAssets: Array.from(assets.values())
+        .filter((a) => a.kind === 'video' || a.kind === 'audio' || a.kind === 'image')
+        .map((a) => ({
+          id: a.id,
+          name: a.name,
+          type: a.kind as 'video' | 'audio' | 'image',
+          duration: a.durationSec,
+        })),
+      availableTracks: activeSequence?.tracks.map((t) => ({
+        id: t.id,
+        name: t.name || `Track ${t.id}`,
+        type: t.kind === 'audio' ? 'audio' as const : 'video' as const,
+        clipCount: t.clips.length,
+      })) ?? [],
+      availableTools: globalToolRegistry.listAll().map((t) => t.name),
+    };
+    return {
+      ...storeContext,
+      ...externalContext,
+      projectId: externalContext?.projectId ?? storeContext.projectId,
+    };
+  }, [
+    currentTime,
+    duration,
+    selectedClipIds,
+    selectedTrackIds,
+    activeSequenceId,
+    sequences,
+    assets,
+    externalContext,
+  ]);
+
+  return useAgenticLoop({
+    ...options,
+    context,
+  });
+}
+
+export function trimDuplicatedTailUserMessageForContext(
+  history: LLMMessage[],
+  input: string
+): LLMMessage[] {
+  if (!history || history.length === 0) {
+    return history;
+  }
+
+  const last = history[history.length - 1];
+  if (last.role === 'user' && last.content.trim() === input.trim()) {
+    return history.slice(0, -1);
+  }
+
+  return history;
 }

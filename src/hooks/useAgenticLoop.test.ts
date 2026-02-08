@@ -7,8 +7,10 @@
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useAgenticLoop } from './useAgenticLoop';
+import { useAgenticLoop, trimDuplicatedTailUserMessageForContext } from './useAgenticLoop';
+import type { LLMMessage } from '@/agents/engine';
 import { createMockLLMAdapter, createMockToolExecutor } from '@/agents/engine';
+import { useConversationStore } from '@/stores/conversationStore';
 
 // Mock the feature flags
 vi.mock('@/config/featureFlags', () => ({
@@ -36,6 +38,7 @@ describe('useAgenticLoop', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    useConversationStore.getState().clearConversation();
   });
 
   describe('initial state', () => {
@@ -161,6 +164,18 @@ describe('useAgenticLoop', () => {
 
       // Hook should initialize without errors
       expect(result.current.phase).toBe('idle');
+    });
+
+    it('should trim duplicate trailing user message from context history', () => {
+      const history: LLMMessage[] = [
+        { role: 'user', content: 'First' },
+        { role: 'assistant', content: 'Done' },
+        { role: 'user', content: 'Split clip at 5s' },
+      ];
+
+      const trimmed = trimDuplicatedTailUserMessageForContext(history, 'Split clip at 5s');
+      expect(trimmed).toHaveLength(2);
+      expect(trimmed[trimmed.length - 1]).toEqual({ role: 'assistant', content: 'Done' });
     });
   });
 
