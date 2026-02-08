@@ -185,7 +185,9 @@ export function AgenticChat({
   }, [rejectPlan, addSystemMessage]);
 
   const handleRetry = useCallback(() => {
-    retry();
+    void retry().catch(() => {
+      // errors are surfaced via onError callback
+    });
   }, [retry]);
 
   // ===========================================================================

@@ -149,24 +149,26 @@ function saveToStorage(conversation: Conversation): void {
 // Debounced Save
 // =============================================================================
 
-let saveTimeoutId: ReturnType<typeof setTimeout> | null = null;
+const saveTimeoutByProject = new Map<string, ReturnType<typeof setTimeout>>();
 
 /**
- * Schedule a debounced save. Reads the latest conversation from the
- * store when the timeout fires, so rapid mutations within the debounce
- * window all get persisted (not just the first snapshot).
+ * Schedule a debounced save scoped to a specific project.
+ * Each project has its own timeout, preventing fast project switches
+ * from dropping pending saves for the previous project.
  */
-function debouncedSave(getLatest: () => Conversation | null): void {
-  if (saveTimeoutId) {
-    clearTimeout(saveTimeoutId);
+function debouncedSave(projectId: string, getLatest: () => Conversation | null): void {
+  const existing = saveTimeoutByProject.get(projectId);
+  if (existing) {
+    clearTimeout(existing);
   }
-  saveTimeoutId = setTimeout(() => {
+  const timeoutId = setTimeout(() => {
     const conversation = getLatest();
-    if (conversation) {
+    if (conversation && conversation.projectId === projectId) {
       saveToStorage(conversation);
     }
-    saveTimeoutId = null;
+    saveTimeoutByProject.delete(projectId);
   }, SAVE_DEBOUNCE_MS);
+  saveTimeoutByProject.set(projectId, timeoutId);
 }
 
 // =============================================================================
@@ -208,7 +210,8 @@ export const useConversationStore = create<ConversationStore>()(
         state.activeConversation.messages.push(msg);
         state.activeConversation.updatedAt = Date.now();
       });
-      debouncedSave(() => get().activeConversation);
+      const pid = get().activeProjectId;
+      if (pid) debouncedSave(pid, () => get().activeConversation);
       return msg.id;
     },
 
@@ -263,7 +266,8 @@ export const useConversationStore = create<ConversationStore>()(
         state.streamingMessageId = null;
         state.activeConversation.updatedAt = Date.now();
       });
-      debouncedSave(() => get().activeConversation);
+      const pid = get().activeProjectId;
+      if (pid) debouncedSave(pid, () => get().activeConversation);
     },
 
     addSystemMessage: (content: string) => {
@@ -273,7 +277,8 @@ export const useConversationStore = create<ConversationStore>()(
         state.activeConversation.messages.push(msg);
         state.activeConversation.updatedAt = Date.now();
       });
-      debouncedSave(() => get().activeConversation);
+      const pid = get().activeProjectId;
+      if (pid) debouncedSave(pid, () => get().activeConversation);
       return msg.id;
     },
 

@@ -350,7 +350,7 @@ export function toSimpleLLMMessages(
   maxMessages?: number
 ): LLMMessage[] {
   let filtered = messages.filter(
-    (msg) => msg.parts.length > 0
+    (msg) => msg.role !== 'system' && msg.parts.length > 0
   );
 
   if (maxMessages !== undefined && filtered.length > maxMessages) {

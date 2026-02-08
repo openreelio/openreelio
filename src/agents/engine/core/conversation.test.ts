@@ -349,6 +349,19 @@ describe('Conversation Model', () => {
       expect(llmMessages[1].content).toBe('Fourth');
     });
 
+    it('should filter out system messages', () => {
+      const messages = [
+        createUserMessage('Hello'),
+        createSystemMessage('System note'),
+        createUserMessage('World'),
+      ];
+
+      const llmMessages = toSimpleLLMMessages(messages);
+      expect(llmMessages).toHaveLength(2);
+      expect(llmMessages[0].content).toBe('Hello');
+      expect(llmMessages[1].content).toBe('World');
+    });
+
     it('should handle empty array', () => {
       const llmMessages = toSimpleLLMMessages([]);
       expect(llmMessages).toEqual([]);

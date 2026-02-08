@@ -23,6 +23,7 @@ interface ToolCallRecord {
 export class DoomLoopDetector {
   private readonly threshold: number;
   private readonly recentCalls: ToolCallRecord[] = [];
+  private totalCalls = 0;
 
   /**
    * @param threshold - Number of consecutive identical calls to trigger detection (default: 3)
@@ -44,16 +45,20 @@ export class DoomLoopDetector {
   check(tool: string, args: Record<string, unknown>): boolean {
     const argsHash = this.hashArgs(args);
     this.recentCalls.push({ tool, argsHash, timestamp: Date.now() });
+    this.totalCalls += 1;
 
-    // Only check the last N calls
+    // Cap buffer to threshold size to prevent unbounded growth
+    if (this.recentCalls.length > this.threshold) {
+      this.recentCalls.shift();
+    }
+
+    // Need exactly threshold calls to detect
     if (this.recentCalls.length < this.threshold) {
       return false;
     }
 
-    const lastN = this.recentCalls.slice(-this.threshold);
-    const firstCall = lastN[0];
-
-    return lastN.every(
+    const firstCall = this.recentCalls[0];
+    return this.recentCalls.every(
       (call) => call.tool === firstCall.tool && call.argsHash === firstCall.argsHash
     );
   }
@@ -63,13 +68,14 @@ export class DoomLoopDetector {
    */
   reset(): void {
     this.recentCalls.length = 0;
+    this.totalCalls = 0;
   }
 
   /**
-   * Get the number of recorded calls.
+   * Get the total number of recorded calls.
    */
   get callCount(): number {
-    return this.recentCalls.length;
+    return this.totalCalls;
   }
 
   /**
