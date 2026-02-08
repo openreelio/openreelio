@@ -2,26 +2,20 @@
  * AgenticChat Component
  *
  * Main chat interface for the agentic AI loop.
- * Integrates with useAgenticLoop to provide a complete chat experience.
+ * Reads messages from conversationStore (unified message model)
+ * and renders them with ConversationMessageItem.
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { useAgenticLoop, type UseAgenticLoopOptions } from '@/hooks/useAgenticLoop';
+import { useAgenticLoopWithStores, type UseAgenticLoopOptions } from '@/hooks/useAgenticLoop';
+import { useAgentEventHandler } from '@/hooks/useAgentEventHandler';
+import { useConversationStore } from '@/stores/conversationStore';
 import type { ILLMClient, IToolExecutor, AgentContext, AgenticEngineConfig } from '@/agents/engine';
-import { ThinkingIndicator } from './ThinkingIndicator';
-import { PlanViewer } from './PlanViewer';
-import { ActionFeed } from './ActionFeed';
+import { ConversationMessageItem } from './ConversationMessageItem';
 
 // =============================================================================
 // Types
 // =============================================================================
-
-interface ChatMessage {
-  id: string;
-  type: 'user' | 'assistant' | 'system';
-  content: string;
-  timestamp: number;
-}
 
 export interface AgenticChatProps {
   /** LLM client to use */
@@ -42,12 +36,6 @@ export interface AgenticChatProps {
   placeholder?: string;
   /** Whether the chat is disabled */
   disabled?: boolean;
-  /** Show thinking indicator */
-  showThinking?: boolean;
-  /** Show plan viewer */
-  showPlan?: boolean;
-  /** Show action feed */
-  showActions?: boolean;
   /** Optional className */
   className?: string;
 }
@@ -66,9 +54,6 @@ export function AgenticChat({
   onError,
   placeholder = 'Ask the AI to edit your video...',
   disabled = false,
-  showThinking = true,
-  showPlan = true,
-  showActions = true,
   className = '',
 }: AgenticChatProps) {
   // ===========================================================================
@@ -76,9 +61,26 @@ export function AgenticChat({
   // ===========================================================================
 
   const [input, setInput] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const isUserScrolledUpRef = useRef(false);
+
+  // ===========================================================================
+  // Conversation Store
+  // ===========================================================================
+
+  const messages = useConversationStore(
+    (s) => s.activeConversation?.messages ?? []
+  );
+  const addUserMessage = useConversationStore((s) => s.addUserMessage);
+  const addSystemMessage = useConversationStore((s) => s.addSystemMessage);
+
+  // ===========================================================================
+  // Agent Event Handler
+  // ===========================================================================
+
+  const { handleEvent } = useAgentEventHandler();
 
   // ===========================================================================
   // Agentic Loop Hook
@@ -89,53 +91,47 @@ export function AgenticChat({
     abort,
     approvePlan,
     rejectPlan,
+    retry,
     phase,
     isRunning,
-    events,
     error,
-    thought,
-    plan,
     isEnabled,
-  } = useAgenticLoop({
+  } = useAgenticLoopWithStores({
     llmClient,
     toolExecutor,
     config,
     context,
+    onEvent: handleEvent,
     onComplete: (result) => {
-      // Add assistant message on completion
-      if (result.summary) {
-        addMessage('assistant', result.summary.finalState);
-      }
       onComplete?.(result);
     },
     onError: (err) => {
-      addMessage('system', `Error: ${err.message}`);
+      addSystemMessage(`Error: ${err.message}`);
       onError?.(err);
     },
     onApprovalRequired: () => {
-      // Approval is handled through the PlanViewer component
+      // Approval is handled through part renderers
     },
   });
 
   // ===========================================================================
-  // Helpers
+  // Scroll Logic
   // ===========================================================================
 
-  const addMessage = useCallback((type: ChatMessage['type'], content: string) => {
-    const message: ChatMessage = {
-      id: crypto.randomUUID(),
-      type,
-      content,
-      timestamp: Date.now(),
-    };
-    setMessages((prev) => [...prev, message]);
-  }, []);
-
   const scrollToBottom = useCallback(() => {
-    // scrollIntoView may not exist in test environments (jsdom)
+    if (isUserScrolledUpRef.current) return;
     if (messagesEndRef.current && typeof messagesEndRef.current.scrollIntoView === 'function') {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
+  }, []);
+
+  const handleScroll = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container) return;
+    const threshold = 100;
+    const isAtBottom =
+      container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
+    isUserScrolledUpRef.current = !isAtBottom;
   }, []);
 
   // ===========================================================================
@@ -148,8 +144,8 @@ export function AgenticChat({
     const userInput = input.trim();
     setInput('');
 
-    // Add user message
-    addMessage('user', userInput);
+    // Add user message to conversation store
+    addUserMessage(userInput);
 
     // Notify parent
     onSubmit?.(userInput);
@@ -162,7 +158,7 @@ export function AgenticChat({
         // Error is handled by onError callback
       }
     }
-  }, [input, isRunning, disabled, isEnabled, run, addMessage, onSubmit]);
+  }, [input, isRunning, disabled, isEnabled, run, addUserMessage, onSubmit]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -176,8 +172,8 @@ export function AgenticChat({
 
   const handleAbort = useCallback(() => {
     abort();
-    addMessage('system', 'Operation cancelled by user');
-  }, [abort, addMessage]);
+    addSystemMessage('Operation cancelled by user');
+  }, [abort, addSystemMessage]);
 
   const handleApprove = useCallback(() => {
     approvePlan();
@@ -185,17 +181,21 @@ export function AgenticChat({
 
   const handleReject = useCallback(() => {
     rejectPlan('User rejected the plan');
-    addMessage('system', 'Plan rejected');
-  }, [rejectPlan, addMessage]);
+    addSystemMessage('Plan rejected');
+  }, [rejectPlan, addSystemMessage]);
+
+  const handleRetry = useCallback(() => {
+    retry();
+  }, [retry]);
 
   // ===========================================================================
   // Effects
   // ===========================================================================
 
-  // Scroll to bottom on new messages or events
+  // Scroll to bottom on new messages
   useEffect(() => {
     scrollToBottom();
-  }, [messages, events, scrollToBottom]);
+  }, [messages, scrollToBottom]);
 
   // Focus input on mount
   useEffect(() => {
@@ -208,54 +208,28 @@ export function AgenticChat({
   // Render
   // ===========================================================================
 
-  const isThinking = phase === 'thinking';
-  const isPlanning = phase === 'planning';
-  const isAwaitingApproval = phase === 'awaiting_approval';
-  const isExecuting = phase === 'executing';
-
   return (
     <div
       data-testid="agentic-chat"
       className={`flex flex-col h-full bg-surface-base ${className}`}
     >
       {/* Messages Area */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
+      <div
+        ref={scrollContainerRef}
+        onScroll={handleScroll}
+        className="flex-1 overflow-y-auto p-4 space-y-4"
+      >
         {messages.map((message) => (
-          <MessageBubble key={message.id} message={message} />
-        ))}
-
-        {/* Thinking Indicator */}
-        {showThinking && (isThinking || isPlanning) && (
-          <ThinkingIndicator
-            isThinking={isThinking}
-            thought={thought}
-            className="my-2"
-          />
-        )}
-
-        {/* Plan Viewer */}
-        {showPlan && plan && (
-          <PlanViewer
-            plan={plan}
-            isAwaitingApproval={isAwaitingApproval}
+          <ConversationMessageItem
+            key={message.id}
+            message={message}
             onApprove={handleApprove}
             onReject={handleReject}
-            className="my-2"
+            onRetry={handleRetry}
           />
-        )}
+        ))}
 
-        {/* Action Feed */}
-        {showActions && events.length > 0 && (isExecuting || phase === 'observing') && (
-          <ActionFeed
-            events={events}
-            filter="tools"
-            autoScroll={true}
-            compact={true}
-            className="my-2 max-h-48"
-          />
-        )}
-
-        {/* Error Display */}
+        {/* Error Display (for errors not captured in parts) */}
         {error && (
           <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg">
             <p className="text-sm text-red-400">{error.message}</p>
@@ -321,42 +295,6 @@ export function AgenticChat({
             </span>
           </div>
         )}
-      </div>
-    </div>
-  );
-}
-
-// =============================================================================
-// Sub-Components
-// =============================================================================
-
-interface MessageBubbleProps {
-  message: ChatMessage;
-}
-
-function MessageBubble({ message }: MessageBubbleProps) {
-  const isUser = message.type === 'user';
-  const isSystem = message.type === 'system';
-
-  return (
-    <div
-      className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}
-    >
-      <div
-        className={`
-          max-w-[80%] px-4 py-2 rounded-lg
-          ${isUser
-            ? 'bg-primary-600 text-white'
-            : isSystem
-            ? 'bg-yellow-500/10 text-yellow-400 border border-yellow-500/20'
-            : 'bg-surface-elevated text-text-primary border border-border-subtle'
-          }
-        `}
-      >
-        <p className="text-sm whitespace-pre-wrap">{message.content}</p>
-        <span className="text-xs opacity-60 mt-1 block">
-          {new Date(message.timestamp).toLocaleTimeString()}
-        </span>
       </div>
     </div>
   );

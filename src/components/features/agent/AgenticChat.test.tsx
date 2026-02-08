@@ -1,7 +1,8 @@
 /**
  * AgenticChat Tests
  *
- * Tests for the main chat component that uses the agentic loop.
+ * Tests for the main chat component that uses the agentic loop
+ * and reads messages from conversationStore.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -9,6 +10,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AgenticChat } from './AgenticChat';
 import type { ILLMClient, IToolExecutor, LLMMessage } from '@/agents/engine';
+import { useConversationStore } from '@/stores/conversationStore';
 
 // Mock feature flags
 vi.mock('@/config/featureFlags', () => ({
@@ -30,6 +32,9 @@ describe('AgenticChat', () => {
   let mockToolExecutor: IToolExecutor;
 
   beforeEach(() => {
+    // Initialize conversation store with a project
+    useConversationStore.getState().loadForProject('test-project');
+
     const generateStream: ILLMClient['generateStream'] = async function* () {
       // No-op streaming for tests
     };
@@ -142,6 +147,7 @@ describe('AgenticChat', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
+    useConversationStore.getState().clearConversation();
   });
 
   describe('rendering', () => {
@@ -318,7 +324,7 @@ describe('AgenticChat', () => {
 
       // Input should be cleared after submission
       expect(input).toHaveValue('');
-      // User message should be visible
+      // User message should be visible (rendered by ConversationMessageItem)
       expect(screen.getByText('Test input')).toBeInTheDocument();
     });
   });
@@ -363,6 +369,37 @@ describe('AgenticChat', () => {
 
       expect(screen.getByText('Split clip at 5 seconds')).toBeInTheDocument();
     });
+
+    it('should render user messages from conversation store', async () => {
+      // Pre-populate the store
+      useConversationStore.getState().addUserMessage('Pre-existing message');
+
+      render(
+        <AgenticChat
+          llmClient={mockLLMClient}
+          toolExecutor={mockToolExecutor}
+        />
+      );
+
+      expect(screen.getByText('Pre-existing message')).toBeInTheDocument();
+    });
+
+    it('should render user messages with right-aligned layout', async () => {
+      const user = userEvent.setup();
+      render(
+        <AgenticChat
+          llmClient={mockLLMClient}
+          toolExecutor={mockToolExecutor}
+        />
+      );
+
+      const input = screen.getByPlaceholderText(/ask.*ai/i);
+      await user.type(input, 'User message');
+      await user.click(screen.getByRole('button', { name: /send/i }));
+
+      const userMsg = screen.getByTestId('conversation-message-user');
+      expect(userMsg).toBeInTheDocument();
+    });
   });
 
   describe('thinking indicator integration', () => {
@@ -374,7 +411,6 @@ describe('AgenticChat', () => {
         <AgenticChat
           llmClient={mockLLMClient}
           toolExecutor={mockToolExecutor}
-          showThinking={true}
         />
       );
 
