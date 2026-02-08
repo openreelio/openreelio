@@ -10,7 +10,7 @@
  * - Returns a final AgentState snapshot for debugging and persistence.
  */
 
-import type { ILLMClient } from './ports/ILLMClient';
+import type { ILLMClient, LLMMessage } from './ports/ILLMClient';
 import type { IToolExecutor, ExecutionContext, ToolExecutionResult } from './ports/IToolExecutor';
 import type {
   AgentContext,
@@ -130,7 +130,8 @@ export class AgenticEngine {
     input: string,
     agentContext: AgentContext,
     executionContext: ExecutionContext,
-    onEvent?: (event: AgentEvent) => void
+    onEvent?: (event: AgentEvent) => void,
+    conversationHistory?: LLMMessage[]
   ): Promise<AgentRunResult> {
     if (this.activeSessionId) {
       const err = new SessionActiveError(this.activeSessionId);
@@ -215,7 +216,7 @@ export class AgenticEngine {
 
         let thought: Thought;
         try {
-          thought = await this.thinker.think(input, state.context);
+          thought = await this.thinker.think(input, state.context, conversationHistory);
         } catch (error) {
           const err = asError(error);
           state.error = err;
@@ -254,7 +255,7 @@ export class AgenticEngine {
 
         let plan: Plan;
         try {
-          plan = await this.planner.plan(thought, state.context);
+          plan = await this.planner.plan(thought, state.context, conversationHistory);
         } catch (error) {
           const err = asError(error);
           state.error = err;
