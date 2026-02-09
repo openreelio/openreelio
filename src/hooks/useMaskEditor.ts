@@ -233,11 +233,6 @@ export function useMaskEditor({
     masksRef.current = masks;
   }, [masks]);
 
-  useEffect(() => {
-    if (!initialMasks) return;
-    setMasks(initialMasks);
-  }, [initialMasks]);
-
   // ---------------------------------------------------------------------------
   // Fetch Masks on Mount
   // ---------------------------------------------------------------------------
