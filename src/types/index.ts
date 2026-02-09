@@ -944,6 +944,7 @@ export type EffectCategory =
   | 'text'
   | 'ai'
   | 'keying'
+  | 'compositing'
   | 'custom';
 
 /** Predefined effect types - matches backend EffectType enum */
@@ -1006,6 +1007,11 @@ export type EffectType =
   | 'chroma_key'
   | 'luma_key'
   | 'hsl_qualifier'
+  // Compositing
+  | 'blend_mode'
+  | 'opacity'
+  // Audio normalization
+  | 'loudness_normalize'
   // Custom
   | { custom: string };
 
@@ -1184,6 +1190,13 @@ export function getEffectCategory(effectType: EffectType): EffectCategory {
     case 'object_tracking':
       return 'ai';
 
+    case 'blend_mode':
+    case 'opacity':
+      return 'compositing';
+
+    case 'loudness_normalize':
+      return 'audio';
+
     default:
       return 'custom';
   }
@@ -1206,6 +1219,7 @@ export const EFFECT_CATEGORY_LABELS: Record<EffectCategory, string> = {
   text: 'Text',
   ai: 'AI',
   keying: 'Keying',
+  compositing: 'Compositing',
   custom: 'Custom',
 };
 
