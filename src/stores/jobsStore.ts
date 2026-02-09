@@ -14,7 +14,21 @@ import { immer } from 'zustand/middleware/immer';
 
 export type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
-export type JobType = 'render' | 'export' | 'transcode' | 'ai_process' | 'import';
+export type JobType =
+  | 'proxy_generation'
+  | 'thumbnail_generation'
+  | 'waveform_generation'
+  | 'indexing'
+  | 'transcription'
+  | 'preview_render'
+  | 'final_render'
+  | 'ai_completion'
+  // Legacy aliases (frontend-only job types)
+  | 'render'
+  | 'export'
+  | 'transcode'
+  | 'ai_process'
+  | 'import';
 
 export interface JobProgress {
   current: number;
