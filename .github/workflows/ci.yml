@@ -67,8 +67,8 @@ jobs:
         shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
 
     env:
-      # Single fork with 4GB heap - useMaskEditor/HDR tests need >2GB with jsdom
-      NODE_OPTIONS: '--max-old-space-size=4096'
+      # Single fork with 6GB heap - heavy jsdom test files (useMaskEditor) need >4GB
+      NODE_OPTIONS: '--max-old-space-size=6144'
       VITEST_MAX_FORKS: '1'
 
     steps:
