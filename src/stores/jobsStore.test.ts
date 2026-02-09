@@ -41,6 +41,51 @@ describe('jobsStore', () => {
   });
 
   // ===========================================================================
+  // JobType Enumeration Tests
+  // ===========================================================================
+
+  describe('JobType enumeration', () => {
+    it('should accept all backend IPC job types', () => {
+      const backendTypes: Array<import('./jobsStore').JobType> = [
+        'proxy_generation',
+        'thumbnail_generation',
+        'waveform_generation',
+        'indexing',
+        'transcription',
+        'preview_render',
+        'final_render',
+        'ai_completion',
+      ];
+
+      for (const type of backendTypes) {
+        useJobsStore.getState().addJob({ id: `job-${type}`, type, title: `Test ${type}` });
+      }
+
+      const jobs = useJobsStore.getState().jobs;
+      expect(jobs).toHaveLength(backendTypes.length);
+      for (const type of backendTypes) {
+        expect(jobs.find((j) => j.type === type)).toBeDefined();
+      }
+    });
+
+    it('should accept all legacy frontend job types', () => {
+      const legacyTypes: Array<import('./jobsStore').JobType> = [
+        'render',
+        'export',
+        'transcode',
+        'ai_process',
+        'import',
+      ];
+
+      for (const type of legacyTypes) {
+        useJobsStore.getState().addJob({ id: `job-${type}`, type, title: `Test ${type}` });
+      }
+
+      expect(useJobsStore.getState().jobs).toHaveLength(legacyTypes.length);
+    });
+  });
+
+  // ===========================================================================
   // Add Job Tests
   // ===========================================================================
 

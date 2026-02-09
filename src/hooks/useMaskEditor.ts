@@ -7,7 +7,7 @@
  * @module hooks/useMaskEditor
  */
 
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type {
   Mask,
@@ -115,7 +115,72 @@ function createDefaultShape(type: MaskShape['type']): MaskShape {
  * Generates a default name for a new mask.
  */
 function generateMaskName(existingMasks: Mask[]): string {
-  return `Mask ${existingMasks.length + 1}`;
+  const used = new Set(existingMasks.map((mask) => mask.name.trim().toLowerCase()));
+  let index = existingMasks.length + 1;
+  while (used.has(`mask ${index}`)) {
+    index += 1;
+  }
+  return `Mask ${index}`;
+}
+
+/**
+ * Ensures incoming update payload only contains fields accepted by UpdateMask.
+ */
+function toMaskUpdatePayload(updates: Partial<Mask>): Partial<Mask> {
+  const payload: Partial<Mask> = {};
+
+  if (updates.shape !== undefined) payload.shape = updates.shape;
+  if (updates.name !== undefined) payload.name = updates.name;
+  if (updates.feather !== undefined) payload.feather = updates.feather;
+  if (updates.opacity !== undefined) payload.opacity = updates.opacity;
+  if (updates.expansion !== undefined) payload.expansion = updates.expansion;
+  if (updates.inverted !== undefined) payload.inverted = updates.inverted;
+  if (updates.blendMode !== undefined) payload.blendMode = updates.blendMode;
+  if (updates.enabled !== undefined) payload.enabled = updates.enabled;
+  if (updates.locked !== undefined) payload.locked = updates.locked;
+
+  return payload;
+}
+
+function hasOwnProperties(obj: object): boolean {
+  return Object.keys(obj).length > 0;
+}
+
+function isValidMaskShape(value: unknown): value is MaskShape {
+  if (!value || typeof value !== 'object') return false;
+  const shape = value as MaskShape;
+  return (
+    shape.type === 'rectangle' ||
+    shape.type === 'ellipse' ||
+    shape.type === 'polygon' ||
+    shape.type === 'bezier'
+  );
+}
+
+function normalizeFetchedMask(raw: unknown): Mask | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const candidate = raw as Partial<Mask>;
+  if (typeof candidate.id !== 'string' || candidate.id.length === 0) return null;
+  if (!isValidMaskShape(candidate.shape)) return null;
+
+  return {
+    id: candidate.id,
+    name: typeof candidate.name === 'string' && candidate.name.length > 0 ? candidate.name : 'Mask',
+    shape: candidate.shape,
+    inverted: Boolean(candidate.inverted),
+    feather: typeof candidate.feather === 'number' ? candidate.feather : 0,
+    opacity: typeof candidate.opacity === 'number' ? candidate.opacity : 1,
+    expansion: typeof candidate.expansion === 'number' ? candidate.expansion : 0,
+    blendMode:
+      candidate.blendMode === 'add' ||
+      candidate.blendMode === 'subtract' ||
+      candidate.blendMode === 'intersect' ||
+      candidate.blendMode === 'difference'
+        ? candidate.blendMode
+        : 'add',
+    enabled: typeof candidate.enabled === 'boolean' ? candidate.enabled : true,
+    locked: typeof candidate.locked === 'boolean' ? candidate.locked : false,
+  };
 }
 
 // =============================================================================
@@ -127,19 +192,33 @@ export function useMaskEditor({
   effectId,
   sequenceId,
   trackId,
-  initialMasks = [],
+  initialMasks,
   fetchOnMount = false,
 }: UseMaskEditorOptions): UseMaskEditorResult {
   // ---------------------------------------------------------------------------
   // State
   // ---------------------------------------------------------------------------
 
-  const [masks, setMasks] = useState<Mask[]>(initialMasks);
+  const [masks, setMasks] = useState<Mask[]>(initialMasks ?? []);
   const [selectedMaskId, setSelectedMaskId] = useState<MaskId | null>(null);
   const [activeTool, setActiveTool] = useState<MaskTool>('rectangle');
   const [isLoading, setIsLoading] = useState(false);
   const [isOperating, setIsOperating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const masksRef = useRef<Mask[]>(initialMasks ?? []);
+  const activeOperationCountRef = useRef(0);
+
+  const beginOperation = useCallback(() => {
+    activeOperationCountRef.current += 1;
+    setIsOperating(true);
+  }, []);
+
+  const endOperation = useCallback(() => {
+    activeOperationCountRef.current = Math.max(0, activeOperationCountRef.current - 1);
+    if (activeOperationCountRef.current === 0) {
+      setIsOperating(false);
+    }
+  }, []);
 
   // ---------------------------------------------------------------------------
   // Computed State
@@ -150,12 +229,16 @@ export function useMaskEditor({
     [masks, selectedMaskId]
   );
 
+  useEffect(() => {
+    masksRef.current = masks;
+  }, [masks]);
+
   // ---------------------------------------------------------------------------
   // Fetch Masks on Mount
   // ---------------------------------------------------------------------------
 
   useEffect(() => {
-    if (!fetchOnMount || initialMasks.length > 0) {
+    if (!fetchOnMount || (initialMasks?.length ?? 0) > 0) {
       return;
     }
 
@@ -168,13 +251,18 @@ export function useMaskEditor({
       try {
         logger.debug('Fetching masks', { effectId });
 
-        const fetchedMasks = await invoke<Mask[]>('get_effect_masks', {
+        const fetchedMasks = await invoke<unknown>('get_effect_masks', {
           effectId,
         });
+        const normalizedMasks = Array.isArray(fetchedMasks)
+          ? fetchedMasks
+              .map((mask) => normalizeFetchedMask(mask))
+              .filter((mask): mask is Mask => mask !== null)
+          : [];
 
         if (cancelled) return;
-        setMasks(fetchedMasks);
-        logger.info('Masks loaded', { effectId, count: fetchedMasks.length });
+        setMasks(normalizedMasks);
+        logger.info('Masks loaded', { effectId, count: normalizedMasks.length });
       } catch (err) {
         if (cancelled) return;
         const errorMsg = err instanceof Error ? err.message : String(err);
@@ -192,7 +280,7 @@ export function useMaskEditor({
     return () => {
       cancelled = true;
     };
-  }, [effectId, fetchOnMount, initialMasks.length]);
+  }, [effectId, fetchOnMount, initialMasks?.length]);
 
   // ---------------------------------------------------------------------------
   // Selection
@@ -212,12 +300,12 @@ export function useMaskEditor({
 
   const addMask = useCallback(
     async (type: MaskShape['type'], name?: string): Promise<MaskId | null> => {
-      setIsOperating(true);
+      beginOperation();
       setError(null);
 
       try {
         const shape = createDefaultShape(type);
-        const maskName = name ?? generateMaskName(masks);
+        const maskName = name ?? generateMaskName(masksRef.current);
 
         logger.debug('Adding mask', { effectId, type, name: maskName });
 
@@ -263,10 +351,10 @@ export function useMaskEditor({
         setError(errorMsg);
         return null;
       } finally {
-        setIsOperating(false);
+        endOperation();
       }
     },
-    [masks, effectId, sequenceId, trackId, clipId]
+    [effectId, sequenceId, trackId, clipId, beginOperation, endOperation]
   );
 
   // ---------------------------------------------------------------------------
@@ -276,7 +364,7 @@ export function useMaskEditor({
   const updateMask = useCallback(
     async (id: MaskId, updates: Partial<Mask>): Promise<boolean> => {
       // Find the mask
-      const mask = masks.find((m) => m.id === id);
+      const mask = masksRef.current.find((m) => m.id === id);
       if (!mask) {
         logger.warn('Mask not found for update', { maskId: id });
         return false;
@@ -288,7 +376,13 @@ export function useMaskEditor({
         return false;
       }
 
-      setIsOperating(true);
+      const payload = toMaskUpdatePayload(updates);
+      if (!hasOwnProperties(payload)) {
+        logger.debug('Skipping empty mask update payload', { maskId: id });
+        return true;
+      }
+
+      beginOperation();
       setError(null);
 
       try {
@@ -299,13 +393,13 @@ export function useMaskEditor({
           payload: {
             effectId,
             maskId: id,
-            ...updates,
+            ...payload,
           },
         });
 
         // Update local state
         setMasks((prev) =>
-          prev.map((m) => (m.id === id ? { ...m, ...updates } : m))
+          prev.map((m) => (m.id === id ? { ...m, ...payload } : m))
         );
 
         logger.info('Mask updated', { maskId: id });
@@ -316,10 +410,10 @@ export function useMaskEditor({
         setError(errorMsg);
         return false;
       } finally {
-        setIsOperating(false);
+        endOperation();
       }
     },
-    [masks, effectId]
+    [effectId, beginOperation, endOperation]
   );
 
   const updateMaskLocal = useCallback((id: MaskId, updates: Partial<Mask>) => {
@@ -335,7 +429,7 @@ export function useMaskEditor({
   const deleteMask = useCallback(
     async (id: MaskId): Promise<boolean> => {
       // Find the mask
-      const mask = masks.find((m) => m.id === id);
+      const mask = masksRef.current.find((m) => m.id === id);
       if (!mask) {
         logger.warn('Mask not found for deletion', { maskId: id });
         return false;
@@ -347,7 +441,7 @@ export function useMaskEditor({
         return false;
       }
 
-      setIsOperating(true);
+      beginOperation();
       setError(null);
 
       try {
@@ -375,10 +469,10 @@ export function useMaskEditor({
         setError(errorMsg);
         return false;
       } finally {
-        setIsOperating(false);
+        endOperation();
       }
     },
-    [masks, effectId]
+    [effectId, beginOperation, endOperation]
   );
 
   // ---------------------------------------------------------------------------
@@ -387,22 +481,22 @@ export function useMaskEditor({
 
   const toggleEnabled = useCallback(
     async (id: MaskId): Promise<boolean> => {
-      const mask = masks.find((m) => m.id === id);
+      const mask = masksRef.current.find((m) => m.id === id);
       if (!mask) return false;
 
       return updateMask(id, { enabled: !mask.enabled });
     },
-    [masks, updateMask]
+    [updateMask]
   );
 
   const toggleLocked = useCallback(
     async (id: MaskId): Promise<boolean> => {
-      const mask = masks.find((m) => m.id === id);
+      const mask = masksRef.current.find((m) => m.id === id);
       if (!mask) return false;
 
       // Toggle lock is a special case - it should always be allowed
       // regardless of current lock state (otherwise we could never unlock)
-      setIsOperating(true);
+      beginOperation();
       setError(null);
 
       try {
@@ -431,10 +525,10 @@ export function useMaskEditor({
         setError(errorMsg);
         return false;
       } finally {
-        setIsOperating(false);
+        endOperation();
       }
     },
-    [masks, effectId]
+    [effectId, beginOperation, endOperation]
   );
 
   // ---------------------------------------------------------------------------
@@ -443,8 +537,22 @@ export function useMaskEditor({
 
   const reorderMasks = useCallback((fromIndex: number, toIndex: number) => {
     setMasks((prev) => {
+      if (
+        fromIndex < 0 ||
+        toIndex < 0 ||
+        fromIndex >= prev.length ||
+        toIndex >= prev.length ||
+        fromIndex === toIndex
+      ) {
+        logger.warn('Invalid mask reorder indices', { fromIndex, toIndex, count: prev.length });
+        return prev;
+      }
+
       const result = [...prev];
       const [removed] = result.splice(fromIndex, 1);
+      if (!removed) {
+        return prev;
+      }
       result.splice(toIndex, 0, removed);
       return result;
     });

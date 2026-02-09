@@ -7,7 +7,7 @@
  * @module hooks/useHDRSettings
  */
 
-import { useState, useCallback, useEffect, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import {
   type HdrMode,
@@ -119,6 +119,53 @@ function getValidationWarning(settings: HdrExportSettings): string | null {
   return null;
 }
 
+/**
+ * Normalizes unknown IPC response into safe HDR settings.
+ * Falls back to defaults when fields are missing or malformed.
+ */
+function normalizeHdrSettings(raw: unknown): HdrExportSettings {
+  if (!raw || typeof raw !== 'object') {
+    return DEFAULT_HDR_EXPORT;
+  }
+
+  const candidate = raw as Partial<HdrExportSettings>;
+  const hdrMode: HdrMode =
+    candidate.hdrMode === 'hdr10' || candidate.hdrMode === 'hlg' || candidate.hdrMode === 'sdr'
+      ? candidate.hdrMode
+      : DEFAULT_HDR_EXPORT.hdrMode;
+  const bitDepth: 8 | 10 | 12 =
+    candidate.bitDepth === 8 || candidate.bitDepth === 10 || candidate.bitDepth === 12
+      ? candidate.bitDepth
+      : DEFAULT_HDR_EXPORT.bitDepth;
+
+  if (hdrMode === 'sdr') {
+    return {
+      hdrMode: 'sdr',
+      bitDepth: 8,
+      maxCll: undefined,
+      maxFall: undefined,
+    };
+  }
+
+  const maxCll = clamp(
+    typeof candidate.maxCll === 'number' ? candidate.maxCll : 1000,
+    MAX_CLL_MIN,
+    MAX_CLL_MAX
+  );
+  const maxFall = clamp(
+    typeof candidate.maxFall === 'number' ? candidate.maxFall : 400,
+    MAX_FALL_MIN,
+    MAX_FALL_MAX
+  );
+
+  return {
+    hdrMode,
+    bitDepth: bitDepth < 10 ? 10 : bitDepth,
+    maxCll,
+    maxFall,
+  };
+}
+
 // =============================================================================
 // Hook Implementation
 // =============================================================================
@@ -141,6 +188,8 @@ export function useHDRSettings({
   const [isLoading, setIsLoading] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const activeSaveCountRef = useRef(0);
+  const latestSaveTokenRef = useRef(0);
 
   // ---------------------------------------------------------------------------
   // Computed State
@@ -174,15 +223,16 @@ export function useHDRSettings({
       try {
         logger.debug('Fetching HDR settings', { sequenceId });
 
-        const fetchedSettings = await invoke<HdrExportSettings>(
+        const fetchedSettings = await invoke<unknown>(
           'get_sequence_hdr_settings',
           { sequenceId }
         );
+        const normalizedSettings = normalizeHdrSettings(fetchedSettings);
 
         if (cancelled) return;
 
-        setSettings(fetchedSettings);
-        setOriginalSettings(fetchedSettings);
+        setSettings(normalizedSettings);
+        setOriginalSettings(normalizedSettings);
 
         logger.info('HDR settings loaded', { sequenceId });
       } catch (err) {
@@ -303,21 +353,26 @@ export function useHDRSettings({
   // ---------------------------------------------------------------------------
 
   const save = useCallback(async (): Promise<boolean> => {
+    const snapshot = normalizeHdrSettings(settings);
+    const saveToken = ++latestSaveTokenRef.current;
+    activeSaveCountRef.current += 1;
     setIsSaving(true);
     setError(null);
 
     try {
-      logger.debug('Saving HDR settings', { sequenceId, settings });
+      logger.debug('Saving HDR settings', { sequenceId, settings: snapshot });
 
       await invoke('execute_command', {
         commandType: 'UpdateSequenceHdrSettings',
         payload: {
           sequenceId,
-          settings,
+          settings: snapshot,
         },
       });
 
-      setOriginalSettings(settings);
+      if (saveToken === latestSaveTokenRef.current) {
+        setOriginalSettings(snapshot);
+      }
       logger.info('HDR settings saved', { sequenceId });
 
       return true;
@@ -327,7 +382,10 @@ export function useHDRSettings({
       setError(errorMsg);
       return false;
     } finally {
-      setIsSaving(false);
+      activeSaveCountRef.current = Math.max(0, activeSaveCountRef.current - 1);
+      if (activeSaveCountRef.current === 0) {
+        setIsSaving(false);
+      }
     }
   }, [sequenceId, settings]);
 

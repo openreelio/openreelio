@@ -32,8 +32,9 @@ describe('AgenticChat', () => {
   let mockToolExecutor: IToolExecutor;
 
   beforeEach(() => {
-    // Initialize conversation store with a project
-    useConversationStore.getState().loadForProject('test-project');
+    // Initialize conversation store with 'default' project to match the
+    // component's fallback when useProjectStore.activeSequenceId is null.
+    useConversationStore.getState().loadForProject('default');
 
     const generateStream: ILLMClient['generateStream'] = async function* () {
       // No-op streaming for tests

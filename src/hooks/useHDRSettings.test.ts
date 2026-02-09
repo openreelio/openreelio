@@ -450,14 +450,14 @@ describe('useHDRSettings', () => {
         result.current.setHdrMode('hdr10');
       });
 
-      // Start multiple save operations concurrently
-      const savePromises = [
-        result.current.save(),
-        result.current.save(),
-        result.current.save(),
-      ];
-
+      let savePromises: Promise<boolean>[] = [];
       await act(async () => {
+        // Start multiple save operations concurrently
+        savePromises = [
+          result.current.save(),
+          result.current.save(),
+          result.current.save(),
+        ];
         await Promise.all(savePromises);
       });
 
@@ -500,6 +500,8 @@ describe('useHDRSettings', () => {
       await waitFor(() => {
         expect(result.current.isLoading).toBe(false);
       });
+
+      expect(result.current.settings).toEqual(DEFAULT_HDR_EXPORT);
     });
 
     it('should clamp extreme luminance values', () => {
@@ -540,6 +542,51 @@ describe('useHDRSettings', () => {
       // Should end up at SDR defaults
       expect(result.current.settings.hdrMode).toBe('sdr');
       expect(result.current.settings.maxCll).toBeUndefined();
+    });
+
+    it('should keep latest saved snapshot when concurrent saves resolve out of order', async () => {
+      let callCount = 0;
+      mockInvoke.mockImplementation((command: string) => {
+        if (command !== 'execute_command') {
+          return Promise.resolve({ success: true });
+        }
+
+        callCount += 1;
+        if (callCount === 1) {
+          return new Promise((resolve) => setTimeout(() => resolve({ success: true }), 50));
+        }
+
+        return Promise.resolve({ success: true });
+      });
+
+      const { result } = renderHook(() => useHDRSettings({ sequenceId: mockSequenceId }));
+
+      act(() => {
+        result.current.setHdrMode('hdr10');
+        result.current.setMaxCll(1200);
+      });
+
+      let firstSave!: Promise<boolean>;
+      let secondSave!: Promise<boolean>;
+
+      await act(async () => {
+        firstSave = result.current.save();
+      });
+
+      act(() => {
+        result.current.setMaxCll(2500);
+      });
+
+      await act(async () => {
+        secondSave = result.current.save();
+      });
+
+      await act(async () => {
+        await Promise.all([firstSave, secondSave]);
+      });
+
+      expect(result.current.isDirty).toBe(false);
+      expect(result.current.settings.maxCll).toBe(2500);
     });
   });
 });

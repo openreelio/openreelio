@@ -123,6 +123,25 @@ export type {
 export { useUIStore } from './uiStore';
 export type { SettingsTab } from './uiStore';
 
+export { useConversationStore } from './conversationStore';
+export type { ConversationState, ConversationActions, ConversationStore } from './conversationStore';
+
+export { usePreviewStore, MIN_ZOOM, MAX_ZOOM, ZOOM_STEP, ZOOM_PRESETS } from './previewStore';
+export type { ZoomMode, PreviewState, PreviewActions, PreviewStore } from './previewStore';
+
+export {
+  useAgentStore,
+  useHasActiveSession,
+  useCurrentPhase,
+  useSessionHistory,
+  useAgentPreferences,
+} from './agentStore';
+export type {
+  SessionState,
+  SessionSummary,
+  AgentPreferences,
+} from './agentStore';
+
 // =============================================================================
 // Global Store Reset
 // =============================================================================
@@ -139,6 +158,9 @@ import { useEditorToolStore } from './editorToolStore';
 import { useAudioMixerStore } from './audioMixerStore';
 import { useModalStore } from './modalStore';
 import { useRenderQueueStore } from './renderQueueStore';
+import { useConversationStore } from './conversationStore';
+import { usePreviewStore } from './previewStore';
+import { useAgentStore } from './agentStore';
 
 /**
  * Reset all project-related stores to their initial state.
@@ -158,6 +180,9 @@ export function resetProjectStores(): void {
   useAudioMixerStore.getState().reset();
   useModalStore.getState().closeModal();
   useRenderQueueStore.getState().clearAll();
+  useConversationStore.getState().clearConversation();
+  usePreviewStore.getState().resetView();
+  useAgentStore.getState().reset();
 
   logger.info('All project stores reset');
 }

@@ -599,7 +599,6 @@ export function Timeline({
             trackId: adjustment.trackId,
             clipId: adjustment.clipId,
             newTimelineIn: adjustment.newTime,
-            newTrackId: adjustment.trackId,
           });
         }
       } else {
@@ -919,8 +918,13 @@ export function Timeline({
 
       const target = e.target as HTMLElement;
 
-      // Keep interactive controls behavior untouched.
-      if (target.closest('button')) {
+      // Keep interactive controls and trim handles untouched.
+      // Trim handles must initiate their own resize interaction.
+      if (
+        target.closest('button') ||
+        target.closest('[data-testid$="-trim-left"]') ||
+        target.closest('[data-testid$="-trim-right"]')
+      ) {
         return;
       }
 

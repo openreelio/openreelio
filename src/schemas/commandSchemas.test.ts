@@ -318,12 +318,12 @@ describe('commandSchemas', () => {
       expect(result.success).toBe(true);
     });
 
-    it('should validate chromaKey effect with params', () => {
+    it('should validate chroma_key effect with params', () => {
       const command = {
         commandType: 'AddEffect',
         params: {
           clipId: '550e8400-e29b-41d4-a716-446655440000',
-          effectType: 'chromaKey',
+          effectType: 'chroma_key',
           params: {
             keyColor: '#00ff00',
             similarity: 0.4,
@@ -737,7 +737,7 @@ describe('commandSchemas', () => {
         commandType: 'AddEffect',
         params: {
           clipId: '550e8400-e29b-41d4-a716-446655440000',
-          effectType: 'blur',
+          effectType: 'gaussian_blur',
           params: { radius: 5 },
         },
       };
@@ -907,19 +907,56 @@ describe('commandSchemas', () => {
   // ==========================================================================
 
   describe('EffectType enum', () => {
-    it('should validate all effect types', () => {
-      const effects = [
-        'brightness', 'contrast', 'saturation', 'hue',
-        'blur', 'sharpen', 'noise',
-        'fadeIn', 'fadeOut',
-        'crop', 'scale', 'rotate',
-        'chromaKey', 'colorCorrection',
-      ];
+    const allEffectTypes = [
+      // Color effects
+      'brightness', 'contrast', 'saturation', 'hue', 'color_balance',
+      'color_wheels', 'gamma', 'levels', 'curves', 'lut',
+      // Transform effects
+      'crop', 'flip', 'mirror', 'rotate',
+      // Blur/Sharpen
+      'gaussian_blur', 'box_blur', 'motion_blur', 'radial_blur', 'sharpen', 'unsharp_mask',
+      // Stylize
+      'vignette', 'glow', 'film_grain', 'chromatic_aberration', 'noise', 'pixelate', 'posterize',
+      // Transitions
+      'cross_dissolve', 'fade', 'wipe', 'slide', 'zoom',
+      // Audio
+      'volume', 'gain', 'eq_band', 'compressor', 'limiter',
+      'noise_reduction', 'reverb', 'delay',
+      // Text
+      'text_overlay', 'subtitle',
+      // AI
+      'background_removal', 'auto_reframe', 'face_blur', 'object_tracking',
+      // Keying
+      'chroma_key', 'luma_key', 'hsl_qualifier',
+      // Compositing
+      'blend_mode', 'opacity',
+      // Audio normalization
+      'loudness_normalize',
+    ];
 
-      for (const effect of effects) {
+    it('should validate all 52 effect types', () => {
+      for (const effect of allEffectTypes) {
         const result = EffectType.safeParse(effect);
-        expect(result.success).toBe(true);
+        expect(result.success, `EffectType should accept '${effect}'`).toBe(true);
       }
+    });
+
+    it('should have exactly 52 valid values', () => {
+      expect(EffectType.options).toHaveLength(52);
+    });
+
+    it('should reject legacy camelCase effect types', () => {
+      const legacyTypes = ['chromaKey', 'colorCorrection', 'fadeIn', 'fadeOut', 'blur', 'scale'];
+      for (const type of legacyTypes) {
+        const result = EffectType.safeParse(type);
+        expect(result.success, `EffectType should reject legacy '${type}'`).toBe(false);
+      }
+    });
+
+    it('should accept compositing effect types from Rust backend', () => {
+      expect(EffectType.safeParse('blend_mode').success).toBe(true);
+      expect(EffectType.safeParse('opacity').success).toBe(true);
+      expect(EffectType.safeParse('loudness_normalize').success).toBe(true);
     });
   });
 

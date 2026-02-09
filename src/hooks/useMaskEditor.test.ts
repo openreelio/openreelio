@@ -465,6 +465,36 @@ describe('useMaskEditor', () => {
       // Should not call IPC for locked mask
       expect(mockInvoke).not.toHaveBeenCalledWith('execute_command', expect.any(Object));
     });
+
+    it('should only send whitelisted update fields to backend', async () => {
+      const initialMasks = [createMockMask('mask-1')];
+
+      const { result } = renderHook(() =>
+        useMaskEditor({
+          clipId: mockClipId,
+          effectId: mockEffectId,
+          sequenceId: mockSequenceId,
+          trackId: mockTrackId,
+          initialMasks,
+        })
+      );
+
+      await act(async () => {
+        await result.current.updateMask('mask-1', {
+          id: 'forbidden-id',
+          feather: 0.4,
+        } as Partial<Mask>);
+      });
+
+      expect(mockInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'UpdateMask',
+        payload: {
+          effectId: mockEffectId,
+          maskId: 'mask-1',
+          feather: 0.4,
+        },
+      });
+    });
   });
 
   // ===========================================================================
@@ -763,14 +793,14 @@ describe('useMaskEditor', () => {
         })
       );
 
-      // Start multiple updates concurrently
-      const updatePromises = [
-        result.current.updateMask('mask-1', { feather: 0.1 }),
-        result.current.updateMask('mask-1', { feather: 0.2 }),
-        result.current.updateMask('mask-1', { feather: 0.3 }),
-      ];
-
+      let updatePromises: Promise<boolean>[] = [];
       await act(async () => {
+        // Start multiple updates concurrently
+        updatePromises = [
+          result.current.updateMask('mask-1', { feather: 0.1 }),
+          result.current.updateMask('mask-1', { feather: 0.2 }),
+          result.current.updateMask('mask-1', { feather: 0.3 }),
+        ];
         await Promise.all(updatePromises);
       });
 
@@ -864,6 +894,31 @@ describe('useMaskEditor', () => {
       expect(result.current.masks).toEqual([]);
     });
 
+    it('should discard malformed masks from fetch response', async () => {
+      mockInvoke.mockResolvedValueOnce([
+        createMockMask('valid-mask'),
+        { invalid: true },
+        { id: 'missing-shape', name: 'Broken' },
+      ]);
+
+      const { result } = renderHook(() =>
+        useMaskEditor({
+          clipId: mockClipId,
+          effectId: mockEffectId,
+          sequenceId: mockSequenceId,
+          trackId: mockTrackId,
+          fetchOnMount: true,
+        })
+      );
+
+      await waitFor(() => {
+        expect(result.current.isLoading).toBe(false);
+      });
+
+      expect(result.current.masks).toHaveLength(1);
+      expect(result.current.masks[0].id).toBe('valid-mask');
+    });
+
     it('should preserve locked mask protection', async () => {
       const lockedMask = { ...createMockMask('mask-1'), locked: true };
 
@@ -914,8 +969,8 @@ describe('useMaskEditor', () => {
         result.current.reorderMasks(0, 100);
       });
 
-      // Array should still be valid (though order may be unexpected)
-      expect(Array.isArray(result.current.masks)).toBe(true);
+      // Invalid reorder is ignored to avoid state corruption
+      expect(result.current.masks.map((m) => m.id)).toEqual(['mask-1', 'mask-2']);
     });
   });
 });

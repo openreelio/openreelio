@@ -794,9 +794,17 @@ export const useAIStore = create<AIState>()(
               convStore.appendPart(msgId, { type: 'text', content });
               convStore.finalizeMessage(msgId);
             }
+          } else {
+            logger.debug('Cannot bridge message to conversationStore: no active conversation', {
+              role,
+              contentPreview: content.substring(0, 80),
+            });
           }
-        } catch {
-          // Silently ignore bridge errors to preserve backward compatibility
+        } catch (error) {
+          logger.warn('Failed to bridge message to conversationStore', {
+            role,
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
       },
 
@@ -827,8 +835,11 @@ export const useAIStore = create<AIState>()(
         // Bridge: also load conversation for the project
         try {
           useConversationStore.getState().loadForProject(projectId);
-        } catch {
-          // Silently ignore bridge errors
+        } catch (error) {
+          logger.warn('Failed to bridge loadForProject to conversationStore', {
+            projectId,
+            error: error instanceof Error ? error.message : String(error),
+          });
         }
       },
 
