@@ -178,8 +178,8 @@ function normalizeFetchedMask(raw: unknown): Mask | null {
       candidate.blendMode === 'difference'
         ? candidate.blendMode
         : 'add',
-    enabled: candidate.enabled ?? true,
-    locked: candidate.locked ?? false,
+    enabled: typeof candidate.enabled === 'boolean' ? candidate.enabled : true,
+    locked: typeof candidate.locked === 'boolean' ? candidate.locked : false,
   };
 }
 

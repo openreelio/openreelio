@@ -98,8 +98,9 @@ export function useSnapDetection(options: UseSnapDetectionOptions): UseSnapDetec
 
     // Grid lines (if grid interval is specified)
     if (gridInterval && gridInterval > 0) {
-      const visibleStart = scrollX / zoom;
-      const visibleEnd = (scrollX + window.innerWidth) / zoom;
+      const safeZoomGrid = zoom > 0 ? zoom : 1;
+      const visibleStart = scrollX / safeZoomGrid;
+      const visibleEnd = (scrollX + window.innerWidth) / safeZoomGrid;
 
       const startGrid = Math.floor(visibleStart / gridInterval) * gridInterval;
       const endGrid = Math.ceil(visibleEnd / gridInterval) * gridInterval;

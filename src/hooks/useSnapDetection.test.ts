@@ -49,10 +49,11 @@ describe('useSnapDetection', () => {
     it('should exclude specified times from snap candidates', () => {
       const { result } = renderHook(() => useSnapDetection(defaultOptions));
 
-      // Exclude the playhead time (5), should not snap to it
-      const { snapPoint } = result.current.findSnapPoint(4.99, [5]);
-      // Should snap to something else or not snap at all
-      expect(snapPoint?.time).not.toBe(5);
+      // Exclude the playhead time (5); 4.99 is not close enough to clip edges
+      // (0, 10) within threshold/zoom = 10/100 = 0.1, so no snap occurs
+      const { snappedTime, snapPoint } = result.current.findSnapPoint(4.99, [5]);
+      expect(snappedTime).toBe(4.99);
+      expect(snapPoint).toBeNull();
     });
 
     it('should snap to clip edges', () => {

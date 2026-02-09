@@ -760,7 +760,7 @@ export interface StateChange {
 // Job Types
 // =============================================================================
 
-/** Job type identifier (snake_case to match Rust IPC) */
+/** Job type identifier (snake_case to match Rust IPC + legacy frontend aliases) */
 export type JobType =
   | 'proxy_generation'
   | 'thumbnail_generation'
@@ -769,7 +769,13 @@ export type JobType =
   | 'transcription'
   | 'preview_render'
   | 'final_render'
-  | 'ai_completion';
+  | 'ai_completion'
+  // Legacy aliases (frontend-only job types)
+  | 'render'
+  | 'export'
+  | 'transcode'
+  | 'ai_process'
+  | 'import';
 
 /** Job priority level */
 export type JobPriority = 'background' | 'normal' | 'preview' | 'user_request';
