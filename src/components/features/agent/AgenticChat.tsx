@@ -10,6 +10,7 @@ import { useState, useCallback, useRef, useEffect } from 'react';
 import { useAgenticLoopWithStores, type UseAgenticLoopOptions } from '@/hooks/useAgenticLoop';
 import { useAgentEventHandler } from '@/hooks/useAgentEventHandler';
 import { useConversationStore } from '@/stores/conversationStore';
+import { useProjectStore } from '@/stores';
 import type { ILLMClient, IToolExecutor, AgentContext, AgenticEngineConfig } from '@/agents/engine';
 import { ConversationMessageItem } from './ConversationMessageItem';
 
@@ -193,6 +194,19 @@ export function AgenticChat({
   // ===========================================================================
   // Effects
   // ===========================================================================
+
+  // Ensure conversationStore is initialized for the active project.
+  // Without this, activeConversation is null and messages are silently lost.
+  const activeSequenceId = useProjectStore((s) => s.activeSequenceId);
+  const activeProjectId = useConversationStore((s) => s.activeProjectId);
+  const loadForProject = useConversationStore((s) => s.loadForProject);
+
+  useEffect(() => {
+    const projectId = activeSequenceId || 'default';
+    if (activeProjectId !== projectId) {
+      loadForProject(projectId);
+    }
+  }, [activeSequenceId, activeProjectId, loadForProject]);
 
   // Scroll to bottom on new messages
   useEffect(() => {
