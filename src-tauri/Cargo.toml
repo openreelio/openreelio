@@ -106,7 +106,7 @@ futures = { version = "0.3", optional = true }
 
 # WASM Plugin System
 wasmtime = "27"
-wasmtime-wasi = "27"
+wasmtime-wasi = "41"
 
 # FFmpeg bundler and AI providers (optional)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"], optional = true }
