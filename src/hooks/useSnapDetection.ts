@@ -126,7 +126,8 @@ export function useSnapDetection(options: UseSnapDetectionOptions): UseSnapDetec
       }
 
       const points = getAllSnapPoints();
-      const thresholdTime = threshold / zoom;
+      const safeZoom = zoom > 0 ? zoom : 1;
+      const thresholdTime = threshold / safeZoom;
 
       let nearestPoint: SnapPoint | null = null;
       let nearestDistance = Number.POSITIVE_INFINITY;
