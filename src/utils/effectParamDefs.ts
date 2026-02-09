@@ -163,6 +163,25 @@ export const AUDIO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
       step: 0.01,
     },
   ],
+
+  loudness_normalize: [
+    {
+      name: 'target_lufs',
+      label: 'Target Loudness (LUFS)',
+      default: { type: 'float', value: -14 },
+      min: -50,
+      max: 0,
+      step: 0.5,
+    },
+    {
+      name: 'true_peak',
+      label: 'True Peak (dBTP)',
+      default: { type: 'float', value: -1 },
+      min: -10,
+      max: 0,
+      step: 0.1,
+    },
+  ],
 };
 
 // =============================================================================
@@ -624,6 +643,43 @@ export const VIDEO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
     },
   ],
 
+  auto_reframe: [
+    {
+      name: 'aspect_ratio',
+      label: 'Target Aspect Ratio',
+      default: { type: 'string', value: '9:16' },
+      inputType: 'select',
+      options: ['16:9', '9:16', '1:1', '4:3', '4:5'],
+    },
+    {
+      name: 'speed',
+      label: 'Tracking Speed',
+      default: { type: 'float', value: 0.5 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+  ],
+
+  object_tracking: [
+    {
+      name: 'confidence',
+      label: 'Detection Confidence',
+      default: { type: 'float', value: 0.7 },
+      min: 0.1,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'smooth',
+      label: 'Smoothing',
+      default: { type: 'float', value: 0.5 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+  ],
+
   // ===========================================================================
   // Keying Effects
   // ===========================================================================
@@ -682,6 +738,201 @@ export const VIDEO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
       name: 'tolerance',
       label: 'Tolerance',
       default: { type: 'float', value: 0.1 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+  ],
+
+  // ===========================================================================
+  // Color Grading Effects
+  // ===========================================================================
+
+  color_wheels: [
+    {
+      name: 'lift_r',
+      label: 'Lift Red',
+      default: { type: 'float', value: 0 },
+      min: -1,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'lift_g',
+      label: 'Lift Green',
+      default: { type: 'float', value: 0 },
+      min: -1,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'lift_b',
+      label: 'Lift Blue',
+      default: { type: 'float', value: 0 },
+      min: -1,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'gamma_r',
+      label: 'Gamma Red',
+      default: { type: 'float', value: 0 },
+      min: -1,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'gamma_g',
+      label: 'Gamma Green',
+      default: { type: 'float', value: 0 },
+      min: -1,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'gamma_b',
+      label: 'Gamma Blue',
+      default: { type: 'float', value: 0 },
+      min: -1,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'gain_r',
+      label: 'Gain Red',
+      default: { type: 'float', value: 1 },
+      min: 0,
+      max: 2,
+      step: 0.01,
+    },
+    {
+      name: 'gain_g',
+      label: 'Gain Green',
+      default: { type: 'float', value: 1 },
+      min: 0,
+      max: 2,
+      step: 0.01,
+    },
+    {
+      name: 'gain_b',
+      label: 'Gain Blue',
+      default: { type: 'float', value: 1 },
+      min: 0,
+      max: 2,
+      step: 0.01,
+    },
+  ],
+
+  hsl_qualifier: [
+    {
+      name: 'hue_center',
+      label: 'Hue Center',
+      default: { type: 'float', value: 120 },
+      min: 0,
+      max: 360,
+      step: 1,
+    },
+    {
+      name: 'hue_width',
+      label: 'Hue Width',
+      default: { type: 'float', value: 30 },
+      min: 0,
+      max: 180,
+      step: 1,
+    },
+    {
+      name: 'hue_softness',
+      label: 'Hue Softness',
+      default: { type: 'float', value: 10 },
+      min: 0,
+      max: 90,
+      step: 1,
+    },
+    {
+      name: 'sat_low',
+      label: 'Saturation Low',
+      default: { type: 'float', value: 0 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'sat_high',
+      label: 'Saturation High',
+      default: { type: 'float', value: 1 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'lum_low',
+      label: 'Luminance Low',
+      default: { type: 'float', value: 0 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+    {
+      name: 'lum_high',
+      label: 'Luminance High',
+      default: { type: 'float', value: 1 },
+      min: 0,
+      max: 1,
+      step: 0.01,
+    },
+  ],
+
+  curves: [
+    {
+      name: 'master',
+      label: 'Master Curve',
+      default: { type: 'string', value: '0/0 1/1' },
+    },
+    {
+      name: 'red',
+      label: 'Red Curve',
+      default: { type: 'string', value: '0/0 1/1' },
+    },
+    {
+      name: 'green',
+      label: 'Green Curve',
+      default: { type: 'string', value: '0/0 1/1' },
+    },
+    {
+      name: 'blue',
+      label: 'Blue Curve',
+      default: { type: 'string', value: '0/0 1/1' },
+    },
+  ],
+
+  blend_mode: [
+    {
+      name: 'mode',
+      label: 'Blend Mode',
+      default: { type: 'string', value: 'normal' },
+      inputType: 'select',
+      options: [
+        'normal',
+        'multiply',
+        'screen',
+        'overlay',
+        'darken',
+        'lighten',
+        'color_dodge',
+        'color_burn',
+        'hard_light',
+        'soft_light',
+        'difference',
+        'exclusion',
+      ],
+    },
+  ],
+
+  opacity: [
+    {
+      name: 'value',
+      label: 'Opacity',
+      default: { type: 'float', value: 1.0 },
       min: 0,
       max: 1,
       step: 0.01,

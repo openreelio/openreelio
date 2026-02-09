@@ -59,6 +59,7 @@ const CATEGORY_ICONS: Record<EffectCategory, ReactNode> = {
   text: <Type className="w-4 h-4" />,
   ai: <Bot className="w-4 h-4" />,
   keying: <Scissors className="w-4 h-4" />,
+  compositing: <Layers className="w-4 h-4" />,
   custom: <Wand2 className="w-4 h-4" />,
 };
 
