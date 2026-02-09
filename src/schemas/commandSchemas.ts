@@ -69,20 +69,69 @@ export type TrackType = z.infer<typeof TrackType>;
  * Available effect types
  */
 export const EffectType = z.enum([
+  // Color effects
   'brightness',
   'contrast',
   'saturation',
   'hue',
-  'blur',
-  'sharpen',
-  'noise',
-  'fadeIn',
-  'fadeOut',
+  'color_balance',
+  'color_wheels',
+  'gamma',
+  'levels',
+  'curves',
+  'lut',
+  // Transform effects
   'crop',
-  'scale',
+  'flip',
+  'mirror',
   'rotate',
-  'chromaKey',
-  'colorCorrection',
+  // Blur/Sharpen
+  'gaussian_blur',
+  'box_blur',
+  'motion_blur',
+  'radial_blur',
+  'sharpen',
+  'unsharp_mask',
+  // Stylize
+  'vignette',
+  'glow',
+  'film_grain',
+  'chromatic_aberration',
+  'noise',
+  'pixelate',
+  'posterize',
+  // Transitions
+  'cross_dissolve',
+  'fade',
+  'wipe',
+  'slide',
+  'zoom',
+  // Audio
+  'volume',
+  'gain',
+  'eq_band',
+  'compressor',
+  'limiter',
+  'noise_reduction',
+  'reverb',
+  'delay',
+  // Text
+  'text_overlay',
+  'subtitle',
+  // AI
+  'background_removal',
+  'auto_reframe',
+  'face_blur',
+  'object_tracking',
+  // Keying/Compositing
+  'chroma_key',
+  'luma_key',
+  'hsl_qualifier',
+  // Compositing
+  'blend_mode',
+  'opacity',
+  // Audio normalization
+  'loudness_normalize',
 ]);
 export type EffectType = z.infer<typeof EffectType>;
 
