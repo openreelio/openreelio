@@ -918,11 +918,10 @@ export function Timeline({
 
       const target = e.target as HTMLElement;
 
-      // Keep interactive controls and clip elements untouched.
-      // Clips handle their own mousedown for drag/trim/selection.
+      // Keep interactive controls and trim handles untouched.
+      // Trim handles must initiate their own resize interaction.
       if (
         target.closest('button') ||
-        target.closest('[data-testid^="clip-"]') ||
         target.closest('[data-testid$="-trim-left"]') ||
         target.closest('[data-testid$="-trim-right"]')
       ) {
