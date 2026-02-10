@@ -456,9 +456,50 @@ export function useAgenticLoopWithStores(
     externalContext,
   ]);
 
+  // Build a contextRefresher that reads fresh state from stores each iteration.
+  // Returns only the fields that may change between iterations (timeline/playback state).
+  // Memory fields (recentOperations, userPreferences, corrections) and availableTools
+  // are preserved from the previous iteration by the engine's spread-merge logic.
+  const contextRefresher = useCallback((): Partial<AgentContext> => {
+    const playback = usePlaybackStore.getState();
+    const timeline = useTimelineStore.getState();
+    const project = useProjectStore.getState();
+
+    const activeSeq = project.activeSequenceId
+      ? project.sequences.get(project.activeSequenceId)
+      : undefined;
+
+    return {
+      projectId: externalContext?.projectId ?? 'current',
+      sequenceId: project.activeSequenceId ?? undefined,
+      playheadPosition: playback.currentTime,
+      timelineDuration: playback.duration,
+      selectedClips: timeline.selectedClipIds,
+      selectedTracks: timeline.selectedTrackIds,
+      availableAssets: Array.from(project.assets.values())
+        .filter((a) => a.kind === 'video' || a.kind === 'audio' || a.kind === 'image')
+        .map((a) => ({
+          id: a.id,
+          name: a.name,
+          type: a.kind as 'video' | 'audio' | 'image',
+          duration: a.durationSec,
+        })),
+      availableTracks: activeSeq?.tracks.map((t) => ({
+        id: t.id,
+        name: t.name || `Track ${t.id}`,
+        type: t.kind === 'audio' ? 'audio' as const : 'video' as const,
+        clipCount: t.clips.length,
+      })) ?? [],
+    };
+  }, [externalContext?.projectId]);
+
   return useAgenticLoop({
     ...options,
     context,
+    config: {
+      ...options.config,
+      contextRefresher,
+    },
   });
 }
 
