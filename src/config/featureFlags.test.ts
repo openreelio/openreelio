@@ -45,7 +45,7 @@ describe('featureFlags', () => {
 
   describe('getFeatureFlag', () => {
     it('should return default value when not set', () => {
-      expect(getFeatureFlag('USE_AGENTIC_ENGINE')).toBe(false);
+      expect(getFeatureFlag('USE_AGENTIC_ENGINE')).toBe(true);
     });
 
     it('should return true when flag is enabled via localStorage', () => {
@@ -69,14 +69,14 @@ describe('featureFlags', () => {
     it('should return default value for invalid JSON in localStorage', () => {
       localStorageMock.setItem('openreelio-feature-flags', 'invalid-json');
 
-      expect(getFeatureFlag('USE_AGENTIC_ENGINE')).toBe(false);
+      expect(getFeatureFlag('USE_AGENTIC_ENGINE')).toBe(true);
     });
 
     it('should handle missing localStorage gracefully', () => {
       vi.stubGlobal('localStorage', undefined);
 
       // Should not throw and return default
-      expect(getFeatureFlag('USE_AGENTIC_ENGINE')).toBe(false);
+      expect(getFeatureFlag('USE_AGENTIC_ENGINE')).toBe(true);
     });
   });
 
@@ -134,8 +134,8 @@ describe('featureFlags', () => {
   });
 
   describe('isAgenticEngineEnabled', () => {
-    it('should return false by default', () => {
-      expect(isAgenticEngineEnabled()).toBe(false);
+    it('should return true by default', () => {
+      expect(isAgenticEngineEnabled()).toBe(true);
     });
 
     it('should return true when USE_AGENTIC_ENGINE is enabled', () => {
@@ -198,16 +198,16 @@ describe('featureFlags', () => {
 
   describe('integration scenarios', () => {
     it('should support typical development workflow', () => {
-      // 1. Start with default (disabled)
-      expect(isAgenticEngineEnabled()).toBe(false);
-
-      // 2. Developer enables for testing
-      setFeatureFlag('USE_AGENTIC_ENGINE', true);
+      // 1. Start with default (enabled)
       expect(isAgenticEngineEnabled()).toBe(true);
 
-      // 3. Developer resets to defaults
-      resetFeatureFlags();
+      // 2. Developer disables for fallback testing
+      setFeatureFlag('USE_AGENTIC_ENGINE', false);
       expect(isAgenticEngineEnabled()).toBe(false);
+
+      // 3. Developer resets to defaults (enabled)
+      resetFeatureFlags();
+      expect(isAgenticEngineEnabled()).toBe(true);
     });
 
     it('should support feature flag toggling in UI', () => {

@@ -38,7 +38,7 @@ export interface FeatureFlags {
   /**
    * Enable the new Agentic Engine (Think-Plan-Act-Observe loop)
    * When false, uses legacy single-shot AI chat
-   * @default false
+   * @default true
    */
   USE_AGENTIC_ENGINE: boolean;
 }
@@ -64,7 +64,7 @@ const STORAGE_KEY = 'openreelio-feature-flags';
  * default to `false` until ready for general release.
  */
 const DEFAULT_FLAGS: FeatureFlags = {
-  USE_AGENTIC_ENGINE: false,
+  USE_AGENTIC_ENGINE: true,
 };
 
 /**
