@@ -279,6 +279,51 @@ describe('aiStore', () => {
       });
     });
 
+    describe('proposal status sync to chat messages', () => {
+      it('should sync rejected status to chat message proposal', () => {
+        const { addChatMessage, createProposal, rejectProposal } = useAIStore.getState();
+        const editScript = createMockEditScript();
+
+        createProposal(editScript);
+        const proposal = useAIStore.getState().currentProposal!;
+        addChatMessage('assistant', 'Suggestion', proposal);
+
+        rejectProposal(proposal.id);
+
+        const state = useAIStore.getState();
+        expect(state.chatMessages[0].proposal?.status).toBe('rejected');
+        expect(state.currentProposal?.status).toBe('rejected');
+      });
+
+      it('should sync rejected status to proposalHistory', () => {
+        const { createProposal, rejectProposal } = useAIStore.getState();
+        const editScript = createMockEditScript();
+
+        createProposal(editScript);
+        const proposalId = useAIStore.getState().currentProposal!.id;
+
+        rejectProposal(proposalId);
+
+        const state = useAIStore.getState();
+        expect(state.proposalHistory[0].status).toBe('rejected');
+      });
+
+      it('should not sync when chat message has no matching proposal', () => {
+        const { addChatMessage, createProposal, rejectProposal } = useAIStore.getState();
+
+        addChatMessage('user', 'Hello');
+        createProposal(createMockEditScript());
+        const proposalId = useAIStore.getState().currentProposal!.id;
+
+        rejectProposal(proposalId);
+
+        const state = useAIStore.getState();
+        // User message has no proposal — should not crash
+        expect(state.chatMessages[0].proposal).toBeUndefined();
+        expect(state.currentProposal?.status).toBe('rejected');
+      });
+    });
+
     describe('clearCurrentProposal', () => {
       it('should clear current proposal', () => {
         const { createProposal, clearCurrentProposal } = useAIStore.getState();
@@ -427,10 +472,9 @@ describe('aiStore', () => {
       expect(state.chatMessages).toHaveLength(2);
       expect(state.chatMessages[0].role).toBe('user');
       expect(state.chatMessages[1].role).toBe('assistant');
-      // Note: The proposal attached to the message is a snapshot (copy)
-      // at the time of attachment, so it retains its original status.
-      // currentProposal status is updated to 'rejected'.
+      // Proposal status is synced to the embedded copy in chat messages
       expect(state.chatMessages[1].proposal).toBeDefined();
+      expect(state.chatMessages[1].proposal?.status).toBe('rejected');
       expect(state.currentProposal?.status).toBe('rejected');
     });
 
