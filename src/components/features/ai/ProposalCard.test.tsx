@@ -156,6 +156,41 @@ describe('ProposalCard', () => {
       expect(mockRejectProposal).toHaveBeenCalledWith('proposal_001');
     });
 
+    it('shows error message when approve fails', async () => {
+      mockApproveProposal.mockRejectedValue(new Error('IPC command failed'));
+
+      const user = userEvent.setup();
+      render(<ProposalCard proposal={createMockProposal()} />);
+
+      await user.click(screen.getByRole('button', { name: 'Approve' }));
+
+      await waitFor(() => {
+        expect(screen.getByText('IPC command failed')).toBeInTheDocument();
+      });
+      // Button should revert from "Applying..." back to "Approve"
+      expect(screen.getByRole('button', { name: 'Approve' })).not.toBeDisabled();
+    });
+
+    it('clears error on retry after failure', async () => {
+      mockApproveProposal.mockRejectedValueOnce(new Error('First attempt failed'));
+      mockApproveProposal.mockResolvedValueOnce(undefined);
+
+      const user = userEvent.setup();
+      render(<ProposalCard proposal={createMockProposal()} />);
+
+      // First click — fails
+      await user.click(screen.getByRole('button', { name: 'Approve' }));
+      await waitFor(() => {
+        expect(screen.getByText('First attempt failed')).toBeInTheDocument();
+      });
+
+      // Second click — succeeds, error should clear
+      await user.click(screen.getByRole('button', { name: 'Approve' }));
+      await waitFor(() => {
+        expect(screen.queryByText('First attempt failed')).not.toBeInTheDocument();
+      });
+    });
+
     it('shows loading state while applying', async () => {
       mockApproveProposal.mockImplementation(
         () => new Promise((resolve) => setTimeout(resolve, 100))

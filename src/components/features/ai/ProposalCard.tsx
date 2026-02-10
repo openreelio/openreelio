@@ -26,6 +26,7 @@ export const ProposalCard = memo(function ProposalCard({
 }: ProposalCardProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [isApplying, setIsApplying] = useState(false);
+  const [approveError, setApproveError] = useState<string | null>(null);
 
   // Track if component is mounted to avoid state updates after unmount
   const isMountedRef = useRef(true);
@@ -46,8 +47,13 @@ export const ProposalCard = memo(function ProposalCard({
   // Handle approve
   const handleApprove = useCallback(async () => {
     setIsApplying(true);
+    setApproveError(null);
     try {
       await approveProposal(id);
+    } catch (error) {
+      if (isMountedRef.current) {
+        setApproveError(error instanceof Error ? error.message : String(error));
+      }
     } finally {
       // Only update state if component is still mounted
       if (isMountedRef.current) {
@@ -147,9 +153,9 @@ export const ProposalCard = memo(function ProposalCard({
       )}
 
       {/* Error message if failed */}
-      {isFailed && proposal.error && (
+      {((isFailed && proposal.error) || approveError) && (
         <div className="px-3 py-2 border-t border-red-600 bg-red-900/20">
-          <p className="text-xs text-red-400">{proposal.error}</p>
+          <p className="text-xs text-red-400">{proposal.error || approveError}</p>
         </div>
       )}
     </div>

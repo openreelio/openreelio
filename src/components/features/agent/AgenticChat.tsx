@@ -197,16 +197,16 @@ export function AgenticChat({
 
   // Ensure conversationStore is initialized for the active project.
   // Without this, activeConversation is null and messages are silently lost.
-  const activeSequenceId = useProjectStore((s) => s.activeSequenceId);
+  const currentProjectId = useProjectStore((s) => s.meta?.id ?? null);
   const activeProjectId = useConversationStore((s) => s.activeProjectId);
   const loadForProject = useConversationStore((s) => s.loadForProject);
 
   useEffect(() => {
-    const projectId = activeSequenceId || 'default';
-    if (activeProjectId !== projectId) {
-      loadForProject(projectId);
+    const targetProjectId = currentProjectId ?? activeProjectId ?? 'default';
+    if (activeProjectId !== targetProjectId) {
+      loadForProject(targetProjectId);
     }
-  }, [activeSequenceId, activeProjectId, loadForProject]);
+  }, [currentProjectId, activeProjectId, loadForProject]);
 
   // Scroll to bottom on new messages
   useEffect(() => {

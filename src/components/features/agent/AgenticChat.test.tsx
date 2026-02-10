@@ -12,9 +12,31 @@ import { AgenticChat } from './AgenticChat';
 import type { ILLMClient, IToolExecutor, LLMMessage } from '@/agents/engine';
 import { useConversationStore } from '@/stores/conversationStore';
 
+const mockRun = vi.fn();
+
 // Mock feature flags
 vi.mock('@/config/featureFlags', () => ({
   isAgenticEngineEnabled: vi.fn(() => true),
+}));
+
+// Mock useAgenticLoop hook to keep component tests deterministic
+vi.mock('@/hooks/useAgenticLoop', () => ({
+  useAgenticLoopWithStores: vi.fn(() => ({
+    run: mockRun,
+    abort: vi.fn(),
+    approvePlan: vi.fn(),
+    rejectPlan: vi.fn(),
+    retry: vi.fn().mockResolvedValue(null),
+    phase: 'idle',
+    isRunning: false,
+    error: null,
+    isEnabled: true,
+    events: [],
+    thought: null,
+    plan: null,
+    sessionId: null,
+    reset: vi.fn(),
+  })),
 }));
 
 // Mock logger
@@ -32,8 +54,10 @@ describe('AgenticChat', () => {
   let mockToolExecutor: IToolExecutor;
 
   beforeEach(() => {
+    mockRun.mockResolvedValue(null);
+    localStorage.clear();
     // Initialize conversation store with 'default' project to match the
-    // component's fallback when useProjectStore.activeSequenceId is null.
+    // component's fallback when no project metadata is loaded.
     useConversationStore.getState().loadForProject('default');
 
     const generateStream: ILLMClient['generateStream'] = async function* () {
@@ -183,6 +207,21 @@ describe('AgenticChat', () => {
       );
 
       expect(screen.getByRole('button', { name: /send/i })).toBeInTheDocument();
+    });
+
+    it('should not override an already loaded project conversation when no sequence is active', () => {
+      useConversationStore.getState().loadForProject('project-123');
+      useConversationStore.getState().addUserMessage('Project scoped message');
+
+      render(
+        <AgenticChat
+          llmClient={mockLLMClient}
+          toolExecutor={mockToolExecutor}
+        />
+      );
+
+      expect(useConversationStore.getState().activeProjectId).toBe('project-123');
+      expect(screen.getByText('Project scoped message')).toBeInTheDocument();
     });
   });
 

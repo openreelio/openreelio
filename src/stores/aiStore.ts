@@ -17,7 +17,7 @@ import {
   createDebouncedSaver,
   cleanupOldHistories,
 } from '@/services/chatStorage';
-import { registerEditingTools, globalToolRegistry } from '@/agents';
+import { registerAllTools, globalToolRegistry } from '@/agents';
 import { useConversationStore } from './conversationStore';
 
 const logger = createLogger('AIStore');
@@ -680,15 +680,42 @@ export const useAIStore = create<AIState>()(
           if (result.success) {
             set((state) => {
               if (state.currentProposal) {
+                const id = state.currentProposal.id;
                 state.currentProposal.status = 'applied';
                 state.currentProposal.appliedOpIds = result.appliedOpIds;
+                // Sync to the embedded proposal in chat messages (Immer structural sharing)
+                const msg = state.chatMessages.find(m => m.proposal?.id === id);
+                if (msg?.proposal) {
+                  msg.proposal.status = 'applied';
+                  msg.proposal.appliedOpIds = result.appliedOpIds;
+                }
+                // Sync to proposalHistory
+                const historyEntry = state.proposalHistory.find(p => p.id === id);
+                if (historyEntry) {
+                  historyEntry.status = 'applied';
+                  historyEntry.appliedOpIds = result.appliedOpIds;
+                }
               }
             });
           } else {
             set((state) => {
               if (state.currentProposal) {
+                const id = state.currentProposal.id;
+                const errorMsg = result.errors.join('; ');
                 state.currentProposal.status = 'failed';
-                state.currentProposal.error = result.errors.join('; ');
+                state.currentProposal.error = errorMsg;
+                // Sync to the embedded proposal in chat messages (Immer structural sharing)
+                const msg = state.chatMessages.find(m => m.proposal?.id === id);
+                if (msg?.proposal) {
+                  msg.proposal.status = 'failed';
+                  msg.proposal.error = errorMsg;
+                }
+                // Sync to proposalHistory
+                const historyEntry = state.proposalHistory.find(p => p.id === id);
+                if (historyEntry) {
+                  historyEntry.status = 'failed';
+                  historyEntry.error = errorMsg;
+                }
               }
             });
           }
@@ -696,10 +723,24 @@ export const useAIStore = create<AIState>()(
           return result;
         } catch (error) {
           set((state) => {
-            state.error = error instanceof Error ? error.message : String(error);
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            state.error = errorMsg;
             if (state.currentProposal) {
+              const id = state.currentProposal.id;
               state.currentProposal.status = 'failed';
-              state.currentProposal.error = error instanceof Error ? error.message : String(error);
+              state.currentProposal.error = errorMsg;
+              // Sync to the embedded proposal in chat messages (Immer structural sharing)
+              const msg = state.chatMessages.find(m => m.proposal?.id === id);
+              if (msg?.proposal) {
+                msg.proposal.status = 'failed';
+                msg.proposal.error = errorMsg;
+              }
+              // Sync to proposalHistory
+              const historyEntry = state.proposalHistory.find(p => p.id === id);
+              if (historyEntry) {
+                historyEntry.status = 'failed';
+                historyEntry.error = errorMsg;
+              }
             }
           });
           throw error;
@@ -736,6 +777,16 @@ export const useAIStore = create<AIState>()(
         set((state) => {
           if (state.currentProposal) {
             state.currentProposal.status = 'approved';
+            // Sync to the embedded proposal in chat messages (Immer structural sharing)
+            const msg = state.chatMessages.find(m => m.proposal?.id === proposalId);
+            if (msg?.proposal) {
+              msg.proposal.status = 'approved';
+            }
+            // Sync to proposalHistory
+            const historyEntry = state.proposalHistory.find(p => p.id === proposalId);
+            if (historyEntry) {
+              historyEntry.status = 'approved';
+            }
           }
         });
 
@@ -751,6 +802,11 @@ export const useAIStore = create<AIState>()(
           const proposal = state.proposalHistory.find((p) => p.id === proposalId);
           if (proposal) {
             proposal.status = 'rejected';
+          }
+          // Sync status to the embedded proposal in chat messages
+          const msg = state.chatMessages.find(m => m.proposal?.id === proposalId);
+          if (msg?.proposal) {
+            msg.proposal.status = 'rejected';
           }
         });
       },
@@ -1131,7 +1187,8 @@ let isAgentSystemInitialized = false;
 
 /**
  * Initialize the AI agent system.
- * Registers editing tools and sets up the agent framework.
+ * Registers all agent tools (editing, analysis, audio, caption, effect, transition)
+ * and sets up the agent framework.
  * Safe to call multiple times - will only initialize once.
  */
 export function initializeAgentSystem(): void {
@@ -1140,8 +1197,8 @@ export function initializeAgentSystem(): void {
     return;
   }
 
-  // Register editing tools with the global registry
-  registerEditingTools();
+  // Register all agent tools with the global registry
+  registerAllTools();
 
   isAgentSystemInitialized = true;
   logger.info('Agent system initialized', {
