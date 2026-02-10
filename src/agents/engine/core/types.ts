@@ -526,6 +526,21 @@ export interface AgenticEngineConfig {
 
   /** Stop execution on the first tool error (default: true) */
   stopOnError?: boolean;
+
+  /**
+   * Optional callback to refresh context between iterations.
+   *
+   * When provided, the engine calls this at the start of each iteration
+   * to get a fresh snapshot of project/timeline state from Zustand stores.
+   * This prevents stale context in multi-step tasks where iteration N
+   * modifies state that iteration N+1 needs to see.
+   *
+   * Returns a partial context — only the fields that changed need to be
+   * included. Fields not present in the result are preserved from the
+   * previous iteration. `availableTools` is always preserved from the
+   * initial context regardless of what the refresher returns.
+   */
+  contextRefresher?: () => Partial<AgentContext> | Promise<Partial<AgentContext>>;
 }
 
 /**

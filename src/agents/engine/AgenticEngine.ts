@@ -156,7 +156,7 @@ export class AgenticEngine {
     const startTime = Date.now();
     const executionResults: ExecutionResult[] = [];
 
-    const contextWithTools: AgentContext = {
+    let contextWithTools: AgentContext = {
       ...agentContext,
       availableTools:
         agentContext.availableTools.length > 0
@@ -205,6 +205,24 @@ export class AgenticEngine {
 
         iteration += 1;
         state.iteration = iteration;
+
+        // Refresh context from stores if a refresher is provided (prevents stale state in multi-step tasks)
+        if (this.config.contextRefresher && iteration > 1) {
+          try {
+            const freshContext = await this.config.contextRefresher();
+            // Merge fresh partial context, preserving availableTools from initial setup
+            contextWithTools = {
+              ...contextWithTools,
+              ...freshContext,
+              availableTools: contextWithTools.availableTools,
+            };
+          } catch (error) {
+            logger.warn('Context refresh failed, continuing with previous context', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
         state.context = { ...contextWithTools, currentIteration: iteration };
 
         // =====================================================================
