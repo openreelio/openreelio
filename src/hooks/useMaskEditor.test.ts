@@ -445,6 +445,30 @@ describe('useMaskEditor', () => {
       expect(result.current.masks[0].feather).toBe(0.7);
     });
 
+    it('should not apply non-updatable fields in local-only update', () => {
+      const initialMasks = [createMockMask('mask-1')];
+
+      const { result } = renderHook(() =>
+        useMaskEditor({
+          clipId: mockClipId,
+          effectId: mockEffectId,
+          sequenceId: mockSequenceId,
+          trackId: mockTrackId,
+          initialMasks,
+        })
+      );
+
+      act(() => {
+        result.current.updateMaskLocal('mask-1', {
+          id: 'tampered-id',
+          feather: 0.3,
+        } as Partial<Mask>);
+      });
+
+      expect(result.current.masks[0].id).toBe('mask-1');
+      expect(result.current.masks[0].feather).toBe(0.3);
+    });
+
     it('should not update locked mask', async () => {
       const lockedMask = { ...createMockMask('mask-1'), locked: true };
 
@@ -492,6 +516,44 @@ describe('useMaskEditor', () => {
           effectId: mockEffectId,
           maskId: 'mask-1',
           feather: 0.4,
+        },
+      });
+    });
+
+    it('should sanitize update values before sending to backend', async () => {
+      const initialMasks = [createMockMask('mask-1')];
+
+      const { result } = renderHook(() =>
+        useMaskEditor({
+          clipId: mockClipId,
+          effectId: mockEffectId,
+          sequenceId: mockSequenceId,
+          trackId: mockTrackId,
+          initialMasks,
+        })
+      );
+
+      await act(async () => {
+        await result.current.updateMask('mask-1', {
+          feather: 9,
+          opacity: -2,
+          expansion: 5,
+          name: '  Sanitized Name  ',
+          inverted: 'yes' as unknown as boolean,
+          enabled: 'yes' as unknown as boolean,
+          blendMode: 'unknown' as unknown as Mask['blendMode'],
+        });
+      });
+
+      expect(mockInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'UpdateMask',
+        payload: {
+          effectId: mockEffectId,
+          maskId: 'mask-1',
+          feather: 1,
+          opacity: 0,
+          expansion: 1,
+          name: 'Sanitized Name',
         },
       });
     });
@@ -899,6 +961,14 @@ describe('useMaskEditor', () => {
         createMockMask('valid-mask'),
         { invalid: true },
         { id: 'missing-shape', name: 'Broken' },
+        {
+          id: 'mask-with-invalid-booleans',
+          name: 'Mask invalid booleans',
+          shape: { type: 'rectangle', x: 0.5, y: 0.5, width: 0.2, height: 0.2, cornerRadius: 0, rotation: 0 },
+          inverted: 'true',
+          enabled: 'false',
+          locked: 'false',
+        },
       ]);
 
       const { result } = renderHook(() =>
@@ -915,8 +985,11 @@ describe('useMaskEditor', () => {
         expect(result.current.isLoading).toBe(false);
       });
 
-      expect(result.current.masks).toHaveLength(1);
+      expect(result.current.masks).toHaveLength(2);
       expect(result.current.masks[0].id).toBe('valid-mask');
+      expect(result.current.masks[1].inverted).toBe(false);
+      expect(result.current.masks[1].enabled).toBe(true);
+      expect(result.current.masks[1].locked).toBe(false);
     });
 
     it('should preserve locked mask protection', async () => {

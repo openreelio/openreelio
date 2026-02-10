@@ -129,15 +129,38 @@ function generateMaskName(existingMasks: Mask[]): string {
 function toMaskUpdatePayload(updates: Partial<Mask>): Partial<Mask> {
   const payload: Partial<Mask> = {};
 
-  if (updates.shape !== undefined) payload.shape = updates.shape;
-  if (updates.name !== undefined) payload.name = updates.name;
-  if (updates.feather !== undefined) payload.feather = updates.feather;
-  if (updates.opacity !== undefined) payload.opacity = updates.opacity;
-  if (updates.expansion !== undefined) payload.expansion = updates.expansion;
-  if (updates.inverted !== undefined) payload.inverted = updates.inverted;
-  if (updates.blendMode !== undefined) payload.blendMode = updates.blendMode;
-  if (updates.enabled !== undefined) payload.enabled = updates.enabled;
-  if (updates.locked !== undefined) payload.locked = updates.locked;
+  if (updates.shape !== undefined && isValidMaskShape(updates.shape)) {
+    payload.shape = updates.shape;
+  }
+  if (typeof updates.name === 'string' && updates.name.trim().length > 0) {
+    payload.name = updates.name.trim();
+  }
+  if (typeof updates.feather === 'number' && Number.isFinite(updates.feather)) {
+    payload.feather = Math.max(0, Math.min(1, updates.feather));
+  }
+  if (typeof updates.opacity === 'number' && Number.isFinite(updates.opacity)) {
+    payload.opacity = Math.max(0, Math.min(1, updates.opacity));
+  }
+  if (typeof updates.expansion === 'number' && Number.isFinite(updates.expansion)) {
+    payload.expansion = Math.max(-1, Math.min(1, updates.expansion));
+  }
+  if (typeof updates.inverted === 'boolean') {
+    payload.inverted = updates.inverted;
+  }
+  if (
+    updates.blendMode === 'add' ||
+    updates.blendMode === 'subtract' ||
+    updates.blendMode === 'intersect' ||
+    updates.blendMode === 'difference'
+  ) {
+    payload.blendMode = updates.blendMode;
+  }
+  if (typeof updates.enabled === 'boolean') {
+    payload.enabled = updates.enabled;
+  }
+  if (typeof updates.locked === 'boolean') {
+    payload.locked = updates.locked;
+  }
 
   return payload;
 }
@@ -167,7 +190,7 @@ function normalizeFetchedMask(raw: unknown): Mask | null {
     id: candidate.id,
     name: typeof candidate.name === 'string' && candidate.name.length > 0 ? candidate.name : 'Mask',
     shape: candidate.shape,
-    inverted: Boolean(candidate.inverted),
+    inverted: typeof candidate.inverted === 'boolean' ? candidate.inverted : false,
     feather: typeof candidate.feather === 'number' ? candidate.feather : 0,
     opacity: typeof candidate.opacity === 'number' ? candidate.opacity : 1,
     expansion: typeof candidate.expansion === 'number' ? candidate.expansion : 0,
@@ -417,8 +440,12 @@ export function useMaskEditor({
   );
 
   const updateMaskLocal = useCallback((id: MaskId, updates: Partial<Mask>) => {
+    const payload = toMaskUpdatePayload(updates);
+    if (!hasOwnProperties(payload)) {
+      return;
+    }
     setMasks((prev) =>
-      prev.map((m) => (m.id === id ? { ...m, ...updates } : m))
+      prev.map((m) => (m.id === id ? { ...m, ...payload } : m))
     );
   }, []);
 
