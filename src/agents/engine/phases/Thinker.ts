@@ -37,7 +37,7 @@ export interface ThinkerConfig {
  * Default configuration values
  */
 const DEFAULT_CONFIG: Required<ThinkerConfig> = {
-  timeout: 30000, // 30 seconds
+  timeout: 60000, // 60 seconds (structured output is slow)
   systemPromptOverride: '',
   maxRetries: 2,
 };

@@ -12,6 +12,14 @@ import {
 } from './ToolRegistryAdapter';
 import { ToolRegistry, type ToolDefinition } from '@/agents/ToolRegistry';
 import type { ExecutionContext } from '../../ports/IToolExecutor';
+import { useProjectStore } from '@/stores/projectStore';
+import { useTimelineStore } from '@/stores/timelineStore';
+import { usePlaybackStore } from '@/stores/playbackStore';
+import {
+  createMockClip,
+  createMockTrack,
+  createMockSequence,
+} from '@/test/mocks';
 
 describe('ToolRegistryAdapter', () => {
   let registry: ToolRegistry;
@@ -289,6 +297,169 @@ describe('ToolRegistryAdapter', () => {
 
       // All tools should be included since they default to 'low' risk
       expect(tools.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ===========================================================================
+  // Context Forwarding (Phase 2.1 BDD)
+  // ===========================================================================
+
+  describe('context forwarding from stores', () => {
+    beforeEach(() => {
+      // Set up store state with known values
+      const clip = createMockClip({
+        id: 'C1',
+        assetId: 'asset1',
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
+
+      const track = createMockTrack({
+        id: 'V1',
+        kind: 'video',
+        name: 'Video 1',
+        clips: [clip],
+      });
+
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        name: 'Test Sequence',
+        tracks: [track],
+      });
+
+      useProjectStore.setState({
+        activeSequenceId: 'seq_001',
+        sequences: new Map([['seq_001', sequence]]),
+        assets: new Map(),
+        isLoaded: true,
+      });
+
+      useTimelineStore.setState({
+        selectedClipIds: ['C1', 'C2'],
+        selectedTrackIds: ['V1'],
+      });
+
+      usePlaybackStore.setState({
+        currentTime: 5.5,
+        duration: 30,
+      });
+    });
+
+    afterEach(() => {
+      useProjectStore.setState({
+        activeSequenceId: null,
+        sequences: new Map(),
+        assets: new Map(),
+        isLoaded: false,
+      });
+      useTimelineStore.setState({
+        selectedClipIds: [],
+        selectedTrackIds: [],
+      });
+      usePlaybackStore.setState({
+        currentTime: 0,
+        duration: 0,
+      });
+    });
+
+    it('should pass selected clips from timelineStore to tool handler', async () => {
+      let capturedContext: Record<string, unknown> | null = null;
+      const contextCaptureTool: ToolDefinition = {
+        name: 'context_capture',
+        description: 'Captures the legacy context for testing',
+        category: 'utility',
+        parameters: { type: 'object', properties: {} },
+        handler: vi.fn().mockImplementation(async (_args, ctx) => {
+          capturedContext = ctx;
+          return { success: true, result: {} };
+        }),
+      };
+      registry.register(contextCaptureTool);
+
+      // Use matching sequenceId so the guard allows forwarding
+      const ctx = { ...executionContext, sequenceId: 'seq_001' };
+      await adapter.execute('context_capture', {}, ctx);
+
+      expect(capturedContext).not.toBeNull();
+      expect(capturedContext!.selectedClips).toEqual(['C1', 'C2']);
+    });
+
+    it('should pass selected tracks from timelineStore to tool handler', async () => {
+      let capturedContext: Record<string, unknown> | null = null;
+      const contextCaptureTool: ToolDefinition = {
+        name: 'context_capture_tracks',
+        description: 'Captures the legacy context for testing',
+        category: 'utility',
+        parameters: { type: 'object', properties: {} },
+        handler: vi.fn().mockImplementation(async (_args, ctx) => {
+          capturedContext = ctx;
+          return { success: true, result: {} };
+        }),
+      };
+      registry.register(contextCaptureTool);
+
+      const ctx = { ...executionContext, sequenceId: 'seq_001' };
+      await adapter.execute('context_capture_tracks', {}, ctx);
+
+      expect(capturedContext).not.toBeNull();
+      expect(capturedContext!.selectedTracks).toEqual(['V1']);
+    });
+
+    it('should pass playhead position from playbackStore to tool handler', async () => {
+      let capturedContext: Record<string, unknown> | null = null;
+      const contextCaptureTool: ToolDefinition = {
+        name: 'context_capture_playhead',
+        description: 'Captures the legacy context for testing',
+        category: 'utility',
+        parameters: { type: 'object', properties: {} },
+        handler: vi.fn().mockImplementation(async (_args, ctx) => {
+          capturedContext = ctx;
+          return { success: true, result: {} };
+        }),
+      };
+      registry.register(contextCaptureTool);
+
+      const ctx = { ...executionContext, sequenceId: 'seq_001' };
+      await adapter.execute('context_capture_playhead', {}, ctx);
+
+      expect(capturedContext).not.toBeNull();
+      expect(capturedContext!.playheadPosition).toBe(5.5);
+    });
+
+    it('should return empty selection when context targets a different sequence', async () => {
+      let capturedContext: Record<string, unknown> | null = null;
+      const contextCaptureTool: ToolDefinition = {
+        name: 'context_capture_mismatch',
+        description: 'Captures the legacy context for testing',
+        category: 'utility',
+        parameters: { type: 'object', properties: {} },
+        handler: vi.fn().mockImplementation(async (_args, ctx) => {
+          capturedContext = ctx;
+          return { success: true, result: {} };
+        }),
+      };
+      registry.register(contextCaptureTool);
+
+      // Use a different sequenceId than the active one ('seq_001')
+      const ctx = { ...executionContext, sequenceId: 'other_seq' };
+      await adapter.execute('context_capture_mismatch', {}, ctx);
+
+      expect(capturedContext).not.toBeNull();
+      expect(capturedContext!.selectedClips).toEqual([]);
+      expect(capturedContext!.selectedTracks).toEqual([]);
+      expect(capturedContext!.playheadPosition).toBe(0);
+    });
+  });
+
+  // ===========================================================================
+  // Analysis tools estimated duration
+  // ===========================================================================
+
+  describe('analysis tools estimated duration', () => {
+    it('should report analysis tools as instant (not slow)', () => {
+      const toolInfo = adapter.getAvailableTools().find((t) => t.name === 'analyze_video');
+
+      expect(toolInfo).toBeDefined();
+      expect(toolInfo!.estimatedDuration).toBe('instant');
     });
   });
 });

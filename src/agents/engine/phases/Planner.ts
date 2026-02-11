@@ -40,7 +40,7 @@ export interface PlannerConfig {
  * Default configuration values
  */
 const DEFAULT_CONFIG: Required<PlannerConfig> = {
-  timeout: 30000, // 30 seconds
+  timeout: 60000, // 60 seconds (structured output is slow)
   maxSteps: 20,
   approvalRequiredRisks: ['high', 'critical'],
   systemPromptOverride: '',

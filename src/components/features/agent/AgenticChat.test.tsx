@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AgenticChat } from './AgenticChat';
 import type { ILLMClient, IToolExecutor, LLMMessage } from '@/agents/engine';
@@ -58,7 +58,9 @@ describe('AgenticChat', () => {
     localStorage.clear();
     // Initialize conversation store with 'default' project to match the
     // component's fallback when no project metadata is loaded.
-    useConversationStore.getState().loadForProject('default');
+    act(() => {
+      useConversationStore.getState().loadForProject('default');
+    });
 
     const generateStream: ILLMClient['generateStream'] = async function* () {
       // No-op streaming for tests
@@ -172,7 +174,9 @@ describe('AgenticChat', () => {
 
   afterEach(() => {
     vi.clearAllMocks();
-    useConversationStore.getState().clearConversation();
+    act(() => {
+      useConversationStore.getState().clearConversation();
+    });
   });
 
   describe('rendering', () => {
@@ -210,8 +214,10 @@ describe('AgenticChat', () => {
     });
 
     it('should not override an already loaded project conversation when no sequence is active', () => {
-      useConversationStore.getState().loadForProject('project-123');
-      useConversationStore.getState().addUserMessage('Project scoped message');
+      act(() => {
+        useConversationStore.getState().loadForProject('project-123');
+        useConversationStore.getState().addUserMessage('Project scoped message');
+      });
 
       render(
         <AgenticChat
@@ -412,7 +418,9 @@ describe('AgenticChat', () => {
 
     it('should render user messages from conversation store', async () => {
       // Pre-populate the store
-      useConversationStore.getState().addUserMessage('Pre-existing message');
+      act(() => {
+        useConversationStore.getState().addUserMessage('Pre-existing message');
+      });
 
       render(
         <AgenticChat

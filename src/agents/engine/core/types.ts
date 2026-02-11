@@ -493,9 +493,9 @@ export interface CorrectionRecord {
 export interface AgenticEngineConfig {
   /** Maximum iterations before giving up (default: 20) */
   maxIterations: number;
-  /** Timeout for thinking phase in ms (default: 30000) */
+  /** Timeout for thinking phase in ms (default: 60000) */
   thinkingTimeout: number;
-  /** Timeout for planning phase in ms (default: 30000) */
+  /** Timeout for planning phase in ms (default: 60000) */
   planningTimeout: number;
   /** Timeout for execution phase in ms (default: 60000) */
   executionTimeout: number;
@@ -548,8 +548,8 @@ export interface AgenticEngineConfig {
  */
 export const DEFAULT_ENGINE_CONFIG: AgenticEngineConfig = {
   maxIterations: 20,
-  thinkingTimeout: 30000,
-  planningTimeout: 30000,
+  thinkingTimeout: 60000,
+  planningTimeout: 60000,
   executionTimeout: 60000,
   observationTimeout: 15000,
   enableStreaming: true,

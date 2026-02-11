@@ -3,54 +3,26 @@
  *
  * Timeline analysis tools for the AI agent system.
  * Provides read-only operations to query timeline state.
+ *
+ * These tools read from Zustand stores (frontend state) instead of calling
+ * backend IPC handlers. The data is already available in projectStore,
+ * timelineStore, and playbackStore.
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
+import {
+  getTimelineSnapshot,
+  getClipById,
+  getTrackById,
+  getAllClipsOnTrack,
+  getClipsAtTime,
+  findClipsByAsset,
+  findGaps,
+  findOverlaps,
+} from './storeAccessor';
 
 const logger = createLogger('AnalysisTools');
-
-// =============================================================================
-// Types
-// =============================================================================
-
-interface TimelineInfo {
-  sequenceId: string;
-  name: string;
-  duration: number;
-  trackCount: number;
-  clipCount: number;
-  frameRate: number;
-}
-
-interface ClipInfo {
-  id: string;
-  assetId: string;
-  trackId: string;
-  timelineIn: number;
-  duration: number;
-  sourceIn: number;
-  sourceOut: number;
-  hasEffects: boolean;
-  effectCount: number;
-}
-
-interface GapInfo {
-  trackId: string;
-  startTime: number;
-  endTime: number;
-  duration: number;
-}
-
-interface OverlapInfo {
-  trackId: string;
-  clip1Id: string;
-  clip2Id: string;
-  overlapStart: number;
-  overlapEnd: number;
-  overlapDuration: number;
-}
 
 // =============================================================================
 // Tool Definitions
@@ -62,25 +34,33 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
   // ---------------------------------------------------------------------------
   {
     name: 'get_timeline_info',
-    description: 'Get general information about the current timeline/sequence',
+    description: 'Get general information about the current timeline/sequence including duration, track count, clip count, and playhead position',
     category: 'analysis',
     parameters: {
       type: 'object',
-      properties: {
-        sequenceId: {
-          type: 'string',
-          description: 'The ID of the sequence',
-        },
-      },
-      required: ['sequenceId'],
+      properties: {},
+      required: [],
     },
-    handler: async (args) => {
+    handler: async () => {
       try {
-        const result = await invoke<TimelineInfo>('get_timeline_info', {
-          sequenceId: args.sequenceId as string,
-        });
+        const snapshot = getTimelineSnapshot();
 
-        logger.debug('get_timeline_info executed', { sequenceId: args.sequenceId });
+        const result = {
+          sequenceId: snapshot.sequenceId,
+          name: snapshot.sequenceName,
+          duration: snapshot.duration,
+          trackCount: snapshot.trackCount,
+          clipCount: snapshot.clipCount,
+          playheadPosition: snapshot.playheadPosition,
+          selectedClipIds: snapshot.selectedClipIds,
+          selectedTrackIds: snapshot.selectedTrackIds,
+        };
+
+        logger.debug('get_timeline_info executed', {
+          sequenceId: snapshot.sequenceId,
+          trackCount: snapshot.trackCount,
+          clipCount: snapshot.clipCount,
+        });
         return { success: true, result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -100,26 +80,18 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
     parameters: {
       type: 'object',
       properties: {
-        sequenceId: {
-          type: 'string',
-          description: 'The ID of the sequence',
-        },
         assetId: {
           type: 'string',
           description: 'The ID of the asset to search for',
         },
       },
-      required: ['sequenceId', 'assetId'],
+      required: ['assetId'],
     },
     handler: async (args) => {
       try {
-        const result = await invoke<ClipInfo[]>('find_clips_by_asset', {
-          sequenceId: args.sequenceId as string,
-          assetId: args.assetId as string,
-        });
+        const result = findClipsByAsset(args.assetId as string);
 
         logger.debug('find_clips_by_asset executed', {
-          sequenceId: args.sequenceId,
           assetId: args.assetId,
           found: result.length,
         });
@@ -142,10 +114,6 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
     parameters: {
       type: 'object',
       properties: {
-        sequenceId: {
-          type: 'string',
-          description: 'The ID of the sequence',
-        },
         trackId: {
           type: 'string',
           description: 'The ID of the track to search (optional, searches all tracks if omitted)',
@@ -155,20 +123,16 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
           description: 'Minimum gap duration in seconds to report (default: 0)',
         },
       },
-      required: ['sequenceId'],
+      required: [],
     },
     handler: async (args) => {
       try {
-        const result = await invoke<GapInfo[]>('find_timeline_gaps', {
-          sequenceId: args.sequenceId as string,
-          trackId: args.trackId as string | undefined,
-          minDuration: (args.minDuration as number | undefined) ?? 0,
-        });
+        const result = findGaps(
+          args.trackId as string | undefined,
+          (args.minDuration as number | undefined) ?? 0,
+        );
 
-        logger.debug('find_gaps executed', {
-          sequenceId: args.sequenceId,
-          found: result.length,
-        });
+        logger.debug('find_gaps executed', { found: result.length });
         return { success: true, result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -183,33 +147,23 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
   // ---------------------------------------------------------------------------
   {
     name: 'find_overlaps',
-    description: 'Find overlapping clips in the timeline',
+    description: 'Find overlapping clips in the timeline on the same track',
     category: 'analysis',
     parameters: {
       type: 'object',
       properties: {
-        sequenceId: {
-          type: 'string',
-          description: 'The ID of the sequence',
-        },
         trackId: {
           type: 'string',
           description: 'The ID of the track to search (optional, searches all tracks if omitted)',
         },
       },
-      required: ['sequenceId'],
+      required: [],
     },
     handler: async (args) => {
       try {
-        const result = await invoke<OverlapInfo[]>('find_timeline_overlaps', {
-          sequenceId: args.sequenceId as string,
-          trackId: args.trackId as string | undefined,
-        });
+        const result = findOverlaps(args.trackId as string | undefined);
 
-        logger.debug('find_overlaps executed', {
-          sequenceId: args.sequenceId,
-          found: result.length,
-        });
+        logger.debug('find_overlaps executed', { found: result.length });
         return { success: true, result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -229,34 +183,215 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
     parameters: {
       type: 'object',
       properties: {
-        sequenceId: {
-          type: 'string',
-          description: 'The ID of the sequence',
-        },
-        trackId: {
-          type: 'string',
-          description: 'The ID of the track',
-        },
         clipId: {
           type: 'string',
           description: 'The ID of the clip',
         },
       },
-      required: ['sequenceId', 'trackId', 'clipId'],
+      required: ['clipId'],
     },
     handler: async (args) => {
       try {
-        const result = await invoke<ClipInfo>('get_clip_info', {
-          sequenceId: args.sequenceId as string,
-          trackId: args.trackId as string,
-          clipId: args.clipId as string,
-        });
+        const result = getClipById(args.clipId as string);
+
+        if (!result) {
+          return { success: false, error: `Clip '${args.clipId}' not found` };
+        }
 
         logger.debug('get_clip_info executed', { clipId: args.clipId });
         return { success: true, result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('get_clip_info failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // List All Clips
+  // ---------------------------------------------------------------------------
+  {
+    name: 'list_all_clips',
+    description: 'List all clips across all tracks with their positions and durations',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+    handler: async () => {
+      try {
+        const snapshot = getTimelineSnapshot();
+
+        logger.debug('list_all_clips executed', { clipCount: snapshot.clips.length });
+        return { success: true, result: snapshot.clips };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('list_all_clips failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // List Tracks
+  // ---------------------------------------------------------------------------
+  {
+    name: 'list_tracks',
+    description: 'List all tracks with their type, clip count, and status',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+    handler: async () => {
+      try {
+        const snapshot = getTimelineSnapshot();
+
+        logger.debug('list_tracks executed', { trackCount: snapshot.tracks.length });
+        return { success: true, result: snapshot.tracks };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('list_tracks failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // Get Clips at Time
+  // ---------------------------------------------------------------------------
+  {
+    name: 'get_clips_at_time',
+    description: 'Find all clips that span a specific time point on the timeline',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {
+        time: {
+          type: 'number',
+          description: 'The time point in seconds to query',
+        },
+      },
+      required: ['time'],
+    },
+    handler: async (args) => {
+      try {
+        const result = getClipsAtTime(args.time as number);
+
+        logger.debug('get_clips_at_time executed', {
+          time: args.time,
+          found: result.length,
+        });
+        return { success: true, result };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('get_clips_at_time failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // Get Selected Clips
+  // ---------------------------------------------------------------------------
+  {
+    name: 'get_selected_clips',
+    description: 'Get full details of all currently selected clips',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+    handler: async () => {
+      try {
+        const snapshot = getTimelineSnapshot();
+        const selectedSet = new Set(snapshot.selectedClipIds);
+        const selectedClips = snapshot.clips.filter((c) => selectedSet.has(c.id));
+
+        logger.debug('get_selected_clips executed', {
+          selectedCount: selectedClips.length,
+        });
+        return { success: true, result: selectedClips };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('get_selected_clips failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // Get Playhead Position
+  // ---------------------------------------------------------------------------
+  {
+    name: 'get_playhead_position',
+    description: 'Get the current playhead time position in seconds',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+    handler: async () => {
+      try {
+        const snapshot = getTimelineSnapshot();
+
+        logger.debug('get_playhead_position executed', {
+          position: snapshot.playheadPosition,
+        });
+        return {
+          success: true,
+          result: {
+            position: snapshot.playheadPosition,
+            duration: snapshot.duration,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('get_playhead_position failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // Get Track Clips
+  // ---------------------------------------------------------------------------
+  {
+    name: 'get_track_clips',
+    description: 'Get all clips on a specific track',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {
+        trackId: {
+          type: 'string',
+          description: 'The ID of the track',
+        },
+      },
+      required: ['trackId'],
+    },
+    handler: async (args) => {
+      try {
+        const track = getTrackById(args.trackId as string);
+        if (!track) {
+          return { success: false, error: `Track '${args.trackId}' not found` };
+        }
+
+        const clips = getAllClipsOnTrack(args.trackId as string);
+
+        logger.debug('get_track_clips executed', {
+          trackId: args.trackId,
+          clipCount: clips.length,
+        });
+        return { success: true, result: { track, clips } };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('get_track_clips failed', { error: message });
         return { success: false, error: message };
       }
     },

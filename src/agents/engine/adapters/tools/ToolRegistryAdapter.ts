@@ -16,6 +16,7 @@ import type {
 } from '../../ports/IToolExecutor';
 import type { RiskLevel, ValidationResult, SideEffect } from '../../core/types';
 import { ToolRegistry, type ToolDefinition as LegacyToolDef } from '@/agents/ToolRegistry';
+import { getSelectionContext } from '@/agents/tools/storeAccessor';
 
 // =============================================================================
 // Types
@@ -49,7 +50,7 @@ const CATEGORY_DURATION_MAP: Record<string, 'instant' | 'fast' | 'slow'> = {
   audio: 'fast',
   export: 'slow',
   project: 'fast',
-  analysis: 'slow',
+  analysis: 'instant',
   utility: 'instant',
 };
 
@@ -92,13 +93,17 @@ export class ToolRegistryAdapter implements IToolExecutor {
   ): Promise<ToolExecutionResult> {
     const startTime = performance.now();
 
-    // Convert context to legacy format
+    // Convert context to legacy format, reading live state from stores.
+    // Only inject active state when the context targets the active sequence.
+    const selection = getSelectionContext();
+    const isActiveSequence = context.sequenceId === selection.sequenceId;
+
     const legacyContext = {
       projectId: context.projectId,
       sequenceId: context.sequenceId,
-      selectedClips: [],
-      selectedTracks: [],
-      playheadPosition: 0,
+      selectedClips: isActiveSequence ? selection.selectedClipIds : [],
+      selectedTracks: isActiveSequence ? selection.selectedTrackIds : [],
+      playheadPosition: isActiveSequence ? selection.playheadPosition : 0,
     };
 
     // Execute through registry with error handling

@@ -139,8 +139,11 @@ export class ThinkingTimeoutError extends AgentError {
   readonly recoverable = true;
   readonly timeoutMs: number;
 
-  constructor(timeoutMs: number) {
-    super(`Thinking phase timed out after ${timeoutMs}ms`);
+  constructor(timeoutMs: number, hint?: string) {
+    super(
+      `Thinking phase timed out after ${timeoutMs}ms. ` +
+      (hint ?? 'AI response took too long. Check your AI provider settings or try a simpler request.')
+    );
     this.timeoutMs = timeoutMs;
   }
 
@@ -187,8 +190,11 @@ export class PlanningTimeoutError extends AgentError {
   readonly recoverable = true;
   readonly timeoutMs: number;
 
-  constructor(timeoutMs: number) {
-    super(`Planning phase timed out after ${timeoutMs}ms`);
+  constructor(timeoutMs: number, hint?: string) {
+    super(
+      `Planning phase timed out after ${timeoutMs}ms. ` +
+      (hint ?? 'AI response took too long. Check your AI provider settings or try a simpler request.')
+    );
     this.timeoutMs = timeoutMs;
   }
 
