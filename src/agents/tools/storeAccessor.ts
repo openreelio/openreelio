@@ -102,6 +102,28 @@ function getActiveSequence(): Sequence | undefined {
 // =============================================================================
 
 /**
+ * Lightweight context for tool execution — avoids iterating all clips/tracks.
+ * Returns only selectedClipIds, selectedTrackIds, playheadPosition, and sequenceId.
+ */
+export function getSelectionContext(): {
+  sequenceId: string | null;
+  selectedClipIds: string[];
+  selectedTrackIds: string[];
+  playheadPosition: number;
+} {
+  const project = useProjectStore.getState();
+  const timeline = useTimelineStore.getState();
+  const playback = usePlaybackStore.getState();
+
+  return {
+    sequenceId: project.activeSequenceId,
+    selectedClipIds: timeline.selectedClipIds,
+    selectedTrackIds: timeline.selectedTrackIds,
+    playheadPosition: playback.currentTime,
+  };
+}
+
+/**
  * Get a complete read-only snapshot of the current timeline state.
  * Reads from projectStore, timelineStore, and playbackStore.
  */
@@ -218,6 +240,9 @@ export function findClipsByAsset(assetId: string): ClipSnapshot[] {
 
 /**
  * Find gaps (empty regions) between clips on a track or all tracks.
+ * Only detects gaps between consecutive clips. Does not detect gaps at
+ * the start of the track (before first clip) or at the end (after last
+ * clip to timeline duration).
  */
 export function findGaps(
   trackId?: string,
@@ -237,19 +262,22 @@ export function findGaps(
       (a, b) => a.place.timelineInSec - b.place.timelineInSec
     );
 
-    for (let i = 0; i < sorted.length - 1; i++) {
-      const currentEnd = sorted[i].place.timelineInSec + sorted[i].place.durationSec;
-      const nextStart = sorted[i + 1].place.timelineInSec;
-      const gapDuration = nextStart - currentEnd;
+    if (sorted.length === 0) continue;
+    let maxEndTime = sorted[0].place.timelineInSec + sorted[0].place.durationSec;
+
+    for (let i = 1; i < sorted.length; i++) {
+      const nextStart = sorted[i].place.timelineInSec;
+      const gapDuration = nextStart - maxEndTime;
 
       if (gapDuration > 0 && gapDuration >= minDuration) {
         gaps.push({
           trackId: track.id,
-          startTime: currentEnd,
+          startTime: maxEndTime,
           endTime: nextStart,
           duration: gapDuration,
         });
       }
+      maxEndTime = Math.max(maxEndTime, sorted[i].place.timelineInSec + sorted[i].place.durationSec);
     }
   }
 

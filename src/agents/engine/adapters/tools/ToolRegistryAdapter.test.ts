@@ -344,6 +344,23 @@ describe('ToolRegistryAdapter', () => {
       });
     });
 
+    afterEach(() => {
+      useProjectStore.setState({
+        activeSequenceId: null,
+        sequences: new Map(),
+        assets: new Map(),
+        isLoaded: false,
+      });
+      useTimelineStore.setState({
+        selectedClipIds: [],
+        selectedTrackIds: [],
+      });
+      usePlaybackStore.setState({
+        currentTime: 0,
+        duration: 0,
+      });
+    });
+
     it('should pass selected clips from timelineStore to tool handler', async () => {
       let capturedContext: Record<string, unknown> | null = null;
       const contextCaptureTool: ToolDefinition = {
@@ -358,7 +375,9 @@ describe('ToolRegistryAdapter', () => {
       };
       registry.register(contextCaptureTool);
 
-      await adapter.execute('context_capture', {}, executionContext);
+      // Use matching sequenceId so the guard allows forwarding
+      const ctx = { ...executionContext, sequenceId: 'seq_001' };
+      await adapter.execute('context_capture', {}, ctx);
 
       expect(capturedContext).not.toBeNull();
       expect(capturedContext!.selectedClips).toEqual(['C1', 'C2']);
@@ -378,7 +397,8 @@ describe('ToolRegistryAdapter', () => {
       };
       registry.register(contextCaptureTool);
 
-      await adapter.execute('context_capture_tracks', {}, executionContext);
+      const ctx = { ...executionContext, sequenceId: 'seq_001' };
+      await adapter.execute('context_capture_tracks', {}, ctx);
 
       expect(capturedContext).not.toBeNull();
       expect(capturedContext!.selectedTracks).toEqual(['V1']);
@@ -398,10 +418,35 @@ describe('ToolRegistryAdapter', () => {
       };
       registry.register(contextCaptureTool);
 
-      await adapter.execute('context_capture_playhead', {}, executionContext);
+      const ctx = { ...executionContext, sequenceId: 'seq_001' };
+      await adapter.execute('context_capture_playhead', {}, ctx);
 
       expect(capturedContext).not.toBeNull();
       expect(capturedContext!.playheadPosition).toBe(5.5);
+    });
+
+    it('should return empty selection when context targets a different sequence', async () => {
+      let capturedContext: Record<string, unknown> | null = null;
+      const contextCaptureTool: ToolDefinition = {
+        name: 'context_capture_mismatch',
+        description: 'Captures the legacy context for testing',
+        category: 'utility',
+        parameters: { type: 'object', properties: {} },
+        handler: vi.fn().mockImplementation(async (_args, ctx) => {
+          capturedContext = ctx;
+          return { success: true, result: {} };
+        }),
+      };
+      registry.register(contextCaptureTool);
+
+      // Use a different sequenceId than the active one ('seq_001')
+      const ctx = { ...executionContext, sequenceId: 'other_seq' };
+      await adapter.execute('context_capture_mismatch', {}, ctx);
+
+      expect(capturedContext).not.toBeNull();
+      expect(capturedContext!.selectedClips).toEqual([]);
+      expect(capturedContext!.selectedTracks).toEqual([]);
+      expect(capturedContext!.playheadPosition).toBe(0);
     });
   });
 

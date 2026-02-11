@@ -10,6 +10,7 @@ import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import {
+  getSelectionContext,
   getTimelineSnapshot,
   getClipById,
   getTrackById,
@@ -155,6 +156,29 @@ describe('storeAccessor', () => {
       expect(snapshot.selectedClipIds).toEqual(['clipA']);
       expect(snapshot.selectedTrackIds).toEqual(['V1']);
       expect(snapshot.playheadPosition).toBe(3.5);
+    });
+  });
+
+  // ===========================================================================
+  // getSelectionContext
+  // ===========================================================================
+
+  describe('getSelectionContext', () => {
+    it('should return lightweight context without iterating clips/tracks', () => {
+      const clipA = createClip({ id: 'clipA', assetId: 'asset1' });
+
+      setupStores({
+        tracks: [createTrack({ id: 'V1', clips: [clipA] })],
+        selectedClipIds: ['clipA'],
+        selectedTrackIds: ['V1'],
+        currentTime: 7.5,
+      });
+
+      const ctx = getSelectionContext();
+      expect(ctx.sequenceId).toBe('seq_001');
+      expect(ctx.selectedClipIds).toEqual(['clipA']);
+      expect(ctx.selectedTrackIds).toEqual(['V1']);
+      expect(ctx.playheadPosition).toBe(7.5);
     });
   });
 
@@ -460,6 +484,40 @@ describe('storeAccessor', () => {
 
       expect(findGaps('V1')).toHaveLength(1);
       expect(findGaps('V2')).toEqual([]);
+    });
+
+    it('should not report false gaps when clips overlap', () => {
+      // Clip A spans 0-10s, clip B is nested within (3-8s), clip C starts at 12s
+      const clipA = createClip({
+        id: 'clipA',
+        assetId: 'asset1',
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
+      const clipB = createClip({
+        id: 'clipB',
+        assetId: 'asset1',
+        place: { timelineInSec: 3, durationSec: 5 },
+      });
+      const clipC = createClip({
+        id: 'clipC',
+        assetId: 'asset1',
+        place: { timelineInSec: 12, durationSec: 3 },
+      });
+
+      setupStores({
+        tracks: [createTrack({ id: 'V1', clips: [clipA, clipB, clipC] })],
+      });
+
+      // Only one real gap: 10-12s (between clipA end and clipC start)
+      // clipB is nested in clipA so should not create a false gap at 8s
+      const gaps = findGaps();
+      expect(gaps).toHaveLength(1);
+      expect(gaps[0]).toEqual({
+        trackId: 'V1',
+        startTime: 10,
+        endTime: 12,
+        duration: 2,
+      });
     });
   });
 

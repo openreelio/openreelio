@@ -16,7 +16,7 @@ import type {
 } from '../../ports/IToolExecutor';
 import type { RiskLevel, ValidationResult, SideEffect } from '../../core/types';
 import { ToolRegistry, type ToolDefinition as LegacyToolDef } from '@/agents/ToolRegistry';
-import { getTimelineSnapshot } from '@/agents/tools/storeAccessor';
+import { getSelectionContext } from '@/agents/tools/storeAccessor';
 
 // =============================================================================
 // Types
@@ -93,14 +93,17 @@ export class ToolRegistryAdapter implements IToolExecutor {
   ): Promise<ToolExecutionResult> {
     const startTime = performance.now();
 
-    // Convert context to legacy format, reading live state from stores
-    const snapshot = getTimelineSnapshot();
+    // Convert context to legacy format, reading live state from stores.
+    // Only inject active state when the context targets the active sequence.
+    const selection = getSelectionContext();
+    const isActiveSequence = context.sequenceId === selection.sequenceId;
+
     const legacyContext = {
       projectId: context.projectId,
       sequenceId: context.sequenceId,
-      selectedClips: snapshot.selectedClipIds,
-      selectedTracks: snapshot.selectedTrackIds,
-      playheadPosition: snapshot.playheadPosition,
+      selectedClips: isActiveSequence ? selection.selectedClipIds : [],
+      selectedTracks: isActiveSequence ? selection.selectedTrackIds : [],
+      playheadPosition: isActiveSequence ? selection.playheadPosition : 0,
     };
 
     // Execute through registry with error handling

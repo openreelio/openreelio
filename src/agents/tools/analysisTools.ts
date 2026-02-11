@@ -21,7 +21,6 @@ import {
   findGaps,
   findOverlaps,
 } from './storeAccessor';
-import { usePlaybackStore } from '@/stores/playbackStore';
 
 const logger = createLogger('AnalysisTools');
 
@@ -39,12 +38,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
     category: 'analysis',
     parameters: {
       type: 'object',
-      properties: {
-        sequenceId: {
-          type: 'string',
-          description: 'The ID of the sequence (optional, uses active sequence if omitted)',
-        },
-      },
+      properties: {},
       required: [],
     },
     handler: async () => {
@@ -344,16 +338,16 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
     },
     handler: async () => {
       try {
-        const playback = usePlaybackStore.getState();
+        const snapshot = getTimelineSnapshot();
 
         logger.debug('get_playhead_position executed', {
-          position: playback.currentTime,
+          position: snapshot.playheadPosition,
         });
         return {
           success: true,
           result: {
-            position: playback.currentTime,
-            duration: playback.duration,
+            position: snapshot.playheadPosition,
+            duration: snapshot.duration,
           },
         };
       } catch (error) {
