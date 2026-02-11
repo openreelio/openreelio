@@ -16,6 +16,7 @@ import type {
 } from '../../ports/IToolExecutor';
 import type { RiskLevel, ValidationResult, SideEffect } from '../../core/types';
 import { ToolRegistry, type ToolDefinition as LegacyToolDef } from '@/agents/ToolRegistry';
+import { getTimelineSnapshot } from '@/agents/tools/storeAccessor';
 
 // =============================================================================
 // Types
@@ -49,7 +50,7 @@ const CATEGORY_DURATION_MAP: Record<string, 'instant' | 'fast' | 'slow'> = {
   audio: 'fast',
   export: 'slow',
   project: 'fast',
-  analysis: 'slow',
+  analysis: 'instant',
   utility: 'instant',
 };
 
@@ -92,13 +93,14 @@ export class ToolRegistryAdapter implements IToolExecutor {
   ): Promise<ToolExecutionResult> {
     const startTime = performance.now();
 
-    // Convert context to legacy format
+    // Convert context to legacy format, reading live state from stores
+    const snapshot = getTimelineSnapshot();
     const legacyContext = {
       projectId: context.projectId,
       sequenceId: context.sequenceId,
-      selectedClips: [],
-      selectedTracks: [],
-      playheadPosition: 0,
+      selectedClips: snapshot.selectedClipIds,
+      selectedTracks: snapshot.selectedTrackIds,
+      playheadPosition: snapshot.playheadPosition,
     };
 
     // Execute through registry with error handling
