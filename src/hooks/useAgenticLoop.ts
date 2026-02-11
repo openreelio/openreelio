@@ -259,6 +259,19 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     setPhase('thinking');
     abortedRef.current = false;
 
+    // Pre-flight: verify AI provider is configured
+    if (typeof llmClient.isConfigured === 'function' && !llmClient.isConfigured()) {
+      const configError = new Error(
+        'AI provider not configured. Go to Settings > AI to set up your API key.'
+      );
+      setError(configError);
+      setPhase('failed');
+      setIsRunning(false);
+      optionsRef.current.onError?.(configError);
+      logger.error('Pre-flight check failed: AI provider not configured');
+      return null;
+    }
+
     // Build context
     const context = buildContext();
 

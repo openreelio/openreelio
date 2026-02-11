@@ -3,7 +3,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import { AgenticSidebarContent } from './AgenticSidebarContent';
 import { useConversationStore } from '@/stores/conversationStore';
 
@@ -102,11 +102,15 @@ vi.mock('@/stores', () => ({
 describe('AgenticSidebarContent', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    useConversationStore.getState().loadForProject('test-project');
+    act(() => {
+      useConversationStore.getState().loadForProject('test-project');
+    });
   });
 
   afterEach(() => {
-    useConversationStore.getState().clearConversation();
+    act(() => {
+      useConversationStore.getState().clearConversation();
+    });
   });
 
   describe('rendering', () => {
