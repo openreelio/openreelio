@@ -167,8 +167,8 @@ describe('types', () => {
   describe('DEFAULT_ENGINE_CONFIG', () => {
     it('should have sensible default values', () => {
       expect(DEFAULT_ENGINE_CONFIG.maxIterations).toBe(20);
-      expect(DEFAULT_ENGINE_CONFIG.thinkingTimeout).toBe(30000);
-      expect(DEFAULT_ENGINE_CONFIG.planningTimeout).toBe(30000);
+      expect(DEFAULT_ENGINE_CONFIG.thinkingTimeout).toBe(60000);
+      expect(DEFAULT_ENGINE_CONFIG.planningTimeout).toBe(60000);
       expect(DEFAULT_ENGINE_CONFIG.executionTimeout).toBe(60000);
       expect(DEFAULT_ENGINE_CONFIG.observationTimeout).toBe(15000);
       expect(DEFAULT_ENGINE_CONFIG.enableStreaming).toBe(true);
