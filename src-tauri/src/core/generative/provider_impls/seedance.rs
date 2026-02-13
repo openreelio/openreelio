@@ -261,11 +261,7 @@ impl SeedanceProvider {
         }
 
         let truncated: String = body.chars().take(500).collect();
-        CoreError::AIRequestFailed(format!(
-            "Seedance API error ({}): {}",
-            status,
-            truncated
-        ))
+        CoreError::AIRequestFailed(format!("Seedance API error ({}): {}", status, truncated))
     }
 }
 
