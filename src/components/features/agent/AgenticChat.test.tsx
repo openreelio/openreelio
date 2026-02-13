@@ -17,6 +17,7 @@ const mockRun = vi.fn();
 // Mock feature flags
 vi.mock('@/config/featureFlags', () => ({
   isAgenticEngineEnabled: vi.fn(() => true),
+  isVideoGenerationEnabled: vi.fn(() => false),
 }));
 
 // Mock useAgenticLoop hook to keep component tests deterministic

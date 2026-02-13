@@ -30,7 +30,7 @@ const defaultAISettings: AISettings = {
   autoCaptionOnImport: false,
   proposalReviewMode: 'always',
   cacheDurationHours: 24,
-  localOnlyMode: false,
+  localOnlyMode: false, seedanceApiKey: null, videoGenProvider: null, videoGenDefaultQuality: 'pro', videoGenBudgetCents: null, videoGenPerRequestLimitCents: 100,
 };
 
 describe('CostControlPanel', () => {

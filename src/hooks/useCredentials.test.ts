@@ -34,7 +34,7 @@ describe('useCredentials', () => {
     // Default: no credentials stored
     mockInvoke.mockImplementation(async (command: string) => {
       if (command === 'get_credential_status') {
-        return { openai: false, anthropic: false, google: false };
+        return { openai: false, anthropic: false, google: false, seedance: false };
       }
       throw new Error(`Unexpected command: ${command}`);
     });
@@ -98,7 +98,7 @@ describe('useCredentials', () => {
     it('should store a credential successfully', async () => {
       mockInvoke.mockImplementation(async (command: string) => {
         if (command === 'get_credential_status') {
-          return { openai: false, anthropic: false, google: false };
+          return { openai: false, anthropic: false, google: false, seedance: false };
         }
         if (command === 'store_credential') {
           return undefined;
@@ -115,7 +115,7 @@ describe('useCredentials', () => {
       // Update mock for after store
       mockInvoke.mockImplementation(async (command: string) => {
         if (command === 'get_credential_status') {
-          return { openai: true, anthropic: false, google: false };
+          return { openai: true, anthropic: false, google: false, seedance: false };
         }
         if (command === 'store_credential') {
           return undefined;
@@ -152,7 +152,7 @@ describe('useCredentials', () => {
     it('should trim whitespace from API key', async () => {
       mockInvoke.mockImplementation(async (command: string) => {
         if (command === 'get_credential_status') {
-          return { openai: false, anthropic: false, google: false };
+          return { openai: false, anthropic: false, google: false, seedance: false };
         }
         if (command === 'store_credential') {
           return undefined;
@@ -184,7 +184,7 @@ describe('useCredentials', () => {
 
       mockInvoke.mockImplementation(async (command: string) => {
         if (command === 'get_credential_status') {
-          return { openai: false, anthropic: false, google: false };
+          return { openai: false, anthropic: false, google: false, seedance: false };
         }
         if (command === 'store_credential') {
           await storePromise;
@@ -227,7 +227,7 @@ describe('useCredentials', () => {
     it('should check credential existence', async () => {
       mockInvoke.mockImplementation(async (command: string) => {
         if (command === 'get_credential_status') {
-          return { openai: true, anthropic: false, google: false };
+          return { openai: true, anthropic: false, google: false, seedance: false };
         }
         if (command === 'has_credential') {
           return true;
@@ -253,7 +253,7 @@ describe('useCredentials', () => {
     it('should return false on error', async () => {
       mockInvoke.mockImplementation(async (command: string) => {
         if (command === 'get_credential_status') {
-          return { openai: false, anthropic: false, google: false };
+          return { openai: false, anthropic: false, google: false, seedance: false };
         }
         if (command === 'has_credential') {
           throw new Error('IPC error');
@@ -282,7 +282,7 @@ describe('useCredentials', () => {
 
       mockInvoke.mockImplementation(async (command: string) => {
         if (command === 'get_credential_status') {
-          return { openai: hasOpenAI, anthropic: false, google: false };
+          return { openai: hasOpenAI, anthropic: false, google: false, seedance: false };
         }
         if (command === 'delete_credential') {
           hasOpenAI = false;
@@ -364,7 +364,7 @@ describe('useCredentials security', () => {
     vi.clearAllMocks();
     mockInvoke.mockImplementation(async (command: string) => {
       if (command === 'get_credential_status') {
-        return { openai: false, anthropic: false, google: false };
+        return { openai: false, anthropic: false, google: false, seedance: false };
       }
       return undefined;
     });
@@ -379,7 +379,7 @@ describe('useCredentials security', () => {
 
     mockInvoke.mockImplementation(async (command: string) => {
       if (command === 'get_credential_status') {
-        return { openai: false, anthropic: false, google: false };
+        return { openai: false, anthropic: false, google: false, seedance: false };
       }
       if (command === 'store_credential') {
         throw new Error('Storage failed');
