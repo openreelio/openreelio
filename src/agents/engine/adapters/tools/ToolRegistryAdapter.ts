@@ -36,6 +36,7 @@ const CATEGORY_RISK_MAP: Record<string, RiskLevel> = {
   project: 'high',
   analysis: 'low',
   utility: 'low',
+  generation: 'high',
 };
 
 /**
@@ -52,6 +53,7 @@ const CATEGORY_DURATION_MAP: Record<string, 'instant' | 'fast' | 'slow'> = {
   project: 'fast',
   analysis: 'instant',
   utility: 'instant',
+  generation: 'slow',
 };
 
 // =============================================================================
@@ -367,6 +369,13 @@ export class ToolRegistryAdapter implements IToolExecutor {
           type: 'modified',
           entity: 'project',
           entityId: context.projectId,
+        });
+        break;
+      case 'generation':
+        effects.push({
+          type: 'created',
+          entity: 'asset',
+          entityId: context.sessionId,
         });
         break;
     }
