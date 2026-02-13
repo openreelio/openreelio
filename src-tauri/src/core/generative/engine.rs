@@ -24,6 +24,8 @@ pub struct GenerativeEngineConfig {
     pub default_tts_provider: Option<String>,
     /// Default provider for music generation
     pub default_music_provider: Option<String>,
+    /// Default provider for video generation
+    pub default_video_provider: Option<String>,
     /// Maximum concurrent generations
     pub max_concurrent: usize,
     /// Cache generated content
@@ -40,6 +42,7 @@ impl Default for GenerativeEngineConfig {
             default_image_provider: None,
             default_tts_provider: None,
             default_music_provider: None,
+            default_video_provider: None,
             max_concurrent: 3,
             cache_enabled: true,
             cache_dir: None,
@@ -58,6 +61,12 @@ impl GenerativeEngineConfig {
     /// Sets the default TTS provider
     pub fn with_tts_provider(mut self, provider: impl Into<String>) -> Self {
         self.default_tts_provider = Some(provider.into());
+        self
+    }
+
+    /// Sets the default video provider
+    pub fn with_video_provider(mut self, provider: impl Into<String>) -> Self {
+        self.default_video_provider = Some(provider.into());
         self
     }
 
@@ -218,6 +227,7 @@ impl GenerativeEngine {
             ProviderCapability::ImageGeneration => config.default_image_provider.clone(),
             ProviderCapability::TextToSpeech => config.default_tts_provider.clone(),
             ProviderCapability::MusicGeneration => config.default_music_provider.clone(),
+            ProviderCapability::VideoGeneration => config.default_video_provider.clone(),
             _ => None,
         };
 

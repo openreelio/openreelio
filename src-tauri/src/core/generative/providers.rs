@@ -6,8 +6,13 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use std::path::Path;
+
 use super::audio::{MusicGenerationParams, MusicGenerationResult, TTSParams, TTSResult};
 use super::image::{ImageGenerationParams, ImageGenerationResult};
+use super::video::{
+    VideoCostEstimate, VideoGenerationParams, VideoGenerationStatus, VideoJobHandle,
+};
 use crate::core::{CoreError, CoreResult};
 
 /// Capabilities supported by a provider
@@ -149,6 +154,53 @@ pub trait GenerativeProvider: Send + Sync {
         )))
     }
 
+    /// Submits a video generation job (async — returns handle, not result)
+    async fn submit_video(&self, _params: &VideoGenerationParams) -> CoreResult<VideoJobHandle> {
+        Err(CoreError::NotSupported(format!(
+            "{} does not support video generation",
+            self.name()
+        )))
+    }
+
+    /// Polls the status of a video generation job
+    async fn poll_video(&self, _handle: &VideoJobHandle) -> CoreResult<VideoGenerationStatus> {
+        Err(CoreError::NotSupported(format!(
+            "{} does not support video generation",
+            self.name()
+        )))
+    }
+
+    /// Cancels a video generation job
+    async fn cancel_video(&self, _handle: &VideoJobHandle) -> CoreResult<()> {
+        Err(CoreError::NotSupported(format!(
+            "{} does not support video generation",
+            self.name()
+        )))
+    }
+
+    /// Downloads a completed video to a local directory
+    async fn download_video(
+        &self,
+        _handle: &VideoJobHandle,
+        _dir: &Path,
+    ) -> CoreResult<std::path::PathBuf> {
+        Err(CoreError::NotSupported(format!(
+            "{} does not support video generation",
+            self.name()
+        )))
+    }
+
+    /// Estimates the cost of a video generation request
+    fn estimate_video_cost(
+        &self,
+        _params: &VideoGenerationParams,
+    ) -> CoreResult<VideoCostEstimate> {
+        Err(CoreError::NotSupported(format!(
+            "{} does not support video cost estimation",
+            self.name()
+        )))
+    }
+
     /// Gets available models for a capability
     async fn list_models(&self, _capability: ProviderCapability) -> CoreResult<Vec<ModelInfo>> {
         Ok(vec![])
@@ -240,6 +292,7 @@ impl MockGenerativeProvider {
                 ProviderCapability::ImageGeneration,
                 ProviderCapability::TextToSpeech,
                 ProviderCapability::MusicGeneration,
+                ProviderCapability::VideoGeneration,
             ],
             available: true,
         }
@@ -336,6 +389,58 @@ impl GenerativeProvider for MockGenerativeProvider {
         })
     }
 
+    async fn submit_video(&self, params: &VideoGenerationParams) -> CoreResult<VideoJobHandle> {
+        if !self.supports(ProviderCapability::VideoGeneration) {
+            return Err(CoreError::NotSupported(
+                "Video generation not supported".to_string(),
+            ));
+        }
+
+        params.validate().map_err(CoreError::ValidationError)?;
+
+        Ok(VideoJobHandle {
+            provider: self.name().to_string(),
+            job_id: ulid::Ulid::new().to_string(),
+            submitted_at: chrono::Utc::now().timestamp(),
+        })
+    }
+
+    async fn poll_video(&self, _handle: &VideoJobHandle) -> CoreResult<VideoGenerationStatus> {
+        if !self.supports(ProviderCapability::VideoGeneration) {
+            return Err(CoreError::NotSupported(
+                "Video generation not supported".to_string(),
+            ));
+        }
+
+        // Mock always returns completed
+        Ok(VideoGenerationStatus::Completed {
+            download_url: "https://mock.example.com/video.mp4".to_string(),
+            duration_sec: 10.0,
+            has_audio: true,
+        })
+    }
+
+    async fn cancel_video(&self, _handle: &VideoJobHandle) -> CoreResult<()> {
+        if !self.supports(ProviderCapability::VideoGeneration) {
+            return Err(CoreError::NotSupported(
+                "Video generation not supported".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn estimate_video_cost(&self, params: &VideoGenerationParams) -> CoreResult<VideoCostEstimate> {
+        if !self.supports(ProviderCapability::VideoGeneration) {
+            return Err(CoreError::NotSupported(
+                "Video cost estimation not supported".to_string(),
+            ));
+        }
+        Ok(VideoCostEstimate::calculate(
+            params.quality,
+            params.duration_sec,
+        ))
+    }
+
     async fn list_models(&self, capability: ProviderCapability) -> CoreResult<Vec<ModelInfo>> {
         let models = match capability {
             ProviderCapability::ImageGeneration => vec![
@@ -354,6 +459,14 @@ impl GenerativeProvider for MockGenerativeProvider {
                 vec![
                     ModelInfo::new("mock-music", "Mock Music Generator", capability)
                         .with_cost_tier(CostTier::Medium)
+                        .as_default(),
+                ]
+            }
+            ProviderCapability::VideoGeneration => {
+                vec![
+                    ModelInfo::new("mock-seedance", "Mock Seedance 2.0", capability)
+                        .with_description("Mock video generation model")
+                        .with_cost_tier(CostTier::High)
                         .as_default(),
                 ]
             }
@@ -525,5 +638,102 @@ mod tests {
             .unwrap();
         assert!(!models.is_empty());
         assert!(models.iter().any(|m| m.is_default));
+    }
+
+    // ========================================================================
+    // Video Generation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_mock_provider_supports_video() {
+        let provider = MockGenerativeProvider::new("Test");
+        assert!(provider.supports(ProviderCapability::VideoGeneration));
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_submit_video() {
+        let provider = MockGenerativeProvider::new("Test");
+        let params = VideoGenerationParams::new("A sunset timelapse over the ocean");
+
+        let handle = provider.submit_video(&params).await.unwrap();
+
+        assert_eq!(handle.provider, "Test");
+        assert!(!handle.job_id.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_poll_video() {
+        let provider = MockGenerativeProvider::new("Test");
+        let params = VideoGenerationParams::new("Test video");
+        let handle = provider.submit_video(&params).await.unwrap();
+
+        let status = provider.poll_video(&handle).await.unwrap();
+
+        match status {
+            VideoGenerationStatus::Completed {
+                duration_sec,
+                has_audio,
+                ..
+            } => {
+                assert!(duration_sec > 0.0);
+                assert!(has_audio);
+            }
+            _ => panic!("Expected Completed status from mock"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_cancel_video() {
+        let provider = MockGenerativeProvider::new("Test");
+        let handle = VideoJobHandle {
+            provider: "Test".to_string(),
+            job_id: "job-1".to_string(),
+            submitted_at: 0,
+        };
+
+        assert!(provider.cancel_video(&handle).await.is_ok());
+    }
+
+    #[test]
+    fn test_mock_provider_estimate_video_cost() {
+        let provider = MockGenerativeProvider::new("Test");
+        let params = VideoGenerationParams::new("Test").with_duration(60.0);
+
+        let estimate = provider.estimate_video_cost(&params).unwrap();
+
+        assert_eq!(estimate.quality, super::super::video::VideoQuality::Pro);
+        assert_eq!(estimate.cents, 30); // 1 min * 30 cents/min (Pro)
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_video_unsupported() {
+        let provider = MockGenerativeProvider::new("NoVideo")
+            .with_capabilities(vec![ProviderCapability::ImageGeneration]);
+
+        let params = VideoGenerationParams::new("Test");
+        let result = provider.submit_video(&params).await;
+        assert!(result.is_err());
+
+        let handle = VideoJobHandle {
+            provider: "NoVideo".to_string(),
+            job_id: "x".to_string(),
+            submitted_at: 0,
+        };
+        assert!(provider.poll_video(&handle).await.is_err());
+        assert!(provider.cancel_video(&handle).await.is_err());
+        assert!(provider.estimate_video_cost(&params).is_err());
+    }
+
+    #[tokio::test]
+    async fn test_mock_provider_list_video_models() {
+        let provider = MockGenerativeProvider::new("Test");
+
+        let models = provider
+            .list_models(ProviderCapability::VideoGeneration)
+            .await
+            .unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "mock-seedance");
+        assert!(models[0].is_default);
     }
 }
