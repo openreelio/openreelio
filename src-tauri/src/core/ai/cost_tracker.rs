@@ -454,28 +454,6 @@ impl CostTracker {
         Ok(())
     }
 
-    /// Record video generation cost after a job completes successfully.
-    ///
-    /// Accumulates into the shared monthly usage bucket so that subsequent
-    /// budget checks see the updated total.
-    pub async fn record_video_usage(&self, cost_cents: u32) {
-        let mut settings = self.settings.write().await;
-        let ai_settings = &mut settings.ai;
-
-        let current_month = Self::get_current_month();
-        if ai_settings.current_usage_month != Some(current_month) {
-            info!("New month detected, resetting usage counter");
-            ai_settings.current_month_usage_cents = 0;
-            ai_settings.current_usage_month = Some(current_month);
-        }
-
-        ai_settings.current_month_usage_cents += cost_cents;
-
-        info!(
-            "Recorded video generation usage: {} cents (total this month: {} cents)",
-            cost_cents, ai_settings.current_month_usage_cents
-        );
-    }
 }
 
 #[cfg(test)]

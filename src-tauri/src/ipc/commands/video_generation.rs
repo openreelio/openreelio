@@ -13,7 +13,6 @@
 
 use tauri::Manager;
 
-use crate::core::ai::cost_tracker::CostTracker;
 use crate::core::credentials::{CredentialType, CredentialVault};
 use crate::core::generative::provider_impls::SeedanceProvider;
 use crate::core::generative::providers::GenerativeProvider;
@@ -102,6 +101,21 @@ fn enforce_video_budget_limits(app: &tauri::AppHandle, estimated_cents: u32) -> 
     }
 
     Ok(())
+}
+
+/// Records video generation cost to the shared monthly usage bucket.
+///
+/// Uses the same SettingsManager that `enforce_video_budget_limits` reads from,
+/// so subsequent budget checks see the accumulated total.
+fn record_video_cost(app: &tauri::AppHandle, cost_cents: u32) {
+    if let Ok(data_dir) = get_app_data_dir(app) {
+        let manager = SettingsManager::new(data_dir);
+        let mut settings = manager.load();
+        settings.ai.current_month_usage_cents += cost_cents;
+        if let Err(e) = manager.save(&settings) {
+            tracing::warn!("Failed to record video cost: {}", e);
+        }
+    }
 }
 
 /// Create a SeedanceProvider from vault credentials.
@@ -296,9 +310,7 @@ pub async fn submit_video_generation(
         .map_err(|e| format!("Video generation submission failed: {}", e))?;
 
     // Record estimated cost to monthly usage so subsequent budget checks see the updated total
-    let state = app.state::<AppState>();
-    let cost_tracker = CostTracker::new(state.settings.clone());
-    cost_tracker.record_video_usage(estimate.cents).await;
+    record_video_cost(&app, estimate.cents);
 
     Ok(SubmitVideoGenerationResponse {
         job_id: ulid::Ulid::new().to_string(),
