@@ -424,7 +424,7 @@ pub async fn estimate_generation_cost(
 ) -> Result<EstimateGenerationCostResponse, String> {
     let quality_enum = parse_quality(&quality)?;
     // Clamp to match submit_video_generation behavior (5-120s via with_duration)
-    let duration_sec = duration_sec.max(5.0).min(120.0);
+    let duration_sec = duration_sec.clamp(5.0, 120.0);
     let estimate = VideoCostEstimate::calculate(quality_enum, duration_sec);
 
     Ok(EstimateGenerationCostResponse {
