@@ -453,7 +453,6 @@ impl CostTracker {
 
         Ok(())
     }
-
 }
 
 #[cfg(test)]
