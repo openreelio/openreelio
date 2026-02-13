@@ -13,6 +13,7 @@
 
 use tauri::Manager;
 
+use crate::core::ai::cost_tracker::CostTracker;
 use crate::core::credentials::{CredentialType, CredentialVault};
 use crate::core::generative::provider_impls::SeedanceProvider;
 use crate::core::generative::providers::GenerativeProvider;
@@ -276,6 +277,11 @@ pub async fn submit_video_generation(
         params.reference_audio.push(std::path::PathBuf::from(path));
     }
 
+    // Validate params before cost estimation and submission
+    params
+        .validate()
+        .map_err(|e| format!("Invalid video generation parameters: {}", e))?;
+
     // Estimate cost
     let estimate = provider
         .estimate_video_cost(&params)
@@ -288,6 +294,11 @@ pub async fn submit_video_generation(
         .submit_video(&params)
         .await
         .map_err(|e| format!("Video generation submission failed: {}", e))?;
+
+    // Record estimated cost to monthly usage so subsequent budget checks see the updated total
+    let state = app.state::<AppState>();
+    let cost_tracker = CostTracker::new(state.settings.clone());
+    cost_tracker.record_video_usage(estimate.cents).await;
 
     Ok(SubmitVideoGenerationResponse {
         job_id: ulid::Ulid::new().to_string(),
@@ -400,6 +411,8 @@ pub async fn estimate_generation_cost(
     duration_sec: f64,
 ) -> Result<EstimateGenerationCostResponse, String> {
     let quality_enum = parse_quality(&quality)?;
+    // Clamp to match submit_video_generation behavior (5-120s via with_duration)
+    let duration_sec = duration_sec.max(5.0).min(120.0);
     let estimate = VideoCostEstimate::calculate(quality_enum, duration_sec);
 
     Ok(EstimateGenerationCostResponse {

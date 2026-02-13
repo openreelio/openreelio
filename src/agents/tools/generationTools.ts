@@ -281,7 +281,12 @@ const GENERATION_TOOLS: ToolDefinition[] = [
     handler: async (args) => {
       try {
         const store = useVideoGenStore.getState();
-        await store.cancelJob(args.jobId as string);
+        const job = store.getJob(args.jobId as string);
+        if (!job) {
+          return { success: false, error: `Job not found: ${args.jobId}` };
+        }
+
+        await store.cancelJob(job.id);
 
         return {
           success: true,

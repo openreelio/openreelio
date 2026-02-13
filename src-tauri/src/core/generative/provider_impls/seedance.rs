@@ -260,10 +260,11 @@ impl SeedanceProvider {
             }
         }
 
+        let truncated: String = body.chars().take(500).collect();
         CoreError::AIRequestFailed(format!(
             "Seedance API error ({}): {}",
             status,
-            &body[..body.len().min(500)]
+            truncated
         ))
     }
 }
@@ -488,7 +489,9 @@ impl GenerativeProvider for SeedanceProvider {
 
         // Create output directory
         let gen_dir = dir.join("generated-media");
-        std::fs::create_dir_all(&gen_dir)?;
+        tokio::fs::create_dir_all(&gen_dir)
+            .await
+            .map_err(|e| CoreError::Internal(format!("Failed to create output dir: {}", e)))?;
 
         let filename = format!("{}.mp4", handle.job_id);
         let output_path = gen_dir.join(&filename);
@@ -513,7 +516,9 @@ impl GenerativeProvider for SeedanceProvider {
             .await
             .map_err(|e| CoreError::Internal(format!("Failed to read download: {}", e)))?;
 
-        std::fs::write(&output_path, &bytes)?;
+        tokio::fs::write(&output_path, &bytes)
+            .await
+            .map_err(|e| CoreError::Internal(format!("Failed to write video file: {}", e)))?;
 
         info!(
             "Downloaded generated video to {} ({} bytes)",

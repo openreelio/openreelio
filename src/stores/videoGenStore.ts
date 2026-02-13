@@ -94,6 +94,8 @@ interface VideoGenState {
   isPolling: boolean;
   /** Interval ID for the polling loop */
   pollingIntervalId: ReturnType<typeof setInterval> | null;
+  /** Prevent overlapping poll cycles */
+  isPollInFlight: boolean;
 }
 
 interface VideoGenActions {
@@ -125,6 +127,7 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
     jobs: new Map(),
     isPolling: false,
     pollingIntervalId: null,
+    isPollInFlight: false,
 
     // =========================================================================
     // Actions
@@ -177,6 +180,8 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
         set((state) => {
           const job = state.jobs.get(localId);
           if (job) {
+            // Honor cancel requested during submission
+            if (job.status === 'cancelled') return;
             job.providerJobId = result.providerJobId;
             job.estimatedCostCents = result.estimatedCostCents;
             job.status = 'queued';
@@ -211,76 +216,87 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
     },
 
     pollActiveJobs: async () => {
-      const activeJobs = get().getActiveJobs();
+      if (get().isPollInFlight) return;
+      set((s) => {
+        s.isPollInFlight = true;
+      });
 
-      if (activeJobs.length === 0) {
-        get().stopPolling();
-        return;
-      }
+      try {
+        const activeJobs = get().getActiveJobs();
 
-      for (const job of activeJobs) {
-        if (!job.providerJobId) continue;
-        if (job.status === 'downloading' || job.status === 'importing') continue;
+        if (activeJobs.length === 0) {
+          get().stopPolling();
+          return;
+        }
 
-        try {
-          const status = await invoke<{
-            status: string;
-            progress: number | null;
-            message: string | null;
-            downloadUrl: string | null;
-            durationSec: number | null;
-            hasAudio: boolean | null;
-            error: string | null;
-          }>('poll_generation_job', {
-            providerJobId: job.providerJobId,
-          });
+        for (const job of activeJobs) {
+          if (!job.providerJobId) continue;
+          if (job.status === 'downloading' || job.status === 'importing') continue;
 
-          set((state) => {
-            const j = state.jobs.get(job.id);
-            if (!j) return;
+          try {
+            const status = await invoke<{
+              status: string;
+              progress: number | null;
+              message: string | null;
+              downloadUrl: string | null;
+              durationSec: number | null;
+              hasAudio: boolean | null;
+              error: string | null;
+            }>('poll_generation_job', {
+              providerJobId: job.providerJobId,
+            });
 
-            switch (status.status) {
-              case 'queued':
-                j.status = 'queued';
-                break;
-              case 'processing':
-                j.status = 'processing';
-                j.progress = status.progress ?? j.progress;
-                break;
-              case 'completed':
-                j.status = 'downloading';
-                j.progress = 100;
-                break;
-              case 'failed':
-                j.status = 'failed';
-                j.error = status.error ?? 'Unknown error';
-                j.completedAt = new Date().toISOString();
-                break;
-              case 'cancelled':
-                j.status = 'cancelled';
-                j.completedAt = new Date().toISOString();
-                break;
-              default:
-                logger.warn('Unknown poll status received', {
-                  jobId: job.id,
-                  status: status.status,
-                });
-                break;
+            set((state) => {
+              const j = state.jobs.get(job.id);
+              if (!j) return;
+
+              switch (status.status) {
+                case 'queued':
+                  j.status = 'queued';
+                  break;
+                case 'processing':
+                  j.status = 'processing';
+                  j.progress = status.progress ?? j.progress;
+                  break;
+                case 'completed':
+                  j.status = 'downloading';
+                  j.progress = 100;
+                  break;
+                case 'failed':
+                  j.status = 'failed';
+                  j.error = status.error ?? 'Unknown error';
+                  j.completedAt = new Date().toISOString();
+                  break;
+                case 'cancelled':
+                  j.status = 'cancelled';
+                  j.completedAt = new Date().toISOString();
+                  break;
+                default:
+                  logger.warn('Unknown poll status received', {
+                    jobId: job.id,
+                    status: status.status,
+                  });
+                  break;
+              }
+            });
+
+            // Trigger download+import for completed jobs
+            if (status.status === 'completed') {
+              get().onJobCompleted(job.id).catch((err) => {
+                logger.error('Auto-import failed for job', { jobId: job.id, error: String(err) });
+              });
             }
-          });
-
-          // Trigger download+import for completed jobs
-          if (status.status === 'completed') {
-            get().onJobCompleted(job.id).catch((err) => {
-              logger.error('Auto-import failed for job', { jobId: job.id, error: String(err) });
+          } catch (error) {
+            logger.warn('Poll failed for job', {
+              jobId: job.id,
+              error: String(error),
             });
           }
-        } catch (error) {
-          logger.warn('Poll failed for job', {
-            jobId: job.id,
-            error: String(error),
-          });
         }
+      } finally {
+        set((s) => {
+          s.isPollInFlight = false;
+        });
       }
     },
 
@@ -318,7 +334,20 @@ export const useVideoGenStore = create<VideoGenState & VideoGenActions>()(
 
     cancelJob: async (jobId: string) => {
       const job = get().jobs.get(jobId);
-      if (!job?.providerJobId) return;
+      if (!job) return;
+
+      // If no providerJobId yet (still submitting), cancel locally
+      if (!job.providerJobId) {
+        set((state) => {
+          const j = state.jobs.get(jobId);
+          if (j) {
+            j.status = 'cancelled';
+            j.completedAt = new Date().toISOString();
+          }
+        });
+        logger.info('Video generation cancelled locally (no provider ID yet)', { jobId });
+        return;
+      }
 
       try {
         await invoke('cancel_generation_job', {

@@ -31,6 +31,7 @@ describe('videoGenStore', () => {
       jobs: new Map(),
       isPolling: false,
       pollingIntervalId: null,
+      isPollInFlight: false,
     });
   });
 
@@ -172,6 +173,35 @@ describe('videoGenStore', () => {
       const job = useVideoGenStore.getState().getJob('job-1');
       expect(job!.status).toBe('cancelled');
       expect(job!.completedAt).not.toBeNull();
+    });
+
+    it('should cancel a job in submitting state locally', async () => {
+      const jobs = new Map();
+      jobs.set('job-2', {
+        id: 'job-2',
+        providerJobId: null,
+        prompt: 'Test',
+        mode: 'text_to_video' as const,
+        quality: 'pro' as const,
+        durationSec: 10,
+        status: 'submitting' as const,
+        progress: 0,
+        estimatedCostCents: 0,
+        actualCostCents: null,
+        assetId: null,
+        error: null,
+        createdAt: new Date().toISOString(),
+        completedAt: null,
+      });
+      useVideoGenStore.setState({ jobs });
+
+      await useVideoGenStore.getState().cancelJob('job-2');
+
+      const job = useVideoGenStore.getState().getJob('job-2');
+      expect(job!.status).toBe('cancelled');
+      expect(job!.completedAt).not.toBeNull();
+      // Should not call invoke since no providerJobId
+      expect(mockInvoke).not.toHaveBeenCalled();
     });
   });
 
