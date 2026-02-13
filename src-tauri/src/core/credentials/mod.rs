@@ -48,6 +48,8 @@ pub enum CredentialType {
     AnthropicApiKey,
     /// Google AI API key (AIza...)
     GoogleApiKey,
+    /// Seedance / BytePlus video generation API key
+    SeedanceApiKey,
     /// Custom provider API key
     CustomApiKey,
 }
@@ -59,6 +61,7 @@ impl CredentialType {
             Self::OpenaiApiKey => "openai_api_key",
             Self::AnthropicApiKey => "anthropic_api_key",
             Self::GoogleApiKey => "google_api_key",
+            Self::SeedanceApiKey => "seedance_api_key",
             Self::CustomApiKey => "custom_api_key",
         }
     }
@@ -94,6 +97,9 @@ impl CredentialType {
                     );
                 }
             }
+            Self::SeedanceApiKey => {
+                // Seedance key format not yet standardized — basic non-empty check is sufficient
+            }
             Self::CustomApiKey => {
                 // No format validation for custom keys
             }
@@ -126,6 +132,7 @@ impl std::str::FromStr for CredentialType {
             "openai_api_key" | "openai" => Ok(Self::OpenaiApiKey),
             "anthropic_api_key" | "anthropic" => Ok(Self::AnthropicApiKey),
             "google_api_key" | "google" | "gemini" => Ok(Self::GoogleApiKey),
+            "seedance_api_key" | "seedance" => Ok(Self::SeedanceApiKey),
             "custom_api_key" | "custom" => Ok(Self::CustomApiKey),
             _ => Err(CredentialError::InvalidCredentialType(s.to_string())),
         }
