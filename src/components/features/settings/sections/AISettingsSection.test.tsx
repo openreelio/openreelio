@@ -48,7 +48,7 @@ const defaultAISettings: AISettings = {
   autoCaptionOnImport: false,
   proposalReviewMode: 'always',
   cacheDurationHours: 24,
-  localOnlyMode: false,
+  localOnlyMode: false, seedanceApiKey: null, videoGenProvider: null, videoGenDefaultQuality: 'pro', videoGenBudgetCents: null, videoGenPerRequestLimitCents: 100,
 };
 
 describe('AISettingsSection', () => {
@@ -66,7 +66,7 @@ describe('AISettingsSection', () => {
     // Default mock implementation
     mockInvoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
       if (command === 'get_credential_status') {
-        return { openai: false, anthropic: false, google: false };
+        return { openai: false, anthropic: false, google: false, seedance: false };
       }
       if (command === 'get_available_ai_models') {
         const provider = args?.providerType as string;
@@ -218,7 +218,7 @@ describe('AISettingsSection', () => {
     it('should show configured status when credential exists', async () => {
       mockInvoke.mockImplementation(async (command: string) => {
         if (command === 'get_credential_status') {
-          return { openai: false, anthropic: true, google: false };
+          return { openai: false, anthropic: true, google: false, seedance: false };
         }
         if (command === 'get_available_ai_models') {
           return ['claude-sonnet-4-5-20251015'];
@@ -395,7 +395,7 @@ describe('AISettingsSection', () => {
     it('should handle model loading error gracefully', async () => {
       mockInvoke.mockImplementation(async (command: string) => {
         if (command === 'get_credential_status') {
-          return { openai: false, anthropic: false, google: false };
+          return { openai: false, anthropic: false, google: false, seedance: false };
         }
         if (command === 'get_available_ai_models') {
           throw new Error('Network error');

@@ -10,6 +10,8 @@ import { registerAudioTools, unregisterAudioTools } from './audioTools';
 import { registerCaptionTools, unregisterCaptionTools } from './captionTools';
 import { registerEffectTools, unregisterEffectTools } from './effectTools';
 import { registerTransitionTools, unregisterTransitionTools } from './transitionTools';
+import { registerGenerationTools, unregisterGenerationTools } from './generationTools';
+import { isVideoGenerationEnabled } from '@/config/featureFlags';
 
 // Re-export individual module functions
 export {
@@ -48,6 +50,12 @@ export {
   getTransitionToolNames,
 } from './transitionTools';
 
+export {
+  registerGenerationTools,
+  unregisterGenerationTools,
+  getGenerationToolNames,
+} from './generationTools';
+
 /**
  * Register all agent tools with the global registry.
  */
@@ -58,6 +66,10 @@ export function registerAllTools(): void {
   registerCaptionTools();
   registerEffectTools();
   registerTransitionTools();
+
+  if (isVideoGenerationEnabled()) {
+    registerGenerationTools();
+  }
 }
 
 /**
@@ -70,4 +82,5 @@ export function unregisterAllTools(): void {
   unregisterCaptionTools();
   unregisterEffectTools();
   unregisterTransitionTools();
+  unregisterGenerationTools();
 }

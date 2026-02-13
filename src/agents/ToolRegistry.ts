@@ -25,7 +25,8 @@ export type ToolCategory =
   | 'export'
   | 'project'
   | 'analysis'
-  | 'utility';
+  | 'utility'
+  | 'generation';
 
 /** Handler function for a tool */
 export type ToolHandler = (

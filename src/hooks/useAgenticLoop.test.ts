@@ -15,6 +15,7 @@ import { useConversationStore } from '@/stores/conversationStore';
 // Mock the feature flags
 vi.mock('@/config/featureFlags', () => ({
   isAgenticEngineEnabled: vi.fn().mockReturnValue(true),
+  isVideoGenerationEnabled: vi.fn().mockReturnValue(false),
 }));
 
 // Mock logger

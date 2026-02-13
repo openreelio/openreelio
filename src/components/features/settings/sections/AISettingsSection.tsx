@@ -16,6 +16,7 @@ import type { AISettings, ProviderType, ProposalReviewMode } from '@/stores/sett
 import { CostControlPanel } from './CostControlPanel';
 import { useAIModels, getDefaultModel } from '@/hooks/useAIModels';
 import { useCredentials, type CredentialProvider } from '@/hooks/useCredentials';
+import { isVideoGenerationEnabled } from '@/config/featureFlags';
 
 // =============================================================================
 // Types
@@ -357,6 +358,7 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
   disabled = false,
 }) => {
   const { status: credentialStatus, isLoading: credentialsLoading } = useCredentials();
+  const videoGenerationEnabled = isVideoGenerationEnabled();
 
   // Handlers
   const handleProviderChange = useCallback(
@@ -454,13 +456,16 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
 
     if (!credentialProvider) return null;
 
-    const providerLabels: Record<CredentialProvider, { label: string; placeholder: string }> = {
+    const providerLabels: Partial<Record<CredentialProvider, { label: string; placeholder: string }>> = {
       openai: { label: 'OpenAI API Key', placeholder: 'sk-...' },
       anthropic: { label: 'Anthropic API Key', placeholder: 'sk-ant-...' },
       google: { label: 'Google API Key', placeholder: 'AIza...' },
     };
 
-    const { label, placeholder } = providerLabels[credentialProvider];
+    const labelInfo = providerLabels[credentialProvider];
+    if (!labelInfo) return null;
+
+    const { label, placeholder } = labelInfo;
 
     return (
       <div>
@@ -669,6 +674,93 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
           </div>
         </div>
       </section>
+
+      {videoGenerationEnabled && (
+        <section>
+          <SectionHeader
+            title="Video Generation"
+            description="Configure AI video generation (Seedance 2.0)"
+          />
+          <div className="space-y-4">
+            {/* Seedance API Key */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-sm font-medium text-editor-text-muted">
+                  Seedance API Key
+                </label>
+                <StatusBadge
+                  isConfigured={credentialStatus.seedance}
+                  isLoading={credentialsLoading}
+                />
+              </div>
+              <SecureApiKeyInput
+                provider="seedance"
+                placeholder="Enter your Seedance API key"
+                disabled={disabled}
+              />
+            </div>
+
+            {/* Default Quality */}
+            <div>
+              <label
+                htmlFor="videogen-quality"
+                className="block text-sm font-medium text-editor-text-muted mb-1"
+              >
+                Default Quality
+              </label>
+              <select
+                id="videogen-quality"
+                value={settings.videoGenDefaultQuality}
+                onChange={(e) =>
+                  onUpdate({
+                    videoGenDefaultQuality: e.target.value as 'basic' | 'pro' | 'cinema',
+                  })
+                }
+                disabled={disabled}
+                className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text focus:outline-none focus:border-primary-500 disabled:opacity-50"
+              >
+                <option value="basic">Basic (~$0.10/min)</option>
+                <option value="pro">Pro (~$0.30/min)</option>
+                <option value="cinema">Cinema (~$0.80/min)</option>
+              </select>
+              <p className="mt-1 text-xs text-editor-text-muted">
+                Default quality tier for video generation requests
+              </p>
+            </div>
+
+            {/* Per-request cost limit */}
+            <div>
+              <label
+                htmlFor="videogen-limit"
+                className="block text-sm font-medium text-editor-text-muted mb-1"
+              >
+                Per-Request Cost Limit
+              </label>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-editor-text-muted">$</span>
+                <input
+                  id="videogen-limit"
+                  type="number"
+                  min={0}
+                  step={0.5}
+                  value={(settings.videoGenPerRequestLimitCents / 100).toFixed(2)}
+                  onChange={(e) => {
+                    const cents = Math.round(parseFloat(e.target.value) * 100);
+                    if (!isNaN(cents) && cents >= 0) {
+                      onUpdate({ videoGenPerRequestLimitCents: cents });
+                    }
+                  }}
+                  disabled={disabled}
+                  className="flex-1 px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text focus:outline-none focus:border-primary-500 disabled:opacity-50"
+                />
+              </div>
+              <p className="mt-1 text-xs text-editor-text-muted">
+                Maximum cost per generation request. Set to 0 for unlimited.
+              </p>
+            </div>
+          </div>
+        </section>
+      )}
     </div>
   );
 };

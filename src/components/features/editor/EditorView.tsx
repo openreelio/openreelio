@@ -20,6 +20,7 @@ import { ExportDialog } from '@/components/features/export';
 import { AddTextDialog, type AddTextPayload } from '@/components/features/text';
 import { Inspector, type SelectedCaption } from '@/components/features/inspector';
 import { AudioMixerPanel, type ChannelLevels } from '@/components/features/mixer';
+import { VideoGenerationPanel } from '@/components/features/generation';
 import { ProjectExplorer } from '@/components/explorer';
 import { UnifiedPreviewPlayer } from '@/components/preview';
 import { Timeline } from '@/components/timeline';
@@ -38,7 +39,8 @@ import { useAudioMixer } from '@/hooks/useAudioMixer';
 import { useMulticamSession } from '@/hooks/useMulticamSession';
 import { dbToLinear, linearToDb } from '@/utils/audioMeter';
 import { createLogger } from '@/services/logger';
-import { Terminal, Sliders } from 'lucide-react';
+import { isVideoGenerationEnabled } from '@/config/featureFlags';
+import { Terminal, Sliders, Sparkles } from 'lucide-react';
 import type { Sequence } from '@/types';
 import type { MulticamGroup } from '@/utils/multicam';
 
@@ -383,43 +385,60 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
   }, [toggleMasterMute]);
 
   // Bottom panel tabs
-  const bottomPanelTabs: BottomPanelTab[] = useMemo(() => [
-    {
-      id: 'console',
-      label: 'Console',
-      icon: <Terminal className="w-3 h-3" />,
-      content: (
-        <div className="h-full p-2 font-mono text-xs text-editor-text-muted overflow-auto">
-          <p>OpenReelio initialized.</p>
-          <p>Ready to edit.</p>
-        </div>
-      ),
-    },
-    {
-      id: 'mixer',
-      label: 'Mixer',
-      icon: <Sliders className="w-3 h-3" />,
-      content: (
-        <AudioMixerPanel
-          tracks={sequence?.tracks ?? []}
-          trackLevels={trackLevels}
-          trackPans={trackPans}
-          soloedTrackIds={soloedTrackIds}
-          masterVolume={masterVolume}
-          masterMuted={masterMuted}
-          masterLevels={masterLevels}
-          onVolumeChange={handleMixerVolumeChange}
-          onPanChange={handleMixerPanChange}
-          onMuteToggle={handleMixerMuteToggle}
-          onSoloToggle={handleMixerSoloToggle}
-          onMasterVolumeChange={handleMasterVolumeChange}
-          onMasterMuteToggle={handleMasterMuteToggle}
-          compact
-          className="h-full"
-        />
-      ),
-    },
-  ], [
+  const videoGenEnabled = isVideoGenerationEnabled();
+  const bottomPanelTabs: BottomPanelTab[] = useMemo(() => {
+    const tabs: BottomPanelTab[] = [
+      {
+        id: 'console',
+        label: 'Console',
+        icon: <Terminal className="w-3 h-3" />,
+        content: (
+          <div className="h-full p-2 font-mono text-xs text-editor-text-muted overflow-auto">
+            <p>OpenReelio initialized.</p>
+            <p>Ready to edit.</p>
+          </div>
+        ),
+      },
+      {
+        id: 'mixer',
+        label: 'Mixer',
+        icon: <Sliders className="w-3 h-3" />,
+        content: (
+          <AudioMixerPanel
+            tracks={sequence?.tracks ?? []}
+            trackLevels={trackLevels}
+            trackPans={trackPans}
+            soloedTrackIds={soloedTrackIds}
+            masterVolume={masterVolume}
+            masterMuted={masterMuted}
+            masterLevels={masterLevels}
+            onVolumeChange={handleMixerVolumeChange}
+            onPanChange={handleMixerPanChange}
+            onMuteToggle={handleMixerMuteToggle}
+            onSoloToggle={handleMixerSoloToggle}
+            onMasterVolumeChange={handleMasterVolumeChange}
+            onMasterMuteToggle={handleMasterMuteToggle}
+            compact
+            className="h-full"
+          />
+        ),
+      },
+    ];
+
+    if (videoGenEnabled) {
+      tabs.push({
+        id: 'videogen',
+        label: 'Generate',
+        icon: <Sparkles className="w-3 h-3" />,
+        content: (
+          <VideoGenerationPanel compact className="h-full" />
+        ),
+      });
+    }
+
+    return tabs;
+  }, [
+    videoGenEnabled,
     sequence?.tracks,
     trackLevels,
     trackPans,

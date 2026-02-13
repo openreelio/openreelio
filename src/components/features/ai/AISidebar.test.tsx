@@ -49,6 +49,7 @@ vi.mock('@/stores/aiStore', () => ({
 // Mock feature flags - default to legacy mode for existing tests
 vi.mock('@/config/featureFlags', () => ({
   isAgenticEngineEnabled: vi.fn(() => false),
+  isVideoGenerationEnabled: vi.fn(() => false),
 }));
 
 // Mock stores

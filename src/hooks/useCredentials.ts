@@ -20,7 +20,7 @@ import { useAIStore } from '@/stores/aiStore';
 const logger = createLogger('useCredentials');
 
 /** Supported credential provider types */
-export type CredentialProvider = 'openai' | 'anthropic' | 'google';
+export type CredentialProvider = 'openai' | 'anthropic' | 'google' | 'seedance';
 
 /**
  * Maps credential provider to AI provider type for cache invalidation
@@ -33,7 +33,9 @@ function mapProviderToAIProvider(provider: CredentialProvider): 'openai' | 'anth
       return 'anthropic';
     case 'google':
       return 'gemini';
-    default:
+    case 'seedance':
+      // Seedance is a video generation provider, not an AI chat provider.
+      // No model cache invalidation needed.
       return undefined;
   }
 }
@@ -43,6 +45,7 @@ export interface CredentialStatus {
   openai: boolean;
   anthropic: boolean;
   google: boolean;
+  seedance: boolean;
 }
 
 /** Hook state */
@@ -98,6 +101,7 @@ export function useCredentials(): UseCredentialsReturn {
     openai: false,
     anthropic: false,
     google: false,
+    seedance: false,
   });
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);

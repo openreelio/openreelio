@@ -642,6 +642,27 @@ pub struct AISettings {
     /// Use only local models (no cloud API calls)
     #[serde(default)]
     pub local_only_mode: bool,
+
+    // === Video Generation ===
+    /// Seedance API key (legacy fallback; secure vault is preferred)
+    #[serde(default)]
+    pub seedance_api_key: Option<String>,
+
+    /// Video generation provider identifier (currently "seedance")
+    #[serde(default)]
+    pub video_gen_provider: Option<String>,
+
+    /// Default quality tier for video generation ("basic", "pro", "cinema")
+    #[serde(default = "default_video_gen_default_quality")]
+    pub video_gen_default_quality: String,
+
+    /// Monthly video-generation budget in cents (None = unlimited)
+    #[serde(default)]
+    pub video_gen_budget_cents: Option<u32>,
+
+    /// Per-request video generation limit in cents (0 = unlimited)
+    #[serde(default = "default_video_gen_per_request_limit")]
+    pub video_gen_per_request_limit_cents: u32,
 }
 
 fn default_primary_model() -> String {
@@ -698,6 +719,14 @@ fn default_cache_duration() -> u32 {
     24 // hours
 }
 
+fn default_video_gen_default_quality() -> String {
+    "pro".to_string()
+}
+
+fn default_video_gen_per_request_limit() -> u32 {
+    100 // $1.00
+}
+
 impl Default for AISettings {
     fn default() -> Self {
         Self {
@@ -721,6 +750,11 @@ impl Default for AISettings {
             proposal_review_mode: ProposalReviewMode::default(),
             cache_duration_hours: default_cache_duration(),
             local_only_mode: false,
+            seedance_api_key: None,
+            video_gen_provider: None,
+            video_gen_default_quality: default_video_gen_default_quality(),
+            video_gen_budget_cents: None,
+            video_gen_per_request_limit_cents: default_video_gen_per_request_limit(),
         }
     }
 }
@@ -790,6 +824,30 @@ impl AISettings {
             self.cache_duration_hours = 1;
         }
         self.cache_duration_hours = self.cache_duration_hours.clamp(1, 168);
+
+        // Video generation provider supports only known values.
+        self.video_gen_provider = self
+            .video_gen_provider
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| v.to_ascii_lowercase())
+            .filter(|v| v == "seedance");
+
+        // Normalize quality to supported values.
+        self.video_gen_default_quality = normalize_enum(
+            &self.video_gen_default_quality,
+            &["basic", "pro", "cinema"],
+            default_video_gen_default_quality(),
+        );
+
+        // Trim legacy API key field if present.
+        self.seedance_api_key = self
+            .seedance_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(ToOwned::to_owned);
     }
 
     /// Get the API key for the specified provider

@@ -344,6 +344,23 @@ async clearAiProvider() : Promise<Result<null, string>> {
 }
 },
 /**
+ * Syncs AI provider configuration from settings and encrypted vault
+ * 
+ * This command:
+ * 1. Reads the primary provider from settings
+ * 2. Retrieves the corresponding API key from the encrypted credential vault
+ * 3. Configures the AI provider with these credentials
+ * 
+ * The API key never leaves the backend, maintaining security.
+ */
+async syncAiFromVault() : Promise<Result<ProviderStatusDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sync_ai_from_vault") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Tests the AI connection by making a simple request with detailed results
  */
 async testAiConnection() : Promise<Result<ConnectionTestResult, string>> {
@@ -359,6 +376,33 @@ async testAiConnection() : Promise<Result<ConnectionTestResult, string>> {
 async generateEditScriptWithAi(intent: string, context: AIContextDto) : Promise<Result<EditScriptDto, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("generate_edit_script_with_ai", { intent, context }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Perform a raw completion using the configured AI provider.
+ * 
+ * Unlike `chat_with_ai`, this does not apply the unified-agent system prompt and does not parse
+ * the output into an `AIResponse`. This is intended for the frontend agentic engine, which
+ * supplies its own prompts and schemas.
+ */
+async completeWithAiRaw(messages: ConversationMessageDto[], options: AICompletionOptionsDto | null) : Promise<Result<AICompletionResponseDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("complete_with_ai_raw", { messages, options }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Chat with AI using conversation history (unified agent mode)
+ * 
+ * This endpoint supports natural conversation and optional edit commands.
+ * The AI will decide whether to respond conversationally or execute edits.
+ */
+async chatWithAi(messages: ConversationMessageDto[], context: AIContextDto) : Promise<Result<AIResponseDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("chat_with_ai", { messages, context }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -722,6 +766,68 @@ async getCredentialStatus() : Promise<Result<CredentialStatusDto, string>> {
 }
 },
 /**
+ * Submit a video generation job.
+ * 
+ * Returns the job handle and estimated cost. Does not block until completion.
+ */
+async submitVideoGeneration(request: SubmitVideoGenerationRequest) : Promise<Result<SubmitVideoGenerationResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("submit_video_generation", { request }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Poll the status of a video generation job.
+ */
+async pollGenerationJob(providerJobId: string) : Promise<Result<PollGenerationJobResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("poll_generation_job", { providerJobId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Cancel a running video generation job.
+ */
+async cancelGenerationJob(providerJobId: string) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_generation_job", { providerJobId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Estimate the cost of a video generation request.
+ */
+async estimateGenerationCost(quality: string, durationSec: number) : Promise<Result<EstimateGenerationCostResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("estimate_generation_cost", { quality, durationSec }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Download a completed generated video to the project directory.
+ */
+async downloadGeneratedVideo(providerJobId: string) : Promise<Result<DownloadGeneratedVideoResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("download_generated_video", { providerJobId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Configure the Seedance provider by storing the API key.
+ */
+async configureSeedanceProvider(apiKey: string, baseUrl: string | null) : Promise<Result<ConfigureSeedanceProviderResponse, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("configure_seedance_provider", { apiKey, baseUrl }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Checks for available updates
  */
 async checkForUpdates() : Promise<Result<UpdateCheckResultDto, string>> {
@@ -770,6 +876,38 @@ async downloadAndInstallUpdate() : Promise<Result<boolean, string>> {
 /** user-defined types **/
 
 /**
+ * Options for raw AI completion (no AIResponse parsing).
+ */
+export type AICompletionOptionsDto = { 
+/**
+ * System prompt override
+ */
+systemPrompt: string | null; 
+/**
+ * Model override
+ */
+model: string | null; 
+/**
+ * Max tokens
+ */
+maxTokens: number | null; 
+/**
+ * Temperature
+ */
+temperature: number | null; 
+/**
+ * Whether to enable JSON mode (provider-dependent)
+ */
+jsonMode: boolean | null }
+/**
+ * Raw completion response from the configured provider.
+ */
+export type AICompletionResponseDto = { text: string; model: string; usage: AICompletionUsageDto; finishReason: string }
+/**
+ * Token usage for a raw completion.
+ */
+export type AICompletionUsageDto = { promptTokens: number; completionTokens: number; totalTokens: number }
+/**
  * Context information for AI intent analysis.
  */
 export type AIContextDto = { 
@@ -801,7 +939,39 @@ assetIds?: string[];
  * Available track IDs
  */
 trackIds?: string[] }
-export type AISettingsDto = { primaryProvider: ProviderTypeDto; primaryModel: string; visionProvider: ProviderTypeDto | null; visionModel: string | null; openaiApiKey: string | null; anthropicApiKey: string | null; googleApiKey: string | null; ollamaUrl: string | null; temperature: number; maxTokens: number; frameExtractionRate: number; monthlyBudgetCents: number | null; perRequestLimitCents: number; currentMonthUsageCents: number; currentUsageMonth: number | null; autoAnalyzeOnImport: boolean; autoCaptionOnImport: boolean; proposalReviewMode: ProposalReviewModeDto; cacheDurationHours: number; localOnlyMode: boolean }
+/**
+ * AI intent classification
+ */
+export type AIIntentDto = { 
+/**
+ * Intent type: chat, edit, query, clarify
+ */
+type: string; 
+/**
+ * Confidence score
+ */
+confidence: number }
+/**
+ * AI response with optional actions
+ */
+export type AIResponseDto = { 
+/**
+ * Conversational response text
+ */
+message: string; 
+/**
+ * Edit actions to execute (if any)
+ */
+actions: EditActionDto[] | null; 
+/**
+ * Whether user confirmation is needed
+ */
+needsConfirmation: boolean | null; 
+/**
+ * AI's understanding of the intent
+ */
+intent: AIIntentDto | null }
+export type AISettingsDto = { primaryProvider: ProviderTypeDto; primaryModel: string; visionProvider: ProviderTypeDto | null; visionModel: string | null; openaiApiKey: string | null; anthropicApiKey: string | null; googleApiKey: string | null; ollamaUrl: string | null; temperature: number; maxTokens: number; frameExtractionRate: number; monthlyBudgetCents: number | null; perRequestLimitCents: number; currentMonthUsageCents: number; currentUsageMonth: number | null; autoAnalyzeOnImport: boolean; autoCaptionOnImport: boolean; proposalReviewMode: ProposalReviewModeDto; cacheDurationHours: number; localOnlyMode: boolean; seedanceApiKey?: string | null; videoGenProvider?: string | null; videoGenDefaultQuality?: string; videoGenBudgetCents?: number | null; videoGenPerRequestLimitCents?: number }
 /**
  * Provider that performed the analysis
  */
@@ -1405,6 +1575,10 @@ createdIds: string[];
  */
 deletedIds: string[] }
 /**
+ * Response for configure_seedance_provider
+ */
+export type ConfigureSeedanceProviderResponse = { isAvailable: boolean }
+/**
  * Error codes for connection test failures
  */
 export type ConnectionErrorCode = 
@@ -1465,6 +1639,18 @@ errorCode: ConnectionErrorCode | null;
  */
 errorDetails: string | null }
 /**
+ * Message for conversation history
+ */
+export type ConversationMessageDto = { 
+/**
+ * Role: user, assistant, or system
+ */
+role: string; 
+/**
+ * Message content
+ */
+content: string }
+/**
  * Cost breakdown for a single analysis type
  */
 export type CostBreakdownItem = { 
@@ -1507,7 +1693,27 @@ breakdown: CostBreakdownItem[] }
 /**
  * Status of credentials for each provider
  */
-export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google: boolean }
+export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google: boolean; seedance: boolean }
+/**
+ * Response for download_generated_video
+ */
+export type DownloadGeneratedVideoResponse = { outputPath: string }
+/**
+ * Edit action from AI
+ */
+export type EditActionDto = { 
+/**
+ * Command type
+ */
+commandType: string; 
+/**
+ * Command parameters as JSON
+ */
+params: JsonValue; 
+/**
+ * Human-readable description
+ */
+description: string | null }
 /**
  * A single edit command within an EditScript.
  */
@@ -1557,6 +1763,10 @@ explanation: string;
  */
 previewPlan: PreviewPlanDto | null }
 export type EditorSettingsDto = { defaultTimelineZoom: number; snapToGrid: boolean; snapTolerance: number; showClipThumbnails: boolean; showAudioWaveforms: boolean; rippleEditDefault: boolean }
+/**
+ * Response for estimate_generation_cost
+ */
+export type EstimateGenerationCostResponse = { estimatedCents: number; quality: string; durationSec: number }
 export type ExportSettingsDto = { defaultFormat: string; defaultVideoCodec: string; defaultAudioCodec: string; defaultExportLocation: string | null; openFolderAfterExport: boolean }
 /**
  * FFmpeg availability and version information.
@@ -1862,6 +2072,10 @@ export type PlaybackSettingsDto = { defaultVolume: number; loopPlayback: boolean
  * 2D coordinates (normalized or pixel)
  */
 export type Point2D = { x: number; y: number }
+/**
+ * Response for poll_generation_job
+ */
+export type PollGenerationJobResponse = { status: string; progress: number | null; message: string | null; downloadUrl: string | null; durationSec: number | null; hasAudio: boolean | null; error: string | null }
 /**
  * Memory pool statistics.
  */
@@ -2508,6 +2722,14 @@ createdIds: string[];
  * Deleted entity IDs
  */
 deletedIds: string[] }
+/**
+ * Request for submit_video_generation
+ */
+export type SubmitVideoGenerationRequest = { prompt: string; mode?: string; quality?: string; durationSec?: number; negativePrompt: string | null; referenceImages?: string[]; referenceVideos?: string[]; referenceAudio?: string[]; aspectRatio?: string; seed: number | null; lipSyncLanguage: string | null }
+/**
+ * Response for submit_video_generation
+ */
+export type SubmitVideoGenerationResponse = { jobId: string; providerJobId: string; estimatedCostCents: number }
 /**
  * System memory information.
  */

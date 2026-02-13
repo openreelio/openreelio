@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use super::provider::TokenUsage;
+use crate::core::generative::video::{VideoCostEstimate, VideoQuality};
 use crate::core::settings::{AppSettings, ProviderType};
 
 /// Error types for cost tracking operations
@@ -413,6 +414,45 @@ impl CostTracker {
         };
         self.calculate_cost(provider, model, &usage)
     }
+
+    /// Estimate cost for video generation based on quality tier and duration
+    pub fn estimate_video_generation_cost(
+        &self,
+        quality: VideoQuality,
+        duration_sec: f64,
+    ) -> VideoCostEstimate {
+        VideoCostEstimate::calculate(quality, duration_sec)
+    }
+
+    /// Check if a video generation request fits within the budget
+    pub async fn check_video_budget(&self, estimated_cents: u32) -> Result<(), CostError> {
+        let settings = self.settings.read().await;
+        let ai_settings = &settings.ai;
+
+        // 0 means unlimited for video generation requests.
+        if ai_settings.video_gen_per_request_limit_cents > 0
+            && estimated_cents > ai_settings.video_gen_per_request_limit_cents
+        {
+            return Err(CostError::PerRequestLimitExceeded {
+                estimated_cost_cents: estimated_cents,
+                limit_cents: ai_settings.video_gen_per_request_limit_cents,
+            });
+        }
+
+        // Reuse current month usage tracking until dedicated video usage metrics are introduced.
+        if let Some(budget) = ai_settings.video_gen_budget_cents {
+            let new_total = ai_settings.current_month_usage_cents + estimated_cents;
+            if new_total > budget {
+                return Err(CostError::MonthlyBudgetExceeded {
+                    estimated_cost_cents: estimated_cents,
+                    current_usage_cents: ai_settings.current_month_usage_cents,
+                    budget_cents: budget,
+                });
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -641,5 +681,59 @@ mod tests {
         // Large request should be allowed with unlimited budget
         let result = tracker.check_budget(500).await;
         assert!(result.is_ok());
+    }
+
+    // ========================================================================
+    // Video Generation Cost Tests
+    // ========================================================================
+
+    #[test]
+    fn test_estimate_video_generation_cost_basic() {
+        let settings = create_test_settings();
+        let tracker = CostTracker::new(settings);
+
+        let estimate = tracker.estimate_video_generation_cost(VideoQuality::Basic, 60.0);
+        assert_eq!(estimate.cents, 10); // 1 min * 10 cents/min
+        assert_eq!(estimate.quality, VideoQuality::Basic);
+    }
+
+    #[test]
+    fn test_estimate_video_generation_cost_pro() {
+        let settings = create_test_settings();
+        let tracker = CostTracker::new(settings);
+
+        let estimate = tracker.estimate_video_generation_cost(VideoQuality::Pro, 30.0);
+        assert_eq!(estimate.cents, 15); // 0.5 min * 30 cents/min
+    }
+
+    #[test]
+    fn test_estimate_video_generation_cost_cinema() {
+        let settings = create_test_settings();
+        let tracker = CostTracker::new(settings);
+
+        let estimate = tracker.estimate_video_generation_cost(VideoQuality::Cinema, 120.0);
+        assert_eq!(estimate.cents, 160); // 2 min * 80 cents/min
+    }
+
+    #[tokio::test]
+    async fn test_check_video_budget_within_limits() {
+        let settings = create_test_settings();
+        let tracker = CostTracker::new(settings);
+
+        let result = tracker.check_video_budget(50).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_check_video_budget_exceeds_limit() {
+        let settings = create_test_settings();
+        let tracker = CostTracker::new(settings);
+
+        // 150 cents exceeds per-request limit of 100
+        let result = tracker.check_video_budget(150).await;
+        assert!(matches!(
+            result,
+            Err(CostError::PerRequestLimitExceeded { .. })
+        ));
     }
 }

@@ -41,6 +41,13 @@ export interface FeatureFlags {
    * @default true
    */
   USE_AGENTIC_ENGINE: boolean;
+
+  /**
+   * Enable AI video generation (Seedance 2.0 integration)
+   * When false, video generation UI and agent tools are hidden
+   * @default false
+   */
+  USE_VIDEO_GENERATION: boolean;
 }
 
 /**
@@ -65,6 +72,7 @@ const STORAGE_KEY = 'openreelio-feature-flags';
  */
 const DEFAULT_FLAGS: FeatureFlags = {
   USE_AGENTIC_ENGINE: true,
+  USE_VIDEO_GENERATION: false,
 };
 
 /**
@@ -72,6 +80,7 @@ const DEFAULT_FLAGS: FeatureFlags = {
  */
 export const FEATURE_FLAG_KEYS: readonly FeatureFlagKey[] = [
   'USE_AGENTIC_ENGINE',
+  'USE_VIDEO_GENERATION',
 ] as const;
 
 // =============================================================================
@@ -290,6 +299,17 @@ export function getAllFeatureFlags(): FeatureFlags {
  */
 export function isAgenticEngineEnabled(): boolean {
   return getFeatureFlag('USE_AGENTIC_ENGINE');
+}
+
+/**
+ * Check if Video Generation is enabled
+ *
+ * Convenience wrapper for the video generation feature flag.
+ *
+ * @returns true if AI video generation should be available
+ */
+export function isVideoGenerationEnabled(): boolean {
+  return getFeatureFlag('USE_VIDEO_GENERATION');
 }
 
 // =============================================================================
