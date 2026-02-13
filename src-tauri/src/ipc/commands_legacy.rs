@@ -5450,6 +5450,26 @@ pub struct AISettingsDto {
 
     // Privacy
     pub local_only_mode: bool,
+
+    // Video Generation
+    #[serde(default)]
+    pub seedance_api_key: Option<String>,
+    #[serde(default)]
+    pub video_gen_provider: Option<String>,
+    #[serde(default = "default_video_gen_default_quality_dto")]
+    pub video_gen_default_quality: String,
+    #[serde(default)]
+    pub video_gen_budget_cents: Option<u32>,
+    #[serde(default = "default_video_gen_per_request_limit_dto")]
+    pub video_gen_per_request_limit_cents: u32,
+}
+
+fn default_video_gen_default_quality_dto() -> String {
+    "pro".to_string()
+}
+
+fn default_video_gen_per_request_limit_dto() -> u32 {
+    100
 }
 
 impl From<AppSettings> for AppSettingsDto {
@@ -5549,6 +5569,11 @@ impl From<AppSettings> for AppSettingsDto {
                 },
                 cache_duration_hours: s.ai.cache_duration_hours,
                 local_only_mode: s.ai.local_only_mode,
+                seedance_api_key: s.ai.seedance_api_key,
+                video_gen_provider: s.ai.video_gen_provider,
+                video_gen_default_quality: s.ai.video_gen_default_quality,
+                video_gen_budget_cents: s.ai.video_gen_budget_cents,
+                video_gen_per_request_limit_cents: s.ai.video_gen_per_request_limit_cents,
             },
         }
     }
@@ -5646,6 +5671,11 @@ impl From<AppSettingsDto> for AppSettings {
                 },
                 cache_duration_hours: dto.ai.cache_duration_hours,
                 local_only_mode: dto.ai.local_only_mode,
+                seedance_api_key: dto.ai.seedance_api_key,
+                video_gen_provider: dto.ai.video_gen_provider,
+                video_gen_default_quality: dto.ai.video_gen_default_quality,
+                video_gen_budget_cents: dto.ai.video_gen_budget_cents,
+                video_gen_per_request_limit_cents: dto.ai.video_gen_per_request_limit_cents,
             },
         }
     }
@@ -5744,6 +5774,7 @@ pub struct CredentialStatusDto {
     pub openai: bool,
     pub anthropic: bool,
     pub google: bool,
+    pub seedance: bool,
 }
 
 /// Stores an API key securely in the encrypted vault
@@ -5867,6 +5898,7 @@ pub async fn get_credential_status(app: tauri::AppHandle) -> Result<CredentialSt
             openai: false,
             anthropic: false,
             google: false,
+            seedance: false,
         });
     }
 
@@ -5886,6 +5918,7 @@ pub async fn get_credential_status(app: tauri::AppHandle) -> Result<CredentialSt
         openai: vault.exists(CredentialType::OpenaiApiKey).await,
         anthropic: vault.exists(CredentialType::AnthropicApiKey).await,
         google: vault.exists(CredentialType::GoogleApiKey).await,
+        seedance: vault.exists(CredentialType::SeedanceApiKey).await,
     })
 }
 

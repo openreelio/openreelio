@@ -450,6 +450,13 @@ mod tauri_app {
                 $crate::ipc::has_credential,
                 $crate::ipc::delete_credential,
                 $crate::ipc::get_credential_status,
+                // Video Generation
+                $crate::ipc::submit_video_generation,
+                $crate::ipc::poll_generation_job,
+                $crate::ipc::cancel_generation_job,
+                $crate::ipc::estimate_generation_cost,
+                $crate::ipc::download_generated_video,
+                $crate::ipc::configure_seedance_provider,
                 // Updates
                 $crate::ipc::check_for_updates,
                 $crate::ipc::get_current_version,
@@ -745,6 +752,13 @@ mod tauri_app {
             ipc::has_credential,
             ipc::delete_credential,
             ipc::get_credential_status,
+            // Video Generation
+            ipc::submit_video_generation,
+            ipc::poll_generation_job,
+            ipc::cancel_generation_job,
+            ipc::estimate_generation_cost,
+            ipc::download_generated_video,
+            ipc::configure_seedance_provider,
             // Updates
             ipc::check_for_updates,
             ipc::get_current_version,

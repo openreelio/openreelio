@@ -54,6 +54,9 @@ pub mod helpers;
 // Annotation commands (Asset Annotation System - ADR-036)
 pub mod annotations;
 
+// Video generation commands (Seedance 2.0 integration)
+pub mod video_generation;
+
 // Placeholder for future extracted modules
 // pub mod settings;
 
@@ -66,3 +69,6 @@ pub use legacy::*;
 
 // Re-export annotation commands
 pub use annotations::*;
+
+// Re-export video generation commands
+pub use video_generation::*;
