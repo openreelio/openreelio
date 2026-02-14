@@ -5,7 +5,7 @@
  * Can be positioned on the left or right side.
  */
 
-import { useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 
 // =============================================================================
@@ -27,6 +27,10 @@ interface SidebarProps {
   defaultCollapsed?: boolean;
   /** Callback when collapse state changes */
   onCollapse?: (collapsed: boolean) => void;
+  /** Additional container classes */
+  className?: string;
+  /** Auto-collapse threshold in px for narrower viewports */
+  autoCollapseBreakpoint?: number;
 }
 
 // =============================================================================
@@ -35,6 +39,7 @@ interface SidebarProps {
 
 const COLLAPSED_WIDTH_CLASS = 'w-10';
 const EXPANDED_WIDTH_CLASS = 'w-64';
+const DEFAULT_AUTO_COLLAPSE_BREAKPOINT = 1024;
 
 // =============================================================================
 // Component
@@ -47,50 +52,82 @@ export function Sidebar({
   width,
   defaultCollapsed = false,
   onCollapse,
+  className = '',
+  autoCollapseBreakpoint = DEFAULT_AUTO_COLLAPSE_BREAKPOINT,
 }: SidebarProps) {
   const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
 
-  const handleToggle = () => {
+  const handleToggle = useCallback(() => {
     const newCollapsed = !isCollapsed;
     setIsCollapsed(newCollapsed);
     onCollapse?.(newCollapsed);
-  };
+  }, [isCollapsed, onCollapse]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const handleResize = () => {
+      if (window.innerWidth < autoCollapseBreakpoint) {
+        setIsCollapsed((current) => {
+          if (current) {
+            return current;
+          }
+
+          onCollapse?.(true);
+          return true;
+        });
+      }
+    };
+
+    handleResize();
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [autoCollapseBreakpoint, onCollapse]);
 
   const borderClass = position === 'left' ? 'border-r' : 'border-l';
   const widthClass = isCollapsed ? COLLAPSED_WIDTH_CLASS : EXPANDED_WIDTH_CLASS;
-  const widthStyle = width && !isCollapsed ? { width: `${width}px` } : undefined;
+  const safeWidth = width && width > 0 ? width : undefined;
+  const widthStyle = safeWidth && !isCollapsed ? { width: `${safeWidth}px` } : undefined;
 
-  const CollapseIcon = position === 'left'
-    ? (isCollapsed ? ChevronRight : ChevronLeft)
-    : (isCollapsed ? ChevronLeft : ChevronRight);
+  const CollapseIcon =
+    position === 'left'
+      ? isCollapsed
+        ? ChevronRight
+        : ChevronLeft
+      : isCollapsed
+        ? ChevronLeft
+        : ChevronRight;
 
   return (
     <aside
-      className={`${widthClass} bg-editor-sidebar ${borderClass} border-editor-border flex flex-col transition-all duration-200`}
+      className={`${widthClass} ${borderClass} border-editor-border bg-editor-sidebar flex shrink-0 flex-col overflow-hidden transition-all duration-200 ${className}`}
       style={widthStyle}
+      data-collapsed={isCollapsed}
     >
       {/* Header with title and toggle */}
-      <div className="flex items-center justify-between p-2 border-b border-editor-border">
+      <div className="flex items-center justify-between border-b border-editor-border p-2">
         {!isCollapsed && (
-          <h2 className="text-xs font-semibold text-editor-text-muted uppercase tracking-wider px-2">
+          <h2 className="truncate px-2 text-xs font-semibold uppercase tracking-wider text-editor-text-muted">
             {title}
           </h2>
         )}
         <button
           onClick={handleToggle}
-          className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text transition-colors"
+          className="rounded p-1 text-editor-text-muted transition-colors hover:bg-editor-border hover:text-editor-text"
           aria-label={`Toggle ${title} sidebar`}
+          aria-expanded={!isCollapsed}
         >
           <CollapseIcon className="w-4 h-4" />
         </button>
       </div>
 
       {/* Content */}
-      {!isCollapsed && (
-        <div className="flex-1 p-4 overflow-auto">
-          {children}
-        </div>
-      )}
+      {!isCollapsed && <div className="flex-1 overflow-auto p-4">{children}</div>}
     </aside>
   );
 }

@@ -36,19 +36,19 @@ export function MainLayout({
   children,
 }: MainLayoutProps) {
   return (
-    <div className="h-screen bg-editor-bg text-editor-text flex flex-col overflow-hidden">
+    <div className="h-screen min-h-screen bg-editor-bg text-editor-text flex flex-col overflow-hidden">
       {/* Header */}
-      <header role="banner">
+      <header role="banner" className="shrink-0">
         {header}
       </header>
 
       {/* Main content area with sidebars */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Left Sidebar */}
         {leftSidebar}
 
         {/* Center content */}
-        <main role="main" className="flex-1 flex flex-col overflow-hidden">
+        <main role="main" className="flex min-w-0 flex-1 flex-col overflow-hidden">
           {children}
         </main>
 
@@ -58,7 +58,7 @@ export function MainLayout({
 
       {/* Footer */}
       {footer && (
-        <footer role="contentinfo">
+        <footer role="contentinfo" className="shrink-0">
           {footer}
         </footer>
       )}

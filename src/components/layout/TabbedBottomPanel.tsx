@@ -4,7 +4,7 @@
  * A collapsible bottom panel with multiple tabs for console, mixer, and other content.
  */
 
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { ChevronDown, ChevronUp } from 'lucide-react';
 
 // =============================================================================
@@ -59,6 +59,18 @@ export function TabbedBottomPanel({
   const [isCollapsed, setIsCollapsed] = useState(defaultCollapsed);
   const [activeTabId, setActiveTabId] = useState(defaultTab ?? tabs[0]?.id ?? '');
 
+  useEffect(() => {
+    if (tabs.length === 0) {
+      setActiveTabId('');
+      return;
+    }
+
+    const hasActiveTab = tabs.some((tab) => tab.id === activeTabId);
+    if (!hasActiveTab) {
+      setActiveTabId(defaultTab ?? tabs[0].id);
+    }
+  }, [activeTabId, defaultTab, tabs]);
+
   const handleToggle = () => {
     const newCollapsed = !isCollapsed;
     setIsCollapsed(newCollapsed);
@@ -86,23 +98,28 @@ export function TabbedBottomPanel({
   const height = isCollapsed ? COLLAPSED_HEIGHT : defaultHeight;
   const CollapseIcon = isCollapsed ? ChevronUp : ChevronDown;
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
+  const activeTabPanelId = activeTab ? `bottom-panel-tab-${activeTab.id}` : undefined;
 
   return (
     <div
       data-testid="tabbed-bottom-panel"
-      className="bg-editor-sidebar border-t border-editor-border transition-all duration-200"
+      className="flex flex-col border-t border-editor-border bg-editor-sidebar transition-all duration-200"
       style={{ height: `${height}px` }}
     >
       {/* Header with tabs and toggle */}
-      <div className="h-8 flex items-center justify-between px-2 border-b border-editor-border">
+      <div className="flex h-8 items-center justify-between border-b border-editor-border px-2">
         {/* Tabs */}
-        <div className="flex items-center gap-1">
+        <div
+          className="flex min-w-0 items-center gap-1 overflow-x-auto"
+          role="tablist"
+          aria-label="Bottom panel tabs"
+        >
           {tabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => handleTabClick(tab.id)}
               className={`
-                flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-t
+                flex shrink-0 items-center gap-1.5 rounded-t px-3 py-1 text-xs font-medium
                 transition-colors
                 ${
                   activeTabId === tab.id && !isCollapsed
@@ -110,11 +127,13 @@ export function TabbedBottomPanel({
                     : 'text-editor-text-muted hover:text-editor-text hover:bg-editor-border/50'
                 }
               `}
+              id={`bottom-panel-tab-button-${tab.id}`}
+              aria-controls={`bottom-panel-tab-${tab.id}`}
               aria-selected={activeTabId === tab.id}
               role="tab"
             >
               {tab.icon}
-              <span>{tab.label}</span>
+              <span className="whitespace-nowrap">{tab.label}</span>
             </button>
           ))}
         </div>
@@ -132,10 +151,19 @@ export function TabbedBottomPanel({
       {/* Content */}
       {!isCollapsed && activeTab && (
         <div
-          className="overflow-auto bg-editor-bg"
+          id={activeTabPanelId}
+          role="tabpanel"
+          aria-labelledby={`bottom-panel-tab-button-${activeTab.id}`}
+          className="flex-1 overflow-auto bg-editor-bg"
           style={{ height: `${height - COLLAPSED_HEIGHT}px` }}
         >
           {activeTab.content}
+        </div>
+      )}
+
+      {!isCollapsed && !activeTab && (
+        <div className="flex flex-1 items-center justify-center bg-editor-bg text-xs text-editor-text-muted">
+          No panel tabs available.
         </div>
       )}
     </div>
