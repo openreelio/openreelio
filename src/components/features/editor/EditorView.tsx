@@ -6,8 +6,15 @@
  * and AI sidebar in a multi-panel layout.
  */
 
-import { useCallback, useState, useEffect, useMemo } from 'react';
-import { MainLayout, Header, Sidebar, TabbedBottomPanel, Panel, type BottomPanelTab } from '@/components/layout';
+import { lazy, Suspense, useCallback, useState, useEffect, useMemo } from 'react';
+import {
+  MainLayout,
+  Header,
+  Sidebar,
+  TabbedBottomPanel,
+  Panel,
+  type BottomPanelTab,
+} from '@/components/layout';
 import { AISidebar } from '@/components/features/ai';
 import {
   TimelineErrorBoundary,
@@ -16,20 +23,11 @@ import {
   InspectorErrorBoundary,
   AIErrorBoundary,
 } from '@/components/shared';
-import { ExportDialog } from '@/components/features/export';
-import { AddTextDialog, type AddTextPayload } from '@/components/features/text';
 import { Inspector, type SelectedCaption } from '@/components/features/inspector';
-import { AudioMixerPanel, type ChannelLevels } from '@/components/features/mixer';
-import { VideoGenerationPanel } from '@/components/features/generation';
 import { ProjectExplorer } from '@/components/explorer';
 import { UnifiedPreviewPlayer } from '@/components/preview';
 import { Timeline } from '@/components/timeline';
-import {
-  useProjectStore,
-  usePlaybackStore,
-  useTimelineStore,
-  useAudioMixerStore,
-} from '@/stores';
+import { useProjectStore, usePlaybackStore, useTimelineStore, useAudioMixerStore } from '@/stores';
 // Direct imports instead of barrel to avoid bundling all 100+ hooks
 import { useTimelineActions } from '@/hooks/useTimelineActions';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
@@ -37,15 +35,44 @@ import { useAudioPlayback } from '@/hooks/useAudioPlayback';
 import { useTextClip } from '@/hooks/useTextClip';
 import { useAudioMixer } from '@/hooks/useAudioMixer';
 import { useMulticamSession } from '@/hooks/useMulticamSession';
+import { useResponsiveSidebarState } from './hooks/useResponsiveSidebarState';
 import { dbToLinear, linearToDb } from '@/utils/audioMeter';
 import { createLogger } from '@/services/logger';
 import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { Terminal, Sliders, Sparkles } from 'lucide-react';
 import type { Sequence } from '@/types';
+import type { AddTextPayload } from '@/components/features/text';
+import type { ChannelLevels } from '@/components/features/mixer';
 import type { MulticamGroup } from '@/utils/multicam';
 
 const logger = createLogger('EditorView');
+const AI_AUTO_COLLAPSE_BREAKPOINT = 1440;
+const BOTTOM_PANEL_LOADING_FALLBACK = (
+  <div className="flex h-full items-center justify-center text-xs text-editor-text-muted">
+    Loading panel...
+  </div>
+);
+
+const ExportDialog = lazy(async () => {
+  const module = await import('@/components/features/export');
+  return { default: module.ExportDialog };
+});
+
+const AddTextDialog = lazy(async () => {
+  const module = await import('@/components/features/text');
+  return { default: module.AddTextDialog };
+});
+
+const AudioMixerPanel = lazy(async () => {
+  const module = await import('@/components/features/mixer');
+  return { default: module.AudioMixerPanel };
+});
+
+const VideoGenerationPanel = lazy(async () => {
+  const module = await import('@/components/features/generation');
+  return { default: module.VideoGenerationPanel };
+});
 
 // =============================================================================
 // EditorView Component
@@ -54,9 +81,11 @@ const logger = createLogger('EditorView');
 export interface EditorViewProps {
   /** Currently active sequence for timeline (null if none active) */
   sequence: Sequence | null;
+  /** App version string displayed in header */
+  appVersion?: string;
 }
 
-export function EditorView({ sequence }: EditorViewProps): JSX.Element {
+export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps): JSX.Element {
   const { selectedAssetId, assets } = useProjectStore();
   const currentTime = usePlaybackStore((state) => state.currentTime);
   const { selectedClipIds } = useTimelineStore();
@@ -68,8 +97,15 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
   const [showAddTextDialog, setShowAddTextDialog] = useState(false);
 
   // AI Sidebar state
-  const [aiSidebarCollapsed, setAiSidebarCollapsed] = useState(false);
-  const [aiSidebarWidth, setAiSidebarWidth] = useState(320);
+  const {
+    collapsed: aiSidebarCollapsed,
+    width: aiSidebarWidth,
+    setWidth: setAiSidebarWidth,
+    toggleCollapsed: toggleAiSidebar,
+  } = useResponsiveSidebarState({
+    autoCollapseBreakpoint: AI_AUTO_COLLAPSE_BREAKPOINT,
+    initialWidth: 320,
+  });
 
   // Multicam session state
   const [multicamGroup, setMulticamGroup] = useState<MulticamGroup | null>(null);
@@ -217,6 +253,7 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
     handleClipSplit,
     handleAssetDrop,
     handleDeleteClips,
+    handleTrackCreate,
     handleTrackMuteToggle,
     handleTrackLockToggle,
     handleTrackVisibilityToggle,
@@ -236,8 +273,7 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
       if (clip) {
         const safeSpeed = clip.speed > 0 ? clip.speed : 1;
         const clipEnd =
-          clip.place.timelineInSec +
-          (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+          clip.place.timelineInSec + (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
 
         // Check if playhead is within the clip
         if (currentTime > clip.place.timelineInSec && currentTime < clipEnd) {
@@ -368,35 +404,50 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
         textData: payload.textData,
       });
     },
-    [sequence, addTextClip]
+    [sequence, addTextClip],
   );
 
   // Audio Mixer handlers - connected to store and Web Audio
-  const handleMixerVolumeChange = useCallback((trackId: string, volumeDb: number) => {
-    setTrackVolume(trackId, volumeDb);
-    logger.debug('Volume change', { trackId, volumeDb });
-  }, [setTrackVolume]);
+  const handleMixerVolumeChange = useCallback(
+    (trackId: string, volumeDb: number) => {
+      setTrackVolume(trackId, volumeDb);
+      logger.debug('Volume change', { trackId, volumeDb });
+    },
+    [setTrackVolume],
+  );
 
-  const handleMixerPanChange = useCallback((trackId: string, pan: number) => {
-    setTrackPan(trackId, pan);
-  }, [setTrackPan]);
+  const handleMixerPanChange = useCallback(
+    (trackId: string, pan: number) => {
+      setTrackPan(trackId, pan);
+    },
+    [setTrackPan],
+  );
 
-  const handleMixerMuteToggle = useCallback((trackId: string) => {
-    // Toggle mute in mixer store (affects audio output)
-    toggleTrackMute(trackId);
-    // Also toggle in timeline if we want visual feedback on track header
-    if (sequence && handleTrackMuteToggle) {
-      handleTrackMuteToggle({ sequenceId: sequence.id, trackId });
-    }
-  }, [sequence, handleTrackMuteToggle, toggleTrackMute]);
+  const handleMixerMuteToggle = useCallback(
+    (trackId: string) => {
+      // Toggle mute in mixer store (affects audio output)
+      toggleTrackMute(trackId);
+      // Also toggle in timeline if we want visual feedback on track header
+      if (sequence && handleTrackMuteToggle) {
+        handleTrackMuteToggle({ sequenceId: sequence.id, trackId });
+      }
+    },
+    [sequence, handleTrackMuteToggle, toggleTrackMute],
+  );
 
-  const handleMixerSoloToggle = useCallback((trackId: string) => {
-    toggleSolo(trackId);
-  }, [toggleSolo]);
+  const handleMixerSoloToggle = useCallback(
+    (trackId: string) => {
+      toggleSolo(trackId);
+    },
+    [toggleSolo],
+  );
 
-  const handleMasterVolumeChange = useCallback((volumeDb: number) => {
-    setMixerMasterVolume(volumeDb);
-  }, [setMixerMasterVolume]);
+  const handleMasterVolumeChange = useCallback(
+    (volumeDb: number) => {
+      setMixerMasterVolume(volumeDb);
+    },
+    [setMixerMasterVolume],
+  );
 
   const handleMasterMuteToggle = useCallback(() => {
     toggleMasterMute();
@@ -422,23 +473,25 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
         label: 'Mixer',
         icon: <Sliders className="w-3 h-3" />,
         content: (
-          <AudioMixerPanel
-            tracks={sequence?.tracks ?? []}
-            trackLevels={trackLevels}
-            trackPans={trackPans}
-            soloedTrackIds={soloedTrackIds}
-            masterVolume={masterVolume}
-            masterMuted={masterMuted}
-            masterLevels={masterLevels}
-            onVolumeChange={handleMixerVolumeChange}
-            onPanChange={handleMixerPanChange}
-            onMuteToggle={handleMixerMuteToggle}
-            onSoloToggle={handleMixerSoloToggle}
-            onMasterVolumeChange={handleMasterVolumeChange}
-            onMasterMuteToggle={handleMasterMuteToggle}
-            compact
-            className="h-full"
-          />
+          <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+            <AudioMixerPanel
+              tracks={sequence?.tracks ?? []}
+              trackLevels={trackLevels}
+              trackPans={trackPans}
+              soloedTrackIds={soloedTrackIds}
+              masterVolume={masterVolume}
+              masterMuted={masterMuted}
+              masterLevels={masterLevels}
+              onVolumeChange={handleMixerVolumeChange}
+              onPanChange={handleMixerPanChange}
+              onMuteToggle={handleMixerMuteToggle}
+              onSoloToggle={handleMixerSoloToggle}
+              onMasterVolumeChange={handleMasterVolumeChange}
+              onMasterMuteToggle={handleMasterMuteToggle}
+              compact
+              className="h-full"
+            />
+          </Suspense>
         ),
       },
     ];
@@ -449,7 +502,9 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
         label: 'Generate',
         icon: <Sparkles className="w-3 h-3" />,
         content: (
-          <VideoGenerationPanel compact className="h-full" />
+          <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+            <VideoGenerationPanel compact className="h-full" />
+          </Suspense>
         ),
       });
     }
@@ -475,9 +530,9 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
   return (
     <>
       <MainLayout
-        header={<Header onExport={handleOpenExport} />}
+        header={<Header onExport={handleOpenExport} version={appVersion} />}
         leftSidebar={
-          <Sidebar title="Project Explorer" position="left">
+          <Sidebar title="Project Explorer" position="left" autoCollapseBreakpoint={1280}>
             <ExplorerErrorBoundary
               onError={(error) => logger.error('ProjectExplorer error', { error })}
             >
@@ -487,8 +542,10 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
         }
         rightSidebar={
           <>
-            <Sidebar title="Inspector" position="right" width={288}>
-              <InspectorErrorBoundary onError={(error) => logger.error('Inspector error', { error })}>
+            <Sidebar title="Inspector" position="right" width={288} autoCollapseBreakpoint={1360}>
+              <InspectorErrorBoundary
+                onError={(error) => logger.error('Inspector error', { error })}
+              >
                 <Inspector
                   selectedAsset={inspectorAsset}
                   selectedCaption={selectedCaption}
@@ -499,7 +556,7 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
             <AIErrorBoundary onError={(error) => logger.error('AISidebar error', { error })}>
               <AISidebar
                 collapsed={aiSidebarCollapsed}
-                onToggle={() => setAiSidebarCollapsed(!aiSidebarCollapsed)}
+                onToggle={toggleAiSidebar}
                 width={aiSidebarWidth}
                 onWidthChange={setAiSidebarWidth}
               />
@@ -507,11 +564,7 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
           </>
         }
         footer={
-          <TabbedBottomPanel
-            tabs={bottomPanelTabs}
-            defaultTab="console"
-            defaultHeight={160}
-          />
+          <TabbedBottomPanel tabs={bottomPanelTabs} defaultTab="console" defaultHeight={160} />
         }
       >
         {/* Center content split between preview and timeline */}
@@ -538,6 +591,7 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
                   onClipSplit={handleClipSplit}
                   onAssetDrop={handleAssetDrop}
                   onDeleteClips={handleDeleteClips}
+                  onTrackCreate={handleTrackCreate}
                   onTrackMuteToggle={handleTrackMuteToggle}
                   onTrackLockToggle={handleTrackLockToggle}
                   onTrackVisibilityToggle={handleTrackVisibilityToggle}
@@ -550,21 +604,25 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
       </MainLayout>
 
       {/* Export Dialog */}
-      <ExportDialog
-        isOpen={showExportDialog}
-        onClose={handleCloseExport}
-        sequenceId={sequence?.id ?? null}
-        sequenceName={sequence?.name}
-      />
+      <Suspense fallback={null}>
+        <ExportDialog
+          isOpen={showExportDialog}
+          onClose={handleCloseExport}
+          sequenceId={sequence?.id ?? null}
+          sequenceName={sequence?.name}
+        />
+      </Suspense>
 
       {/* Add Text Dialog */}
-      <AddTextDialog
-        isOpen={showAddTextDialog}
-        onClose={handleCloseAddText}
-        onAdd={handleAddTextClip}
-        tracks={sequence?.tracks ?? []}
-        currentTime={currentTime}
-      />
+      <Suspense fallback={null}>
+        <AddTextDialog
+          isOpen={showAddTextDialog}
+          onClose={handleCloseAddText}
+          onAdd={handleAddTextClip}
+          tracks={sequence?.tracks ?? []}
+          currentTime={currentTime}
+        />
+      </Suspense>
     </>
   );
 }

@@ -5,18 +5,10 @@
  * Shows WelcomeScreen when no project is loaded, Editor when project is active.
  */
 
-import { useCallback, useState, useEffect, useMemo } from 'react';
+import { lazy, Suspense, useCallback, useState, useEffect, useMemo } from 'react';
 import { ErrorBoundary } from './components/shared';
-import { WelcomeScreen } from './components/features/welcome';
-import { ProjectCreationDialog } from './components/features/project';
-import { SetupWizard } from './components/features/setup';
-import { EditorView } from './components/features/editor';
 import { FFmpegWarning, ToastContainer, type ToastVariant } from './components/ui';
-import {
-  useProjectStore,
-  setupProxyEventListeners,
-  cleanupProxyEventListeners,
-} from './stores';
+import { useProjectStore, setupProxyEventListeners, cleanupProxyEventListeners } from './stores';
 import { initializeAgentSystem } from './stores/aiStore';
 import {
   useFFmpegStatus,
@@ -37,6 +29,34 @@ initializeLogger();
 
 // Create module logger
 const logger = createLogger('App');
+
+const WelcomeScreen = lazy(async () => {
+  const module = await import('./components/features/welcome');
+  return { default: module.WelcomeScreen };
+});
+
+const ProjectCreationDialog = lazy(async () => {
+  const module = await import('./components/features/project');
+  return { default: module.ProjectCreationDialog };
+});
+
+const SetupWizard = lazy(async () => {
+  const module = await import('./components/features/setup');
+  return { default: module.SetupWizard };
+});
+
+const EditorView = lazy(async () => {
+  const module = await import('./components/features/editor');
+  return { default: module.EditorView };
+});
+
+function ScreenLoadingFallback(): JSX.Element {
+  return (
+    <div className="flex h-screen items-center justify-center bg-editor-bg text-editor-text-muted">
+      Loading interface...
+    </div>
+  );
+}
 
 // =============================================================================
 // Main Application Component
@@ -183,16 +203,18 @@ function App(): JSX.Element {
   if (isTauri && settingsLoaded && !general.hasCompletedSetup) {
     return (
       <>
-        <SetupWizard
-          onComplete={() => {
-            // After setup, refresh to show welcome screen
-            logger.info('Setup wizard completed');
-          }}
-          onSkip={() => {
-            logger.info('Setup wizard skipped');
-          }}
-          version={appVersion}
-        />
+        <Suspense fallback={<ScreenLoadingFallback />}>
+          <SetupWizard
+            onComplete={() => {
+              // After setup, refresh to show welcome screen
+              logger.info('Setup wizard completed');
+            }}
+            onSkip={() => {
+              logger.info('Setup wizard skipped');
+            }}
+            version={appVersion}
+          />
+        </Suspense>
         <ToastContainer toasts={toasts} onClose={dismissToast} />
       </>
     );
@@ -203,22 +225,24 @@ function App(): JSX.Element {
     return (
       <>
         <UpdateBanner checkOnMount={settingsLoaded && general.checkUpdatesOnStartup} />
-        <WelcomeScreen
-          onNewProject={handleNewProject}
-          onOpenProject={(path) => void handleOpenProject(path)}
-          recentProjects={recentProjects}
-          isLoading={isLoading || isCreatingProject}
-          version={appVersion}
-          showDontShowOption={settingsLoaded}
-          onDontShowAgain={handleDontShowWelcome}
-          onClearRecentProjects={handleClearRecentProjects}
-        />
-        <ProjectCreationDialog
-          isOpen={showCreateDialog}
-          onCancel={handleCancelCreate}
-          onCreate={(data) => void handleCreateProject(data)}
-          isCreating={isCreatingProject}
-        />
+        <Suspense fallback={<ScreenLoadingFallback />}>
+          <WelcomeScreen
+            onNewProject={handleNewProject}
+            onOpenProject={(path) => void handleOpenProject(path)}
+            recentProjects={recentProjects}
+            isLoading={isLoading || isCreatingProject}
+            version={appVersion}
+            showDontShowOption={settingsLoaded}
+            onDontShowAgain={handleDontShowWelcome}
+            onClearRecentProjects={handleClearRecentProjects}
+          />
+          <ProjectCreationDialog
+            isOpen={showCreateDialog}
+            onCancel={handleCancelCreate}
+            onCreate={(data) => void handleCreateProject(data)}
+            isCreating={isCreatingProject}
+          />
+        </Suspense>
         <FFmpegWarning
           isOpen={showFFmpegWarning}
           onDismiss={handleDismissFFmpegWarning}
@@ -266,7 +290,9 @@ function App(): JSX.Element {
           </div>
         )}
       >
-        <EditorView sequence={activeSequence ?? null} />
+        <Suspense fallback={<ScreenLoadingFallback />}>
+          <EditorView sequence={activeSequence ?? null} appVersion={appVersion} />
+        </Suspense>
       </ErrorBoundary>
       <FFmpegWarning
         isOpen={showFFmpegWarning}

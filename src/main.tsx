@@ -11,94 +11,43 @@ const logger = createLogger('Root');
  * Root error fallback for catastrophic failures.
  * Shows a basic UI that allows the user to reload the application.
  */
-export function RootErrorFallback({
-  error,
-  resetError,
-}: {
-  error: Error;
-  resetError: () => void;
-}) {
+export function RootErrorFallback({ error, resetError }: { error: Error; resetError: () => void }) {
   return (
-    <div
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        height: '100vh',
-        backgroundColor: '#0d0d1a',
-        color: '#ecf0f1',
-        fontFamily: 'system-ui, -apple-system, sans-serif',
-        padding: '20px',
-        textAlign: 'center',
-      }}
-    >
-      <h1 style={{ color: '#e74c3c', marginBottom: '16px' }}>
-        OpenReelio encountered an error
-      </h1>
-      <p style={{ color: '#bdc3c7', marginBottom: '24px', maxWidth: '500px' }}>
-        Something went wrong. Your work may have been auto-saved.
-        Please try reloading the application.
-      </p>
-      <div style={{ display: 'flex', gap: '12px' }}>
-        <button
-          onClick={resetError}
-          style={{
-            padding: '12px 24px',
-            backgroundColor: '#3498db',
-            border: 'none',
-            borderRadius: '6px',
-            color: 'white',
-            cursor: 'pointer',
-            fontSize: '14px',
-          }}
-        >
-          Try Again
-        </button>
-        <button
-          onClick={() => window.location.reload()}
-          style={{
-            padding: '12px 24px',
-            backgroundColor: '#7f8c8d',
-            border: 'none',
-            borderRadius: '6px',
-            color: 'white',
-            cursor: 'pointer',
-            fontSize: '14px',
-          }}
-        >
-          Reload Application
-        </button>
-      </div>
-      {import.meta.env.DEV && (
-        <details
-          style={{
-            marginTop: '24px',
-            padding: '16px',
-            backgroundColor: '#1a1a2e',
-            borderRadius: '8px',
-            maxWidth: '600px',
-            textAlign: 'left',
-          }}
-        >
-          <summary style={{ cursor: 'pointer', color: '#95a5a6' }}>
-            Error Details (Development Only)
-          </summary>
-          <pre
-            style={{
-              marginTop: '12px',
-              padding: '12px',
-              overflow: 'auto',
-              fontSize: '11px',
-              color: '#e74c3c',
-              backgroundColor: '#0d0d1a',
-              borderRadius: '4px',
-            }}
+    <div className="flex h-screen items-center justify-center bg-editor-bg px-4 py-6 text-editor-text sm:px-8">
+      <div className="w-full max-w-2xl rounded-xl border border-editor-border bg-surface-panel p-6 text-center shadow-2xl">
+        <h1 className="mb-3 text-xl font-semibold text-status-error sm:text-2xl">
+          OpenReelio encountered an error
+        </h1>
+        <p className="mx-auto mb-6 max-w-xl text-sm text-text-secondary sm:text-base">
+          Something went wrong. Your work may have been auto-saved. Please try reloading the
+          application.
+        </p>
+        <div className="flex flex-col gap-3 sm:flex-row sm:justify-center">
+          <button
+            onClick={resetError}
+            className="rounded-md bg-primary-600 px-5 py-2.5 text-sm font-medium text-white transition-colors hover:bg-primary-500"
           >
-            {error.stack ?? error.message}
-          </pre>
-        </details>
-      )}
+            Try Again
+          </button>
+          <button
+            onClick={() => window.location.reload()}
+            className="rounded-md bg-surface-active px-5 py-2.5 text-sm font-medium text-editor-text transition-colors hover:bg-surface-highest"
+          >
+            Reload Application
+          </button>
+        </div>
+
+        {import.meta.env.DEV && (
+          <details className="mt-6 rounded-lg border border-editor-border bg-editor-panel p-4 text-left">
+            <summary className="cursor-pointer text-sm text-text-secondary">
+              Error Details (Development Only)
+            </summary>
+            <pre className="mt-3 max-h-64 overflow-auto rounded bg-editor-bg p-3 font-mono text-xs text-status-error">
+              {error.stack ?? error.message}
+            </pre>
+          </details>
+        )}
+      </div>
     </div>
   );
 }
@@ -118,5 +67,5 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     >
       <App />
     </ErrorBoundary>
-  </React.StrictMode>
+  </React.StrictMode>,
 );
