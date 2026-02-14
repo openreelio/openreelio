@@ -252,13 +252,13 @@ export function startPlayheadBackendSync(options: PlayheadBackendSyncOptions = {
   const applyBackendPayload = (payload: PlayheadChangedEventPayload): void => {
     if (disposed) return;
 
-    const positionSec = normalizePosition(
-      payload.positionSec ?? 0,
-      normalizeDuration(usePlaybackStore.getState().duration),
-    );
-    const sequenceId = normalizeOptionalSequenceId(payload.sequenceId ?? null);
     const durationRaw = normalizeIncomingDuration(payload.durationSec);
     const durationSec = durationRaw !== null && durationRaw > 0 ? durationRaw : null;
+    const positionSec = normalizePosition(
+      payload.positionSec ?? 0,
+      durationSec ?? normalizeDuration(usePlaybackStore.getState().duration),
+    );
+    const sequenceId = normalizeOptionalSequenceId(payload.sequenceId ?? null);
     const source = normalizeSource(payload.source, BACKEND_APPLY_SOURCE);
 
     // Ignore echoes of our own outbound sync writes.

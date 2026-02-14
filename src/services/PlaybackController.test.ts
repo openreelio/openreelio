@@ -476,10 +476,11 @@ describe('Destructive: seek edge cases', () => {
     controller.dispose();
   });
 
-  it('should handle NaN seek (passes through Math.max/min as NaN)', () => {
+  it('should handle NaN seek (delegates sanitization to store layer)', () => {
     const result = controller.seek(NaN);
-    // NaN propagates through Math.max(0, Math.min(duration, NaN)) = NaN
-    // Controller does not guard non-frameAccurate seeks against NaN
+    // NaN propagates through controller to store.seek(), where
+    // playbackStore.clampTimeToDuration sanitizes non-finite values to 0.
+    // Controller intentionally delegates NaN validation to the store layer.
     expect(result).toBe(true);
     expect(mockSeek).toHaveBeenCalledWith(NaN, 'playback-controller:unknown');
   });

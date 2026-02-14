@@ -172,6 +172,18 @@ export function Clip({
   useEffect(() => {
     if (isDragging) {
       dragCompletedRef.current = true;
+      return;
+    }
+
+    // When drag ends, clear the flag after a microtask so the immediate
+    // post-drag click is still suppressed but subsequent clicks work
+    // (handles mouseup outside the clip where no click event fires).
+    if (dragCompletedRef.current) {
+      const id = setTimeout(() => {
+        dragCompletedRef.current = false;
+      }, 0);
+
+      return () => clearTimeout(id);
     }
   }, [isDragging]);
 

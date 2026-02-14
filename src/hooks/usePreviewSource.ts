@@ -67,7 +67,8 @@ function findClipAtTime(sequence: Sequence, time: number): Clip | null {
 function getSourceTimeForClip(clip: Clip, timelineTime: number): number {
   const clipStart = clip.place.timelineInSec;
   const timeInClip = timelineTime - clipStart;
-  const sourceTime = clip.range.sourceInSec + timeInClip * clip.speed;
+  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+  const sourceTime = clip.range.sourceInSec + timeInClip * safeSpeed;
   return sourceTime;
 }
 
