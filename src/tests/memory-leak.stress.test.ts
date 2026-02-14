@@ -119,13 +119,15 @@ describe('Hook Memory Leak Tests', () => {
 
       // Start-stop cycles
       for (let i = 0; i < 5; i++) {
-        act(() => {
+        await act(async () => {
           result.current.start();
+          await flushPromises();
         });
         expect(result.current.isMonitoring).toBe(true);
 
-        act(() => {
+        await act(async () => {
           result.current.stop();
+          await flushPromises();
         });
         expect(result.current.isMonitoring).toBe(false);
       }
