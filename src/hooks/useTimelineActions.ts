@@ -20,6 +20,7 @@ import type {
   ClipTrimData,
   ClipSplitData,
   TrackControlData,
+  TrackCreateData,
   CaptionUpdateData,
 } from '@/components/timeline/Timeline';
 import type { Sequence } from '@/types';
@@ -40,10 +41,81 @@ interface TimelineActions {
   handleClipSplit: (data: ClipSplitData) => Promise<void>;
   handleAssetDrop: (data: AssetDropData) => Promise<void>;
   handleDeleteClips: (clipIds: string[]) => Promise<void>;
+  handleTrackCreate: (data: TrackCreateData) => Promise<void>;
   handleTrackMuteToggle: (data: TrackControlData) => Promise<void>;
   handleTrackLockToggle: (data: TrackControlData) => Promise<void>;
   handleTrackVisibilityToggle: (data: TrackControlData) => Promise<void>;
   handleUpdateCaption: (data: CaptionUpdateData) => Promise<void>;
+}
+
+const TRACK_KIND_LABEL: Record<TrackCreateData['kind'], string> = {
+  video: 'Video',
+  audio: 'Audio',
+};
+
+function getNextTrackName(sequence: Sequence, kind: TrackCreateData['kind']): string {
+  const baseLabel = TRACK_KIND_LABEL[kind];
+  let highestIndex = 0;
+
+  for (const track of sequence.tracks) {
+    if (track.kind !== kind) continue;
+
+    const trimmedName = track.name.trim();
+    if (trimmedName === baseLabel) {
+      highestIndex = Math.max(highestIndex, 1);
+      continue;
+    }
+
+    const match = new RegExp(`^${baseLabel}\\s+(\\d+)$`).exec(trimmedName);
+    if (match) {
+      highestIndex = Math.max(highestIndex, parseInt(match[1], 10));
+    }
+  }
+
+  return `${baseLabel} ${highestIndex + 1}`;
+}
+
+/**
+ * Calculates insertion index that matches common NLE lane layout.
+ * - New video tracks are inserted above existing video tracks (below overlays).
+ * - New audio tracks are appended below existing audio tracks.
+ */
+function getDefaultTrackInsertPosition(sequence: Sequence, kind: TrackCreateData['kind']): number {
+  if (kind === 'video') {
+    let firstVideoIndex = -1;
+    let firstLowerLaneIndex = -1;
+
+    for (let index = 0; index < sequence.tracks.length; index += 1) {
+      const track = sequence.tracks[index];
+
+      if (firstVideoIndex === -1 && track.kind === 'video') {
+        firstVideoIndex = index;
+      }
+
+      if (firstLowerLaneIndex === -1 && (track.kind === 'caption' || track.kind === 'audio')) {
+        firstLowerLaneIndex = index;
+      }
+    }
+
+    if (firstVideoIndex !== -1) {
+      return firstVideoIndex;
+    }
+
+    if (firstLowerLaneIndex !== -1) {
+      return firstLowerLaneIndex;
+    }
+
+    return sequence.tracks.length;
+  }
+
+  let lastAudioIndex = -1;
+  for (let index = 0; index < sequence.tracks.length; index += 1) {
+    if (sequence.tracks[index].kind === 'audio') {
+      lastAudioIndex = index;
+    }
+  }
+
+  return lastAudioIndex !== -1 ? lastAudioIndex + 1 : sequence.tracks.length;
 }
 
 // =============================================================================
@@ -227,6 +299,47 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
   );
 
   /**
+   * Handle creating a new track with deterministic naming and placement.
+   */
+  const handleTrackCreate = useCallback(
+    async (data: TrackCreateData): Promise<void> => {
+      if (!sequence) {
+        logger.warn('Cannot create track: no sequence');
+        return;
+      }
+
+      const trimmedName = data.name?.trim();
+      const trackName =
+        trimmedName && trimmedName.length > 0 ? trimmedName : getNextTrackName(sequence, data.kind);
+      const position =
+        typeof data.position === 'number'
+          ? data.position
+          : getDefaultTrackInsertPosition(sequence, data.kind);
+
+      try {
+        await executeCommand({
+          type: 'CreateTrack',
+          payload: {
+            sequenceId: data.sequenceId,
+            kind: data.kind,
+            name: trackName,
+            position,
+          },
+        });
+      } catch (error) {
+        logger.error('Failed to create track', {
+          error,
+          sequenceId: data.sequenceId,
+          kind: data.kind,
+          name: trackName,
+          position,
+        });
+      }
+    },
+    [sequence, executeCommand],
+  );
+
+  /**
    * Handle track mute toggle.
    * State refresh is automatic via executeCommand.
    */
@@ -341,6 +454,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleClipSplit,
     handleAssetDrop,
     handleDeleteClips,
+    handleTrackCreate,
     handleTrackMuteToggle,
     handleTrackLockToggle,
     handleTrackVisibilityToggle,

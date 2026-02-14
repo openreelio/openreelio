@@ -151,6 +151,20 @@ export interface TrackControlData {
   trackId: string;
 }
 
+/**
+ * Data for creating a new timeline track.
+ */
+export interface TrackCreateData {
+  /** ID of the sequence where the track should be created */
+  sequenceId: string;
+  /** Track kind to create */
+  kind: 'video' | 'audio';
+  /** Optional custom track name */
+  name?: string;
+  /** Optional insertion position (0-based) */
+  position?: number;
+}
+
 // =============================================================================
 // Component Props Types
 // =============================================================================
@@ -184,6 +198,8 @@ export interface TimelineProps {
   onTrackLockToggle?: (data: TrackControlData) => void;
   /** Callback when track visibility is toggled */
   onTrackVisibilityToggle?: (data: TrackControlData) => void;
+  /** Callback when a new track should be created */
+  onTrackCreate?: (data: TrackCreateData) => void | Promise<void>;
   /** Callback when Add Text button is clicked */
   onAddText?: () => void;
 }

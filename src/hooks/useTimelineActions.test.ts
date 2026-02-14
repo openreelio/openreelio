@@ -320,6 +320,156 @@ describe('useTimelineActions', () => {
   });
 
   // ===========================================================================
+  // Track Create Tests
+  // ===========================================================================
+
+  describe('handleTrackCreate', () => {
+    it('should execute CreateTrack for video lanes with generated name and top insertion', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', name: 'Audio 1' }),
+        ],
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_001',
+            createdIds: ['track_v2'],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleTrackCreate({
+          sequenceId: 'seq_001',
+          kind: 'video',
+        });
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'CreateTrack',
+        payload: {
+          sequenceId: 'seq_001',
+          kind: 'video',
+          name: 'Video 2',
+          position: 0,
+        },
+      });
+    });
+
+    it('should append audio lanes after existing audio tracks', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', name: 'Audio 1' }),
+          createMockTrack({ id: 'track_a2', kind: 'audio', name: 'Audio 2' }),
+        ],
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_002',
+            createdIds: ['track_a3'],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleTrackCreate({
+          sequenceId: 'seq_001',
+          kind: 'audio',
+        });
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'CreateTrack',
+        payload: {
+          sequenceId: 'seq_001',
+          kind: 'audio',
+          name: 'Audio 3',
+          position: 3,
+        },
+      });
+    });
+
+    it('should respect explicit track name and insertion position overrides', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', name: 'Audio 1' }),
+        ],
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_003',
+            createdIds: ['track_custom'],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleTrackCreate({
+          sequenceId: 'seq_001',
+          kind: 'video',
+          name: 'B-Roll Stack',
+          position: 1,
+        });
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'CreateTrack',
+        payload: {
+          sequenceId: 'seq_001',
+          kind: 'video',
+          name: 'B-Roll Stack',
+          position: 1,
+        },
+      });
+    });
+  });
+
+  // ===========================================================================
   // Clip Move Tests
   // ===========================================================================
 
