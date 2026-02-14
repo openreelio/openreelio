@@ -5,7 +5,16 @@
  * Uses TimelineEngine for playback control and grid snapping for interactions.
  */
 
-import { useState, useCallback, useRef, useMemo, useLayoutEffect, type MouseEvent } from 'react';
+import {
+  useState,
+  useCallback,
+  useRef,
+  useMemo,
+  useLayoutEffect,
+  useEffect,
+  type MouseEvent,
+  type PointerEvent,
+} from 'react';
 import type { PlayheadHandle } from './Playhead';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores/projectStore';
@@ -42,10 +51,7 @@ import { SelectionBox } from './SelectionBox';
 import { ShotMarkers } from './ShotMarkers';
 import { CaptionEditor } from '@/components/features/captions';
 import { CaptionExportDialog } from '@/components/features/export/CaptionExportDialog';
-import {
-  TimelineOperationsProvider,
-  type TimelineOperations,
-} from './TimelineOperationsContext';
+import { TimelineOperationsProvider, type TimelineOperations } from './TimelineOperationsContext';
 import type { ClipWaveformConfig, ClipThumbnailConfig } from './Clip';
 import type { TimelineProps } from './types';
 import type { CaptionTrack as CaptionTrackType, Caption } from '@/types';
@@ -65,11 +71,21 @@ export type {
   ClipDuplicateData,
   ClipPasteData,
   TrackControlData,
+  TrackCreateData,
   CaptionUpdateData,
 } from './types';
 import type { Track as TrackType } from '@/types';
 
 const logger = createLogger('Timeline');
+
+const EMPTY_AREA_DRAG_THRESHOLD_PX = 4;
+
+interface EmptyAreaPanGesture {
+  startX: number;
+  startY: number;
+  startScrollX: number;
+  didPan: boolean;
+}
 
 // Adapter to convert Track (with clips) to CaptionTrack (with captions)
 function adaptTrackToCaptionTrack(track: TrackType): CaptionTrackType {
@@ -77,7 +93,8 @@ function adaptTrackToCaptionTrack(track: TrackType): CaptionTrackType {
     id: clip.id,
     startSec: clip.place.timelineInSec,
     endSec:
-      clip.place.timelineInSec + (clip.range.sourceOutSec - clip.range.sourceInSec) / (clip.speed > 0 ? clip.speed : 1),
+      clip.place.timelineInSec +
+      (clip.range.sourceOutSec - clip.range.sourceInSec) / (clip.speed > 0 ? clip.speed : 1),
     text: clip.label || '',
     speaker: undefined,
     styleOverride: undefined,
@@ -125,6 +142,7 @@ export function Timeline({
   onTrackMuteToggle,
   onTrackLockToggle,
   onTrackVisibilityToggle,
+  onTrackCreate,
   onAddText,
 }: TimelineProps) {
   // ===========================================================================
@@ -139,6 +157,7 @@ export function Timeline({
 
   // Actions - stable references, don't cause re-renders
   const setScrollX = useTimelineStore((state) => state.setScrollX);
+  const setScrollY = useTimelineStore((state) => state.setScrollY);
   const setZoom = useTimelineStore((state) => state.setZoom);
   const selectClip = useTimelineStore((state) => state.selectClip);
   const selectClips = useTimelineStore((state) => state.selectClips);
@@ -153,7 +172,6 @@ export function Timeline({
   const setActiveTool = useEditorToolStore((state) => state.setActiveTool);
   const activeTool = useEditorToolStore((state) => state.activeTool);
 
-
   // ===========================================================================
   // Refs and Local State
   // ===========================================================================
@@ -163,7 +181,12 @@ export function Timeline({
   const clipDragMouseXRef = useRef<number>(0);
   const [activeSnapPoint, setActiveSnapPoint] = useState<SnapPoint | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
   const [isClipDragging, setIsClipDragging] = useState(false);
+  const [isEmptyAreaPanning, setIsEmptyAreaPanning] = useState(false);
+  const emptyAreaPanRef = useRef<EmptyAreaPanGesture | null>(null);
+  const emptyAreaPanPointerIdRef = useRef<number | null>(null);
+  const suppressTracksAreaClickRef = useRef(false);
 
   // Caption editing state
   const [editingCaption, setEditingCaption] = useState<{
@@ -215,14 +238,23 @@ export function Timeline({
   const selectedAssetInfo = selectedAssetInfos.length > 0 ? selectedAssetInfos[0] : null;
 
   // ===========================================================================
-  // Viewport Width Measurement (for clip virtualization)
+  // Viewport Measurement (for clip virtualization and scroll bounds)
   // ===========================================================================
   useLayoutEffect(() => {
     const element = tracksAreaRef.current;
     if (!element) return;
 
-    // Initial measurement
-    setViewportWidth(Math.max(0, element.clientWidth - TRACK_HEADER_WIDTH));
+    const measureViewport = (width: number, height: number) => {
+      setViewportWidth(Math.max(0, width - TRACK_HEADER_WIDTH));
+      setViewportHeight(Math.max(0, height));
+    };
+
+    // Initial measurement (client* can be 0 in test environments)
+    const initialRect = element.getBoundingClientRect();
+    measureViewport(
+      element.clientWidth > 0 ? element.clientWidth : initialRect.width,
+      element.clientHeight > 0 ? element.clientHeight : initialRect.height,
+    );
 
     // Observe resize changes with error handling
     let resizeObserver: ResizeObserver | null = null;
@@ -234,8 +266,7 @@ export function Timeline({
         if (!isObserving) return;
 
         for (const entry of entries) {
-          const width = entry.contentRect.width - TRACK_HEADER_WIDTH;
-          setViewportWidth(Math.max(0, width));
+          measureViewport(entry.contentRect.width, entry.contentRect.height);
         }
       });
 
@@ -246,8 +277,13 @@ export function Timeline({
       // Fall back to window resize events
       const handleWindowResize = () => {
         if (tracksAreaRef.current) {
-          const width = tracksAreaRef.current.clientWidth - TRACK_HEADER_WIDTH;
-          setViewportWidth(Math.max(0, width));
+          const rect = tracksAreaRef.current.getBoundingClientRect();
+          measureViewport(
+            tracksAreaRef.current.clientWidth > 0 ? tracksAreaRef.current.clientWidth : rect.width,
+            tracksAreaRef.current.clientHeight > 0
+              ? tracksAreaRef.current.clientHeight
+              : rect.height,
+          );
         }
       };
       window.addEventListener('resize', handleWindowResize);
@@ -308,7 +344,7 @@ export function Timeline({
   } = useTimelineEngine({ duration, fps: DEFAULT_FPS });
 
   const seekFromTimelineClick = useCallback(
-    (time: number) => setPlayhead(time, 'timeline-click-capture'),
+    (time: number) => setPlayhead(time, 'timeline-click-release'),
     [setPlayhead],
   );
 
@@ -354,7 +390,7 @@ export function Timeline({
   // ===========================================================================
   // Scrubbing
   // ===========================================================================
-  const { isScrubbing, handleScrubStart } = useScrubbing({
+  const { isScrubbing } = useScrubbing({
     isPlaying,
     togglePlayback,
     seek: seekFromTimelineScrub,
@@ -408,14 +444,14 @@ export function Timeline({
   // Timeline Panning (Hand Tool / Middle Mouse)
   // ===========================================================================
   const maxScrollX = Math.max(0, duration * zoom - viewportWidth + TRACK_HEADER_WIDTH);
-  const maxScrollY = Math.max(0, (sequence?.tracks.length ?? 0) * TRACK_HEIGHT - 300);
+  const maxScrollY = Math.max(0, (sequence?.tracks.length ?? 0) * TRACK_HEIGHT - viewportHeight);
   const isHandToolActive = activeTool === 'hand';
 
   const { isPanning, handleMouseDown: handlePanMouseDown } = useTimelinePan({
     scrollX,
     scrollY,
     setScrollX,
-    setScrollY: useTimelineStore.getState().setScrollY,
+    setScrollY,
     maxScrollX,
     maxScrollY,
     isHandToolActive,
@@ -507,7 +543,13 @@ export function Timeline({
       if (!sequence || !onClipTrim) return;
       // Apply roll changes to both clips
       for (const track of sequence.tracks) {
-        if (track.clips.some((c) => c.id === result.outgoingClipChange.clipId || c.id === result.incomingClipChange.clipId)) {
+        if (
+          track.clips.some(
+            (c) =>
+              c.id === result.outgoingClipChange.clipId ||
+              c.id === result.incomingClipChange.clipId,
+          )
+        ) {
           // Update outgoing clip
           onClipTrim({
             sequenceId: sequence.id,
@@ -531,14 +573,7 @@ export function Timeline({
   // ===========================================================================
   // Clipboard Operations
   // ===========================================================================
-  const {
-    copy,
-    cut,
-    paste,
-    duplicate,
-    canCopy,
-    canPaste,
-  } = useClipboard({
+  const { copy, cut, paste, duplicate, canCopy, canPaste } = useClipboard({
     sequence,
     selectedClipIds,
     onDuplicate: onClipDuplicate
@@ -724,7 +759,18 @@ export function Timeline({
       // Delegate to base keyboard handler
       baseHandleKeyDown(e);
     },
-    [baseHandleKeyDown, canCopy, canPaste, copy, cut, paste, duplicate, setActiveTool, toggleRipple, onAddText],
+    [
+      baseHandleKeyDown,
+      canCopy,
+      canPaste,
+      copy,
+      cut,
+      paste,
+      duplicate,
+      setActiveTool,
+      toggleRipple,
+      onAddText,
+    ],
   );
 
   // ===========================================================================
@@ -801,12 +847,15 @@ export function Timeline({
   // ===========================================================================
   const { handleWheel, handleFitToWindow } = useTimelineNavigation({
     scrollX,
+    scrollY,
     zoom,
     duration,
     zoomIn,
     zoomOut,
     setZoom,
     setScrollX,
+    setScrollY,
+    maxScrollY,
     fitToWindow,
     trackHeaderWidth: TRACK_HEADER_WIDTH,
     tracksAreaRef,
@@ -897,8 +946,185 @@ export function Timeline({
     [selectClip, selectClips, selectedClipIds],
   );
 
+  const isInteractiveTracksAreaTarget = useCallback((target: HTMLElement): boolean => {
+    return Boolean(
+      target.closest('[data-testid^="clip-"]') ||
+      target.closest('[data-testid^="caption-clip-"]') ||
+      target.closest('button') ||
+      target.closest('[data-testid^="resize-handle-"]') ||
+      target.closest('[data-testid$="-trim-left"]') ||
+      target.closest('[data-testid$="-trim-right"]'),
+    );
+  }, []);
+
+  const clearEmptyAreaPanGesture = useCallback(() => {
+    const pointerId = emptyAreaPanPointerIdRef.current;
+    if (
+      pointerId !== null &&
+      tracksAreaRef.current &&
+      typeof tracksAreaRef.current.releasePointerCapture === 'function'
+    ) {
+      try {
+        tracksAreaRef.current.releasePointerCapture(pointerId);
+      } catch {
+        // Ignore pointer capture release errors during teardown.
+      }
+    }
+
+    emptyAreaPanPointerIdRef.current = null;
+    emptyAreaPanRef.current = null;
+    setIsEmptyAreaPanning(false);
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      clearEmptyAreaPanGesture();
+    };
+  }, [clearEmptyAreaPanGesture]);
+
+  /**
+   * Empty-space interaction model:
+   * - pointer down: start pending gesture
+   * - move above threshold: pan timeline (no seek)
+   * - pointer up without drag: seek playhead
+   */
+  const handleTracksAreaPrimaryPointerDown = useCallback(
+    (e: PointerEvent<HTMLDivElement>): boolean => {
+      if (
+        e.button !== 0 ||
+        isRazorActive ||
+        isHandToolActive ||
+        e.shiftKey ||
+        e.ctrlKey ||
+        e.metaKey ||
+        isDraggingPlayhead ||
+        dragPreview !== null
+      ) {
+        return false;
+      }
+
+      const target = e.target as HTMLElement;
+      if (isInteractiveTracksAreaTarget(target)) {
+        return false;
+      }
+
+      clearEmptyAreaPanGesture();
+
+      emptyAreaPanPointerIdRef.current = e.pointerId;
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // Ignore capture failures in unsupported environments.
+      }
+
+      const { scrollX: currentScrollX } = useTimelineStore.getState();
+      emptyAreaPanRef.current = {
+        startX: e.clientX,
+        startY: e.clientY,
+        startScrollX: currentScrollX,
+        didPan: false,
+      };
+
+      e.preventDefault();
+      return true;
+    },
+    [
+      clearEmptyAreaPanGesture,
+      isRazorActive,
+      isHandToolActive,
+      isDraggingPlayhead,
+      dragPreview,
+      isInteractiveTracksAreaTarget,
+    ],
+  );
+
+  const handleTracksAreaPointerMove = useCallback(
+    (e: PointerEvent<HTMLDivElement>) => {
+      if (emptyAreaPanPointerIdRef.current !== e.pointerId) return;
+
+      const gesture = emptyAreaPanRef.current;
+      if (!gesture) return;
+
+      const deltaX = e.clientX - gesture.startX;
+      const deltaY = e.clientY - gesture.startY;
+      const absDeltaX = Math.abs(deltaX);
+      const absDeltaY = Math.abs(deltaY);
+
+      if (!gesture.didPan) {
+        const passesThreshold = absDeltaX >= EMPTY_AREA_DRAG_THRESHOLD_PX;
+        const horizontalIntent = absDeltaX >= absDeltaY;
+
+        if (!passesThreshold || !horizontalIntent) {
+          return;
+        }
+
+        gesture.didPan = true;
+        setIsEmptyAreaPanning(true);
+        document.body.style.cursor = 'grabbing';
+        document.body.style.userSelect = 'none';
+      }
+
+      const nextScrollX = Math.max(0, Math.min(maxScrollX, gesture.startScrollX - deltaX));
+
+      setScrollX(nextScrollX);
+      e.preventDefault();
+    },
+    [maxScrollX, setScrollX],
+  );
+
+  const handleTracksAreaPointerUp = useCallback(
+    (e: PointerEvent<HTMLDivElement>) => {
+      if (emptyAreaPanPointerIdRef.current !== e.pointerId) return;
+
+      const gesture = emptyAreaPanRef.current;
+      if (gesture?.didPan) {
+        suppressTracksAreaClickRef.current = true;
+        window.setTimeout(() => {
+          suppressTracksAreaClickRef.current = false;
+        }, 0);
+      } else if (gesture) {
+        const { time } = calculateTimeFromMouseEvent(e as unknown as globalThis.MouseEvent, true);
+        if (time !== null) {
+          seekFromTimelineClick(time);
+        }
+      }
+
+      clearEmptyAreaPanGesture();
+      e.preventDefault();
+    },
+    [calculateTimeFromMouseEvent, seekFromTimelineClick, clearEmptyAreaPanGesture],
+  );
+
+  const handleTracksAreaPointerCancel = useCallback(
+    (e: PointerEvent<HTMLDivElement>) => {
+      if (emptyAreaPanPointerIdRef.current !== e.pointerId) return;
+      clearEmptyAreaPanGesture();
+    },
+    [clearEmptyAreaPanGesture],
+  );
+
+  const handleTracksAreaPointerDown = useCallback(
+    (e: PointerEvent<HTMLDivElement>) => {
+      // Pan/selection modifiers are handled by mouse handlers to preserve existing behavior.
+      const shouldPan = e.button === 1 || (e.button === 0 && (isHandToolActive || e.shiftKey));
+      if (shouldPan || (e.button === 0 && (e.ctrlKey || e.metaKey))) {
+        return;
+      }
+
+      handleTracksAreaPrimaryPointerDown(e);
+    },
+    [handleTracksAreaPrimaryPointerDown, isHandToolActive],
+  );
+
   const handleTracksAreaClick = useCallback(
     (e: MouseEvent) => {
+      if (suppressTracksAreaClickRef.current) {
+        suppressTracksAreaClickRef.current = false;
+        return;
+      }
+
       // Handle razor tool click - split clip at click position
       if (isRazorActive && tracksAreaRef.current) {
         const containerRect = tracksAreaRef.current.getBoundingClientRect();
@@ -917,69 +1143,6 @@ export function Timeline({
       }
     },
     [clearClipSelection, isSelecting, isRazorActive, handleRazorClick],
-  );
-
-  /**
-   * Ensure primary clicks anywhere in the editable tracks content
-   * immediately move the playhead, even when the target clip consumes
-   * bubbling mouse events for drag/trim interactions.
-   */
-  const handleTracksAreaMouseDownCapture = useCallback(
-    (e: MouseEvent<HTMLDivElement>) => {
-      // Skip seek for: non-left click, tool modes that don't seek, and Shift+click (pan)
-      if (e.button !== 0 || isRazorActive || isHandToolActive || e.shiftKey) return;
-
-      const target = e.target as HTMLElement;
-
-      // Keep interactive controls and trim handles untouched.
-      // Trim handles must initiate their own resize interaction.
-      if (
-        target.closest('button') ||
-        target.closest('[data-testid^="resize-handle-"]') ||
-        target.closest('[data-testid$="-trim-left"]') ||
-        target.closest('[data-testid$="-trim-right"]')
-      ) {
-        return;
-      }
-
-      const { time } = calculateTimeFromMouseEvent(e, true);
-      if (time !== null) {
-        seekFromTimelineClick(time);
-      }
-    },
-    [calculateTimeFromMouseEvent, isRazorActive, isHandToolActive, seekFromTimelineClick],
-  );
-
-  /**
-   * Combined mouse down handler for scrubbing and selection box
-   * Both can coexist: scrubbing sets playhead position immediately,
-   * while selection box handles drag-to-select.
-   */
-  const handleTracksAreaMouseDown = useCallback(
-    (e: MouseEvent) => {
-      // If razor tool is active, don't start scrubbing or selection
-      if (isRazorActive) {
-        return;
-      }
-
-      // Check if clicking on empty area (not on clips, buttons, or headers)
-      const target = e.target as HTMLElement;
-      const isEmptyAreaClick =
-        !target.closest('[data-testid^="clip-"]') &&
-        !target.closest('[data-testid="track-header"]') &&
-        !target.closest('button');
-
-      // Always try to set playhead position first (scrubbing)
-      // This ensures clicking anywhere on empty area moves the playhead
-      if (isEmptyAreaClick) {
-        handleScrubStart(e);
-      }
-
-      // Selection box will also activate on empty area for drag-to-select
-      // but scrubbing already handled the initial click
-      handleSelectionMouseDown(e);
-    },
-    [handleSelectionMouseDown, handleScrubStart, isRazorActive],
   );
 
   const createTrackHandler = useCallback(
@@ -1120,8 +1283,7 @@ export function Timeline({
           const clip = track.clips.find((c) => c.id === clipId);
           if (clip) {
             const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-            const clipDuration =
-              (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+            const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
             onClipDuplicate({
               sequenceId: sequence.id,
               trackId: track.id,
@@ -1139,12 +1301,20 @@ export function Timeline({
     handleRippleDelete(selectedClipIds);
   }, [selectedClipIds, handleRippleDelete]);
 
+  const handleToolbarTrackCreate = useCallback(
+    (kind: 'video' | 'audio') => {
+      if (!sequence || !onTrackCreate) return;
+      void onTrackCreate({ sequenceId: sequence.id, kind });
+    },
+    [sequence, onTrackCreate],
+  );
+
   // ===========================================================================
   // Combined Mouse Down Handler
   // ===========================================================================
   // Must be defined before early return to satisfy React hooks rules.
-  // Uses synchronous button/tool checks to route EXCLUSIVELY between pan and
-  // scrub/select, avoiding stale-state race conditions from async setState.
+  // Routes between explicit pan modes and marquee selection.
+  // Default empty-space click/drag navigation is handled by pointer handlers.
   const handleTracksAreaMouseDownCombined = useCallback(
     (e: MouseEvent<HTMLDivElement>) => {
       // Middle mouse button or hand tool active: pan exclusively
@@ -1154,10 +1324,13 @@ export function Timeline({
         return;
       }
 
-      // Left click without pan modifier: scrub/select exclusively
-      handleTracksAreaMouseDown(e);
+      // Keep marquee selection available via Ctrl/Cmd + drag.
+      if (e.button === 0 && (e.ctrlKey || e.metaKey)) {
+        handleSelectionMouseDown(e);
+        return;
+      }
     },
-    [handlePanMouseDown, isHandToolActive, handleTracksAreaMouseDown]
+    [handlePanMouseDown, isHandToolActive, handleSelectionMouseDown],
   );
 
   // ===========================================================================
@@ -1190,7 +1363,7 @@ export function Timeline({
       onTrackLockToggle,
       onTrackVisibilityToggle,
       onAddText,
-    ]
+    ],
   );
 
   // ===========================================================================
@@ -1226,7 +1399,7 @@ export function Timeline({
   // Determine cursor style based on active tool and interaction state
   const getTracksAreaCursor = (): string => {
     // Panning cursor takes priority
-    if (isPanning) return 'cursor-grabbing';
+    if (isPanning || isEmptyAreaPanning) return 'cursor-grabbing';
     if (isHandToolActive) return 'cursor-grab';
     if (isScrubbing || isDraggingPlayhead) return 'cursor-ew-resize';
     if (isSelecting) return 'cursor-crosshair';
@@ -1253,6 +1426,8 @@ export function Timeline({
         <EnhancedTimelineToolbar
           onFitToWindow={handleFitToWindow}
           onAddText={onAddText}
+          onAddVideoTrack={() => handleToolbarTrackCreate('video')}
+          onAddAudioTrack={() => handleToolbarTrackCreate('audio')}
           onSplit={handleToolbarSplit}
           onDuplicate={handleToolbarDuplicate}
           onDelete={handleToolbarDelete}
@@ -1273,7 +1448,10 @@ export function Timeline({
               </span>
             </div>
             <div className="flex-1 overflow-hidden" onWheel={handleWheel}>
-              <div style={{ transform: `translateX(-${scrollX}px)` }}>
+              <div
+                data-testid="timeline-ruler-scroll-layer"
+                style={{ transform: `translateX(-${scrollX}px)` }}
+              >
                 <TimeRuler duration={duration} zoom={zoom} scrollX={scrollX} onSeek={handleSeek} />
               </div>
             </div>
@@ -1285,7 +1463,10 @@ export function Timeline({
             data-testid="timeline-tracks-area"
             className={`flex-1 overflow-hidden relative ${getTracksAreaCursor()}`}
             onClick={handleTracksAreaClick}
-            onMouseDownCapture={handleTracksAreaMouseDownCapture}
+            onPointerDown={handleTracksAreaPointerDown}
+            onPointerMove={handleTracksAreaPointerMove}
+            onPointerUp={handleTracksAreaPointerUp}
+            onPointerCancel={handleTracksAreaPointerCancel}
             onMouseDown={handleTracksAreaMouseDownCombined}
             onWheel={handleWheel}
             onDragEnter={handleDragEnter}
@@ -1293,7 +1474,10 @@ export function Timeline({
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
           >
-            <div style={{ transform: `translateY(-${scrollY}px)` }}>
+            <div
+              data-testid="timeline-tracks-scroll-layer"
+              style={{ transform: `translateY(-${scrollY}px)` }}
+            >
               {sequence.tracks.map((track) => {
                 if (track.kind === 'caption') {
                   const captionTrack = adaptTrackToCaptionTrack(track);
@@ -1423,4 +1607,3 @@ export function Timeline({
     </TimelineOperationsProvider>
   );
 }
-

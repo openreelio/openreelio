@@ -178,6 +178,30 @@ describe('Timeline', () => {
       expect(screen.getByTestId('playhead')).toBeInTheDocument();
     });
 
+    it('should request video track creation from toolbar', () => {
+      const onTrackCreate = vi.fn();
+      render(<Timeline sequence={mockSequence} onTrackCreate={onTrackCreate} />);
+
+      fireEvent.click(screen.getByTestId('add-video-track-button'));
+
+      expect(onTrackCreate).toHaveBeenCalledWith({
+        sequenceId: 'seq_001',
+        kind: 'video',
+      });
+    });
+
+    it('should request audio track creation from toolbar', () => {
+      const onTrackCreate = vi.fn();
+      render(<Timeline sequence={mockSequence} onTrackCreate={onTrackCreate} />);
+
+      fireEvent.click(screen.getByTestId('add-audio-track-button'));
+
+      expect(onTrackCreate).toHaveBeenCalledWith({
+        sequenceId: 'seq_001',
+        kind: 'audio',
+      });
+    });
+
     it('should show empty state when no sequence', () => {
       render(<Timeline sequence={null} />);
       expect(screen.getByText(/no sequence/i)).toBeInTheDocument();
@@ -201,7 +225,12 @@ describe('Timeline', () => {
                 assetId: 'asset_001',
                 range: { sourceInSec: 0, sourceOutSec: 10 },
                 place: { timelineInSec: 0, durationSec: 10 },
-                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
                 opacity: 1,
                 speed: 1,
                 effects: [],
@@ -273,16 +302,70 @@ describe('Timeline', () => {
 
       const tracksArea = screen.getByTestId('timeline-tracks-area');
       await act(async () => {
-        fireEvent.mouseDown(tracksArea, { clientX: 300, clientY: 40, button: 0 });
+        fireEvent.pointerDown(tracksArea, { clientX: 300, clientY: 40, button: 0, pointerId: 1 });
+      });
+
+      // Deferred seek model: click commits on mouse up, not mouse down
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+
+      await act(async () => {
+        fireEvent.pointerUp(tracksArea, { clientX: 300, clientY: 40, button: 0, pointerId: 1 });
       });
 
       expect(usePlaybackStore.getState().currentTime).toBeGreaterThan(0);
 
-      // Ensure scrubbing cleans up global cursor state
-      await act(async () => {
-        fireEvent.mouseUp(document);
-      });
+      // Ensure gesture cleanup restores global cursor state
       expect(document.body.style.cursor).toBe('');
+    });
+
+    it('should pan timeline on empty-area drag without moving playhead', async () => {
+      useTimelineStore.setState({ scrollX: 200, scrollY: 0 });
+      render(<Timeline sequence={mockSequence} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+
+      await act(async () => {
+        fireEvent.pointerDown(tracksArea, { clientX: 400, clientY: 120, button: 0, pointerId: 2 });
+      });
+
+      await act(async () => {
+        fireEvent.pointerMove(tracksArea, { clientX: 300, clientY: 120, pointerId: 2 });
+      });
+
+      expect(useTimelineStore.getState().scrollX).toBeGreaterThan(200);
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+
+      await act(async () => {
+        fireEvent.pointerUp(tracksArea, { clientX: 300, clientY: 120, button: 0, pointerId: 2 });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+      expect(document.body.style.cursor).toBe('');
+    });
+
+    it('should treat mostly vertical empty-area movement as click seek, not horizontal pan', async () => {
+      useTimelineStore.setState({ scrollX: 200, scrollY: 0 });
+      render(<Timeline sequence={mockSequence} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+
+      await act(async () => {
+        fireEvent.pointerDown(tracksArea, { clientX: 400, clientY: 120, button: 0, pointerId: 3 });
+      });
+
+      await act(async () => {
+        fireEvent.pointerMove(tracksArea, { clientX: 402, clientY: 40, pointerId: 3 });
+      });
+
+      // Horizontal threshold/intent not met -> no pan yet
+      expect(useTimelineStore.getState().scrollX).toBe(200);
+
+      await act(async () => {
+        fireEvent.pointerUp(tracksArea, { clientX: 402, clientY: 40, button: 0, pointerId: 3 });
+      });
+
+      // Mouse up still commits click seek at release point
+      expect(usePlaybackStore.getState().currentTime).toBeGreaterThan(0);
     });
 
     it('should allow dragging playhead head to seek', async () => {
@@ -306,7 +389,28 @@ describe('Timeline', () => {
       expect(screen.getByTestId('playhead')).toHaveAttribute('data-dragging', 'false');
     });
 
-    it('should seek when clicking directly on a clip body', async () => {
+    it('should allow dragging playhead line area to seek', async () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      const lineHitArea = screen.getByTestId('playhead-line-hit-area');
+
+      await act(async () => {
+        // Container left: 0, trackHeaderWidth: 192, zoom: 100
+        // 592px => (592 - 192) / 100 = 4s
+        fireEvent.mouseDown(lineHitArea, { clientX: 592, button: 0 });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBeCloseTo(4, 3);
+      expect(screen.getByTestId('playhead')).toHaveAttribute('data-dragging', 'true');
+
+      await act(async () => {
+        fireEvent.mouseUp(document);
+      });
+
+      expect(screen.getByTestId('playhead')).toHaveAttribute('data-dragging', 'false');
+    });
+
+    it('should not seek when clicking directly on a clip body', async () => {
       const sequenceWithClip: Sequence = {
         ...mockSequence,
         tracks: [
@@ -318,7 +422,12 @@ describe('Timeline', () => {
                 assetId: 'asset_001',
                 range: { sourceInSec: 0, sourceOutSec: 10 },
                 place: { timelineInSec: 0, durationSec: 10 },
-                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
                 opacity: 1,
                 speed: 1,
                 effects: [],
@@ -333,13 +442,15 @@ describe('Timeline', () => {
       render(<Timeline sequence={sequenceWithClip} />);
 
       const clip = screen.getByTestId('clip-clip_seek_click');
+
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+
       await act(async () => {
         // Container left=0, header=192, zoom=100 => (300-192)/100 = 1.08s
         fireEvent.mouseDown(clip, { clientX: 300, clientY: 40, button: 0 });
       });
 
-      expect(usePlaybackStore.getState().currentTime).toBeGreaterThan(0);
-      expect(usePlaybackStore.getState().currentTime).toBeLessThan(2);
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
 
       await act(async () => {
         fireEvent.mouseUp(document);
@@ -352,14 +463,21 @@ describe('Timeline', () => {
       const header = screen.getAllByTestId('track-header')[0];
       await act(async () => {
         // Container left=0, header width=192, zoom=100 => (260-192)/100 = 0.68s
-        fireEvent.mouseDown(header, { clientX: 260, clientY: 40, button: 0 });
+        fireEvent.pointerDown(header, { clientX: 260, clientY: 40, button: 0, pointerId: 4 });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+
+      await act(async () => {
+        fireEvent.pointerUp(header, {
+          clientX: 260,
+          clientY: 40,
+          button: 0,
+          pointerId: 4,
+        });
       });
 
       expect(usePlaybackStore.getState().currentTime).toBeGreaterThan(0);
-
-      await act(async () => {
-        fireEvent.mouseUp(document);
-      });
     });
 
     it('should not seek when clicking track header control buttons', async () => {
@@ -387,7 +505,12 @@ describe('Timeline', () => {
                 assetId: 'asset_001',
                 range: { sourceInSec: 0, sourceOutSec: 10 },
                 place: { timelineInSec: 0, durationSec: 10 },
-                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
                 opacity: 1,
                 speed: 1,
                 effects: [],
@@ -419,7 +542,7 @@ describe('Timeline', () => {
 
       const tracksArea = screen.getByTestId('timeline-tracks-area');
       await act(async () => {
-        fireEvent.mouseDown(tracksArea, { clientX: 320, clientY: 40, button: 0 });
+        fireEvent.pointerDown(tracksArea, { clientX: 320, clientY: 40, button: 0, pointerId: 5 });
       });
 
       expect(usePlaybackStore.getState().currentTime).toBe(0);
@@ -486,7 +609,12 @@ describe('Timeline', () => {
                 assetId: 'asset_001',
                 range: { sourceInSec: 0, sourceOutSec: 5 },
                 place: { timelineInSec: 0, durationSec: 5 },
-                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
                 opacity: 1,
                 speed: 1,
                 effects: [],
@@ -497,7 +625,12 @@ describe('Timeline', () => {
                 assetId: 'asset_002',
                 range: { sourceInSec: 0, sourceOutSec: 5 },
                 place: { timelineInSec: 5, durationSec: 5 },
-                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
                 opacity: 1,
                 speed: 1,
                 effects: [],
@@ -517,7 +650,7 @@ describe('Timeline', () => {
         () =>
           new Promise<void>((resolve) => {
             resolveDelete = resolve;
-          })
+          }),
       );
       const onClipMove = vi.fn().mockResolvedValue(undefined);
 
@@ -526,7 +659,7 @@ describe('Timeline', () => {
           sequence={sequenceWithRipple}
           onDeleteClips={onDeleteClips}
           onClipMove={onClipMove}
-        />
+        />,
       );
 
       const timeline = screen.getByTestId('timeline');
@@ -545,7 +678,7 @@ describe('Timeline', () => {
         expect.objectContaining({
           clipId: 'clip_002',
           newTimelineIn: 0,
-        })
+        }),
       );
     });
     it('should not throw when ripple move fails after delete', async () => {
@@ -560,7 +693,12 @@ describe('Timeline', () => {
                 assetId: 'asset_001',
                 range: { sourceInSec: 0, sourceOutSec: 5 },
                 place: { timelineInSec: 0, durationSec: 5 },
-                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
                 opacity: 1,
                 speed: 1,
                 effects: [],
@@ -571,7 +709,12 @@ describe('Timeline', () => {
                 assetId: 'asset_002',
                 range: { sourceInSec: 0, sourceOutSec: 5 },
                 place: { timelineInSec: 5, durationSec: 5 },
-                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
                 opacity: 1,
                 speed: 1,
                 effects: [],
@@ -594,7 +737,7 @@ describe('Timeline', () => {
           sequence={sequenceWithRipple}
           onDeleteClips={onDeleteClips}
           onClipMove={onClipMove}
-        />
+        />,
       );
 
       const timeline = screen.getByTestId('timeline');
@@ -621,20 +764,43 @@ describe('Timeline', () => {
       expect(screen.getByTestId('enhanced-timeline-toolbar')).toBeInTheDocument();
     });
 
-    it('should scroll horizontally on wheel without Shift', () => {
+    it('should not scroll horizontally on wheel without Shift when there is no vertical overflow', () => {
       render(<Timeline sequence={mockSequence} />);
 
       const tracksArea = screen.getByTestId('timeline-tracks-area');
       fireEvent.wheel(tracksArea, { deltaY: 100 });
 
-      expect(useTimelineStore.getState().scrollX).toBeGreaterThan(0);
+      expect(useTimelineStore.getState().scrollX).toBe(0);
+    });
+
+    it('should scroll vertically on wheel when tracks overflow viewport', () => {
+      const sequenceWithManyTracks: Sequence = {
+        ...mockSequence,
+        tracks: Array.from({ length: 10 }, (_, index) => {
+          const template = index % 2 === 0 ? mockSequence.tracks[0] : mockSequence.tracks[1];
+          return {
+            ...template,
+            id: `track_overflow_${index + 1}`,
+            name: `${template.kind === 'video' ? 'Video' : 'Audio'} ${index + 1}`,
+            clips: [],
+          };
+        }),
+      };
+
+      render(<Timeline sequence={sequenceWithManyTracks} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      fireEvent.wheel(tracksArea, { deltaY: 100 });
+
+      expect(useTimelineStore.getState().scrollY).toBeGreaterThan(0);
+      expect(useTimelineStore.getState().scrollX).toBe(0);
     });
 
     it('should scroll horizontally when wheeling over the time ruler', () => {
       render(<Timeline sequence={mockSequence} />);
 
       const ruler = screen.getByTestId('time-ruler');
-      fireEvent.wheel(ruler, { deltaY: 100 });
+      fireEvent.wheel(ruler, { deltaY: 100, shiftKey: true });
 
       expect(useTimelineStore.getState().scrollX).toBeGreaterThan(0);
     });
@@ -734,7 +900,7 @@ describe('Timeline', () => {
           assetId: 'asset_001',
           trackId: expect.any(String),
           timelinePosition: expect.any(Number),
-        })
+        }),
       );
     });
 
@@ -817,10 +983,7 @@ describe('Timeline', () => {
     it('should not allow drop on locked tracks', () => {
       const lockedSequence: Sequence = {
         ...mockSequence,
-        tracks: [
-          { ...mockSequence.tracks[0], locked: true },
-          mockSequence.tracks[1],
-        ],
+        tracks: [{ ...mockSequence.tracks[0], locked: true }, mockSequence.tracks[1]],
       };
 
       const onAssetDrop = vi.fn();
@@ -846,5 +1009,3 @@ describe('Timeline', () => {
     });
   });
 });
-
-
