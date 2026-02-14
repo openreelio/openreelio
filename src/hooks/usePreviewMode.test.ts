@@ -24,7 +24,7 @@ function createMockClip(overrides: Partial<Clip> = {}): Clip {
       sourceOutSec: 10,
     },
     transform: {
-      position: { x: 0, y: 0 },
+      position: { x: 0.5, y: 0.5 },
       scale: { x: 1, y: 1 },
       rotationDeg: 0,
       anchor: { x: 0.5, y: 0.5 },
@@ -364,10 +364,81 @@ describe('usePreviewMode', () => {
       });
 
       expect(result.current.mode).toBe('canvas');
-      expect(result.current.reason).toBe('No video clips (images use canvas)');
+      expect(result.current.reason).toContain('non-video clip');
     });
   });
+  describe('composition constraints', () => {
+    it('should force canvas mode when clip transform is not identity', () => {
+      const clip = createMockClip({
+        transform: {
+          position: { x: 0.4, y: 0.5 },
+          scale: { x: 1, y: 1 },
+          rotationDeg: 0,
+          anchor: { x: 0.5, y: 0.5 },
+        },
+      });
+      const track = createMockTrack({ clips: [clip] });
+      const sequence = createMockSequence([track]);
+      const assets = new Map([
+        ['asset-1', createMockAsset({ id: 'asset-1', proxyStatus: 'ready', proxyUrl: 'asset://localhost/proxy.mp4' })],
+      ]);
 
+      const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
+
+      expect(result.current.mode).toBe('canvas');
+      expect(result.current.reason).toContain('transform');
+    });
+
+    it('should force canvas mode when active track uses non-normal blend mode', () => {
+      const clip = createMockClip();
+      const track = createMockTrack({ blendMode: 'overlay', clips: [clip] });
+      const sequence = createMockSequence([track]);
+      const assets = new Map([
+        ['asset-1', createMockAsset({ id: 'asset-1', proxyStatus: 'ready', proxyUrl: 'asset://localhost/proxy.mp4' })],
+      ]);
+
+      const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
+
+      expect(result.current.mode).toBe('canvas');
+      expect(result.current.reason).toContain('blend mode');
+    });
+
+    it('should force canvas mode when active clip has effects', () => {
+      const clip = createMockClip({ effects: ['fx-1'] });
+      const track = createMockTrack({ clips: [clip] });
+      const sequence = createMockSequence([track]);
+      const assets = new Map([
+        ['asset-1', createMockAsset({ id: 'asset-1', proxyStatus: 'ready', proxyUrl: 'asset://localhost/proxy.mp4' })],
+      ]);
+
+      const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
+
+      expect(result.current.mode).toBe('canvas');
+      expect(result.current.reason).toContain('effects');
+    });
+
+    it('should keep video mode when only audio tracks overlap with ready video proxies', () => {
+      const videoTrack = createMockTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [createMockClip({ id: 'video-clip', assetId: 'asset-video' })],
+      });
+      const audioTrack = createMockTrack({
+        id: 'audio-track',
+        kind: 'audio',
+        clips: [createMockClip({ id: 'audio-clip', assetId: 'asset-audio' })],
+      });
+      const sequence = createMockSequence([videoTrack, audioTrack]);
+      const assets = new Map([
+        ['asset-video', createMockAsset({ id: 'asset-video', proxyStatus: 'ready', proxyUrl: 'asset://localhost/proxy.mp4' })],
+        ['asset-audio', createMockAsset({ id: 'asset-audio', kind: 'audio', proxyStatus: 'notNeeded' })],
+      ]);
+
+      const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
+
+      expect(result.current.mode).toBe('video');
+    });
+  });
   describe('muted/hidden tracks', () => {
     it('should ignore muted tracks', () => {
       const clip = createMockClip({
