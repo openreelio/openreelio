@@ -74,8 +74,20 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
   // Get store actions and state
   const playbackStore = usePlaybackStore();
   const { currentTime, isPlaying, playbackRate, loop } = playbackStore;
-  const { setCurrentTime, setIsPlaying, setDuration } = playbackStore;
+  const {
+    setCurrentTime,
+    setIsPlaying,
+    setDuration,
+    seek: storeSeek,
+    seekForward: storeSeekForward,
+    seekBackward: storeSeekBackward,
+    goToStart: storeGoToStart,
+    goToEnd: storeGoToEnd,
+    stepForward: storeStepForward,
+    stepBackward: storeStepBackward,
+  } = playbackStore;
   const pendingTimeSourceRef = useRef<string | null>(null);
+  const disposeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /**
    * Track the last time value that the engine explicitly set.
@@ -115,6 +127,14 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
   // Sync engine -> store. Use layout effect to avoid illegal state updates during render,
   // while still ensuring the store is initialized before the user can interact.
   useLayoutEffect(() => {
+    // StrictMode in development replays effect cleanup/setup once on mount.
+    // Delay disposal in cleanup and cancel it here so the replay does not
+    // permanently dispose the active engine instance.
+    if (disposeTimeoutRef.current !== null) {
+      clearTimeout(disposeTimeoutRef.current);
+      disposeTimeoutRef.current = null;
+    }
+
     const storeApi = usePlaybackStore as unknown as { getState?: () => unknown };
     const getState = typeof storeApi.getState === 'function' ? storeApi.getState : null;
 
@@ -143,7 +163,8 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
         }
         // Track the time value that engine set (for external seek detection)
         lastEngineTimeRef.current = time;
-        const source = pendingTimeSourceRef.current ?? (engine.isPlaying ? 'engine-tick' : 'engine-sync');
+        const source =
+          pendingTimeSourceRef.current ?? (engine.isPlaying ? 'engine-tick' : 'engine-sync');
         pendingTimeSourceRef.current = null;
         setCurrentTime(time, source);
       },
@@ -178,9 +199,12 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
     });
 
     return () => {
-      if (autoDispose) {
+      if (!autoDispose) return;
+
+      disposeTimeoutRef.current = setTimeout(() => {
         engine.dispose();
-      }
+        disposeTimeoutRef.current = null;
+      }, 0);
     };
   }, [engine, setCurrentTime, setIsPlaying, setDuration, autoDispose]);
 
@@ -199,16 +223,34 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
     const unsubscribe = storeApi.subscribe((state: unknown) => {
       if (!state || typeof state !== 'object') return;
 
-      const next = state as { isPlaying?: boolean; currentTime?: number; playbackRate?: number; loop?: boolean };
+      const next = state as {
+        isPlaying?: boolean;
+        currentTime?: number;
+        playbackRate?: number;
+        loop?: boolean;
+      };
 
       // Check if state updates (play/pause) originated from the engine
       const timeSinceStateUpdate = performance.now() - lastEngineStateUpdateRef.current;
       const isEngineStateUpdate = timeSinceStateUpdate < STATE_UPDATE_GRACE_MS;
 
       // Sync isPlaying state (use timestamp-based check for play/pause)
-      if (!isEngineStateUpdate && typeof next.isPlaying === 'boolean' && next.isPlaying !== engine.isPlaying) {
-        if (next.isPlaying) engine.play();
-        else engine.pause();
+      if (
+        !isEngineStateUpdate &&
+        typeof next.isPlaying === 'boolean' &&
+        next.isPlaying !== engine.isPlaying
+      ) {
+        if (next.isPlaying) {
+          engine.play();
+
+          // Reconcile optimistic store toggles when engine refuses to play
+          // (e.g. playhead already at end, or duration is 0).
+          if (!engine.isPlaying) {
+            usePlaybackStore.getState().setIsPlaying(false, 'engine-play-rejected');
+          }
+        } else {
+          engine.pause();
+        }
       }
 
       // Sync currentTime: Use VALUE-BASED detection for external seeks
@@ -332,44 +374,43 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
 
   const seek = useCallback(
     (time: number, source: string = 'timeline-engine-api') => {
-      pendingTimeSourceRef.current = source;
-      engine.seek(time);
-      if (pendingTimeSourceRef.current === source) {
-        pendingTimeSourceRef.current = null;
-      }
+      // Route user-intent seeks through PlaybackStore so all downstream
+      // consumers (proxy player, backend sync, diagnostics) receive
+      // the canonical PLAYBACK_EVENTS.SEEK signal immediately.
+      storeSeek(time, source);
     },
-    [engine],
+    [storeSeek],
   );
 
   const seekForward = useCallback(
     (amount: number) => {
-      engine.seekForward(amount);
+      storeSeekForward(amount, 'timeline-engine-seek-forward');
     },
-    [engine],
+    [storeSeekForward],
   );
 
   const seekBackward = useCallback(
     (amount: number) => {
-      engine.seekBackward(amount);
+      storeSeekBackward(amount, 'timeline-engine-seek-backward');
     },
-    [engine],
+    [storeSeekBackward],
   );
 
   const goToStart = useCallback(() => {
-    engine.goToStart();
-  }, [engine]);
+    storeGoToStart('timeline-engine-go-to-start');
+  }, [storeGoToStart]);
 
   const goToEnd = useCallback(() => {
-    engine.goToEnd();
-  }, [engine]);
+    storeGoToEnd('timeline-engine-go-to-end');
+  }, [storeGoToEnd]);
 
   const stepForward = useCallback(() => {
-    engine.stepForward(fps);
-  }, [engine, fps]);
+    storeStepForward(fps, 'timeline-engine-step-forward');
+  }, [storeStepForward, fps]);
 
   const stepBackward = useCallback(() => {
-    engine.stepBackward(fps);
-  }, [engine, fps]);
+    storeStepBackward(fps, 'timeline-engine-step-backward');
+  }, [storeStepBackward, fps]);
 
   const setPlaybackRate = useCallback(
     (rate: number) => {
@@ -429,4 +470,3 @@ export function useTimelineEngine(options: UseTimelineEngineOptions): UseTimelin
     ],
   );
 }
-
