@@ -12,7 +12,7 @@ use tauri::{Emitter, Manager, State};
 use crate::core::{
     assets::{Asset, AudioInfo, ProxyStatus, VideoInfo},
     commands::{
-        AddEffectCommand, AddMaskCommand, AddTextClipCommand, CreateBinCommand,
+        AddEffectCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand, CreateBinCommand,
         CreateSequenceCommand, ImportAssetCommand, InsertClipCommand, MoveBinCommand,
         MoveClipCommand, RemoveAssetCommand, RemoveBinCommand, RemoveClipCommand,
         RemoveEffectCommand, RemoveMaskCommand, RemoveTextClipCommand, RenameBinCommand,
@@ -1495,6 +1495,13 @@ pub async fn execute_command(
             &p.name,
             &p.format.unwrap_or_else(|| "1080p".to_string()),
         )),
+        CommandPayload::CreateTrack(p) => {
+            let mut cmd = AddTrackCommand::new(&p.sequence_id, &p.name, p.kind);
+            if let Some(position) = p.position {
+                cmd = cmd.at_position(position);
+            }
+            Box::new(cmd)
+        }
         CommandPayload::SplitClip(p) => Box::new(SplitClipCommand::new(
             &p.sequence_id,
             &p.track_id,
@@ -2333,6 +2340,10 @@ pub async fn apply_edit_script(
                 | "RemoveClip"
                 | "TrimClip"
                 | "MoveClip"
+                | "CreateTrack"
+                | "createTrack"
+                | "AddTrack"
+                | "addTrack"
                 | "UpdateCaption"
         );
         if needs_sequence_id && !obj.contains_key("sequenceId") {
@@ -2471,6 +2482,13 @@ pub async fn apply_edit_script(
                 &p.name,
                 &p.format.unwrap_or_else(|| "1080p".to_string()),
             )),
+            CommandPayload::CreateTrack(p) => {
+                let mut track_cmd = AddTrackCommand::new(&p.sequence_id, &p.name, p.kind);
+                if let Some(position) = p.position {
+                    track_cmd = track_cmd.at_position(position);
+                }
+                Box::new(track_cmd)
+            }
             CommandPayload::UpdateCaption(p) => Box::new(
                 crate::core::commands::UpdateCaptionCommand::new(
                     &p.sequence_id,
@@ -2677,6 +2695,14 @@ pub async fn validate_edit_script(
             "SplitClip" | "DeleteClip" | "TrimClip" | "MoveClip" => {
                 if cmd.params.get("clipId").is_none() {
                     issues.push(format!("{} command {} missing clipId", cmd.command_type, i));
+                }
+            }
+            "CreateTrack" | "createTrack" | "AddTrack" | "addTrack" => {
+                if cmd.params.get("kind").is_none() {
+                    issues.push(format!("CreateTrack command {} missing kind", i));
+                }
+                if cmd.params.get("name").is_none() {
+                    issues.push(format!("CreateTrack command {} missing name", i));
                 }
             }
             _ => {

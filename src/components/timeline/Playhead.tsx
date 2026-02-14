@@ -5,6 +5,7 @@
  * The playhead consists of:
  * - A vertical line indicating the current time position (spanning ruler and tracks)
  * - A draggable head marker at the top for direct manipulation
+ * - An invisible hit area around the line for easier dragging
  *
  * Performance optimizations:
  * - Uses CSS transform instead of left for GPU acceleration
@@ -68,6 +69,9 @@ export interface PlayheadProps {
 /** Width of the playhead line in pixels */
 const LINE_WIDTH = 2;
 
+/** Width of the invisible draggable hit area around the line in pixels */
+const LINE_HIT_AREA_WIDTH = 14;
+
 /** Size of the playhead head marker in pixels */
 const HEAD_SIZE = 10;
 
@@ -89,7 +93,7 @@ const RULER_HEIGHT = 24;
  *
  * Features:
  * - Visual time position indicator
- * - Draggable head marker for direct seeking
+ * - Draggable head and line hit area for direct seeking
  * - Touch-friendly hit area
  * - Visual feedback during drag operations
  * - Animation during playback
@@ -108,7 +112,7 @@ const PlayheadComponent = forwardRef<PlayheadHandle, PlayheadProps>(function Pla
     onDragStart,
     onPointerDown,
   },
-  ref
+  ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -130,11 +134,11 @@ const PlayheadComponent = forwardRef<PlayheadHandle, PlayheadProps>(function Pla
       },
       getElement: () => containerRef.current,
     }),
-    []
+    [],
   );
 
   /**
-   * Handle mouse down on the playhead head.
+   * Handle mouse down on the playhead interaction target.
    */
   const handleMouseDown = useCallback(
     (e: MouseEvent<HTMLDivElement>) => {
@@ -142,7 +146,7 @@ const PlayheadComponent = forwardRef<PlayheadHandle, PlayheadProps>(function Pla
       e.stopPropagation();
       onDragStart?.(e);
     },
-    [onDragStart]
+    [onDragStart],
   );
 
   /**
@@ -154,7 +158,7 @@ const PlayheadComponent = forwardRef<PlayheadHandle, PlayheadProps>(function Pla
       e.stopPropagation();
       onPointerDown?.(e);
     },
-    [onPointerDown]
+    [onPointerDown],
   );
 
   // Determine visual state
@@ -191,6 +195,20 @@ const PlayheadComponent = forwardRef<PlayheadHandle, PlayheadProps>(function Pla
       <div
         data-testid="playhead-line"
         className="absolute top-0 left-0 w-full h-full pointer-events-none bg-timeline-playhead-line"
+      />
+
+      {/* Invisible draggable zone around the line for easier playhead grabs */}
+      <div
+        data-testid="playhead-line-hit-area"
+        aria-hidden="true"
+        className="absolute top-0 left-1/2 -translate-x-1/2 h-full select-none touch-none"
+        style={{
+          width: `${LINE_HIT_AREA_WIDTH}px`,
+          pointerEvents: isInteractive ? 'auto' : 'none',
+          cursor: headCursor,
+        }}
+        onMouseDown={handleMouseDown}
+        onPointerDown={handlePointerDown}
       />
 
       {/* Draggable head marker - positioned in ruler area */}

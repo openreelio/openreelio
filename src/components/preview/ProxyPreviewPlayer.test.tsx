@@ -250,7 +250,7 @@ describe('ProxyPreviewPlayer', () => {
         <ProxyPreviewPlayer
           sequence={sequence}
           assets={new Map<string, Asset>([[initialAsset.id, initialAsset]])}
-        />
+        />,
       );
 
       const before = screen.getByTestId('proxy-video-clip-1') as HTMLVideoElement;
@@ -260,7 +260,7 @@ describe('ProxyPreviewPlayer', () => {
         <ProxyPreviewPlayer
           sequence={sequence}
           assets={new Map<string, Asset>([[updatedAsset.id, updatedAsset]])}
-        />
+        />,
       );
 
       const after = screen.getByTestId('proxy-video-clip-1') as HTMLVideoElement;
@@ -295,7 +295,7 @@ describe('ProxyPreviewPlayer', () => {
       window.dispatchEvent(
         new CustomEvent('playback-seek', {
           detail: { time: 8, source: 'test-seek' },
-        })
+        }),
       );
 
       expect(video.currentTime).toBe(8);
@@ -325,6 +325,36 @@ describe('ProxyPreviewPlayer', () => {
       playSpy.mockRestore();
     });
 
+    it('pauses active video immediately when isPlaying turns false without time change', () => {
+      const playSpy = vi
+        .spyOn(HTMLMediaElement.prototype, 'play')
+        .mockImplementation(() => Promise.resolve());
+      const pauseSpy = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+
+      const sequence = createMockSequence();
+      const asset = createMockAsset();
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      mockPlaybackStore.currentTime = 5;
+      mockPlaybackStore.isPlaying = true;
+
+      const { rerender } = render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      const video = screen.getByTestId('proxy-video-clip-1') as HTMLVideoElement;
+      Object.defineProperty(video, 'paused', {
+        configurable: true,
+        get: () => false,
+      });
+
+      mockPlaybackStore.isPlaying = false;
+      rerender(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      expect(pauseSpy).toHaveBeenCalled();
+
+      pauseSpy.mockRestore();
+      playSpy.mockRestore();
+    });
+
     it('does not render audio-track clips as proxy video layers', () => {
       const audioTrack = createMockTrack({
         kind: 'audio',
@@ -332,7 +362,10 @@ describe('ProxyPreviewPlayer', () => {
       });
       const sequence = createMockSequence({ tracks: [audioTrack] });
       const assets = new Map<string, Asset>([
-        ['asset-audio', createMockAsset({ id: 'asset-audio', kind: 'audio', uri: '/path/to/audio.mp3' })],
+        [
+          'asset-audio',
+          createMockAsset({ id: 'asset-audio', kind: 'audio', uri: '/path/to/audio.mp3' }),
+        ],
       ]);
 
       mockPlaybackStore.currentTime = 5;
@@ -387,7 +420,7 @@ describe('ProxyPreviewPlayer', () => {
       const assets = new Map<string, Asset>();
 
       const { container } = render(
-        <ProxyPreviewPlayer sequence={sequence} assets={assets} showControls={false} />
+        <ProxyPreviewPlayer sequence={sequence} assets={assets} showControls={false} />,
       );
 
       // Controls container should not be present
@@ -517,9 +550,7 @@ describe('ProxyPreviewPlayer', () => {
       });
       const assets = new Map<string, Asset>();
 
-      render(
-        <ProxyPreviewPlayer sequence={sequence} assets={assets} />
-      );
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
 
       const player = screen.getByTestId('proxy-preview-player');
       const style = player.style.aspectRatio;
@@ -678,9 +709,7 @@ describe('ProxyPreviewPlayer', () => {
 
       mockPlaybackStore.currentTime = 5;
 
-      const { rerender } = render(
-        <ProxyPreviewPlayer sequence={sequence} assets={assets} />
-      );
+      const { rerender } = render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
 
       const video = screen.getByTestId('proxy-video-clip-1') as HTMLVideoElement;
 
@@ -738,9 +767,7 @@ describe('ProxyPreviewPlayer', () => {
 
       mockPlaybackStore.currentTime = 0;
 
-      const { rerender } = render(
-        <ProxyPreviewPlayer sequence={sequence} assets={assets} />
-      );
+      const { rerender } = render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
 
       // Simulate rapid scrubbing across 100 positions
       for (let i = 0; i < 100; i++) {
@@ -753,4 +780,3 @@ describe('ProxyPreviewPlayer', () => {
     });
   });
 });
-

@@ -14,13 +14,10 @@ export default defineConfig(({ mode }) => {
   // CI runners (GitHub Actions ubuntu-latest) have ~7GB RAM.
   // Using multiple forks with large heaps causes OOM.
   // Strategy: CI uses single fork with moderate heap, local dev uses 2 forks.
-  const vitestMaxForks = Math.max(
-    1,
-    Number(process.env.VITEST_MAX_FORKS ?? (isCI ? '1' : '2'))
-  );
+  const vitestMaxForks = Math.max(1, Number(process.env.VITEST_MAX_FORKS ?? (isCI ? '1' : '2')));
   const vitestMaxOldSpaceSizeMb = Math.max(
     1024,
-    Number(process.env.VITEST_MAX_OLD_SPACE_SIZE ?? (isCI ? '3072' : '4096'))
+    Number(process.env.VITEST_MAX_OLD_SPACE_SIZE ?? (isCI ? '3072' : '4096')),
   );
   const analyzePlugins =
     mode === 'analyze'
@@ -90,8 +87,7 @@ export default defineConfig(({ mode }) => {
     envPrefix: ['VITE_', 'TAURI_'],
     build: {
       // Tauri uses Chromium on Windows and WebKit on macOS and Linux
-      target:
-        process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari14',
+      target: process.env.TAURI_ENV_PLATFORM === 'windows' ? 'chrome105' : 'safari14',
       // Don't minify for debug builds
       minify: !process.env.TAURI_ENV_DEBUG ? 'esbuild' : false,
       // Produce sourcemaps for debug builds
@@ -99,11 +95,61 @@ export default defineConfig(({ mode }) => {
       // Rollup options for better bundle analysis
       rollupOptions: {
         output: {
-          manualChunks: {
-            // Split vendor chunks for better caching
-            vendor: ['react', 'react-dom', 'react-router-dom'],
-            state: ['zustand', 'immer'],
-            icons: ['lucide-react'],
+          manualChunks(id) {
+            const normalizedId = id.replace(/\\/g, '/');
+
+            if (normalizedId.includes('/node_modules/')) {
+              if (
+                normalizedId.includes('/react/') ||
+                normalizedId.includes('/react-dom/') ||
+                normalizedId.includes('/react-router-dom/')
+              ) {
+                return 'vendor-react';
+              }
+              if (normalizedId.includes('/zustand/') || normalizedId.includes('/immer/')) {
+                return 'vendor-state';
+              }
+              if (normalizedId.includes('/lucide-react/')) {
+                return 'vendor-icons';
+              }
+              if (normalizedId.includes('/@tauri-apps/')) {
+                return 'vendor-tauri';
+              }
+              if (normalizedId.includes('/zod/')) {
+                return 'vendor-validation';
+              }
+              return 'vendor';
+            }
+
+            if (
+              normalizedId.includes('/src/components/timeline/') ||
+              normalizedId.includes('/src/hooks/useTimeline') ||
+              normalizedId.includes('/src/services/timeline') ||
+              normalizedId.includes('/src/components/preview/') ||
+              normalizedId.includes('/src/hooks/useAudioPlayback') ||
+              normalizedId.includes('/src/services/PlaybackController')
+            ) {
+              return 'feature-editing-core';
+            }
+
+            if (
+              normalizedId.includes('/src/components/features/ai/') ||
+              normalizedId.includes('/src/components/features/agent/') ||
+              normalizedId.includes('/src/stores/aiStore') ||
+              normalizedId.includes('/src/agents/')
+            ) {
+              return 'feature-ai';
+            }
+
+            if (
+              normalizedId.includes('/src/components/explorer/') ||
+              normalizedId.includes('/src/components/features/inspector/') ||
+              normalizedId.includes('/src/components/features/search/')
+            ) {
+              return 'feature-workspace-panels';
+            }
+
+            return undefined;
           },
         },
       },

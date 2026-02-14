@@ -1,7 +1,7 @@
 use crate::core::effects::{EffectType, ParamValue};
 use crate::core::masks::{MaskBlendMode, MaskShape};
 use crate::core::text::TextClipData;
-use crate::core::timeline::{BlendMode, Transform};
+use crate::core::timeline::{BlendMode, TrackKind, Transform};
 use crate::core::{AssetId, BinId, ClipId, EffectId, MaskId, SequenceId, TimeSec, TrackId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -107,6 +107,15 @@ pub struct RemoveAssetPayload {
 pub struct CreateSequencePayload {
     pub name: String,
     pub format: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateTrackPayload {
+    pub sequence_id: SequenceId,
+    pub kind: TrackKind,
+    pub name: String,
+    pub position: Option<usize>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -471,6 +480,14 @@ pub enum CommandPayload {
     #[serde(alias = "createSequence", alias = "CreateSequence")]
     CreateSequence(CreateSequencePayload),
 
+    #[serde(
+        alias = "createTrack",
+        alias = "CreateTrack",
+        alias = "addTrack",
+        alias = "AddTrack"
+    )]
+    CreateTrack(CreateTrackPayload),
+
     #[serde(alias = "updateCaption", alias = "UpdateCaption")]
     UpdateCaption(UpdateCaptionPayload),
 
@@ -641,6 +658,75 @@ mod tests {
         });
 
         let parsed = CommandPayload::parse("SetTrackBlendMode".to_string(), payload);
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn parse_create_track_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "kind": "video",
+            "name": "Video 2",
+            "position": 0,
+        });
+
+        let parsed = CommandPayload::parse("CreateTrack".to_string(), payload);
+        assert!(
+            matches!(parsed, Ok(CommandPayload::CreateTrack(_))),
+            "expected CreateTrack to parse, got: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_create_track_payload_supports_aliases() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "kind": "audio",
+            "name": "Audio 2",
+            "position": 3,
+        });
+
+        for command_type in ["createTrack", "addTrack", "AddTrack"] {
+            let parsed = CommandPayload::parse(command_type.to_string(), payload.clone());
+            assert!(
+                matches!(parsed, Ok(CommandPayload::CreateTrack(_))),
+                "expected {command_type} alias to parse, got: {parsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_create_track_payload_without_position_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "kind": "video",
+            "name": "Video 3",
+        });
+
+        let parsed = CommandPayload::parse("CreateTrack".to_string(), payload);
+        assert!(
+            matches!(
+                parsed,
+                Ok(CommandPayload::CreateTrack(CreateTrackPayload {
+                    position: None,
+                    ..
+                }))
+            ),
+            "expected CreateTrack to parse without position, got: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_create_track_rejects_unknown_fields() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "kind": "video",
+            "name": "Video 2",
+            "position": 0,
+            "unexpected": true,
+        });
+
+        let parsed = CommandPayload::parse("CreateTrack".to_string(), payload);
         assert!(parsed.is_err());
     }
 

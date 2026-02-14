@@ -38,15 +38,17 @@ vi.mock('@/services/logger', () => ({
 }));
 
 // Helper to create mock state
-function createMockState(overrides: Partial<{
-  currentTime: number;
-  duration: number;
-  isPlaying: boolean;
-  playbackRate: number;
-  seek: ReturnType<typeof vi.fn>;
-  setCurrentTime: ReturnType<typeof vi.fn>;
-  setIsPlaying: ReturnType<typeof vi.fn>;
-}> = {}) {
+function createMockState(
+  overrides: Partial<{
+    currentTime: number;
+    duration: number;
+    isPlaying: boolean;
+    playbackRate: number;
+    seek: ReturnType<typeof vi.fn>;
+    setCurrentTime: ReturnType<typeof vi.fn>;
+    setIsPlaying: ReturnType<typeof vi.fn>;
+  }> = {},
+) {
   return {
     currentTime: 0,
     duration: 60,
@@ -73,7 +75,10 @@ describe('PlaybackController', () => {
     mockSeek = vi.fn();
     mockSetCurrentTime = vi.fn();
     vi.mocked(usePlaybackStore.getState).mockReturnValue(
-      createMockState({ seek: mockSeek, setCurrentTime: mockSetCurrentTime }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+      createMockState({
+        seek: mockSeek,
+        setCurrentTime: mockSetCurrentTime,
+      }) as unknown as ReturnType<typeof usePlaybackStore.getState>,
     );
   });
 
@@ -177,7 +182,7 @@ describe('PlaybackController', () => {
           currentTime: 1.0,
           seek: mockSeek,
           setCurrentTime: mockSetCurrentTime,
-        }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+        }) as unknown as ReturnType<typeof usePlaybackStore.getState>,
       );
 
       controller.stepForward();
@@ -191,7 +196,7 @@ describe('PlaybackController', () => {
           currentTime: 1.0,
           seek: mockSeek,
           setCurrentTime: mockSetCurrentTime,
-        }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+        }) as unknown as ReturnType<typeof usePlaybackStore.getState>,
       );
 
       controller.stepBackward();
@@ -205,7 +210,7 @@ describe('PlaybackController', () => {
           currentTime: 0,
           seek: mockSeek,
           setCurrentTime: mockSetCurrentTime,
-        }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+        }) as unknown as ReturnType<typeof usePlaybackStore.getState>,
       );
 
       controller.stepBackward();
@@ -279,6 +284,32 @@ describe('PlaybackController', () => {
       const syncState = controller.getSyncState();
       expect(syncState.isSynced).toBe(true); // Not updated during drag
     });
+
+    it('should not force correction when only audio clock reports', () => {
+      vi.mocked(usePlaybackStore.getState).mockReturnValue(
+        createMockState({ isPlaying: true, seek: mockSeek }) as unknown as ReturnType<
+          typeof usePlaybackStore.getState
+        >,
+      );
+
+      // Audio-only report should not trigger sync seek.
+      controller.reportAudioTime(1.0);
+
+      expect(mockSeek).not.toHaveBeenCalled();
+    });
+
+    it('should force correction when both clocks report and drift is critical', () => {
+      vi.mocked(usePlaybackStore.getState).mockReturnValue(
+        createMockState({ isPlaying: true, seek: mockSeek }) as unknown as ReturnType<
+          typeof usePlaybackStore.getState
+        >,
+      );
+
+      controller.reportVideoTime(0);
+      controller.reportAudioTime(1.0);
+
+      expect(mockSeek).toHaveBeenCalledWith(1.0, 'playback-controller:sync');
+    });
   });
 
   describe('Event System', () => {
@@ -292,7 +323,7 @@ describe('PlaybackController', () => {
         expect.objectContaining({
           type: 'seek',
           time: 5.0,
-        })
+        }),
       );
     });
 
@@ -305,7 +336,7 @@ describe('PlaybackController', () => {
         expect.objectContaining({
           type: 'dragStart',
           source: 'scrubbing',
-        })
+        }),
       );
 
       controller.releaseDragLock('scrubbing');
@@ -313,7 +344,7 @@ describe('PlaybackController', () => {
         expect.objectContaining({
           type: 'dragEnd',
           source: 'scrubbing',
-        })
+        }),
       );
     });
 
@@ -380,7 +411,7 @@ describe('Playback Rate Extremes', () => {
       createMockState({
         isPlaying: true,
         playbackRate: 4.0, // 4x speed
-      }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+      }) as unknown as ReturnType<typeof usePlaybackStore.getState>,
     );
   });
 
@@ -404,7 +435,7 @@ describe('Destructive: concurrent lock operations', () => {
   beforeEach(() => {
     controller = new PlaybackController({ fps: 30 });
     vi.mocked(usePlaybackStore.getState).mockReturnValue(
-      createMockState() as unknown as ReturnType<typeof usePlaybackStore.getState>
+      createMockState() as unknown as ReturnType<typeof usePlaybackStore.getState>,
     );
   });
 
@@ -424,7 +455,11 @@ describe('Destructive: concurrent lock operations', () => {
 
   it('should allow rapid acquire-release cycles', () => {
     const operations: Array<'scrubbing' | 'playhead' | 'clip'> = [
-      'scrubbing', 'playhead', 'clip', 'scrubbing', 'playhead',
+      'scrubbing',
+      'playhead',
+      'clip',
+      'scrubbing',
+      'playhead',
     ];
 
     for (const op of operations) {
@@ -468,7 +503,9 @@ describe('Destructive: seek edge cases', () => {
     controller = new PlaybackController({ fps: 30 });
     mockSeek = vi.fn();
     vi.mocked(usePlaybackStore.getState).mockReturnValue(
-      createMockState({ seek: mockSeek }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+      createMockState({ seek: mockSeek }) as unknown as ReturnType<
+        typeof usePlaybackStore.getState
+      >,
     );
   });
 
@@ -518,7 +555,7 @@ describe('Destructive: post-dispose operations', () => {
   beforeEach(() => {
     controller = new PlaybackController({ fps: 30 });
     vi.mocked(usePlaybackStore.getState).mockReturnValue(
-      createMockState() as unknown as ReturnType<typeof usePlaybackStore.getState>
+      createMockState() as unknown as ReturnType<typeof usePlaybackStore.getState>,
     );
   });
 
@@ -577,7 +614,7 @@ describe('Destructive: frame stepping boundary conditions', () => {
       createMockState({
         currentTime: 0,
         seek: mockSeek,
-      }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+      }) as unknown as ReturnType<typeof usePlaybackStore.getState>,
     );
 
     controller.stepBackward();
@@ -591,7 +628,7 @@ describe('Destructive: frame stepping boundary conditions', () => {
         currentTime: 60,
         duration: 60,
         seek: mockSeek,
-      }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+      }) as unknown as ReturnType<typeof usePlaybackStore.getState>,
     );
 
     controller.stepForward();
@@ -604,7 +641,7 @@ describe('Destructive: frame stepping boundary conditions', () => {
       createMockState({
         currentTime: 1.0001,
         seek: mockSeek,
-      }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+      }) as unknown as ReturnType<typeof usePlaybackStore.getState>,
     );
 
     controller.stepForward();
@@ -621,7 +658,7 @@ describe('Destructive: subscription lifecycle', () => {
   beforeEach(() => {
     controller = new PlaybackController({ fps: 30 });
     vi.mocked(usePlaybackStore.getState).mockReturnValue(
-      createMockState() as unknown as ReturnType<typeof usePlaybackStore.getState>
+      createMockState() as unknown as ReturnType<typeof usePlaybackStore.getState>,
     );
   });
 
@@ -643,7 +680,7 @@ describe('Destructive: subscription lifecycle', () => {
 
   it('should handle many concurrent subscribers', () => {
     const listeners = Array.from({ length: 100 }, () => vi.fn());
-    const unsubs = listeners.map(l => controller.subscribe(l));
+    const unsubs = listeners.map((l) => controller.subscribe(l));
 
     controller.seek(5.0);
 

@@ -14,6 +14,7 @@
 
 import { renderHook, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createElement, StrictMode, type ReactNode } from 'react';
 import { useTimelineEngine } from './useTimelineEngine';
 import { usePlaybackStore } from '@/stores/playbackStore';
 
@@ -105,6 +106,37 @@ describe('useTimelineEngine (store sync)', () => {
       });
 
       expect(result.current.engine.isPlaying).toBe(false);
+
+      await act(async () => {
+        hookResult?.unmount();
+      });
+    });
+
+    it('should keep engine playable under StrictMode effect replay', async () => {
+      const StrictWrapper = ({ children }: { children: ReactNode }) =>
+        createElement(StrictMode, null, children);
+
+      let hookResult: {
+        result: { current: ReturnType<typeof useTimelineEngine> };
+        unmount: () => void;
+      } | null = null;
+
+      await act(async () => {
+        hookResult = renderHook(() => useTimelineEngine({ duration: 60 }), {
+          wrapper: StrictWrapper,
+        }) as unknown as {
+          result: { current: ReturnType<typeof useTimelineEngine> };
+          unmount: () => void;
+        };
+      });
+
+      const { result } = hookResult!;
+
+      act(() => {
+        usePlaybackStore.getState().setIsPlaying(true);
+      });
+
+      expect(result.current.engine.isPlaying).toBe(true);
 
       await act(async () => {
         hookResult?.unmount();
@@ -590,7 +622,9 @@ describe('useTimelineEngine (store sync)', () => {
       } | null = null;
 
       await act(async () => {
-        hookResult = renderHook(() => useTimelineEngine({ duration: 60, autoDispose: true })) as unknown as {
+        hookResult = renderHook(() =>
+          useTimelineEngine({ duration: 60, autoDispose: true }),
+        ) as unknown as {
           result: { current: ReturnType<typeof useTimelineEngine> };
           unmount: () => void;
         };
@@ -603,6 +637,10 @@ describe('useTimelineEngine (store sync)', () => {
         hookResult?.unmount();
       });
 
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+
       expect(disposeSpy).toHaveBeenCalled();
     });
 
@@ -613,7 +651,9 @@ describe('useTimelineEngine (store sync)', () => {
       } | null = null;
 
       await act(async () => {
-        hookResult = renderHook(() => useTimelineEngine({ duration: 60, autoDispose: false })) as unknown as {
+        hookResult = renderHook(() =>
+          useTimelineEngine({ duration: 60, autoDispose: false }),
+        ) as unknown as {
           result: { current: ReturnType<typeof useTimelineEngine> };
           unmount: () => void;
         };

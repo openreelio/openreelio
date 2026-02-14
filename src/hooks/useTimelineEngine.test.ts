@@ -21,18 +21,60 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 // Mocks
 // =============================================================================
 
-vi.mock('@/stores/playbackStore');
+vi.mock('@/stores/playbackStore', () => ({
+  usePlaybackStore: vi.fn(),
+  PLAYBACK_EVENTS: {
+    SEEK: 'playback-seek',
+    UPDATE: 'playback-update',
+  },
+}));
 
 // =============================================================================
 // Test Setup
 // =============================================================================
 
 describe('useTimelineEngine', () => {
-  const mockSetCurrentTime = vi.fn();
+  // Track mock state so relative seek mocks can compute target times
+  let trackedCurrentTime = 0;
+  let trackedDuration = 0;
+
+  const mockSetCurrentTime = vi.fn((time: number) => {
+    trackedCurrentTime = time;
+  });
   const mockSetIsPlaying = vi.fn();
-  const mockSetDuration = vi.fn();
+  const mockSetDuration = vi.fn((duration: number) => {
+    trackedDuration = duration;
+  });
   const mockSetPlaybackRate = vi.fn();
   const mockToggleLoop = vi.fn();
+
+  // Seek mocks dispatch PLAYBACK_EVENTS.SEEK so the hook's event listener
+  // routes them to engine.seek(), matching real store behavior.
+  const mockSeek = vi.fn((time: number, source?: string) => {
+    window.dispatchEvent(new CustomEvent('playback-seek', { detail: { time, source } }));
+  });
+  const mockSeekForward = vi.fn((amount: number, source?: string) => {
+    const newTime = trackedCurrentTime + amount;
+    window.dispatchEvent(new CustomEvent('playback-seek', { detail: { time: newTime, source } }));
+  });
+  const mockSeekBackward = vi.fn((amount: number, source?: string) => {
+    const newTime = trackedCurrentTime - amount;
+    window.dispatchEvent(new CustomEvent('playback-seek', { detail: { time: newTime, source } }));
+  });
+  const mockGoToStart = vi.fn((source?: string) => {
+    window.dispatchEvent(new CustomEvent('playback-seek', { detail: { time: 0, source } }));
+  });
+  const mockGoToEnd = vi.fn((source?: string) => {
+    window.dispatchEvent(new CustomEvent('playback-seek', { detail: { time: trackedDuration, source } }));
+  });
+  const mockStepForward = vi.fn((fps: number, source?: string) => {
+    const newTime = trackedCurrentTime + 1 / fps;
+    window.dispatchEvent(new CustomEvent('playback-seek', { detail: { time: newTime, source } }));
+  });
+  const mockStepBackward = vi.fn((fps: number, source?: string) => {
+    const newTime = trackedCurrentTime - 1 / fps;
+    window.dispatchEvent(new CustomEvent('playback-seek', { detail: { time: newTime, source } }));
+  });
 
   const defaultPlaybackStore = {
     currentTime: 0,
@@ -44,11 +86,20 @@ describe('useTimelineEngine', () => {
     setDuration: mockSetDuration,
     setPlaybackRate: mockSetPlaybackRate,
     toggleLoop: mockToggleLoop,
+    seek: mockSeek,
+    seekForward: mockSeekForward,
+    seekBackward: mockSeekBackward,
+    goToStart: mockGoToStart,
+    goToEnd: mockGoToEnd,
+    stepForward: mockStepForward,
+    stepBackward: mockStepBackward,
   };
 
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
+    trackedCurrentTime = 0;
+    trackedDuration = 0;
     vi.mocked(usePlaybackStore).mockReturnValue(defaultPlaybackStore);
 
     // Mock requestAnimationFrame
@@ -232,7 +283,7 @@ describe('useTimelineEngine', () => {
       });
 
       expect(result.current.engine.currentTime).toBe(30);
-      expect(mockSetCurrentTime).toHaveBeenCalledWith(30, 'timeline-engine-api');
+      expect(mockSetCurrentTime).toHaveBeenCalledWith(30, 'seek-event:timeline-engine-api');
     });
 
     it('should clamp seek time to duration', () => {
@@ -487,6 +538,8 @@ describe('useTimelineEngine', () => {
       const disposeSpy = vi.spyOn(engine, 'dispose');
 
       unmount();
+      // Dispose is deferred via setTimeout(0) for StrictMode safety
+      vi.advanceTimersByTime(1);
 
       expect(disposeSpy).toHaveBeenCalledTimes(1);
     });
@@ -516,6 +569,8 @@ describe('useTimelineEngine', () => {
       expect(result.current.engine.isPlaying).toBe(true);
 
       unmount();
+      // Dispose is deferred via setTimeout(0) for StrictMode safety
+      vi.advanceTimersByTime(1);
 
       expect(result.current.engine.isPlaying).toBe(false);
     });

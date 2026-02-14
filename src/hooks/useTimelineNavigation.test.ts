@@ -21,15 +21,16 @@ const createMockRef = (width = 800): RefObject<HTMLDivElement> => ({
   } as HTMLDivElement,
 });
 
-const createWheelEvent = (options: Partial<WheelEvent> = {}): WheelEvent => ({
-  deltaX: 0,
-  deltaY: 0,
-  ctrlKey: false,
-  metaKey: false,
-  shiftKey: false,
-  preventDefault: vi.fn(),
-  ...options,
-} as unknown as WheelEvent);
+const createWheelEvent = (options: Partial<WheelEvent> = {}): WheelEvent =>
+  ({
+    deltaX: 0,
+    deltaY: 0,
+    ctrlKey: false,
+    metaKey: false,
+    shiftKey: false,
+    preventDefault: vi.fn(),
+    ...options,
+  }) as unknown as WheelEvent;
 
 // =============================================================================
 // Tests
@@ -39,6 +40,7 @@ describe('useTimelineNavigation', () => {
   let zoomIn: ReturnType<typeof vi.fn>;
   let zoomOut: ReturnType<typeof vi.fn>;
   let setScrollX: ReturnType<typeof vi.fn>;
+  let setScrollY: ReturnType<typeof vi.fn>;
   let fitToWindow: ReturnType<typeof vi.fn>;
   const zoom = 100;
 
@@ -46,6 +48,7 @@ describe('useTimelineNavigation', () => {
     zoomIn = vi.fn();
     zoomOut = vi.fn();
     setScrollX = vi.fn();
+    setScrollY = vi.fn();
     fitToWindow = vi.fn();
   });
 
@@ -65,7 +68,7 @@ describe('useTimelineNavigation', () => {
           setScrollX,
           fitToWindow,
           trackHeaderWidth: 192,
-        })
+        }),
       );
 
       const event = createWheelEvent({ deltaY: -100, ctrlKey: true });
@@ -90,7 +93,7 @@ describe('useTimelineNavigation', () => {
           setScrollX,
           fitToWindow,
           trackHeaderWidth: 192,
-        })
+        }),
       );
 
       const event = createWheelEvent({ deltaY: 100, ctrlKey: true });
@@ -115,7 +118,7 @@ describe('useTimelineNavigation', () => {
           setScrollX,
           fitToWindow,
           trackHeaderWidth: 192,
-        })
+        }),
       );
 
       const event = createWheelEvent({ deltaY: -100, metaKey: true });
@@ -145,7 +148,7 @@ describe('useTimelineNavigation', () => {
           setScrollX,
           fitToWindow,
           trackHeaderWidth: 192,
-        })
+        }),
       );
 
       const event = createWheelEvent({ deltaY: 50, shiftKey: true });
@@ -169,7 +172,7 @@ describe('useTimelineNavigation', () => {
           setScrollX,
           fitToWindow,
           trackHeaderWidth: 192,
-        })
+        }),
       );
 
       // deltaX should be ignored when Shift is pressed, only deltaY is used
@@ -193,7 +196,7 @@ describe('useTimelineNavigation', () => {
           setScrollX,
           fitToWindow,
           trackHeaderWidth: 192,
-        })
+        }),
       );
 
       const event = createWheelEvent({ deltaY: 50 });
@@ -206,6 +209,93 @@ describe('useTimelineNavigation', () => {
       expect(zoomIn).not.toHaveBeenCalled();
       expect(zoomOut).not.toHaveBeenCalled();
       expect(setScrollX).toHaveBeenCalledWith(150);
+    });
+  });
+
+  // ===========================================================================
+  // Vertical Scroll Tests
+  // ===========================================================================
+
+  describe('vertical scroll with wheel', () => {
+    it('should scroll vertically when configured and no horizontal modifier is used', () => {
+      const { result } = renderHook(() =>
+        useTimelineNavigation({
+          scrollX: 100,
+          scrollY: 40,
+          zoom,
+          duration: 60,
+          zoomIn,
+          zoomOut,
+          setScrollX,
+          setScrollY,
+          maxScrollY: 300,
+          fitToWindow,
+          trackHeaderWidth: 192,
+        }),
+      );
+
+      const event = createWheelEvent({ deltaY: 50 });
+
+      act(() => {
+        result.current.handleWheel(event);
+      });
+
+      expect(event.preventDefault).toHaveBeenCalled();
+      expect(setScrollY).toHaveBeenCalledWith(90);
+      expect(setScrollX).not.toHaveBeenCalled();
+    });
+
+    it('should clamp vertical scrolling to maxScrollY', () => {
+      const { result } = renderHook(() =>
+        useTimelineNavigation({
+          scrollX: 0,
+          scrollY: 290,
+          zoom,
+          duration: 60,
+          zoomIn,
+          zoomOut,
+          setScrollX,
+          setScrollY,
+          maxScrollY: 300,
+          fitToWindow,
+          trackHeaderWidth: 192,
+        }),
+      );
+
+      const event = createWheelEvent({ deltaY: 50 });
+
+      act(() => {
+        result.current.handleWheel(event);
+      });
+
+      expect(setScrollY).toHaveBeenCalledWith(300);
+    });
+
+    it('should keep Shift+wheel as horizontal even when vertical scrolling is configured', () => {
+      const { result } = renderHook(() =>
+        useTimelineNavigation({
+          scrollX: 100,
+          scrollY: 40,
+          zoom,
+          duration: 60,
+          zoomIn,
+          zoomOut,
+          setScrollX,
+          setScrollY,
+          maxScrollY: 300,
+          fitToWindow,
+          trackHeaderWidth: 192,
+        }),
+      );
+
+      const event = createWheelEvent({ deltaY: 25, shiftKey: true });
+
+      act(() => {
+        result.current.handleWheel(event);
+      });
+
+      expect(setScrollX).toHaveBeenCalledWith(125);
+      expect(setScrollY).not.toHaveBeenCalled();
     });
   });
 
@@ -228,7 +318,7 @@ describe('useTimelineNavigation', () => {
           fitToWindow,
           trackHeaderWidth: 192,
           tracksAreaRef: mockRef,
-        })
+        }),
       );
 
       act(() => {
@@ -253,7 +343,7 @@ describe('useTimelineNavigation', () => {
           fitToWindow,
           trackHeaderWidth: 192,
           tracksAreaRef: nullRef,
-        })
+        }),
       );
 
       act(() => {
@@ -274,7 +364,7 @@ describe('useTimelineNavigation', () => {
           setScrollX,
           fitToWindow,
           trackHeaderWidth: 192,
-        })
+        }),
       );
 
       act(() => {
@@ -298,7 +388,7 @@ describe('useTimelineNavigation', () => {
           fitToWindow,
           trackHeaderWidth: 250, // Custom track header width
           tracksAreaRef: mockRef,
-        })
+        }),
       );
 
       act(() => {
@@ -326,7 +416,7 @@ describe('useTimelineNavigation', () => {
           setScrollX,
           fitToWindow,
           trackHeaderWidth: 192,
-        })
+        }),
       );
 
       const event = createWheelEvent({ deltaY: -100, ctrlKey: true, shiftKey: true });

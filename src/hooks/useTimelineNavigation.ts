@@ -25,6 +25,8 @@ import {
 export interface UseTimelineNavigationProps {
   /** Current horizontal scroll position */
   scrollX: number;
+  /** Current vertical scroll position */
+  scrollY?: number;
   /** Current zoom level (pixels per second) */
   zoom: number;
   /** Total timeline duration in seconds */
@@ -39,6 +41,10 @@ export interface UseTimelineNavigationProps {
   setZoom?: (zoom: number) => void;
   /** Callback to set horizontal scroll position */
   setScrollX: (value: number) => void;
+  /** Callback to set vertical scroll position */
+  setScrollY?: (value: number) => void;
+  /** Maximum vertical scroll range */
+  maxScrollY?: number;
   /** Callback to fit timeline to window */
   fitToWindow: (duration: number, viewportWidth: number) => void;
   /** Width of track header in pixels */
@@ -84,6 +90,7 @@ const DEFAULT_ZOOM_STEP_FACTOR = 1.2;
 
 export function useTimelineNavigation({
   scrollX,
+  scrollY = 0,
   zoom,
   duration,
   playheadTime = 0,
@@ -91,6 +98,8 @@ export function useTimelineNavigation({
   zoomOut,
   setZoom,
   setScrollX,
+  setScrollY,
+  maxScrollY = 0,
   fitToWindow,
   trackHeaderWidth,
   tracksAreaRef,
@@ -123,9 +132,10 @@ export function useTimelineNavigation({
   // ===========================================================================
 
   /**
-   * Handle wheel events for zoom (Ctrl/Meta) and horizontal scroll (Shift).
+   * Handle wheel events for zoom, vertical scroll, and horizontal timeline pan.
    * Ctrl/Meta + wheel: zoom in/out with cursor position preservation
-   * Shift + wheel: horizontal scroll
+   * Shift + wheel or horizontal trackpad movement: horizontal timeline scroll
+   * Plain wheel: vertical track scroll (for multi-lane timelines)
    */
   const handleWheel = useCallback(
     (e: WheelEvent) => {
@@ -148,12 +158,7 @@ export function useTimelineNavigation({
           const clampedZoom = Math.max(minZoom, Math.min(maxZoom, newZoom));
 
           // Calculate new scroll to preserve cursor position
-          const result = zoomWithCursorPreservation(
-            zoom,
-            clampedZoom,
-            cursorX,
-            scrollX
-          );
+          const result = zoomWithCursorPreservation(zoom, clampedZoom, cursorX, scrollX);
 
           setZoom(result.zoom);
           setScrollX(result.scrollX);
@@ -168,34 +173,49 @@ export function useTimelineNavigation({
         return;
       }
 
-      // Timeline default: treat wheel as horizontal scroll (NLE behavior).
-      // Trackpads may provide deltaX directly; mouse wheels typically provide deltaY.
-      //
-      // Shift + wheel: also horizontal scroll (kept for compatibility).
-      // Shift+wheel uses deltaY for consistent cross-device behavior.
-      const delta = e.shiftKey
-        ? e.deltaY
-        : (Math.abs(e.deltaX) > 0 ? e.deltaX : e.deltaY);
+      const horizontalDelta = e.shiftKey ? e.deltaY : e.deltaX;
+      const hasHorizontalIntent =
+        e.shiftKey || (Number.isFinite(e.deltaX) && Math.abs(e.deltaX) > Math.abs(e.deltaY));
 
-      // No-op if there's no meaningful delta.
-      if (!Number.isFinite(delta) || delta === 0) return;
+      if (hasHorizontalIntent && Number.isFinite(horizontalDelta) && horizontalDelta !== 0) {
+        e.preventDefault();
+
+        // Clamp horizontal scroll to content bounds.
+        const viewportState = getViewportState();
+        const viewportWidth = viewportState?.viewportWidth ?? 0;
+        const maxScrollX = Math.max(0, duration * zoom - viewportWidth);
+
+        setScrollX(Math.max(0, Math.min(maxScrollX, scrollX + horizontalDelta)));
+        return;
+      }
+
+      // Vertical wheel defaults to lane navigation for multi-track timelines.
+      if (setScrollY && Number.isFinite(e.deltaY) && e.deltaY !== 0) {
+        e.preventDefault();
+        const clampedScrollY = Math.max(0, Math.min(maxScrollY, scrollY + e.deltaY));
+        setScrollY(clampedScrollY);
+        return;
+      }
+
+      // Backward-compatible fallback when vertical scrolling is not configured.
+      if (!Number.isFinite(e.deltaY) || e.deltaY === 0) return;
 
       e.preventDefault();
-
-      // Clamp scroll to content bounds (prevents infinite blank scrolling).
       const viewportState = getViewportState();
       const viewportWidth = viewportState?.viewportWidth ?? 0;
       const maxScrollX = Math.max(0, duration * zoom - viewportWidth);
-
-      setScrollX(Math.max(0, Math.min(maxScrollX, scrollX + delta)));
+      setScrollX(Math.max(0, Math.min(maxScrollX, scrollX + e.deltaY)));
     },
     [
       zoom,
       scrollX,
+      scrollY,
       zoomIn,
       zoomOut,
       setZoom,
       setScrollX,
+      setScrollY,
+      maxScrollY,
       preserveCursorOnZoom,
       zoomStepFactor,
       minZoom,
@@ -204,7 +224,7 @@ export function useTimelineNavigation({
       tracksAreaRef,
       getViewportState,
       duration,
-    ]
+    ],
   );
 
   // ===========================================================================
@@ -240,7 +260,7 @@ export function useTimelineNavigation({
         setScrollX(newScrollX);
       }
     },
-    [scrollX, setScrollX, getViewportState]
+    [scrollX, setScrollX, getViewportState],
   );
 
   // ===========================================================================
@@ -290,17 +310,23 @@ export function useTimelineNavigation({
       const timePixelPosition = time * zoom;
       const cursorX = timePixelPosition - scrollX;
 
-      const result = zoomWithCursorPreservation(
-        zoom,
-        clampedZoom,
-        cursorX,
-        scrollX
-      );
+      const result = zoomWithCursorPreservation(zoom, clampedZoom, cursorX, scrollX);
 
       setZoom(result.zoom);
       setScrollX(result.scrollX);
     },
-    [zoom, scrollX, zoomIn, zoomOut, setZoom, setScrollX, zoomStepFactor, minZoom, maxZoom, getViewportState]
+    [
+      zoom,
+      scrollX,
+      zoomIn,
+      zoomOut,
+      setZoom,
+      setScrollX,
+      zoomStepFactor,
+      minZoom,
+      maxZoom,
+      getViewportState,
+    ],
   );
 
   // ===========================================================================

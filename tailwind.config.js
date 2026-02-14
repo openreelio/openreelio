@@ -43,13 +43,23 @@ export default {
         // Keep these stable to avoid breaking existing classnames.
         editor: {
           bg: '#09090b', // surface.base
+          'bg-secondary': '#18181b', // surface.panel
+          'bg-tertiary': '#27272a', // surface.elevated
+          'bg-hover': '#18181b', // hover on editor.bg surfaces
           sidebar: '#18181b', // surface.panel
           panel: '#18181b', // surface.panel
+          modal: '#27272a', // surface.elevated
           surface: '#27272a', // surface.elevated
+          'surface-hover': '#3f3f46', // surface.active
+          hover: '#27272a', // generic hover surface
+          highlight: '#3f3f46', // emphasized hover/selection
+          backdrop: 'rgba(9, 9, 11, 0.8)', // modal backdrop
           input: '#18181b', // surface.panel
+          key: '#3f3f46', // keyboard hint background
           border: '#3f3f46', // border.default
           text: '#e4e4e7', // text.primary
           'text-muted': '#a1a1aa', // text.secondary
+          'text-secondary': '#a1a1aa', // text.secondary alias
         },
 
         // Semantic Surface System (Elevation & Role)

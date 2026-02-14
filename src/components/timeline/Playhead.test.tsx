@@ -53,6 +53,11 @@ describe('Playhead', () => {
       expect(screen.getByTestId('playhead-line')).toBeInTheDocument();
     });
 
+    it('should render playhead line hit area', () => {
+      render(<Playhead position={0} zoom={100} />);
+      expect(screen.getByTestId('playhead-line-hit-area')).toBeInTheDocument();
+    });
+
     it('should render playhead head marker', () => {
       render(<Playhead position={0} zoom={100} />);
       expect(screen.getByTestId('playhead-head')).toBeInTheDocument();
@@ -220,6 +225,26 @@ describe('Playhead', () => {
       expect(onPointerDown).toHaveBeenCalledTimes(1);
     });
 
+    it('should call onDragStart when line hit area is clicked', () => {
+      const onDragStart = vi.fn();
+      render(<Playhead position={0} zoom={100} onDragStart={onDragStart} />);
+
+      const lineHitArea = screen.getByTestId('playhead-line-hit-area');
+      fireEvent.mouseDown(lineHitArea, createMockMouseEvent());
+
+      expect(onDragStart).toHaveBeenCalledTimes(1);
+    });
+
+    it('should call onPointerDown when line hit area receives pointer down', () => {
+      const onPointerDown = vi.fn();
+      render(<Playhead position={0} zoom={100} onPointerDown={onPointerDown} />);
+
+      const lineHitArea = screen.getByTestId('playhead-line-hit-area');
+      fireEvent.pointerDown(lineHitArea);
+
+      expect(onPointerDown).toHaveBeenCalledTimes(1);
+    });
+
     it('should not throw when clicking head without handlers', () => {
       render(<Playhead position={0} zoom={100} />);
 
@@ -241,10 +266,22 @@ describe('Playhead', () => {
       expect(head).toHaveStyle({ pointerEvents: 'auto' });
     });
 
+    it('should enable pointer events on line hit area when handlers provided', () => {
+      render(<Playhead position={0} zoom={100} onDragStart={vi.fn()} />);
+      const lineHitArea = screen.getByTestId('playhead-line-hit-area');
+      expect(lineHitArea).toHaveStyle({ pointerEvents: 'auto' });
+    });
+
     it('should disable pointer events on head when no handlers', () => {
       render(<Playhead position={0} zoom={100} />);
       const head = screen.getByTestId('playhead-head');
       expect(head).toHaveStyle({ pointerEvents: 'none' });
+    });
+
+    it('should disable pointer events on line hit area when no handlers', () => {
+      render(<Playhead position={0} zoom={100} />);
+      const lineHitArea = screen.getByTestId('playhead-line-hit-area');
+      expect(lineHitArea).toHaveStyle({ pointerEvents: 'none' });
     });
 
     it('should disable pointer events on line', () => {
@@ -348,7 +385,7 @@ describe('Playhead', () => {
     it('should not re-render when same props passed', () => {
       const onDragStart = vi.fn();
       const { rerender } = render(
-        <Playhead position={5} zoom={100} onDragStart={onDragStart} trackHeaderWidth={0} />
+        <Playhead position={5} zoom={100} onDragStart={onDragStart} trackHeaderWidth={0} />,
       );
 
       // Re-render with same props
@@ -399,7 +436,7 @@ describe('Playhead', () => {
       // Position 0, scrollX 1000, trackHeaderWidth 192 => -808px position
       // Component always renders, visibility is controlled by parent
       const { container } = render(
-        <Playhead position={0} zoom={100} scrollX={1000} trackHeaderWidth={192} />
+        <Playhead position={0} zoom={100} scrollX={1000} trackHeaderWidth={192} />,
       );
       expect(container.querySelector('[data-testid="playhead"]')).toBeInTheDocument();
     });

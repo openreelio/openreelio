@@ -84,6 +84,17 @@ const RESCHEDULE_INTERVAL = 0.25;
  */
 const RAPID_SEEK_VELOCITY_THRESHOLD = 5.0;
 
+/**
+ * Minimum timeline delta to consider as a potential seek/jump.
+ */
+const SEEK_DETECTION_DELTA_THRESHOLD = 0.1;
+
+/**
+ * Base tolerance (seconds) for normal playback progression jitter.
+ * Prevents false-positive seek detection during regular playback updates.
+ */
+const PLAYBACK_PROGRESS_TOLERANCE = 0.08;
+
 /** Maximum retry attempts for failed audio loads */
 const MAX_RETRY_ATTEMPTS = 3;
 
@@ -105,6 +116,9 @@ export function useAudioPlayback({
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioBuffersRef = useRef<Map<string, AudioBuffer>>(new Map());
   const scheduledSourcesRef = useRef<Map<string, ScheduledSource>>(new Map());
+  const scheduleVersionRef = useRef(0);
+  const isSchedulingRef = useRef(false);
+  const rescheduleRequestedRef = useRef(false);
   const masterGainRef = useRef<GainNode | null>(null);
   const isAudioReadyRef = useRef(false);
   const lastScheduleTimeRef = useRef(0);
@@ -122,6 +136,24 @@ export function useAudioPlayback({
 
   // Playback state from store
   const { currentTime, isPlaying, volume, isMuted, playbackRate } = usePlaybackStore();
+  const isPlayingRef = useRef(isPlaying);
+
+  const getLiveIsPlaying = useCallback((): boolean => {
+    const storeApi = usePlaybackStore as unknown as {
+      getState?: () => { isPlaying?: boolean };
+    };
+    if (typeof storeApi.getState === 'function') {
+      const liveState = storeApi.getState();
+      if (liveState && typeof liveState.isPlaying === 'boolean') {
+        return liveState.isPlaying;
+      }
+    }
+    return isPlayingRef.current;
+  }, []);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
 
   /**
    * Initialize AudioContext on user interaction
@@ -235,7 +267,11 @@ export function useAudioPlayback({
         // Schedule automatic retry if under the limit
         if (currentAttempt < MAX_RETRY_ATTEMPTS) {
           const retryDelay = getRetryDelay(currentAttempt);
-          logger.debug('Scheduling audio load retry', { assetId, retryDelay, attempt: currentAttempt });
+          logger.debug('Scheduling audio load retry', {
+            assetId,
+            retryDelay,
+            attempt: currentAttempt,
+          });
 
           // Clear any existing retry timeout
           const existingTimeout = retryTimeoutsRef.current.get(assetId);
@@ -255,7 +291,7 @@ export function useAudioPlayback({
         return null;
       }
     },
-    [getRetryDelay]
+    [getRetryDelay],
   );
 
   /**
@@ -285,16 +321,26 @@ export function useAudioPlayback({
 
       return buffer !== null;
     },
-    [assets, loadAudioBuffer]
+    [assets, loadAudioBuffer],
   );
 
   /**
    * Get all audio clips from sequence
    */
-  const getAudioClips = useCallback((): Array<{ clip: Clip; asset: Asset; trackVolume: number; trackMuted: boolean }> => {
+  const getAudioClips = useCallback((): Array<{
+    clip: Clip;
+    asset: Asset;
+    trackVolume: number;
+    trackMuted: boolean;
+  }> => {
     if (!sequence) return [];
 
-    const audioClips: Array<{ clip: Clip; asset: Asset; trackVolume: number; trackMuted: boolean }> = [];
+    const audioClips: Array<{
+      clip: Clip;
+      asset: Asset;
+      trackVolume: number;
+      trackMuted: boolean;
+    }> = [];
 
     for (const track of sequence.tracks) {
       // Include both audio tracks and video tracks with audio
@@ -324,6 +370,12 @@ export function useAudioPlayback({
    * Stop all scheduled sources
    */
   const stopAllSources = useCallback(() => {
+    // Invalidate any in-flight async scheduling work.
+    // This prevents stale `scheduleAudioClips()` calls from creating
+    // new sources after pause/seek/cleanup has already stopped playback.
+    scheduleVersionRef.current += 1;
+    rescheduleRequestedRef.current = false;
+
     scheduledSourcesRef.current.forEach((scheduled) => {
       try {
         scheduled.source.stop();
@@ -377,110 +429,164 @@ export function useAudioPlayback({
    */
   const scheduleAudioClips = useCallback(async () => {
     if (!audioContextRef.current || !masterGainRef.current || !enabled) return;
-    if (!isPlaying) return;
+    if (!isPlaying || !getLiveIsPlaying()) return;
 
-    const ctx = audioContextRef.current;
-    const now = ctx.currentTime;
-
-    // Don't reschedule too frequently
-    if (now - lastScheduleTimeRef.current < RESCHEDULE_INTERVAL) return;
-    lastScheduleTimeRef.current = now;
-
-    const audioClips = getAudioClips();
-    const scheduleAheadTime = getScheduleAheadTime();
-
-    // Find clips that need to be scheduled
-    for (const { clip, asset, trackVolume, trackMuted } of audioClips) {
-      if (trackMuted) continue;
-
-      // Calculate clip timing
-      const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-      const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-      const clipEnd = clip.place.timelineInSec + clipDuration;
-
-      // Skip clips that have ended
-      if (currentTime >= clipEnd) continue;
-
-      // Skip clips that are too far in the future (using dynamic window)
-      if (clip.place.timelineInSec > currentTime + scheduleAheadTime) continue;
-
-      // Check if already scheduled
-      if (scheduledSourcesRef.current.has(clip.id)) continue;
-
-      // Load audio buffer
-      const audioUrl = asset.proxyUrl || asset.uri;
-      const audioBuffer = await loadAudioBuffer(asset.id, audioUrl);
-      if (!audioBuffer) continue;
-
-      // Create source node
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.playbackRate.value = playbackRate * safeSpeed;
-
-      // Create gain node for this clip
-      const gainNode = ctx.createGain();
-      const clipVolume = calculateClipVolume(clip, trackVolume);
-      gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
-
-      // Connect: source -> gainNode -> masterGain -> destination
-      source.connect(gainNode);
-      gainNode.connect(masterGainRef.current);
-
-      // Calculate start timing
-      const timeIntoClip = Math.max(0, currentTime - clip.place.timelineInSec);
-      const sourceOffset = clip.range.sourceInSec + (timeIntoClip * safeSpeed);
-      const startDelay = Math.max(0, clip.place.timelineInSec - currentTime);
-
-      // Calculate duration to stop at clip's source out point
-      const remainingSourceDuration = clip.range.sourceOutSec - sourceOffset;
-      const audioDuration = Math.max(0, remainingSourceDuration);
-
-      // Schedule playback with duration to stop at clip end
-      const scheduledStartTime = now + startDelay;
-      source.start(scheduledStartTime, sourceOffset, audioDuration);
-
-      // Track the scheduled source
-      scheduledSourcesRef.current.set(clip.id, {
-        source,
-        gainNode,
-        clipId: clip.id,
-        startTime: scheduledStartTime,
-      });
-
-      // Clean up when source ends
-      source.onended = () => {
-        scheduledSourcesRef.current.delete(clip.id);
-        source.disconnect();
-        gainNode.disconnect();
-      };
+    // Prevent overlapping async scheduling passes.
+    // Overlaps can create duplicate BufferSource nodes for the same clip.
+    if (isSchedulingRef.current) {
+      rescheduleRequestedRef.current = true;
+      return;
     }
 
-    // Update volume on existing sources
-    scheduledSourcesRef.current.forEach((scheduled) => {
-      const clipData = audioClips.find(c => c.clip.id === scheduled.clipId);
-      if (clipData) {
-        const clipVolume = calculateClipVolume(clipData.clip, clipData.trackVolume);
-        scheduled.gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
-        const updateSpeed = clipData.clip.speed > 0 ? clipData.clip.speed : 1;
-        scheduled.source.playbackRate.value = playbackRate * updateSpeed;
-      }
-    });
+    isSchedulingRef.current = true;
 
-    // Report audio time to PlaybackController for A/V sync tracking
-    if (ctx && scheduledSourcesRef.current.size > 0) {
-      // Find the first active clip to calculate audio timeline position
-      const firstActiveClip = audioClips.find(c => {
-        const syncSpeed = c.clip.speed > 0 ? c.clip.speed : 1;
-        const clipEnd = c.clip.place.timelineInSec +
-          (c.clip.range.sourceOutSec - c.clip.range.sourceInSec) / syncSpeed;
-        return currentTime >= c.clip.place.timelineInSec && currentTime < clipEnd;
-      });
+    try {
+      schedulingPass: do {
+        rescheduleRequestedRef.current = false;
 
-      if (firstActiveClip) {
-        // Report the current audio time to the controller
-        // This enables drift detection and correction
-        playbackController.reportAudioTime(currentTime);
-      }
+        if (!audioContextRef.current || !masterGainRef.current || !enabled || !getLiveIsPlaying()) {
+          break;
+        }
+
+        const scheduleVersion = scheduleVersionRef.current;
+
+        const ctx = audioContextRef.current;
+        const now = ctx.currentTime;
+
+        // Don't reschedule too frequently
+        if (now - lastScheduleTimeRef.current < RESCHEDULE_INTERVAL) {
+          continue;
+        }
+        lastScheduleTimeRef.current = now;
+
+        const audioClips = getAudioClips();
+        const scheduleAheadTime = getScheduleAheadTime();
+
+        // Find clips that need to be scheduled
+        for (const { clip, asset, trackVolume, trackMuted } of audioClips) {
+          if (trackMuted) continue;
+
+          // Calculate clip timing
+          const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+          const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+          const clipEnd = clip.place.timelineInSec + clipDuration;
+
+          // Skip clips that have ended
+          if (currentTime >= clipEnd) continue;
+
+          // Skip clips that are too far in the future (using dynamic window)
+          if (clip.place.timelineInSec > currentTime + scheduleAheadTime) continue;
+
+          // Check if already scheduled
+          if (scheduledSourcesRef.current.has(clip.id)) continue;
+
+          // Load audio buffer
+          const audioUrl = asset.proxyUrl || asset.uri;
+          const audioBuffer = await loadAudioBuffer(asset.id, audioUrl);
+          if (!audioBuffer) continue;
+
+          // Abort stale async scheduling work (pause/seek/unmount may have happened
+          // while waiting for network/decode).
+          if (
+            scheduleVersion !== scheduleVersionRef.current ||
+            !audioContextRef.current ||
+            !masterGainRef.current ||
+            !enabled ||
+            !getLiveIsPlaying()
+          ) {
+            rescheduleRequestedRef.current = enabled && getLiveIsPlaying();
+            continue schedulingPass;
+          }
+
+          // Re-check after await: another pass may have scheduled this clip.
+          if (scheduledSourcesRef.current.has(clip.id)) {
+            continue;
+          }
+
+          // Create source node
+          const source = ctx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.playbackRate.value = playbackRate * safeSpeed;
+
+          // Create gain node for this clip
+          const gainNode = ctx.createGain();
+          const clipVolume = calculateClipVolume(clip, trackVolume);
+          gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
+
+          // Connect: source -> gainNode -> masterGain -> destination
+          source.connect(gainNode);
+          gainNode.connect(masterGainRef.current);
+
+          // Calculate start timing
+          const timeIntoClip = Math.max(0, currentTime - clip.place.timelineInSec);
+          const sourceOffset = clip.range.sourceInSec + timeIntoClip * safeSpeed;
+          const startDelay = Math.max(0, clip.place.timelineInSec - currentTime);
+
+          // Calculate duration to stop at clip's source out point
+          const remainingSourceDuration = clip.range.sourceOutSec - sourceOffset;
+          const audioDuration = Math.max(0, remainingSourceDuration);
+
+          // Schedule playback with duration to stop at clip end
+          const scheduledStartTime = now + startDelay;
+          source.start(scheduledStartTime, sourceOffset, audioDuration);
+
+          // Track the scheduled source
+          scheduledSourcesRef.current.set(clip.id, {
+            source,
+            gainNode,
+            clipId: clip.id,
+            startTime: scheduledStartTime,
+          });
+
+          // Clean up when source ends.
+          // Only delete map entry if this exact source is still the active one.
+          source.onended = () => {
+            const active = scheduledSourcesRef.current.get(clip.id);
+            if (active?.source === source) {
+              scheduledSourcesRef.current.delete(clip.id);
+            }
+            source.disconnect();
+            gainNode.disconnect();
+          };
+        }
+
+        // Guard post-loop updates as well in case invalidation happened mid-loop.
+        if (scheduleVersion !== scheduleVersionRef.current) {
+          rescheduleRequestedRef.current = enabled && getLiveIsPlaying();
+          continue;
+        }
+
+        // Update volume on existing sources
+        scheduledSourcesRef.current.forEach((scheduled) => {
+          const clipData = audioClips.find((c) => c.clip.id === scheduled.clipId);
+          if (clipData) {
+            const clipVolume = calculateClipVolume(clipData.clip, clipData.trackVolume);
+            scheduled.gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
+            const updateSpeed = clipData.clip.speed > 0 ? clipData.clip.speed : 1;
+            scheduled.source.playbackRate.value = playbackRate * updateSpeed;
+          }
+        });
+
+        // Report audio time to PlaybackController for A/V sync tracking
+        if (ctx && scheduledSourcesRef.current.size > 0) {
+          // Find the first active clip to calculate audio timeline position
+          const firstActiveClip = audioClips.find((c) => {
+            const syncSpeed = c.clip.speed > 0 ? c.clip.speed : 1;
+            const clipEnd =
+              c.clip.place.timelineInSec +
+              (c.clip.range.sourceOutSec - c.clip.range.sourceInSec) / syncSpeed;
+            return currentTime >= c.clip.place.timelineInSec && currentTime < clipEnd;
+          });
+
+          if (firstActiveClip) {
+            // Report the current audio time to the controller
+            // This enables drift detection and correction
+            playbackController.reportAudioTime(currentTime);
+          }
+        }
+      } while (rescheduleRequestedRef.current);
+    } finally {
+      isSchedulingRef.current = false;
     }
   }, [
     enabled,
@@ -493,9 +599,16 @@ export function useAudioPlayback({
     loadAudioBuffer,
     calculateClipVolume,
     getScheduleAheadTime,
+    getLiveIsPlaying,
   ]);
 
   // Handle play/pause
+  useEffect(() => {
+    if (!enabled) {
+      stopAllSources();
+    }
+  }, [enabled, stopAllSources]);
+
   useEffect(() => {
     if (!enabled) return;
 
@@ -503,13 +616,15 @@ export function useAudioPlayback({
 
     if (isPlaying) {
       // Initialize audio context if needed
-      initAudio().then(() => {
-        if (!cancelled) {
-          void scheduleAudioClips();
-        }
-      }).catch((error) => {
-        logger.error('Failed to initialize audio', { error });
-      });
+      initAudio()
+        .then(() => {
+          if (!cancelled) {
+            void scheduleAudioClips();
+          }
+        })
+        .catch((error) => {
+          logger.error('Failed to initialize audio', { error });
+        });
     } else {
       // Stop all sources when pausing
       stopAllSources();
@@ -540,29 +655,49 @@ export function useAudioPlayback({
     if (!enabled) return;
 
     const now = Date.now();
-    const timeDiff = Math.abs(currentTime - lastSeekTimeRef.current);
-    const timestampDiff = (now - lastSeekTimestampRef.current) / 1000; // seconds
+    const previousTime = lastSeekTimeRef.current;
+    const previousTimestamp = lastSeekTimestampRef.current;
+    const timeDiff = Math.abs(currentTime - previousTime);
+    const timestampDiff = (now - previousTimestamp) / 1000; // seconds
 
-    // Only handle significant seeks (more than 0.1 second difference)
-    if (timeDiff < 0.1) return;
-
-    // Calculate seek velocity (timeline seconds per real second)
-    // This helps detect rapid scrubbing vs normal playback
-    if (timestampDiff > 0) {
-      seekVelocityRef.current = timeDiff / timestampDiff;
-    }
-
+    // Always advance baseline refs to avoid accumulated-delta false positives
+    // during normal playback (which can cause repeated stop/reschedule glitches).
     lastSeekTimeRef.current = currentTime;
     lastSeekTimestampRef.current = now;
 
-    // Stop current sources on seek
+    // Ignore tiny changes and invalid timing intervals.
+    if (timeDiff < SEEK_DETECTION_DELTA_THRESHOLD || timestampDiff <= 0) {
+      return;
+    }
+
+    // Calculate seek velocity (timeline seconds per real second)
+    // for dynamic scheduling and diagnostics.
+    const seekVelocity = timeDiff / timestampDiff;
+    seekVelocityRef.current = seekVelocity;
+
+    // When paused, playback sources are already stopped via play/pause effect.
+    // Do not force rescheduling here.
+    if (!isPlaying) {
+      return;
+    }
+
+    // Distinguish natural playback progression from real seeks/jumps.
+    // If observed delta is close to expected real-time progression, treat it
+    // as normal playback and skip stop/reschedule to avoid crackle artifacts.
+    const expectedDelta = Math.abs(playbackRate) * timestampDiff;
+    const tolerance = Math.max(PLAYBACK_PROGRESS_TOLERANCE, expectedDelta * 0.35);
+    const isLikelyNaturalPlayback = timeDiff <= expectedDelta + tolerance;
+
+    if (isLikelyNaturalPlayback) {
+      return;
+    }
+
+    // Stop current sources on real seek/jump
     stopAllSources();
 
-    // Reschedule if playing
-    if (isPlaying) {
-      lastScheduleTimeRef.current = 0; // Allow immediate rescheduling
-      void scheduleAudioClips();
-    }
+    // Reschedule immediately if still playing
+    lastScheduleTimeRef.current = 0;
+    void scheduleAudioClips();
 
     // Log if rapid seeking detected (for performance monitoring)
     if (seekVelocityRef.current > RAPID_SEEK_VELOCITY_THRESHOLD) {
@@ -571,7 +706,7 @@ export function useAudioPlayback({
         timeDiff: timeDiff.toFixed(2),
       });
     }
-  }, [enabled, currentTime, isPlaying, stopAllSources, scheduleAudioClips]);
+  }, [enabled, currentTime, isPlaying, playbackRate, stopAllSources, scheduleAudioClips]);
 
   // Update master volume
   useEffect(() => {

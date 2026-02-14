@@ -103,7 +103,7 @@ const DEFAULT_THUMBNAIL_STATE: ThumbnailState = {
  */
 export function useLazyThumbnails(
   requests: ThumbnailRequest[],
-  config: LazyThumbnailsConfig
+  config: LazyThumbnailsConfig,
 ): UseLazyThumbnailsResult {
   const {
     extractFrame,
@@ -149,6 +149,55 @@ export function useLazyThumbnails(
     requestMapRef.current = map;
   }, [requests]);
 
+  useEffect(() => {
+    const activeIds = new Set(requests.map((request) => request.id));
+
+    pendingQueueRef.current = pendingQueueRef.current.filter((request) =>
+      activeIds.has(request.id),
+    );
+
+    for (const pendingId of Array.from(pendingIdsRef.current)) {
+      if (!activeIds.has(pendingId)) {
+        pendingIdsRef.current.delete(pendingId);
+      }
+    }
+
+    for (const loadedId of Array.from(loadedIdsRef.current)) {
+      if (!activeIds.has(loadedId)) {
+        loadedIdsRef.current.delete(loadedId);
+      }
+    }
+
+    setThumbnails((prev) => {
+      const keys = Object.keys(prev);
+      if (keys.length === 0) {
+        return prev;
+      }
+
+      let changed = false;
+      const next: Record<string, ThumbnailState> = {};
+
+      for (const [id, state] of Object.entries(prev)) {
+        if (activeIds.has(id)) {
+          next[id] = state;
+        } else {
+          changed = true;
+        }
+      }
+
+      return changed ? next : prev;
+    });
+  }, [requests]);
+
+  const isRequestCurrent = useCallback((request: ThumbnailRequest): boolean => {
+    const current = requestMapRef.current.get(request.id);
+    if (!current) {
+      return false;
+    }
+
+    return current.timeSec === request.timeSec && current.assetPath === request.assetPath;
+  }, []);
+
   // Process the pending queue - stable callback that uses refs
   const processQueue = useCallback(async () => {
     if (!mountedRef.current) return;
@@ -183,6 +232,11 @@ export function useLazyThumbnails(
 
         if (!mountedRef.current) return;
 
+        if (!isRequestCurrent(request)) {
+          loadingIdsRef.current.delete(request.id);
+          continue;
+        }
+
         loadingIdsRef.current.delete(request.id);
 
         if (framePath) {
@@ -200,6 +254,11 @@ export function useLazyThumbnails(
       } catch {
         if (!mountedRef.current) return;
 
+        if (!isRequestCurrent(request)) {
+          loadingIdsRef.current.delete(request.id);
+          continue;
+        }
+
         loadingIdsRef.current.delete(request.id);
         setThumbnails((prev) => ({
           ...prev,
@@ -213,7 +272,7 @@ export function useLazyThumbnails(
         }
       }
     }
-  }, []);
+  }, [isRequestCurrent]);
 
   // Handle intersection changes - stable callback
   const handleIntersection = useCallback(
@@ -247,7 +306,7 @@ export function useLazyThumbnails(
         void processQueue();
       }
     },
-    [processQueue]
+    [processQueue],
   );
 
   // Create and manage IntersectionObserver - only recreate when root/rootMargin changes
@@ -302,7 +361,7 @@ export function useLazyThumbnails(
     (id: string): ThumbnailState => {
       return thumbnails[id] ?? DEFAULT_THUMBNAIL_STATE;
     },
-    [thumbnails]
+    [thumbnails],
   );
 
   // Calculate counts

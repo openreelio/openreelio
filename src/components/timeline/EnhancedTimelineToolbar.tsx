@@ -27,6 +27,8 @@ import {
   Trash2,
   Layers,
   Focus,
+  Video,
+  Music,
 } from 'lucide-react';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
@@ -43,6 +45,10 @@ export interface EnhancedTimelineToolbarProps {
   onFitToWindow?: () => void;
   /** Callback when add text is clicked */
   onAddText?: () => void;
+  /** Callback when add video track is clicked */
+  onAddVideoTrack?: () => void;
+  /** Callback when add audio track is clicked */
+  onAddAudioTrack?: () => void;
   /** Callback when split is clicked */
   onSplit?: () => void;
   /** Callback when duplicate is clicked */
@@ -100,9 +106,10 @@ const ToolButton = memo(function ToolButton({
       type="button"
       className={`
         p-1.5 rounded transition-colors
-        ${isActive
-          ? 'bg-primary-500/30 text-primary-400'
-          : 'text-editor-text-muted hover:bg-editor-border hover:text-editor-text'
+        ${
+          isActive
+            ? 'bg-primary-500/30 text-primary-400'
+            : 'text-editor-text-muted hover:bg-editor-border hover:text-editor-text'
         }
         disabled:opacity-50 disabled:cursor-not-allowed
       `}
@@ -122,6 +129,8 @@ const ToolButton = memo(function ToolButton({
 function EnhancedTimelineToolbarComponent({
   onFitToWindow,
   onAddText,
+  onAddVideoTrack,
+  onAddAudioTrack,
   onSplit,
   onDuplicate,
   onDelete,
@@ -131,15 +140,8 @@ function EnhancedTimelineToolbarComponent({
 }: EnhancedTimelineToolbarProps) {
   // Store state
   const { zoom, snapEnabled, setZoom, zoomIn, zoomOut, toggleSnap } = useTimelineStore();
-  const {
-    isPlaying,
-    currentTime,
-    togglePlayback,
-    goToStart,
-    goToEnd,
-    stepForward,
-    stepBackward,
-  } = usePlaybackStore();
+  const { isPlaying, currentTime, togglePlayback, goToStart, goToEnd, stepForward, stepBackward } =
+    usePlaybackStore();
   const {
     activeTool,
     setActiveTool,
@@ -157,7 +159,7 @@ function EnhancedTimelineToolbarComponent({
     (tool: EditorTool) => {
       setActiveTool(tool);
     },
-    [setActiveTool]
+    [setActiveTool],
   );
 
   const handleZoomIn = useCallback(() => {
@@ -172,7 +174,7 @@ function EnhancedTimelineToolbarComponent({
     (e: React.ChangeEvent<HTMLInputElement>) => {
       setZoom(parseInt(e.target.value, 10));
     },
-    [setZoom]
+    [setZoom],
   );
 
   const handleFitToWindow = useCallback(() => {
@@ -194,6 +196,14 @@ function EnhancedTimelineToolbarComponent({
   const handleAddText = useCallback(() => {
     onAddText?.();
   }, [onAddText]);
+
+  const handleAddVideoTrack = useCallback(() => {
+    onAddVideoTrack?.();
+  }, [onAddVideoTrack]);
+
+  const handleAddAudioTrack = useCallback(() => {
+    onAddAudioTrack?.();
+  }, [onAddAudioTrack]);
 
   const handleSplit = useCallback(() => {
     onSplit?.();
@@ -247,7 +257,7 @@ function EnhancedTimelineToolbarComponent({
         }
       }
     },
-    [zoomIn, zoomOut, onFitToWindow]
+    [zoomIn, zoomOut, onFitToWindow],
   );
 
   // ===========================================================================
@@ -275,21 +285,9 @@ function EnhancedTimelineToolbarComponent({
       <div className="flex items-center gap-1">
         {/* Tool Selection */}
         <div className="flex items-center gap-0.5 bg-editor-panel/50 rounded p-0.5">
-          <ToolButton
-            tool="select"
-            activeTool={activeTool}
-            onClick={handleToolChange}
-          />
-          <ToolButton
-            tool="razor"
-            activeTool={activeTool}
-            onClick={handleToolChange}
-          />
-          <ToolButton
-            tool="hand"
-            activeTool={activeTool}
-            onClick={handleToolChange}
-          />
+          <ToolButton tool="select" activeTool={activeTool} onClick={handleToolChange} />
+          <ToolButton tool="razor" activeTool={activeTool} onClick={handleToolChange} />
+          <ToolButton tool="hand" activeTool={activeTool} onClick={handleToolChange} />
         </div>
 
         {/* Divider */}
@@ -339,6 +337,29 @@ function EnhancedTimelineToolbarComponent({
           title="Add text (T)"
         >
           <Type className="w-4 h-4" />
+        </button>
+
+        {/* Add Track Buttons */}
+        <button
+          data-testid="add-video-track-button"
+          type="button"
+          className="p-1.5 rounded text-sky-400 hover:bg-sky-600/20 hover:text-sky-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          onClick={handleAddVideoTrack}
+          disabled={!hasActiveSequence}
+          title="Add video track"
+        >
+          <Video className="w-4 h-4" />
+        </button>
+
+        <button
+          data-testid="add-audio-track-button"
+          type="button"
+          className="p-1.5 rounded text-amber-400 hover:bg-amber-600/20 hover:text-amber-300 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          onClick={handleAddAudioTrack}
+          disabled={!hasActiveSequence}
+          title="Add audio track"
+        >
+          <Music className="w-4 h-4" />
         </button>
       </div>
 
@@ -445,7 +466,9 @@ function EnhancedTimelineToolbarComponent({
               : 'text-editor-text-muted hover:bg-editor-border hover:text-editor-text'
           }`}
           onClick={handleAutoScrollToggle}
-          title={autoScrollEnabled ? 'Disable Auto-Follow (Shift+F)' : 'Enable Auto-Follow (Shift+F)'}
+          title={
+            autoScrollEnabled ? 'Disable Auto-Follow (Shift+F)' : 'Enable Auto-Follow (Shift+F)'
+          }
         >
           <Focus className="w-4 h-4" />
         </button>

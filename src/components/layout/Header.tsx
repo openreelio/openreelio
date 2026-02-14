@@ -4,18 +4,17 @@
  * Application header with branding, project info, menu bar, and toolbar.
  */
 
-import { X, Save, FolderOpen, Download, Search, Settings, Check, Loader2, AlertCircle } from 'lucide-react';
+import { X, Save, FolderOpen, Download, Search, Settings, Loader2 } from 'lucide-react';
 import { UndoRedoButtons } from '@/components/ui';
 import { SearchPanel } from '@/components/features/search';
 import { SettingsDialog } from '@/components/features/settings';
 import { ShortcutsDialog } from '@/components/features/help';
 import { useProjectStore, useUIStore } from '@/stores';
-import { useCallback, useState, useEffect, useRef } from 'react';
+import { useCallback, useState, useEffect, useMemo, useRef } from 'react';
 import { createLogger } from '@/services/logger';
-import { updateService } from '@/services/updateService';
+import { SaveStatusBadge, type SaveStatus } from './SaveStatusBadge';
+import { UnsavedChangesDialog } from './UnsavedChangesDialog';
 import type { AssetSearchResultItem } from '@/hooks/useSearch';
-
-type SaveStatus = 'idle' | 'saving' | 'saved' | 'error';
 
 const logger = createLogger('Header');
 
@@ -56,30 +55,27 @@ export function Header({
   const isSaving = saveStatus === 'saving';
   const [showSearch, setShowSearch] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
-  const [displayVersion, setDisplayVersion] = useState(version);
+
+  const isMacLikePlatform = useMemo(
+    () => typeof navigator !== 'undefined' && /(Mac|iPhone|iPad|iPod)/i.test(navigator.platform),
+    [],
+  );
+  const searchShortcutLabel = isMacLikePlatform ? '⌘K' : 'Ctrl+K';
+  const settingsShortcutLabel = isMacLikePlatform ? '⌘,' : 'Ctrl+,';
+  const saveShortcutLabel = isMacLikePlatform ? '⌘S' : 'Ctrl+S';
 
   // Global settings dialog state
   const isSettingsOpen = useUIStore((state) => state.isSettingsOpen);
   const openSettings = useUIStore((state) => state.openSettings);
   const closeSettings = useUIStore((state) => state.closeSettings);
 
-  // Fetch actual version from backend on mount
-  useEffect(() => {
-    updateService.getCurrentVersion().then((v) => {
-      if (v && v !== 'unknown') {
-        setDisplayVersion(v);
-      }
-    }).catch((error) => {
-      logger.warn('Failed to fetch app version', { error });
-    });
-  }, []);
-
   // Keyboard shortcuts (Ctrl/Cmd + K for search, Ctrl/Cmd + , for settings, ? for shortcuts)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Skip all shortcuts if in input element to avoid disrupting user input
       const target = e.target as HTMLElement;
-      const isInput = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
+      const isInput =
+        target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable;
 
       if (isInput) {
         return;
@@ -113,7 +109,7 @@ export function Header({
       onSearchResultSelect?.(result);
       setShowSearch(false);
     },
-    [onSearchResultSelect]
+    [onSearchResultSelect],
   );
 
   const handleSave = useCallback(async () => {
@@ -185,185 +181,121 @@ export function Header({
   }, []);
 
   return (
-    <div className="h-10 bg-editor-sidebar border-b border-editor-border flex items-center px-4">
-      {/* Branding */}
-      <h1 className="text-sm font-semibold text-primary-400">{title}</h1>
-      <span className="ml-2 text-xs text-editor-text-muted">v{displayVersion}</span>
+    <div className="border-b border-editor-border bg-editor-sidebar px-2 py-2 sm:px-3">
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
+        {/* Branding */}
+        <div className="flex min-w-0 items-center gap-2">
+          <h1 className="shrink-0 text-sm font-semibold text-primary-400">{title}</h1>
+          <span className="text-xs text-editor-text-muted">v{version}</span>
+        </div>
 
-      {/* Separator */}
-      {meta && (
-        <>
-          <div className="mx-3 h-4 w-px bg-editor-border" />
+        {/* Project Info */}
+        {meta && (
+          <div className="hidden min-w-0 items-center gap-2 lg:flex">
+            <div className="h-4 w-px bg-editor-border" />
+            <div className="flex min-w-0 items-center gap-2">
+              <FolderOpen className="h-4 w-4 shrink-0 text-editor-text-muted" />
+              <span className="max-w-[220px] truncate text-sm text-editor-text" title={meta.name}>
+                {meta.name}
+              </span>
 
-          {/* Project Info */}
-          <div className="flex items-center gap-2 min-w-0 max-w-[200px]">
-            <FolderOpen className="w-4 h-4 text-editor-text-muted flex-shrink-0" />
-            <span className="text-sm text-editor-text truncate" title={meta.name}>{meta.name}</span>
-
-            {/* Save Status Indicator */}
-            <div className="flex items-center gap-1.5 ml-2">
-              {saveStatus === 'saving' && (
-                <span className="flex items-center gap-1 text-xs text-blue-400">
-                  <Loader2 className="w-3 h-3 animate-spin" />
-                  Saving...
-                </span>
-              )}
-              {saveStatus === 'saved' && (
-                <span className="flex items-center gap-1 text-xs text-green-400">
-                  <Check className="w-3 h-3" />
-                  Saved
-                </span>
-              )}
-              {saveStatus === 'error' && (
-                <span className="flex items-center gap-1 text-xs text-red-400">
-                  <AlertCircle className="w-3 h-3" />
-                  Save failed
-                </span>
-              )}
-              {saveStatus === 'idle' && isDirty && (
-                <span className="flex items-center gap-1 text-xs text-yellow-500" title="Unsaved changes">
-                  <span className="w-2 h-2 bg-yellow-500 rounded-full" />
-                  Unsaved
-                </span>
-              )}
+              {/* Save Status Indicator */}
+              <div className="ml-1 flex items-center gap-1.5">
+                <SaveStatusBadge status={saveStatus} isDirty={isDirty} />
+              </div>
             </div>
           </div>
-        </>
-      )}
+        )}
 
-      {/* Separator */}
-      <div className="mx-3 h-4 w-px bg-editor-border" />
-
-      {/* Search Button */}
-      <button
-        onClick={() => setShowSearch(true)}
-        className="flex items-center gap-2 px-3 py-1.5 bg-surface-panel border border-border-default rounded-lg text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
-        title="Search (Ctrl+K)"
-      >
-        <Search className="w-4 h-4" />
-        <span className="text-sm hidden sm:inline">Search</span>
-        <kbd className="hidden md:inline-block text-xs bg-surface-active px-1.5 py-0.5 rounded">⌘K</kbd>
-      </button>
-
-      {/* Spacer */}
-      <div className="flex-1" />
-
-      {/* Toolbar */}
-      {showToolbar && (
-        <div className="flex items-center gap-2">
-          <UndoRedoButtons />
-
-          {/* Separator */}
-          <div className="mx-2 h-4 w-px bg-editor-border" />
-
-          {/* Save Button */}
+        <div className="ml-auto flex min-w-0 items-center gap-2">
+          {/* Search Button */}
           <button
-            onClick={() => void handleSave()}
-            disabled={!isDirty || isSaving}
-            className={`p-1.5 rounded hover:bg-editor-bg transition-colors disabled:cursor-not-allowed ${
-              isSaving
-                ? 'text-blue-400'
-                : isDirty
-                  ? 'text-yellow-500 hover:text-yellow-400'
-                  : 'text-editor-text-muted hover:text-editor-text disabled:opacity-50'
-            }`}
-            title={isSaving ? 'Saving...' : isDirty ? 'Save project (Ctrl+S)' : 'No changes to save'}
+            onClick={() => setShowSearch(true)}
+            className="flex items-center gap-2 rounded-lg border border-border-default bg-surface-panel px-2 py-1.5 text-text-secondary transition-colors hover:border-border-strong hover:text-text-primary sm:px-3"
+            title={`Search (${searchShortcutLabel})`}
           >
-            {isSaving ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Save className="w-4 h-4" />
-            )}
+            <Search className="h-4 w-4" />
+            <span className="hidden text-sm sm:inline">Search</span>
+            <kbd className="hidden rounded bg-surface-active px-1.5 py-0.5 text-xs md:inline-block">
+              {searchShortcutLabel}
+            </kbd>
           </button>
 
-          {/* Export Button */}
-          {onExport && (
-            <button
-              onClick={onExport}
-              className="p-1.5 rounded hover:bg-editor-bg transition-colors text-editor-text-muted hover:text-primary-400"
-              title="Export video"
-            >
-              <Download className="w-4 h-4" />
-            </button>
-          )}
+          {/* Toolbar */}
+          {showToolbar && (
+            <div className="flex items-center gap-1 sm:gap-2">
+              <div className="hidden sm:flex">
+                <UndoRedoButtons />
+              </div>
 
-          {/* Separator */}
-          <div className="mx-1 h-4 w-px bg-editor-border" />
-
-          {/* Settings Button */}
-          <button
-            onClick={() => openSettings()}
-            className="p-1.5 rounded hover:bg-editor-bg transition-colors text-editor-text-muted hover:text-editor-text"
-            title="Settings (Ctrl+,)"
-          >
-            <Settings className="w-4 h-4" />
-          </button>
-
-          {/* Close Project Button */}
-          <button
-            onClick={handleCloseClick}
-            className="p-1.5 rounded hover:bg-editor-bg transition-colors text-editor-text-muted hover:text-red-400"
-            title="Close project"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-      )}
-
-      {/* Unsaved Changes Confirmation Dialog */}
-      {showCloseConfirm && (
-        <div
-          data-testid="unsaved-changes-dialog"
-          role="dialog"
-          aria-modal="true"
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-        >
-          {/* Backdrop */}
-          <div
-            className="absolute inset-0 bg-surface-overlay backdrop-blur-sm"
-            onClick={handleCancelClose}
-          />
-
-          {/* Dialog Content */}
-          <div className="relative z-10 w-full max-w-md bg-surface-elevated rounded-lg shadow-xl p-6 border border-border-default">
-            <h2 className="text-lg font-semibold text-text-primary mb-2">
-              Unsaved Changes
-            </h2>
-            <p className="text-text-secondary mb-6">
-              You have unsaved changes. Do you want to save before closing?
-            </p>
-
-            {/* Actions - 3 buttons: Save, Don't Save, Cancel */}
-            <div className="flex flex-col-reverse sm:flex-row sm:justify-end gap-2 sm:gap-3">
+              {/* Save Button */}
               <button
-                type="button"
-                className="px-4 py-2 text-sm font-medium text-text-secondary bg-surface-active rounded hover:bg-surface-highest transition-colors"
-                onClick={handleCancelClose}
+                onClick={() => void handleSave()}
+                disabled={!isDirty || isSaving}
+                className={`rounded p-1.5 transition-colors disabled:cursor-not-allowed ${
+                  isSaving
+                    ? 'text-blue-400'
+                    : isDirty
+                      ? 'text-yellow-500 hover:text-yellow-400 hover:bg-editor-bg'
+                      : 'text-editor-text-muted hover:text-editor-text disabled:opacity-50'
+                }`}
+                title={
+                  isSaving
+                    ? 'Saving...'
+                    : isDirty
+                      ? `Save project (${saveShortcutLabel})`
+                      : 'No changes to save'
+                }
               >
-                Cancel
-              </button>
-              <button
-                type="button"
-                className="px-4 py-2 text-sm font-medium text-white bg-status-error rounded hover:bg-red-700 transition-colors"
-                onClick={handleDiscardAndClose}
-              >
-                Don&apos;t Save
-              </button>
-              <button
-                type="button"
-                className="px-4 py-2 text-sm font-medium text-white bg-primary-600 rounded hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
-                onClick={() => void handleSaveAndClose()}
-                disabled={isSaving}
-              >
-                {isSaving && (
-                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                {isSaving ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4" />
                 )}
-                Save
+              </button>
+
+              {/* Export Button */}
+              {onExport && (
+                <button
+                  onClick={onExport}
+                  className="rounded p-1.5 text-editor-text-muted transition-colors hover:bg-editor-bg hover:text-primary-400"
+                  title="Export video"
+                >
+                  <Download className="h-4 w-4" />
+                </button>
+              )}
+
+              <div className="h-4 w-px bg-editor-border" />
+
+              {/* Settings Button */}
+              <button
+                onClick={() => openSettings()}
+                className="rounded p-1.5 text-editor-text-muted transition-colors hover:bg-editor-bg hover:text-editor-text"
+                title={`Settings (${settingsShortcutLabel})`}
+              >
+                <Settings className="h-4 w-4" />
+              </button>
+
+              {/* Close Project Button */}
+              <button
+                onClick={handleCloseClick}
+                className="rounded p-1.5 text-editor-text-muted transition-colors hover:bg-editor-bg hover:text-red-400"
+                title="Close project"
+              >
+                <X className="h-4 w-4" />
               </button>
             </div>
-          </div>
+          )}
         </div>
-      )}
+      </div>
+
+      <UnsavedChangesDialog
+        isOpen={showCloseConfirm}
+        isSaving={isSaving}
+        onCancel={handleCancelClose}
+        onDiscard={handleDiscardAndClose}
+        onSave={() => void handleSaveAndClose()}
+      />
 
       {/* Search Panel */}
       <SearchPanel
@@ -375,16 +307,10 @@ export function Header({
       />
 
       {/* Settings Dialog */}
-      <SettingsDialog
-        isOpen={isSettingsOpen}
-        onClose={closeSettings}
-      />
+      <SettingsDialog isOpen={isSettingsOpen} onClose={closeSettings} />
 
       {/* Shortcuts Dialog */}
-      <ShortcutsDialog
-        isOpen={showShortcuts}
-        onClose={() => setShowShortcuts(false)}
-      />
+      <ShortcutsDialog isOpen={showShortcuts} onClose={() => setShowShortcuts(false)} />
     </div>
   );
 }

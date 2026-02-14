@@ -49,7 +49,7 @@ interface RenderableClip extends ActiveClip {
 
 const FRAME_INTERVAL = 1000 / 30; // 30fps for animation frame updates
 const PRECISE_SEEK_TOLERANCE = 0.008; // ~0.5 frame at 60fps for paused scrubbing
-const DRIFT_SEEK_TOLERANCE = 0.08; // ~5 frames at 60fps for playback drift correction
+const DRIFT_SEEK_TOLERANCE = 0.12; // reduce micro-stutter from overly frequent drift seeks
 const HARD_SEEK_DETECTION_DELTA = 0.25; // Treat as explicit jump when delta exceeds this
 const TIME_CHANGE_EPSILON = 0.001;
 const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:/;
@@ -266,100 +266,109 @@ export function ProxyPreviewPlayer({
   const getClampedSourceTime = useCallback((clip: Clip, timelineTime: number) => {
     const offsetInClip = timelineTime - clip.place.timelineInSec;
     const safeSpeed = getSafeClipSpeed(clip);
-    const sourceTime = clip.range.sourceInSec + (offsetInClip * safeSpeed);
-    return Math.max(
-      clip.range.sourceInSec,
-      Math.min(clip.range.sourceOutSec, sourceTime),
-    );
+    const sourceTime = clip.range.sourceInSec + offsetInClip * safeSpeed;
+    return Math.max(clip.range.sourceInSec, Math.min(clip.range.sourceOutSec, sourceTime));
   }, []);
 
   // Sync video elements to timeline position.
   // - forceSeek=true: hard align to requested time (user seek/scrub)
   // - forceSeek=false: only correct significant drift during playback
-  const syncVideos = useCallback((timelineTime: number, forceSeek: boolean = false) => {
-    const safeTimelineTime = clampTimelineTime(timelineTime, duration);
+  const syncVideos = useCallback(
+    (timelineTime: number, forceSeek: boolean = false) => {
+      const safeTimelineTime = clampTimelineTime(timelineTime, duration);
 
-    renderableClips.forEach(({ clip }) => {
-      const video = videoRefs.current.get(clip.id);
-      if (!video) return;
+      renderableClips.forEach(({ clip }) => {
+        const video = videoRefs.current.get(clip.id);
+        if (!video) return;
 
-      const clampedSourceTime = getClampedSourceTime(clip, safeTimelineTime);
-      const safeSpeed = getSafeClipSpeed(clip);
+        const clampedSourceTime = getClampedSourceTime(clip, safeTimelineTime);
+        const safeSpeed = getSafeClipSpeed(clip);
 
-      const tolerance = forceSeek || !isPlaying ? PRECISE_SEEK_TOLERANCE : DRIFT_SEEK_TOLERANCE;
-      if (Math.abs(video.currentTime - clampedSourceTime) > tolerance) {
-        video.currentTime = clampedSourceTime;
-      }
-
-      // Sync playback rate
-      video.playbackRate = playbackRate * safeSpeed;
-
-      // ProxyPreviewPlayer video elements stay muted; Web Audio owns timeline audio output.
-      // Keep volume at zero as a defensive fallback even if browser muted state changes.
-      video.volume = 0;
-
-      // Sync play state
-      if (isPlaying && video.paused) {
-        const playResult = video.play();
-        if (playResult && typeof playResult.catch === 'function') {
-          void playResult.catch(() => {
-            // Autoplay prevented
-          });
+        const tolerance = forceSeek || !isPlaying ? PRECISE_SEEK_TOLERANCE : DRIFT_SEEK_TOLERANCE;
+        // During active playback, avoid forcing currentTime while the element is
+        // already seeking. Re-seeking a seeking element can cause visible jitter.
+        if (!forceSeek && isPlaying && video.seeking) {
+          return;
         }
-      } else if (!isPlaying && !video.paused) {
-        video.pause();
-      }
-    });
-  }, [duration, renderableClips, getClampedSourceTime, isPlaying, playbackRate]);
+
+        if (Math.abs(video.currentTime - clampedSourceTime) > tolerance) {
+          video.currentTime = clampedSourceTime;
+        }
+
+        // Sync playback rate
+        video.playbackRate = playbackRate * safeSpeed;
+
+        // ProxyPreviewPlayer video elements stay muted; Web Audio owns timeline audio output.
+        // Keep volume at zero as a defensive fallback even if browser muted state changes.
+        video.volume = 0;
+
+        // Sync play state
+        if (isPlaying && video.paused) {
+          const playResult = video.play();
+          if (playResult && typeof playResult.catch === 'function') {
+            void playResult.catch(() => {
+              // Autoplay prevented
+            });
+          }
+        } else if (!isPlaying && !video.paused) {
+          video.pause();
+        }
+      });
+    },
+    [duration, renderableClips, getClampedSourceTime, isPlaying, playbackRate],
+  );
 
   // Track playback start time for synthetic time advancement
   const playbackStartRef = useRef<{ timestamp: number; timelineTime: number } | null>(null);
 
   // Animation frame loop for playback
-  const updatePlayback = useCallback((timestamp: number) => {
-    if (!isPlaying) return;
+  const updatePlayback = useCallback(
+    (timestamp: number) => {
+      if (!isPlaying) return;
 
-    // Limit updates to avoid excessive re-renders
-    if (timestamp - lastUpdateTimeRef.current >= FRAME_INTERVAL) {
-      const prevTimestamp = lastUpdateTimeRef.current;
-      lastUpdateTimeRef.current = timestamp;
+      // Limit updates to avoid excessive re-renders
+      if (timestamp - lastUpdateTimeRef.current >= FRAME_INTERVAL) {
+        const prevTimestamp = lastUpdateTimeRef.current;
+        lastUpdateTimeRef.current = timestamp;
 
-      // Find the first playing video to sync time from (not just first clip)
-      // This handles cases where some clips may have load errors or be paused
-      let foundVideoSource = false;
-      for (const { clip } of renderableClips) {
-        const video = videoRefs.current.get(clip.id);
-        if (video && !video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-          // Calculate timeline time from video time
-          const offsetInSource = video.currentTime - clip.range.sourceInSec;
-          const safeSpeed = getSafeClipSpeed(clip);
-          const timelineTime = clip.place.timelineInSec + (offsetInSource / safeSpeed);
-          const clampedTimelineTime = clampTimelineTime(timelineTime, duration);
-          setCurrentTime(clampedTimelineTime, 'proxy-video-clock');
-          // Update synthetic time reference
-          playbackStartRef.current = { timestamp, timelineTime: clampedTimelineTime };
-          foundVideoSource = true;
-          break; // Use first valid video as time source
+        // Find the first playing video to sync time from (not just first clip)
+        // This handles cases where some clips may have load errors or be paused
+        let foundVideoSource = false;
+        for (const { clip } of renderableClips) {
+          const video = videoRefs.current.get(clip.id);
+          if (video && !video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+            // Calculate timeline time from video time
+            const offsetInSource = video.currentTime - clip.range.sourceInSec;
+            const safeSpeed = getSafeClipSpeed(clip);
+            const timelineTime = clip.place.timelineInSec + offsetInSource / safeSpeed;
+            const clampedTimelineTime = clampTimelineTime(timelineTime, duration);
+            setCurrentTime(clampedTimelineTime, 'proxy-video-clock');
+            // Update synthetic time reference
+            playbackStartRef.current = { timestamp, timelineTime: clampedTimelineTime };
+            foundVideoSource = true;
+            break; // Use first valid video as time source
+          }
+        }
+
+        // Fallback: If no video is available, advance time synthetically
+        // This ensures playback continues even when all videos fail to load
+        if (!foundVideoSource && prevTimestamp > 0) {
+          const elapsed = (timestamp - prevTimestamp) / 1000; // Convert to seconds
+          const timeAdvance = elapsed * playbackRate;
+          const newTime = clampTimelineTime(currentTime + timeAdvance, duration);
+          setCurrentTime(newTime, 'proxy-synthetic-clock');
+
+          // Stop at end of duration
+          if (newTime >= duration) {
+            setIsPlaying(false);
+          }
         }
       }
 
-      // Fallback: If no video is available, advance time synthetically
-      // This ensures playback continues even when all videos fail to load
-      if (!foundVideoSource && prevTimestamp > 0) {
-        const elapsed = (timestamp - prevTimestamp) / 1000; // Convert to seconds
-        const timeAdvance = elapsed * playbackRate;
-        const newTime = clampTimelineTime(currentTime + timeAdvance, duration);
-        setCurrentTime(newTime, 'proxy-synthetic-clock');
-
-        // Stop at end of duration
-        if (newTime >= duration) {
-          setIsPlaying(false);
-        }
-      }
-    }
-
-    animationFrameRef.current = requestAnimationFrame(updatePlayback);
-  }, [isPlaying, renderableClips, setCurrentTime, playbackRate, currentTime, duration, setIsPlaying]);
+      animationFrameRef.current = requestAnimationFrame(updatePlayback);
+    },
+    [isPlaying, renderableClips, setCurrentTime, playbackRate, currentTime, duration, setIsPlaying],
+  );
 
   // Start/stop animation frame loop
   useEffect(() => {
@@ -387,6 +396,24 @@ export function ProxyPreviewPlayer({
     if (!isPlaying) return;
     syncVideos(currentTime, false);
   }, [currentTime, isPlaying, syncVideos]);
+
+  // Playback state transition sync:
+  // Ensure pause is applied immediately even when currentTime does not change.
+  // Without this, toggling play->pause can leave HTMLVideoElements running
+  // until the next seek/time update arrives.
+  useEffect(() => {
+    if (!isPlaying) {
+      // Hard-stop every known video element to avoid background playback from
+      // stale refs that may not be in the current active clip set.
+      videoRefs.current.forEach((video) => {
+        if (!video.paused) {
+          video.pause();
+        }
+      });
+
+      syncVideos(currentTime, true);
+    }
+  }, [isPlaying, currentTime, syncVideos]);
 
   // Hard-seek pass:
   // - always when paused (timeline scrubbing/playhead drag)
@@ -430,7 +457,7 @@ export function ProxyPreviewPlayer({
 
   // Clean up stale video refs
   useEffect(() => {
-    const activeClipIds = new Set(renderableClips.map(c => c.clip.id));
+    const activeClipIds = new Set(renderableClips.map((c) => c.clip.id));
     videoRefs.current.forEach((video, clipId) => {
       if (!activeClipIds.has(clipId)) {
         video.pause();
@@ -441,9 +468,9 @@ export function ProxyPreviewPlayer({
 
   // Clear error state when clips change or proxy becomes ready
   useEffect(() => {
-    const activeClipIds = new Set(renderableClips.map(c => c.clip.id));
+    const activeClipIds = new Set(renderableClips.map((c) => c.clip.id));
 
-    setVideoErrors(prev => {
+    setVideoErrors((prev) => {
       let changed = false;
       const next = new Map(prev);
 
@@ -477,28 +504,35 @@ export function ProxyPreviewPlayer({
   }, []);
 
   // Handle video loaded
-  const handleVideoLoaded = useCallback((clipId: string) => {
-    const video = videoRefs.current.get(clipId);
-    if (video) {
-      // Update buffered progress
-      if (video.buffered.length > 0) {
-        const bufferedEnd = video.buffered.end(video.buffered.length - 1);
-        setBuffered(bufferedEnd);
+  const handleVideoLoaded = useCallback(
+    (clipId: string) => {
+      const video = videoRefs.current.get(clipId);
+      if (video) {
+        // Update buffered progress
+        if (video.buffered.length > 0) {
+          const bufferedEnd = video.buffered.end(video.buffered.length - 1);
+          setBuffered(bufferedEnd);
+        }
+        // Clear any previous error for this clip (skip if no error existed)
+        setVideoErrors((prev) => {
+          if (!prev.has(clipId)) return prev;
+          const next = new Map(prev);
+          next.delete(clipId);
+          return next;
+        });
+
+        // Keep newly loaded clips frame-accurate with the current playhead.
+        // Without this, paused scrubbing can display frame 0 until the next seek.
+        syncVideos(currentTime, true);
       }
-      // Clear any previous error for this clip (skip if no error existed)
-      setVideoErrors(prev => {
-        if (!prev.has(clipId)) return prev;
-        const next = new Map(prev);
-        next.delete(clipId);
-        return next;
-      });
-    }
-  }, []);
+    },
+    [currentTime, syncVideos],
+  );
 
   // Handle video load error
   const handleVideoError = useCallback((clipId: string, error: string) => {
     logger.error('Proxy video element failed to load', { clipId, error });
-    setVideoErrors(prev => {
+    setVideoErrors((prev) => {
       const next = new Map(prev);
       next.set(clipId, error);
       return next;
@@ -514,12 +548,15 @@ export function ProxyPreviewPlayer({
     (time: number) => {
       seek(Math.max(0, Math.min(duration, time)));
     },
-    [seek, duration]
+    [seek, duration],
   );
 
-  const handleVolumeChange = useCallback((newVolume: number) => {
-    setVolume(newVolume);
-  }, [setVolume]);
+  const handleVolumeChange = useCallback(
+    (newVolume: number) => {
+      setVolume(newVolume);
+    },
+    [setVolume],
+  );
 
   const handleMuteToggle = useCallback(() => {
     toggleMute();
@@ -529,17 +566,23 @@ export function ProxyPreviewPlayer({
     if (!containerRef.current) return;
 
     if (!document.fullscreenElement) {
-      void containerRef.current.requestFullscreen?.().then(() => {
-        setIsFullscreen(true);
-      }).catch(() => {
-        // Fullscreen not supported
-      });
+      void containerRef.current
+        .requestFullscreen?.()
+        .then(() => {
+          setIsFullscreen(true);
+        })
+        .catch(() => {
+          // Fullscreen not supported
+        });
     } else {
-      void document.exitFullscreen?.().then(() => {
-        setIsFullscreen(false);
-      }).catch(() => {
-        // Exit failed
-      });
+      void document
+        .exitFullscreen?.()
+        .then(() => {
+          setIsFullscreen(false);
+        })
+        .catch(() => {
+          // Exit failed
+        });
     }
   }, []);
 
@@ -564,26 +607,30 @@ export function ProxyPreviewPlayer({
   }, [syncWithTimeline, currentTime, duration, isPlaying, setIsPlaying, setCurrentTime]);
 
   // Keyboard shortcuts
-  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.defaultPrevented) return;
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (e.defaultPrevented) return;
 
-    switch (e.key) {
-      case ' ':
-        e.preventDefault();
-        togglePlayback();
-        break;
-      case 'f':
-      case 'F':
-        e.preventDefault();
-        handleFullscreenToggle();
-        break;
-    }
-  }, [togglePlayback, handleFullscreenToggle]);
+      switch (e.key) {
+        case ' ':
+          e.preventDefault();
+          togglePlayback();
+          break;
+        case 'f':
+        case 'F':
+          e.preventDefault();
+          handleFullscreenToggle();
+          break;
+      }
+    },
+    [togglePlayback, handleFullscreenToggle],
+  );
 
   // Calculate aspect ratio from sequence format (guard against zero height)
-  const aspectRatio = sequence?.format?.canvas && sequence.format.canvas.height > 0
-    ? sequence.format.canvas.width / sequence.format.canvas.height
-    : 16 / 9;
+  const aspectRatio =
+    sequence?.format?.canvas && sequence.format.canvas.height > 0
+      ? sequence.format.canvas.width / sequence.format.canvas.height
+      : 16 / 9;
 
   // Empty state
   if (!sequence) {
@@ -686,7 +733,9 @@ export function ProxyPreviewPlayer({
                 playsInline
                 muted
                 onLoadedData={() => handleVideoLoaded(clip.id)}
-                onError={(e) => handleVideoError(clip.id, e.currentTarget.error?.message || 'Unknown error')}
+                onError={(e) =>
+                  handleVideoError(clip.id, e.currentTarget.error?.message || 'Unknown error')
+                }
               />
             );
           })
@@ -718,4 +767,3 @@ export function ProxyPreviewPlayer({
     </div>
   );
 }
-

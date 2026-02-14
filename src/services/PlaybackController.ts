@@ -87,6 +87,12 @@ const DEFAULT_CONFIG: PlaybackControllerConfig = {
 /** Minimum interval between sync corrections (ms) */
 const SYNC_CORRECTION_COOLDOWN_MS = 100;
 
+/**
+ * Maximum age for audio/video reports to be considered a valid sync pair.
+ * Prevents false drift corrections when only one clock source is reporting.
+ */
+const SYNC_SOURCE_FRESHNESS_MS = 300;
+
 /** Seek debounce time during scrubbing (ms) */
 const SCRUB_SEEK_DEBOUNCE_MS = 16; // ~60fps
 
@@ -119,6 +125,8 @@ export class PlaybackController {
   private playbackMode: PlaybackMode = 'normal';
   private listeners: Set<PlaybackEventListener> = new Set();
   private isDisposed: boolean = false;
+  private lastAudioReportTime: number = 0;
+  private lastVideoReportTime: number = 0;
 
   // Performance tracking
   private seekCount: number = 0;
@@ -230,7 +238,7 @@ export class PlaybackController {
       source?: string;
       forceUpdate?: boolean;
       frameAccurate?: boolean;
-    } = {}
+    } = {},
   ): boolean {
     if (this.isDisposed) return false;
 
@@ -336,6 +344,7 @@ export class PlaybackController {
     if (this.isDisposed) return;
 
     this.syncState.audioTime = audioTime;
+    this.lastAudioReportTime = performance.now();
     this.checkAndCorrectSync();
   }
 
@@ -346,7 +355,18 @@ export class PlaybackController {
     if (this.isDisposed) return;
 
     this.syncState.videoTime = videoTime;
+    this.lastVideoReportTime = performance.now();
     this.checkAndCorrectSync();
+  }
+
+  /**
+   * Whether both A/V sources have reported recently enough for reliable drift correction.
+   */
+  private hasFreshSyncSources(now: number): boolean {
+    return (
+      now - this.lastAudioReportTime <= SYNC_SOURCE_FRESHNESS_MS &&
+      now - this.lastVideoReportTime <= SYNC_SOURCE_FRESHNESS_MS
+    );
   }
 
   /**
@@ -356,13 +376,21 @@ export class PlaybackController {
     if (!this.config.enableSyncCorrection) return;
     if (this.currentDragOperation !== 'none') return; // Don't correct during drag
 
+    const now = performance.now();
+
+    // Skip correction when we don't have a fresh A/V pair.
+    // This avoids self-induced seeks/jitter from single-source reports.
+    if (!this.hasFreshSyncSources(now)) {
+      this.syncState.isSynced = true;
+      return;
+    }
+
     const store = usePlaybackStore.getState();
     if (!store.isPlaying) return;
 
     const driftMs = Math.abs(this.syncState.videoTime - this.syncState.audioTime) * 1000;
     this.syncState.driftMs = driftMs;
 
-    const now = performance.now();
     const timeSinceLastCorrection = now - this.syncState.lastCorrectionTime;
 
     // Cooldown period to prevent oscillation
@@ -453,8 +481,7 @@ export class PlaybackController {
     return {
       seekCount: this.seekCount,
       deduplicatedSeekCount: this.deduplicatedSeekCount,
-      deduplicationRate:
-        this.seekCount > 0 ? this.deduplicatedSeekCount / this.seekCount : 0,
+      deduplicationRate: this.seekCount > 0 ? this.deduplicatedSeekCount / this.seekCount : 0,
       currentDragOperation: this.currentDragOperation,
       playbackMode: this.playbackMode,
       syncState: { ...this.syncState },
@@ -564,28 +591,22 @@ export function usePlaybackController(config?: Partial<PlaybackControllerConfig>
     seek: useCallback(
       (time: number, options?: Parameters<PlaybackController['seek']>[1]) =>
         playbackController.seek(time, options),
-      []
+      [],
     ),
     stepForward: useCallback(() => playbackController.stepForward(), []),
     stepBackward: useCallback(() => playbackController.stepBackward(), []),
     snapToFrame: useCallback((time: number) => playbackController.snapToFrame(time), []),
     acquireDragLock: useCallback(
       (operation: DragOperation) => playbackController.acquireDragLock(operation),
-      []
+      [],
     ),
     releaseDragLock: useCallback(
       (operation: DragOperation) => playbackController.releaseDragLock(operation),
-      []
+      [],
     ),
     isDragActive: useCallback(() => playbackController.isDragActive(), []),
-    reportAudioTime: useCallback(
-      (time: number) => playbackController.reportAudioTime(time),
-      []
-    ),
-    reportVideoTime: useCallback(
-      (time: number) => playbackController.reportVideoTime(time),
-      []
-    ),
+    reportAudioTime: useCallback((time: number) => playbackController.reportAudioTime(time), []),
+    reportVideoTime: useCallback((time: number) => playbackController.reportVideoTime(time), []),
     syncState,
     stats,
   };
