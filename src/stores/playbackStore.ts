@@ -109,6 +109,31 @@ export const PLAYBACK_EVENTS = {
 const MIN_PLAYBACK_RATE = 0.25;
 const MAX_PLAYBACK_RATE = 4;
 
+function getSafeDuration(duration: number): number {
+  if (!Number.isFinite(duration) || duration < 0) {
+    return 0;
+  }
+  return duration;
+}
+
+function clampTimeToDuration(time: number, duration: number): number {
+  if (!Number.isFinite(time)) {
+    return 0;
+  }
+  const safeDuration = getSafeDuration(duration);
+  if (safeDuration <= 0) {
+    return Math.max(0, time);
+  }
+  return Math.max(0, Math.min(safeDuration, time));
+}
+
+function normalizeDelta(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return value;
+}
+
 // =============================================================================
 // Playback Events
 // =============================================================================
@@ -212,7 +237,7 @@ export const usePlaybackStore = create<PlaybackStore>()(
 
     seek: (time: number, source = 'seek') => {
       const { duration, currentTime, isPlaying } = get();
-      const newTime = Math.max(0, Math.min(duration, time));
+      const newTime = clampTimeToDuration(time, duration);
       set((state) => {
         state.currentTime = newTime;
       });
@@ -222,7 +247,8 @@ export const usePlaybackStore = create<PlaybackStore>()(
 
     seekForward: (amount: number, source = 'seek-forward') => {
       const { currentTime, duration, isPlaying } = get();
-      const newTime = Math.min(duration, currentTime + amount);
+      const delta = normalizeDelta(amount);
+      const newTime = clampTimeToDuration(currentTime + delta, duration);
       set((state) => {
         state.currentTime = newTime;
       });
@@ -231,8 +257,9 @@ export const usePlaybackStore = create<PlaybackStore>()(
     },
 
     seekBackward: (amount: number, source = 'seek-backward') => {
-      const { currentTime, isPlaying } = get();
-      const newTime = Math.max(0, currentTime - amount);
+      const { currentTime, duration, isPlaying } = get();
+      const delta = normalizeDelta(amount);
+      const newTime = clampTimeToDuration(currentTime - delta, duration);
       set((state) => {
         state.currentTime = newTime;
       });
@@ -251,18 +278,19 @@ export const usePlaybackStore = create<PlaybackStore>()(
 
     goToEnd: (source = 'go-to-end') => {
       const { duration, currentTime, isPlaying } = get();
+      const endTime = clampTimeToDuration(duration, duration);
       set((state) => {
-        state.currentTime = state.duration;
+        state.currentTime = endTime;
       });
-      dispatchSeekEvent(duration, source);
-      recordPlaybackTrace('seek', source, currentTime, duration, isPlaying);
+      dispatchSeekEvent(endTime, source);
+      recordPlaybackTrace('seek', source, currentTime, endTime, isPlaying);
     },
 
     stepForward: (fps: number, source = 'step-forward') => {
-      if (fps <= 0) return; // Guard against invalid fps
+      if (!Number.isFinite(fps) || fps <= 0) return; // Guard against invalid fps
       const frameTime = 1 / fps;
       const { currentTime, duration, isPlaying } = get();
-      const newTime = Math.min(duration, currentTime + frameTime);
+      const newTime = clampTimeToDuration(currentTime + frameTime, duration);
       set((state) => {
         state.currentTime = newTime;
       });
@@ -271,10 +299,10 @@ export const usePlaybackStore = create<PlaybackStore>()(
     },
 
     stepBackward: (fps: number, source = 'step-backward') => {
-      if (fps <= 0) return; // Guard against invalid fps
+      if (!Number.isFinite(fps) || fps <= 0) return; // Guard against invalid fps
       const frameTime = 1 / fps;
-      const { currentTime, isPlaying } = get();
-      const newTime = Math.max(0, currentTime - frameTime);
+      const { currentTime, duration, isPlaying } = get();
+      const newTime = clampTimeToDuration(currentTime - frameTime, duration);
       set((state) => {
         state.currentTime = newTime;
       });
@@ -287,19 +315,22 @@ export const usePlaybackStore = create<PlaybackStore>()(
     // =========================================================================
 
     setCurrentTime: (time: number, source = 'time-update') => {
-      const { currentTime, isPlaying } = get();
+      const { currentTime, duration, isPlaying } = get();
+      const newTime = clampTimeToDuration(time, duration);
       set((state) => {
-        state.currentTime = time;
+        state.currentTime = newTime;
       });
       // Use update event for regular time updates (during playback)
       // This is different from seek which is user-initiated
-      dispatchUpdateEvent(time, source);
-      recordPlaybackTrace('time-update', source, currentTime, time, isPlaying);
+      dispatchUpdateEvent(newTime, source);
+      recordPlaybackTrace('time-update', source, currentTime, newTime, isPlaying);
     },
 
-    setDuration: (duration: number) => {
+    setDuration: (durationInput: number) => {
+      const nextDuration = getSafeDuration(durationInput);
       set((state) => {
-        state.duration = duration;
+        state.duration = nextDuration;
+        state.currentTime = clampTimeToDuration(state.currentTime, nextDuration);
       });
     },
 
@@ -309,7 +340,7 @@ export const usePlaybackStore = create<PlaybackStore>()(
 
     setVolume: (volume: number) => {
       set((state) => {
-        state.volume = Math.max(0, Math.min(1, volume));
+        state.volume = !Number.isFinite(volume) ? state.volume : Math.max(0, Math.min(1, volume));
       });
     },
 
@@ -331,10 +362,9 @@ export const usePlaybackStore = create<PlaybackStore>()(
 
     setPlaybackRate: (rate: number) => {
       set((state) => {
-        state.playbackRate = Math.max(
-          MIN_PLAYBACK_RATE,
-          Math.min(MAX_PLAYBACK_RATE, rate)
-        );
+        state.playbackRate = !Number.isFinite(rate)
+          ? state.playbackRate
+          : Math.max(MIN_PLAYBACK_RATE, Math.min(MAX_PLAYBACK_RATE, rate));
       });
     },
 
