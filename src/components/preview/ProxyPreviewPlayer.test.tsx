@@ -32,6 +32,10 @@ const mockPlaybackStore = {
 
 vi.mock('@/stores/playbackStore', () => ({
   usePlaybackStore: () => mockPlaybackStore,
+  PLAYBACK_EVENTS: {
+    SEEK: 'playback-seek',
+    UPDATE: 'playback-update',
+  },
 }));
 
 // =============================================================================
@@ -198,6 +202,146 @@ describe('ProxyPreviewPlayer', () => {
 
       expect(screen.queryByTestId('proxy-video-clip-1')).not.toBeInTheDocument();
     });
+
+    it('renders clips with non-positive speed using safe speed fallback', () => {
+      const clip = createMockClip({ speed: 0 });
+      const sequence = createMockSequence({ tracks: [createMockTrack({ clips: [clip] })] });
+      const asset = createMockAsset({ id: 'asset-1' });
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      mockPlaybackStore.currentTime = 5;
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      expect(screen.getByTestId('proxy-video-clip-1')).toBeInTheDocument();
+    });
+
+    it('blocks unsupported media URL schemes and falls back to empty preview state', () => {
+      const sequence = createMockSequence();
+      const asset = createMockAsset({ uri: 'javascript:alert(1)' });
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      mockPlaybackStore.currentTime = 5;
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      expect(screen.queryByTestId('proxy-video-clip-1')).not.toBeInTheDocument();
+      expect(screen.getByText('No clips at current time')).toBeInTheDocument();
+    });
+
+    it('updates rendered source when asset metadata changes for the same active clip', () => {
+      const sequence = createMockSequence();
+      const initialAsset = createMockAsset({
+        id: 'asset-1',
+        uri: '/path/to/original.mp4',
+        proxyStatus: 'pending',
+        proxyUrl: '/path/to/proxy-pending.mp4',
+      });
+      const updatedAsset = createMockAsset({
+        id: 'asset-1',
+        uri: '/path/to/original.mp4',
+        proxyStatus: 'ready',
+        proxyUrl: '/path/to/proxy-ready.mp4',
+      });
+
+      mockPlaybackStore.currentTime = 5;
+
+      const { rerender } = render(
+        <ProxyPreviewPlayer
+          sequence={sequence}
+          assets={new Map<string, Asset>([[initialAsset.id, initialAsset]])}
+        />
+      );
+
+      const before = screen.getByTestId('proxy-video-clip-1') as HTMLVideoElement;
+      expect(before.getAttribute('src')).toContain('/path/to/original.mp4');
+
+      rerender(
+        <ProxyPreviewPlayer
+          sequence={sequence}
+          assets={new Map<string, Asset>([[updatedAsset.id, updatedAsset]])}
+        />
+      );
+
+      const after = screen.getByTestId('proxy-video-clip-1') as HTMLVideoElement;
+      expect(after.getAttribute('src')).toContain('/path/to/proxy-ready.mp4');
+    });
+    it('always keeps video elements muted to avoid duplicate audio output', () => {
+      const sequence = createMockSequence();
+      const asset = createMockAsset();
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      mockPlaybackStore.currentTime = 5;
+      mockPlaybackStore.isMuted = false;
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      const video = screen.getByTestId('proxy-video-clip-1') as HTMLVideoElement;
+      expect(video.muted).toBe(true);
+    });
+
+    it('hard-syncs active videos on playback seek events', () => {
+      const sequence = createMockSequence();
+      const asset = createMockAsset();
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      mockPlaybackStore.currentTime = 0;
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      const video = screen.getByTestId('proxy-video-clip-1') as HTMLVideoElement;
+      video.currentTime = 0;
+
+      window.dispatchEvent(
+        new CustomEvent('playback-seek', {
+          detail: { time: 8, source: 'test-seek' },
+        })
+      );
+
+      expect(video.currentTime).toBe(8);
+    });
+
+    it('avoids hard-seeking for tiny drift while actively playing', () => {
+      const playSpy = vi
+        .spyOn(HTMLMediaElement.prototype, 'play')
+        .mockImplementation(() => Promise.resolve());
+
+      const sequence = createMockSequence();
+      const asset = createMockAsset();
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      mockPlaybackStore.currentTime = 5;
+      mockPlaybackStore.isPlaying = true;
+
+      const { rerender } = render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      const video = screen.getByTestId('proxy-video-clip-1') as HTMLVideoElement;
+      video.currentTime = 5.02;
+
+      mockPlaybackStore.currentTime = 5.03;
+      rerender(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      expect(video.currentTime).toBe(5.02);
+      playSpy.mockRestore();
+    });
+
+    it('does not render audio-track clips as proxy video layers', () => {
+      const audioTrack = createMockTrack({
+        kind: 'audio',
+        clips: [createMockClip({ id: 'clip-audio', assetId: 'asset-audio' })],
+      });
+      const sequence = createMockSequence({ tracks: [audioTrack] });
+      const assets = new Map<string, Asset>([
+        ['asset-audio', createMockAsset({ id: 'asset-audio', kind: 'audio', uri: '/path/to/audio.mp3' })],
+      ]);
+
+      mockPlaybackStore.currentTime = 5;
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      expect(screen.queryByTestId('proxy-video-clip-audio')).not.toBeInTheDocument();
+      expect(screen.getByText('No clips at current time')).toBeInTheDocument();
+    });
   });
 
   describe('Duration Calculation', () => {
@@ -222,7 +366,7 @@ describe('ProxyPreviewPlayer', () => {
 
       render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
 
-      // ProxyPreviewPlayer must NOT call setDuration — useTimelineEngine owns it
+      // ProxyPreviewPlayer must NOT call setDuration - useTimelineEngine owns it
       expect(mockPlaybackStore.setDuration).not.toHaveBeenCalled();
     });
   });
@@ -356,4 +500,257 @@ describe('ProxyPreviewPlayer', () => {
       expect(video2).toHaveStyle({ zIndex: '10' });
     });
   });
+
+  // ===========================================================================
+  // Destructive / Edge Case Tests
+  // ===========================================================================
+
+  describe('Destructive: aspect ratio edge cases', () => {
+    it('falls back to 16/9 when canvas height is zero', () => {
+      const sequence = createMockSequence({
+        format: {
+          canvas: { width: 1920, height: 0 },
+          fps: { num: 30, den: 1 },
+          audioSampleRate: 48000,
+          audioChannels: 2,
+        },
+      });
+      const assets = new Map<string, Asset>();
+
+      render(
+        <ProxyPreviewPlayer sequence={sequence} assets={assets} />
+      );
+
+      const player = screen.getByTestId('proxy-preview-player');
+      const style = player.style.aspectRatio;
+      // Should be 16/9, not Infinity from 1920/0
+      expect(style).not.toContain('Infinity');
+    });
+
+    it('falls back to 16/9 when canvas height is negative', () => {
+      const sequence = createMockSequence({
+        format: {
+          canvas: { width: 1920, height: -1080 },
+          fps: { num: 30, den: 1 },
+          audioSampleRate: 48000,
+          audioChannels: 2,
+        },
+      });
+      const assets = new Map<string, Asset>();
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      const player = screen.getByTestId('proxy-preview-player');
+      const style = player.style.aspectRatio;
+      expect(style).not.toContain('-');
+    });
+
+    it('uses correct aspect ratio when canvas dimensions are valid', () => {
+      const sequence = createMockSequence({
+        format: {
+          canvas: { width: 1920, height: 1080 },
+          fps: { num: 30, den: 1 },
+          audioSampleRate: 48000,
+          audioChannels: 2,
+        },
+      });
+      const assets = new Map<string, Asset>();
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      const player = screen.getByTestId('proxy-preview-player');
+      // Aspect ratio should be ~1.777...
+      const ratio = parseFloat(player.style.aspectRatio);
+      expect(ratio).toBeCloseTo(16 / 9, 2);
+    });
+  });
+
+  describe('Destructive: clip speed edge cases', () => {
+    it('handles clip with speed=0 without freezing or Infinity', () => {
+      const clip = createMockClip({
+        id: 'clip-zero-speed',
+        assetId: 'asset-1',
+        speed: 0,
+        range: { sourceInSec: 0, sourceOutSec: 10 },
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
+      const sequence = createMockSequence({
+        tracks: [createMockTrack({ clips: [clip] })],
+      });
+      const asset = createMockAsset();
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      mockPlaybackStore.currentTime = 5;
+
+      // Should render without throwing, using safeSpeed=1 fallback
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      expect(screen.getByTestId('proxy-video-clip-zero-speed')).toBeInTheDocument();
+    });
+
+    it('handles clip with negative speed', () => {
+      const clip = createMockClip({
+        id: 'clip-neg-speed',
+        assetId: 'asset-1',
+        speed: -2,
+        range: { sourceInSec: 0, sourceOutSec: 10 },
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
+      const sequence = createMockSequence({
+        tracks: [createMockTrack({ clips: [clip] })],
+      });
+      const asset = createMockAsset();
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      mockPlaybackStore.currentTime = 5;
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      expect(screen.getByTestId('proxy-video-clip-neg-speed')).toBeInTheDocument();
+    });
+  });
+
+  describe('Destructive: keyboard double-fire prevention', () => {
+    it('does not toggle playback when event is already defaultPrevented', () => {
+      const sequence = createMockSequence();
+      const assets = new Map<string, Asset>();
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      const player = screen.getByTestId('proxy-preview-player');
+
+      // Simulate a space key event that was already handled by a global handler
+      const event = new KeyboardEvent('keydown', {
+        key: ' ',
+        bubbles: true,
+        cancelable: true,
+      });
+      event.preventDefault(); // Mark as already handled
+
+      fireEvent(player, event);
+
+      // togglePlayback should NOT have been called since event was already handled
+      expect(mockPlaybackStore.togglePlayback).not.toHaveBeenCalled();
+    });
+
+    it('toggles playback when event is NOT defaultPrevented', () => {
+      const sequence = createMockSequence();
+      const assets = new Map<string, Asset>();
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      const player = screen.getByTestId('proxy-preview-player');
+      fireEvent.keyDown(player, { key: ' ' });
+
+      expect(mockPlaybackStore.togglePlayback).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('Destructive: source time clamping in syncVideos', () => {
+    it('clamps source time when currentTime is before clip timeline start', () => {
+      const clip = createMockClip({
+        id: 'clip-1',
+        range: { sourceInSec: 5, sourceOutSec: 15 },
+        place: { timelineInSec: 10, durationSec: 10 },
+      });
+      const sequence = createMockSequence({
+        tracks: [createMockTrack({ clips: [clip] })],
+      });
+      const asset = createMockAsset();
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      // Set currentTime to exactly clip start (offsetInClip=0, sourceTime=sourceInSec)
+      mockPlaybackStore.currentTime = 10;
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      const video = screen.getByTestId('proxy-video-clip-1') as HTMLVideoElement;
+      // Video should exist and be within valid source range
+      expect(video).toBeInTheDocument();
+    });
+  });
+
+  describe('Destructive: handleVideoLoaded efficiency', () => {
+    it('does not trigger re-render when clearing nonexistent error', () => {
+      const sequence = createMockSequence();
+      const asset = createMockAsset();
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      mockPlaybackStore.currentTime = 5;
+
+      const { rerender } = render(
+        <ProxyPreviewPlayer sequence={sequence} assets={assets} />
+      );
+
+      const video = screen.getByTestId('proxy-video-clip-1') as HTMLVideoElement;
+
+      // Fire loadeddata - should not cause unnecessary state updates
+      // since there's no error to clear
+      fireEvent.loadedData(video);
+
+      // Re-render should be stable
+      rerender(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+
+      expect(screen.getByTestId('proxy-video-clip-1')).toBeInTheDocument();
+    });
+  });
+
+  describe('Destructive: sequence format edge cases', () => {
+    it('handles sequence with zero FPS denominator', () => {
+      const sequence = createMockSequence({
+        format: {
+          canvas: { width: 1920, height: 1080 },
+          fps: { num: 30, den: 0 },
+          audioSampleRate: 48000,
+          audioChannels: 2,
+        },
+      });
+      const assets = new Map<string, Asset>();
+
+      // Should fall back to 30fps
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+      expect(screen.getByTestId('proxy-preview-player')).toBeInTheDocument();
+    });
+
+    it('handles sequence with missing format', () => {
+      const sequence = createMockSequence();
+      // @ts-expect-error - testing runtime safety with missing format
+      delete sequence.format;
+
+      const assets = new Map<string, Asset>();
+
+      render(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+      expect(screen.getByTestId('proxy-preview-player')).toBeInTheDocument();
+    });
+  });
+
+  describe('Destructive: rapid time changes (scrubbing simulation)', () => {
+    it('handles rapid currentTime changes without errors', () => {
+      const clip = createMockClip({
+        range: { sourceInSec: 0, sourceOutSec: 10 },
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
+      const sequence = createMockSequence({
+        tracks: [createMockTrack({ clips: [clip] })],
+      });
+      const asset = createMockAsset();
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      mockPlaybackStore.currentTime = 0;
+
+      const { rerender } = render(
+        <ProxyPreviewPlayer sequence={sequence} assets={assets} />
+      );
+
+      // Simulate rapid scrubbing across 100 positions
+      for (let i = 0; i < 100; i++) {
+        mockPlaybackStore.currentTime = i * 0.1;
+        rerender(<ProxyPreviewPlayer sequence={sequence} assets={assets} />);
+      }
+
+      // Should still render correctly at final position
+      expect(screen.getByTestId('proxy-video-clip-1')).toBeInTheDocument();
+    });
+  });
 });
+

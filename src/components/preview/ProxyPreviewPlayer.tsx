@@ -7,7 +7,12 @@
 
 import { useRef, useMemo, useCallback, useEffect, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { usePlaybackStore } from '@/stores/playbackStore';
+import {
+  PLAYBACK_EVENTS,
+  type PlaybackSeekEventDetail,
+  usePlaybackStore,
+} from '@/stores/playbackStore';
+import { createLogger } from '@/services/logger';
 import { PlayerControls } from './PlayerControls';
 import { normalizeFileUriToPath } from '@/utils/uri';
 import type { Sequence, Asset, Clip } from '@/types';
@@ -34,14 +39,40 @@ interface ActiveClip {
   trackIndex: number;
 }
 
+interface RenderableClip extends ActiveClip {
+  src: string;
+}
+
 // =============================================================================
 // Constants
 // =============================================================================
 
 const FRAME_INTERVAL = 1000 / 30; // 30fps for animation frame updates
-// Reduced seek tolerance for more responsive scrubbing (was 0.05)
-// Lower value = more responsive but more seeks
-const SEEK_TOLERANCE = 0.016; // ~1 frame at 60fps for immediate response
+const PRECISE_SEEK_TOLERANCE = 0.008; // ~0.5 frame at 60fps for paused scrubbing
+const DRIFT_SEEK_TOLERANCE = 0.08; // ~5 frames at 60fps for playback drift correction
+const HARD_SEEK_DETECTION_DELTA = 0.25; // Treat as explicit jump when delta exceeds this
+const TIME_CHANGE_EPSILON = 0.001;
+const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:/;
+
+const logger = createLogger('ProxyPreviewPlayer');
+
+function getSafeClipSpeed(clip: Clip): number {
+  return clip.speed > 0 ? clip.speed : 1;
+}
+
+function isWindowsAbsolutePath(path: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(path);
+}
+
+function clampTimelineTime(time: number, duration: number): number {
+  if (!Number.isFinite(time)) {
+    return 0;
+  }
+  if (!Number.isFinite(duration) || duration <= 0) {
+    return Math.max(0, time);
+  }
+  return Math.max(0, Math.min(duration, time));
+}
 
 // =============================================================================
 // Component
@@ -57,7 +88,7 @@ export function ProxyPreviewPlayer({
   const videoRefs = useRef<Map<string, HTMLVideoElement>>(new Map());
   const animationFrameRef = useRef<number | null>(null);
   const lastUpdateTimeRef = useRef<number>(0);
-  // Track previous time for external seek detection
+  // Track previous store time to detect explicit jump seeks during active playback.
   const prevTimeRef = useRef<number>(0);
 
   // Playback state from store
@@ -84,7 +115,7 @@ export function ProxyPreviewPlayer({
   const [videoErrors, setVideoErrors] = useState<Map<string, string>>(new Map());
 
   // NOTE: Playback duration is managed by useTimelineEngine (Timeline component).
-  // Do NOT compute or set it here — competing setDuration calls cause the SeekBar
+  // Do NOT compute or set it here - competing setDuration calls cause the SeekBar
   // and Timeline to use different duration ranges, breaking positional sync.
 
   // Calculate sequence FPS
@@ -94,40 +125,75 @@ export function ProxyPreviewPlayer({
     return den > 0 ? num / den : 30;
   }, [sequence]);
 
+  // Cache previous active clip result to stabilize the reference when the same
+  // clips are active across consecutive frames. This prevents unnecessary
+  // downstream re-renders and effect re-fires during steady-state playback.
+  const prevActiveClipsRef = useRef<ActiveClip[]>([]);
+
   // Find active clips at current time (sorted by layer/track)
   const activeClips = useMemo((): ActiveClip[] => {
-    if (!sequence) return [];
+    if (!sequence) {
+      if (prevActiveClipsRef.current.length === 0) return prevActiveClipsRef.current;
+      prevActiveClipsRef.current = [];
+      return prevActiveClipsRef.current;
+    }
 
     const clips: ActiveClip[] = [];
 
     sequence.tracks.forEach((track, trackIndex) => {
       if (track.muted || !track.visible) return;
 
+      // Proxy mode renders plain video tracks only (no overlay/caption compositing).
+      if (track.kind !== 'video') return;
+
       for (const clip of track.clips) {
-        const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+        const clipSpeed = clip.speed > 0 ? clip.speed : 1;
+        const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / clipSpeed;
         const clipEnd = clip.place.timelineInSec + clipDuration;
 
         // Check if clip is active at current time
         if (currentTime >= clip.place.timelineInSec && currentTime < clipEnd) {
           const asset = assets.get(clip.assetId);
-          if (asset) {
-            clips.push({
-              clip,
-              asset,
-              trackId: track.id,
-              trackIndex,
-            });
+          if (!asset || asset.kind !== 'video') {
+            continue;
           }
+
+          clips.push({
+            clip,
+            asset,
+            trackId: track.id,
+            trackIndex,
+          });
         }
       }
     });
 
     // Sort by trackIndex (lower track = rendered first/behind)
-    return clips.sort((a, b) => a.trackIndex - b.trackIndex);
+    clips.sort((a, b) => a.trackIndex - b.trackIndex);
+
+    // Return the same reference if the active clip set hasn't changed.
+    // This avoids cascading re-renders when playhead moves within the same clip.
+    const prev = prevActiveClipsRef.current;
+    if (
+      clips.length === prev.length &&
+      clips.every(
+        (clipInfo, index) =>
+          clipInfo.clip === prev[index].clip &&
+          clipInfo.asset === prev[index].asset &&
+          clipInfo.trackId === prev[index].trackId &&
+          clipInfo.trackIndex === prev[index].trackIndex,
+      )
+    ) {
+      return prev;
+    }
+
+    prevActiveClipsRef.current = clips;
+    return clips;
   }, [sequence, currentTime, assets]);
 
   // Get video source URL for an asset
-  // Prioritizes proxy URL when proxy is ready, falls back to original
+  // Prioritizes proxy URL when proxy is ready, falls back to original.
+  // Rejects unsupported URI schemes to prevent unsafe URL injection.
   const getVideoSrc = useCallback((asset: Asset): string | null => {
     const safeDecodeURIComponent = (input: string): string => {
       try {
@@ -139,9 +205,23 @@ export function ProxyPreviewPlayer({
 
     // Use proxy URL only when proxy generation is complete
     const useProxy = asset.proxyStatus === 'ready' && asset.proxyUrl;
-    const url = useProxy ? asset.proxyUrl : asset.uri;
+    const url = (useProxy ? asset.proxyUrl : asset.uri)?.trim();
 
     if (!url) return null;
+
+    const hasUnsupportedUriScheme =
+      URI_SCHEME_PATTERN.test(url) &&
+      !isWindowsAbsolutePath(url) &&
+      !url.startsWith('http://') &&
+      !url.startsWith('https://') &&
+      !url.startsWith('file://') &&
+      !url.startsWith('asset://');
+
+    if (hasUnsupportedUriScheme) {
+      const scheme = url.slice(0, url.indexOf(':')).toLowerCase();
+      logger.warn('Blocked unsupported preview media URL scheme', { assetId: asset.id, scheme });
+      return null;
+    }
 
     // Already a valid HTTP/HTTPS URL
     if (url.startsWith('http://') || url.startsWith('https://')) {
@@ -166,45 +246,71 @@ export function ProxyPreviewPlayer({
       return convertFileSrc(path);
     }
 
-    // Handle all other paths (Windows: C:\path, Unix: /path)
+    // Handle all other paths (Windows: C:\\path, Unix: /path)
     // convertFileSrc handles both formats correctly
     return convertFileSrc(safeDecodeURIComponent(url));
   }, []);
 
-  // Sync video elements to timeline position
-  const syncVideos = useCallback(() => {
-    activeClips.forEach(({ clip }) => {
+  const renderableClips = useMemo((): RenderableClip[] => {
+    const clips: RenderableClip[] = [];
+
+    for (const clipInfo of activeClips) {
+      const src = getVideoSrc(clipInfo.asset);
+      if (!src) continue;
+      clips.push({ ...clipInfo, src });
+    }
+
+    return clips;
+  }, [activeClips, getVideoSrc]);
+
+  const getClampedSourceTime = useCallback((clip: Clip, timelineTime: number) => {
+    const offsetInClip = timelineTime - clip.place.timelineInSec;
+    const safeSpeed = getSafeClipSpeed(clip);
+    const sourceTime = clip.range.sourceInSec + (offsetInClip * safeSpeed);
+    return Math.max(
+      clip.range.sourceInSec,
+      Math.min(clip.range.sourceOutSec, sourceTime),
+    );
+  }, []);
+
+  // Sync video elements to timeline position.
+  // - forceSeek=true: hard align to requested time (user seek/scrub)
+  // - forceSeek=false: only correct significant drift during playback
+  const syncVideos = useCallback((timelineTime: number, forceSeek: boolean = false) => {
+    const safeTimelineTime = clampTimelineTime(timelineTime, duration);
+
+    renderableClips.forEach(({ clip }) => {
       const video = videoRefs.current.get(clip.id);
       if (!video) return;
 
-      // Calculate source time from timeline time
-      const offsetInClip = currentTime - clip.place.timelineInSec;
-      const sourceTime = clip.range.sourceInSec + (offsetInClip * clip.speed);
+      const clampedSourceTime = getClampedSourceTime(clip, safeTimelineTime);
+      const safeSpeed = getSafeClipSpeed(clip);
 
-      // Only seek if difference is significant (reduced tolerance for responsive scrubbing)
-      if (Math.abs(video.currentTime - sourceTime) > SEEK_TOLERANCE) {
-        video.currentTime = sourceTime;
+      const tolerance = forceSeek || !isPlaying ? PRECISE_SEEK_TOLERANCE : DRIFT_SEEK_TOLERANCE;
+      if (Math.abs(video.currentTime - clampedSourceTime) > tolerance) {
+        video.currentTime = clampedSourceTime;
       }
 
       // Sync playback rate
-      video.playbackRate = playbackRate * clip.speed;
+      video.playbackRate = playbackRate * safeSpeed;
 
-      // Sync volume - Convert dB to linear scale
-      // Note: Use nullish coalescing (??) not truthy check because volumeDb=0 is valid (unity gain)
-      const clipVolumeDb = clip.audio?.volumeDb ?? 0;
-      const clipLinearVolume = Math.pow(10, clipVolumeDb / 20);
-      video.volume = isMuted ? 0 : volume * clipLinearVolume;
+      // ProxyPreviewPlayer video elements stay muted; Web Audio owns timeline audio output.
+      // Keep volume at zero as a defensive fallback even if browser muted state changes.
+      video.volume = 0;
 
       // Sync play state
       if (isPlaying && video.paused) {
-        void video.play().catch(() => {
-          // Autoplay prevented
-        });
+        const playResult = video.play();
+        if (playResult && typeof playResult.catch === 'function') {
+          void playResult.catch(() => {
+            // Autoplay prevented
+          });
+        }
       } else if (!isPlaying && !video.paused) {
         video.pause();
       }
     });
-  }, [activeClips, currentTime, isPlaying, playbackRate, volume, isMuted]);
+  }, [duration, renderableClips, getClampedSourceTime, isPlaying, playbackRate]);
 
   // Track playback start time for synthetic time advancement
   const playbackStartRef = useRef<{ timestamp: number; timelineTime: number } | null>(null);
@@ -221,15 +327,17 @@ export function ProxyPreviewPlayer({
       // Find the first playing video to sync time from (not just first clip)
       // This handles cases where some clips may have load errors or be paused
       let foundVideoSource = false;
-      for (const { clip } of activeClips) {
+      for (const { clip } of renderableClips) {
         const video = videoRefs.current.get(clip.id);
         if (video && !video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
           // Calculate timeline time from video time
           const offsetInSource = video.currentTime - clip.range.sourceInSec;
-          const timelineTime = clip.place.timelineInSec + (offsetInSource / clip.speed);
-          setCurrentTime(timelineTime);
+          const safeSpeed = getSafeClipSpeed(clip);
+          const timelineTime = clip.place.timelineInSec + (offsetInSource / safeSpeed);
+          const clampedTimelineTime = clampTimelineTime(timelineTime, duration);
+          setCurrentTime(clampedTimelineTime, 'proxy-video-clock');
           // Update synthetic time reference
-          playbackStartRef.current = { timestamp, timelineTime };
+          playbackStartRef.current = { timestamp, timelineTime: clampedTimelineTime };
           foundVideoSource = true;
           break; // Use first valid video as time source
         }
@@ -240,8 +348,8 @@ export function ProxyPreviewPlayer({
       if (!foundVideoSource && prevTimestamp > 0) {
         const elapsed = (timestamp - prevTimestamp) / 1000; // Convert to seconds
         const timeAdvance = elapsed * playbackRate;
-        const newTime = Math.min(currentTime + timeAdvance, duration);
-        setCurrentTime(newTime);
+        const newTime = clampTimelineTime(currentTime + timeAdvance, duration);
+        setCurrentTime(newTime, 'proxy-synthetic-clock');
 
         // Stop at end of duration
         if (newTime >= duration) {
@@ -251,7 +359,7 @@ export function ProxyPreviewPlayer({
     }
 
     animationFrameRef.current = requestAnimationFrame(updatePlayback);
-  }, [isPlaying, activeClips, setCurrentTime, playbackRate, currentTime, duration, setIsPlaying]);
+  }, [isPlaying, renderableClips, setCurrentTime, playbackRate, currentTime, duration, setIsPlaying]);
 
   // Start/stop animation frame loop
   useEffect(() => {
@@ -272,53 +380,68 @@ export function ProxyPreviewPlayer({
     };
   }, [isPlaying, syncWithTimeline, updatePlayback]);
 
-  // Sync videos when state changes
+  // Baseline sync pass (playing only):
+  // Drift correction during active playback. When paused, the hard-seek
+  // effect below handles precise alignment on every time change.
   useEffect(() => {
-    syncVideos();
-  }, [syncVideos]);
+    if (!isPlaying) return;
+    syncVideos(currentTime, false);
+  }, [currentTime, isPlaying, syncVideos]);
 
-  // Explicit video seek when currentTime changes externally (timeline scrubbing)
-  // This ensures immediate response to timeline playhead dragging
+  // Hard-seek pass:
+  // - always when paused (timeline scrubbing/playhead drag)
+  // - when playing only for explicit jump deltas
   useEffect(() => {
-    // Skip if time hasn't changed significantly (avoids redundant seeks)
     const timeDiff = Math.abs(currentTime - prevTimeRef.current);
-    if (timeDiff < 0.001) return; // 1ms threshold
-    prevTimeRef.current = currentTime;
+    const hasSignificantTimeChange = timeDiff > TIME_CHANGE_EPSILON;
 
-    // Force sync all videos to new time position
-    activeClips.forEach(({ clip }) => {
-      const video = videoRefs.current.get(clip.id);
-      if (!video) return;
-
-      // Calculate source time from timeline time
-      const offsetInClip = currentTime - clip.place.timelineInSec;
-      const sourceTime = clip.range.sourceInSec + (offsetInClip * clip.speed);
-      const clampedTime = Math.max(
-        clip.range.sourceInSec,
-        Math.min(clip.range.sourceOutSec, sourceTime)
-      );
-
-      // Always update video time for responsive scrubbing
-      if (Math.abs(video.currentTime - clampedTime) > SEEK_TOLERANCE) {
-        video.currentTime = clampedTime;
+    if (hasSignificantTimeChange) {
+      const shouldHardSeek = !isPlaying || timeDiff >= HARD_SEEK_DETECTION_DELTA;
+      if (shouldHardSeek) {
+        syncVideos(currentTime, true);
       }
-    });
-  }, [currentTime, activeClips]);
+    }
+
+    // Always update ref to prevent drift from sub-epsilon increments
+    prevTimeRef.current = currentTime;
+  }, [currentTime, isPlaying, syncVideos]);
+
+  // Explicit user-intent seek path (seek bar, keyboard jump, etc.).
+  // Use hard seek regardless of playback state to keep preview frame-accurate.
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const handlePlaybackSeek = (event: Event) => {
+      const customEvent = event as CustomEvent<PlaybackSeekEventDetail>;
+      const targetTime = customEvent.detail?.time;
+      if (!Number.isFinite(targetTime)) {
+        return;
+      }
+      syncVideos(targetTime, true);
+    };
+
+    window.addEventListener(PLAYBACK_EVENTS.SEEK, handlePlaybackSeek);
+    return () => {
+      window.removeEventListener(PLAYBACK_EVENTS.SEEK, handlePlaybackSeek);
+    };
+  }, [syncVideos]);
 
   // Clean up stale video refs
   useEffect(() => {
-    const activeClipIds = new Set(activeClips.map(c => c.clip.id));
+    const activeClipIds = new Set(renderableClips.map(c => c.clip.id));
     videoRefs.current.forEach((video, clipId) => {
       if (!activeClipIds.has(clipId)) {
         video.pause();
         videoRefs.current.delete(clipId);
       }
     });
-  }, [activeClips]);
+  }, [renderableClips]);
 
   // Clear error state when clips change or proxy becomes ready
   useEffect(() => {
-    const activeClipIds = new Set(activeClips.map(c => c.clip.id));
+    const activeClipIds = new Set(renderableClips.map(c => c.clip.id));
 
     setVideoErrors(prev => {
       let changed = false;
@@ -333,7 +456,7 @@ export function ProxyPreviewPlayer({
       });
 
       // Clear errors for clips whose proxy is now ready
-      activeClips.forEach(({ clip, asset }) => {
+      renderableClips.forEach(({ clip, asset }) => {
         if (next.has(clip.id) && asset.proxyStatus === 'ready') {
           next.delete(clip.id);
           changed = true;
@@ -342,7 +465,7 @@ export function ProxyPreviewPlayer({
 
       return changed ? next : prev;
     });
-  }, [activeClips]);
+  }, [renderableClips]);
 
   // Handle video element ref
   const setVideoRef = useCallback((clipId: string, el: HTMLVideoElement | null) => {
@@ -362,8 +485,9 @@ export function ProxyPreviewPlayer({
         const bufferedEnd = video.buffered.end(video.buffered.length - 1);
         setBuffered(bufferedEnd);
       }
-      // Clear any previous error for this clip
+      // Clear any previous error for this clip (skip if no error existed)
       setVideoErrors(prev => {
+        if (!prev.has(clipId)) return prev;
         const next = new Map(prev);
         next.delete(clipId);
         return next;
@@ -373,6 +497,7 @@ export function ProxyPreviewPlayer({
 
   // Handle video load error
   const handleVideoError = useCallback((clipId: string, error: string) => {
+    logger.error('Proxy video element failed to load', { clipId, error });
     setVideoErrors(prev => {
       const next = new Map(prev);
       next.set(clipId, error);
@@ -434,12 +559,14 @@ export function ProxyPreviewPlayer({
   useEffect(() => {
     if (!syncWithTimeline && isPlaying && currentTime >= duration && duration > 0) {
       setIsPlaying(false);
-      setCurrentTime(duration);
+      setCurrentTime(duration, 'proxy-playback-end');
     }
   }, [syncWithTimeline, currentTime, duration, isPlaying, setIsPlaying, setCurrentTime]);
 
   // Keyboard shortcuts
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.defaultPrevented) return;
+
     switch (e.key) {
       case ' ':
         e.preventDefault();
@@ -453,8 +580,8 @@ export function ProxyPreviewPlayer({
     }
   }, [togglePlayback, handleFullscreenToggle]);
 
-  // Calculate aspect ratio from sequence format
-  const aspectRatio = sequence?.format?.canvas
+  // Calculate aspect ratio from sequence format (guard against zero height)
+  const aspectRatio = sequence?.format?.canvas && sequence.format.canvas.height > 0
     ? sequence.format.canvas.width / sequence.format.canvas.height
     : 16 / 9;
 
@@ -507,16 +634,13 @@ export function ProxyPreviewPlayer({
     >
       {/* Video Layers */}
       <div className="absolute inset-0">
-        {activeClips.length === 0 ? (
+        {renderableClips.length === 0 ? (
           <div className="w-full h-full flex items-center justify-center text-gray-500">
             <p>No clips at current time</p>
           </div>
         ) : (
-          activeClips.map(({ clip, asset, trackIndex }) => {
-            const src = getVideoSrc(asset);
+          renderableClips.map(({ clip, asset, trackIndex, src }) => {
             const error = videoErrors.get(clip.id);
-
-            if (!src) return null;
 
             // Show error state if video failed to load
             if (error) {
@@ -560,7 +684,7 @@ export function ProxyPreviewPlayer({
                   zIndex: trackIndex * 10,
                 }}
                 playsInline
-                muted={isMuted || clip.audio?.muted}
+                muted
                 onLoadedData={() => handleVideoLoaded(clip.id)}
                 onError={(e) => handleVideoError(clip.id, e.currentTarget.error?.message || 'Unknown error')}
               />
@@ -594,3 +718,4 @@ export function ProxyPreviewPlayer({
     </div>
   );
 }
+
