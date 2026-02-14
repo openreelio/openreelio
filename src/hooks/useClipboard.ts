@@ -89,7 +89,8 @@ function findClipInSequence(
  * Calculate clip duration
  */
 function getClipDuration(clip: Clip): number {
-  return (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+  return (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
 }
 
 /**

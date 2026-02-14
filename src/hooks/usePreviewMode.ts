@@ -1,13 +1,12 @@
 /**
  * usePreviewMode Hook
  *
- * Determines the optimal preview mode based on asset proxy availability.
- * Returns 'video' mode when all active video clips have ready proxies,
- * otherwise returns 'canvas' mode for frame-by-frame extraction.
+ * Determines the optimal preview mode based on both proxy readiness and
+ * whether the active frame can be represented by the proxy video renderer.
  */
 
 import { useMemo } from 'react';
-import type { Sequence, Asset, Clip } from '@/types';
+import type { Sequence, Asset, Clip, Track } from '@/types';
 
 // =============================================================================
 // Types
@@ -41,11 +40,18 @@ export interface UsePreviewModeOptions {
 
 interface ActiveClipInfo {
   clip: Clip;
-  asset: Asset;
+  track: Track;
+  asset: Asset | null;
+}
+
+const FLOAT_EPSILON = 0.0001;
+
+function nearlyEqual(a: number, b: number): boolean {
+  return Math.abs(a - b) <= FLOAT_EPSILON;
 }
 
 /**
- * Find all active clips at the given timeline position
+ * Find all active clips at the given timeline position.
  */
 function findActiveClips(
   sequence: Sequence,
@@ -60,15 +66,16 @@ function findActiveClips(
 
     for (const clip of track.clips) {
       const clipStart = clip.place.timelineInSec;
-      const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+      const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+      const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
       const clipEnd = clipStart + clipDuration;
 
-      // Check if clip is active at current time
       if (currentTime >= clipStart && currentTime < clipEnd) {
-        const asset = assets.get(clip.assetId);
-        if (asset) {
-          activeClips.push({ clip, asset });
-        }
+        activeClips.push({
+          clip,
+          track,
+          asset: assets.get(clip.assetId) ?? null,
+        });
       }
     }
   }
@@ -77,17 +84,75 @@ function findActiveClips(
 }
 
 /**
- * Check if a video asset has a ready proxy
+ * Check if a video asset has a ready proxy.
  */
 function hasReadyProxy(asset: Asset): boolean {
   return asset.proxyStatus === 'ready' && !!asset.proxyUrl;
 }
 
 /**
- * Check if an asset is a video that could benefit from proxy
+ * Check if an asset is a video that could benefit from proxy.
  */
 function isVideoAsset(asset: Asset): boolean {
   return asset.kind === 'video';
+}
+
+/**
+ * Check whether a clip uses the identity transform expected by proxy mode.
+ */
+function hasIdentityTransform(clip: Clip): boolean {
+  const { transform } = clip;
+
+  return (
+    nearlyEqual(transform.position.x, 0.5) &&
+    nearlyEqual(transform.position.y, 0.5) &&
+    nearlyEqual(transform.scale.x, 1) &&
+    nearlyEqual(transform.scale.y, 1) &&
+    nearlyEqual(transform.rotationDeg, 0) &&
+    nearlyEqual(transform.anchor.x, 0.5) &&
+    nearlyEqual(transform.anchor.y, 0.5)
+  );
+}
+
+/**
+ * Return a canvas-only reason when an active clip needs composition features
+ * unsupported by proxy video mode.
+ */
+function getCanvasFallbackReason({ clip, track, asset }: ActiveClipInfo): string | null {
+  // Audio tracks do not affect visual mode selection.
+  if (track.kind === 'audio') {
+    return null;
+  }
+
+  if (track.kind !== 'video') {
+    return 'Overlay/caption compositing requires canvas mode';
+  }
+
+  if (!asset) {
+    return 'Active clip asset is unavailable - using frame extraction';
+  }
+
+  if (!isVideoAsset(asset)) {
+    return 'Active non-video clip requires canvas compositing';
+  }
+
+  if (track.blendMode !== 'normal') {
+    return 'Track blend mode requires canvas compositing';
+  }
+
+  if (!hasIdentityTransform(clip)) {
+    return 'Clip transform requires canvas compositing';
+  }
+
+  if (!nearlyEqual(clip.opacity, 1)) {
+    return 'Clip opacity compositing requires canvas mode';
+  }
+
+  if (clip.effects.length > 0) {
+    return 'Clip effects require canvas compositing';
+  }
+
+  return null;
 }
 
 // =============================================================================
@@ -123,10 +188,26 @@ export function usePreviewMode({
       };
     }
 
-    // Analyze video clips
-    const videoClips = activeClips.filter(({ asset }) => isVideoAsset(asset));
+    // If any active visual clip needs compositing, force canvas mode.
+    const canvasFallbackReason = activeClips
+      .map((activeClip) => getCanvasFallbackReason(activeClip))
+      .find((reason): reason is string => reason !== null);
 
-    // No video clips = canvas mode (images work fine with canvas)
+    if (canvasFallbackReason) {
+      return {
+        mode: 'canvas',
+        reason: canvasFallbackReason,
+        hasGeneratingProxy: false,
+        clipsNeedingProxy: 0,
+      };
+    }
+
+    // Analyze proxy readiness for active video clips on visual tracks.
+    const videoClips = activeClips.filter(
+      (activeClip): activeClip is ActiveClipInfo & { asset: Asset } =>
+        activeClip.track.kind === 'video' && activeClip.asset !== null && isVideoAsset(activeClip.asset)
+    );
+
     if (videoClips.length === 0) {
       return {
         mode: 'canvas',
@@ -136,19 +217,16 @@ export function usePreviewMode({
       };
     }
 
-    // Check proxy status for all video clips
     const clipStatuses = videoClips.map(({ asset }) => ({
       hasProxy: hasReadyProxy(asset),
       isGenerating: asset.proxyStatus === 'generating',
-      isPending: asset.proxyStatus === 'pending',
       needsProxy: asset.proxyStatus !== 'notNeeded',
     }));
 
-    const allHaveProxy = clipStatuses.every((s) => s.hasProxy);
-    const anyGenerating = clipStatuses.some((s) => s.isGenerating);
-    const clipsNeedingProxy = clipStatuses.filter((s) => s.needsProxy && !s.hasProxy).length;
+    const allHaveProxy = clipStatuses.every((status) => status.hasProxy);
+    const anyGenerating = clipStatuses.some((status) => status.isGenerating);
+    const clipsNeedingProxy = clipStatuses.filter((status) => status.needsProxy && !status.hasProxy).length;
 
-    // All video clips have ready proxies = video mode
     if (allHaveProxy) {
       return {
         mode: 'video',
@@ -158,7 +236,6 @@ export function usePreviewMode({
       };
     }
 
-    // Some proxies are generating = canvas mode (will switch when ready)
     if (anyGenerating) {
       return {
         mode: 'canvas',
@@ -168,7 +245,6 @@ export function usePreviewMode({
       };
     }
 
-    // Fallback to canvas mode
     return {
       mode: 'canvas',
       reason: 'Some clips missing proxy - using frame extraction',

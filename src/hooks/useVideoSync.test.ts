@@ -435,3 +435,228 @@ describe('getClipTimelineDuration', () => {
     expect(getClipTimelineDuration(clip)).toBe(10); // 15 - 5
   });
 });
+
+// =============================================================================
+// Destructive / Edge Case Tests
+// =============================================================================
+
+describe('Destructive: speed edge cases', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPlaybackStore.currentTime = 0;
+    mockPlaybackStore.isPlaying = false;
+    mockPlaybackStore.playbackRate = 1;
+    mockPlaybackStore.syncWithTimeline = true;
+  });
+
+  it('handles clip speed=0 without Infinity or NaN in video.currentTime', () => {
+    const clip = createMockClip({ speed: 0 });
+    const video = createMockVideoElement();
+    const videoRefs = new Map<string, HTMLVideoElement>([[clip.id, video]]);
+    const assets = new Map<string, Asset>([[createMockAsset().id, createMockAsset()]]);
+
+    mockPlaybackStore.currentTime = 5;
+
+    const { result } = renderHook(() =>
+      useVideoSync({ videoRefs, clips: [clip], assets })
+    );
+
+    act(() => {
+      result.current.syncVideo(clip.id);
+    });
+
+    // safeSpeed fallback to 1: sourceTime = 0 + 5 * 1 = 5
+    expect(video.currentTime).toBe(5);
+    expect(Number.isFinite(video.currentTime)).toBe(true);
+  });
+
+  it('handles clip speed=-1 without negative source time', () => {
+    const clip = createMockClip({ speed: -1 });
+    const video = createMockVideoElement();
+    const videoRefs = new Map<string, HTMLVideoElement>([[clip.id, video]]);
+    const assets = new Map<string, Asset>([[createMockAsset().id, createMockAsset()]]);
+
+    mockPlaybackStore.currentTime = 5;
+
+    const { result } = renderHook(() =>
+      useVideoSync({ videoRefs, clips: [clip], assets })
+    );
+
+    act(() => {
+      result.current.syncVideo(clip.id);
+    });
+
+    // safeSpeed fallback to 1
+    expect(video.currentTime).toBe(5);
+    expect(Number.isFinite(video.currentTime)).toBe(true);
+  });
+
+  it('sets video.playbackRate to safeSpeed * playbackRate (not zero)', () => {
+    const clip = createMockClip({ speed: 0 });
+    const video = createMockVideoElement();
+    const videoRefs = new Map<string, HTMLVideoElement>([[clip.id, video]]);
+    const assets = new Map<string, Asset>([[createMockAsset().id, createMockAsset()]]);
+
+    mockPlaybackStore.playbackRate = 2;
+
+    const { result } = renderHook(() =>
+      useVideoSync({ videoRefs, clips: [clip], assets })
+    );
+
+    act(() => {
+      result.current.syncVideo(clip.id);
+    });
+
+    // safeSpeed=1, playbackRate=2 → video.playbackRate = 2
+    expect(video.playbackRate).toBe(2);
+  });
+});
+
+describe('Destructive: calculateTimelineTime with zero speed', () => {
+  it('handles speed=0 without division by zero', () => {
+    const clip = createMockClip({ speed: 0 });
+    const result = calculateTimelineTime(clip, 5);
+    // safeSpeed=1: timelineIn + (5-0)/1 = 5
+    expect(result).toBe(5);
+    expect(Number.isFinite(result)).toBe(true);
+  });
+
+  it('handles negative speed without negative duration', () => {
+    const clip = createMockClip({ speed: -2 });
+    const result = calculateTimelineTime(clip, 5);
+    // safeSpeed=1: timelineIn + (5-0)/1 = 5
+    expect(result).toBe(5);
+    expect(Number.isFinite(result)).toBe(true);
+  });
+});
+
+describe('Destructive: isTimeInClip with zero speed', () => {
+  it('handles speed=0 without Infinity duration', () => {
+    const clip = createMockClip({
+      range: { sourceInSec: 0, sourceOutSec: 10 },
+      place: { timelineInSec: 0, durationSec: 10 },
+      speed: 0,
+    });
+
+    // safeSpeed=1: duration = 10/1 = 10, clipEnd = 10
+    expect(isTimeInClip(clip, 5)).toBe(true);
+    expect(isTimeInClip(clip, 10)).toBe(false);
+  });
+});
+
+describe('Destructive: getClipTimelineDuration with zero speed', () => {
+  it('returns finite duration for speed=0', () => {
+    const clip = createMockClip({
+      range: { sourceInSec: 0, sourceOutSec: 10 },
+      speed: 0,
+    });
+
+    const duration = getClipTimelineDuration(clip);
+    // safeSpeed=1: (10-0)/1 = 10
+    expect(duration).toBe(10);
+    expect(Number.isFinite(duration)).toBe(true);
+  });
+
+  it('returns finite duration for negative speed', () => {
+    const clip = createMockClip({
+      range: { sourceInSec: 0, sourceOutSec: 10 },
+      speed: -3,
+    });
+
+    const duration = getClipTimelineDuration(clip);
+    expect(duration).toBe(10);
+    expect(Number.isFinite(duration)).toBe(true);
+  });
+});
+
+describe('Destructive: syncWithTimeline toggle', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPlaybackStore.currentTime = 5;
+    mockPlaybackStore.isPlaying = false;
+    mockPlaybackStore.playbackRate = 1;
+  });
+
+  it('does not sync when syncWithTimeline is false', () => {
+    mockPlaybackStore.syncWithTimeline = false;
+
+    const clip = createMockClip();
+    const video = createMockVideoElement();
+    const videoRefs = new Map<string, HTMLVideoElement>([[clip.id, video]]);
+    const assets = new Map<string, Asset>([[createMockAsset().id, createMockAsset()]]);
+
+    const { result } = renderHook(() =>
+      useVideoSync({ videoRefs, clips: [clip], assets })
+    );
+
+    act(() => {
+      result.current.syncVideo(clip.id);
+    });
+
+    // Should not sync because syncWithTimeline is false
+    expect(video.currentTime).toBe(0);
+  });
+
+  it('does not sync when both enabled=false and syncWithTimeline=false', () => {
+    mockPlaybackStore.syncWithTimeline = false;
+
+    const clip = createMockClip();
+    const video = createMockVideoElement();
+    const videoRefs = new Map<string, HTMLVideoElement>([[clip.id, video]]);
+    const assets = new Map<string, Asset>([[createMockAsset().id, createMockAsset()]]);
+
+    const { result } = renderHook(() =>
+      useVideoSync({ videoRefs, clips: [clip], assets, enabled: false })
+    );
+
+    act(() => {
+      result.current.syncAll();
+    });
+
+    expect(video.currentTime).toBe(0);
+  });
+});
+
+describe('Destructive: missing video element', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockPlaybackStore.currentTime = 5;
+    mockPlaybackStore.isPlaying = false;
+    mockPlaybackStore.playbackRate = 1;
+    mockPlaybackStore.syncWithTimeline = true;
+  });
+
+  it('handles syncVideo with missing video ref gracefully', () => {
+    const clip = createMockClip();
+    const videoRefs = new Map<string, HTMLVideoElement>(); // No video ref
+    const assets = new Map<string, Asset>([[createMockAsset().id, createMockAsset()]]);
+
+    const { result } = renderHook(() =>
+      useVideoSync({ videoRefs, clips: [clip], assets })
+    );
+
+    // Should not throw
+    act(() => {
+      result.current.syncVideo(clip.id);
+    });
+  });
+
+  it('handles syncVideo with nonexistent clip ID gracefully', () => {
+    const clip = createMockClip();
+    const video = createMockVideoElement();
+    const videoRefs = new Map<string, HTMLVideoElement>([[clip.id, video]]);
+    const assets = new Map<string, Asset>([[createMockAsset().id, createMockAsset()]]);
+
+    const { result } = renderHook(() =>
+      useVideoSync({ videoRefs, clips: [clip], assets })
+    );
+
+    // Should not throw for nonexistent clip
+    act(() => {
+      result.current.syncVideo('nonexistent-clip');
+    });
+
+    // Original video should not be affected
+    expect(video.currentTime).toBe(5); // syncAll ran via effect
+  });
+});

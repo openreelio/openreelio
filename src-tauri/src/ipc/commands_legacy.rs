@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 use crate::core::{
     assets::{Asset, AudioInfo, ProxyStatus, VideoInfo},
@@ -72,6 +72,53 @@ fn fps_to_ratio(fps: f64) -> (i32, i32) {
     (num, 1000)
 }
 
+fn validate_non_negative_f64(field_name: &str, value: f64) -> Result<f64, String> {
+    if !value.is_finite() {
+        return Err(format!("{field_name} must be a finite number"));
+    }
+    if value < 0.0 {
+        return Err(format!("{field_name} must be non-negative"));
+    }
+    Ok(value)
+}
+
+fn validate_optional_non_negative_f64(
+    field_name: &str,
+    value: Option<f64>,
+) -> Result<Option<f64>, String> {
+    match value {
+        Some(v) => Ok(Some(validate_non_negative_f64(field_name, v)?)),
+        None => Ok(None),
+    }
+}
+
+fn normalize_optional_tag(
+    value: Option<String>,
+    field_name: &str,
+    max_len: usize,
+) -> Result<Option<String>, String> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Err(format!("{field_name} contains control characters"));
+    }
+
+    if trimmed.len() > max_len {
+        return Err(format!(
+            "{field_name} is too long (max {max_len} characters)"
+        ));
+    }
+
+    Ok(Some(trimmed.to_string()))
+}
+
 // =============================================================================
 // App Lifecycle
 // =============================================================================
@@ -83,6 +130,53 @@ pub struct AppCleanupResult {
     pub project_saved: bool,
     pub workers_shutdown: bool,
     pub error: Option<String>,
+}
+
+/// Input payload for runtime playhead synchronization.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetPlayheadPositionPayload {
+    /// Current playhead position in seconds.
+    pub position_sec: f64,
+    /// Active sequence ID (if available).
+    pub sequence_id: Option<String>,
+    /// Source label for diagnostics (e.g. "timeline-scrub", "seek-bar").
+    pub source: Option<String>,
+    /// Whether playback is currently active.
+    pub is_playing: Option<bool>,
+    /// Timeline duration in seconds (if known).
+    pub duration_sec: Option<f64>,
+}
+
+/// Runtime playback sync DTO returned by backend sync commands.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayheadSyncStateDto {
+    /// Current playhead position in seconds.
+    pub position_sec: f64,
+    /// Active sequence ID (if available).
+    pub sequence_id: Option<String>,
+    /// Last update source label.
+    pub source: Option<String>,
+    /// Whether playback is currently active.
+    pub is_playing: bool,
+    /// Timeline duration in seconds (if known).
+    pub duration_sec: Option<f64>,
+    /// RFC3339 timestamp of last backend update.
+    pub updated_at: String,
+}
+
+impl PlayheadSyncStateDto {
+    fn from_runtime(state: &crate::PlaybackSyncState) -> Self {
+        Self {
+            position_sec: state.position_sec,
+            sequence_id: state.sequence_id.clone(),
+            source: state.last_source.clone(),
+            is_playing: state.is_playing,
+            duration_sec: state.duration_sec,
+            updated_at: state.updated_at.clone(),
+        }
+    }
 }
 
 /// Performs best-effort cleanup when the user closes the window.
@@ -101,6 +195,60 @@ pub async fn app_cleanup(_state: State<'_, AppState>) -> Result<AppCleanupResult
         workers_shutdown: true,
         error: None,
     })
+}
+
+/// Updates the backend runtime playhead position for cross-layer synchronization.
+///
+/// Notes:
+/// - Runtime-only state (not persisted in project files)
+/// - Input is strictly validated and clamped to known duration
+/// - Emits `playback:changed` for interested listeners
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state, app), fields(position_sec = payload.position_sec))]
+pub async fn set_playhead_position(
+    payload: SetPlayheadPositionPayload,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<PlayheadSyncStateDto, String> {
+    let mut position_sec = validate_non_negative_f64("positionSec", payload.position_sec)?;
+    let duration_sec = validate_optional_non_negative_f64("durationSec", payload.duration_sec)?;
+    let sequence_id = normalize_optional_tag(payload.sequence_id, "sequenceId", 128)?;
+    let source = normalize_optional_tag(payload.source, "source", 64)?;
+    let is_playing = payload.is_playing.unwrap_or(false);
+
+    // Clamp to known duration for deterministic backend state.
+    if let Some(duration) = duration_sec {
+        position_sec = position_sec.min(duration);
+    }
+
+    let dto = {
+        let mut playback_sync = state.playback_sync.lock().await;
+        playback_sync.position_sec = position_sec;
+        playback_sync.sequence_id = sequence_id;
+        playback_sync.last_source = source;
+        playback_sync.is_playing = is_playing;
+        playback_sync.duration_sec = duration_sec;
+        playback_sync.updated_at = chrono::Utc::now().to_rfc3339();
+        PlayheadSyncStateDto::from_runtime(&playback_sync)
+    };
+
+    if let Err(error) = app.emit(crate::ipc::event_names::PLAYBACK_CHANGED, &dto) {
+        tracing::warn!("Failed to emit playback:changed event: {}", error);
+    }
+
+    Ok(dto)
+}
+
+/// Reads the latest backend runtime playhead position.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state))]
+pub async fn get_playhead_position(
+    state: State<'_, AppState>,
+) -> Result<PlayheadSyncStateDto, String> {
+    let playback_sync = state.playback_sync.lock().await;
+    Ok(PlayheadSyncStateDto::from_runtime(&playback_sync))
 }
 
 /// Attempts to remove a lock file with retries.

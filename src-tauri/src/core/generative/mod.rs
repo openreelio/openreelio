@@ -9,6 +9,7 @@ pub mod image;
 pub mod provider_impls;
 pub mod providers;
 pub mod video;
+pub mod video_input_validation;
 
 // Re-export main types
 pub use audio::{MusicGenerationParams, MusicGenerationResult, TTSParams, TTSResult, Voice};

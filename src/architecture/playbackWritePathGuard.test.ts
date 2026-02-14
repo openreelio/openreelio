@@ -18,6 +18,7 @@ const ALLOWED_SET_CURRENT_TIME_CALLERS = new Set([
   'src/core/TimelineEngine.ts',
   'src/hooks/usePlaybackLoop.ts',
   'src/hooks/useTimelineEngine.ts',
+  'src/services/playheadBackendSync.ts',
 ]);
 
 function normalizePath(filePath: string): string {

@@ -332,7 +332,8 @@ export function calculateClipDuration(
   sourceOut: number,
   speed: number = 1
 ): number {
-  return (sourceOut - sourceIn) / speed;
+  const safeSpeed = speed > 0 ? speed : 1;
+  return (sourceOut - sourceIn) / safeSpeed;
 }
 
 /**

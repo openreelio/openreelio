@@ -82,8 +82,9 @@ export function useVideoSync({
    * Calculate the source time for a clip given a timeline time
    */
   const calculateSourceTime = useCallback((clip: Clip, timelineTime: number): number => {
+    const safeSpeed = clip.speed > 0 ? clip.speed : 1;
     const offsetInClip = timelineTime - clip.place.timelineInSec;
-    return clip.range.sourceInSec + (offsetInClip * clip.speed);
+    return clip.range.sourceInSec + (offsetInClip * safeSpeed);
   }, []);
 
   /**
@@ -164,8 +165,9 @@ export function useVideoSync({
         video.currentTime = clampedTime;
       }
 
-      // Set playback rate
-      video.playbackRate = playbackRate * clip.speed;
+      // Set playback rate (guard against zero speed → playbackRate=0 which freezes playback)
+      const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+      video.playbackRate = playbackRate * safeSpeed;
 
       // Sync play state
       if (isPlaying) {
@@ -221,7 +223,8 @@ export function useVideoSync({
     clips.forEach(clip => {
       const video = videoRefs.get(clip.id);
       if (video) {
-        video.playbackRate = playbackRate * clip.speed;
+        const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+        video.playbackRate = playbackRate * safeSpeed;
       }
     });
   }, [effectivelyEnabled, playbackRate, clips, videoRefs]);
@@ -257,15 +260,17 @@ export function useVideoSync({
  * Calculate timeline time from a video's current time
  */
 export function calculateTimelineTime(clip: Clip, sourceTime: number): number {
+  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
   const offsetInSource = sourceTime - clip.range.sourceInSec;
-  return clip.place.timelineInSec + (offsetInSource / clip.speed);
+  return clip.place.timelineInSec + (offsetInSource / safeSpeed);
 }
 
 /**
  * Check if a timeline time falls within a clip's range
  */
 export function isTimeInClip(clip: Clip, timelineTime: number): boolean {
-  const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+  const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
   const clipEnd = clip.place.timelineInSec + clipDuration;
   return timelineTime >= clip.place.timelineInSec && timelineTime < clipEnd;
 }
@@ -274,5 +279,6 @@ export function isTimeInClip(clip: Clip, timelineTime: number): boolean {
  * Get the duration of a clip on the timeline
  */
 export function getClipTimelineDuration(clip: Clip): number {
-  return (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+  return (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
 }

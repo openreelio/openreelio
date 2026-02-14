@@ -99,6 +99,12 @@ describe('playbackStore', () => {
       expect(usePlaybackStore.getState().currentTime).toBe(60);
     });
 
+    it('should guard against NaN seek input', () => {
+      usePlaybackStore.setState({ duration: 60, currentTime: 20 });
+      usePlaybackStore.getState().seek(Number.NaN);
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+    });
+
     it('should seek forward by specified amount', () => {
       usePlaybackStore.setState({ duration: 60, currentTime: 20 });
       usePlaybackStore.getState().seekForward(10);
@@ -109,6 +115,30 @@ describe('playbackStore', () => {
       usePlaybackStore.setState({ duration: 60, currentTime: 20 });
       usePlaybackStore.getState().seekBackward(10);
       expect(usePlaybackStore.getState().currentTime).toBe(10);
+    });
+
+    it('should guard against NaN seekForward amount', () => {
+      usePlaybackStore.setState({ duration: 60, currentTime: 20 });
+      usePlaybackStore.getState().seekForward(Number.NaN);
+      expect(usePlaybackStore.getState().currentTime).toBe(20);
+    });
+
+    it('should guard against Infinity seekForward amount', () => {
+      usePlaybackStore.setState({ duration: 60, currentTime: 20 });
+      usePlaybackStore.getState().seekForward(Infinity);
+      expect(usePlaybackStore.getState().currentTime).toBe(20);
+    });
+
+    it('should guard against NaN seekBackward amount', () => {
+      usePlaybackStore.setState({ duration: 60, currentTime: 20 });
+      usePlaybackStore.getState().seekBackward(Number.NaN);
+      expect(usePlaybackStore.getState().currentTime).toBe(20);
+    });
+
+    it('should guard against Infinity seekBackward amount', () => {
+      usePlaybackStore.setState({ duration: 60, currentTime: 20 });
+      usePlaybackStore.getState().seekBackward(Infinity);
+      expect(usePlaybackStore.getState().currentTime).toBe(20);
     });
 
     it('should go to start', () => {
@@ -134,9 +164,37 @@ describe('playbackStore', () => {
       expect(usePlaybackStore.getState().currentTime).toBe(15);
     });
 
+    it('should clamp time updates when duration is set', () => {
+      usePlaybackStore.setState({ duration: 10 });
+      usePlaybackStore.getState().setCurrentTime(15);
+      expect(usePlaybackStore.getState().currentTime).toBe(10);
+    });
+
+    it('should guard against NaN time updates', () => {
+      usePlaybackStore.setState({ currentTime: 5, duration: 60 });
+      usePlaybackStore.getState().setCurrentTime(Number.NaN);
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+    });
+
     it('should update duration', () => {
       usePlaybackStore.getState().setDuration(120);
       expect(usePlaybackStore.getState().duration).toBe(120);
+    });
+
+    it('should clamp currentTime when duration shrinks', () => {
+      usePlaybackStore.setState({ currentTime: 50, duration: 60 });
+      usePlaybackStore.getState().setDuration(10);
+      const state = usePlaybackStore.getState();
+      expect(state.duration).toBe(10);
+      expect(state.currentTime).toBe(10);
+    });
+
+    it('should guard against invalid duration', () => {
+      usePlaybackStore.setState({ duration: 60, currentTime: 10 });
+      usePlaybackStore.getState().setDuration(Number.NaN);
+      const state = usePlaybackStore.getState();
+      expect(state.duration).toBe(0);
+      expect(state.currentTime).toBe(10);
     });
   });
 
@@ -158,6 +216,18 @@ describe('playbackStore', () => {
     it('should clamp volume to 1', () => {
       usePlaybackStore.getState().setVolume(1.5);
       expect(usePlaybackStore.getState().volume).toBe(1);
+    });
+
+    it('should guard against NaN volume', () => {
+      usePlaybackStore.setState({ volume: 0.7 });
+      usePlaybackStore.getState().setVolume(Number.NaN);
+      expect(usePlaybackStore.getState().volume).toBe(0.7);
+    });
+
+    it('should guard against Infinity volume', () => {
+      usePlaybackStore.setState({ volume: 0.7 });
+      usePlaybackStore.getState().setVolume(Infinity);
+      expect(usePlaybackStore.getState().volume).toBe(0.7);
     });
 
     it('should toggle mute', () => {
@@ -195,6 +265,18 @@ describe('playbackStore', () => {
     it('should clamp playback rate to maximum', () => {
       usePlaybackStore.getState().setPlaybackRate(10);
       expect(usePlaybackStore.getState().playbackRate).toBe(4);
+    });
+
+    it('should guard against NaN playback rate', () => {
+      usePlaybackStore.setState({ playbackRate: 1.5 });
+      usePlaybackStore.getState().setPlaybackRate(Number.NaN);
+      expect(usePlaybackStore.getState().playbackRate).toBe(1.5);
+    });
+
+    it('should guard against Infinity playback rate', () => {
+      usePlaybackStore.setState({ playbackRate: 1.5 });
+      usePlaybackStore.getState().setPlaybackRate(Infinity);
+      expect(usePlaybackStore.getState().playbackRate).toBe(1.5);
     });
   });
 
@@ -283,6 +365,30 @@ describe('playbackStore', () => {
     it('should not step backward with negative fps', () => {
       usePlaybackStore.setState({ duration: 60, currentTime: 10 });
       usePlaybackStore.getState().stepBackward(-30);
+      expect(usePlaybackStore.getState().currentTime).toBe(10); // unchanged
+    });
+
+    it('should not step forward with NaN fps', () => {
+      usePlaybackStore.setState({ duration: 60, currentTime: 10 });
+      usePlaybackStore.getState().stepForward(Number.NaN);
+      expect(usePlaybackStore.getState().currentTime).toBe(10); // unchanged
+    });
+
+    it('should not step forward with Infinity fps', () => {
+      usePlaybackStore.setState({ duration: 60, currentTime: 10 });
+      usePlaybackStore.getState().stepForward(Infinity);
+      expect(usePlaybackStore.getState().currentTime).toBe(10); // unchanged
+    });
+
+    it('should not step backward with NaN fps', () => {
+      usePlaybackStore.setState({ duration: 60, currentTime: 10 });
+      usePlaybackStore.getState().stepBackward(Number.NaN);
+      expect(usePlaybackStore.getState().currentTime).toBe(10); // unchanged
+    });
+
+    it('should not step backward with Infinity fps', () => {
+      usePlaybackStore.setState({ duration: 60, currentTime: 10 });
+      usePlaybackStore.getState().stepBackward(Infinity);
       expect(usePlaybackStore.getState().currentTime).toBe(10); // unchanged
     });
   });

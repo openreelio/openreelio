@@ -200,6 +200,44 @@ pub struct AppState {
     /// - prevents concurrent reads/writes from racing on the vault file
     /// - avoids re-deriving keys and re-reading the vault on every IPC call
     pub credential_vault: Mutex<Option<crate::core::credentials::CredentialVault>>,
+
+    /// Runtime playback sync state shared with the frontend.
+    ///
+    /// This is intentionally runtime-only (not persisted in project state).
+    /// It provides a stable backend anchor for playhead/time synchronization,
+    /// diagnostics, and cross-service coordination.
+    pub playback_sync: Mutex<PlaybackSyncState>,
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Debug)]
+pub struct PlaybackSyncState {
+    /// Current playhead position in seconds.
+    pub position_sec: f64,
+    /// Active sequence ID associated with the current position.
+    pub sequence_id: Option<String>,
+    /// Whether playback is active.
+    pub is_playing: bool,
+    /// Timeline duration in seconds, when known.
+    pub duration_sec: Option<f64>,
+    /// Last update source label (frontend/system).
+    pub last_source: Option<String>,
+    /// RFC3339 timestamp of last update.
+    pub updated_at: String,
+}
+
+#[cfg(not(test))]
+impl Default for PlaybackSyncState {
+    fn default() -> Self {
+        Self {
+            position_sec: 0.0,
+            sequence_id: None,
+            is_playing: false,
+            duration_sec: None,
+            last_source: None,
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
 }
 
 #[cfg(not(test))]
@@ -215,6 +253,7 @@ impl AppState {
             search_service: Mutex::new(None),
             app_handle: OnceLock::new(),
             credential_vault: Mutex::new(None),
+            playback_sync: Mutex::new(PlaybackSyncState::default()),
         }
     }
 
@@ -364,6 +403,10 @@ mod tauri_app {
     macro_rules! collect_commands {
         () => {
             tauri_specta::collect_commands![
+                // App lifecycle / runtime sync
+                $crate::ipc::app_cleanup,
+                $crate::ipc::set_playhead_position,
+                $crate::ipc::get_playhead_position,
                 // Project commands
                 $crate::ipc::create_project,
                 $crate::ipc::open_project,
@@ -661,6 +704,8 @@ mod tauri_app {
             greet,
             // App lifecycle
             ipc::app_cleanup,
+            ipc::set_playhead_position,
+            ipc::get_playhead_position,
             // Project commands
             ipc::create_project,
             ipc::open_project,

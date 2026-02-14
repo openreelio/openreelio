@@ -62,7 +62,8 @@ const MIN_CLIP_WIDTH_PX = 4;
  * Calculate clip position and dimensions in pixels
  */
 function computeClipMetrics(clip: Clip, zoom: number): VirtualizedClip {
-  const durationSec = (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+  const durationSec = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
   const leftPx = clip.place.timelineInSec * zoom;
   const widthPx = Math.max(durationSec * zoom, MIN_CLIP_WIDTH_PX);
 
@@ -182,7 +183,8 @@ export function calculateTimelineExtent(clips: Clip[]): {
 
   for (const clip of clips) {
     const startTime = clip.place.timelineInSec;
-    const duration = (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+    const speed = clip.speed > 0 ? clip.speed : 1;
+    const duration = (clip.range.sourceOutSec - clip.range.sourceInSec) / speed;
     const endTime = startTime + duration;
 
     minTimeSec = Math.min(minTimeSec, startTime);

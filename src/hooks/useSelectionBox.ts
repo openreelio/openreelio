@@ -130,8 +130,9 @@ export function useSelectionBox({
         track.clips.forEach((clip) => {
           // Calculate clip position in pixels
           const clipLeft = clip.place.timelineInSec * currentZoom - currentScrollX + trackHeaderWidth;
+          const safeSpeed = clip.speed > 0 ? clip.speed : 1;
           const clipDuration =
-            (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+            (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
           const clipWidth = clipDuration * currentZoom;
           const clipRight = clipLeft + clipWidth;
 

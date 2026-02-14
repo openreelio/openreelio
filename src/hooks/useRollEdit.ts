@@ -105,7 +105,8 @@ export interface UseRollEditReturn {
 // =============================================================================
 
 function getClipDuration(clip: Clip): number {
-  return (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+  return (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
 }
 
 function getClipEndTime(clip: Clip): number {
@@ -224,11 +225,13 @@ export function useRollEdit(options: UseRollEditOptions = {}): UseRollEditReturn
 
       // Can't roll right past source availability of outgoing
       const outgoingSourceRemaining = outgoingSourceDuration - outgoingClip.range.sourceOutSec;
-      const maxByOutgoingSource = outgoingSourceRemaining / outgoingClip.speed;
+      const safeOutgoingSpeed = outgoingClip.speed > 0 ? outgoingClip.speed : 1;
+      const maxByOutgoingSource = outgoingSourceRemaining / safeOutgoingSpeed;
 
       // Can't roll left past source availability of incoming
       const incomingSourceRemaining = incomingClip.range.sourceInSec;
-      const minByIncomingSource = -(incomingSourceRemaining / incomingClip.speed);
+      const safeIncomingSpeed = incomingClip.speed > 0 ? incomingClip.speed : 1;
+      const minByIncomingSource = -(incomingSourceRemaining / safeIncomingSpeed);
 
       const minOffset = Math.max(minByOutgoingDuration, minByIncomingSource);
       const maxOffset = Math.min(maxByIncomingDuration, maxByOutgoingSource);

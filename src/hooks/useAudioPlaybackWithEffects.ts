@@ -434,7 +434,8 @@ export function useAudioPlaybackWithEffects({
     for (const { clip, asset, trackVolume, trackMuted } of audioClips) {
       if (trackMuted) continue;
 
-      const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+      const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+      const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
       const clipEnd = clip.place.timelineInSec + clipDuration;
 
       if (currentTime >= clipEnd) continue;
@@ -448,7 +449,7 @@ export function useAudioPlaybackWithEffects({
       // Create source node
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
-      source.playbackRate.value = playbackRate * clip.speed;
+      source.playbackRate.value = playbackRate * safeSpeed;
 
       // Create gain node for this clip
       // Note: Global volume/mute is handled by masterGainRef, not here
@@ -472,7 +473,7 @@ export function useAudioPlaybackWithEffects({
 
       // Calculate timing
       const timeIntoClip = Math.max(0, currentTime - clip.place.timelineInSec);
-      const sourceOffset = clip.range.sourceInSec + timeIntoClip * clip.speed;
+      const sourceOffset = clip.range.sourceInSec + timeIntoClip * safeSpeed;
       const startDelay = Math.max(0, clip.place.timelineInSec - currentTime);
       const remainingSourceDuration = clip.range.sourceOutSec - sourceOffset;
       const audioDuration = Math.max(0, remainingSourceDuration);
@@ -514,7 +515,8 @@ export function useAudioPlaybackWithEffects({
       if (clipData) {
         const clipVolume = calculateClipVolume(clipData.clip, clipData.trackVolume);
         scheduled.gainNode.gain.value = clipVolume;
-        scheduled.source.playbackRate.value = playbackRate * clipData.clip.speed;
+        const updateSpeed = clipData.clip.speed > 0 ? clipData.clip.speed : 1;
+        scheduled.source.playbackRate.value = playbackRate * updateSpeed;
       }
     });
   }, [

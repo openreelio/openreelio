@@ -9,6 +9,7 @@ import { render, screen, fireEvent, act, createEvent } from '@testing-library/re
 import { Timeline } from './Timeline';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
+import { useEditorToolStore } from '@/stores/editorToolStore';
 import type { Sequence } from '@/types';
 
 // =============================================================================
@@ -121,6 +122,15 @@ describe('Timeline', () => {
       isMuted: false,
       loop: false,
       syncWithTimeline: true,
+    });
+
+    // Reset editor tool store before each test
+    useEditorToolStore.setState({
+      activeTool: 'select',
+      previousTool: null,
+      rippleEnabled: false,
+      autoScrollEnabled: true,
+      clipboard: null,
     });
 
     // Mock getBoundingClientRect for drop tests
@@ -364,6 +374,56 @@ describe('Timeline', () => {
 
       expect(usePlaybackStore.getState().currentTime).toBe(0);
     });
+
+    it('should not seek when clicking clip trim handles', async () => {
+      const sequenceWithClip: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            clips: [
+              {
+                id: 'clip_trim_seek_guard',
+                assetId: 'asset_001',
+                range: { sourceInSec: 0, sourceOutSec: 10 },
+                place: { timelineInSec: 0, durationSec: 10 },
+                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+          mockSequence.tracks[1],
+        ],
+      };
+
+      render(<Timeline sequence={sequenceWithClip} />);
+
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+
+      const leftHandle = screen.getByTestId('resize-handle-left');
+      await act(async () => {
+        fireEvent.mouseDown(leftHandle, { clientX: 300, clientY: 40, button: 0 });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+    });
+
+    it('should not seek when hand tool is active', async () => {
+      useEditorToolStore.setState({ activeTool: 'hand' });
+      render(<Timeline sequence={mockSequence} />);
+
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      await act(async () => {
+        fireEvent.mouseDown(tracksArea, { clientX: 320, clientY: 40, button: 0 });
+      });
+
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
+    });
   });
 
   // ===========================================================================
@@ -412,6 +472,141 @@ describe('Timeline', () => {
       fireEvent.keyDown(timeline, { key: 'Delete' });
 
       expect(onDeleteClips).toHaveBeenCalledWith(['clip_001']);
+    });
+
+    it('should apply ripple moves only after delete operation resolves', async () => {
+      const sequenceWithRipple: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            clips: [
+              {
+                id: 'clip_001',
+                assetId: 'asset_001',
+                range: { sourceInSec: 0, sourceOutSec: 5 },
+                place: { timelineInSec: 0, durationSec: 5 },
+                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+              {
+                id: 'clip_002',
+                assetId: 'asset_002',
+                range: { sourceInSec: 0, sourceOutSec: 5 },
+                place: { timelineInSec: 5, durationSec: 5 },
+                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+          mockSequence.tracks[1],
+        ],
+      };
+
+      useTimelineStore.setState({ selectedClipIds: ['clip_001'] });
+      useEditorToolStore.setState({ rippleEnabled: true });
+
+      let resolveDelete: (() => void) | null = null;
+      const onDeleteClips = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveDelete = resolve;
+          })
+      );
+      const onClipMove = vi.fn().mockResolvedValue(undefined);
+
+      render(
+        <Timeline
+          sequence={sequenceWithRipple}
+          onDeleteClips={onDeleteClips}
+          onClipMove={onClipMove}
+        />
+      );
+
+      const timeline = screen.getByTestId('timeline');
+      fireEvent.keyDown(timeline, { key: 'Delete' });
+
+      expect(onDeleteClips).toHaveBeenCalledWith(['clip_001']);
+      expect(onClipMove).not.toHaveBeenCalled();
+
+      await act(async () => {
+        resolveDelete?.();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(onClipMove).toHaveBeenCalledWith(
+        expect.objectContaining({
+          clipId: 'clip_002',
+          newTimelineIn: 0,
+        })
+      );
+    });
+    it('should not throw when ripple move fails after delete', async () => {
+      const sequenceWithRipple: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            clips: [
+              {
+                id: 'clip_001',
+                assetId: 'asset_001',
+                range: { sourceInSec: 0, sourceOutSec: 5 },
+                place: { timelineInSec: 0, durationSec: 5 },
+                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+              {
+                id: 'clip_002',
+                assetId: 'asset_002',
+                range: { sourceInSec: 0, sourceOutSec: 5 },
+                place: { timelineInSec: 5, durationSec: 5 },
+                transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+          mockSequence.tracks[1],
+        ],
+      };
+
+      useTimelineStore.setState({ selectedClipIds: ['clip_001'] });
+      useEditorToolStore.setState({ rippleEnabled: true });
+
+      const onDeleteClips = vi.fn().mockResolvedValue(undefined);
+      const onClipMove = vi.fn().mockRejectedValue(new Error('move failed'));
+
+      render(
+        <Timeline
+          sequence={sequenceWithRipple}
+          onDeleteClips={onDeleteClips}
+          onClipMove={onClipMove}
+        />
+      );
+
+      const timeline = screen.getByTestId('timeline');
+      fireEvent.keyDown(timeline, { key: 'Delete' });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(onDeleteClips).toHaveBeenCalledWith(['clip_001']);
+      expect(onClipMove).toHaveBeenCalled();
     });
   });
 
@@ -651,3 +846,5 @@ describe('Timeline', () => {
     });
   });
 });
+
+

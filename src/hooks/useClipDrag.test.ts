@@ -804,4 +804,338 @@ describe('useClipDrag', () => {
       expect(result.current.previewPosition?.timelineIn).toBe(7);
     });
   });
+
+  // ===========================================================================
+  // Destructive / Race Condition Tests
+  // ===========================================================================
+
+  describe('destructive: unmount during active drag', () => {
+    it('cleans up refs when component unmounts mid-drag', () => {
+      const onDragEnd = vi.fn();
+      const removeEventListenerSpy = vi.spyOn(document, 'removeEventListener');
+      const { result, unmount } = renderHook(() =>
+        useClipDrag({ ...defaultOptions, onDragEnd }),
+      );
+
+      // Start drag
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      // Exceed threshold to enter active drag
+      act(() => {
+        const event = createMouseEvent('mousemove', 120);
+        document.dispatchEvent(event);
+      });
+
+      expect(result.current.isDragging).toBe(true);
+
+      // Unmount while actively dragging
+      unmount();
+
+      // Event listeners should be cleaned up
+      expect(removeEventListenerSpy).toHaveBeenCalledWith(
+        'mousemove',
+        expect.any(Function),
+        expect.objectContaining({ capture: true }),
+      );
+      expect(removeEventListenerSpy).toHaveBeenCalledWith(
+        'mouseup',
+        expect.any(Function),
+        expect.objectContaining({ capture: true }),
+      );
+
+      removeEventListenerSpy.mockRestore();
+    });
+
+    it('does not call onDragEnd after unmount', () => {
+      const onDragEnd = vi.fn();
+      const { result, unmount } = renderHook(() =>
+        useClipDrag({ ...defaultOptions, onDragEnd }),
+      );
+
+      // Start and exceed threshold
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 120));
+      });
+
+      // Unmount
+      unmount();
+
+      // Simulate mouseup after unmount - should not call onDragEnd
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mouseup', 200));
+      });
+
+      // onDragEnd should not be called after unmount
+      expect(onDragEnd).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('destructive: escape key cancellation', () => {
+    it('cancels active drag on Escape without committing', () => {
+      const onDragEnd = vi.fn();
+      const { result } = renderHook(() =>
+        useClipDrag({ ...defaultOptions, onDragEnd }),
+      );
+
+      // Start drag
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 120));
+      });
+
+      expect(result.current.isDragging).toBe(true);
+
+      // Press Escape
+      act(() => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      });
+
+      expect(result.current.isDragging).toBe(false);
+      expect(result.current.previewPosition).toBeNull();
+      // onDragEnd should NOT be called (drag was cancelled, not committed)
+      expect(onDragEnd).not.toHaveBeenCalled();
+    });
+
+    it('cancels pending drag on Escape', () => {
+      const onDragStart = vi.fn();
+      const { result } = renderHook(() =>
+        useClipDrag({ ...defaultOptions, onDragStart }),
+      );
+
+      // Start pending drag (no threshold exceeded)
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+
+      expect(result.current.isPendingDrag).toBe(true);
+
+      // Press Escape
+      act(() => {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      });
+
+      expect(result.current.isPendingDrag).toBe(false);
+      expect(result.current.isDragging).toBe(false);
+      expect(onDragStart).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('destructive: window blur during drag', () => {
+    it('cancels drag when window loses focus', () => {
+      const onDragEnd = vi.fn();
+      const { result } = renderHook(() =>
+        useClipDrag({ ...defaultOptions, onDragEnd }),
+      );
+
+      // Start active drag
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 120));
+      });
+
+      expect(result.current.isDragging).toBe(true);
+
+      // Simulate window blur (e.g., Alt+Tab)
+      act(() => {
+        window.dispatchEvent(new Event('blur'));
+      });
+
+      expect(result.current.isDragging).toBe(false);
+      expect(result.current.previewPosition).toBeNull();
+    });
+  });
+
+  describe('destructive: zero and invalid zoom', () => {
+    it('handles zero zoom without division by zero', () => {
+      const { result } = renderHook(() =>
+        useClipDrag({ ...defaultOptions, zoom: 0 }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 120));
+      });
+
+      // Should use fallback zoom (100) and produce finite values
+      expect(result.current.isDragging).toBe(true);
+      expect(result.current.previewPosition).not.toBeNull();
+      expect(Number.isFinite(result.current.previewPosition?.timelineIn)).toBe(true);
+    });
+
+    it('handles negative zoom without producing negative time', () => {
+      const { result } = renderHook(() =>
+        useClipDrag({ ...defaultOptions, zoom: -50 }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 120));
+      });
+
+      expect(result.current.isDragging).toBe(true);
+      expect(Number.isFinite(result.current.previewPosition?.timelineIn)).toBe(true);
+    });
+  });
+
+  describe('destructive: speed edge cases in drag', () => {
+    it('handles speed=0 without Infinity duration', () => {
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          speed: 0,
+          initialSourceIn: 0,
+          initialSourceOut: 10,
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 120));
+      });
+
+      // Duration should fallback to speed=1 → 10 seconds, not Infinity
+      expect(result.current.previewPosition?.duration).toBe(10);
+      expect(Number.isFinite(result.current.previewPosition?.duration)).toBe(true);
+    });
+
+    it('handles negative speed without negative duration', () => {
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          speed: -2,
+          initialSourceIn: 0,
+          initialSourceOut: 10,
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 120));
+      });
+
+      // Should fallback to speed=1
+      expect(result.current.previewPosition?.duration).toBe(10);
+    });
+  });
+
+  describe('destructive: NaN and Infinity inputs', () => {
+    it('handles NaN initialTimelineIn', () => {
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          initialTimelineIn: NaN,
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 120));
+      });
+
+      // Should produce safe fallback values
+      expect(result.current.previewPosition).not.toBeNull();
+      const pos = result.current.previewPosition!;
+      expect(Number.isFinite(pos.timelineIn) || pos.timelineIn === 0).toBe(true);
+    });
+
+    it('handles Infinity sourceOut', () => {
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          initialSourceOut: Infinity,
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+      });
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 120));
+      });
+
+      expect(result.current.previewPosition).not.toBeNull();
+    });
+  });
+
+  describe('destructive: rapid mousedown without mouseup', () => {
+    it('handles rapid successive mousedowns gracefully', () => {
+      const onDragStart = vi.fn();
+      const { result } = renderHook(() =>
+        useClipDrag({ ...defaultOptions, onDragStart }),
+      );
+
+      // Multiple rapid mousedowns without mouseup between them
+      for (let i = 0; i < 5; i++) {
+        act(() => {
+          const event = createMouseEvent('mousedown', 100 + i * 10);
+          result.current.handleMouseDown(event as unknown as React.MouseEvent, 'move');
+        });
+      }
+
+      // State should be in pending drag (last mousedown wins)
+      expect(result.current.isPendingDrag).toBe(true);
+
+      // Clean up with mouseup
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mouseup', 200));
+      });
+
+      expect(result.current.isPendingDrag).toBe(false);
+      expect(result.current.isDragging).toBe(false);
+    });
+  });
+
+  describe('destructive: trim with inverted source range', () => {
+    it('handles sourceIn >= sourceOut gracefully', () => {
+      const { result } = renderHook(() =>
+        useClipDrag({
+          ...defaultOptions,
+          initialSourceIn: 10,
+          initialSourceOut: 10, // Equal, zero-length clip
+        }),
+      );
+
+      act(() => {
+        const event = createMouseEvent('mousedown', 100);
+        result.current.handleMouseDown(event as unknown as React.MouseEvent, 'trim-right');
+      });
+      act(() => {
+        document.dispatchEvent(createMouseEvent('mousemove', 120));
+      });
+
+      // Should still produce valid state
+      expect(result.current.isDragging).toBe(true);
+      expect(result.current.previewPosition?.duration).toBeGreaterThanOrEqual(0);
+    });
+  });
 });

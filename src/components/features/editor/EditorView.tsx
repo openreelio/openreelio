@@ -39,6 +39,7 @@ import { useAudioMixer } from '@/hooks/useAudioMixer';
 import { useMulticamSession } from '@/hooks/useMulticamSession';
 import { dbToLinear, linearToDb } from '@/utils/audioMeter';
 import { createLogger } from '@/services/logger';
+import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { Terminal, Sliders, Sparkles } from 'lucide-react';
 import type { Sequence } from '@/types';
@@ -189,6 +190,21 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
     }
   }, [isPlaying, isAudioMixerReady, startMetering, stopMetering]);
 
+  // Keep backend runtime playhead state aligned while editor is active.
+  useEffect(() => {
+    if (!sequence?.id) {
+      return;
+    }
+
+    const stopSync = startPlayheadBackendSync({
+      getSequenceId: () => sequence.id,
+    });
+
+    return () => {
+      stopSync();
+    };
+  }, [sequence?.id]);
+
   // NOTE: Playback duration is set by useTimelineEngine (inside Timeline component)
   // with proper padding. Do NOT set duration here — it would overwrite the padded
   // value and cause the SeekBar and Timeline playhead to use different ranges,
@@ -218,9 +234,10 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
     for (const track of sequence.tracks) {
       const clip = track.clips.find((c) => c.id === clipId);
       if (clip) {
+        const safeSpeed = clip.speed > 0 ? clip.speed : 1;
         const clipEnd =
           clip.place.timelineInSec +
-          (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+          (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
 
         // Check if playhead is within the clip
         if (currentTime > clip.place.timelineInSec && currentTime < clipEnd) {
@@ -278,7 +295,8 @@ export function EditorView({ sequence }: EditorViewProps): JSX.Element {
         const clip = track.clips.find((c) => c.id === clipId);
         if (clip) {
           // Calculate duration adjusting for speed
-          const duration = (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+          const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+          const duration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
 
           return {
             id: clip.id,

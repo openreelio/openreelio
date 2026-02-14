@@ -491,9 +491,9 @@ describe('calculateClipDuration', () => {
     expect(calculateClipDuration(0, 10, 0.5)).toBe(20); // 0.5x speed = double duration
   });
 
-  it('handles zero speed (edge case)', () => {
+  it('handles zero speed (edge case) - falls back to speed 1', () => {
     const result = calculateClipDuration(0, 10, 0);
-    expect(result).toBe(Infinity); // Division by zero
+    expect(result).toBe(10); // Zero speed safely falls back to 1x
   });
 });
 

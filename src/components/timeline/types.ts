@@ -165,11 +165,11 @@ export interface TimelineProps {
   /** Sequence to display */
   sequence: Sequence | null;
   /** Callback when clips should be deleted */
-  onDeleteClips?: (clipIds: string[]) => void;
+  onDeleteClips?: (clipIds: string[]) => void | Promise<void>;
   /** Callback when asset is dropped on timeline */
   onAssetDrop?: (data: AssetDropData) => void;
   /** Callback when clip is moved */
-  onClipMove?: (data: ClipMoveData) => void;
+  onClipMove?: (data: ClipMoveData) => void | Promise<void>;
   /** Callback when clip is trimmed */
   onClipTrim?: (data: ClipTrimData) => void;
   /** Callback when clip is split */

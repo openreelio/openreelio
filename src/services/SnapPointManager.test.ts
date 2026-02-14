@@ -433,4 +433,126 @@ describe('SnapPointManager Edge Cases', () => {
     const gridPoints = snapPoints.filter(p => p.type === 'grid');
     expect(gridPoints.length).toBe(0);
   });
+
+  it('should handle clip with speed=0 (safeSpeed fallback)', () => {
+    const clip: Clip = {
+      id: 'clip-zero-speed',
+      assetId: 'asset-1',
+      place: { timelineInSec: 5, trackId: 'track-1' },
+      range: { sourceInSec: 0, sourceOutSec: 10 },
+      speed: 0, // Would cause Infinity without guard
+      transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, anchor: { x: 0.5, y: 0.5 } },
+      opacity: 1,
+      effects: [],
+      audio: { volumeDb: 0, muted: false },
+    } as unknown as Clip;
+
+    manager.updateClip(clip);
+    const snapPoints = manager.getSnapPoints();
+    const clipEndPoints = snapPoints.filter(p => p.type === 'clip-end' && p.clipId === 'clip-zero-speed');
+
+    // safeSpeed=1: out = 5 + 10/1 = 15
+    expect(clipEndPoints).toContainEqual(expect.objectContaining({ time: 15 }));
+    // Verify no Infinity or NaN values
+    for (const point of clipEndPoints) {
+      expect(Number.isFinite(point.time)).toBe(true);
+    }
+  });
+
+  it('should handle clip with negative speed (safeSpeed fallback)', () => {
+    const clip: Clip = {
+      id: 'clip-neg-speed',
+      assetId: 'asset-1',
+      place: { timelineInSec: 0, trackId: 'track-1' },
+      range: { sourceInSec: 0, sourceOutSec: 10 },
+      speed: -2,
+      transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, anchor: { x: 0.5, y: 0.5 } },
+      opacity: 1,
+      effects: [],
+      audio: { volumeDb: 0, muted: false },
+    } as unknown as Clip;
+
+    manager.updateClip(clip);
+    const snapPoints = manager.getSnapPoints();
+    const clipEndPoints = snapPoints.filter(p => p.type === 'clip-end' && p.clipId === 'clip-neg-speed');
+
+    // safeSpeed=1: out = 0 + 10/1 = 10
+    expect(clipEndPoints).toContainEqual(expect.objectContaining({ time: 10 }));
+  });
+
+  it('should handle removing a clip that does not exist', () => {
+    // Should not throw
+    manager.removeClip('nonexistent-clip');
+    const stats = manager.getStats();
+    expect(stats.clipCount).toBe(0);
+  });
+
+  it('should handle rapid add/remove cycles', () => {
+    for (let i = 0; i < 100; i++) {
+      const clip = createMockClip(`clip-${i}`, i, 1);
+      manager.updateClip(clip);
+    }
+    expect(manager.getStats().clipCount).toBe(100);
+
+    for (let i = 0; i < 100; i++) {
+      manager.removeClip(`clip-${i}`);
+    }
+    expect(manager.getStats().clipCount).toBe(0);
+
+    const snapPoints = manager.getSnapPoints();
+    const clipPoints = snapPoints.filter(p => p.type === 'clip-start' || p.type === 'clip-end');
+    expect(clipPoints.length).toBe(0);
+  });
+
+  it('should handle negative grid interval', () => {
+    manager.updateConfig({ gridInterval: -1 });
+    const snapPoints = manager.getSnapPoints();
+    const gridPoints = snapPoints.filter(p => p.type === 'grid');
+    expect(gridPoints.length).toBe(0);
+  });
+
+  it('should handle concurrent config and clip updates', () => {
+    // Simulate rapid interleaved updates
+    for (let i = 0; i < 50; i++) {
+      manager.updateClip(createMockClip(`clip-${i}`, i * 2, 1));
+      manager.updateConfig({ zoom: 100 + i });
+    }
+
+    const snapPoints = manager.getSnapPoints();
+    expect(snapPoints.length).toBeGreaterThan(0);
+
+    // All points should have finite times
+    for (const point of snapPoints) {
+      expect(Number.isFinite(point.time)).toBe(true);
+    }
+  });
+
+  it('should handle snapToNearest with zero threshold', () => {
+    const clip = createMockClip('clip-1', 5, 10);
+    manager.updateClip(clip);
+
+    const result = manager.snapToNearest(5.001, 0);
+    // Zero threshold = nothing should snap
+    expect(result.snapped).toBe(false);
+    expect(result.time).toBe(5.001);
+  });
+
+  it('should handle snapToNearest with negative threshold', () => {
+    const clip = createMockClip('clip-1', 5, 10);
+    manager.updateClip(clip);
+
+    const result = manager.snapToNearest(5.001, -1);
+    // Negative threshold should not snap
+    expect(result.snapped).toBe(false);
+  });
+
+  it('should preserve clipId in snap results for accurate filtering', () => {
+    manager.updateConfig({ snapToGrid: false });
+    const clip = createMockClip('clip-1', 5, 10);
+    manager.updateClip(clip);
+
+    const result = manager.snapToNearest(5.01, 0.1);
+    expect(result.snapped).toBe(true);
+    expect(result.snapPoint?.clipId).toBe('clip-1');
+  });
 });

@@ -165,10 +165,6 @@ export function useScrubbing({
 
   /**
    * Process pending mouse event in rAF callback.
-   * Updates both playhead visual (direct DOM) and playback store (throttled seek).
-   */
-  /**
-   * Process pending mouse event in rAF callback.
    * Updates both playhead visual (direct DOM) and playback store (seek on every frame).
    */
   const processFrame = useCallback(() => {
@@ -186,11 +182,12 @@ export function useScrubbing({
       // This matches OpenCut's approach where seek() is called on every mousemove
       seek(result.time);
 
-      onSnapChange?.(result.snapPoint);
+      // Use ref to avoid stale closure during active scrubbing
+      onSnapChangeRef.current?.(result.snapPoint);
     }
 
     state.pendingEvent = null;
-  }, [calculateTimeFromMouseEvent, updatePlayheadDirect, onSnapChange, seek]);
+  }, [calculateTimeFromMouseEvent, updatePlayheadDirect, seek]);
 
   // Cleanup function to remove event listeners
   const cleanup = useCallback(() => {
@@ -281,7 +278,8 @@ export function useScrubbing({
         scrubStateRef.current.currentTime = result.time;
         updatePlayheadDirect(result.time);
         seek(result.time);
-        onSnapChange?.(result.snapPoint);
+        // Use ref to avoid stale closure if onSnapChange changes mid-scrub
+        onSnapChangeRef.current?.(result.snapPoint);
       }
 
       // Apply ew-resize cursor to entire document during scrubbing
@@ -316,7 +314,8 @@ export function useScrubbing({
         }
 
         setIsScrubbing(false);
-        onSnapChange?.(null);
+        // Use ref to avoid stale closure - handler was captured at scrub start
+        onSnapChangeRef.current?.(null);
 
         // Sync final position to React state and restore playback
         if (state) {
@@ -353,7 +352,6 @@ export function useScrubbing({
       togglePlayback,
       calculateTimeFromMouseEvent,
       seek,
-      onSnapChange,
       cleanup,
       updatePlayheadDirect,
       processFrame,

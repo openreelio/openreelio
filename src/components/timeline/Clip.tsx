@@ -111,8 +111,7 @@ export function Clip({
   onSnapPointChange,
 }: ClipProps) {
   // Use the clip drag hook for smooth drag operations
-  // isPendingDrag indicates mouse is down but hasn't exceeded drag threshold yet
-  const { isDragging, isPendingDrag, previewPosition, activeSnapPoint, handleMouseDown } = useClipDrag({
+  const { isDragging, previewPosition, activeSnapPoint, handleMouseDown } = useClipDrag({
     clipId: clip.id,
     initialTimelineIn: clip.place.timelineInSec,
     initialSourceIn: clip.range.sourceInSec,
@@ -148,7 +147,8 @@ export function Clip({
       };
     }
 
-    const duration = (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+    const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+    const duration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
     return {
       duration,
       left: clip.place.timelineInSec * zoom,
@@ -164,20 +164,39 @@ export function Clip({
     return undefined;
   }, [clip.color]);
 
-  // Track if mousedown initiated a potential drag (set synchronously, cleared in click handler)
-  const hadMouseDownRef = useRef(false);
+  // Track if a drag operation completed (threshold exceeded + released).
+  // Set via effect when isDragging becomes true; read-and-reset in click handler.
+  // This replaces the broken hadMouseDownRef which blocked ALL clicks.
+  const dragCompletedRef = useRef(false);
+
+  useEffect(() => {
+    if (isDragging) {
+      dragCompletedRef.current = true;
+      return;
+    }
+
+    // When drag ends, clear the flag after a microtask so the immediate
+    // post-drag click is still suppressed but subsequent clicks work
+    // (handles mouseup outside the clip where no click event fires).
+    if (dragCompletedRef.current) {
+      const id = setTimeout(() => {
+        dragCompletedRef.current = false;
+      }, 0);
+
+      return () => clearTimeout(id);
+    }
+  }, [isDragging]);
 
   // Handle click (differentiate from drag)
   const handleClick = (e: MouseEvent) => {
     e.stopPropagation();
 
-    // Check if we had a mousedown that initiated drag handling
-    const hadDragMouseDown = hadMouseDownRef.current;
-    hadMouseDownRef.current = false; // Reset for next interaction
+    // Read and reset the drag-completed flag
+    const wasDragCompleted = dragCompletedRef.current;
+    dragCompletedRef.current = false;
 
-    // Don't trigger click if we were dragging, in pending drag state,
-    // or had a mousedown that was captured for potential drag
-    if (isDragging || isPendingDrag || hadDragMouseDown) return;
+    // Don't trigger click if actively dragging or just completed a drag
+    if (isDragging || wasDragCompleted) return;
 
     if (!disabled && onClick) {
       onClick(clip.id, {
@@ -198,22 +217,18 @@ export function Clip({
 
   // Handle mouse down on main clip area
   const handleClipMouseDown = (e: MouseEvent) => {
-    // Mark that mousedown started a potential drag - cleared in click handler
-    hadMouseDownRef.current = true;
     handleMouseDown(e, 'move');
   };
 
   // Handle mouse down on left trim handle
   const handleLeftTrimMouseDown = (e: MouseEvent) => {
     e.stopPropagation();
-    hadMouseDownRef.current = true;
     handleMouseDown(e, 'trim-left');
   };
 
   // Handle mouse down on right trim handle
   const handleRightTrimMouseDown = (e: MouseEvent) => {
     e.stopPropagation();
-    hadMouseDownRef.current = true;
     handleMouseDown(e, 'trim-right');
   };
 
