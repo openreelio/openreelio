@@ -48,8 +48,9 @@ function findClipAtTime(sequence: Sequence, time: number): Clip | null {
 
     for (const clip of track.clips) {
       const clipStart = clip.place.timelineInSec;
+      const safeSpeed = clip.speed > 0 ? clip.speed : 1;
       const clipDuration =
-        (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+        (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
       const clipEnd = clipStart + clipDuration;
 
       if (time >= clipStart && time < clipEnd) {

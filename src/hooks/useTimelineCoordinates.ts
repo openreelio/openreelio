@@ -112,9 +112,10 @@ export function useTimelineCoordinates({
     const points: SnapPoint[] = [];
     for (const track of sequence.tracks) {
       for (const clip of track.clips) {
+        const safeSpeed = clip.speed > 0 ? clip.speed : 1;
         const endTime =
           clip.place.timelineInSec +
-          (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+          (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
         points.push(...createClipSnapPoints(clip.id, clip.place.timelineInSec, endTime));
       }
     }

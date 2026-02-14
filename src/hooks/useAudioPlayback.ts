@@ -394,7 +394,8 @@ export function useAudioPlayback({
       if (trackMuted) continue;
 
       // Calculate clip timing
-      const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+      const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+      const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
       const clipEnd = clip.place.timelineInSec + clipDuration;
 
       // Skip clips that have ended
@@ -414,7 +415,7 @@ export function useAudioPlayback({
       // Create source node
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
-      source.playbackRate.value = playbackRate * clip.speed;
+      source.playbackRate.value = playbackRate * safeSpeed;
 
       // Create gain node for this clip
       const gainNode = ctx.createGain();
@@ -427,7 +428,7 @@ export function useAudioPlayback({
 
       // Calculate start timing
       const timeIntoClip = Math.max(0, currentTime - clip.place.timelineInSec);
-      const sourceOffset = clip.range.sourceInSec + (timeIntoClip * clip.speed);
+      const sourceOffset = clip.range.sourceInSec + (timeIntoClip * safeSpeed);
       const startDelay = Math.max(0, clip.place.timelineInSec - currentTime);
 
       // Calculate duration to stop at clip's source out point
@@ -460,7 +461,8 @@ export function useAudioPlayback({
       if (clipData) {
         const clipVolume = calculateClipVolume(clipData.clip, clipData.trackVolume);
         scheduled.gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
-        scheduled.source.playbackRate.value = playbackRate * clipData.clip.speed;
+        const updateSpeed = clipData.clip.speed > 0 ? clipData.clip.speed : 1;
+        scheduled.source.playbackRate.value = playbackRate * updateSpeed;
       }
     });
 
@@ -468,8 +470,9 @@ export function useAudioPlayback({
     if (ctx && scheduledSourcesRef.current.size > 0) {
       // Find the first active clip to calculate audio timeline position
       const firstActiveClip = audioClips.find(c => {
+        const syncSpeed = c.clip.speed > 0 ? c.clip.speed : 1;
         const clipEnd = c.clip.place.timelineInSec +
-          (c.clip.range.sourceOutSec - c.clip.range.sourceInSec) / c.clip.speed;
+          (c.clip.range.sourceOutSec - c.clip.range.sourceInSec) / syncSpeed;
         return currentTime >= c.clip.place.timelineInSec && currentTime < clipEnd;
       });
 

@@ -158,7 +158,8 @@ export class SnapPointManager {
   updateClip(clip: Clip): void {
     const clipId = clip.id;
     const inTime = clip.place.timelineInSec;
-    const outTime = inTime + (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+    const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+    const outTime = inTime + (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
 
     const snapPoints: ManagedSnapPoint[] = [
       {
@@ -208,7 +209,8 @@ export class SnapPointManager {
     for (const track of sequence.tracks) {
       for (const clip of track.clips) {
         const inTime = clip.place.timelineInSec;
-        const outTime = inTime + (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+        const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+        const outTime = inTime + (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
 
         const snapPoints: ManagedSnapPoint[] = [
           {

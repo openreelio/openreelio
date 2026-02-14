@@ -196,7 +196,7 @@ export function useTimelineClipOperations({
 
         if (clipInfo && trackIndex >= 0) {
           const clipDuration =
-            (data.originalSourceOut - data.originalSourceIn) / clipInfo.clip.speed;
+            (data.originalSourceOut - data.originalSourceIn) / (clipInfo.clip.speed > 0 ? clipInfo.clip.speed : 1);
 
           setDragPreview({
             clipId: data.clipId,
