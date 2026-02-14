@@ -393,3 +393,273 @@ describe('Playback Rate Extremes', () => {
     expect(controller.frameDuration).toBeCloseTo(1 / 30, 6);
   });
 });
+
+// =============================================================================
+// Destructive / Race Condition Tests
+// =============================================================================
+
+describe('Destructive: concurrent lock operations', () => {
+  let controller: PlaybackController;
+
+  beforeEach(() => {
+    controller = new PlaybackController({ fps: 30 });
+    vi.mocked(usePlaybackStore.getState).mockReturnValue(
+      createMockState() as unknown as ReturnType<typeof usePlaybackStore.getState>
+    );
+  });
+
+  afterEach(() => {
+    controller.dispose();
+  });
+
+  it('should deny all concurrent lock types when one is held', () => {
+    controller.acquireDragLock('scrubbing');
+
+    expect(controller.acquireDragLock('playhead')).toBe(false);
+    expect(controller.acquireDragLock('clip')).toBe(false);
+    expect(controller.acquireDragLock('scrubbing')).toBe(false);
+
+    expect(controller.getCurrentDragOperation()).toBe('scrubbing');
+  });
+
+  it('should allow rapid acquire-release cycles', () => {
+    const operations: Array<'scrubbing' | 'playhead' | 'clip'> = [
+      'scrubbing', 'playhead', 'clip', 'scrubbing', 'playhead',
+    ];
+
+    for (const op of operations) {
+      const acquired = controller.acquireDragLock(op);
+      expect(acquired).toBe(true);
+      controller.releaseDragLock(op);
+      expect(controller.isDragActive()).toBe(false);
+    }
+  });
+
+  it('should ignore release with wrong operation name', () => {
+    controller.acquireDragLock('scrubbing');
+
+    // Try releasing with every wrong name
+    controller.releaseDragLock('playhead');
+    expect(controller.isDragActive()).toBe(true);
+
+    controller.releaseDragLock('clip');
+    expect(controller.isDragActive()).toBe(true);
+
+    // Only correct release works
+    controller.releaseDragLock('scrubbing');
+    expect(controller.isDragActive()).toBe(false);
+  });
+
+  it('should handle release when no lock is held', () => {
+    // Should not throw
+    controller.releaseDragLock('scrubbing');
+    controller.releaseDragLock('playhead');
+    controller.releaseDragLock('clip');
+
+    expect(controller.isDragActive()).toBe(false);
+  });
+});
+
+describe('Destructive: seek edge cases', () => {
+  let controller: PlaybackController;
+  let mockSeek: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    controller = new PlaybackController({ fps: 30 });
+    mockSeek = vi.fn();
+    vi.mocked(usePlaybackStore.getState).mockReturnValue(
+      createMockState({ seek: mockSeek }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+    );
+  });
+
+  afterEach(() => {
+    controller.dispose();
+  });
+
+  it('should handle NaN seek (passes through Math.max/min as NaN)', () => {
+    const result = controller.seek(NaN);
+    // NaN propagates through Math.max(0, Math.min(duration, NaN)) = NaN
+    // Controller does not guard non-frameAccurate seeks against NaN
+    expect(result).toBe(true);
+    expect(mockSeek).toHaveBeenCalledWith(NaN, 'playback-controller:unknown');
+  });
+
+  it('should handle negative seek', () => {
+    controller.seek(-100);
+    expect(mockSeek).toHaveBeenCalledWith(0, 'playback-controller:unknown');
+  });
+
+  it('should handle very large seek', () => {
+    controller.seek(1e15);
+    // Should clamp to duration (60)
+    expect(mockSeek).toHaveBeenCalledWith(60, 'playback-controller:unknown');
+  });
+
+  it('should deduplicate rapid seeks to identical positions', () => {
+    for (let i = 0; i < 100; i++) {
+      controller.seek(5.0);
+    }
+    // First seek goes through, rest are deduplicated
+    expect(mockSeek).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not deduplicate seeks to different positions', () => {
+    for (let i = 0; i < 10; i++) {
+      controller.seek(i);
+    }
+    expect(mockSeek).toHaveBeenCalledTimes(10);
+  });
+});
+
+describe('Destructive: post-dispose operations', () => {
+  let controller: PlaybackController;
+
+  beforeEach(() => {
+    controller = new PlaybackController({ fps: 30 });
+    vi.mocked(usePlaybackStore.getState).mockReturnValue(
+      createMockState() as unknown as ReturnType<typeof usePlaybackStore.getState>
+    );
+  });
+
+  it('should reject all operations after dispose', () => {
+    controller.dispose();
+
+    expect(controller.seek(5.0)).toBe(false);
+    expect(controller.acquireDragLock('scrubbing')).toBe(false);
+
+    // These should not throw
+    controller.releaseDragLock('scrubbing');
+    controller.reportVideoTime(1.0);
+    controller.reportAudioTime(1.0);
+    controller.stepForward();
+    controller.stepBackward();
+  });
+
+  it('should not emit events after dispose', () => {
+    const listener = vi.fn();
+    controller.subscribe(listener);
+    controller.dispose();
+
+    controller.seek(5.0);
+    controller.acquireDragLock('scrubbing');
+
+    // Listener should only have received events before dispose
+    const postDisposeCallCount = listener.mock.calls.length;
+    controller.seek(10.0);
+    expect(listener.mock.calls.length).toBe(postDisposeCallCount);
+  });
+
+  it('should handle double dispose', () => {
+    // Should not throw
+    controller.dispose();
+    controller.dispose();
+
+    expect(controller.seek(5.0)).toBe(false);
+  });
+});
+
+describe('Destructive: frame stepping boundary conditions', () => {
+  let controller: PlaybackController;
+  let mockSeek: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    controller = new PlaybackController({ fps: 30 });
+    mockSeek = vi.fn();
+  });
+
+  afterEach(() => {
+    controller.dispose();
+  });
+
+  it('should not step below 0 at timeline start', () => {
+    vi.mocked(usePlaybackStore.getState).mockReturnValue(
+      createMockState({
+        currentTime: 0,
+        seek: mockSeek,
+      }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+    );
+
+    controller.stepBackward();
+    const seekArg = mockSeek.mock.calls[0][0];
+    expect(seekArg).toBeGreaterThanOrEqual(0);
+  });
+
+  it('should not step beyond duration at timeline end', () => {
+    vi.mocked(usePlaybackStore.getState).mockReturnValue(
+      createMockState({
+        currentTime: 60,
+        duration: 60,
+        seek: mockSeek,
+      }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+    );
+
+    controller.stepForward();
+    const seekArg = mockSeek.mock.calls[0][0];
+    expect(seekArg).toBeLessThanOrEqual(60);
+  });
+
+  it('should handle stepping at sub-frame precision (frame-snapped)', () => {
+    vi.mocked(usePlaybackStore.getState).mockReturnValue(
+      createMockState({
+        currentTime: 1.0001,
+        seek: mockSeek,
+      }) as unknown as ReturnType<typeof usePlaybackStore.getState>
+    );
+
+    controller.stepForward();
+    const seekArg = mockSeek.mock.calls[0][0];
+    // stepForward uses frameAccurate: true, so result is snapped to frame boundary
+    // 1.0001 + 1/30 ≈ 1.03343 → snapToFrame → round(1.03343 * 30) / 30 = 31/30 ≈ 1.03333
+    expect(seekArg).toBeCloseTo(31 / 30, 6);
+  });
+});
+
+describe('Destructive: subscription lifecycle', () => {
+  let controller: PlaybackController;
+
+  beforeEach(() => {
+    controller = new PlaybackController({ fps: 30 });
+    vi.mocked(usePlaybackStore.getState).mockReturnValue(
+      createMockState() as unknown as ReturnType<typeof usePlaybackStore.getState>
+    );
+  });
+
+  afterEach(() => {
+    controller.dispose();
+  });
+
+  it('should handle unsubscribe called multiple times', () => {
+    const listener = vi.fn();
+    const unsub = controller.subscribe(listener);
+
+    unsub();
+    unsub(); // Double unsubscribe should not throw
+    unsub();
+
+    controller.seek(5.0);
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it('should handle many concurrent subscribers', () => {
+    const listeners = Array.from({ length: 100 }, () => vi.fn());
+    const unsubs = listeners.map(l => controller.subscribe(l));
+
+    controller.seek(5.0);
+
+    for (const listener of listeners) {
+      expect(listener).toHaveBeenCalledTimes(1);
+    }
+
+    // Unsubscribe all
+    for (const unsub of unsubs) {
+      unsub();
+    }
+
+    controller.seek(10.0);
+
+    // No additional calls
+    for (const listener of listeners) {
+      expect(listener).toHaveBeenCalledTimes(1);
+    }
+  });
+});
