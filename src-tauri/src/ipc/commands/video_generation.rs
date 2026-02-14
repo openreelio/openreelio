@@ -11,14 +11,19 @@
 //! - `download_generated_video`: Download a completed video to project dir
 //! - `configure_seedance_provider`: Configure the Seedance API key
 
+use std::sync::OnceLock;
+
 use tauri::Manager;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::core::credentials::{CredentialType, CredentialVault};
 use crate::core::generative::provider_impls::SeedanceProvider;
 use crate::core::generative::providers::GenerativeProvider;
+use crate::core::generative::video_input_validation::{
+    normalize_enum_input, parse_mode, parse_quality, quality_to_wire_value, validate_base_url,
+};
 use crate::core::generative::video::{
-    VideoCostEstimate, VideoGenMode, VideoGenerationParams, VideoGenerationStatus, VideoJobHandle,
-    VideoQuality,
+    VideoCostEstimate, VideoGenerationParams, VideoGenerationStatus, VideoJobHandle,
 };
 use crate::core::settings::SettingsManager;
 use crate::AppState;
@@ -34,6 +39,11 @@ fn get_app_data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String
         .map_err(|e| format!("Failed to get app data directory: {}", e))
 }
 
+fn video_cost_write_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
 /// Retrieves the Seedance API key from the credential vault.
 async fn get_seedance_api_key(app: &tauri::AppHandle) -> Result<Option<String>, String> {
     let app_data_dir = get_app_data_dir(app)?;
@@ -43,9 +53,11 @@ async fn get_seedance_api_key(app: &tauri::AppHandle) -> Result<Option<String>, 
         match CredentialVault::new(vault_path) {
             Ok(vault) => {
                 if vault.exists(CredentialType::SeedanceApiKey).await {
-                    match vault.retrieve(CredentialType::SeedanceApiKey).await {
-                        Ok(key) if !key.is_empty() => return Ok(Some(key)),
-                        _ => {}
+                    if let Ok(key) = vault.retrieve(CredentialType::SeedanceApiKey).await {
+                        let trimmed = key.trim();
+                        if !trimmed.is_empty() {
+                            return Ok(Some(trimmed.to_string()));
+                        }
                     }
                 }
             }
@@ -105,16 +117,26 @@ fn enforce_video_budget_limits(app: &tauri::AppHandle, estimated_cents: u32) -> 
 
 /// Records video generation cost to the shared monthly usage bucket.
 ///
-/// Uses the same SettingsManager that `enforce_video_budget_limits` reads from,
-/// so subsequent budget checks see the accumulated total.
-fn record_video_cost(app: &tauri::AppHandle, cost_cents: u32) {
-    if let Ok(data_dir) = get_app_data_dir(app) {
-        let manager = SettingsManager::new(data_dir);
-        let mut settings = manager.load();
-        settings.ai.current_month_usage_cents += cost_cents;
-        if let Err(e) = manager.save(&settings) {
-            tracing::warn!("Failed to record video cost: {}", e);
+/// Uses a process-wide async mutex to avoid read-modify-write races between
+/// concurrent submissions.
+async fn record_video_cost(app: &tauri::AppHandle, cost_cents: u32) {
+    let _guard = video_cost_write_lock().lock().await;
+
+    let data_dir = match get_app_data_dir(app) {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!("Failed to get app data dir for cost recording: {}", e);
+            return;
         }
+    };
+    let manager = SettingsManager::new(data_dir);
+    let mut settings = manager.load();
+    settings.ai.current_month_usage_cents = settings
+        .ai
+        .current_month_usage_cents
+        .saturating_add(cost_cents);
+    if let Err(e) = manager.save(&settings) {
+        tracing::warn!("Failed to record video cost: {}", e);
     }
 }
 
@@ -133,7 +155,7 @@ async fn create_seedance_provider(app: &tauri::AppHandle) -> Result<SeedanceProv
 
 /// Request for submit_video_generation
 #[derive(Clone, Debug, serde::Deserialize, specta::Type)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SubmitVideoGenerationRequest {
     pub prompt: String,
     #[serde(default = "default_mode")]
@@ -214,34 +236,6 @@ pub struct ConfigureSeedanceProviderResponse {
 }
 
 // =============================================================================
-// Helper: Parse enums from strings
-// =============================================================================
-
-fn parse_mode(s: &str) -> Result<VideoGenMode, String> {
-    match s {
-        "text_to_video" => Ok(VideoGenMode::TextToVideo),
-        "image_to_video" => Ok(VideoGenMode::ImageToVideo),
-        "multimodal" => Ok(VideoGenMode::Multimodal),
-        _ => Err(format!(
-            "Invalid video generation mode: '{}'. Valid: text_to_video, image_to_video, multimodal",
-            s
-        )),
-    }
-}
-
-fn parse_quality(s: &str) -> Result<VideoQuality, String> {
-    match s {
-        "basic" => Ok(VideoQuality::Basic),
-        "pro" => Ok(VideoQuality::Pro),
-        "cinema" => Ok(VideoQuality::Cinema),
-        _ => Err(format!(
-            "Invalid video quality: '{}'. Valid: basic, pro, cinema",
-            s
-        )),
-    }
-}
-
-// =============================================================================
 // IPC Commands
 // =============================================================================
 
@@ -256,17 +250,35 @@ pub async fn submit_video_generation(
 ) -> Result<SubmitVideoGenerationResponse, String> {
     let provider = create_seedance_provider(&app).await?;
 
-    let mode = parse_mode(&request.mode)?;
-    let quality = parse_quality(&request.quality)?;
+    let prompt = request.prompt.trim();
+    if prompt.is_empty() {
+        return Err("Prompt cannot be empty".to_string());
+    }
 
-    let params = VideoGenerationParams::new(&request.prompt)
+    let normalized_mode = normalize_enum_input(&request.mode);
+    let normalized_quality = normalize_enum_input(&request.quality);
+    let mode = parse_mode(&normalized_mode)?;
+    let quality = parse_quality(&normalized_quality)?;
+
+    let aspect_ratio = if request.aspect_ratio.trim().is_empty() {
+        default_aspect_ratio()
+    } else {
+        request.aspect_ratio.trim().to_string()
+    };
+
+    let params = VideoGenerationParams::new(prompt)
         .with_mode(mode)
         .with_quality(quality)
         .with_duration(request.duration_sec)
-        .with_aspect_ratio(&request.aspect_ratio);
+        .with_aspect_ratio(&aspect_ratio);
 
     // Apply optional fields
-    let params = if let Some(neg) = &request.negative_prompt {
+    let params = if let Some(neg) = request
+        .negative_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         params.with_negative_prompt(neg)
     } else {
         params
@@ -278,17 +290,37 @@ pub async fn submit_video_generation(
         params
     };
 
-    params.lip_sync_language = request.lip_sync_language;
+    params.lip_sync_language = request
+        .lip_sync_language
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(ToOwned::to_owned);
 
     // Add reference files
     for path in &request.reference_images {
-        params.reference_images.push(std::path::PathBuf::from(path));
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            params
+                .reference_images
+                .push(std::path::PathBuf::from(trimmed));
+        }
     }
     for path in &request.reference_videos {
-        params.reference_videos.push(std::path::PathBuf::from(path));
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            params
+                .reference_videos
+                .push(std::path::PathBuf::from(trimmed));
+        }
     }
     for path in &request.reference_audio {
-        params.reference_audio.push(std::path::PathBuf::from(path));
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            params
+                .reference_audio
+                .push(std::path::PathBuf::from(trimmed));
+        }
     }
 
     // Validate params before cost estimation and submission
@@ -310,7 +342,7 @@ pub async fn submit_video_generation(
         .map_err(|e| format!("Video generation submission failed: {}", e))?;
 
     // Record estimated cost to monthly usage so subsequent budget checks see the updated total
-    record_video_cost(&app, estimate.cents);
+    record_video_cost(&app, estimate.cents).await;
 
     Ok(SubmitVideoGenerationResponse {
         job_id: ulid::Ulid::new().to_string(),
@@ -422,14 +454,15 @@ pub async fn estimate_generation_cost(
     quality: String,
     duration_sec: f64,
 ) -> Result<EstimateGenerationCostResponse, String> {
-    let quality_enum = parse_quality(&quality)?;
+    let normalized_quality = normalize_enum_input(&quality);
+    let quality_enum = parse_quality(&normalized_quality)?;
     // Clamp to match submit_video_generation behavior (5-120s via with_duration)
     let duration_sec = duration_sec.clamp(5.0, 120.0);
     let estimate = VideoCostEstimate::calculate(quality_enum, duration_sec);
 
     Ok(EstimateGenerationCostResponse {
         estimated_cents: estimate.cents,
-        quality,
+        quality: quality_to_wire_value(quality_enum).to_string(),
         duration_sec: estimate.duration_sec,
     })
 }
@@ -508,7 +541,8 @@ pub async fn configure_seedance_provider(
         SeedanceProvider::new(&api_key).map_err(|e| format!("Failed to create provider: {}", e))?;
 
     if let Some(url) = base_url {
-        provider = provider.with_base_url(url);
+        let validated = validate_base_url(&url)?;
+        provider = provider.with_base_url(validated);
     }
 
     Ok(ConfigureSeedanceProviderResponse {

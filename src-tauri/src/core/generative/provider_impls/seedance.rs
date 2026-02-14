@@ -14,6 +14,7 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 use tracing::{debug, info, warn};
 
 use crate::core::generative::providers::{
@@ -40,6 +41,12 @@ const MAX_RETRIES: u32 = 3;
 
 /// Base delay for exponential backoff (milliseconds)
 const BASE_RETRY_DELAY_MS: u64 = 1000;
+
+/// Maximum allowed download size (500 MB) to prevent unbounded memory/disk usage.
+const MAX_DOWNLOAD_BYTES: u64 = 500 * 1024 * 1024;
+
+/// Maximum length for job-id-derived output filenames.
+const MAX_JOB_ID_FILENAME_LEN: usize = 64;
 
 // =============================================================================
 // API Request/Response Types
@@ -188,6 +195,42 @@ impl SeedanceProvider {
             VideoQuality::Basic => "basic",
             VideoQuality::Pro => "pro",
             VideoQuality::Cinema => "cinema",
+        }
+    }
+
+    /// Sanitize a provider job ID for use as a filesystem filename segment.
+    fn sanitize_job_id_for_filename(job_id: &str) -> String {
+        let sanitized: String = job_id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .take(MAX_JOB_ID_FILENAME_LEN)
+            .collect();
+
+        if sanitized.is_empty() {
+            "generated_video".to_string()
+        } else {
+            sanitized
+        }
+    }
+
+    /// Validate that the download URL is a safe HTTP(S) URL.
+    fn validate_download_url(url: &str) -> CoreResult<reqwest::Url> {
+        let parsed = reqwest::Url::parse(url).map_err(|e| {
+            CoreError::ValidationError(format!("Invalid download URL '{}': {}", url, e))
+        })?;
+
+        match parsed.scheme() {
+            "http" | "https" => Ok(parsed),
+            scheme => Err(CoreError::ValidationError(format!(
+                "Unsupported download URL scheme '{}'. Only http/https are allowed.",
+                scheme
+            ))),
         }
     }
 
@@ -483,19 +526,21 @@ impl GenerativeProvider for SeedanceProvider {
             }
         };
 
+        let validated_url = Self::validate_download_url(&download_url)?;
+
         // Create output directory
         let gen_dir = dir.join("generated-media");
         tokio::fs::create_dir_all(&gen_dir)
             .await
             .map_err(|e| CoreError::Internal(format!("Failed to create output dir: {}", e)))?;
 
-        let filename = format!("{}.mp4", handle.job_id);
+        let filename = format!("{}.mp4", Self::sanitize_job_id_for_filename(&handle.job_id));
         let output_path = gen_dir.join(&filename);
 
-        // Download the file
-        let resp = self
+        // Download the file as a stream to avoid holding large blobs in memory.
+        let mut resp = self
             .client
-            .get(&download_url)
+            .get(validated_url)
             .send()
             .await
             .map_err(|e| CoreError::Internal(format!("Download failed: {}", e)))?;
@@ -507,19 +552,47 @@ impl GenerativeProvider for SeedanceProvider {
             )));
         }
 
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| CoreError::Internal(format!("Failed to read download: {}", e)))?;
+        if let Some(content_len) = resp.content_length() {
+            if content_len > MAX_DOWNLOAD_BYTES {
+                return Err(CoreError::ValidationError(format!(
+                    "Downloaded video is too large ({} bytes > {} bytes limit)",
+                    content_len, MAX_DOWNLOAD_BYTES
+                )));
+            }
+        }
 
-        tokio::fs::write(&output_path, &bytes)
+        let mut file = tokio::fs::File::create(&output_path)
             .await
-            .map_err(|e| CoreError::Internal(format!("Failed to write video file: {}", e)))?;
+            .map_err(|e| CoreError::Internal(format!("Failed to create video file: {}", e)))?;
+
+        let mut total_bytes: u64 = 0;
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| CoreError::Internal(format!("Failed to read chunk: {}", e)))?
+        {
+            total_bytes = total_bytes.saturating_add(chunk.len() as u64);
+            if total_bytes > MAX_DOWNLOAD_BYTES {
+                let _ = tokio::fs::remove_file(&output_path).await;
+                return Err(CoreError::ValidationError(format!(
+                    "Downloaded video exceeded max size limit ({} bytes)",
+                    MAX_DOWNLOAD_BYTES
+                )));
+            }
+
+            file.write_all(&chunk)
+                .await
+                .map_err(|e| CoreError::Internal(format!("Failed to write video file: {}", e)))?;
+        }
+
+        file.flush()
+            .await
+            .map_err(|e| CoreError::Internal(format!("Failed to flush video file: {}", e)))?;
 
         info!(
             "Downloaded generated video to {} ({} bytes)",
             output_path.display(),
-            bytes.len()
+            total_bytes
         );
 
         Ok(output_path)
@@ -619,6 +692,31 @@ mod tests {
         let params = VideoGenerationParams::new("Test").with_duration(60.0);
         let estimate = provider.estimate_video_cost(&params).unwrap();
         assert_eq!(estimate.cents, 30); // 1 min * 30 cents/min (Pro default)
+    }
+
+    #[test]
+    fn test_sanitize_job_id_for_filename() {
+        let sanitized = SeedanceProvider::sanitize_job_id_for_filename("../../job:abc?*");
+        assert_eq!(sanitized, "______job_abc__");
+
+        let empty = SeedanceProvider::sanitize_job_id_for_filename("!!!");
+        assert_eq!(empty, "___");
+    }
+
+    #[test]
+    fn test_validate_download_url() {
+        assert!(SeedanceProvider::validate_download_url("https://example.com/video.mp4").is_ok());
+        assert!(SeedanceProvider::validate_download_url("http://example.com/video.mp4").is_ok());
+        assert!(SeedanceProvider::validate_download_url("file:///tmp/video.mp4").is_err());
+    }
+
+    #[test]
+    fn test_is_retryable_error_for_ai_request_failed() {
+        let err = CoreError::AIRequestFailed("Seedance API error (429): rate limit".to_string());
+        assert!(SeedanceProvider::is_retryable_error(&err));
+
+        let err = CoreError::AIRequestFailed("validation failed".to_string());
+        assert!(!SeedanceProvider::is_retryable_error(&err));
     }
 
     #[tokio::test]
