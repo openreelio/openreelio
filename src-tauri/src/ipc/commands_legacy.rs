@@ -111,7 +111,9 @@ fn normalize_optional_tag(
     }
 
     if trimmed.len() > max_len {
-        return Err(format!("{field_name} is too long (max {max_len} characters)"));
+        return Err(format!(
+            "{field_name} is too long (max {max_len} characters)"
+        ));
     }
 
     Ok(Some(trimmed.to_string()))

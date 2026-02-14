@@ -19,11 +19,11 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::core::credentials::{CredentialType, CredentialVault};
 use crate::core::generative::provider_impls::SeedanceProvider;
 use crate::core::generative::providers::GenerativeProvider;
-use crate::core::generative::video_input_validation::{
-    normalize_enum_input, parse_mode, parse_quality, quality_to_wire_value, validate_base_url,
-};
 use crate::core::generative::video::{
     VideoCostEstimate, VideoGenerationParams, VideoGenerationStatus, VideoJobHandle,
+};
+use crate::core::generative::video_input_validation::{
+    normalize_enum_input, parse_mode, parse_quality, quality_to_wire_value, validate_base_url,
 };
 use crate::core::settings::SettingsManager;
 use crate::AppState;

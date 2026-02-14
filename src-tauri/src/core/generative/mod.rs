@@ -21,4 +21,3 @@ pub use video::{
     VideoCostEstimate, VideoGenMode, VideoGenerationParams, VideoGenerationResult,
     VideoGenerationStatus, VideoJobHandle, VideoQuality, VideoResolution,
 };
-
