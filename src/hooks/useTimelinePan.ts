@@ -58,6 +58,8 @@ export function useTimelinePan({
   enabled = true,
 }: UseTimelinePanOptions): UseTimelinePanResult {
   const [isPanning, setIsPanning] = useState(false);
+  // Mirror isPanning in a ref for reliable cleanup on unmount
+  const isPanningRef = useRef(false);
 
   // Track drag state
   const dragStateRef = useRef<{
@@ -101,6 +103,7 @@ export function useTimelinePan({
       startScrollY: sy,
     };
 
+    isPanningRef.current = true;
     setIsPanning(true);
     document.body.style.cursor = 'grabbing';
     document.body.style.userSelect = 'none';
@@ -135,6 +138,7 @@ export function useTimelinePan({
    */
   const endPan = useCallback(() => {
     dragStateRef.current = null;
+    isPanningRef.current = false;
     setIsPanning(false);
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
@@ -178,17 +182,18 @@ export function useTimelinePan({
     [enabled, isHandToolActive, startPan, handleMouseMove, handleMouseUp]
   );
 
-  // Cleanup on unmount
+  // Cleanup on unmount - use ref to avoid stale isPanning state
   useEffect(() => {
     return () => {
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
-      if (isPanning) {
+      if (isPanningRef.current) {
+        isPanningRef.current = false;
         document.body.style.cursor = '';
         document.body.style.userSelect = '';
       }
     };
-  }, [handleMouseMove, handleMouseUp, isPanning]);
+  }, [handleMouseMove, handleMouseUp]);
 
   // Determine cursor style
   const panCursor = isPanning

@@ -166,10 +166,11 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
   const previewPositionRef = useRef<DragPreviewPosition | null>(null);
   const isMountedRef = useRef(true);
 
-  // Calculate initial duration
+  // Calculate initial duration with safety guard against zero/negative speed
   const calculateDuration = useCallback(
     (sourceIn: number, sourceOut: number, clipSpeed: number): number => {
-      return (sourceOut - sourceIn) / clipSpeed;
+      const safeSpeed = clipSpeed > 0 ? clipSpeed : 1;
+      return (sourceOut - sourceIn) / safeSpeed;
     },
     [],
   );
@@ -339,9 +340,6 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
     // Only set up listeners when actively engaged in drag operation
     if (!isPendingDrag && !isDragging) return;
 
-    // Capture current mount state for cleanup validation
-    const mountedAtSetup = isMountedRef.current;
-
     const handleMouseMove = (e: MouseEvent) => {
       // Use refs for current state (avoids stale closure issues during state transitions)
       const isPending = isPendingDragRef.current;
@@ -468,8 +466,8 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
       document.removeEventListener('keydown', handleKeyDown, { capture: true });
       window.removeEventListener('blur', handleWindowBlur);
 
-      // Clean up any pending state if component unmounts during drag
-      if (!mountedAtSetup) {
+      // Clean up any pending state if component unmounted during drag
+      if (!isMountedRef.current) {
         pendingDragRef.current = null;
         dragDataRef.current = null;
         previewPositionRef.current = null;
