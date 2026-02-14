@@ -6,9 +6,18 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { Clip } from './Clip';
-import type { Clip as ClipType } from '@/types';
+import type { Clip as ClipType, Asset } from '@/types';
 import { TEXT_ASSET_PREFIX } from '@/types';
+
+vi.mock('./LazyThumbnailStrip', () => ({
+  LazyThumbnailStrip: () => <div data-testid="lazy-thumbnail-strip-mock" />,
+}));
+
+vi.mock('./AudioClipWaveform', () => ({
+  AudioClipWaveform: () => <div data-testid="audio-clip-waveform-mock" />,
+}));
+
+import { Clip } from './Clip';
 
 // =============================================================================
 // Test Data
@@ -30,6 +39,24 @@ const mockClip: ClipType = {
   effects: [],
   audio: { volumeDb: 0, pan: 0, muted: false },
   label: 'Test Clip',
+};
+
+const mockVisualAsset: Asset = {
+  id: 'asset_001',
+  kind: 'video',
+  name: 'city-broll.mp4',
+  uri: '/path/to/video.mp4',
+  hash: 'hash123',
+  durationSec: 10,
+  fileSize: 1024,
+  importedAt: '2024-01-01T00:00:00Z',
+  license: {
+    source: 'user',
+    licenseType: 'unknown',
+    allowedUse: [],
+  },
+  tags: [],
+  proxyStatus: 'notNeeded',
 };
 
 // =============================================================================
@@ -68,6 +95,38 @@ describe('Clip', () => {
       const clipElement = container.firstChild as HTMLElement;
 
       expect(clipElement).toHaveClass('ring-2');
+    });
+
+    it('should render thumbnails even when waveform is enabled', () => {
+      render(
+        <Clip
+          clip={mockClip}
+          zoom={100}
+          selected={false}
+          thumbnailConfig={{ asset: mockVisualAsset, enabled: true }}
+          waveformConfig={{
+            assetId: mockVisualAsset.id,
+            inputPath: mockVisualAsset.uri,
+            totalDurationSec: mockVisualAsset.durationSec ?? 0,
+            enabled: true,
+          }}
+        />,
+      );
+
+      expect(screen.getByTestId('lazy-thumbnail-strip-mock')).toBeInTheDocument();
+    });
+
+    it('should fall back to asset name when clip label is missing', () => {
+      render(
+        <Clip
+          clip={{ ...mockClip, label: undefined }}
+          zoom={100}
+          selected={false}
+          thumbnailConfig={{ asset: mockVisualAsset, enabled: true }}
+        />,
+      );
+
+      expect(screen.getByText('city-broll.mp4')).toBeInTheDocument();
     });
   });
 
@@ -221,12 +280,7 @@ describe('Clip', () => {
       };
 
       render(
-        <Clip
-          clip={mockTextClip}
-          zoom={100}
-          selected={false}
-          thumbnailConfig={thumbnailConfig}
-        />
+        <Clip clip={mockTextClip} zoom={100} selected={false} thumbnailConfig={thumbnailConfig} />,
       );
 
       // The thumbnail strip should not be rendered for text clips

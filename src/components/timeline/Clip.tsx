@@ -242,8 +242,11 @@ export function Clip({
   // Text clips don't have visual content like thumbnails or waveforms
   const hasVisualContent = !isText && (thumbnailConfig?.enabled || waveformConfig?.enabled);
 
-  // Display label for text clips (default to "Text" if no label)
-  const displayLabel = clip.label ?? (isText ? 'Text' : undefined);
+  // Display label fallback strategy:
+  // 1) Explicit clip label
+  // 2) Text clips default to "Text"
+  // 3) Visual clips fall back to asset name for quick identification
+  const displayLabel = clip.label ?? (isText ? 'Text' : thumbnailConfig?.asset.name);
 
   return (
     <div
@@ -267,7 +270,7 @@ export function Clip({
       onMouseDown={handleClipMouseDown}
     >
       {/* Video Thumbnails (background layer) - not for text clips */}
-      {!isText && thumbnailConfig?.enabled && !waveformConfig?.enabled && displayPosition.width > 0 && (
+      {!isText && thumbnailConfig?.enabled && displayPosition.width > 0 && (
         <LazyThumbnailStrip
           asset={thumbnailConfig.asset}
           sourceInSec={clip.range.sourceInSec}
@@ -299,9 +302,7 @@ export function Clip({
       <div className="h-full p-1 overflow-hidden pointer-events-none relative z-10">
         {/* Label */}
         {displayLabel && (
-          <span className="text-xs text-white truncate block drop-shadow-sm">
-            {displayLabel}
-          </span>
+          <span className="text-xs text-white truncate block drop-shadow-sm">{displayLabel}</span>
         )}
 
         {/* Indicators */}
@@ -375,12 +376,7 @@ interface ClipWaveformRendererProps {
 /**
  * Renders waveform for a clip using either image-based or JSON peak-based approach.
  */
-function ClipWaveformRenderer({
-  config,
-  clipRange,
-  width,
-  height,
-}: ClipWaveformRendererProps) {
+function ClipWaveformRenderer({ config, clipRange, width, height }: ClipWaveformRendererProps) {
   // Use JSON peaks if configured
   const { data: peaksData } = useWaveformPeaks(config.assetId, {
     enabled: config.useJsonPeaks === true,
