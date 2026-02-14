@@ -52,6 +52,20 @@ const DEFAULT_THUMBNAIL_ASPECT_RATIO = 16 / 9;
 const MIN_THUMBNAIL_WIDTH = 40;
 const DEFAULT_ROOT_MARGIN = '100px';
 const DEFAULT_MAX_CONCURRENT = 3;
+const TIMESTAMP_PRECISION_MULTIPLIER = 1000;
+
+function buildThumbnailRequestId(
+  assetId: string,
+  index: number,
+  sourceInSec: number,
+  sourceOutSec: number,
+  timeSec: number,
+): string {
+  const sourceInMs = Math.round(sourceInSec * TIMESTAMP_PRECISION_MULTIPLIER);
+  const sourceOutMs = Math.round(sourceOutSec * TIMESTAMP_PRECISION_MULTIPLIER);
+  const timeMs = Math.round(timeSec * TIMESTAMP_PRECISION_MULTIPLIER);
+  return `thumb-${assetId}-${index}-${sourceInMs}-${sourceOutMs}-${timeMs}`;
+}
 
 // =============================================================================
 // Component
@@ -101,7 +115,7 @@ export const LazyThumbnailStrip = memo(function LazyThumbnailStrip({
       // Place thumbnail at center of each interval
       const timeSec = sourceInSec + interval * (i + 0.5);
       return {
-        id: `thumb-${asset.id}-${i}`,
+        id: buildThumbnailRequestId(asset.id, i, sourceInSec, sourceOutSec, timeSec),
         timeSec,
         assetPath,
       };
@@ -117,7 +131,7 @@ export const LazyThumbnailStrip = memo(function LazyThumbnailStrip({
       }
       return null;
     },
-    [getFrame]
+    [getFrame],
   );
 
   // Use lazy thumbnails hook
@@ -146,7 +160,7 @@ export const LazyThumbnailStrip = memo(function LazyThumbnailStrip({
   return (
     <div
       data-testid="lazy-thumbnail-strip"
-      className={`flex overflow-hidden ${className}`}
+      className={`relative flex overflow-hidden ${className}`}
       style={{ width, height }}
     >
       {thumbnailRequests.map((request, index) => {

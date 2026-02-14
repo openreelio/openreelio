@@ -359,6 +359,59 @@ describe('LazyThumbnailStrip', () => {
         expect(img).toHaveAttribute('src', 'asset:///path/to/extracted-frame.png');
       });
     });
+
+    it('should request new frames when source range changes', async () => {
+      const { rerender } = render(
+        <LazyThumbnailStrip
+          asset={mockAsset}
+          sourceInSec={0}
+          sourceOutSec={10}
+          width={300}
+          height={50}
+          maxThumbnails={1}
+        />,
+      );
+
+      const firstObserver = MockIntersectionObserver.instances[0];
+      const firstElement = firstObserver.getObservedElements()[0];
+
+      act(() => {
+        firstObserver.simulateIntersection([{ target: firstElement, isIntersecting: true }]);
+      });
+
+      await waitFor(() => {
+        expect(mockGetFrame).toHaveBeenCalledTimes(1);
+      });
+
+      expect(mockGetFrame.mock.calls[0][1]).toBeCloseTo(5, 3);
+
+      rerender(
+        <LazyThumbnailStrip
+          asset={mockAsset}
+          sourceInSec={10}
+          sourceOutSec={20}
+          width={300}
+          height={50}
+          maxThumbnails={1}
+        />,
+      );
+
+      const latestObserver = MockIntersectionObserver.instances.at(-1);
+      const latestElement = latestObserver?.getObservedElements()[0];
+
+      expect(latestObserver).toBeDefined();
+      expect(latestElement).toBeDefined();
+
+      act(() => {
+        latestObserver?.simulateIntersection([{ target: latestElement!, isIntersecting: true }]);
+      });
+
+      await waitFor(() => {
+        expect(mockGetFrame).toHaveBeenCalledTimes(2);
+      });
+
+      expect(mockGetFrame.mock.calls[1][1]).toBeCloseTo(15, 3);
+    });
   });
 
   // ===========================================================================
