@@ -37,7 +37,7 @@ export interface UseTimelineKeyboardOptions {
   /** Select multiple clips */
   selectClips: (clipIds: string[]) => void;
   /** Callback to delete clips */
-  onDeleteClips?: (clipIds: string[]) => void;
+  onDeleteClips?: (clipIds: string[]) => void | Promise<void>;
   /** Callback to split clip */
   onClipSplit?: (data: ClipSplitData) => void;
 }
@@ -74,7 +74,7 @@ interface CommandContext {
   stepBackward: () => void;
   clearClipSelection: () => void;
   selectClips: (clipIds: string[]) => void;
-  onDeleteClips?: (clipIds: string[]) => void;
+  onDeleteClips?: (clipIds: string[]) => void | Promise<void>;
   onClipSplit?: (data: ClipSplitData) => void;
   findClip: (clipId: string) => { clip: ClipType; trackId: string } | null;
 }
@@ -140,9 +140,10 @@ const KEYBOARD_COMMANDS: KeyboardCommand[] = [
       if (!clipInfo) return;
 
       const { clip, trackId } = clipInfo;
+      const safeSpeed = clip.speed > 0 ? clip.speed : 1;
       const clipEnd =
         clip.place.timelineInSec +
-        (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+        (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
 
       // Check if playhead is within the clip
       if (ctx.playhead > clip.place.timelineInSec && ctx.playhead < clipEnd) {

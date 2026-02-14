@@ -30,6 +30,7 @@ import { useSlideEdit } from '@/hooks/useSlideEdit';
 import { useRollEdit } from '@/hooks/useRollEdit';
 import { useEdgeAutoScroll } from '@/hooks/useEdgeAutoScroll';
 import { useTimelinePan } from '@/hooks/useTimelinePan';
+import { createLogger } from '@/services/logger';
 import { TimeRuler } from './TimeRuler';
 import { Track } from './Track';
 import { CaptionTrack } from './CaptionTrack';
@@ -68,13 +69,15 @@ export type {
 } from './types';
 import type { Track as TrackType } from '@/types';
 
+const logger = createLogger('Timeline');
+
 // Adapter to convert Track (with clips) to CaptionTrack (with captions)
 function adaptTrackToCaptionTrack(track: TrackType): CaptionTrackType {
   const captions: Caption[] = track.clips.map((clip) => ({
     id: clip.id,
     startSec: clip.place.timelineInSec,
     endSec:
-      clip.place.timelineInSec + (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed,
+      clip.place.timelineInSec + (clip.range.sourceOutSec - clip.range.sourceInSec) / (clip.speed > 0 ? clip.speed : 1),
     text: clip.label || '',
     speaker: undefined,
     styleOverride: undefined,
@@ -277,7 +280,7 @@ export function Timeline({
       track.clips.map(
         (clip) =>
           clip.place.timelineInSec +
-          (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed,
+          (clip.range.sourceOutSec - clip.range.sourceInSec) / (clip.speed > 0 ? clip.speed : 1),
       ),
     );
 
@@ -581,29 +584,38 @@ export function Timeline({
   // Ripple-Aware Delete Handler (must be before keyboard shortcuts)
   // ===========================================================================
   const handleRippleDelete = useCallback(
-    (clipIdsToDelete: string[]) => {
+    async (clipIdsToDelete: string[]) => {
       if (clipIdsToDelete.length === 0 || !onDeleteClips) return;
 
-      // If ripple mode is enabled, apply ripple adjustments after delete
-      if (isRippleEnabled && sequence && onClipMove) {
-        // Calculate ripple adjustments before deleting
-        const rippleResult = calculateDeleteRipple(clipIdsToDelete);
+      try {
+        // If ripple mode is enabled, apply ripple adjustments after delete
+        if (isRippleEnabled && sequence && onClipMove) {
+          // Calculate ripple adjustments before deleting
+          const rippleResult = calculateDeleteRipple(clipIdsToDelete);
 
-        // Delete the selected clips
-        onDeleteClips(clipIdsToDelete);
+          // Delete first, then move remaining clips to avoid command-order races.
+          await onDeleteClips(clipIdsToDelete);
 
-        // Apply ripple adjustments to shift remaining clips
-        for (const adjustment of rippleResult.affectedClips) {
-          onClipMove({
-            sequenceId: sequence.id,
-            trackId: adjustment.trackId,
-            clipId: adjustment.clipId,
-            newTimelineIn: adjustment.newTime,
-          });
+          // Apply ripple adjustments sequentially to preserve deterministic ordering.
+          for (const adjustment of rippleResult.affectedClips) {
+            await onClipMove({
+              sequenceId: sequence.id,
+              trackId: adjustment.trackId,
+              clipId: adjustment.clipId,
+              newTimelineIn: adjustment.newTime,
+            });
+          }
+        } else {
+          // Normal delete without ripple
+          await onDeleteClips(clipIdsToDelete);
         }
-      } else {
-        // Normal delete without ripple
-        onDeleteClips(clipIdsToDelete);
+      } catch (error) {
+        logger.error('Failed to perform ripple delete', {
+          clipIds: clipIdsToDelete,
+          sequenceId: sequence?.id,
+          rippleEnabled: isRippleEnabled,
+          error,
+        });
       }
     },
     [onDeleteClips, isRippleEnabled, sequence, onClipMove, calculateDeleteRipple],
@@ -914,7 +926,8 @@ export function Timeline({
    */
   const handleTracksAreaMouseDownCapture = useCallback(
     (e: MouseEvent<HTMLDivElement>) => {
-      if (e.button !== 0 || isRazorActive) return;
+      // Skip seek for: non-left click, tool modes that don't seek, and Shift+click (pan)
+      if (e.button !== 0 || isRazorActive || isHandToolActive || e.shiftKey) return;
 
       const target = e.target as HTMLElement;
 
@@ -922,6 +935,7 @@ export function Timeline({
       // Trim handles must initiate their own resize interaction.
       if (
         target.closest('button') ||
+        target.closest('[data-testid^="resize-handle-"]') ||
         target.closest('[data-testid$="-trim-left"]') ||
         target.closest('[data-testid$="-trim-right"]')
       ) {
@@ -933,7 +947,7 @@ export function Timeline({
         seekFromTimelineClick(time);
       }
     },
-    [calculateTimeFromMouseEvent, isRazorActive, seekFromTimelineClick],
+    [calculateTimeFromMouseEvent, isRazorActive, isHandToolActive, seekFromTimelineClick],
   );
 
   /**
@@ -997,7 +1011,7 @@ export function Timeline({
         startSec: clip.place.timelineInSec,
         endSec:
           clip.place.timelineInSec +
-          (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed,
+          (clip.range.sourceOutSec - clip.range.sourceInSec) / (clip.speed > 0 ? clip.speed : 1),
         text: clip.label || '',
         speaker: undefined,
       };
@@ -1080,9 +1094,10 @@ export function Timeline({
         for (const track of sequence.tracks) {
           const clip = track.clips.find((c) => c.id === clipId);
           if (clip) {
+            const safeSpeed = clip.speed > 0 ? clip.speed : 1;
             const clipEnd =
               clip.place.timelineInSec +
-              (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+              (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
             if (playhead > clip.place.timelineInSec && playhead < clipEnd) {
               onClipSplit({
                 sequenceId: sequence.id,
@@ -1104,8 +1119,9 @@ export function Timeline({
         for (const track of sequence.tracks) {
           const clip = track.clips.find((c) => c.id === clipId);
           if (clip) {
+            const safeSpeed = clip.speed > 0 ? clip.speed : 1;
             const clipDuration =
-              (clip.range.sourceOutSec - clip.range.sourceInSec) / clip.speed;
+              (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
             onClipDuplicate({
               sequenceId: sequence.id,
               trackId: track.id,
@@ -1126,17 +1142,22 @@ export function Timeline({
   // ===========================================================================
   // Combined Mouse Down Handler
   // ===========================================================================
-  // Must be defined before early return to satisfy React hooks rules
+  // Must be defined before early return to satisfy React hooks rules.
+  // Uses synchronous button/tool checks to route EXCLUSIVELY between pan and
+  // scrub/select, avoiding stale-state race conditions from async setState.
   const handleTracksAreaMouseDownCombined = useCallback(
     (e: MouseEvent<HTMLDivElement>) => {
-      // Try panning first (middle mouse or hand tool)
-      handlePanMouseDown(e);
-      // Then fall through to existing handler if not handled
-      if (!isPanning && !isHandToolActive) {
-        handleTracksAreaMouseDown(e);
+      // Middle mouse button or hand tool active: pan exclusively
+      const shouldPan = e.button === 1 || (e.button === 0 && (isHandToolActive || e.shiftKey));
+      if (shouldPan) {
+        handlePanMouseDown(e);
+        return;
       }
+
+      // Left click without pan modifier: scrub/select exclusively
+      handleTracksAreaMouseDown(e);
     },
-    [handlePanMouseDown, isPanning, isHandToolActive, handleTracksAreaMouseDown]
+    [handlePanMouseDown, isHandToolActive, handleTracksAreaMouseDown]
   );
 
   // ===========================================================================
@@ -1402,3 +1423,4 @@ export function Timeline({
     </TimelineOperationsProvider>
   );
 }
+
