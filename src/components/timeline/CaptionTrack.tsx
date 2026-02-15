@@ -6,15 +6,7 @@
  */
 
 import { useRef, useMemo } from 'react';
-import {
-  Type,
-  Eye,
-  EyeOff,
-  Lock,
-  Unlock,
-  Globe,
-  Download,
-} from 'lucide-react';
+import { Type, Eye, EyeOff, Lock, Unlock, Globe, Download } from 'lucide-react';
 import type { Caption, CaptionTrack as CaptionTrackType, CaptionColor } from '@/types';
 import { CaptionClip, type ClickModifiers } from './CaptionClip';
 
@@ -94,7 +86,7 @@ function virtualizeCaptions(
   zoom: number,
   scrollX: number,
   viewportWidth: number,
-  bufferPx: number
+  bufferPx: number,
 ): Caption[] {
   // Guard against division by zero or invalid zoom values
   if (zoom <= 0 || !Number.isFinite(zoom)) {
@@ -145,9 +137,9 @@ export function CaptionTrack({
         zoom,
         scrollX,
         actualViewportWidth,
-        VIRTUALIZATION_BUFFER_PX
+        VIRTUALIZATION_BUFFER_PX,
       ),
-    [track.captions, zoom, scrollX, actualViewportWidth]
+    [track.captions, zoom, scrollX, actualViewportWidth],
   );
 
   // Calculate track content width based on duration and zoom
@@ -157,7 +149,12 @@ export function CaptionTrack({
   const languageDisplay = getLanguageDisplayName(track.language);
 
   return (
-    <div className="flex border-b border-editor-border">
+    <div
+      data-track-row="true"
+      data-track-id={track.id}
+      data-track-kind="caption"
+      className="flex border-b border-editor-border"
+    >
       {/* Track Header */}
       <div
         data-testid="caption-track-header"
@@ -204,11 +201,7 @@ export function CaptionTrack({
             }}
             title={track.locked ? 'Unlock' : 'Lock'}
           >
-            {track.locked ? (
-              <Lock className="w-3.5 h-3.5" />
-            ) : (
-              <Unlock className="w-3.5 h-3.5" />
-            )}
+            {track.locked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
           </button>
 
           {/* Visibility button */}
@@ -221,11 +214,7 @@ export function CaptionTrack({
             }}
             title={track.visible ? 'Hide' : 'Show'}
           >
-            {track.visible ? (
-              <Eye className="w-3.5 h-3.5" />
-            ) : (
-              <EyeOff className="w-3.5 h-3.5" />
-            )}
+            {track.visible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
           </button>
         </div>
       </div>
@@ -263,9 +252,7 @@ export function CaptionTrack({
               zoom={zoom}
               selected={selectedCaptionIds.includes(caption.id)}
               disabled={track.locked}
-              speakerColor={
-                caption.speaker ? speakerColors?.get(caption.speaker) : undefined
-              }
+              speakerColor={caption.speaker ? speakerColors?.get(caption.speaker) : undefined}
               onClick={onCaptionClick}
               onDoubleClick={onCaptionDoubleClick}
             />

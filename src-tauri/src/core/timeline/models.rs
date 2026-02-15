@@ -602,13 +602,23 @@ impl Clip {
     /// Sets the clip range from source
     pub fn with_source_range(mut self, source_in: TimeSec, source_out: TimeSec) -> Self {
         self.range = ClipRange::new(source_in, source_out);
-        self.place.duration_sec = self.range.duration() / self.speed as f64;
+        let safe_speed = if self.speed > 0.0 {
+            self.speed as f64
+        } else {
+            1.0
+        };
+        self.place.duration_sec = self.range.duration() / safe_speed;
         self
     }
 
     /// Returns the effective duration considering speed
     pub fn duration(&self) -> TimeSec {
-        self.range.duration() / self.speed as f64
+        let safe_speed = if self.speed > 0.0 {
+            self.speed as f64
+        } else {
+            1.0
+        };
+        self.range.duration() / safe_speed
     }
 
     /// Returns the timeline end position

@@ -86,7 +86,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const clips = result.current.getTrackClips('track_001');
@@ -101,7 +101,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const clips = result.current.getTrackClips('track_002');
@@ -115,7 +115,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const clips = result.current.getTrackClips('non_existent');
@@ -129,7 +129,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const clips = result.current.getTrackClips('track_001');
@@ -149,7 +149,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const found = result.current.findClip('clip_001');
@@ -165,7 +165,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const found = result.current.findClip('non_existent');
@@ -179,7 +179,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const found = result.current.findClip('clip_001');
@@ -199,7 +199,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       expect(result.current.dragPreview).toBeNull();
@@ -214,7 +214,7 @@ describe('useTimelineClipOperations', () => {
           onClipMove: undefined,
           onClipTrim: undefined,
           selectClip,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -244,7 +244,7 @@ describe('useTimelineClipOperations', () => {
           onClipMove: undefined,
           onClipTrim: undefined,
           selectClip,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -271,7 +271,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -306,7 +306,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -355,7 +355,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -395,7 +395,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -422,7 +422,7 @@ describe('useTimelineClipOperations', () => {
       expect(onClipMove).toHaveBeenCalledWith(
         expect.objectContaining({
           newTimelineIn: 0,
-        })
+        }),
       );
     });
 
@@ -434,7 +434,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -460,6 +460,47 @@ describe('useTimelineClipOperations', () => {
 
       expect(onClipMove).not.toHaveBeenCalled();
     });
+
+    it('should pass ignoreLinkedSelection for move drags', () => {
+      const onClipMove = vi.fn();
+      const { result } = renderHook(() =>
+        useTimelineClipOperations({
+          sequence: mockSequence,
+          zoom: 100,
+          onClipMove,
+          onClipTrim: undefined,
+        }),
+      );
+
+      const dragData: ClipDragData = {
+        clipId: 'clip_001',
+        type: 'move',
+        startX: 500,
+        startY: 0,
+        originalTimelineIn: 5,
+        originalSourceIn: 0,
+        originalSourceOut: 10,
+        ignoreLinkedSelection: true,
+      };
+
+      const finalPosition: DragPreviewPosition = {
+        timelineIn: 15,
+        sourceIn: 0,
+        sourceOut: 10,
+        duration: 10,
+      };
+
+      act(() => {
+        result.current.handleClipDragEnd('track_001', dragData, finalPosition);
+      });
+
+      expect(onClipMove).toHaveBeenCalledWith(
+        expect.objectContaining({
+          clipId: 'clip_001',
+          ignoreLinkedSelection: true,
+        }),
+      );
+    });
   });
 
   // ===========================================================================
@@ -475,7 +516,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -516,7 +557,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -544,7 +585,48 @@ describe('useTimelineClipOperations', () => {
         expect.objectContaining({
           newSourceIn: 0,
           newTimelineIn: 3,
-        })
+        }),
+      );
+    });
+
+    it('should pass ignoreLinkedSelection for trim drags', () => {
+      const onClipTrim = vi.fn();
+      const { result } = renderHook(() =>
+        useTimelineClipOperations({
+          sequence: mockSequence,
+          zoom: 100,
+          onClipMove: undefined,
+          onClipTrim,
+        }),
+      );
+
+      const dragData: ClipDragData = {
+        clipId: 'clip_001',
+        type: 'trim-left',
+        startX: 500,
+        startY: 0,
+        originalTimelineIn: 5,
+        originalSourceIn: 0,
+        originalSourceOut: 10,
+        ignoreLinkedSelection: true,
+      };
+
+      const finalPosition: DragPreviewPosition = {
+        timelineIn: 7,
+        sourceIn: 2,
+        sourceOut: 10,
+        duration: 8,
+      };
+
+      act(() => {
+        result.current.handleClipDragEnd('track_001', dragData, finalPosition);
+      });
+
+      expect(onClipTrim).toHaveBeenCalledWith(
+        expect.objectContaining({
+          clipId: 'clip_001',
+          ignoreLinkedSelection: true,
+        }),
       );
     });
   });
@@ -558,7 +640,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -651,7 +733,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -693,7 +775,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -726,7 +808,7 @@ describe('useTimelineClipOperations', () => {
       } satisfies ClipMoveData);
     });
 
-    it('should revert to original track for incompatible track types (video → audio)', () => {
+    it('should include newTrackId when moving a video clip to an audio track', () => {
       const onClipMove = vi.fn();
       const { result } = renderHook(() =>
         useTimelineClipOperations({
@@ -734,7 +816,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -759,23 +841,24 @@ describe('useTimelineClipOperations', () => {
         result.current.handleClipDragEnd('video_track_1', dragData, finalPosition, 2);
       });
 
-      // Should NOT include newTrackId (invalid drop reverts to original)
+      // Video clips can be moved to audio tracks for audio-component workflows.
       expect(onClipMove).toHaveBeenCalledWith({
         sequenceId: 'seq_001',
         trackId: 'video_track_1',
         clipId: 'clip_001',
         newTimelineIn: 10,
+        newTrackId: 'audio_track_1',
       } satisfies ClipMoveData);
     });
 
-    it('should set isValidDrop to false during drag over incompatible track', () => {
+    it('should set isValidDrop to true during drag over audio track', () => {
       const { result } = renderHook(() =>
         useTimelineClipOperations({
           sequence: multiTrackSequence,
           zoom: 100,
           onClipMove: undefined,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -795,13 +878,13 @@ describe('useTimelineClipOperations', () => {
         duration: 10,
       };
 
-      // Drag over audio track (index 2) - should show invalid
+      // Drag over audio track (index 2) - should show valid drop
       act(() => {
         result.current.handleClipDrag('video_track_1', dragData, previewPosition, 2);
       });
 
       expect(result.current.dragPreview).not.toBeNull();
-      expect(result.current.dragPreview?.isValidDrop).toBe(false);
+      expect(result.current.dragPreview?.isValidDrop).toBe(true);
     });
 
     it('should set isValidDrop to true during drag over compatible track', () => {
@@ -811,7 +894,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove: undefined,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -849,7 +932,7 @@ describe('useTimelineClipOperations', () => {
           onClipMove: undefined,
           onClipTrim: undefined,
           trackHeight: TRACK_HEIGHT,
-        })
+        }),
       );
 
       // Test utility function to calculate track index
@@ -867,7 +950,7 @@ describe('useTimelineClipOperations', () => {
           onClipMove: undefined,
           onClipTrim: undefined,
           trackHeight: TRACK_HEIGHT,
-        })
+        }),
       );
 
       // mouseY = 80, scrollY = 64 → effective Y = 144 → track index 2
@@ -931,7 +1014,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -961,7 +1044,7 @@ describe('useTimelineClipOperations', () => {
           dragData,
           finalPosition,
           selectedClipIds,
-          0
+          0,
         );
       });
 
@@ -992,7 +1075,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -1021,14 +1104,12 @@ describe('useTimelineClipOperations', () => {
           dragData,
           finalPosition,
           selectedClipIds,
-          0
+          0,
         );
       });
 
       expect(onClipMove).toHaveBeenCalledTimes(1);
-      expect(onClipMove).toHaveBeenCalledWith(
-        expect.objectContaining({ clipId: 'clip_001' })
-      );
+      expect(onClipMove).toHaveBeenCalledWith(expect.objectContaining({ clipId: 'clip_001' }));
     });
 
     it('should clamp all clips to timeline start (no negative positions)', () => {
@@ -1039,7 +1120,7 @@ describe('useTimelineClipOperations', () => {
           zoom: 100,
           onClipMove,
           onClipTrim: undefined,
-        })
+        }),
       );
 
       const dragData: ClipDragData = {
@@ -1068,7 +1149,7 @@ describe('useTimelineClipOperations', () => {
           dragData,
           finalPosition,
           selectedClipIds,
-          0
+          0,
         );
       });
 
@@ -1078,13 +1159,13 @@ describe('useTimelineClipOperations', () => {
         expect.objectContaining({
           clipId: 'clip_001',
           newTimelineIn: 0,
-        })
+        }),
       );
       expect(onClipMove).toHaveBeenCalledWith(
         expect.objectContaining({
           clipId: 'clip_002',
           newTimelineIn: 15,
-        })
+        }),
       );
     });
   });

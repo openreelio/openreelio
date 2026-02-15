@@ -31,6 +31,7 @@ pub enum OpKind {
     ClipMove,
     ClipTrim,
     ClipSplit,
+    ClipUpdate,
 
     // Track operations
     TrackAdd,

@@ -74,6 +74,11 @@ describe('Clip', () => {
       expect(screen.getByText('Test Clip')).toBeInTheDocument();
     });
 
+    it('should expose clip label through title attribute', () => {
+      render(<Clip clip={mockClip} zoom={100} selected={false} />);
+      expect(screen.getByTestId('clip-clip_001')).toHaveAttribute('title', 'Test Clip');
+    });
+
     it('should position clip correctly based on timeline position and zoom', () => {
       const { container } = render(<Clip clip={mockClip} zoom={100} selected={false} />);
       const clipElement = container.firstChild as HTMLElement;
@@ -127,6 +132,101 @@ describe('Clip', () => {
       );
 
       expect(screen.getByText('city-broll.mp4')).toBeInTheDocument();
+    });
+
+    it('should fall back to waveform display label when thumbnail is not available', () => {
+      render(
+        <Clip
+          clip={{ ...mockClip, label: undefined }}
+          zoom={100}
+          selected={false}
+          waveformConfig={{
+            assetId: mockVisualAsset.id,
+            inputPath: mockVisualAsset.uri,
+            totalDurationSec: mockVisualAsset.durationSec ?? 0,
+            enabled: true,
+            displayLabel: 'Video Audio: city-broll.mp4',
+          }}
+        />,
+      );
+
+      expect(screen.getByText('Video Audio: city-broll.mp4')).toBeInTheDocument();
+    });
+
+    it('should treat empty clip label as missing and use waveform display label fallback', () => {
+      render(
+        <Clip
+          clip={{ ...mockClip, label: '   ' }}
+          zoom={100}
+          selected={false}
+          waveformConfig={{
+            assetId: mockVisualAsset.id,
+            inputPath: mockVisualAsset.uri,
+            totalDurationSec: mockVisualAsset.durationSec ?? 0,
+            enabled: true,
+            displayLabel: 'Video Audio: city-broll.mp4',
+          }}
+        />,
+      );
+
+      expect(screen.getByText('Video Audio: city-broll.mp4')).toBeInTheDocument();
+    });
+
+    it('should render video-audio source tag when waveform comes from video asset', () => {
+      render(
+        <Clip
+          clip={mockClip}
+          zoom={100}
+          selected={false}
+          waveformConfig={{
+            assetId: mockVisualAsset.id,
+            inputPath: mockVisualAsset.uri,
+            totalDurationSec: mockVisualAsset.durationSec ?? 0,
+            enabled: true,
+            isVideoSource: true,
+          }}
+        />,
+      );
+
+      expect(screen.getByTestId('video-audio-source-tag')).toHaveTextContent('Video Audio');
+    });
+
+    it('should not render video-audio source tag for pure audio source', () => {
+      render(
+        <Clip
+          clip={mockClip}
+          zoom={100}
+          selected={false}
+          waveformConfig={{
+            assetId: 'asset_audio_001',
+            inputPath: '/path/to/audio.wav',
+            totalDurationSec: 10,
+            enabled: true,
+            isVideoSource: false,
+          }}
+        />,
+      );
+
+      expect(screen.queryByTestId('video-audio-source-tag')).not.toBeInTheDocument();
+    });
+
+    it('should allow label overflow for audio-style clips', () => {
+      render(
+        <Clip
+          clip={{ ...mockClip, label: undefined }}
+          zoom={100}
+          selected={false}
+          waveformConfig={{
+            assetId: 'asset_audio_001',
+            inputPath: '/path/to/audio.wav',
+            totalDurationSec: 10,
+            enabled: true,
+            displayLabel: 'Very long audio source label that must remain visible',
+          }}
+        />,
+      );
+
+      expect(screen.getByTestId('clip-clip_001')).toHaveClass('overflow-visible');
     });
   });
 

@@ -52,6 +52,8 @@ export interface ClipDragData {
   originalTimelineIn: number;
   originalSourceIn: number;
   originalSourceOut: number;
+  /** If true, bypass linked companion operations for this drag */
+  ignoreLinkedSelection?: boolean;
 }
 
 /**
@@ -129,6 +131,7 @@ interface PendingDragState {
   originalTimelineIn: number;
   originalSourceIn: number;
   originalSourceOut: number;
+  ignoreLinkedSelection: boolean;
 }
 
 // =============================================================================
@@ -187,10 +190,17 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
       const opts = optionsRef.current;
 
       // Validate inputs - return safe defaults for invalid values
-      if (!Number.isFinite(deltaX) || !Number.isFinite(origTimelineIn) ||
-          !Number.isFinite(origSourceIn) || !Number.isFinite(origSourceOut)) {
+      if (
+        !Number.isFinite(deltaX) ||
+        !Number.isFinite(origTimelineIn) ||
+        !Number.isFinite(origSourceIn) ||
+        !Number.isFinite(origSourceOut)
+      ) {
         logger.warn('Invalid input values in calculatePreviewPosition', {
-          deltaX, origTimelineIn, origSourceIn, origSourceOut
+          deltaX,
+          origTimelineIn,
+          origSourceIn,
+          origSourceOut,
         });
         return {
           timelineIn: Math.max(0, origTimelineIn || 0),
@@ -286,6 +296,10 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
         originalSourceIn: pending.originalSourceIn,
         originalSourceOut: pending.originalSourceOut,
       };
+
+      if (pending.ignoreLinkedSelection) {
+        dragData.ignoreLinkedSelection = true;
+      }
 
       dragDataRef.current = dragData;
       previewPositionRef.current = initialPreview;
@@ -495,6 +509,7 @@ export function useClipDrag(options: UseClipDragOptions): UseClipDragReturn {
         originalTimelineIn: initialTimelineIn,
         originalSourceIn: initialSourceIn,
         originalSourceOut: initialSourceOut,
+        ignoreLinkedSelection: e.altKey,
       };
 
       // Update ref synchronously (for event handlers)

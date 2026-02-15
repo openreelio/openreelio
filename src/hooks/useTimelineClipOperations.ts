@@ -19,7 +19,8 @@ import { useToastStore } from '@/hooks/useToast';
 /**
  * Check if two track kinds are compatible for cross-track drag.
  * video and overlay tracks are compatible with each other.
- * audio tracks are only compatible with other audio tracks.
+ * video and audio tracks are compatible for A/V component workflows.
+ * audio tracks are only compatible with video/audio tracks.
  * caption tracks are only compatible with other caption tracks.
  */
 function isTrackKindCompatible(sourceKind: TrackKind, targetKind: TrackKind): boolean {
@@ -27,8 +28,18 @@ function isTrackKindCompatible(sourceKind: TrackKind, targetKind: TrackKind): bo
   if (sourceKind === targetKind) return true;
 
   // video and overlay are compatible
-  if ((sourceKind === 'video' || sourceKind === 'overlay') &&
-      (targetKind === 'video' || targetKind === 'overlay')) {
+  if (
+    (sourceKind === 'video' || sourceKind === 'overlay') &&
+    (targetKind === 'video' || targetKind === 'overlay')
+  ) {
+    return true;
+  }
+
+  // Allow moving between video and audio lanes for component-based edits.
+  if (
+    (sourceKind === 'video' && targetKind === 'audio') ||
+    (sourceKind === 'audio' && targetKind === 'video')
+  ) {
     return true;
   }
 
@@ -74,16 +85,26 @@ export interface UseTimelineClipOperationsResult {
   /** Handle clip drag start */
   handleClipDragStart: (trackId: string, data: ClipDragData) => void;
   /** Handle clip drag (update preview) */
-  handleClipDrag: (trackId: string, data: ClipDragData, previewPosition: DragPreviewPosition, targetTrackIndex?: number) => void;
+  handleClipDrag: (
+    trackId: string,
+    data: ClipDragData,
+    previewPosition: DragPreviewPosition,
+    targetTrackIndex?: number,
+  ) => void;
   /** Handle clip drag end (commit operation) */
-  handleClipDragEnd: (trackId: string, data: ClipDragData, finalPosition: DragPreviewPosition, targetTrackIndex?: number) => void;
+  handleClipDragEnd: (
+    trackId: string,
+    data: ClipDragData,
+    finalPosition: DragPreviewPosition,
+    targetTrackIndex?: number,
+  ) => void;
   /** Handle multi-clip drag end (move multiple selected clips) */
   handleMultiClipDragEnd: (
     trackId: string,
     dragData: ClipDragData,
     finalPosition: DragPreviewPosition,
     selectedClipIds: string[],
-    targetTrackIndex?: number
+    targetTrackIndex?: number,
   ) => void;
   /** Calculate track index from Y coordinate */
   calculateTrackIndexFromY: (mouseY: number, scrollY: number) => number;
@@ -141,7 +162,7 @@ export function useTimelineClipOperations({
       const maxIndex = sequence.tracks.length - 1;
       return Math.min(trackIndex, maxIndex);
     },
-    [trackHeight, sequence]
+    [trackHeight, sequence],
   );
 
   // ===========================================================================
@@ -157,7 +178,7 @@ export function useTimelineClipOperations({
       const track = sequence.tracks.find((t) => t.id === trackId);
       return track?.clips || [];
     },
-    [sequence]
+    [sequence],
   );
 
   /**
@@ -174,7 +195,7 @@ export function useTimelineClipOperations({
       }
       return null;
     },
-    [sequence]
+    [sequence],
   );
 
   // ===========================================================================
@@ -196,7 +217,8 @@ export function useTimelineClipOperations({
 
         if (clipInfo && trackIndex >= 0) {
           const clipDuration =
-            (data.originalSourceOut - data.originalSourceIn) / (clipInfo.clip.speed > 0 ? clipInfo.clip.speed : 1);
+            (data.originalSourceOut - data.originalSourceIn) /
+            (clipInfo.clip.speed > 0 ? clipInfo.clip.speed : 1);
 
           setDragPreview({
             clipId: data.clipId,
@@ -207,7 +229,7 @@ export function useTimelineClipOperations({
         }
       }
     },
-    [selectClip, sequence, zoom, findClip]
+    [selectClip, sequence, zoom, findClip],
   );
 
   /**
@@ -215,7 +237,12 @@ export function useTimelineClipOperations({
    * Supports cross-track drag with validity checking.
    */
   const handleClipDrag = useCallback(
-    (trackId: string, data: ClipDragData, previewPosition: DragPreviewPosition, targetTrackIndex?: number) => {
+    (
+      trackId: string,
+      data: ClipDragData,
+      previewPosition: DragPreviewPosition,
+      targetTrackIndex?: number,
+    ) => {
       if (!sequence || sequence.tracks.length === 0) return;
 
       const sourceTrackIndex = sequence.tracks.findIndex((t) => t.id === trackId);
@@ -225,7 +252,10 @@ export function useTimelineClipOperations({
 
       // Determine target track index (default to source track) with bounds checking
       let effectiveTargetIndex = targetTrackIndex ?? sourceTrackIndex;
-      effectiveTargetIndex = Math.max(0, Math.min(effectiveTargetIndex, sequence.tracks.length - 1));
+      effectiveTargetIndex = Math.max(
+        0,
+        Math.min(effectiveTargetIndex, sequence.tracks.length - 1),
+      );
 
       const targetTrack = sequence.tracks[effectiveTargetIndex];
 
@@ -250,7 +280,7 @@ export function useTimelineClipOperations({
         isValidDrop,
       });
     },
-    [sequence, zoom]
+    [sequence, zoom],
   );
 
   /**
@@ -259,7 +289,12 @@ export function useTimelineClipOperations({
    * Supports cross-track moves to compatible tracks.
    */
   const handleClipDragEnd = useCallback(
-    (trackId: string, data: ClipDragData, finalPosition: DragPreviewPosition, targetTrackIndex?: number) => {
+    (
+      trackId: string,
+      data: ClipDragData,
+      finalPosition: DragPreviewPosition,
+      targetTrackIndex?: number,
+    ) => {
       if (!sequence || sequence.tracks.length === 0) {
         setDragPreview(null);
         return;
@@ -291,7 +326,10 @@ export function useTimelineClipOperations({
 
         if (targetTrackIndex !== undefined && targetTrackIndex !== sourceTrackIndex) {
           // Bounds check targetTrackIndex
-          const safeTargetIndex = Math.max(0, Math.min(targetTrackIndex, sequence.tracks.length - 1));
+          const safeTargetIndex = Math.max(
+            0,
+            Math.min(targetTrackIndex, sequence.tracks.length - 1),
+          );
           const targetTrack = sequence.tracks[safeTargetIndex];
 
           // Only set newTrackId if target track exists and is compatible
@@ -314,6 +352,10 @@ export function useTimelineClipOperations({
           newTimelineIn: safeTimelineIn,
         };
 
+        if (data.ignoreLinkedSelection) {
+          moveData.ignoreLinkedSelection = true;
+        }
+
         // Only include newTrackId if it's defined (cross-track move)
         if (newTrackId) {
           moveData.newTrackId = newTrackId;
@@ -322,26 +364,38 @@ export function useTimelineClipOperations({
         onClipMove(moveData);
       } else if ((data.type === 'trim-left' || data.type === 'trim-right') && onClipTrim) {
         if (data.type === 'trim-left') {
-          onClipTrim({
+          const trimData: ClipTrimData = {
             sequenceId: sequence.id,
             trackId,
             clipId: data.clipId,
             newSourceIn: safeSourceIn,
             newTimelineIn: safeTimelineIn,
-          });
+          };
+
+          if (data.ignoreLinkedSelection) {
+            trimData.ignoreLinkedSelection = true;
+          }
+
+          onClipTrim(trimData);
         } else {
-          onClipTrim({
+          const trimData: ClipTrimData = {
             sequenceId: sequence.id,
             trackId,
             clipId: data.clipId,
             newSourceOut: safeSourceOut,
-          });
+          };
+
+          if (data.ignoreLinkedSelection) {
+            trimData.ignoreLinkedSelection = true;
+          }
+
+          onClipTrim(trimData);
         }
       }
 
       setDragPreview(null);
     },
-    [sequence, onClipMove, onClipTrim]
+    [sequence, onClipMove, onClipTrim],
   );
 
   /**
@@ -355,7 +409,7 @@ export function useTimelineClipOperations({
       dragData: ClipDragData,
       finalPosition: DragPreviewPosition,
       selectedClipIds: string[],
-      targetTrackIndex?: number
+      targetTrackIndex?: number,
     ) => {
       if (!sequence || !onClipMove || sequence.tracks.length === 0) {
         setDragPreview(null);
@@ -369,8 +423,12 @@ export function useTimelineClipOperations({
       }
 
       // Validate finalPosition
-      const safeTimelineIn = Number.isFinite(finalPosition.timelineIn) ? finalPosition.timelineIn : 0;
-      const safeOriginalTimelineIn = Number.isFinite(dragData.originalTimelineIn) ? dragData.originalTimelineIn : 0;
+      const safeTimelineIn = Number.isFinite(finalPosition.timelineIn)
+        ? finalPosition.timelineIn
+        : 0;
+      const safeOriginalTimelineIn = Number.isFinite(dragData.originalTimelineIn)
+        ? dragData.originalTimelineIn
+        : 0;
 
       // Calculate the offset from the primary clip's original position
       const offset = safeTimelineIn - safeOriginalTimelineIn;
@@ -412,7 +470,10 @@ export function useTimelineClipOperations({
 
         // Calculate new position based on offset
         const currentTimelineIn = clipInfo.clip.place.timelineInSec;
-        const newTimelineIn = Math.min(MAX_TIMELINE_POSITION, Math.max(0, currentTimelineIn + offset));
+        const newTimelineIn = Math.min(
+          MAX_TIMELINE_POSITION,
+          Math.max(0, currentTimelineIn + offset),
+        );
 
         const moveData: ClipMoveData = {
           sequenceId: sequence.id,
@@ -420,6 +481,10 @@ export function useTimelineClipOperations({
           clipId,
           newTimelineIn,
         };
+
+        if (dragData.ignoreLinkedSelection) {
+          moveData.ignoreLinkedSelection = true;
+        }
 
         // Only include newTrackId for clips on the source track
         if (newTrackId && clipInfo.trackId === trackId) {
@@ -436,7 +501,7 @@ export function useTimelineClipOperations({
 
       setDragPreview(null);
     },
-    [sequence, onClipMove, findClip]
+    [sequence, onClipMove, findClip],
   );
 
   // ===========================================================================

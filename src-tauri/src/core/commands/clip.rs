@@ -813,6 +813,98 @@ impl SplitClipCommand {
 }
 
 // =============================================================================
+// SetClipMuteCommand
+// =============================================================================
+
+/// Command to set clip-level audio mute state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetClipMuteCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub muted: bool,
+    #[serde(skip)]
+    previous_muted: Option<bool>,
+}
+
+impl SetClipMuteCommand {
+    pub fn new(sequence_id: &str, track_id: &str, clip_id: &str, muted: bool) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            muted,
+            previous_muted: None,
+        }
+    }
+}
+
+impl Command for SetClipMuteCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        let clip = track
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        self.previous_muted = Some(clip.audio.muted);
+        clip.audio.muted = self.muted;
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(previous_muted) = self.previous_muted else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) else {
+            return Ok(());
+        };
+
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.audio.muted = previous_muted;
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetClipMute"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "muted": self.muted,
+        })
+    }
+}
+
+// =============================================================================
 // SetClipTransformCommand
 // =============================================================================
 
@@ -963,13 +1055,18 @@ impl Command for SplitClipCommand {
 
         // Calculate source time at split point (accounting for speed)
         let relative_split = self.split_at - clip_start;
+        let safe_speed = if original.speed > 0.0 {
+            original.speed as f64
+        } else {
+            1.0
+        };
         // When speed is applied, the source time advances at a different rate
         // relative_split is in timeline seconds, multiply by speed to get source seconds
-        let source_split = original.range.source_in_sec + (relative_split * original.speed as f64);
+        let source_split = original.range.source_in_sec + (relative_split * safe_speed);
 
         // Create second clip (after split) with ALL properties copied
         let second_source_duration = original.range.source_out_sec - source_split;
-        let second_timeline_duration = second_source_duration / original.speed as f64;
+        let second_timeline_duration = second_source_duration / safe_speed;
 
         let mut second_clip = Clip::new(&original.asset_id);
         second_clip.range = ClipRange {
@@ -1604,5 +1701,28 @@ mod tests {
         cmd.undo(&mut state).unwrap();
         let restored = &state.sequences[&seq_id].tracks[0].clips[0].transform;
         assert_eq!(restored, &original);
+    }
+
+    #[test]
+    fn test_set_clip_mute_command_updates_and_undoes() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        assert!(!state.sequences[&seq_id].tracks[0].clips[0].audio.muted);
+
+        let mut mute_cmd = SetClipMuteCommand::new(&seq_id, &track_id, &clip_id, true);
+        mute_cmd.execute(&mut state).unwrap();
+
+        assert!(state.sequences[&seq_id].tracks[0].clips[0].audio.muted);
+
+        mute_cmd.undo(&mut state).unwrap();
+
+        assert!(!state.sequences[&seq_id].tracks[0].clips[0].audio.muted);
     }
 }

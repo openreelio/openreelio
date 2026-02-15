@@ -219,14 +219,19 @@ export function AudioClipWaveform({
 
       {/* Fallback pattern for error or loading state */}
       {!waveformSrc && !isLoading && (
-        <div
-          className="absolute inset-0 opacity-30"
-          style={{
-            background: color
-              ? `repeating-linear-gradient(90deg, ${color} 0px, ${color} 2px, transparent 2px, transparent 4px)`
-              : 'repeating-linear-gradient(90deg, currentColor 0px, currentColor 2px, transparent 2px, transparent 4px)',
-          }}
-        />
+        <div data-testid="waveform-fallback" className="absolute inset-0 pointer-events-none">
+          <div
+            className="absolute inset-0"
+            style={{
+              background:
+                'linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.04) 100%)',
+            }}
+          />
+          <div
+            className="absolute left-0 right-0 top-1/2 -translate-y-1/2 h-px"
+            style={{ backgroundColor: color || 'rgba(255, 255, 255, 0.22)' }}
+          />
+        </div>
       )}
     </div>
   );

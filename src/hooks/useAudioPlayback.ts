@@ -17,6 +17,7 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 import { playbackController } from '@/services/PlaybackController';
 import type { Sequence, Asset, Clip } from '@/types';
 import { createLogger } from '@/services/logger';
+import { collectPlaybackAudioClips } from '@/utils/audioPlayback';
 
 const logger = createLogger('AudioPlayback');
 
@@ -139,16 +140,7 @@ export function useAudioPlayback({
   const isPlayingRef = useRef(isPlaying);
 
   const getLiveIsPlaying = useCallback((): boolean => {
-    const storeApi = usePlaybackStore as unknown as {
-      getState?: () => { isPlaying?: boolean };
-    };
-    if (typeof storeApi.getState === 'function') {
-      const liveState = storeApi.getState();
-      if (liveState && typeof liveState.isPlaying === 'boolean') {
-        return liveState.isPlaying;
-      }
-    }
-    return isPlayingRef.current;
+    return usePlaybackStore.getState().isPlaying;
   }, []);
 
   useEffect(() => {
@@ -333,37 +325,7 @@ export function useAudioPlayback({
     trackVolume: number;
     trackMuted: boolean;
   }> => {
-    if (!sequence) return [];
-
-    const audioClips: Array<{
-      clip: Clip;
-      asset: Asset;
-      trackVolume: number;
-      trackMuted: boolean;
-    }> = [];
-
-    for (const track of sequence.tracks) {
-      // Include both audio tracks and video tracks with audio
-      if (track.muted) continue;
-
-      for (const clip of track.clips) {
-        const asset = assets.get(clip.assetId);
-        if (!asset) continue;
-
-        // Check if asset has audio
-        const hasAudio = asset.kind === 'audio' || (asset.kind === 'video' && asset.audio);
-        if (!hasAudio) continue;
-
-        audioClips.push({
-          clip,
-          asset,
-          trackVolume: track.volume,
-          trackMuted: track.muted,
-        });
-      }
-    }
-
-    return audioClips;
+    return collectPlaybackAudioClips(sequence, assets);
   }, [sequence, assets]);
 
   /**
@@ -602,10 +564,17 @@ export function useAudioPlayback({
     getLiveIsPlaying,
   ]);
 
-  // Handle play/pause
+  // Handle play/pause and enabled toggle
   useEffect(() => {
     if (!enabled) {
       stopAllSources();
+
+      // Clear all pending retry timeouts to prevent resource leaks
+      // when audio playback is disabled (e.g., component deactivation).
+      for (const timeoutId of retryTimeoutsRef.current.values()) {
+        clearTimeout(timeoutId);
+      }
+      retryTimeoutsRef.current.clear();
     }
   }, [enabled, stopAllSources]);
 

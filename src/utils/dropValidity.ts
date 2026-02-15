@@ -49,8 +49,13 @@ export interface DropValidationContext {
 // Track Type Compatibility
 // =============================================================================
 
-/** Track kinds that accept video assets */
-const VIDEO_COMPATIBLE_TRACKS: TrackKind[] = ['video', 'overlay'];
+/**
+ * Track kinds that accept video assets.
+ *
+ * Audio lanes are allowed so editors can place a video's audio component
+ * directly on audio tracks (A/V split workflow).
+ */
+const VIDEO_COMPATIBLE_TRACKS: TrackKind[] = ['video', 'overlay', 'audio'];
 
 /** Track kinds that accept audio assets */
 const AUDIO_COMPATIBLE_TRACKS: TrackKind[] = ['audio', 'video'];
@@ -66,7 +71,7 @@ const SUBTITLE_COMPATIBLE_TRACKS: TrackKind[] = ['caption'];
  */
 export function isAssetCompatibleWithTrack(
   assetKind: AssetKind | undefined,
-  trackKind: TrackKind
+  trackKind: TrackKind,
 ): boolean {
   if (!assetKind) return true; // No asset info, assume compatible
 
@@ -87,10 +92,7 @@ export function isAssetCompatibleWithTrack(
 /**
  * Get user-friendly message for track type mismatch
  */
-export function getTrackTypeMismatchMessage(
-  assetKind: AssetKind,
-  trackKind: TrackKind
-): string {
+export function getTrackTypeMismatchMessage(assetKind: AssetKind, trackKind: TrackKind): string {
   const assetLabel = assetKind.charAt(0).toUpperCase() + assetKind.slice(1);
   const trackLabel = trackKind.charAt(0).toUpperCase() + trackKind.slice(1);
 
@@ -108,7 +110,7 @@ export function checkClipOverlap(
   clips: Clip[],
   startTime: number,
   endTime: number,
-  excludeClipId?: string
+  excludeClipId?: string,
 ): Clip | null {
   for (const clip of clips) {
     // Skip the clip being moved
@@ -116,8 +118,7 @@ export function checkClipOverlap(
 
     const clipStart = clip.place.timelineInSec;
     const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-    const clipDuration =
-      (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+    const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
     const clipEnd = clipStart + clipDuration;
 
     // Check for overlap
@@ -144,7 +145,7 @@ export function checkClipOverlap(
 export function validateDrop(
   targetPosition: number,
   clipDuration: number,
-  context: DropValidationContext
+  context: DropValidationContext,
 ): DropValidity {
   const { track, clips, sourceClip, assetKind, assets } = context;
 
@@ -188,12 +189,7 @@ export function validateDrop(
 
   // Check: Overlap with existing clips
   const targetEnd = targetPosition + clipDuration;
-  const overlappingClip = checkClipOverlap(
-    clips,
-    targetPosition,
-    targetEnd,
-    sourceClip?.id
-  );
+  const overlappingClip = checkClipOverlap(clips, targetPosition, targetEnd, sourceClip?.id);
 
   if (overlappingClip) {
     return {
@@ -213,7 +209,7 @@ export function validateDrop(
  */
 function getAssetKindFromClip(
   clip: Clip | null | undefined,
-  assets: Map<string, Asset> | undefined
+  assets: Map<string, Asset> | undefined,
 ): AssetKind | undefined {
   if (!clip || !assets) return undefined;
 
@@ -238,7 +234,7 @@ export function validDrop(): DropValidity {
 export function invalidDrop(
   reason: DropInvalidReason,
   message: string,
-  conflictingClipId?: string
+  conflictingClipId?: string,
 ): DropValidity {
   return {
     isValid: false,

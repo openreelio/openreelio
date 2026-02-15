@@ -90,45 +90,45 @@ export interface TimeRange {
 
 /** Rectangle mask shape */
 export interface RectMask {
-  x: number;           // Center X (0.0-1.0 normalized)
-  y: number;           // Center Y (0.0-1.0 normalized)
-  width: number;       // Width (0.0-2.0 normalized)
-  height: number;      // Height (0.0-2.0 normalized)
+  x: number; // Center X (0.0-1.0 normalized)
+  y: number; // Center Y (0.0-1.0 normalized)
+  width: number; // Width (0.0-2.0 normalized)
+  height: number; // Height (0.0-2.0 normalized)
   cornerRadius: number; // Rounded corners (0.0-1.0)
-  rotation: number;    // Rotation in degrees
+  rotation: number; // Rotation in degrees
 }
 
 /** Ellipse mask shape */
 export interface EllipseMask {
-  x: number;           // Center X (0.0-1.0)
-  y: number;           // Center Y (0.0-1.0)
-  radiusX: number;     // Horizontal radius
-  radiusY: number;     // Vertical radius
-  rotation: number;    // Rotation in degrees
+  x: number; // Center X (0.0-1.0)
+  y: number; // Center Y (0.0-1.0)
+  radiusX: number; // Horizontal radius
+  radiusY: number; // Vertical radius
+  rotation: number; // Rotation in degrees
 }
 
 /** Polygon mask shape */
 export interface PolygonMask {
-  points: Point2D[];   // Polygon vertices (min 3)
+  points: Point2D[]; // Polygon vertices (min 3)
 }
 
 /** Bezier control point */
 export interface BezierPoint {
-  anchor: Point2D;           // Anchor point
+  anchor: Point2D; // Anchor point
   handleIn?: Point2D | null; // Incoming control handle
   handleOut?: Point2D | null; // Outgoing control handle
 }
 
 /** Bezier curve mask shape */
 export interface BezierMask {
-  points: BezierPoint[];  // Control points (min 2)
-  closed: boolean;        // Open or closed path
+  points: BezierPoint[]; // Control points (min 2)
+  closed: boolean; // Open or closed path
 }
 
 /** Discriminated union for mask shapes */
 export type MaskShape =
-  | { type: 'rectangle' } & RectMask
-  | { type: 'ellipse' } & EllipseMask
+  | ({ type: 'rectangle' } & RectMask)
+  | ({ type: 'ellipse' } & EllipseMask)
   | { type: 'polygon'; points: Point2D[] }
   | { type: 'bezier'; points: BezierPoint[]; closed: boolean };
 
@@ -141,9 +141,9 @@ export interface Mask {
   name: string;
   shape: MaskShape;
   inverted: boolean;
-  feather: number;      // Edge softness (0.0-1.0)
-  opacity: number;      // Mask opacity (0.0-1.0)
-  expansion: number;    // Expand/contract (-1.0 to 1.0)
+  feather: number; // Edge softness (0.0-1.0)
+  opacity: number; // Mask opacity (0.0-1.0)
+  expansion: number; // Expand/contract (-1.0 to 1.0)
   blendMode: MaskBlendMode;
   enabled: boolean;
   locked: boolean;
@@ -179,12 +179,7 @@ export type AssetKind =
   | 'memePack';
 
 /** Proxy video generation status */
-export type ProxyStatus =
-  | 'notNeeded'
-  | 'pending'
-  | 'generating'
-  | 'ready'
-  | 'failed';
+export type ProxyStatus = 'notNeeded' | 'pending' | 'generating' | 'ready' | 'failed';
 
 /** Minimum video height that requires proxy generation */
 export const PROXY_THRESHOLD_HEIGHT = 720;
@@ -257,15 +252,7 @@ export interface Asset {
 // =============================================================================
 
 /** Color for bin visual identification */
-export type BinColor =
-  | 'gray'
-  | 'red'
-  | 'orange'
-  | 'yellow'
-  | 'green'
-  | 'blue'
-  | 'purple'
-  | 'pink';
+export type BinColor = 'gray' | 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | 'pink';
 
 /**
  * Bin (Folder) for organizing assets in the Project Explorer.
@@ -288,9 +275,11 @@ export interface Bin {
 
 /** Check if an asset requires proxy generation based on video dimensions */
 export function assetNeedsProxy(asset: Asset): boolean {
-  return asset.kind === 'video' &&
-         asset.video !== undefined &&
-         asset.video.height > PROXY_THRESHOLD_HEIGHT;
+  return (
+    asset.kind === 'video' &&
+    asset.video !== undefined &&
+    asset.video.height > PROXY_THRESHOLD_HEIGHT
+  );
 }
 
 // =============================================================================
@@ -705,6 +694,7 @@ export type CommandType =
   | 'MoveAssetToBin'
   | 'InsertClip'
   | 'SetClipTransform'
+  | 'SetClipMute'
   | 'SplitClip'
   | 'TrimClip'
   | 'MoveClip'
@@ -1032,7 +1022,12 @@ export type ParamValue =
   | { type: 'range'; value: [number, number] }; // min, max
 
 /** Simplified param value for UI (auto-detected type) */
-export type SimpleParamValue = number | boolean | string | [number, number, number, number] | [number, number];
+export type SimpleParamValue =
+  | number
+  | boolean
+  | string
+  | [number, number, number, number]
+  | [number, number];
 
 /** Parameter definition with constraints */
 /** Input type for parameter editor UI */
