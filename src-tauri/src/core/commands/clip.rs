@@ -963,13 +963,18 @@ impl Command for SplitClipCommand {
 
         // Calculate source time at split point (accounting for speed)
         let relative_split = self.split_at - clip_start;
+        let safe_speed = if original.speed > 0.0 {
+            original.speed as f64
+        } else {
+            1.0
+        };
         // When speed is applied, the source time advances at a different rate
         // relative_split is in timeline seconds, multiply by speed to get source seconds
-        let source_split = original.range.source_in_sec + (relative_split * original.speed as f64);
+        let source_split = original.range.source_in_sec + (relative_split * safe_speed);
 
         // Create second clip (after split) with ALL properties copied
         let second_source_duration = original.range.source_out_sec - source_split;
-        let second_timeline_duration = second_source_duration / original.speed as f64;
+        let second_timeline_duration = second_source_duration / safe_speed;
 
         let mut second_clip = Clip::new(&original.asset_id);
         second_clip.range = ClipRange {
