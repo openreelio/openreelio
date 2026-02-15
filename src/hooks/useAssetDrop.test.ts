@@ -5,15 +5,15 @@
 import { renderHook, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useAssetDrop } from './useAssetDrop';
-import type { Sequence, Track } from '@/types';
+import type { Sequence, Track, TrackKind } from '@/types';
 
 // =============================================================================
 // Test Fixtures
 // =============================================================================
 
-const createMockTrack = (id: string, locked = false): Track => ({
+const createMockTrack = (id: string, locked = false, kind: TrackKind = 'video'): Track => ({
   id,
-  kind: 'video',
+  kind,
   name: `Track ${id}`,
   clips: [],
   blendMode: 'normal',
@@ -32,11 +32,40 @@ const createMockSequence = (trackCount = 2): Sequence => ({
     audioSampleRate: 48000,
     audioChannels: 2,
   },
-  tracks: Array.from({ length: trackCount }, (_, i) =>
-    createMockTrack(`track-${i}`, i === 1)
-  ),
+  tracks: Array.from({ length: trackCount }, (_, i) => createMockTrack(`track-${i}`, i === 1)),
   markers: [],
 });
+
+function createMockRect(top: number, height: number, left = 100, width = 800): DOMRect {
+  return {
+    x: left,
+    y: top,
+    top,
+    left,
+    width,
+    height,
+    right: left + width,
+    bottom: top + height,
+    toJSON: () => ({}),
+  } as DOMRect;
+}
+
+function createTrackRowContainer(
+  rows: Array<{ trackId: string; top: number; height: number }>,
+): HTMLElement {
+  const container = document.createElement('div');
+  container.getBoundingClientRect = vi.fn().mockReturnValue(createMockRect(0, 220));
+
+  for (const row of rows) {
+    const rowElement = document.createElement('div');
+    rowElement.dataset.trackRow = 'true';
+    rowElement.dataset.trackId = row.trackId;
+    rowElement.getBoundingClientRect = vi.fn().mockReturnValue(createMockRect(row.top, row.height));
+    container.appendChild(rowElement);
+  }
+
+  return container;
+}
 
 const createMockDragEvent = (
   type: 'dragenter' | 'dragover' | 'dragleave' | 'drop',
@@ -46,7 +75,7 @@ const createMockDragEvent = (
     dataTransferData: Record<string, string>;
     dataTransferTypes: string[];
     currentTarget: HTMLElement;
-  }> = {}
+  }> = {},
 ) => {
   const {
     clientX = 300,
@@ -57,12 +86,7 @@ const createMockDragEvent = (
   } = options;
 
   // Mock getBoundingClientRect
-  currentTarget.getBoundingClientRect = vi.fn().mockReturnValue({
-    left: 100,
-    top: 0,
-    width: 800,
-    height: 200,
-  });
+  currentTarget.getBoundingClientRect = vi.fn().mockReturnValue(createMockRect(0, 200));
 
   return {
     type,
@@ -168,6 +192,36 @@ describe('useAssetDrop', () => {
       expect(event.dataTransfer.dropEffect).toBe('copy');
       expect(event.preventDefault).toHaveBeenCalled();
     });
+
+    it('should set dropEffect to none for image on audio track', () => {
+      const sequence: Sequence = {
+        ...createMockSequence(2),
+        tracks: [
+          createMockTrack('track-0', false, 'video'),
+          createMockTrack('track-1', false, 'audio'),
+        ],
+      };
+
+      const { result } = renderHook(() =>
+        useAssetDrop({
+          ...defaultOptions,
+          sequence,
+        }),
+      );
+
+      const event = createMockDragEvent('dragover', {
+        clientY: 90,
+        dataTransferData: {
+          'application/json': JSON.stringify({ id: 'asset-1', kind: 'image' }),
+        },
+      });
+
+      act(() => {
+        result.current.handleDragOver(event);
+      });
+
+      expect(event.dataTransfer.dropEffect).toBe('none');
+    });
   });
 
   describe('handleDragLeave', () => {
@@ -216,9 +270,7 @@ describe('useAssetDrop', () => {
   describe('handleDrop', () => {
     it('should call onAssetDrop with correct data', () => {
       const onAssetDrop = vi.fn();
-      const { result } = renderHook(() =>
-        useAssetDrop({ ...defaultOptions, onAssetDrop })
-      );
+      const { result } = renderHook(() => useAssetDrop({ ...defaultOptions, onAssetDrop }));
 
       const event = createMockDragEvent('drop', {
         clientX: 300, // 300 - 100 (rect.left) - 100 (trackHeaderWidth) = 100px = 1s at zoom 100
@@ -236,11 +288,46 @@ describe('useAssetDrop', () => {
       });
     });
 
-    it('should handle text/plain data format', () => {
+    it('should resolve the exact target track using DOM row hit-testing', () => {
+      const sequence: Sequence = {
+        ...createMockSequence(2),
+        tracks: [createMockTrack('track-0'), createMockTrack('track-1')],
+      };
+
       const onAssetDrop = vi.fn();
       const { result } = renderHook(() =>
-        useAssetDrop({ ...defaultOptions, onAssetDrop })
+        useAssetDrop({
+          ...defaultOptions,
+          sequence,
+          onAssetDrop,
+        }),
       );
+
+      const currentTarget = createTrackRowContainer([
+        { trackId: 'track-0', top: 0, height: 48 },
+        { trackId: 'track-1', top: 48, height: 64 },
+      ]);
+
+      const event = createMockDragEvent('drop', {
+        clientX: 300,
+        clientY: 52, // Inside second row (48-112), but would map to track-0 with fixed 64px math
+        currentTarget,
+      });
+
+      act(() => {
+        result.current.handleDrop(event);
+      });
+
+      expect(onAssetDrop).toHaveBeenCalledWith(
+        expect.objectContaining({
+          trackId: 'track-1',
+        }),
+      );
+    });
+
+    it('should handle text/plain data format', () => {
+      const onAssetDrop = vi.fn();
+      const { result } = renderHook(() => useAssetDrop({ ...defaultOptions, onAssetDrop }));
 
       const event = createMockDragEvent('drop', {
         dataTransferTypes: ['text/plain'],
@@ -251,16 +338,12 @@ describe('useAssetDrop', () => {
         result.current.handleDrop(event);
       });
 
-      expect(onAssetDrop).toHaveBeenCalledWith(
-        expect.objectContaining({ assetId: 'asset-2' })
-      );
+      expect(onAssetDrop).toHaveBeenCalledWith(expect.objectContaining({ assetId: 'asset-2' }));
     });
 
     it('should not call onAssetDrop when dropping on locked track', () => {
       const onAssetDrop = vi.fn();
-      const { result } = renderHook(() =>
-        useAssetDrop({ ...defaultOptions, onAssetDrop })
-      );
+      const { result } = renderHook(() => useAssetDrop({ ...defaultOptions, onAssetDrop }));
 
       const event = createMockDragEvent('drop', {
         clientY: 90, // trackIndex 1 which is locked
@@ -273,10 +356,42 @@ describe('useAssetDrop', () => {
       expect(onAssetDrop).not.toHaveBeenCalled();
     });
 
+    it('should not call onAssetDrop when image is dropped on audio track', () => {
+      const sequence: Sequence = {
+        ...createMockSequence(2),
+        tracks: [
+          createMockTrack('track-0', false, 'video'),
+          createMockTrack('track-1', false, 'audio'),
+        ],
+      };
+
+      const onAssetDrop = vi.fn();
+      const { result } = renderHook(() =>
+        useAssetDrop({
+          ...defaultOptions,
+          sequence,
+          onAssetDrop,
+        }),
+      );
+
+      const event = createMockDragEvent('drop', {
+        clientY: 90, // track-1 (audio)
+        dataTransferData: {
+          'application/json': JSON.stringify({ id: 'asset-1', kind: 'image' }),
+        },
+      });
+
+      act(() => {
+        result.current.handleDrop(event);
+      });
+
+      expect(onAssetDrop).not.toHaveBeenCalled();
+    });
+
     it('should not call onAssetDrop when sequence is null', () => {
       const onAssetDrop = vi.fn();
       const { result } = renderHook(() =>
-        useAssetDrop({ ...defaultOptions, sequence: null, onAssetDrop })
+        useAssetDrop({ ...defaultOptions, sequence: null, onAssetDrop }),
       );
 
       const event = createMockDragEvent('drop');
@@ -290,7 +405,7 @@ describe('useAssetDrop', () => {
 
     it('should not call onAssetDrop when onAssetDrop is undefined', () => {
       const { result } = renderHook(() =>
-        useAssetDrop({ ...defaultOptions, onAssetDrop: undefined })
+        useAssetDrop({ ...defaultOptions, onAssetDrop: undefined }),
       );
 
       const event = createMockDragEvent('drop');
@@ -305,9 +420,7 @@ describe('useAssetDrop', () => {
 
     it('should handle invalid JSON data gracefully', () => {
       const onAssetDrop = vi.fn();
-      const { result } = renderHook(() =>
-        useAssetDrop({ ...defaultOptions, onAssetDrop })
-      );
+      const { result } = renderHook(() => useAssetDrop({ ...defaultOptions, onAssetDrop }));
 
       const event = createMockDragEvent('drop', {
         dataTransferData: { 'application/json': 'invalid json' },
@@ -322,9 +435,7 @@ describe('useAssetDrop', () => {
 
     it('should handle missing asset id gracefully', () => {
       const onAssetDrop = vi.fn();
-      const { result } = renderHook(() =>
-        useAssetDrop({ ...defaultOptions, onAssetDrop })
-      );
+      const { result } = renderHook(() => useAssetDrop({ ...defaultOptions, onAssetDrop }));
 
       const event = createMockDragEvent('drop', {
         dataTransferData: { 'application/json': JSON.stringify({ name: 'test' }) },
@@ -361,7 +472,7 @@ describe('useAssetDrop', () => {
           scrollX: 200,
           scrollY: 0, // No vertical scroll for simpler calculation
           onAssetDrop,
-        })
+        }),
       );
 
       const event = createMockDragEvent('drop', {
@@ -378,15 +489,13 @@ describe('useAssetDrop', () => {
         expect.objectContaining({
           timelinePosition: 3,
           trackId: 'track-0',
-        })
+        }),
       );
     });
 
     it('should clamp timeline position to 0 minimum', () => {
       const onAssetDrop = vi.fn();
-      const { result } = renderHook(() =>
-        useAssetDrop({ ...defaultOptions, onAssetDrop })
-      );
+      const { result } = renderHook(() => useAssetDrop({ ...defaultOptions, onAssetDrop }));
 
       const event = createMockDragEvent('drop', {
         clientX: 50, // Before track header, would result in negative position
@@ -399,7 +508,7 @@ describe('useAssetDrop', () => {
       expect(onAssetDrop).toHaveBeenCalledWith(
         expect.objectContaining({
           timelinePosition: 0,
-        })
+        }),
       );
     });
   });
