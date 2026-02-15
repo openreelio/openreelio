@@ -17,6 +17,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import type { Sequence, Asset, Clip, Effect } from '@/types';
 import { createLogger } from '@/services/logger';
+import { collectPlaybackAudioClips } from '@/utils/audioPlayback';
 import {
   createAudioEffectNode,
   updateAudioEffectNode,
@@ -52,12 +53,7 @@ export interface UseAudioPlaybackWithEffectsReturn {
   /** Get list of assets that failed to load */
   failedAssets: string[];
   /** Update an effect parameter for a clip in real-time */
-  updateClipEffect: (
-    clipId: string,
-    effectId: string,
-    paramName: string,
-    value: number
-  ) => void;
+  updateClipEffect: (clipId: string, effectId: string, paramName: string, value: number) => void;
 }
 
 interface ScheduledSource {
@@ -100,9 +96,7 @@ function toEffectTypeId(effectType: Effect['effectType']): string {
 /**
  * Extract numeric parameters from effect params
  */
-function extractNumericParams(
-  params: Record<string, unknown>
-): Record<string, number> {
+function extractNumericParams(params: Record<string, unknown>): Record<string, number> {
   const result: Record<string, number> = {};
   for (const [key, value] of Object.entries(params)) {
     if (typeof value === 'number') {
@@ -240,7 +234,11 @@ export function useAudioPlaybackWithEffects({
 
         if (currentAttempt < MAX_RETRY_ATTEMPTS) {
           const retryDelay = getRetryDelay(currentAttempt);
-          logger.debug('Scheduling audio load retry', { assetId, retryDelay, attempt: currentAttempt });
+          logger.debug('Scheduling audio load retry', {
+            assetId,
+            retryDelay,
+            attempt: currentAttempt,
+          });
 
           const existingTimeout = retryTimeoutsRef.current.get(assetId);
           if (existingTimeout) {
@@ -258,7 +256,7 @@ export function useAudioPlaybackWithEffects({
         return null;
       }
     },
-    [getRetryDelay]
+    [getRetryDelay],
   );
 
   // -------------------------------------------------------------------------
@@ -286,7 +284,7 @@ export function useAudioPlaybackWithEffects({
 
       return buffer !== null;
     },
-    [assets, loadAudioBuffer]
+    [assets, loadAudioBuffer],
   );
 
   // -------------------------------------------------------------------------
@@ -332,7 +330,7 @@ export function useAudioPlaybackWithEffects({
 
       return effectNodes;
     },
-    [getEffectById]
+    [getEffectById],
   );
 
   // -------------------------------------------------------------------------
@@ -345,35 +343,7 @@ export function useAudioPlaybackWithEffects({
     trackVolume: number;
     trackMuted: boolean;
   }> => {
-    if (!sequence) return [];
-
-    const audioClips: Array<{
-      clip: Clip;
-      asset: Asset;
-      trackVolume: number;
-      trackMuted: boolean;
-    }> = [];
-
-    for (const track of sequence.tracks) {
-      if (track.muted) continue;
-
-      for (const clip of track.clips) {
-        const asset = assets.get(clip.assetId);
-        if (!asset) continue;
-
-        const hasAudio = asset.kind === 'audio' || (asset.kind === 'video' && asset.audio);
-        if (!hasAudio) continue;
-
-        audioClips.push({
-          clip,
-          asset,
-          trackVolume: track.volume,
-          trackMuted: track.muted,
-        });
-      }
-    }
-
-    return audioClips;
+    return collectPlaybackAudioClips(sequence, assets);
   }, [sequence, assets]);
 
   // -------------------------------------------------------------------------
@@ -451,11 +421,10 @@ export function useAudioPlaybackWithEffects({
       source.buffer = audioBuffer;
       source.playbackRate.value = playbackRate * safeSpeed;
 
-      // Create gain node for this clip
-      // Note: Global volume/mute is handled by masterGainRef, not here
+      // Create gain node for this clip with global volume/mute applied
       const gainNode = ctx.createGain();
       const clipVolume = calculateClipVolume(clip, trackVolume);
-      gainNode.gain.value = clipVolume;
+      gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
 
       // Create effect chain for this clip
       const effectNodes = createEffectChainForClip(clip, ctx);
@@ -509,12 +478,11 @@ export function useAudioPlaybackWithEffects({
     }
 
     // Update playback rate and clip volume on existing sources
-    // Note: Global volume/mute is handled by masterGainRef
     scheduledSourcesRef.current.forEach((scheduled) => {
       const clipData = audioClips.find((c) => c.clip.id === scheduled.clipId);
       if (clipData) {
         const clipVolume = calculateClipVolume(clipData.clip, clipData.trackVolume);
-        scheduled.gainNode.gain.value = clipVolume;
+        scheduled.gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
         const updateSpeed = clipData.clip.speed > 0 ? clipData.clip.speed : 1;
         scheduled.source.playbackRate.value = playbackRate * updateSpeed;
       }
@@ -523,6 +491,8 @@ export function useAudioPlaybackWithEffects({
     enabled,
     isPlaying,
     currentTime,
+    volume,
+    isMuted,
     playbackRate,
     getAudioClips,
     loadAudioBuffer,
@@ -544,20 +514,29 @@ export function useAudioPlaybackWithEffects({
 
       // Find the effect node for this effect
       const effectTypeId = toEffectTypeId(effect.effectType);
-      const effectNode = scheduled.effectNodes.find(
-        (node) => node.effectType === effectTypeId
-      );
+      const effectNode = scheduled.effectNodes.find((node) => node.effectType === effectTypeId);
 
       if (effectNode) {
         updateAudioEffectNode(effectNode, { [paramName]: value });
       }
     },
-    [getEffectById]
+    [getEffectById],
   );
 
   // -------------------------------------------------------------------------
   // Effects
   // -------------------------------------------------------------------------
+
+  // Clean up retry timeouts when disabled
+  useEffect(() => {
+    if (!enabled) {
+      stopAllSources();
+      for (const timeoutId of retryTimeoutsRef.current.values()) {
+        clearTimeout(timeoutId);
+      }
+      retryTimeoutsRef.current.clear();
+    }
+  }, [enabled, stopAllSources]);
 
   // Handle play/pause
   useEffect(() => {
