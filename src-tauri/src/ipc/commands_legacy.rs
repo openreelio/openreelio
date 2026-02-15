@@ -16,9 +16,9 @@ use crate::core::{
         CreateSequenceCommand, ImportAssetCommand, InsertClipCommand, MoveBinCommand,
         MoveClipCommand, RemoveAssetCommand, RemoveBinCommand, RemoveClipCommand,
         RemoveEffectCommand, RemoveMaskCommand, RemoveTextClipCommand, RenameBinCommand,
-        SetBinColorCommand, SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand,
-        TrimClipCommand, UpdateAssetCommand, UpdateEffectCommand, UpdateMaskCommand,
-        UpdateTextCommand,
+        SetBinColorCommand, SetClipMuteCommand, SetClipTransformCommand, SetTrackBlendModeCommand,
+        SplitClipCommand, TrimClipCommand, UpdateAssetCommand, UpdateEffectCommand,
+        UpdateMaskCommand, UpdateTextCommand,
     },
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
     fs::{
@@ -1514,6 +1514,12 @@ pub async fn execute_command(
             &p.clip_id,
             p.transform,
         )),
+        CommandPayload::SetClipMute(p) => Box::new(SetClipMuteCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            &p.clip_id,
+            p.muted,
+        )),
         CommandPayload::SetTrackBlendMode(p) => Box::new(SetTrackBlendModeCommand::new(
             &p.sequence_id,
             &p.track_id,
@@ -2340,6 +2346,7 @@ pub async fn apply_edit_script(
                 | "RemoveClip"
                 | "TrimClip"
                 | "MoveClip"
+                | "SetClipMute"
                 | "CreateTrack"
                 | "createTrack"
                 | "AddTrack"
@@ -2364,6 +2371,7 @@ pub async fn apply_edit_script(
             cmd.command_type.as_str(),
             "SplitClip"
                 | "SetClipTransform"
+                | "SetClipMute"
                 | "DeleteClip"
                 | "RemoveClip"
                 | "TrimClip"
@@ -2470,6 +2478,12 @@ pub async fn apply_edit_script(
                 &p.track_id,
                 &p.clip_id,
                 p.transform,
+            )),
+            CommandPayload::SetClipMute(p) => Box::new(SetClipMuteCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.muted,
             )),
             CommandPayload::SetTrackBlendMode(p) => Box::new(SetTrackBlendModeCommand::new(
                 &p.sequence_id,
