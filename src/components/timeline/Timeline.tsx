@@ -61,6 +61,8 @@ import {
   DEFAULT_TIMELINE_DURATION,
   DEFAULT_FPS,
 } from './constants';
+import { resolveTrackDropTarget } from '@/utils/trackDropTarget';
+import { expandClipIdsWithLinkedCompanions } from '@/utils/clipLinking';
 
 // Re-export types for backward compatibility
 export type {
@@ -154,6 +156,7 @@ export function Timeline({
   const scrollY = useTimelineStore((state) => state.scrollY);
   const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
   const snapEnabled = useTimelineStore((state) => state.snapEnabled);
+  const linkedSelectionEnabled = useTimelineStore((state) => state.linkedSelectionEnabled);
 
   // Actions - stable references, don't cause re-renders
   const setScrollX = useTimelineStore((state) => state.setScrollX);
@@ -165,6 +168,7 @@ export function Timeline({
   const zoomIn = useTimelineStore((state) => state.zoomIn);
   const zoomOut = useTimelineStore((state) => state.zoomOut);
   const fitToWindow = useTimelineStore((state) => state.fitToWindow);
+  const toggleLinkedSelection = useTimelineStore((state) => state.toggleLinkedSelection);
 
   const assets = useProjectStore((state) => state.assets);
 
@@ -179,6 +183,7 @@ export function Timeline({
   const playheadViewportRef = useRef<HTMLDivElement>(null);
   const playheadRef = useRef<PlayheadHandle>(null);
   const clipDragMouseXRef = useRef<number>(0);
+  const clipDragMouseYRef = useRef<number>(0);
   const [activeSnapPoint, setActiveSnapPoint] = useState<SnapPoint | null>(null);
   const [viewportWidth, setViewportWidth] = useState(0);
   const [viewportHeight, setViewportHeight] = useState(0);
@@ -435,6 +440,7 @@ export function Timeline({
   // Auto-follow hook handles auto-scrolling during playback
   useAutoFollow({
     viewportWidth,
+    contentWidth: duration * zoom,
     trackHeaderWidth: TRACK_HEADER_WIDTH,
     isScrubbing,
     isDraggingPlayhead,
@@ -753,6 +759,13 @@ export function Timeline({
               return;
             }
             break;
+          case 'l':
+            if (e.shiftKey) {
+              toggleLinkedSelection();
+              e.preventDefault();
+              return;
+            }
+            break;
         }
       }
 
@@ -769,6 +782,7 @@ export function Timeline({
       duplicate,
       setActiveTool,
       toggleRipple,
+      toggleLinkedSelection,
       onAddText,
     ],
   );
@@ -790,11 +804,29 @@ export function Timeline({
     selectClip,
   });
 
+  const resolveTrackIndexFromDragPointer = useCallback((): number | undefined => {
+    if (!sequence || !tracksAreaRef.current) {
+      return undefined;
+    }
+
+    const dropTarget = resolveTrackDropTarget({
+      sequence,
+      container: tracksAreaRef.current,
+      clientY: clipDragMouseYRef.current,
+      scrollY,
+      fallbackTrackHeight: TRACK_HEIGHT,
+    });
+
+    return dropTarget?.trackIndex;
+  }, [sequence, scrollY]);
+
   // Wrapped clip drag handlers to track mouse position for edge auto-scroll
+  // and resolve vertical cross-track targeting from pointer coordinates.
   const handleClipDragStart: typeof baseHandleClipDragStart = useCallback(
     (trackId, data) => {
       setIsClipDragging(true);
       clipDragMouseXRef.current = data.startX;
+      clipDragMouseYRef.current = data.startY;
       baseHandleClipDragStart(trackId, data);
     },
     [baseHandleClipDragStart],
@@ -802,34 +834,38 @@ export function Timeline({
 
   const handleClipDrag: typeof baseHandleClipDrag = useCallback(
     (trackId, data, previewPosition, targetTrackIndex) => {
-      // The clip drag hook doesn't expose current mouse position in callbacks,
-      // so we track it via a global mousemove listener when dragging (added below)
-      baseHandleClipDrag(trackId, data, previewPosition, targetTrackIndex);
+      const resolvedTargetTrackIndex =
+        targetTrackIndex ?? (data.type === 'move' ? resolveTrackIndexFromDragPointer() : undefined);
+
+      baseHandleClipDrag(trackId, data, previewPosition, resolvedTargetTrackIndex);
     },
-    [baseHandleClipDrag],
+    [baseHandleClipDrag, resolveTrackIndexFromDragPointer],
   );
 
   const handleClipDragEnd: typeof baseHandleClipDragEnd = useCallback(
     (trackId, data, finalPosition, targetTrackIndex) => {
       setIsClipDragging(false);
-      baseHandleClipDragEnd(trackId, data, finalPosition, targetTrackIndex);
+
+      const resolvedTargetTrackIndex =
+        targetTrackIndex ?? (data.type === 'move' ? resolveTrackIndexFromDragPointer() : undefined);
+
+      baseHandleClipDragEnd(trackId, data, finalPosition, resolvedTargetTrackIndex);
     },
-    [baseHandleClipDragEnd],
+    [baseHandleClipDragEnd, resolveTrackIndexFromDragPointer],
   );
 
-  // Track mouse position during clip drag for edge auto-scroll
-  useLayoutEffect(() => {
-    if (!isClipDragging) return;
-
+  // Track global mouse position for drag helpers (cross-track targeting, edge auto-scroll).
+  useEffect(() => {
     const handleMouseMove = (e: globalThis.MouseEvent) => {
       clipDragMouseXRef.current = e.clientX;
+      clipDragMouseYRef.current = e.clientY;
     };
 
-    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mousemove', handleMouseMove, true);
     return () => {
-      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mousemove', handleMouseMove, true);
     };
-  }, [isClipDragging]);
+  }, []);
 
   // Edge auto-scroll during clip drag
   useEdgeAutoScroll({
@@ -873,6 +909,7 @@ export function Timeline({
       trackHeaderWidth: TRACK_HEADER_WIDTH,
       trackHeight: TRACK_HEIGHT,
       onAssetDrop,
+      assets,
     });
 
   // ===========================================================================
@@ -904,18 +941,31 @@ export function Timeline({
       if (!asset) return undefined;
       const hasAudio = asset.kind === 'audio' || (asset.kind === 'video' && asset.audio);
       if (!hasAudio) return undefined;
+
+      const proxyPath = asset.proxyUrl?.trim();
+      const canUseProxyForWaveform =
+        !!proxyPath && (proxyPath.startsWith('file://') || !proxyPath.includes('://'));
+
       return {
         assetId: asset.id,
-        inputPath: asset.proxyUrl || asset.uri,
+        inputPath: canUseProxyForWaveform ? proxyPath : asset.uri,
         totalDurationSec: asset.durationSec ?? 0,
         enabled: true,
+        displayLabel: asset.kind === 'video' ? `Video Audio: ${asset.name}` : asset.name,
+        isVideoSource: asset.kind === 'video',
       };
     },
     [assets],
   );
 
   const getClipThumbnailConfig = useCallback(
-    (_clipId: string, assetId: string): ClipThumbnailConfig | undefined => {
+    (
+      _clipId: string,
+      assetId: string,
+      trackKind: TrackType['kind'],
+    ): ClipThumbnailConfig | undefined => {
+      if (trackKind === 'audio') return undefined;
+
       const asset = assets.get(assetId);
       if (!asset) return undefined;
       // Enable thumbnails for video and image assets
@@ -933,17 +983,23 @@ export function Timeline({
 
   const handleClipClick = useCallback(
     (clipId: string, modifiers: { ctrlKey: boolean; shiftKey: boolean; metaKey: boolean }) => {
+      const selectedIds =
+        sequence && linkedSelectionEnabled
+          ? expandClipIdsWithLinkedCompanions(sequence, [clipId])
+          : [clipId];
+
       if (modifiers.ctrlKey || modifiers.metaKey) {
-        if (selectedClipIds.includes(clipId)) {
-          selectClips(selectedClipIds.filter((id) => id !== clipId));
+        const shouldDeselect = selectedIds.every((id) => selectedClipIds.includes(id));
+        if (shouldDeselect) {
+          selectClips(selectedClipIds.filter((id) => !selectedIds.includes(id)));
         } else {
-          selectClip(clipId, true);
+          selectClips(Array.from(new Set([...selectedClipIds, ...selectedIds])));
         }
       } else {
-        selectClip(clipId, false);
+        selectClips(selectedIds);
       }
     },
-    [selectClip, selectClips, selectedClipIds],
+    [sequence, linkedSelectionEnabled, selectClips, selectedClipIds],
   );
 
   const isInteractiveTracksAreaTarget = useCallback((target: HTMLElement): boolean => {

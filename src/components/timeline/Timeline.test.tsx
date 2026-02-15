@@ -10,6 +10,7 @@ import { Timeline } from './Timeline';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useEditorToolStore } from '@/stores/editorToolStore';
+import { useProjectStore } from '@/stores/projectStore';
 import type { Sequence } from '@/types';
 
 // =============================================================================
@@ -109,6 +110,7 @@ describe('Timeline', () => {
       snapToClips: true,
       snapToMarkers: true,
       snapToPlayhead: true,
+      linkedSelectionEnabled: true,
     });
 
     // Reset playback store before each test
@@ -131,6 +133,11 @@ describe('Timeline', () => {
       rippleEnabled: false,
       autoScrollEnabled: true,
       clipboard: null,
+    });
+
+    // Reset project assets used by clip render helpers
+    useProjectStore.setState({
+      assets: new Map(),
     });
 
     // Mock getBoundingClientRect for drop tests
@@ -206,6 +213,136 @@ describe('Timeline', () => {
       render(<Timeline sequence={null} />);
       expect(screen.getByText(/no sequence/i)).toBeInTheDocument();
     });
+
+    it('should render video-audio source tag on audio clips extracted from video assets', () => {
+      const sequenceWithAudioClip: Sequence = {
+        ...mockSequence,
+        tracks: [
+          mockSequence.tracks[0],
+          {
+            ...mockSequence.tracks[1],
+            clips: [
+              {
+                id: 'clip_audio_from_video_001',
+                assetId: 'asset_video_001',
+                range: { sourceInSec: 0, sourceOutSec: 0.2 },
+                place: { timelineInSec: 0, durationSec: 0.2 },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+                label: 'Dialogue Stem',
+              },
+            ],
+          },
+        ],
+      };
+
+      useProjectStore.setState({
+        assets: new Map([
+          [
+            'asset_video_001',
+            {
+              id: 'asset_video_001',
+              kind: 'video',
+              name: 'interview-cam-a.mp4',
+              uri: '/assets/interview-cam-a.mp4',
+              hash: 'hash_video_001',
+              durationSec: 10,
+              fileSize: 1024,
+              importedAt: '2024-01-01T00:00:00Z',
+              license: {
+                source: 'user',
+                licenseType: 'unknown',
+                allowedUse: [],
+              },
+              tags: [],
+              proxyStatus: 'notNeeded',
+              audio: {
+                sampleRate: 48000,
+                channels: 2,
+                codec: 'aac',
+              },
+            },
+          ],
+        ]),
+      });
+
+      render(<Timeline sequence={sequenceWithAudioClip} />);
+
+      expect(screen.getByTestId('video-audio-source-tag')).toHaveTextContent('Video Audio');
+    });
+
+    it('should render fallback video-audio label when clip label is empty', () => {
+      const sequenceWithAudioClip: Sequence = {
+        ...mockSequence,
+        tracks: [
+          mockSequence.tracks[0],
+          {
+            ...mockSequence.tracks[1],
+            clips: [
+              {
+                id: 'clip_audio_from_video_empty_label',
+                assetId: 'asset_video_002',
+                range: { sourceInSec: 0, sourceOutSec: 0.2 },
+                place: { timelineInSec: 0, durationSec: 0.2 },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+                label: ' ',
+              },
+            ],
+          },
+        ],
+      };
+
+      useProjectStore.setState({
+        assets: new Map([
+          [
+            'asset_video_002',
+            {
+              id: 'asset_video_002',
+              kind: 'video',
+              name: 'city-night-take.mp4',
+              uri: '/assets/city-night-take.mp4',
+              hash: 'hash_video_002',
+              durationSec: 12,
+              fileSize: 1024,
+              importedAt: '2024-01-01T00:00:00Z',
+              license: {
+                source: 'user',
+                licenseType: 'unknown',
+                allowedUse: [],
+              },
+              tags: [],
+              proxyStatus: 'notNeeded',
+              audio: {
+                sampleRate: 48000,
+                channels: 2,
+                codec: 'aac',
+              },
+            },
+          ],
+        ]),
+      });
+
+      render(<Timeline sequence={sequenceWithAudioClip} />);
+
+      expect(screen.getByText('Video Audio: city-night-take.mp4')).toBeInTheDocument();
+    });
   });
 
   // ===========================================================================
@@ -259,6 +396,221 @@ describe('Timeline', () => {
       fireEvent.click(timeline);
 
       expect(useTimelineStore.getState().selectedClipIds).toEqual([]);
+    });
+
+    it('should select linked companion clips when linked selection is enabled', () => {
+      const sequenceWithLinkedClips: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            clips: [
+              {
+                id: 'clip_video_001',
+                assetId: 'asset_linked_001',
+                range: { sourceInSec: 0, sourceOutSec: 10 },
+                place: { timelineInSec: 5, durationSec: 10 },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+          {
+            ...mockSequence.tracks[1],
+            clips: [
+              {
+                id: 'clip_audio_001',
+                assetId: 'asset_linked_001',
+                range: { sourceInSec: 0, sourceOutSec: 10 },
+                place: { timelineInSec: 5, durationSec: 10 },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+        ],
+      };
+
+      useTimelineStore.setState({ linkedSelectionEnabled: true, selectedClipIds: [] });
+      render(<Timeline sequence={sequenceWithLinkedClips} />);
+
+      fireEvent.click(screen.getByTestId('clip-clip_video_001'));
+
+      expect(useTimelineStore.getState().selectedClipIds).toEqual(
+        expect.arrayContaining(['clip_video_001', 'clip_audio_001']),
+      );
+    });
+
+    it('should not select linked companion clips when linked selection is disabled', () => {
+      const sequenceWithLinkedClips: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            clips: [
+              {
+                id: 'clip_video_001',
+                assetId: 'asset_linked_001',
+                range: { sourceInSec: 0, sourceOutSec: 10 },
+                place: { timelineInSec: 5, durationSec: 10 },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+          {
+            ...mockSequence.tracks[1],
+            clips: [
+              {
+                id: 'clip_audio_001',
+                assetId: 'asset_linked_001',
+                range: { sourceInSec: 0, sourceOutSec: 10 },
+                place: { timelineInSec: 5, durationSec: 10 },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+        ],
+      };
+
+      useTimelineStore.setState({ linkedSelectionEnabled: false, selectedClipIds: [] });
+      render(<Timeline sequence={sequenceWithLinkedClips} />);
+
+      fireEvent.click(screen.getByTestId('clip-clip_video_001'));
+
+      expect(useTimelineStore.getState().selectedClipIds).toEqual(['clip_video_001']);
+    });
+  });
+
+  // ===========================================================================
+  // Clip Drag Tests
+  // ===========================================================================
+
+  describe('clip drag', () => {
+    it('should move clip to another compatible track when dragged vertically', async () => {
+      const onClipMove = vi.fn();
+
+      const sequenceWithTwoVideoTracks: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            id: 'track_001',
+            kind: 'video',
+            clips: [
+              {
+                id: 'clip_drag_001',
+                assetId: 'asset_001',
+                range: { sourceInSec: 0, sourceOutSec: 10 },
+                place: { timelineInSec: 0, durationSec: 10 },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+          {
+            ...mockSequence.tracks[1],
+            id: 'track_002',
+            kind: 'video',
+            name: 'Video 2',
+            clips: [],
+          },
+        ],
+      };
+
+      render(<Timeline sequence={sequenceWithTwoVideoTracks} onClipMove={onClipMove} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      const firstTrackRow = tracksArea.querySelector<HTMLElement>('[data-track-id="track_001"]');
+      const secondTrackRow = tracksArea.querySelector<HTMLElement>('[data-track-id="track_002"]');
+
+      expect(firstTrackRow).not.toBeNull();
+      expect(secondTrackRow).not.toBeNull();
+
+      const createRect = (top: number, height: number) => ({
+        left: 0,
+        top,
+        width: 800,
+        height,
+        right: 800,
+        bottom: top + height,
+        x: 0,
+        y: top,
+        toJSON: () => ({}),
+      });
+
+      tracksArea.getBoundingClientRect = vi.fn().mockReturnValue(createRect(0, 220));
+      firstTrackRow!.getBoundingClientRect = vi.fn().mockReturnValue(createRect(0, 64));
+      secondTrackRow!.getBoundingClientRect = vi.fn().mockReturnValue(createRect(64, 64));
+
+      const clip = screen.getByTestId('clip-clip_drag_001');
+
+      await act(async () => {
+        fireEvent.mouseDown(clip, { button: 0, clientX: 240, clientY: 20 });
+      });
+
+      // First move exceeds drag threshold and enters the second track row.
+      await act(async () => {
+        fireEvent.mouseMove(document, { clientX: 250, clientY: 90 });
+      });
+
+      // Keep dragging in second track before drop.
+      await act(async () => {
+        fireEvent.mouseMove(document, { clientX: 280, clientY: 90 });
+      });
+
+      await act(async () => {
+        fireEvent.mouseUp(document, { clientX: 280, clientY: 90 });
+      });
+
+      expect(onClipMove).toHaveBeenCalledWith(
+        expect.objectContaining({
+          clipId: 'clip_drag_001',
+          trackId: 'track_001',
+          newTrackId: 'track_002',
+        }),
+      );
     });
   });
 
@@ -750,6 +1102,32 @@ describe('Timeline', () => {
 
       expect(onDeleteClips).toHaveBeenCalledWith(['clip_001']);
       expect(onClipMove).toHaveBeenCalled();
+    });
+
+    it('should toggle linked selection with Shift+L', () => {
+      useTimelineStore.setState({ linkedSelectionEnabled: true });
+      render(<Timeline sequence={mockSequence} />);
+
+      const timeline = screen.getByTestId('timeline');
+      fireEvent.keyDown(timeline, { key: 'L', shiftKey: true });
+      expect(useTimelineStore.getState().linkedSelectionEnabled).toBe(false);
+
+      fireEvent.keyDown(timeline, { key: 'L', shiftKey: true });
+      expect(useTimelineStore.getState().linkedSelectionEnabled).toBe(true);
+    });
+  });
+
+  describe('toolbar toggles', () => {
+    it('should toggle linked selection from toolbar button', () => {
+      useTimelineStore.setState({ linkedSelectionEnabled: true });
+      render(<Timeline sequence={mockSequence} />);
+
+      const button = screen.getByTestId('linked-selection-toggle-button');
+      expect(button).toHaveAttribute('aria-pressed', 'true');
+
+      fireEvent.click(button);
+      expect(useTimelineStore.getState().linkedSelectionEnabled).toBe(false);
+      expect(button).toHaveAttribute('aria-pressed', 'false');
     });
   });
 
