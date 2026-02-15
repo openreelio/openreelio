@@ -35,6 +35,9 @@ interface TimelineState {
   snapToMarkers: boolean;
   snapToPlayhead: boolean;
 
+  // Link settings
+  linkedSelectionEnabled: boolean;
+
   // Actions - Selection
   selectClip: (clipId: string, addToSelection?: boolean) => void;
   selectClips: (clipIds: string[]) => void;
@@ -59,6 +62,7 @@ interface TimelineState {
   setSnapToClips: (enabled: boolean) => void;
   setSnapToMarkers: (enabled: boolean) => void;
   setSnapToPlayhead: (enabled: boolean) => void;
+  toggleLinkedSelection: () => void;
 
   // Utilities
   timeToPixels: (time: TimeSec) => number;
@@ -94,6 +98,7 @@ export const useTimelineStore = create<TimelineState>()(
     snapToClips: true,
     snapToMarkers: true,
     snapToPlayhead: true,
+    linkedSelectionEnabled: true,
 
     // Selection actions - consistently use array reassignment pattern
     selectClip: (clipId: string, addToSelection = false) => {
@@ -238,6 +243,12 @@ export const useTimelineStore = create<TimelineState>()(
       });
     },
 
+    toggleLinkedSelection: () => {
+      set((state) => {
+        state.linkedSelectionEnabled = !state.linkedSelectionEnabled;
+      });
+    },
+
     // Utilities
     timeToPixels: (time: TimeSec) => {
       return time * get().zoom;
@@ -272,7 +283,8 @@ export const useTimelineStore = create<TimelineState>()(
         state.snapToClips = true;
         state.snapToMarkers = true;
         state.snapToPlayhead = true;
+        state.linkedSelectionEnabled = true;
       });
     },
-  }))
+  })),
 );

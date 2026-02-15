@@ -41,6 +41,27 @@ describe('timelineStore', () => {
       expect(state.scrollX).toBe(0);
       expect(state.scrollY).toBe(0);
       expect(state.snapEnabled).toBe(true);
+      expect(state.linkedSelectionEnabled).toBe(true);
+    });
+  });
+
+  describe('linked selection', () => {
+    it('toggles linked selection mode', () => {
+      const { toggleLinkedSelection } = useTimelineStore.getState();
+
+      toggleLinkedSelection();
+      expect(useTimelineStore.getState().linkedSelectionEnabled).toBe(false);
+
+      toggleLinkedSelection();
+      expect(useTimelineStore.getState().linkedSelectionEnabled).toBe(true);
+    });
+
+    it('resets linked selection mode to enabled', () => {
+      useTimelineStore.setState({ linkedSelectionEnabled: false });
+
+      useTimelineStore.getState().reset();
+
+      expect(useTimelineStore.getState().linkedSelectionEnabled).toBe(true);
     });
   });
 
@@ -181,10 +202,7 @@ describe('timelineStore', () => {
     describe('selectAll', () => {
       it('should select all provided clips', () => {
         // Use minimal clip structure for test - only id is needed for selectAll
-        const clips = [
-          { id: 'clip_001' },
-          { id: 'clip_002' },
-        ] as Clip[];
+        const clips = [{ id: 'clip_001' }, { id: 'clip_002' }] as Clip[];
 
         const { selectAll } = useTimelineStore.getState();
         selectAll(clips);
