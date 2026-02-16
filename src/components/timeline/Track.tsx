@@ -21,7 +21,14 @@ import {
 import type { Track as TrackType, Clip as ClipType, TrackKind, SnapPoint } from '@/types';
 import { useVirtualizedClips } from '@/hooks/useVirtualizedClips';
 import { useTransitionZones } from '@/hooks/useTransitionZones';
-import { Clip, type ClipDragData, type DragPreviewPosition, type ClickModifiers, type ClipWaveformConfig, type ClipThumbnailConfig } from './Clip';
+import {
+  Clip,
+  type ClipDragData,
+  type DragPreviewPosition,
+  type ClickModifiers,
+  type ClipWaveformConfig,
+  type ClipThumbnailConfig,
+} from './Clip';
 import { TransitionZone } from './TransitionZone';
 import type { DropValidity } from '@/utils/dropValidity';
 
@@ -47,7 +54,11 @@ interface TrackProps {
   /** Function to get waveform config for a clip */
   getClipWaveformConfig?: (clipId: string, assetId: string) => ClipWaveformConfig | undefined;
   /** Function to get thumbnail config for a clip */
-  getClipThumbnailConfig?: (clipId: string, assetId: string) => ClipThumbnailConfig | undefined;
+  getClipThumbnailConfig?: (
+    clipId: string,
+    assetId: string,
+    trackKind: TrackKind,
+  ) => ClipThumbnailConfig | undefined;
   /** Snap points for intelligent snapping (clip edges, playhead, etc.) */
   snapPoints?: SnapPoint[];
   /** Snap threshold in seconds (distance within which snapping occurs) */
@@ -139,7 +150,8 @@ export function Track({
   const contentRef = useRef<HTMLDivElement>(null);
 
   // Calculate actual viewport width (use provided or measure from ref)
-  const actualViewportWidth = viewportWidth ?? contentRef.current?.clientWidth ?? DEFAULT_VIEWPORT_WIDTH;
+  const actualViewportWidth =
+    viewportWidth ?? contentRef.current?.clientWidth ?? DEFAULT_VIEWPORT_WIDTH;
 
   // Virtualize clips - only render clips visible in viewport + buffer
   const { visibleClips } = useVirtualizedClips(clips, {
@@ -165,7 +177,7 @@ export function Track({
       if (track.locked) return;
       onTransitionZoneClick?.(clipAId, clipBId);
     },
-    [track.locked, onTransitionZoneClick]
+    [track.locked, onTransitionZoneClick],
   );
 
   // Calculate track content width based on duration and zoom
@@ -173,7 +185,12 @@ export function Track({
   const TrackIcon = TrackIcons[track.kind] || Video;
 
   return (
-    <div className="flex border-b border-editor-border">
+    <div
+      data-track-row="true"
+      data-track-id={track.id}
+      data-track-kind={track.kind}
+      className="flex border-b border-editor-border"
+    >
       {/* Track Header */}
       <div
         data-testid="track-header"
@@ -269,7 +286,7 @@ export function Track({
               selected={selectedClipIds.includes(clip.id)}
               disabled={track.locked}
               waveformConfig={getClipWaveformConfig?.(clip.id, clip.assetId)}
-              thumbnailConfig={getClipThumbnailConfig?.(clip.id, clip.assetId)}
+              thumbnailConfig={getClipThumbnailConfig?.(clip.id, clip.assetId, track.kind)}
               snapPoints={snapPoints}
               snapThreshold={snapThreshold}
               onClick={onClipClick}

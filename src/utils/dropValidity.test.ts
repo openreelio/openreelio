@@ -38,7 +38,7 @@ function createTestClip(
   timelineIn: number,
   sourceIn: number,
   sourceOut: number,
-  overrides: Partial<Clip> = {}
+  overrides: Partial<Clip> = {},
 ): Clip {
   return {
     id,
@@ -74,8 +74,8 @@ describe('isAssetCompatibleWithTrack', () => {
       expect(isAssetCompatibleWithTrack('video', 'overlay')).toBe(true);
     });
 
-    it('should not be compatible with audio tracks', () => {
-      expect(isAssetCompatibleWithTrack('video', 'audio')).toBe(false);
+    it('should be compatible with audio tracks for audio-component workflows', () => {
+      expect(isAssetCompatibleWithTrack('video', 'audio')).toBe(true);
     });
 
     it('should not be compatible with caption tracks', () => {
@@ -226,7 +226,7 @@ describe('validateDrop', () => {
       const context: DropValidationContext = {
         track,
         clips: [],
-        assetKind: 'video',
+        assetKind: 'image',
       };
 
       const result = validateDrop(0, 10, context);

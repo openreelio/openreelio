@@ -10,6 +10,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useTimelineActions } from './useTimelineActions';
 import { useProjectStore } from '@/stores';
 import { _resetCommandQueueForTesting } from '@/stores/projectStore';
+import { useTimelineStore } from '@/stores/timelineStore';
 import type { Sequence, Track, Clip, Asset } from '@/types';
 
 // Mock the logger - define mock fn inline to avoid hoisting issues
@@ -127,6 +128,7 @@ describe('useTimelineActions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetCommandQueueForTesting();
+    useTimelineStore.setState({ linkedSelectionEnabled: true });
     // Reset projectStore
     useProjectStore.setState({
       isLoaded: true,
@@ -244,6 +246,370 @@ describe('useTimelineActions', () => {
           trackId: 'track_001',
           assetId: 'asset_001',
           timelineIn: 5.0,
+        },
+      });
+    });
+
+    it('should insert linked audio to the first available audio track', async () => {
+      const videoTrack = createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' });
+      const audioTrack = createMockTrack({ id: 'track_a1', kind: 'audio', name: 'Audio 1' });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [videoTrack, audioTrack],
+      });
+      const asset = createMockAsset({
+        id: 'asset_001',
+        kind: 'video',
+        durationSec: 12,
+        audio: {
+          sampleRate: 48000,
+          channels: 2,
+          codec: 'aac',
+        },
+      });
+
+      useProjectStore.setState({
+        assets: new Map([[asset.id, asset]]),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          const call = args as { commandType: string; payload: Record<string, unknown> };
+          executeCalls.push(call);
+          return Promise.resolve({
+            opId: `op_${executeCalls.length}`,
+            createdIds: [`clip_${executeCalls.length}`],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [asset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          assetId: 'asset_001',
+          trackId: 'track_v1',
+          timelinePosition: 3,
+        });
+      });
+
+      expect(executeCalls).toHaveLength(3);
+      expect(executeCalls[0]).toEqual({
+        commandType: 'InsertClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          assetId: 'asset_001',
+          timelineIn: 3,
+        },
+      });
+      expect(executeCalls[2]).toEqual({
+        commandType: 'SetClipMute',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          clipId: 'clip_1',
+          muted: true,
+        },
+      });
+      expect(executeCalls[1]).toEqual({
+        commandType: 'InsertClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_a1',
+          assetId: 'asset_001',
+          timelineIn: 3,
+        },
+      });
+    });
+
+    it('should route video drop on audio track to video lane and keep audio on audio lane', async () => {
+      const videoTrack = createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' });
+      const audioTrack = createMockTrack({ id: 'track_a1', kind: 'audio', name: 'Audio 1' });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [videoTrack, audioTrack],
+      });
+      const asset = createMockAsset({
+        id: 'asset_001',
+        kind: 'video',
+        durationSec: 12,
+        audio: {
+          sampleRate: 48000,
+          channels: 2,
+          codec: 'aac',
+        },
+      });
+
+      useProjectStore.setState({
+        assets: new Map([[asset.id, asset]]),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          const call = args as { commandType: string; payload: Record<string, unknown> };
+          executeCalls.push(call);
+          return Promise.resolve({
+            opId: `op_${executeCalls.length}`,
+            createdIds: [`clip_${executeCalls.length}`],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [asset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          assetId: 'asset_001',
+          trackId: 'track_a1',
+          timelinePosition: 3,
+        });
+      });
+
+      expect(executeCalls).toHaveLength(3);
+      expect(executeCalls[0]).toEqual({
+        commandType: 'InsertClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          assetId: 'asset_001',
+          timelineIn: 3,
+        },
+      });
+      expect(executeCalls[2]).toEqual({
+        commandType: 'SetClipMute',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          clipId: 'clip_1',
+          muted: true,
+        },
+      });
+      expect(executeCalls[1]).toEqual({
+        commandType: 'InsertClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_a1',
+          assetId: 'asset_001',
+          timelineIn: 3,
+        },
+      });
+    });
+
+    it('should create audio track before inserting linked audio when needed', async () => {
+      const videoTrack = createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' });
+      const baseSequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [videoTrack],
+      });
+      const createdAudioTrack = createMockTrack({
+        id: 'track_a1',
+        kind: 'audio',
+        name: 'Audio 1',
+      });
+      const asset = createMockAsset({
+        id: 'asset_001',
+        kind: 'video',
+        durationSec: 12,
+        audio: {
+          sampleRate: 48000,
+          channels: 2,
+          codec: 'aac',
+        },
+      });
+
+      let currentSequence = baseSequence;
+
+      useProjectStore.setState({
+        assets: new Map([[asset.id, asset]]),
+        sequences: new Map([[baseSequence.id, baseSequence]]),
+      });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          const call = args as { commandType: string; payload: Record<string, unknown> };
+          executeCalls.push(call);
+
+          if (call.commandType === 'CreateTrack') {
+            currentSequence = {
+              ...currentSequence,
+              tracks: [...currentSequence.tracks, createdAudioTrack],
+            };
+
+            return Promise.resolve({
+              opId: 'op_create_track',
+              createdIds: ['track_a1'],
+              deletedIds: [],
+            });
+          }
+
+          return Promise.resolve({
+            opId: `op_${executeCalls.length}`,
+            createdIds: [`clip_${executeCalls.length}`],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [asset],
+            sequences: [currentSequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence: baseSequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          assetId: 'asset_001',
+          trackId: 'track_v1',
+          timelinePosition: 3,
+        });
+      });
+
+      expect(executeCalls).toHaveLength(4);
+      expect(executeCalls[0].commandType).toBe('InsertClip');
+      expect(executeCalls[1]).toEqual({
+        commandType: 'CreateTrack',
+        payload: {
+          sequenceId: 'seq_001',
+          kind: 'audio',
+          name: 'Audio 1',
+          position: 1,
+        },
+      });
+      expect(executeCalls[2]).toEqual({
+        commandType: 'InsertClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_a1',
+          assetId: 'asset_001',
+          timelineIn: 3,
+        },
+      });
+      expect(executeCalls[3]).toEqual({
+        commandType: 'SetClipMute',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          clipId: 'clip_1',
+          muted: true,
+        },
+      });
+    });
+
+    it('should select a non-overlapping audio track when extracting linked audio', async () => {
+      const videoTrack = createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' });
+      const busyAudioTrack = createMockTrack({
+        id: 'track_a1',
+        kind: 'audio',
+        name: 'Audio 1',
+        clips: [
+          createMockClip({
+            id: 'clip_busy',
+            range: { sourceInSec: 0, sourceOutSec: 30 },
+            place: { timelineInSec: 0, durationSec: 30 },
+          }),
+        ],
+      });
+      const openAudioTrack = createMockTrack({ id: 'track_a2', kind: 'audio', name: 'Audio 2' });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [videoTrack, busyAudioTrack, openAudioTrack],
+      });
+      const asset = createMockAsset({
+        id: 'asset_001',
+        kind: 'video',
+        durationSec: 10,
+        audio: {
+          sampleRate: 48000,
+          channels: 2,
+          codec: 'aac',
+        },
+      });
+
+      useProjectStore.setState({
+        assets: new Map([[asset.id, asset]]),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          const call = args as { commandType: string; payload: Record<string, unknown> };
+          executeCalls.push(call);
+          return Promise.resolve({
+            opId: `op_${executeCalls.length}`,
+            createdIds: [`clip_${executeCalls.length}`],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [asset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          assetId: 'asset_001',
+          trackId: 'track_v1',
+          timelinePosition: 5,
+        });
+      });
+
+      expect(executeCalls).toHaveLength(3);
+      expect(executeCalls[1]).toEqual({
+        commandType: 'InsertClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_a2',
+          assetId: 'asset_001',
+          timelineIn: 5,
+        },
+      });
+      expect(executeCalls[2]).toEqual({
+        commandType: 'SetClipMute',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          clipId: 'clip_1',
+          muted: true,
         },
       });
     });
@@ -869,6 +1235,310 @@ describe('useTimelineActions', () => {
         trackId: 'track_002',
         clipId: 'clip_002',
       });
+    });
+  });
+
+  // ===========================================================================
+  // Linked Selection Tests
+  // ===========================================================================
+
+  describe('linked selection operations', () => {
+    it('should move linked companion clip when linked selection is enabled', async () => {
+      const videoClip = createMockClip({
+        id: 'clip_video_001',
+        assetId: 'asset_linked_001',
+        place: { timelineInSec: 5, durationSec: 10 },
+      });
+      const audioClip = createMockClip({
+        id: 'clip_audio_001',
+        assetId: 'asset_linked_001',
+        place: { timelineInSec: 5, durationSec: 10 },
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', clips: [videoClip] }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', clips: [audioClip] }),
+        ],
+      });
+
+      useProjectStore.setState({ sequences: new Map([[sequence.id, sequence]]) });
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          executeCalls.push(args as { commandType: string; payload: Record<string, unknown> });
+          return Promise.resolve({ opId: 'op_001', createdIds: [], deletedIds: [] });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleClipMove({
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          clipId: 'clip_video_001',
+          newTimelineIn: 8,
+        });
+      });
+
+      const moveCalls = executeCalls.filter((call) => call.commandType === 'MoveClip');
+      expect(moveCalls).toHaveLength(2);
+      expect(moveCalls[0].payload).toEqual({
+        sequenceId: 'seq_001',
+        trackId: 'track_v1',
+        clipId: 'clip_video_001',
+        newTimelineIn: 8,
+        newTrackId: undefined,
+      });
+      expect(moveCalls[1].payload).toEqual({
+        sequenceId: 'seq_001',
+        trackId: 'track_a1',
+        clipId: 'clip_audio_001',
+        newTimelineIn: 8,
+      });
+    });
+
+    it('should skip linked companion move when ignoreLinkedSelection is true', async () => {
+      const videoClip = createMockClip({
+        id: 'clip_video_001',
+        assetId: 'asset_linked_001',
+        place: { timelineInSec: 5, durationSec: 10 },
+      });
+      const audioClip = createMockClip({
+        id: 'clip_audio_001',
+        assetId: 'asset_linked_001',
+        place: { timelineInSec: 5, durationSec: 10 },
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', clips: [videoClip] }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', clips: [audioClip] }),
+        ],
+      });
+
+      useProjectStore.setState({ sequences: new Map([[sequence.id, sequence]]) });
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          executeCalls.push(args as { commandType: string; payload: Record<string, unknown> });
+          return Promise.resolve({ opId: 'op_001', createdIds: [], deletedIds: [] });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleClipMove({
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          clipId: 'clip_video_001',
+          newTimelineIn: 8,
+          ignoreLinkedSelection: true,
+        });
+      });
+
+      const moveCalls = executeCalls.filter((call) => call.commandType === 'MoveClip');
+      expect(moveCalls).toHaveLength(1);
+    });
+
+    it('should trim linked companion clip with matching delta', async () => {
+      const videoClip = createMockClip({
+        id: 'clip_video_001',
+        assetId: 'asset_linked_001',
+        range: { sourceInSec: 2, sourceOutSec: 12 },
+        place: { timelineInSec: 5, durationSec: 10 },
+      });
+      const audioClip = createMockClip({
+        id: 'clip_audio_001',
+        assetId: 'asset_linked_001',
+        range: { sourceInSec: 2, sourceOutSec: 12 },
+        place: { timelineInSec: 5, durationSec: 10 },
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', clips: [videoClip] }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', clips: [audioClip] }),
+        ],
+      });
+
+      useProjectStore.setState({ sequences: new Map([[sequence.id, sequence]]) });
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          executeCalls.push(args as { commandType: string; payload: Record<string, unknown> });
+          return Promise.resolve({ opId: 'op_001', createdIds: [], deletedIds: [] });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleClipTrim({
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          clipId: 'clip_video_001',
+          newSourceIn: 3,
+          newTimelineIn: 6,
+        });
+      });
+
+      const trimCalls = executeCalls.filter((call) => call.commandType === 'TrimClip');
+      expect(trimCalls).toHaveLength(2);
+      expect(trimCalls[1].payload).toEqual({
+        sequenceId: 'seq_001',
+        trackId: 'track_a1',
+        clipId: 'clip_audio_001',
+        newSourceIn: 3,
+        newSourceOut: undefined,
+        newTimelineIn: 6,
+      });
+    });
+
+    it('should split linked companion clip at matching time', async () => {
+      const videoClip = createMockClip({
+        id: 'clip_video_001',
+        assetId: 'asset_linked_001',
+        place: { timelineInSec: 5, durationSec: 10 },
+      });
+      const audioClip = createMockClip({
+        id: 'clip_audio_001',
+        assetId: 'asset_linked_001',
+        place: { timelineInSec: 5, durationSec: 10 },
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', clips: [videoClip] }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', clips: [audioClip] }),
+        ],
+      });
+
+      useProjectStore.setState({ sequences: new Map([[sequence.id, sequence]]) });
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          executeCalls.push(args as { commandType: string; payload: Record<string, unknown> });
+          return Promise.resolve({ opId: 'op_001', createdIds: [], deletedIds: [] });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleClipSplit({
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          clipId: 'clip_video_001',
+          splitTime: 9,
+        });
+      });
+
+      const splitCalls = executeCalls.filter((call) => call.commandType === 'SplitClip');
+      expect(splitCalls).toHaveLength(2);
+      expect(splitCalls[1].payload).toEqual({
+        sequenceId: 'seq_001',
+        trackId: 'track_a1',
+        clipId: 'clip_audio_001',
+        splitTime: 9,
+      });
+    });
+
+    it('should delete linked companion clips when linked selection is enabled', async () => {
+      const videoClip = createMockClip({
+        id: 'clip_video_001',
+        assetId: 'asset_linked_001',
+        place: { timelineInSec: 5, durationSec: 10 },
+      });
+      const audioClip = createMockClip({
+        id: 'clip_audio_001',
+        assetId: 'asset_linked_001',
+        place: { timelineInSec: 5, durationSec: 10 },
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', clips: [videoClip] }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', clips: [audioClip] }),
+        ],
+      });
+
+      useProjectStore.setState({ sequences: new Map([[sequence.id, sequence]]) });
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          executeCalls.push(args as { commandType: string; payload: Record<string, unknown> });
+          return Promise.resolve({ opId: 'op_001', createdIds: [], deletedIds: [] });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleDeleteClips(['clip_video_001']);
+      });
+
+      const deleteCalls = executeCalls.filter((call) => call.commandType === 'DeleteClip');
+      expect(deleteCalls).toHaveLength(2);
+      expect(deleteCalls).toEqual(
+        expect.arrayContaining([
+          {
+            commandType: 'DeleteClip',
+            payload: { sequenceId: 'seq_001', trackId: 'track_v1', clipId: 'clip_video_001' },
+          },
+          {
+            commandType: 'DeleteClip',
+            payload: { sequenceId: 'seq_001', trackId: 'track_a1', clipId: 'clip_audio_001' },
+          },
+        ]),
+      );
     });
   });
 

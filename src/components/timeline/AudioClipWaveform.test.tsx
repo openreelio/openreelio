@@ -258,6 +258,8 @@ describe('AudioClipWaveform', () => {
       await waitFor(() => {
         expect(container.querySelector('img')).toBeNull();
       });
+
+      expect(screen.getByTestId('waveform-fallback')).toBeInTheDocument();
     });
 
     it('should not generate waveform for invalid asset ID', () => {

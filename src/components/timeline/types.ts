@@ -41,6 +41,8 @@ export interface ClipMoveData {
   newTimelineIn: number;
   /** Optional new track ID if moving to different track */
   newTrackId?: string;
+  /** If true, bypass linked companion operations for this action */
+  ignoreLinkedSelection?: boolean;
 }
 
 /**
@@ -59,6 +61,8 @@ export interface ClipTrimData {
   newSourceOut?: number;
   /** New timeline in position (for left trim) */
   newTimelineIn?: number;
+  /** If true, bypass linked companion operations for this action */
+  ignoreLinkedSelection?: boolean;
 }
 
 /**
@@ -77,6 +81,8 @@ export interface ClipSplitData {
   keepLeft?: boolean;
   /** If true, keep only the right portion after split */
   keepRight?: boolean;
+  /** If true, bypass linked companion operations for this action */
+  ignoreLinkedSelection?: boolean;
 }
 
 /**
@@ -91,6 +97,8 @@ export interface ClipDuplicateData {
   clipId: string;
   /** Timeline position for the duplicate */
   newTimelineIn: number;
+  /** If true, bypass linked companion operations for this action */
+  ignoreLinkedSelection?: boolean;
 }
 
 /**

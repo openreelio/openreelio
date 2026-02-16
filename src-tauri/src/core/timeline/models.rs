@@ -599,16 +599,25 @@ impl Clip {
         self
     }
 
+    /// Returns the effective playback speed, falling back to 1.0 for invalid values.
+    fn safe_speed(&self) -> f64 {
+        if self.speed > 0.0 {
+            self.speed as f64
+        } else {
+            1.0
+        }
+    }
+
     /// Sets the clip range from source
     pub fn with_source_range(mut self, source_in: TimeSec, source_out: TimeSec) -> Self {
         self.range = ClipRange::new(source_in, source_out);
-        self.place.duration_sec = self.range.duration() / self.speed as f64;
+        self.place.duration_sec = self.range.duration() / self.safe_speed();
         self
     }
 
     /// Returns the effective duration considering speed
     pub fn duration(&self) -> TimeSec {
-        self.range.duration() / self.speed as f64
+        self.range.duration() / self.safe_speed()
     }
 
     /// Returns the timeline end position
@@ -631,7 +640,7 @@ impl Clip {
     /// Converts a timeline time to source time
     pub fn timeline_to_source(&self, timeline_sec: TimeSec) -> TimeSec {
         let offset = timeline_sec - self.place.timeline_in_sec;
-        self.range.source_in_sec + (offset * self.speed as f64)
+        self.range.source_in_sec + (offset * self.safe_speed())
     }
 }
 

@@ -39,6 +39,10 @@ export interface ClipWaveformConfig {
   totalDurationSec: number;
   /** Whether to show waveform (for audio clips) */
   enabled: boolean;
+  /** Optional fallback label for audio-oriented clips */
+  displayLabel?: string;
+  /** True when audio is sourced from a video asset */
+  isVideoSource?: boolean;
   /** Use JSON-based peak data rendering (default: false = use image-based) */
   useJsonPeaks?: boolean;
   /** Waveform display color */
@@ -242,17 +246,31 @@ export function Clip({
   // Text clips don't have visual content like thumbnails or waveforms
   const hasVisualContent = !isText && (thumbnailConfig?.enabled || waveformConfig?.enabled);
 
+  const normalizedClipLabel = clip.label?.trim();
+
   // Display label fallback strategy:
-  // 1) Explicit clip label
+  // 1) Non-empty explicit clip label
   // 2) Text clips default to "Text"
   // 3) Visual clips fall back to asset name for quick identification
-  const displayLabel = clip.label ?? (isText ? 'Text' : thumbnailConfig?.asset.name);
+  // 4) Audio-oriented clips can provide a waveform label fallback
+  // 5) Final safety fallback to clip asset ID
+  const displayLabel =
+    (normalizedClipLabel && normalizedClipLabel.length > 0 ? normalizedClipLabel : undefined) ??
+    (isText
+      ? 'Text'
+      : (thumbnailConfig?.asset.name ?? waveformConfig?.displayLabel ?? clip.assetId));
+
+  const showVideoAudioSourceTag =
+    !isText && Boolean(waveformConfig?.isVideoSource) && !thumbnailConfig?.enabled;
+  const showAudioLabelBackdrop = !isText && !thumbnailConfig?.enabled;
+  const allowLabelOverflow = showAudioLabelBackdrop;
 
   return (
     <div
       data-testid={`clip-${clip.id}`}
       className={`
-        absolute h-full rounded-sm cursor-pointer transition-shadow select-none overflow-hidden
+        absolute h-full rounded-sm cursor-pointer transition-shadow select-none
+        ${allowLabelOverflow ? 'overflow-visible' : 'overflow-hidden'}
         ${selected ? 'ring-2 ring-primary-400 z-10' : ''}
         ${disabled ? 'opacity-50 cursor-not-allowed' : 'hover:brightness-110'}
         ${isDragging ? 'opacity-80 z-20' : ''}
@@ -265,6 +283,7 @@ export function Clip({
         width: `${Math.max(displayPosition.width, 4)}px`,
         backgroundColor: isText ? undefined : backgroundColor,
       }}
+      title={displayLabel}
       onClick={handleClick}
       onDoubleClick={handleDoubleClick}
       onMouseDown={handleClipMouseDown}
@@ -299,10 +318,23 @@ export function Clip({
       )}
 
       {/* Clip content */}
-      <div className="h-full p-1 overflow-hidden pointer-events-none relative z-10">
+      <div className={`h-full p-1 pointer-events-none relative z-10 ${allowLabelOverflow ? 'overflow-visible' : 'overflow-hidden'}`}>
         {/* Label */}
         {displayLabel && (
-          <span className="text-xs text-white truncate block drop-shadow-sm">{displayLabel}</span>
+          <span
+            className={`text-xs text-white block max-w-full drop-shadow-sm ${showAudioLabelBackdrop ? 'inline-block rounded bg-black/55 px-1.5 py-0.5 whitespace-nowrap' : 'truncate'}`}
+          >
+            {displayLabel}
+          </span>
+        )}
+
+        {showVideoAudioSourceTag && (
+          <span
+            data-testid="video-audio-source-tag"
+            className="mt-0.5 inline-block rounded bg-black/45 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-white"
+          >
+            Video Audio
+          </span>
         )}
 
         {/* Indicators */}

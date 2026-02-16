@@ -29,6 +29,7 @@ import {
   Focus,
   Video,
   Music,
+  Link2,
 } from 'lucide-react';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
@@ -139,7 +140,16 @@ function EnhancedTimelineToolbarComponent({
   duration = 0,
 }: EnhancedTimelineToolbarProps) {
   // Store state
-  const { zoom, snapEnabled, setZoom, zoomIn, zoomOut, toggleSnap } = useTimelineStore();
+  const {
+    zoom,
+    snapEnabled,
+    linkedSelectionEnabled,
+    setZoom,
+    zoomIn,
+    zoomOut,
+    toggleSnap,
+    toggleLinkedSelection,
+  } = useTimelineStore();
   const { isPlaying, currentTime, togglePlayback, goToStart, goToEnd, stepForward, stepBackward } =
     usePlaybackStore();
   const {
@@ -192,6 +202,10 @@ function EnhancedTimelineToolbarComponent({
   const handleAutoScrollToggle = useCallback(() => {
     toggleAutoScroll();
   }, [toggleAutoScroll]);
+
+  const handleLinkedSelectionToggle = useCallback(() => {
+    toggleLinkedSelection();
+  }, [toggleLinkedSelection]);
 
   const handleAddText = useCallback(() => {
     onAddText?.();
@@ -455,6 +469,25 @@ function EnhancedTimelineToolbarComponent({
           title={rippleEnabled ? 'Disable Ripple Edit (R)' : 'Enable Ripple Edit (R)'}
         >
           <Layers className="w-4 h-4" />
+        </button>
+
+        <button
+          data-testid="linked-selection-toggle-button"
+          type="button"
+          aria-pressed={linkedSelectionEnabled}
+          className={`p-1.5 rounded transition-colors ${
+            linkedSelectionEnabled
+              ? 'bg-sky-500/20 text-sky-400'
+              : 'text-editor-text-muted hover:bg-editor-border hover:text-editor-text'
+          }`}
+          onClick={handleLinkedSelectionToggle}
+          title={
+            linkedSelectionEnabled
+              ? 'Disable Linked Selection (Shift+L)'
+              : 'Enable Linked Selection (Shift+L)'
+          }
+        >
+          <Link2 className="w-4 h-4" />
         </button>
 
         <button

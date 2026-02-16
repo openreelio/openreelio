@@ -191,6 +191,7 @@ impl ProjectState {
             OpKind::ClipMove => self.apply_clip_move(op)?,
             OpKind::ClipTrim => self.apply_clip_trim(op)?,
             OpKind::ClipSplit => self.apply_clip_split(op)?,
+            OpKind::ClipUpdate => self.apply_clip_update(op)?,
 
             // Effect operations
             OpKind::EffectAdd => self.apply_effect_add(op)?,
@@ -745,6 +746,54 @@ impl ProjectState {
                 Self::validate_track_no_overlap(track)?;
             }
         }
+        Ok(())
+    }
+
+    fn apply_clip_update(&mut self, op: &Operation) -> CoreResult<()> {
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let clip_id = op.payload["clipId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing clipId".to_string()))?;
+
+        let sequence = self
+            .sequences
+            .get_mut(seq_id)
+            .ok_or_else(|| CoreError::NotFound(format!("Sequence not found: {}", seq_id)))?;
+
+        // Find clip across all tracks
+        for track in &mut sequence.tracks {
+            if let Some(clip) = track.get_clip_mut(clip_id) {
+                // Apply mute change if present
+                if let Some(muted_value) = op.payload.get("muted") {
+                    if muted_value.is_null() {
+                        // no-op: null means no change
+                    } else if let Some(muted) = muted_value.as_bool() {
+                        clip.audio.muted = muted;
+                    } else {
+                        return Err(CoreError::InvalidCommand(
+                            "Invalid muted value (expected boolean)".to_string(),
+                        ));
+                    }
+                }
+                // Apply transform change if present
+                if let Some(transform_val) = op.payload.get("transform") {
+                    if transform_val.is_null() {
+                        // no-op: null means no change
+                    } else {
+                        let transform =
+                            serde_json::from_value(transform_val.clone()).map_err(|e| {
+                                CoreError::InvalidCommand(format!("Invalid transform: {e}"))
+                            })?;
+                        clip.transform = transform;
+                    }
+                }
+                return Ok(());
+            }
+        }
+
+        // Clip not found is non-fatal during replay (may have been deleted)
         Ok(())
     }
 
