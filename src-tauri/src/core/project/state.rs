@@ -782,8 +782,8 @@ impl ProjectState {
                     if transform_val.is_null() {
                         // no-op: null means no change
                     } else {
-                        let transform = serde_json::from_value(transform_val.clone())
-                            .map_err(|e| {
+                        let transform =
+                            serde_json::from_value(transform_val.clone()).map_err(|e| {
                                 CoreError::InvalidCommand(format!("Invalid transform: {e}"))
                             })?;
                         clip.transform = transform;
