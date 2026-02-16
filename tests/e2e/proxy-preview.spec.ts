@@ -22,17 +22,19 @@ async function dismissBlockingFFmpegWarning(page: Page): Promise<void> {
 }
 
 async function seedProxyPreviewState(page: Page): Promise<void> {
-  await page.evaluate(async () => {
+  const origin = new URL(page.url()).origin;
+  await page.evaluate(async (baseUrl) => {
     const { useProjectStore } = await import('../../src/stores/projectStore.ts');
     const { usePlaybackStore } = await import('../../src/stores/playbackStore.ts');
 
     const now = new Date().toISOString();
+    const fixtureBase = `${baseUrl}/tests/e2e/fixtures`;
 
     const asset = {
       id: 'asset_proxy_qa_1',
       kind: 'video',
       name: 'sample-video.mp4',
-      uri: 'http://localhost:5173/tests/e2e/fixtures/sample-video.mp4',
+      uri: `${fixtureBase}/sample-video.mp4`,
       hash: 'proxy-qa-hash',
       fileSize: 1024,
       durationSec: 10,
@@ -51,7 +53,7 @@ async function seedProxyPreviewState(page: Page): Promise<void> {
       },
       tags: [],
       proxyStatus: 'ready',
-      proxyUrl: 'http://localhost:5173/tests/e2e/fixtures/sample-video.mp4',
+      proxyUrl: `${fixtureBase}/sample-video.mp4`,
     };
 
     const clip = {
@@ -135,7 +137,7 @@ async function seedProxyPreviewState(page: Page): Promise<void> {
       loop: false,
       syncWithTimeline: true,
     });
-  });
+  }, origin);
 }
 
 test.describe('Proxy Preview QA', () => {
@@ -213,8 +215,10 @@ test.describe('Proxy Preview QA', () => {
     // Console/Page errors are allowed only for benign React warnings.
     const criticalErrors = pageErrors.filter(
       (entry) =>
-        !entry.includes('Warning') &&
-        !entry.includes('React') &&
+        !entry.startsWith('Warning:') &&
+        !/^Warning: /.test(entry) &&
+        !entry.includes('ReactDOM') &&
+        !entry.includes('react-dom') &&
         !entry.includes('ResizeObserver') &&
         !entry.includes('[AIStore] Failed to sync AI provider from vault') &&
         !entry.includes('[FrameExtractor] Frame extraction error'),

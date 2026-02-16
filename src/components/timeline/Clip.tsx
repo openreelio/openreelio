@@ -318,7 +318,7 @@ export function Clip({
       )}
 
       {/* Clip content */}
-      <div className="h-full p-1 overflow-hidden pointer-events-none relative z-10">
+      <div className={`h-full p-1 pointer-events-none relative z-10 ${allowLabelOverflow ? 'overflow-visible' : 'overflow-hidden'}`}>
         {/* Label */}
         {displayLabel && (
           <span

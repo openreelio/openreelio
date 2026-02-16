@@ -88,12 +88,16 @@ function parseDraggedAssetData(dataTransfer: DataTransfer): ParsedAssetDragData 
 
   try {
     const parsed = JSON.parse(jsonData) as { id?: unknown; kind?: unknown };
-    if (typeof parsed.id !== 'string' || parsed.id.trim().length === 0) {
+    if (typeof parsed.id !== 'string') {
+      return null;
+    }
+    const id = parsed.id.trim();
+    if (id.length === 0) {
       return null;
     }
 
     return {
-      id: parsed.id,
+      id,
       kind: isAssetKind(parsed.kind) ? parsed.kind : undefined,
     };
   } catch {
@@ -195,6 +199,7 @@ export function useAssetDrop({
 
       const parsedData = parseDraggedAssetData(e.dataTransfer);
       if (!parsedData) {
+        e.dataTransfer.dropEffect = 'none';
         return;
       }
 

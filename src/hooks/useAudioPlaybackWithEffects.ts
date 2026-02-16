@@ -591,10 +591,10 @@ export function useAudioPlaybackWithEffects({
     }
   }, [enabled, currentTime, isPlaying, stopAllSources, scheduleAudioClips]);
 
-  // Update master volume
+  // Master gain kept at unity — global volume/mute is already applied per-clip
   useEffect(() => {
     if (masterGainRef.current) {
-      masterGainRef.current.gain.value = isMuted ? 0 : volume;
+      masterGainRef.current.gain.value = 1;
     }
   }, [volume, isMuted]);
 

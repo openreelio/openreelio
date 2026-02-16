@@ -766,12 +766,26 @@ impl ProjectState {
         for track in &mut sequence.tracks {
             if let Some(clip) = track.get_clip_mut(clip_id) {
                 // Apply mute change if present
-                if let Some(muted) = op.payload.get("muted").and_then(|v| v.as_bool()) {
-                    clip.audio.muted = muted;
+                if let Some(muted_value) = op.payload.get("muted") {
+                    if muted_value.is_null() {
+                        // no-op: null means no change
+                    } else if let Some(muted) = muted_value.as_bool() {
+                        clip.audio.muted = muted;
+                    } else {
+                        return Err(CoreError::InvalidCommand(
+                            "Invalid muted value (expected boolean)".to_string(),
+                        ));
+                    }
                 }
                 // Apply transform change if present
                 if let Some(transform_val) = op.payload.get("transform") {
-                    if let Ok(transform) = serde_json::from_value(transform_val.clone()) {
+                    if transform_val.is_null() {
+                        // no-op: null means no change
+                    } else {
+                        let transform = serde_json::from_value(transform_val.clone())
+                            .map_err(|e| {
+                                CoreError::InvalidCommand(format!("Invalid transform: {e}"))
+                            })?;
                         clip.transform = transform;
                     }
                 }
