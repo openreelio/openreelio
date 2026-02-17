@@ -48,6 +48,19 @@ vi.mock('@/stores', () => ({
   },
 }));
 
+vi.mock('@/stores/settingsStore', () => ({
+  useSettingsStore: (selector: (state: unknown) => unknown) => {
+    const state = {
+      settings: {
+        general: {
+          language: 'en',
+        },
+      },
+    };
+    return selector(state);
+  },
+}));
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -67,16 +80,12 @@ describe('ChatInput', () => {
 
     it('renders textarea with placeholder', () => {
       render(<ChatInput />);
-      expect(
-        screen.getByPlaceholderText(/Message AI.*commands/i)
-      ).toBeInTheDocument();
+      expect(screen.getByPlaceholderText(/Message AI.*commands/i)).toBeInTheDocument();
     });
 
     it('renders send button', () => {
       render(<ChatInput />);
-      expect(
-        screen.getByRole('button', { name: /send message/i })
-      ).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /send message/i })).toBeInTheDocument();
     });
 
     it('renders hint text', () => {
@@ -130,6 +139,7 @@ describe('ChatInput', () => {
         playheadPosition: 5.5,
         selectedClips: ['clip_001'],
         selectedTracks: ['track_001'],
+        preferredLanguage: 'en',
       });
     });
 
@@ -186,9 +196,7 @@ describe('ChatInput', () => {
       mockIsGenerating = true;
       render(<ChatInput />);
 
-      expect(
-        screen.getByRole('button', { name: /stop generating/i })
-      ).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /stop generating/i })).toBeInTheDocument();
     });
 
     it('disables textarea when generating', () => {

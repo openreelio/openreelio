@@ -3054,6 +3054,8 @@ pub struct AIContextDto {
     /// Available track IDs
     #[serde(default)]
     pub track_ids: Vec<String>,
+    /// Preferred output language for assistant responses
+    pub preferred_language: Option<String>,
 }
 
 /// AI-generated edit script containing commands to execute.
@@ -5023,7 +5025,8 @@ pub async fn chat_with_ai(
         .with_assets(context.asset_ids.clone())
         .with_tracks(context.track_ids.clone())
         .with_selection(context.selected_clips.clone())
-        .with_playhead(context.playhead_position);
+        .with_playhead(context.playhead_position)
+        .with_preferred_language(context.preferred_language.clone());
 
     // Chat with AI
     let response = gateway

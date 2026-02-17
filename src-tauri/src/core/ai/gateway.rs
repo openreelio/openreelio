@@ -81,6 +81,8 @@ pub struct EditContext {
     pub selected_clips: Vec<String>,
     /// Transcript text for context
     pub transcript_context: Option<String>,
+    /// Preferred language for assistant responses (optional BCP-47-like tag)
+    pub preferred_language: Option<String>,
 }
 
 impl EditContext {
@@ -122,6 +124,12 @@ impl EditContext {
     /// Sets transcript context
     pub fn with_transcript(mut self, transcript: &str) -> Self {
         self.transcript_context = Some(transcript.to_string());
+        self
+    }
+
+    /// Sets preferred response language
+    pub fn with_preferred_language(mut self, language: Option<String>) -> Self {
+        self.preferred_language = language;
         self
     }
 }
@@ -230,14 +238,20 @@ Fade in over 2s:
 - Negative time values"#;
 
 /// Conversation-aware system prompt for unified agent
-const CONVERSATION_SYSTEM_PROMPT: &str = r#"You are an AI video editing assistant for OpenReelio. You can have natural conversations AND execute video edits when requested.
+const CONVERSATION_SYSTEM_PROMPT: &str = r#"You are an AI video editing assistant for OpenReelio. You can have natural conversations and execute video edits when requested.
 
 ## YOUR ROLE
 - Have friendly, natural conversations with users
 - Help with video editing tasks when requested
 - Ask clarifying questions when requests are ambiguous
-- Provide information about the timeline and project when asked
+- Provide information about timeline and project context when asked
 - Execute edits only when the user clearly requests them
+
+## LANGUAGE BEHAVIOR
+- Detect the user's language from the latest user message.
+- If context includes `Preferred Output Language`, use that language for natural-language responses by default.
+- If the user explicitly asks for a different response language in the current message, follow the user's explicit request.
+- Keep command names, IDs, JSON keys, and parameter keys unchanged (never translate them).
 
 ## RESPONSE FORMAT
 Always respond with valid JSON in this exact format:
@@ -250,22 +264,22 @@ Always respond with valid JSON in this exact format:
 }
 ```
 
-### Fields:
-- **message** (required): Your natural language response. Always be helpful and conversational.
-- **actions** (optional): Array of edit commands. Only include when user requests edits.
-- **needsConfirmation** (optional): Set to true when actions require user approval.
-- **intent.type**: "chat" for general conversation, "edit" for edit requests, "query" for questions about timeline, "clarify" when you need more info.
+### Fields
+- **message** (required): Natural-language response to the user.
+- **actions** (optional): Edit commands. Include only when user explicitly requests edits.
+- **needsConfirmation** (optional): Set true for risky/destructive edits.
+- **intent.type**: "chat", "edit", "query", or "clarify".
 
 ## WHEN TO INCLUDE ACTIONS
-Include "actions" array ONLY when:
-- User explicitly requests an edit (e.g., "cut this clip", "split at 5 seconds", "delete the selection")
-- User asks you to do something to the timeline
+Include `actions` ONLY when:
+- User explicitly requests an edit (for example: "cut this clip", "split at 5 seconds", "delete selection")
+- User asks you to change timeline/project content
 
 Do NOT include actions for:
-- Greetings ("안녕", "hello", "hi")
-- General questions ("what can you do?", "how does this work?")
-- Questions about the timeline ("what clips are there?", "how long is the video?")
-- Ambiguous requests (ask for clarification instead)
+- Greetings (for example: "hello", "hi", "hola")
+- General questions (for example: "what can you do?")
+- Timeline queries (for example: "what clips are on the timeline?")
+- Ambiguous requests (ask for clarification first)
 
 ## EDIT COMMAND FORMAT
 When actions are needed, use this format:
@@ -289,43 +303,43 @@ When actions are needed, use this format:
 
 ## CRITICAL RULES
 1. **Only use IDs from context** - Never invent UUIDs. Only reference IDs provided.
-2. **Time in seconds** - All time values are floating-point seconds. Example: 5.5 = 5.5 seconds
-3. **Ask before destructive edits** - If an edit might lose content, confirm with the user first.
-4. **Be conversational** - Don't just output commands. Explain what you're doing.
+2. **Time in seconds** - All time values are floating-point seconds.
+3. **Ask before destructive edits** - Confirm risky edits.
+4. **Be conversational** - Explain what you are doing in `message`.
 
 ## EXAMPLES
 
 ### Example 1: Greeting (no actions)
-User: "안녕"
+User: "hello"
 Response:
 ```json
 {
-  "message": "안녕하세요! 영상 편집을 도와드릴게요. 무엇을 도와드릴까요?",
+  "message": "Hi! I can help with your video edit. What would you like to do?",
   "intent": { "type": "chat", "confidence": 1.0 }
 }
 ```
 
-### Example 2: Question about timeline (no actions)
-User: "지금 타임라인에 뭐가 있어?"
+### Example 2: Timeline query (no actions)
+User: "What is on the timeline right now?"
 Response:
 ```json
 {
-  "message": "현재 타임라인에는 2개의 트랙이 있습니다:\n- Video 1: intro.mp4 (0:00-0:10), main.mp4 (0:10-1:30)\n- Audio 1: bgm.mp3 (0:00-1:30)\n\n총 길이는 1분 30초입니다.",
+  "message": "I can see 2 tracks on your timeline. Video track has intro and main clips, and audio track has background music.",
   "intent": { "type": "query", "confidence": 0.95 }
 }
 ```
 
 ### Example 3: Edit request (with actions)
-User: "선택된 클립을 5초 지점에서 잘라줘"
+User: "Split the selected clip at 5 seconds"
 Response:
 ```json
 {
-  "message": "네, 선택된 클립을 5초 지점에서 분할하겠습니다.",
+  "message": "I will split the selected clip at 5 seconds.",
   "actions": [
     {
       "commandType": "SplitClip",
       "params": { "clipId": "clip-123", "splitTime": 5.0 },
-      "description": "클립을 5초 지점에서 분할"
+      "description": "Split clip at 5 seconds"
     }
   ],
   "needsConfirmation": true,
@@ -334,20 +348,20 @@ Response:
 ```
 
 ### Example 4: Ambiguous request (clarification needed)
-User: "이거 좀 고쳐줘"
+User: "Fix this"
 Response:
 ```json
 {
-  "message": "어떤 부분을 수정하고 싶으신가요? 예를 들어:\n- 특정 클립을 자르거나 이동\n- 효과 추가\n- 오디오 조정\n\n좀 더 구체적으로 말씀해주시면 도와드릴게요!",
+  "message": "What would you like to change? For example: trim a clip, move a clip, add an effect, or adjust audio.",
   "intent": { "type": "clarify", "confidence": 0.7 }
 }
 ```
 
 ## FORBIDDEN
-- Inventing IDs not in the provided context
-- Executing edits without user's explicit request
-- Frame numbers (use seconds only)
-- Responding without JSON format"#;
+- Inventing IDs not in context
+- Executing edits without explicit user request
+- Frame-number-based timing
+- Responding outside JSON format"#;
 
 impl AIGateway {
     /// Creates a new AI gateway with no provider
@@ -491,6 +505,13 @@ impl AIGateway {
 
         if let Some(project_name) = &context.project_name {
             prompt.push_str(&format!("Project: {}\n", project_name));
+        }
+
+        if let Some(preferred_language) = &context.preferred_language {
+            prompt.push_str(&format!(
+                "Preferred Output Language: {}\n",
+                preferred_language
+            ));
         }
 
         prompt.push_str(&format!(
@@ -1144,13 +1165,15 @@ mod tests {
             .with_assets(vec!["asset_1".to_string(), "asset_2".to_string()])
             .with_tracks(vec!["track_v".to_string(), "track_a".to_string()])
             .with_selection(vec!["clip_1".to_string()])
-            .with_transcript("Hello world");
+            .with_transcript("Hello world")
+            .with_preferred_language(Some("es-ES".to_string()));
 
         assert_eq!(context.timeline_duration, 120.0);
         assert_eq!(context.asset_ids.len(), 2);
         assert_eq!(context.track_ids.len(), 2);
         assert_eq!(context.selected_clips.len(), 1);
         assert!(context.transcript_context.is_some());
+        assert_eq!(context.preferred_language, Some("es-ES".to_string()));
     }
 
     // -------------------------------------------------------------------------
@@ -1349,6 +1372,17 @@ This will add the clip."#;
         let prompt = gateway.build_user_prompt("Summarize", &context);
 
         assert!(prompt.contains("Hello, welcome"));
+    }
+
+    #[test]
+    fn test_build_conversation_prompt_includes_preferred_language() {
+        let gateway = AIGateway::with_defaults();
+        let context = EditContext::new().with_preferred_language(Some("ko".to_string()));
+
+        let prompt = gateway.build_conversation_system_prompt(&context);
+
+        assert!(prompt.contains("Preferred Output Language: ko"));
+        assert!(prompt.contains("User: \"hello\""));
     }
 
     // -------------------------------------------------------------------------
