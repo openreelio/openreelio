@@ -142,7 +142,8 @@ export class ThinkingTimeoutError extends AgentError {
   constructor(timeoutMs: number, hint?: string) {
     super(
       `Thinking phase timed out after ${timeoutMs}ms. ` +
-      (hint ?? 'AI response took too long. Check your AI provider settings or try a simpler request.')
+        (hint ??
+          'AI response took too long. Check your AI provider settings or try a simpler request.'),
     );
     this.timeoutMs = timeoutMs;
   }
@@ -193,7 +194,8 @@ export class PlanningTimeoutError extends AgentError {
   constructor(timeoutMs: number, hint?: string) {
     super(
       `Planning phase timed out after ${timeoutMs}ms. ` +
-      (hint ?? 'AI response took too long. Check your AI provider settings or try a simpler request.')
+        (hint ??
+          'AI response took too long. Check your AI provider settings or try a simpler request.'),
     );
     this.timeoutMs = timeoutMs;
   }
@@ -238,7 +240,9 @@ export class PlanValidationError extends AgentError {
   readonly validationErrors: string[];
 
   constructor(message: string, validationErrors: string[]) {
-    super(`${message}: ${validationErrors.length > 0 ? validationErrors.join(', ') : 'no details'}`);
+    super(
+      `${message}: ${validationErrors.length > 0 ? validationErrors.join(', ') : 'no details'}`,
+    );
     this.validationErrors = validationErrors;
   }
 
@@ -373,7 +377,7 @@ export class ToolExecutionError extends AgentError {
   constructor(
     stepIdOrStep: string | PlanStep,
     toolError: string | Error,
-    recoverable: boolean = true
+    recoverable: boolean = true,
   ) {
     const stepId = typeof stepIdOrStep === 'string' ? stepIdOrStep : stepIdOrStep.id;
     const errorMessage = toolError instanceof Error ? toolError.message : toolError;
@@ -434,9 +438,7 @@ export class DependencyError extends AgentError {
   readonly missingDependencies: string[];
 
   constructor(stepId: string, missingDependencies: string[]) {
-    super(
-      `Step ${stepId} has unsatisfied dependencies: ${missingDependencies.join(', ')}`
-    );
+    super(`Step ${stepId} has unsatisfied dependencies: ${missingDependencies.join(', ')}`);
     this.stepId = stepId;
     this.missingDependencies = missingDependencies;
   }
@@ -446,6 +448,66 @@ export class DependencyError extends AgentError {
       ...super.toJSON(),
       stepId: this.stepId,
       missingDependencies: this.missingDependencies,
+    };
+  }
+}
+
+/**
+ * Planned steps exceed configured run budget
+ */
+export class StepBudgetExceededError extends AgentError {
+  readonly code = 'STEP_BUDGET_EXCEEDED';
+  readonly phase: AgentPhase = 'planning';
+  readonly recoverable = true;
+  readonly maxSteps: number;
+  readonly attemptedSteps: number;
+
+  constructor(maxSteps: number, attemptedSteps: number) {
+    super(`Step budget exceeded: attempted ${attemptedSteps}, allowed ${maxSteps}`);
+    this.maxSteps = maxSteps;
+    this.attemptedSteps = attemptedSteps;
+  }
+
+  toJSON(): Record<string, unknown> {
+    return {
+      ...super.toJSON(),
+      maxSteps: this.maxSteps,
+      attemptedSteps: this.attemptedSteps,
+    };
+  }
+}
+
+/**
+ * Tool call attempts exceed configured run budget
+ */
+export class ToolBudgetExceededError extends AgentError {
+  readonly code = 'TOOL_BUDGET_EXCEEDED';
+  readonly phase: AgentPhase = 'executing';
+  readonly recoverable = true;
+  readonly maxToolCalls: number;
+  readonly usedToolCalls: number;
+  readonly stepId?: string;
+  readonly toolName?: string;
+
+  constructor(maxToolCalls: number, usedToolCalls: number, stepId?: string, toolName?: string) {
+    const stepLabel = stepId ? ` at step ${stepId}` : '';
+    const toolLabel = toolName ? ` (${toolName})` : '';
+    super(
+      `Tool call budget exceeded${stepLabel}${toolLabel}: used ${usedToolCalls}, allowed ${maxToolCalls}`,
+    );
+    this.maxToolCalls = maxToolCalls;
+    this.usedToolCalls = usedToolCalls;
+    this.stepId = stepId;
+    this.toolName = toolName;
+  }
+
+  toJSON(): Record<string, unknown> {
+    return {
+      ...super.toJSON(),
+      maxToolCalls: this.maxToolCalls,
+      usedToolCalls: this.usedToolCalls,
+      stepId: this.stepId,
+      toolName: this.toolName,
     };
   }
 }
@@ -466,7 +528,7 @@ export class DoomLoopError extends AgentError {
 
   constructor(tool: string, consecutiveCalls: number) {
     super(
-      `Doom loop detected: tool '${tool}' called ${consecutiveCalls} consecutive times with identical arguments`
+      `Doom loop detected: tool '${tool}' called ${consecutiveCalls} consecutive times with identical arguments`,
     );
     this.tool = tool;
     this.consecutiveCalls = consecutiveCalls;
@@ -566,7 +628,7 @@ export class LLMError extends AgentError {
     message: string,
     phase: AgentPhase,
     statusCode?: number,
-    recoverable: boolean = true
+    recoverable: boolean = true,
   ) {
     super(`LLM error (${provider}): ${message}`);
     this.provider = provider;

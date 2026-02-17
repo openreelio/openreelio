@@ -6,6 +6,8 @@ import { describe, it, expect } from 'vitest';
 import {
   createInitialState,
   createEmptyContext,
+  createLanguagePolicy,
+  normalizeLanguageCode,
   mergeConfig,
   requiresApproval,
   generateId,
@@ -53,6 +55,7 @@ describe('types', () => {
       const context = createEmptyContext(projectId);
 
       expect(context.projectId).toBe(projectId);
+      expect(context.languagePolicy).toEqual(createLanguagePolicy('en'));
       expect(context.playheadPosition).toBe(0);
       expect(context.timelineDuration).toBe(0);
       expect(context.selectedClips).toEqual([]);
@@ -63,6 +66,43 @@ describe('types', () => {
       expect(context.recentOperations).toEqual([]);
       expect(context.userPreferences).toEqual({});
       expect(context.corrections).toEqual([]);
+    });
+  });
+
+  describe('language helpers', () => {
+    it('should normalize language tags consistently', () => {
+      expect(normalizeLanguageCode('EN_us')).toBe('en-US');
+      expect(normalizeLanguageCode('ko')).toBe('ko');
+      expect(normalizeLanguageCode('zh-hant')).toBe('zh-Hant');
+    });
+
+    it('should fallback to en for invalid tags', () => {
+      expect(normalizeLanguageCode('')).toBe('en');
+      expect(normalizeLanguageCode('invalid_tag')).toBe('en');
+      expect(normalizeLanguageCode(null)).toBe('en');
+    });
+
+    it('should build language policy with defaults', () => {
+      const policy = createLanguagePolicy('ES_es');
+
+      expect(policy).toEqual({
+        uiLanguage: 'es-ES',
+        outputLanguage: 'es-ES',
+        detectInputLanguage: true,
+        allowUserLanguageOverride: true,
+      });
+    });
+
+    it('should respect policy overrides', () => {
+      const policy = createLanguagePolicy('en', {
+        outputLanguage: 'fr-ca',
+        detectInputLanguage: false,
+      });
+
+      expect(policy.uiLanguage).toBe('en');
+      expect(policy.outputLanguage).toBe('fr-CA');
+      expect(policy.detectInputLanguage).toBe(false);
+      expect(policy.allowUserLanguageOverride).toBe(true);
     });
   });
 
@@ -177,6 +217,17 @@ describe('types', () => {
       expect(DEFAULT_ENGINE_CONFIG.approvalThreshold).toBe('high');
       expect(DEFAULT_ENGINE_CONFIG.autoRetryOnFailure).toBe(true);
       expect(DEFAULT_ENGINE_CONFIG.maxRetries).toBe(2);
+      expect(DEFAULT_ENGINE_CONFIG.enableFastPath).toBe(true);
+      expect(DEFAULT_ENGINE_CONFIG.fastPathConfidenceThreshold).toBe(0.85);
+      expect(DEFAULT_ENGINE_CONFIG.maxStepsPerRun).toBe(60);
+      expect(DEFAULT_ENGINE_CONFIG.maxToolCallsPerRun).toBe(120);
+      expect(DEFAULT_ENGINE_CONFIG.requireApprovalForDestructiveActions).toBe(true);
+      expect(DEFAULT_ENGINE_CONFIG.destructiveToolNames).toContain('delete_clip');
+      expect(DEFAULT_ENGINE_CONFIG.enableAutoRollbackOnFailure).toBe(true);
+      expect(DEFAULT_ENGINE_CONFIG.maxRollbackSteps).toBe(20);
+      expect(DEFAULT_ENGINE_CONFIG.memoryStore).toBeUndefined();
+      expect(DEFAULT_ENGINE_CONFIG.memoryRecentOperationsLimit).toBe(20);
+      expect(DEFAULT_ENGINE_CONFIG.memoryCorrectionsLimit).toBe(20);
     });
   });
 });
