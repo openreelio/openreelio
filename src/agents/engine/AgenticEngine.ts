@@ -12,6 +12,7 @@
 
 import type { ILLMClient, LLMMessage } from './ports/ILLMClient';
 import type { IToolExecutor, ExecutionContext, ToolExecutionResult } from './ports/IToolExecutor';
+import type { IMemoryStore } from './ports/IMemoryStore';
 import type {
   AgentContext,
   AgentEvent,
@@ -22,17 +23,34 @@ import type {
   Observation,
   Plan,
   PlanStep,
+  RollbackReport,
   RiskLevel,
   SessionSummary,
   Thought,
   ToolResult,
 } from './core/types';
 import { createInitialState, mergeConfig } from './core/types';
-import { MaxIterationsError, SessionActiveError } from './core/errors';
+import {
+  MaxIterationsError,
+  SessionActiveError,
+  StepBudgetExceededError,
+  ToolBudgetExceededError,
+} from './core/errors';
+import { parseFastPathPlan } from './core/fastPathParser';
 import { Thinker, createThinker } from './phases/Thinker';
 import { Planner, createPlanner } from './phases/Planner';
-import { Executor, createExecutor, type ExecutionResult } from './phases/Executor';
+import {
+  Executor,
+  createExecutor,
+  getPartialExecutionResult,
+  type ExecutionResult,
+} from './phases/Executor';
 import { Observer, createObserver } from './phases/Observer';
+import {
+  detectImmediateTerminalFailure,
+  detectRepeatedTerminalFailure,
+  type TerminalFailureGuidance,
+} from './phases/executionFailureUtils';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('AgenticEngine');
@@ -75,6 +93,8 @@ export interface AgentRunResult {
   finalState: AgentState;
   /** Session summary (also emitted via session_complete) */
   summary?: SessionSummary;
+  /** Rollback report when recovery was attempted */
+  rollbackReport?: RollbackReport;
 }
 
 // =============================================================================
@@ -85,6 +105,7 @@ export class AgenticEngine {
   private readonly toolExecutor: IToolExecutor;
   private readonly config: AgenticEngineConfig;
   private readonly approvalHandler: (plan: Plan) => Promise<boolean>;
+  private readonly memoryStore?: IMemoryStore;
 
   private readonly thinker: Thinker;
   private readonly planner: Planner;
@@ -98,11 +119,12 @@ export class AgenticEngine {
   constructor(
     llm: ILLMClient,
     toolExecutor: IToolExecutor,
-    config: Partial<AgenticEngineConfig> = {}
+    config: Partial<AgenticEngineConfig> = {},
   ) {
     this.toolExecutor = toolExecutor;
     this.config = mergeConfig(config);
     this.approvalHandler = this.config.approvalHandler ?? (async () => false);
+    this.memoryStore = this.config.enableMemory ? this.config.memoryStore : undefined;
 
     const approvalRequiredRisks = risksAtOrAbove(this.config.approvalThreshold);
 
@@ -131,7 +153,7 @@ export class AgenticEngine {
     agentContext: AgentContext,
     executionContext: ExecutionContext,
     onEvent?: (event: AgentEvent) => void,
-    conversationHistory?: LLMMessage[]
+    conversationHistory?: LLMMessage[],
   ): Promise<AgentRunResult> {
     if (this.activeSessionId) {
       const err = new SessionActiveError(this.activeSessionId);
@@ -141,7 +163,7 @@ export class AgenticEngine {
         executionContext.sessionId,
         input,
         agentContext,
-        this.config
+        this.config,
       );
 
       return this.createResult(false, [], 0, 0, {
@@ -155,12 +177,15 @@ export class AgenticEngine {
 
     const startTime = Date.now();
     const executionResults: ExecutionResult[] = [];
+    let plannedStepCount = 0;
+    let toolCallsUsed = 0;
 
-    let contextWithTools: AgentContext = {
-      ...agentContext,
+    let contextWithTools = await this.hydrateContextWithMemory(agentContext);
+    contextWithTools = {
+      ...contextWithTools,
       availableTools:
-        agentContext.availableTools.length > 0
-          ? agentContext.availableTools
+        contextWithTools.availableTools.length > 0
+          ? contextWithTools.availableTools
           : this.toolExecutor.getAvailableTools().map((t) => t.name),
     };
 
@@ -168,7 +193,7 @@ export class AgenticEngine {
       executionContext.sessionId,
       input,
       contextWithTools,
-      this.config
+      this.config,
     );
 
     this.emitEvent(onEvent, {
@@ -225,6 +250,13 @@ export class AgenticEngine {
 
         state.context = { ...contextWithTools, currentIteration: iteration };
 
+        const fastPathMatch =
+          iteration === 1 && this.config.enableFastPath
+            ? parseFastPathPlan(input, state.context, this.toolExecutor, {
+                minConfidence: this.config.fastPathConfidenceThreshold,
+              })
+            : null;
+
         // =====================================================================
         // THINK
         // =====================================================================
@@ -233,32 +265,55 @@ export class AgenticEngine {
         this.emitEvent(onEvent, { type: 'thinking_start', timestamp: Date.now() });
 
         let thought: Thought;
-        try {
-          thought = await this.thinker.think(input, state.context, conversationHistory);
-        } catch (error) {
-          const err = asError(error);
-          state.error = err;
-          state = this.finalizeState(state, 'failed');
-          this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
-          logger.error('Thinking phase failed', { sessionId: executionContext.sessionId, error: err.message });
-
-          return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
-            error: err,
-            finalState: state,
+        if (fastPathMatch) {
+          thought = fastPathMatch.thought;
+          logger.info('Fast path selected', {
+            sessionId: executionContext.sessionId,
+            strategy: fastPathMatch.strategy,
+            confidence: fastPathMatch.confidence,
           });
+        } else {
+          try {
+            thought = await this.thinker.think(input, state.context, conversationHistory);
+          } catch (error) {
+            const err = asError(error);
+            state.error = err;
+            state = this.finalizeState(state, 'failed');
+            this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
+            logger.error('Thinking phase failed', {
+              sessionId: executionContext.sessionId,
+              error: err.message,
+            });
+
+            return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
+              error: err,
+              finalState: state,
+            });
+          }
         }
 
         state.thought = thought;
         this.emitEvent(onEvent, { type: 'thinking_complete', thought, timestamp: Date.now() });
 
         if (thought.needsMoreInfo) {
+          const question =
+            thought.clarificationQuestion?.trim() ||
+            'Could you clarify your request so I can proceed?';
+
+          this.emitEvent(onEvent, {
+            type: 'clarification_required',
+            question,
+            thought,
+            timestamp: Date.now(),
+          });
+
           state = this.finalizeState(state, 'completed');
           const summary = this.createSummary(state, Date.now() - startTime);
           this.emitEvent(onEvent, { type: 'session_complete', summary, timestamp: Date.now() });
 
           return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
             needsClarification: true,
-            clarificationQuestion: thought.clarificationQuestion,
+            clarificationQuestion: question,
             finalState: state,
             summary,
           });
@@ -272,20 +327,48 @@ export class AgenticEngine {
         this.emitEvent(onEvent, { type: 'planning_start', timestamp: Date.now() });
 
         let plan: Plan;
-        try {
-          plan = await this.planner.plan(thought, state.context, conversationHistory);
-        } catch (error) {
-          const err = asError(error);
+        if (fastPathMatch) {
+          plan = fastPathMatch.plan;
+        } else {
+          try {
+            plan = await this.planner.plan(thought, state.context, conversationHistory);
+          } catch (error) {
+            const err = asError(error);
+            state.error = err;
+            state = this.finalizeState(state, 'failed');
+            this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
+            logger.error('Planning phase failed', {
+              sessionId: executionContext.sessionId,
+              error: err.message,
+            });
+
+            return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
+              error: err,
+              finalState: state,
+            });
+          }
+        }
+
+        plan = this.enforceDestructiveApproval(plan);
+
+        const attemptedStepCount = plannedStepCount + plan.steps.length;
+        if (attemptedStepCount > this.config.maxStepsPerRun) {
+          const err = new StepBudgetExceededError(this.config.maxStepsPerRun, attemptedStepCount);
           state.error = err;
           state = this.finalizeState(state, 'failed');
           this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
-          logger.error('Planning phase failed', { sessionId: executionContext.sessionId, error: err.message });
+          logger.error('Step budget exceeded', {
+            sessionId: executionContext.sessionId,
+            maxStepsPerRun: this.config.maxStepsPerRun,
+            attemptedStepCount,
+          });
 
           return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
             error: err,
             finalState: state,
           });
         }
+        plannedStepCount = attemptedStepCount;
 
         state.plan = plan;
         this.emitEvent(onEvent, { type: 'planning_complete', plan, timestamp: Date.now() });
@@ -307,7 +390,10 @@ export class AgenticEngine {
             state.error = err;
             state = this.finalizeState(state, 'failed');
             this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
-            logger.error('Approval phase failed', { sessionId: executionContext.sessionId, error: err.message });
+            logger.error('Approval phase failed', {
+              sessionId: executionContext.sessionId,
+              error: err.message,
+            });
             return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
               error: err,
               finalState: state,
@@ -356,41 +442,18 @@ export class AgenticEngine {
         state.phase = 'executing';
 
         const stepById = new Map<string, PlanStep>(plan.steps.map((s) => [s.id, s]));
+        const remainingToolCalls = this.config.maxToolCallsPerRun - toolCallsUsed;
 
-        let executionResult: ExecutionResult;
-        try {
-          executionResult = await this.executor.execute(plan, executionContext, (progress) => {
-            const step = progress.stepId ? stepById.get(progress.stepId) : undefined;
-            if (!step) return;
-
-            if (progress.phase === 'step_started') {
-              this.emitEvent(onEvent, { type: 'execution_start', step, timestamp: Date.now() });
-            }
-
-            if (progress.phase === 'step_completed' || progress.phase === 'step_failed') {
-              if (progress.result) {
-                this.emitEvent(onEvent, {
-                  type: 'execution_complete',
-                  step,
-                  result: this.toToolResult(progress.result),
-                  timestamp: Date.now(),
-                });
-              }
-            }
-
-            const ratio =
-              progress.totalSteps > 0
-                ? (progress.completedCount + progress.failedCount) / progress.totalSteps
-                : 0;
-
-            this.emitEvent(onEvent, { type: 'execution_progress', step, progress: ratio, timestamp: Date.now() });
-          });
-        } catch (error) {
-          const err = asError(error);
+        if (remainingToolCalls <= 0) {
+          const err = new ToolBudgetExceededError(this.config.maxToolCallsPerRun, toolCallsUsed);
           state.error = err;
           state = this.finalizeState(state, 'failed');
           this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
-          logger.error('Execution phase failed', { sessionId: executionContext.sessionId, error: err.message });
+          logger.error('Tool budget exhausted before execution', {
+            sessionId: executionContext.sessionId,
+            maxToolCallsPerRun: this.config.maxToolCallsPerRun,
+            toolCallsUsed,
+          });
 
           return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
             error: err,
@@ -398,12 +461,97 @@ export class AgenticEngine {
           });
         }
 
+        let executionResult: ExecutionResult;
+        try {
+          executionResult = await this.executor.execute(
+            plan,
+            executionContext,
+            (progress) => {
+              const step = progress.stepId ? stepById.get(progress.stepId) : undefined;
+              if (!step) return;
+
+              if (progress.phase === 'step_started') {
+                this.emitEvent(onEvent, { type: 'execution_start', step, timestamp: Date.now() });
+              }
+
+              if (progress.phase === 'step_completed' || progress.phase === 'step_failed') {
+                if (progress.result) {
+                  this.emitEvent(onEvent, {
+                    type: 'execution_complete',
+                    step,
+                    result: this.toToolResult(progress.result),
+                    timestamp: Date.now(),
+                  });
+                }
+              }
+
+              const ratio =
+                progress.totalSteps > 0
+                  ? (progress.completedCount + progress.failedCount) / progress.totalSteps
+                  : 0;
+
+              this.emitEvent(onEvent, {
+                type: 'execution_progress',
+                step,
+                progress: ratio,
+                timestamp: Date.now(),
+              });
+            },
+            { maxToolCalls: remainingToolCalls },
+          );
+        } catch (error) {
+          const err = asError(error);
+          const partialExecutionResult = getPartialExecutionResult(error);
+
+          if (partialExecutionResult) {
+            executionResults.push(partialExecutionResult);
+            toolCallsUsed += partialExecutionResult.toolCallsUsed;
+            state.executionHistory.push(...this.toExecutionRecords(partialExecutionResult));
+            await this.recordExecutionOperations(
+              partialExecutionResult,
+              contextWithTools.projectId,
+            );
+          }
+
+          const rollbackReport = await this.attemptRollback(executionResults, executionContext);
+
+          state.error = err;
+          state = this.finalizeState(state, 'failed');
+          this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
+          logger.error('Execution phase failed', {
+            sessionId: executionContext.sessionId,
+            error: err.message,
+            rollbackAttempted: rollbackReport.attempted,
+            rollbackSucceeded: rollbackReport.succeededCount,
+            rollbackFailed: rollbackReport.failedCount,
+            rollbackSkipped: rollbackReport.skippedCount,
+          });
+
+          const summary = this.createSummary(state, Date.now() - startTime, {
+            failureReason: err.message,
+            rollbackReport,
+          });
+
+          return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
+            error: err,
+            finalState: state,
+            summary,
+            rollbackReport,
+          });
+        }
+
         executionResults.push(executionResult);
+        toolCallsUsed += executionResult.toolCallsUsed;
         state.executionHistory.push(...this.toExecutionRecords(executionResult));
+        await this.recordExecutionOperations(executionResult, contextWithTools.projectId);
 
         if (this.isAborted || executionResult.aborted) {
           state = this.finalizeState(state, 'aborted');
-          this.emitEvent(onEvent, { type: 'session_aborted', reason: 'Aborted by user', timestamp: Date.now() });
+          this.emitEvent(onEvent, {
+            type: 'session_aborted',
+            reason: 'Aborted by user',
+            timestamp: Date.now(),
+          });
 
           return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
             aborted: true,
@@ -425,7 +573,10 @@ export class AgenticEngine {
           state.error = err;
           state = this.finalizeState(state, 'failed');
           this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
-          logger.error('Observation phase failed', { sessionId: executionContext.sessionId, error: err.message });
+          logger.error('Observation phase failed', {
+            sessionId: executionContext.sessionId,
+            error: err.message,
+          });
 
           return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
             error: err,
@@ -433,8 +584,34 @@ export class AgenticEngine {
           });
         }
 
+        const immediateTerminalFailure = detectImmediateTerminalFailure(
+          executionResult,
+          state.context,
+        );
+        const repeatedTerminalFailure =
+          executionResults.length > 1
+            ? detectRepeatedTerminalFailure(
+                executionResults[executionResults.length - 2],
+                executionResult,
+              )
+            : null;
+
+        const terminalFailureGuard = immediateTerminalFailure ?? repeatedTerminalFailure;
+        if (observation.needsIteration && terminalFailureGuard) {
+          logger.warn('Stopping automatic retry loop after terminal failure', {
+            sessionId: executionContext.sessionId,
+            reason: terminalFailureGuard.reason,
+            failureSignature: terminalFailureGuard.failureSignature,
+          });
+          observation = this.applyTerminalFailureGuard(observation, terminalFailureGuard);
+        }
+
         lastObservation = observation;
-        this.emitEvent(onEvent, { type: 'observation_complete', observation, timestamp: Date.now() });
+        this.emitEvent(onEvent, {
+          type: 'observation_complete',
+          observation,
+          timestamp: Date.now(),
+        });
 
         // =====================================================================
         // DONE / ITERATE
@@ -454,7 +631,7 @@ export class AgenticEngine {
             executionResults,
             iteration,
             Date.now() - startTime,
-            { observation, finalState: state, summary }
+            { observation, finalState: state, summary },
           );
         }
 
@@ -497,6 +674,179 @@ export class AgenticEngine {
   // Private Helpers
   // ===========================================================================
 
+  private enforceDestructiveApproval(plan: Plan): Plan {
+    if (!this.config.requireApprovalForDestructiveActions || plan.requiresApproval) {
+      return plan;
+    }
+
+    const destructiveSteps = plan.steps.filter((step) => this.isDestructiveTool(step.tool));
+    if (destructiveSteps.length === 0) {
+      return plan;
+    }
+
+    logger.info('Destructive plan detected, forcing approval', {
+      destructiveTools: destructiveSteps.map((step) => step.tool),
+    });
+
+    return {
+      ...plan,
+      requiresApproval: true,
+      rollbackStrategy:
+        plan.rollbackStrategy && plan.rollbackStrategy.trim().length > 0
+          ? plan.rollbackStrategy
+          : 'Use undo stack to roll back destructive operations',
+    };
+  }
+
+  private isDestructiveTool(toolName: string): boolean {
+    const normalizedToolName = toolName.toLowerCase();
+    const configured = this.config.destructiveToolNames.map((name) => name.toLowerCase());
+    if (configured.includes(normalizedToolName)) {
+      return true;
+    }
+
+    return (
+      normalizedToolName.startsWith('delete_') ||
+      normalizedToolName.startsWith('remove_') ||
+      normalizedToolName.includes('ripple_delete')
+    );
+  }
+
+  private async attemptRollback(
+    executionResults: ExecutionResult[],
+    executionContext: ExecutionContext,
+  ): Promise<RollbackReport> {
+    if (!this.config.enableAutoRollbackOnFailure) {
+      return {
+        attempted: false,
+        candidateCount: 0,
+        attemptedCount: 0,
+        succeededCount: 0,
+        failedCount: 0,
+        skippedCount: 0,
+        reason: 'Auto rollback is disabled by configuration',
+        failures: [],
+      };
+    }
+
+    const rollbackCandidates = this.collectRollbackCandidates(executionResults);
+    if (rollbackCandidates.length === 0) {
+      return {
+        attempted: false,
+        candidateCount: 0,
+        attemptedCount: 0,
+        succeededCount: 0,
+        failedCount: 0,
+        skippedCount: 0,
+        reason: 'No undoable operations were recorded',
+        failures: [],
+      };
+    }
+
+    const limitedCandidates = rollbackCandidates.slice(0, this.config.maxRollbackSteps);
+    const report: RollbackReport = {
+      attempted: true,
+      candidateCount: rollbackCandidates.length,
+      attemptedCount: 0,
+      succeededCount: 0,
+      failedCount: 0,
+      skippedCount: 0,
+      reason:
+        rollbackCandidates.length > limitedCandidates.length
+          ? `Rollback limited to ${limitedCandidates.length} operations`
+          : undefined,
+      failures: [],
+    };
+
+    for (const candidate of limitedCandidates) {
+      if (!this.toolExecutor.hasTool(candidate.undoTool)) {
+        report.skippedCount += 1;
+        report.failures.push({
+          tool: candidate.undoTool,
+          sourceStepId: candidate.sourceStepId,
+          error: `Undo tool '${candidate.undoTool}' is not available`,
+        });
+        continue;
+      }
+
+      const validation = this.toolExecutor.validateArgs(candidate.undoTool, candidate.undoArgs);
+      if (!validation.valid) {
+        report.skippedCount += 1;
+        report.failures.push({
+          tool: candidate.undoTool,
+          sourceStepId: candidate.sourceStepId,
+          error: validation.errors.join(', '),
+        });
+        continue;
+      }
+
+      report.attemptedCount += 1;
+      try {
+        const undoResult = await this.toolExecutor.execute(
+          candidate.undoTool,
+          candidate.undoArgs,
+          executionContext,
+        );
+
+        if (undoResult.success) {
+          report.succeededCount += 1;
+        } else {
+          report.failedCount += 1;
+          report.failures.push({
+            tool: candidate.undoTool,
+            sourceStepId: candidate.sourceStepId,
+            error: undoResult.error ?? 'Undo operation failed',
+          });
+        }
+      } catch (error) {
+        report.failedCount += 1;
+        report.failures.push({
+          tool: candidate.undoTool,
+          sourceStepId: candidate.sourceStepId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return report;
+  }
+
+  private collectRollbackCandidates(executionResults: ExecutionResult[]): Array<{
+    sourceStepId: string;
+    undoTool: string;
+    undoArgs: Record<string, unknown>;
+  }> {
+    const candidates: Array<{
+      sourceStepId: string;
+      undoTool: string;
+      undoArgs: Record<string, unknown>;
+    }> = [];
+
+    for (let resultIndex = executionResults.length - 1; resultIndex >= 0; resultIndex -= 1) {
+      const executionResult = executionResults[resultIndex];
+
+      for (
+        let stepIndex = executionResult.completedSteps.length - 1;
+        stepIndex >= 0;
+        stepIndex -= 1
+      ) {
+        const step = executionResult.completedSteps[stepIndex];
+        const undoOperation = step.result.undoOperation;
+        if (!step.result.undoable || !undoOperation) {
+          continue;
+        }
+
+        candidates.push({
+          sourceStepId: step.stepId,
+          undoTool: undoOperation.tool,
+          undoArgs: undoOperation.args,
+        });
+      }
+    }
+
+    return candidates;
+  }
+
   private emitEvent(onEvent: ((event: AgentEvent) => void) | undefined, event: AgentEvent): void {
     if (!onEvent) return;
     try {
@@ -504,6 +854,92 @@ export class AgenticEngine {
     } catch (error) {
       logger.error('Error in agent event handler', { error });
     }
+  }
+
+  private async hydrateContextWithMemory(agentContext: AgentContext): Promise<AgentContext> {
+    if (!this.memoryStore) {
+      return agentContext;
+    }
+
+    try {
+      const [recentOperations, userPreferences, corrections] = await Promise.all([
+        this.memoryStore.getRecentOperations(this.config.memoryRecentOperationsLimit),
+        this.memoryStore.getPreferences(),
+        this.memoryStore.getCorrections(this.config.memoryCorrectionsLimit),
+      ]);
+
+      return {
+        ...agentContext,
+        recentOperations:
+          agentContext.recentOperations.length > 0
+            ? agentContext.recentOperations
+            : recentOperations,
+        userPreferences: {
+          ...userPreferences.custom,
+          ...userPreferences,
+          ...agentContext.userPreferences,
+        },
+        corrections: agentContext.corrections.length > 0 ? agentContext.corrections : corrections,
+      };
+    } catch (error) {
+      logger.warn('Failed to hydrate memory context, using input context only', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return agentContext;
+    }
+  }
+
+  private async recordExecutionOperations(
+    executionResult: ExecutionResult,
+    projectId: string,
+  ): Promise<void> {
+    const memoryStore = this.memoryStore;
+    if (!memoryStore) {
+      return;
+    }
+
+    const operationNames = [
+      ...executionResult.completedSteps.map((step) => step.tool),
+      ...executionResult.failedSteps.map((step) => step.tool),
+    ];
+
+    if (operationNames.length === 0) {
+      return;
+    }
+
+    try {
+      await Promise.all(
+        operationNames.map((operation) => memoryStore.recordOperation(operation, projectId)),
+      );
+    } catch (error) {
+      logger.warn('Failed to record operation usage in memory store', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private applyTerminalFailureGuard(
+    observation: Observation,
+    guidance: TerminalFailureGuidance,
+  ): Observation {
+    const guardSummary = `Stopped automatic retries: ${guidance.reason}`;
+    const summary = observation.summary.includes('Stopped automatic retries')
+      ? observation.summary
+      : `${observation.summary} ${guardSummary}`.trim();
+
+    const hasSuggestedAction =
+      typeof observation.suggestedAction === 'string' &&
+      observation.suggestedAction.trim().length > 0;
+
+    return {
+      ...observation,
+      goalAchieved: false,
+      needsIteration: false,
+      iterationReason: guidance.reason,
+      suggestedAction: hasSuggestedAction ? observation.suggestedAction : guidance.suggestedAction,
+      summary,
+      confidence: Math.max(observation.confidence, 0.9),
+    };
   }
 
   private finalizeState(state: AgentState, phase: AgentPhase): AgentState {
@@ -514,7 +950,14 @@ export class AgenticEngine {
     };
   }
 
-  private createSummary(state: AgentState, durationMs: number): SessionSummary {
+  private createSummary(
+    state: AgentState,
+    durationMs: number,
+    options: {
+      failureReason?: string;
+      rollbackReport?: RollbackReport;
+    } = {},
+  ): SessionSummary {
     const executedSteps = state.executionHistory.length;
     const successfulSteps = state.executionHistory.filter((r) => r.result.success).length;
     const failedSteps = state.executionHistory.filter((r) => !r.result.success).length;
@@ -528,6 +971,8 @@ export class AgenticEngine {
       failedSteps,
       duration: durationMs,
       finalState: state.phase,
+      failureReason: options.failureReason,
+      rollbackReport: options.rollbackReport,
     };
   }
 
@@ -559,9 +1004,11 @@ export class AgenticEngine {
     executionResults: ExecutionResult[],
     iterations: number,
     totalDuration: number,
-    options: Partial<Omit<AgentRunResult, 'success' | 'executionResults' | 'iterations' | 'totalDuration'>> & {
+    options: Partial<
+      Omit<AgentRunResult, 'success' | 'executionResults' | 'iterations' | 'totalDuration'>
+    > & {
       finalState: AgentState;
-    }
+    },
   ): AgentRunResult {
     return {
       success,
@@ -578,6 +1025,7 @@ export class AgenticEngine {
       error: options.error,
       finalState: options.finalState,
       summary: options.summary,
+      rollbackReport: options.rollbackReport,
     };
   }
 }
@@ -589,7 +1037,7 @@ export class AgenticEngine {
 export function createAgenticEngine(
   llm: ILLMClient,
   toolExecutor: IToolExecutor,
-  config?: Partial<AgenticEngineConfig>
+  config?: Partial<AgenticEngineConfig>,
 ): AgenticEngine {
   return new AgenticEngine(llm, toolExecutor, config);
 }

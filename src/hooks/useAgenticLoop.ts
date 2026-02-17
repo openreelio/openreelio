@@ -29,9 +29,11 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   createAgenticEngine,
   createEmptyContext,
+  createLanguagePolicy,
   type AgentEvent,
   type AgentRunResult,
   type AgenticEngineConfig,
+  type IMemoryStore,
   type ILLMClient,
   type IToolExecutor,
   type AgentPhase,
@@ -39,12 +41,14 @@ import {
   type LLMMessage,
   type Thought,
   type Plan,
+  createMemoryManagerAdapter,
 } from '@/agents/engine';
 import { isAgenticEngineEnabled } from '@/config/featureFlags';
 import { useConversationStore } from '@/stores/conversationStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores';
+import { useSettingsStore } from '@/stores/settingsStore';
 import { globalToolRegistry } from '@/agents';
 import { createLogger } from '@/services/logger';
 
@@ -128,12 +132,7 @@ export interface UseAgenticLoopReturn {
  * Main hook for using the AgenticEngine in React components.
  */
 export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopReturn {
-  const {
-    llmClient,
-    toolExecutor,
-    config,
-    context: externalContext,
-  } = options;
+  const { llmClient, toolExecutor, config, context: externalContext } = options;
 
   // State
   const [phase, setPhase] = useState<AgentPhase>('idle');
@@ -150,6 +149,11 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   const approvalResolverRef = useRef<{
     resolve: (approved: boolean) => void;
   } | null>(null);
+  const memoryStoreRef = useRef<IMemoryStore | null>(null);
+
+  if (!memoryStoreRef.current && config?.enableMemory !== false) {
+    memoryStoreRef.current = createMemoryManagerAdapter();
+  }
 
   // Options ref to avoid stale closures
   const optionsRef = useRef(options);
@@ -158,9 +162,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   }, [options]);
 
   // Check if feature is enabled (with fallback for test environments)
-  const isEnabled = typeof isAgenticEngineEnabled === 'function'
-    ? isAgenticEngineEnabled()
-    : false;
+  const isEnabled = typeof isAgenticEngineEnabled === 'function' ? isAgenticEngineEnabled() : false;
 
   // Build context
   const buildContext = useCallback((): AgentContext => {
@@ -239,90 +241,118 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   }, []);
 
   // Run the engine
-  const run = useCallback(async (input: string): Promise<AgentRunResult | null> => {
-    if (!isEnabled) {
-      logger.warn('Agentic engine is disabled via feature flag');
-      return null;
-    }
-
-    if (isRunning) {
-      logger.warn('Engine is already running');
-      return null;
-    }
-
-    // Reset state
-    setIsRunning(true);
-    setEvents([]);
-    setError(null);
-    setThought(null);
-    setPlan(null);
-    setPhase('thinking');
-    abortedRef.current = false;
-
-    // Pre-flight: verify AI provider is configured
-    if (typeof llmClient.isConfigured === 'function' && !llmClient.isConfigured()) {
-      const configError = new Error(
-        'AI provider not configured. Go to Settings > AI to set up your API key.'
-      );
-      setError(configError);
-      setPhase('failed');
-      setIsRunning(false);
-      optionsRef.current.onError?.(configError);
-      logger.error('Pre-flight check failed: AI provider not configured');
-      return null;
-    }
-
-    // Build context
-    const context = buildContext();
-
-    // Create execution context
-    const executionContext = {
-      projectId: context.projectId,
-      sequenceId: context.sequenceId,
-      sessionId: crypto.randomUUID(),
-    };
-
-    try {
-      // Create engine
-      const engine = createAgenticEngine(llmClient, toolExecutor, {
-        ...config,
-        approvalHandler:
-          config?.approvalHandler ??
-          (async () => {
-            return await new Promise<boolean>((resolve) => {
-              approvalResolverRef.current = { resolve };
-            });
-          }),
-      });
-      engineRef.current = engine;
-
-      // Get conversation history for multi-turn context
-      const rawHistory = useConversationStore
-        .getState()
-        .getMessagesForContext(CONTEXT_HISTORY_LIMIT);
-      const conversationHistory = trimDuplicatedTailUserMessageForContext(rawHistory, input);
-
-      // Run engine with conversation history
-      const result = await engine.run(input, context, executionContext, handleEvent, conversationHistory);
-
-      if (!abortedRef.current) {
-        setPhase(result.finalState.phase);
-        optionsRef.current.onComplete?.(result);
+  const run = useCallback(
+    async (input: string): Promise<AgentRunResult | null> => {
+      if (!isEnabled) {
+        logger.warn('Agentic engine is disabled via feature flag');
+        return null;
       }
 
-      return result;
-    } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      setError(error);
-      setPhase('failed');
-      optionsRef.current.onError?.(error);
-      logger.error('Engine run failed', { error: error.message });
-      throw error;
-    } finally {
-      setIsRunning(false);
-      engineRef.current = null;
-    }
-  }, [isEnabled, isRunning, llmClient, toolExecutor, config, buildContext, handleEvent]);
+      if (isRunning) {
+        logger.warn('Engine is already running');
+        return null;
+      }
+
+      // Reset state
+      setIsRunning(true);
+      setEvents([]);
+      setError(null);
+      setThought(null);
+      setPlan(null);
+      setPhase('thinking');
+      abortedRef.current = false;
+
+      // Pre-flight: verify AI provider is configured
+      // For refreshable clients (e.g., Tauri adapter), refresh backend status first
+      // to avoid false negatives from stale in-memory cache.
+      if (typeof llmClient.isConfigured === 'function' && !llmClient.isConfigured()) {
+        const refreshableClient = llmClient as ILLMClient & {
+          refreshStatus?: () => Promise<{ isConfigured: boolean }>;
+        };
+
+        if (typeof refreshableClient.refreshStatus === 'function') {
+          try {
+            await refreshableClient.refreshStatus();
+          } catch (statusError) {
+            logger.warn('Failed to refresh LLM provider status before run', {
+              error: statusError instanceof Error ? statusError.message : String(statusError),
+            });
+          }
+        }
+      }
+
+      if (typeof llmClient.isConfigured === 'function' && !llmClient.isConfigured()) {
+        const configError = new Error(
+          'AI provider not configured. Go to Settings > AI to set up your API key.',
+        );
+        setError(configError);
+        setPhase('failed');
+        setIsRunning(false);
+        optionsRef.current.onError?.(configError);
+        logger.error('Pre-flight check failed: AI provider not configured');
+        return null;
+      }
+
+      // Build context
+      const context = buildContext();
+
+      // Create execution context
+      const executionContext = {
+        projectId: context.projectId,
+        sequenceId: context.sequenceId,
+        sessionId: crypto.randomUUID(),
+      };
+
+      try {
+        // Create engine
+        const engine = createAgenticEngine(llmClient, toolExecutor, {
+          ...config,
+          memoryStore: config?.memoryStore ?? memoryStoreRef.current ?? undefined,
+          approvalHandler:
+            config?.approvalHandler ??
+            (async () => {
+              return await new Promise<boolean>((resolve) => {
+                approvalResolverRef.current = { resolve };
+              });
+            }),
+        });
+        engineRef.current = engine;
+
+        // Get conversation history for multi-turn context
+        const rawHistory = useConversationStore
+          .getState()
+          .getMessagesForContext(CONTEXT_HISTORY_LIMIT);
+        const conversationHistory = trimDuplicatedTailUserMessageForContext(rawHistory, input);
+
+        // Run engine with conversation history
+        const result = await engine.run(
+          input,
+          context,
+          executionContext,
+          handleEvent,
+          conversationHistory,
+        );
+
+        if (!abortedRef.current) {
+          setPhase(result.finalState.phase);
+          optionsRef.current.onComplete?.(result);
+        }
+
+        return result;
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        setError(error);
+        setPhase('failed');
+        optionsRef.current.onError?.(error);
+        logger.error('Engine run failed', { error: error.message });
+        throw error;
+      } finally {
+        setIsRunning(false);
+        engineRef.current = null;
+      }
+    },
+    [isEnabled, isRunning, llmClient, toolExecutor, config, buildContext, handleEvent],
+  );
 
   // Abort
   const abort = useCallback(() => {
@@ -414,7 +444,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
  * Reads playbackStore, timelineStore, projectStore to build real AgentContext.
  */
 export function useAgenticLoopWithStores(
-  options: Omit<UseAgenticLoopOptions, 'context'> & { context?: Partial<AgentContext> }
+  options: Omit<UseAgenticLoopOptions, 'context'> & { context?: Partial<AgentContext> },
 ): UseAgenticLoopReturn {
   const externalContext = options.context;
   // Read from stores
@@ -425,6 +455,7 @@ export function useAgenticLoopWithStores(
   const activeSequenceId = useProjectStore((s) => s.activeSequenceId);
   const sequences = useProjectStore((s) => s.sequences);
   const assets = useProjectStore((s) => s.assets);
+  const uiLanguage = useSettingsStore((s) => s.settings.general.language);
 
   // Build real context from stores
   const context = useMemo((): Partial<AgentContext> => {
@@ -433,6 +464,7 @@ export function useAgenticLoopWithStores(
     const storeContext: Partial<AgentContext> = {
       projectId: 'current',
       sequenceId: activeSequenceId ?? undefined,
+      languagePolicy: createLanguagePolicy(uiLanguage),
       playheadPosition: currentTime,
       timelineDuration: duration,
       selectedClips: selectedClipIds,
@@ -445,12 +477,13 @@ export function useAgenticLoopWithStores(
           type: a.kind as 'video' | 'audio' | 'image',
           duration: a.durationSec,
         })),
-      availableTracks: activeSequence?.tracks.map((t) => ({
-        id: t.id,
-        name: t.name || `Track ${t.id}`,
-        type: t.kind === 'audio' ? 'audio' as const : 'video' as const,
-        clipCount: t.clips.length,
-      })) ?? [],
+      availableTracks:
+        activeSequence?.tracks.map((t) => ({
+          id: t.id,
+          name: t.name || `Track ${t.id}`,
+          type: t.kind === 'audio' ? ('audio' as const) : ('video' as const),
+          clipCount: t.clips.length,
+        })) ?? [],
       availableTools: globalToolRegistry.listAll().map((t) => t.name),
     };
     return {
@@ -466,6 +499,7 @@ export function useAgenticLoopWithStores(
     activeSequenceId,
     sequences,
     assets,
+    uiLanguage,
     externalContext,
   ]);
 
@@ -477,6 +511,7 @@ export function useAgenticLoopWithStores(
     const playback = usePlaybackStore.getState();
     const timeline = useTimelineStore.getState();
     const project = useProjectStore.getState();
+    const settings = useSettingsStore.getState();
 
     const activeSeq = project.activeSequenceId
       ? project.sequences.get(project.activeSequenceId)
@@ -485,6 +520,7 @@ export function useAgenticLoopWithStores(
     return {
       projectId: externalContext?.projectId ?? 'current',
       sequenceId: project.activeSequenceId ?? undefined,
+      languagePolicy: createLanguagePolicy(settings.settings.general.language),
       playheadPosition: playback.currentTime,
       timelineDuration: playback.duration,
       selectedClips: timeline.selectedClipIds,
@@ -497,12 +533,13 @@ export function useAgenticLoopWithStores(
           type: a.kind as 'video' | 'audio' | 'image',
           duration: a.durationSec,
         })),
-      availableTracks: activeSeq?.tracks.map((t) => ({
-        id: t.id,
-        name: t.name || `Track ${t.id}`,
-        type: t.kind === 'audio' ? 'audio' as const : 'video' as const,
-        clipCount: t.clips.length,
-      })) ?? [],
+      availableTracks:
+        activeSeq?.tracks.map((t) => ({
+          id: t.id,
+          name: t.name || `Track ${t.id}`,
+          type: t.kind === 'audio' ? ('audio' as const) : ('video' as const),
+          clipCount: t.clips.length,
+        })) ?? [],
     };
   }, [externalContext?.projectId]);
 
@@ -518,7 +555,7 @@ export function useAgenticLoopWithStores(
 
 export function trimDuplicatedTailUserMessageForContext(
   history: LLMMessage[],
-  input: string
+  input: string,
 ): LLMMessage[] {
   if (!history || history.length === 0) {
     return history;

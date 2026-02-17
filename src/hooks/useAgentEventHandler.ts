@@ -39,30 +39,28 @@ export function useAgentEventHandler() {
 
       case 'thinking_complete': {
         if (messageIdRef.current) {
-          store.appendPart(
-            messageIdRef.current,
-            createThinkingPart(event.thought)
-          );
+          store.appendPart(messageIdRef.current, createThinkingPart(event.thought));
+        }
+        break;
+      }
+
+      case 'clarification_required': {
+        if (messageIdRef.current) {
+          store.appendPart(messageIdRef.current, createTextPart(event.question));
         }
         break;
       }
 
       case 'planning_complete': {
         if (messageIdRef.current) {
-          store.appendPart(
-            messageIdRef.current,
-            createPlanPart(event.plan, 'proposed')
-          );
+          store.appendPart(messageIdRef.current, createPlanPart(event.plan, 'proposed'));
         }
         break;
       }
 
       case 'approval_required': {
         if (messageIdRef.current) {
-          store.appendPart(
-            messageIdRef.current,
-            createApprovalPart(event.plan, 'pending')
-          );
+          store.appendPart(messageIdRef.current, createApprovalPart(event.plan, 'pending'));
         }
         break;
       }
@@ -75,7 +73,7 @@ export function useAgentEventHandler() {
             const msg = conv.messages.find((m) => m.id === messageIdRef.current);
             if (msg) {
               const approvalPartIndex = msg.parts.findIndex(
-                (p) => p.type === 'approval' && p.status === 'pending'
+                (p) => p.type === 'approval' && p.status === 'pending',
               );
               if (approvalPartIndex >= 0) {
                 store.updatePart(messageIdRef.current, approvalPartIndex, {
@@ -84,7 +82,7 @@ export function useAgentEventHandler() {
               }
 
               const planPartIndex = msg.parts.findIndex(
-                (p) => p.type === 'plan' && p.status === 'proposed'
+                (p) => p.type === 'plan' && p.status === 'proposed',
               );
               if (planPartIndex >= 0) {
                 store.updatePart(messageIdRef.current, planPartIndex, {
@@ -122,9 +120,7 @@ export function useAgentEventHandler() {
             if (msg) {
               const callIndex = msg.parts.findIndex(
                 (p) =>
-                  p.type === 'tool_call' &&
-                  p.stepId === event.step.id &&
-                  p.status === 'running'
+                  p.type === 'tool_call' && p.stepId === event.step.id && p.status === 'running',
               );
               if (callIndex >= 0) {
                 store.updatePart(messageIdRef.current, callIndex, {
@@ -143,8 +139,8 @@ export function useAgentEventHandler() {
               event.result.success,
               event.result.duration,
               event.result.data,
-              event.result.error
-            )
+              event.result.error,
+            ),
           );
         }
         break;
@@ -152,10 +148,7 @@ export function useAgentEventHandler() {
 
       case 'observation_complete': {
         if (messageIdRef.current) {
-          store.appendPart(
-            messageIdRef.current,
-            createTextPart(event.observation.summary)
-          );
+          store.appendPart(messageIdRef.current, createTextPart(event.observation.summary));
         }
         break;
       }
@@ -177,8 +170,8 @@ export function useAgentEventHandler() {
               isAgentError(error) ? error.code : 'UNKNOWN',
               error.message,
               isAgentError(error) ? error.phase : 'unknown',
-              isAgentError(error) ? error.recoverable : false
-            )
+              isAgentError(error) ? error.recoverable : false,
+            ),
           );
           store.finalizeMessage(messageIdRef.current);
           messageIdRef.current = null;
@@ -190,7 +183,7 @@ export function useAgentEventHandler() {
         if (messageIdRef.current) {
           store.appendPart(
             messageIdRef.current,
-            createTextPart(`Session aborted: ${event.reason}`)
+            createTextPart(`Session aborted: ${event.reason}`),
           );
           store.finalizeMessage(messageIdRef.current);
           messageIdRef.current = null;

@@ -19,6 +19,18 @@ const mockThinkingPart: ThinkingPart = {
   },
 };
 
+const clarificationThinkingPart: ThinkingPart = {
+  type: 'thinking',
+  thought: {
+    understanding: 'Need more details before editing',
+    approach: 'Ask one direct clarification question',
+    requirements: ['Target clip selection'],
+    uncertainties: ['Which clip should be edited first?'],
+    needsMoreInfo: true,
+    clarificationQuestion: 'Which clip should I use as the background?',
+  },
+};
+
 describe('ThinkingPartRenderer', () => {
   it('should render thinking label', () => {
     render(<ThinkingPartRenderer part={mockThinkingPart} />);
@@ -62,5 +74,15 @@ describe('ThinkingPartRenderer', () => {
     render(<ThinkingPartRenderer part={mockThinkingPart} className="custom" />);
 
     expect(screen.getByTestId('thinking-part')).toHaveClass('custom');
+  });
+
+  it('should show clarification question when needsMoreInfo is true', async () => {
+    const user = userEvent.setup();
+    render(<ThinkingPartRenderer part={clarificationThinkingPart} />);
+
+    await user.click(screen.getByText('Thinking'));
+
+    expect(screen.getByText('Clarification Needed')).toBeInTheDocument();
+    expect(screen.getByText('Which clip should I use as the background?')).toBeInTheDocument();
   });
 });

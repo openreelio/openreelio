@@ -126,6 +126,35 @@ describe('useAgentEventHandler', () => {
     expect(msg.parts[0].type).toBe('thinking');
   });
 
+  it('should append clarification text on clarification_required', () => {
+    const { result } = renderHook(() => useAgentEventHandler());
+
+    act(() => {
+      result.current.handleEvent({
+        type: 'session_start',
+        sessionId: 'session-1',
+        input: 'test',
+        timestamp: Date.now(),
+      });
+    });
+
+    act(() => {
+      result.current.handleEvent({
+        type: 'clarification_required',
+        question: 'Which clip should I use as the background?',
+        thought: createTestThought(),
+        timestamp: Date.now(),
+      });
+    });
+
+    const msg = useConversationStore.getState().activeConversation!.messages[0];
+    const textPart = msg.parts.find((p) => p.type === 'text');
+    expect(textPart).toBeDefined();
+    if (textPart?.type === 'text') {
+      expect(textPart.content).toBe('Which clip should I use as the background?');
+    }
+  });
+
   it('should append plan part on planning_complete', () => {
     const { result } = renderHook(() => useAgentEventHandler());
     const plan = createTestPlan();
