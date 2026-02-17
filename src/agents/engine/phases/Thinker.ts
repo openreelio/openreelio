@@ -113,7 +113,7 @@ export class Thinker {
       }
       throw new UnderstandingError(
         `Failed to analyze input: ${error instanceof Error ? error.message : String(error)}`,
-        { originalError: error },
+        error instanceof Error ? error.stack ?? error.message : String(error),
       );
     } finally {
       this.abortController = null;
@@ -156,7 +156,7 @@ export class Thinker {
     } catch (error) {
       throw new UnderstandingError(
         `Failed to analyze input with streaming: ${error instanceof Error ? error.message : String(error)}`,
-        { originalError: error },
+        error instanceof Error ? error.stack ?? error.message : String(error),
       );
     } finally {
       this.abortController = null;

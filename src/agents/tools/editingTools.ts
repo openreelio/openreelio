@@ -294,15 +294,33 @@ const EDITING_TOOLS: ToolDefinition[] = [
 
         const removedClipIds: string[] = [];
         for (const clip of candidates) {
-          await invoke<CommandResult>('execute_command', {
-            commandType: 'RemoveClip',
-            payload: {
-              sequenceId,
-              trackId: clip.trackId,
-              clipId: clip.id,
-            },
-          });
-          removedClipIds.push(clip.id);
+          try {
+            await invoke<CommandResult>('execute_command', {
+              commandType: 'RemoveClip',
+              payload: {
+                sequenceId,
+                trackId: clip.trackId,
+                clipId: clip.id,
+              },
+            });
+            removedClipIds.push(clip.id);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error('delete_clips_in_range partial failure', {
+              error: message,
+              removedSoFar: removedClipIds,
+              failedClipId: clip.id,
+            });
+            return {
+              success: false,
+              error: message,
+              result: {
+                removedCount: removedClipIds.length,
+                removedClipIds,
+                range: { startTime, endTime, trackId },
+              },
+            };
+          }
         }
 
         logger.debug('delete_clips_in_range executed', {

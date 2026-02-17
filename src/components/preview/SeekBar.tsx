@@ -69,11 +69,11 @@ function getPointerClientX(e: PointerEvent<HTMLDivElement>): number | null {
 
   return firstFiniteNumber(
     e.clientX,
-    e.pageX,
     (e as { x?: unknown }).x,
+    e.pageX != null ? e.pageX - window.scrollX : undefined,
     nativeEvent.clientX,
-    nativeEvent.pageX,
     (nativeEvent as { x?: unknown }).x,
+    nativeEvent.pageX != null ? nativeEvent.pageX - window.scrollX : undefined,
   );
 }
 

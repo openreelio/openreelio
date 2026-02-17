@@ -880,8 +880,12 @@ export const useAIStore = create<AIState>()(
               } else {
                 // For assistant messages, create a complete message with text
                 const msgId = convStore.startAssistantMessage();
-                convStore.appendPart(msgId, { type: 'text', content });
-                convStore.finalizeMessage(msgId);
+                try {
+                  convStore.appendPart(msgId, { type: 'text', content });
+                  convStore.finalizeMessage(msgId);
+                } catch (innerError) {
+                  logger.warn('Failed to finalize bridged assistant message', { msgId, error: innerError });
+                }
               }
             } else {
               logger.debug('Cannot bridge message to conversationStore: no active conversation', {

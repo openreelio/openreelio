@@ -53,7 +53,7 @@ function parseSplit(
   context: AgentContext,
   toolExecutor: IToolExecutor,
 ): FastPathMatch | null {
-  if (!/(\bsplit\b|\bcut\b|분할|쪼개|split)/i.test(input)) {
+  if (!/(\bsplit\b|\bcut\b(?!\s*out)|분할|쪼개)/i.test(input)) {
     return null;
   }
 
@@ -317,6 +317,11 @@ function parseAllTimes(input: string): number[] {
   }
 
   for (const match of input.matchAll(/(\d+(?:\.\d+)?)\s*(minutes?|mins?|m|분)\b/gi)) {
+    // Skip if this is the prefix of a Korean composite (e.g. "5분30초")
+    const afterMatch = input.slice((match.index ?? 0) + match[0].length);
+    if (/^\s*\d/.test(afterMatch) && match[2] === '분') {
+      continue;
+    }
     push(parseFloat(match[1]) * 60);
   }
 

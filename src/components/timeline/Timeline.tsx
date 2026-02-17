@@ -116,19 +116,19 @@ function getPointerClientPoint(e: PointerEvent<HTMLDivElement>): { x: number; y:
 
   const x = firstFiniteNumber(
     e.clientX,
-    e.pageX,
     (e as { x?: unknown }).x,
+    e.pageX != null ? e.pageX - window.scrollX : undefined,
     nativeEvent.clientX,
-    nativeEvent.pageX,
     (nativeEvent as { x?: unknown }).x,
+    nativeEvent.pageX != null ? nativeEvent.pageX - window.scrollX : undefined,
   );
   const y = firstFiniteNumber(
     e.clientY,
-    e.pageY,
     (e as { y?: unknown }).y,
+    e.pageY != null ? e.pageY - window.scrollY : undefined,
     nativeEvent.clientY,
-    nativeEvent.pageY,
     (nativeEvent as { y?: unknown }).y,
+    nativeEvent.pageY != null ? nativeEvent.pageY - window.scrollY : undefined,
   );
 
   if (x === null || y === null) {

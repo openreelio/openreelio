@@ -585,6 +585,7 @@ export class Planner {
       };
 
       if (this.abortController?.signal.aborted) {
+        settled = true;
         clearTimeout(timeoutId);
         reject(new PlanningTimeoutError(timeout));
         return;

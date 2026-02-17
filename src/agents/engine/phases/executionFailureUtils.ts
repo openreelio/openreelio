@@ -46,8 +46,6 @@ const CLIP_EDIT_TOOL_NAMES = new Set([
   'move_clip',
   'delete_clip',
   'delete_clips_in_range',
-  'remove_clip',
-  'ripple_delete',
 ]);
 
 const READ_ONLY_TOOL_PREFIXES = [

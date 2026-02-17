@@ -471,6 +471,7 @@ ${languageSection}`;
       };
 
       if (this.abortController?.signal.aborted) {
+        settled = true;
         clearTimeout(timeoutId);
         reject(new ObservationTimeoutError(timeout));
         return;
