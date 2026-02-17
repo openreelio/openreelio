@@ -89,6 +89,55 @@ interface EmptyAreaPanGesture {
   didPan: boolean;
 }
 
+function firstFiniteNumber(...candidates: unknown[]): number | null {
+  for (const candidate of candidates) {
+    const value =
+      typeof candidate === 'number'
+        ? candidate
+        : typeof candidate === 'string'
+          ? Number(candidate)
+          : Number.NaN;
+
+    if (Number.isFinite(value)) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function getPointerIdFromEvent(e: PointerEvent<HTMLDivElement>): number | null {
+  const nativeEvent = e.nativeEvent as Partial<globalThis.PointerEvent>;
+  return firstFiniteNumber(e.pointerId, nativeEvent.pointerId);
+}
+
+function getPointerClientPoint(e: PointerEvent<HTMLDivElement>): { x: number; y: number } | null {
+  const nativeEvent = e.nativeEvent as Partial<globalThis.PointerEvent>;
+
+  const x = firstFiniteNumber(
+    e.clientX,
+    e.pageX,
+    (e as { x?: unknown }).x,
+    nativeEvent.clientX,
+    nativeEvent.pageX,
+    (nativeEvent as { x?: unknown }).x,
+  );
+  const y = firstFiniteNumber(
+    e.clientY,
+    e.pageY,
+    (e as { y?: unknown }).y,
+    nativeEvent.clientY,
+    nativeEvent.pageY,
+    (nativeEvent as { y?: unknown }).y,
+  );
+
+  if (x === null || y === null) {
+    return null;
+  }
+
+  return { x, y };
+}
+
 // Adapter to convert Track (with clips) to CaptionTrack (with captions)
 function adaptTrackToCaptionTrack(track: TrackType): CaptionTrackType {
   const captions: Caption[] = track.clips.map((clip) => ({
@@ -1066,19 +1115,27 @@ export function Timeline({
         return false;
       }
 
+      const point = getPointerClientPoint(e);
+      if (!point) {
+        return false;
+      }
+
       clearEmptyAreaPanGesture();
 
-      emptyAreaPanPointerIdRef.current = e.pointerId;
-      try {
-        e.currentTarget.setPointerCapture(e.pointerId);
-      } catch {
-        // Ignore capture failures in unsupported environments.
+      const pointerId = getPointerIdFromEvent(e);
+      emptyAreaPanPointerIdRef.current = pointerId;
+      if (pointerId !== null) {
+        try {
+          e.currentTarget.setPointerCapture(pointerId);
+        } catch {
+          // Ignore capture failures in unsupported environments.
+        }
       }
 
       const { scrollX: currentScrollX } = useTimelineStore.getState();
       emptyAreaPanRef.current = {
-        startX: e.clientX,
-        startY: e.clientY,
+        startX: point.x,
+        startY: point.y,
         startScrollX: currentScrollX,
         didPan: false,
       };
@@ -1098,13 +1155,25 @@ export function Timeline({
 
   const handleTracksAreaPointerMove = useCallback(
     (e: PointerEvent<HTMLDivElement>) => {
-      if (emptyAreaPanPointerIdRef.current !== e.pointerId) return;
+      const eventPointerId = getPointerIdFromEvent(e);
+      if (
+        emptyAreaPanPointerIdRef.current !== null &&
+        eventPointerId !== null &&
+        emptyAreaPanPointerIdRef.current !== eventPointerId
+      ) {
+        return;
+      }
 
       const gesture = emptyAreaPanRef.current;
       if (!gesture) return;
 
-      const deltaX = e.clientX - gesture.startX;
-      const deltaY = e.clientY - gesture.startY;
+      const point = getPointerClientPoint(e);
+      if (!point) {
+        return;
+      }
+
+      const deltaX = point.x - gesture.startX;
+      const deltaY = point.y - gesture.startY;
       const absDeltaX = Math.abs(deltaX);
       const absDeltaY = Math.abs(deltaY);
 
@@ -1132,7 +1201,14 @@ export function Timeline({
 
   const handleTracksAreaPointerUp = useCallback(
     (e: PointerEvent<HTMLDivElement>) => {
-      if (emptyAreaPanPointerIdRef.current !== e.pointerId) return;
+      const eventPointerId = getPointerIdFromEvent(e);
+      if (
+        emptyAreaPanPointerIdRef.current !== null &&
+        eventPointerId !== null &&
+        emptyAreaPanPointerIdRef.current !== eventPointerId
+      ) {
+        return;
+      }
 
       const gesture = emptyAreaPanRef.current;
       if (gesture?.didPan) {
@@ -1141,7 +1217,14 @@ export function Timeline({
           suppressTracksAreaClickRef.current = false;
         }, 0);
       } else if (gesture) {
-        const { time } = calculateTimeFromMouseEvent(e as unknown as globalThis.MouseEvent, true);
+        const point = getPointerClientPoint(e);
+        const clientX = point?.x ?? gesture.startX;
+        const clientY = point?.y ?? gesture.startY;
+
+        const { time } = calculateTimeFromMouseEvent(
+          { clientX, clientY } as globalThis.MouseEvent,
+          true,
+        );
         if (time !== null) {
           seekFromTimelineClick(time);
         }
@@ -1155,7 +1238,14 @@ export function Timeline({
 
   const handleTracksAreaPointerCancel = useCallback(
     (e: PointerEvent<HTMLDivElement>) => {
-      if (emptyAreaPanPointerIdRef.current !== e.pointerId) return;
+      const eventPointerId = getPointerIdFromEvent(e);
+      if (
+        emptyAreaPanPointerIdRef.current !== null &&
+        eventPointerId !== null &&
+        emptyAreaPanPointerIdRef.current !== eventPointerId
+      ) {
+        return;
+      }
       clearEmptyAreaPanGesture();
     },
     [clearEmptyAreaPanGesture],
