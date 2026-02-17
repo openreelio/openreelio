@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import {
   Executor,
   createExecutor,
+  getPartialExecutionResult,
   type ExecutionProgress,
 } from './Executor';
 import {
@@ -20,6 +21,7 @@ import {
   ToolExecutionError,
   ExecutionTimeoutError,
   DependencyError,
+  ToolBudgetExceededError,
 } from '../core/errors';
 
 describe('Executor', () => {
@@ -68,6 +70,7 @@ describe('Executor', () => {
 
       expect(result.completedSteps[0].stepId).toBe('step-1');
       expect(result.completedSteps[0].result.success).toBe(true);
+      expect(result.toolCallsUsed).toBe(1);
     });
 
     it('should execute multi-step plan in order', async () => {
@@ -210,9 +213,7 @@ describe('Executor', () => {
         rollbackStrategy: 'N/A',
       };
 
-      await expect(
-        executor.execute(badPlan, executionContext)
-      ).rejects.toThrow(DependencyError);
+      await expect(executor.execute(badPlan, executionContext)).rejects.toThrow(DependencyError);
     });
   });
 
@@ -308,9 +309,9 @@ describe('Executor', () => {
     it('should handle tool throwing exception', async () => {
       mockToolExecutor.setToolError('split_clip', new Error('Tool crashed'));
 
-      await expect(
-        executor.execute(simplePlan, executionContext)
-      ).rejects.toThrow(ToolExecutionError);
+      await expect(executor.execute(simplePlan, executionContext)).rejects.toThrow(
+        ToolExecutionError,
+      );
     });
 
     it('should include step context in error', async () => {
@@ -323,6 +324,47 @@ describe('Executor', () => {
         expect(error).toBeInstanceOf(ToolExecutionError);
         const execError = error as ToolExecutionError;
         expect(execError.stepId).toBe('step-1');
+      }
+    });
+
+    it('should attach partial execution result when an error interrupts mid-plan', async () => {
+      mockToolExecutor.setToolError('move_clip', new Error('Move crashed'));
+
+      const midPlanFailure: Plan = {
+        goal: 'Split then move',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'split_clip',
+            args: { clipId: 'clip-1', position: 5 },
+            description: 'Split first',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+          {
+            id: 'step-2',
+            tool: 'move_clip',
+            args: { clipId: 'clip-1', position: 10 },
+            description: 'Move second',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+            dependsOn: ['step-1'],
+          },
+        ],
+        estimatedTotalDuration: 200,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo all',
+      };
+
+      try {
+        await executor.execute(midPlanFailure, executionContext);
+        expect.fail('Execution should throw');
+      } catch (error) {
+        const partial = getPartialExecutionResult(error);
+        expect(partial).not.toBeNull();
+        expect(partial?.completedSteps).toHaveLength(1);
+        expect(partial?.failedSteps).toHaveLength(1);
+        expect(partial?.failedSteps[0]?.stepId).toBe('step-2');
       }
     });
   });
@@ -372,9 +414,7 @@ describe('Executor', () => {
         progressEvents.push(progress);
       });
 
-      const stepStartEvents = progressEvents.filter(
-        (p) => p.phase === 'step_started'
-      );
+      const stepStartEvents = progressEvents.filter((p) => p.phase === 'step_started');
       expect(stepStartEvents).toHaveLength(2);
     });
   });
@@ -416,9 +456,9 @@ describe('Executor', () => {
         stepTimeout: 100,
       });
 
-      await expect(
-        timeoutExecutor.execute(slowPlan, executionContext)
-      ).rejects.toThrow(ExecutionTimeoutError);
+      await expect(timeoutExecutor.execute(slowPlan, executionContext)).rejects.toThrow(
+        ExecutionTimeoutError,
+      );
     });
   });
 
@@ -581,6 +621,105 @@ describe('Executor', () => {
 
       expect(result.success).toBe(true);
       expect(callCount).toBe(2);
+    });
+
+    it('should not retry deterministic terminal failures', async () => {
+      let callCount = 0;
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'terminal_tool',
+          description: 'Always fails with terminal not-found error',
+          category: 'test',
+          riskLevel: 'low',
+          supportsUndo: false,
+          parallelizable: true,
+        },
+        parameters: {},
+        executor: async () => {
+          callCount += 1;
+          return {
+            success: false,
+            error: 'Clip not found on timeline',
+            duration: 10,
+          };
+        },
+      });
+
+      const plan: Plan = {
+        goal: 'Terminal failure operation',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'terminal_tool',
+            args: {},
+            description: 'Fails with non-retryable error',
+            riskLevel: 'low',
+            estimatedDuration: 10,
+          },
+        ],
+        estimatedTotalDuration: 10,
+        requiresApproval: false,
+        rollbackStrategy: 'N/A',
+      };
+
+      const retryExecutor = createExecutor(mockToolExecutor, {
+        maxRetries: 3,
+        stopOnError: true,
+      });
+
+      const result = await retryExecutor.execute(plan, executionContext);
+
+      expect(result.success).toBe(false);
+      expect(result.failedSteps).toHaveLength(1);
+      expect(result.failedSteps[0]?.retryCount).toBe(0);
+      expect(callCount).toBe(1);
+    });
+
+    it('Given retrying tool execution, When tool-call budget is exhausted, Then executor raises budget error', async () => {
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'flaky_budget_tool',
+          description: 'Fails first, then succeeds',
+          category: 'test',
+          riskLevel: 'low',
+          supportsUndo: false,
+          parallelizable: true,
+        },
+        parameters: {},
+        executor: async () => {
+          const attempts = mockToolExecutor.getExecutionsFor('flaky_budget_tool').length;
+          if (attempts === 0) {
+            return { success: false, error: 'Temporary failure', duration: 10 };
+          }
+          return { success: true, data: { ok: true }, duration: 10 };
+        },
+      });
+
+      const plan: Plan = {
+        goal: 'Budget constrained operation',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'flaky_budget_tool',
+            args: {},
+            description: 'Flaky with retries',
+            riskLevel: 'low',
+            estimatedDuration: 10,
+          },
+        ],
+        estimatedTotalDuration: 10,
+        requiresApproval: false,
+        rollbackStrategy: 'N/A',
+      };
+
+      const retryExecutor = createExecutor(mockToolExecutor, {
+        maxRetries: 3,
+      });
+
+      await expect(
+        retryExecutor.execute(plan, executionContext, undefined, { maxToolCalls: 1 }),
+      ).rejects.toBeInstanceOf(ToolBudgetExceededError);
     });
   });
 

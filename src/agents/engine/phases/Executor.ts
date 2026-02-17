@@ -13,19 +13,17 @@
  * - Create execution records
  */
 
-import type {
-  IToolExecutor,
-  ExecutionContext,
-  ToolExecutionResult,
-} from '../ports/IToolExecutor';
+import type { IToolExecutor, ExecutionContext, ToolExecutionResult } from '../ports/IToolExecutor';
 import type { Plan, PlanStep } from '../core/types';
 import {
   ToolExecutionError,
   ExecutionTimeoutError,
   DependencyError,
   DoomLoopError,
+  ToolBudgetExceededError,
 } from '../core/errors';
 import { DoomLoopDetector } from '../core/DoomLoopDetector';
+import { isRetryableToolFailure } from './executionFailureUtils';
 
 // =============================================================================
 // Types
@@ -103,6 +101,33 @@ export interface ExecutionResult {
   failedSteps: StepExecutionRecord[];
   totalDuration: number;
   aborted: boolean;
+  toolCallsUsed: number;
+}
+
+/**
+ * Error shape used when execution throws after partial progress.
+ */
+export interface ExecutionErrorWithPartialResult extends Error {
+  partialResult?: ExecutionResult;
+  failingStepId?: string;
+  failingTool?: string;
+}
+
+export interface ExecutionLimits {
+  /** Maximum number of tool call attempts allowed for this execution */
+  maxToolCalls?: number;
+}
+
+/**
+ * Extract partial execution result from thrown executor errors.
+ */
+export function getPartialExecutionResult(error: unknown): ExecutionResult | null {
+  if (!error || typeof error !== 'object') {
+    return null;
+  }
+
+  const candidate = error as ExecutionErrorWithPartialResult;
+  return candidate.partialResult ?? null;
 }
 
 // =============================================================================
@@ -157,7 +182,8 @@ export class Executor {
   async execute(
     plan: Plan,
     context: ExecutionContext,
-    onProgress?: (progress: ExecutionProgress) => void
+    onProgress?: (progress: ExecutionProgress) => void,
+    limits: ExecutionLimits = {},
   ): Promise<ExecutionResult> {
     this.abortController = new AbortController();
     this.isAborted = false;
@@ -167,6 +193,18 @@ export class Executor {
     const completedSteps: StepExecutionRecord[] = [];
     const failedSteps: StepExecutionRecord[] = [];
     const completedStepIds = new Set<string>();
+    let toolCallsUsed = 0;
+
+    const consumeToolCallBudget = (step: PlanStep): void => {
+      if (
+        typeof limits.maxToolCalls === 'number' &&
+        Number.isFinite(limits.maxToolCalls) &&
+        toolCallsUsed >= limits.maxToolCalls
+      ) {
+        throw new ToolBudgetExceededError(limits.maxToolCalls, toolCallsUsed, step.id, step.tool);
+      }
+      toolCallsUsed += 1;
+    };
 
     // Emit started event
     this.emitProgress(onProgress, {
@@ -210,7 +248,40 @@ export class Executor {
         }
 
         // Execute the step
-        const record = await this.executeStep(step, context);
+        let record: StepExecutionRecord;
+        try {
+          record = await this.executeStep(step, context, consumeToolCallBudget);
+        } catch (error) {
+          const err = error instanceof Error ? error : new Error(String(error));
+          const failedRecord = this.createFailedRecordFromError(step, err);
+          failedSteps.push(failedRecord);
+
+          this.emitProgress(onProgress, {
+            phase: 'step_failed',
+            stepId: step.id,
+            stepIndex: i,
+            totalSteps: plan.steps.length,
+            completedCount: completedSteps.length,
+            failedCount: failedSteps.length,
+            message: failedRecord.result.error,
+            result: failedRecord.result,
+          });
+
+          this.attachPartialResult(
+            err,
+            {
+              success: false,
+              completedSteps: [...completedSteps],
+              failedSteps: [...failedSteps],
+              totalDuration: Date.now() - startTime,
+              aborted: this.isAborted,
+              toolCallsUsed,
+            },
+            step,
+          );
+
+          throw err;
+        }
 
         if (record.result.success) {
           completedSteps.push(record);
@@ -259,6 +330,7 @@ export class Executor {
         failedSteps,
         totalDuration: Date.now() - startTime,
         aborted: this.isAborted,
+        toolCallsUsed,
       };
     } finally {
       this.abortController = null;
@@ -279,12 +351,37 @@ export class Executor {
   // Private Methods - Step Execution
   // ===========================================================================
 
+  private createFailedRecordFromError(step: PlanStep, error: Error): StepExecutionRecord {
+    const now = Date.now();
+    return {
+      stepId: step.id,
+      tool: step.tool,
+      args: step.args,
+      result: {
+        success: false,
+        error: error.message,
+        duration: 0,
+      },
+      startTime: now,
+      endTime: now,
+      retryCount: 0,
+    };
+  }
+
+  private attachPartialResult(error: Error, partialResult: ExecutionResult, step: PlanStep): void {
+    const annotated = error as ExecutionErrorWithPartialResult;
+    annotated.partialResult = partialResult;
+    annotated.failingStepId = step.id;
+    annotated.failingTool = step.tool;
+  }
+
   /**
    * Execute a single step with retries and timeout
    */
   private async executeStep(
     step: PlanStep,
-    context: ExecutionContext
+    context: ExecutionContext,
+    consumeToolCallBudget: (step: PlanStep) => void,
   ): Promise<StepExecutionRecord> {
     const startTime = Date.now();
     let retryCount = 0;
@@ -309,10 +406,11 @@ export class Executor {
       }
 
       try {
+        consumeToolCallBudget(step);
         lastResult = await this.executeWithTimeout(
           () => this.toolExecutor.execute(step.tool, step.args, context),
           this.config.stepTimeout,
-          step.id
+          step.id,
         );
 
         if (lastResult.success) {
@@ -327,13 +425,22 @@ export class Executor {
           };
         }
 
-        // Tool returned failure, try again if retries available
+        // Retry only if the failure looks transient.
+        if (!isRetryableToolFailure(lastResult.error)) {
+          break;
+        }
+
+        // Tool returned transient failure, try again if retries available
         retryCount++;
       } catch (error) {
         lastError = error instanceof Error ? error : new Error(String(error));
 
         // Check if it's a timeout or abort - don't retry
         if (error instanceof ExecutionTimeoutError || this.isAborted) {
+          throw error;
+        }
+
+        if (error instanceof ToolBudgetExceededError) {
           throw error;
         }
 
@@ -368,7 +475,7 @@ export class Executor {
   private async executeWithTimeout<T>(
     operation: () => Promise<T>,
     timeout: number,
-    stepId: string
+    stepId: string,
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       let settled = false;
@@ -452,10 +559,7 @@ export class Executor {
   /**
    * Check that all dependencies for a step have been completed
    */
-  private checkDependencies(
-    step: PlanStep,
-    completedStepIds: Set<string>
-  ): void {
+  private checkDependencies(step: PlanStep, completedStepIds: Set<string>): void {
     if (step.dependsOn) {
       const missing = step.dependsOn.filter((id) => !completedStepIds.has(id));
       if (missing.length > 0) {
@@ -519,9 +623,7 @@ export class Executor {
 
     // Detect cycles - if not all steps were processed, there's a cycle
     if (result.length !== steps.length) {
-      const remaining = steps
-        .filter((s) => !result.some((r) => r.id === s.id))
-        .map((s) => s.id);
+      const remaining = steps.filter((s) => !result.some((r) => r.id === s.id)).map((s) => s.id);
       throw new DependencyError(remaining[0] ?? 'unknown', remaining);
     }
 
@@ -537,7 +639,7 @@ export class Executor {
    */
   private emitProgress(
     onProgress: ((progress: ExecutionProgress) => void) | undefined,
-    progress: ExecutionProgress
+    progress: ExecutionProgress,
   ): void {
     if (onProgress) {
       onProgress(progress);
@@ -556,9 +658,6 @@ export class Executor {
  * @param config - Optional configuration
  * @returns Configured Executor instance
  */
-export function createExecutor(
-  toolExecutor: IToolExecutor,
-  config?: ExecutorConfig
-): Executor {
+export function createExecutor(toolExecutor: IToolExecutor, config?: ExecutorConfig): Executor {
   return new Executor(toolExecutor, config);
 }
