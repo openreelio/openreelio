@@ -15,6 +15,7 @@ import {
 } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { useTimelineStore, usePlaybackStore } from '@/stores';
+import { useSettingsStore } from '@/stores/settingsStore';
 
 // =============================================================================
 // Constants
@@ -56,6 +57,7 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
   // Get selection from TimelineStore
   const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
   const selectedTrackIds = useTimelineStore((state) => state.selectedTrackIds);
+  const preferredLanguage = useSettingsStore((state) => state.settings.general.language);
 
   // Auto-resize textarea
   useEffect(() => {
@@ -67,11 +69,8 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
 
     // Calculate new height
     const lineCount = Math.min(
-      Math.max(
-        Math.ceil((textarea.scrollHeight - PADDING_PX) / LINE_HEIGHT_PX),
-        MIN_ROWS
-      ),
-      MAX_ROWS
+      Math.max(Math.ceil((textarea.scrollHeight - PADDING_PX) / LINE_HEIGHT_PX), MIN_ROWS),
+      MAX_ROWS,
     );
     const newHeight = lineCount * LINE_HEIGHT_PX + PADDING_PX;
 
@@ -93,21 +92,24 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
       }
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [input, isGenerating]
+    [input, isGenerating],
   );
 
   // Handle slash commands
-  const handleCommand = useCallback((command: string): boolean => {
-    const cmd = command.toLowerCase();
+  const handleCommand = useCallback(
+    (command: string): boolean => {
+      const cmd = command.toLowerCase();
 
-    if (cmd === '/new' || cmd === '/clear') {
-      clearChatHistory();
-      addChatMessage('system', 'Started a new conversation.');
-      return true;
-    }
+      if (cmd === '/new' || cmd === '/clear') {
+        clearChatHistory();
+        addChatMessage('system', 'Started a new conversation.');
+        return true;
+      }
 
-    if (cmd === '/help' || cmd === '/?') {
-      addChatMessage('system', `**Available Commands:**
+      if (cmd === '/help' || cmd === '/?') {
+        addChatMessage(
+          'system',
+          `**Available Commands:**
 • /new or /clear - Start a new conversation
 • /help or /? - Show this help message
 
@@ -115,12 +117,15 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
 • Just type naturally to chat with the AI
 • Ask for edits like "split clip at 5 seconds"
 • Ask questions like "what clips are in the timeline?"
-• The AI will ask for clarification if needed`);
-      return true;
-    }
+• The AI will ask for clarification if needed`,
+        );
+        return true;
+      }
 
-    return false;
-  }, [clearChatHistory, addChatMessage]);
+      return false;
+    },
+    [clearChatHistory, addChatMessage],
+  );
 
   // Handle submit
   const handleSubmit = useCallback(() => {
@@ -134,7 +139,10 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
         return;
       }
       // Unknown command - show help
-      addChatMessage('system', `Unknown command: ${trimmedInput}. Type /help for available commands.`);
+      addChatMessage(
+        'system',
+        `Unknown command: ${trimmedInput}. Type /help for available commands.`,
+      );
       setInput('');
       return;
     }
@@ -147,6 +155,7 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
       playheadPosition: playhead,
       selectedClips: selectedClipIds,
       selectedTracks: selectedTrackIds,
+      preferredLanguage,
     });
 
     // Clear input
@@ -161,6 +170,7 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
     playhead,
     selectedClipIds,
     selectedTrackIds,
+    preferredLanguage,
   ]);
 
   // Handle stop button
@@ -171,10 +181,7 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
   const canSend = input.trim().length > 0 && !isGenerating;
 
   return (
-    <div
-      data-testid="chat-input"
-      className={`border-t border-editor-border p-3 ${className}`}
-    >
+    <div data-testid="chat-input" className={`border-t border-editor-border p-3 ${className}`}>
       <div className="relative">
         {/* Textarea */}
         <textarea
@@ -217,8 +224,10 @@ export function ChatInput({ className = '', onSend }: ChatInputProps) {
 
       {/* Hint text */}
       <p className="mt-1.5 text-[10px] text-editor-text-secondary">
-        Press <kbd className="px-1 py-0.5 rounded bg-editor-surface text-editor-text">Enter</kbd> to send,{' '}
-        <kbd className="px-1 py-0.5 rounded bg-editor-surface text-editor-text">Shift+Enter</kbd> for new line
+        Press <kbd className="px-1 py-0.5 rounded bg-editor-surface text-editor-text">Enter</kbd> to
+        send,{' '}
+        <kbd className="px-1 py-0.5 rounded bg-editor-surface text-editor-text">Shift+Enter</kbd>{' '}
+        for new line
       </p>
     </div>
   );

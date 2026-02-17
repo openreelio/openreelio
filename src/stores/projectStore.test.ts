@@ -285,7 +285,7 @@ describe('projectStore', () => {
   // ===========================================================================
 
   describe('closeProject', () => {
-    it('should reset state when closing project', () => {
+    it('should reset state when closing project', async () => {
       // Setup loaded project state
       useProjectStore.setState({
         isLoaded: true,
@@ -294,8 +294,10 @@ describe('projectStore', () => {
         activeSequenceId: 'seq_001',
       });
 
+      mockTauriCommand('close_project', true);
+
       const { closeProject } = useProjectStore.getState();
-      closeProject();
+      await closeProject();
 
       const state = useProjectStore.getState();
       expect(state.isLoaded).toBe(false);
@@ -305,6 +307,38 @@ describe('projectStore', () => {
       expect(state.activeSequenceId).toBeNull();
       expect(state.isDirty).toBe(false);
       expect(state.error).toBeNull();
+    });
+
+    it('should call backend close_project with requireSaved=false', async () => {
+      useProjectStore.setState({
+        isLoaded: true,
+        isDirty: true,
+        meta: createMockProjectMeta(),
+      });
+
+      mockTauriCommand('close_project', true);
+
+      await useProjectStore.getState().closeProject();
+
+      expect(invoke).toHaveBeenCalledWith('close_project', { requireSaved: false });
+    });
+
+    it('should still clear frontend state if backend close fails', async () => {
+      useProjectStore.setState({
+        isLoaded: true,
+        isDirty: true,
+        meta: createMockProjectMeta(),
+        activeSequenceId: 'seq_001',
+      });
+
+      mockTauriCommandError('close_project', 'Backend error');
+
+      await useProjectStore.getState().closeProject();
+
+      const state = useProjectStore.getState();
+      expect(state.isLoaded).toBe(false);
+      expect(state.meta).toBeNull();
+      expect(state.isDirty).toBe(false);
     });
   });
 

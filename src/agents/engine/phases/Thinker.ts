@@ -14,7 +14,7 @@
  */
 
 import type { ILLMClient, LLMMessage } from '../ports/ILLMClient';
-import type { AgentContext, Thought } from '../core/types';
+import type { AgentContext, LanguagePolicy, Thought } from '../core/types';
 import { ThinkingTimeoutError, UnderstandingError } from '../core/errors';
 
 // =============================================================================
@@ -99,7 +99,7 @@ export class Thinker {
     try {
       const thought = await this.executeWithTimeout(
         () => this.llm.generateStructured<Thought>(messages, schema),
-        this.config.timeout
+        this.config.timeout,
       );
 
       this.validateThought(thought);
@@ -113,7 +113,7 @@ export class Thinker {
       }
       throw new UnderstandingError(
         `Failed to analyze input: ${error instanceof Error ? error.message : String(error)}`,
-        { originalError: error }
+        error instanceof Error ? error.stack ?? error.message : String(error),
       );
     } finally {
       this.abortController = null;
@@ -132,7 +132,7 @@ export class Thinker {
     input: string,
     context: AgentContext,
     onProgress: (chunk: string) => void,
-    history?: LLMMessage[]
+    history?: LLMMessage[],
   ): Promise<Thought> {
     this.abortController = new AbortController();
 
@@ -149,17 +149,14 @@ export class Thinker {
 
       // Then get the structured result
       const schema = this.buildThoughtSchema();
-      const thought = await this.llm.generateStructured<Thought>(
-        messages,
-        schema
-      );
+      const thought = await this.llm.generateStructured<Thought>(messages, schema);
 
       this.validateThought(thought);
       return thought;
     } catch (error) {
       throw new UnderstandingError(
         `Failed to analyze input with streaming: ${error instanceof Error ? error.message : String(error)}`,
-        { originalError: error }
+        error instanceof Error ? error.stack ?? error.message : String(error),
       );
     } finally {
       this.abortController = null;
@@ -183,11 +180,13 @@ export class Thinker {
   /**
    * Build messages for LLM including system prompt, optional history, and user input
    */
-  private buildMessages(input: string, context: AgentContext, history?: LLMMessage[]): LLMMessage[] {
+  private buildMessages(
+    input: string,
+    context: AgentContext,
+    history?: LLMMessage[],
+  ): LLMMessage[] {
     const systemPrompt = this.buildSystemPrompt(context);
-    const messages: LLMMessage[] = [
-      { role: 'system', content: systemPrompt },
-    ];
+    const messages: LLMMessage[] = [{ role: 'system', content: systemPrompt }];
 
     // Insert conversation history between system prompt and current input
     if (history && history.length > 0) {
@@ -208,7 +207,7 @@ export class Thinker {
 
     const parts: string[] = [
       'You are an AI assistant for a video editing application.',
-      'Your task is to analyze the user\'s request and understand their intent.',
+      "Your task is to analyze the user's request and understand their intent.",
       '',
       'Current Context:',
     ];
@@ -234,15 +233,63 @@ export class Thinker {
       parts.push(`- Track count: ${context.timelineInfo.trackCount}`);
     }
 
+    this.appendLanguagePolicyInstructions(parts, context.languagePolicy);
+
     parts.push('');
-    parts.push('Analyze the user\'s request and provide:');
+    parts.push("Analyze the user's request and provide:");
     parts.push('1. Your understanding of what they want to do');
     parts.push('2. Requirements needed to fulfill the request');
     parts.push('3. Any uncertainties that need clarification');
     parts.push('4. Your proposed approach');
     parts.push('5. Whether you need more information from the user');
+    parts.push('');
+    parts.push('Clarification Policy (important):');
+    parts.push(
+      '- Prefer proceeding with reasonable defaults and assumptions when the request is generally understandable.',
+    );
+    parts.push(
+      '- Do NOT set needsMoreInfo=true for optional stylistic choices (e.g., visual style, mood, exact wording) if execution can still proceed safely.',
+    );
+    parts.push(
+      '- Set needsMoreInfo=true ONLY when execution would likely fail or be unsafe without missing critical data (e.g., required target asset/track and no safe default).',
+    );
+    parts.push(
+      '- When needsMoreInfo=true, provide exactly one concise clarificationQuestion that unblocks execution.',
+    );
+    parts.push('');
+    parts.push('Source-Aware Policy:');
+    parts.push(
+      '- Do not assume timeline clips are the only available media. Imported assets may exist without timeline placement.',
+    );
+    parts.push(
+      '- When the request implies searching or selecting moments from source footage, prefer using source-discovery analysis tools before asking for clarification.',
+    );
+    parts.push(
+      '- Use timeline-only reasoning only when the request explicitly limits scope to existing timeline clips.',
+    );
 
     return parts.join('\n');
+  }
+
+  private appendLanguagePolicyInstructions(parts: string[], languagePolicy?: LanguagePolicy): void {
+    if (!languagePolicy) {
+      return;
+    }
+
+    parts.push('');
+    parts.push('Language Policy:');
+    parts.push(`- UI language: ${languagePolicy.uiLanguage}`);
+    parts.push(`- Default output language: ${languagePolicy.outputLanguage}`);
+    parts.push(
+      `- Detect input language: ${languagePolicy.detectInputLanguage ? 'enabled' : 'disabled'}`,
+    );
+    parts.push(
+      `- User language override: ${languagePolicy.allowUserLanguageOverride ? 'allowed' : 'disallowed'}`,
+    );
+    parts.push(
+      '- Keep all natural-language response fields in the default output language unless user explicitly asks otherwise.',
+    );
+    parts.push('- Never translate IDs, tool names, schema keys, or structured field names.');
   }
 
   /**
@@ -279,35 +326,33 @@ export class Thinker {
           description: 'Question to ask user if needsMoreInfo is true',
         },
       },
-      required: [
-        'understanding',
-        'requirements',
-        'uncertainties',
-        'approach',
-        'needsMoreInfo',
-      ],
+      required: ['understanding', 'requirements', 'uncertainties', 'approach', 'needsMoreInfo'],
     };
   }
 
   /**
    * Execute operation with timeout
    */
-  private async executeWithTimeout<T>(
-    operation: () => Promise<T>,
-    timeout: number
-  ): Promise<T> {
+  private async executeWithTimeout<T>(operation: () => Promise<T>, timeout: number): Promise<T> {
     return new Promise<T>((resolve, reject) => {
+      let settled = false;
+
       const timeoutId = setTimeout(() => {
-        this.abort();
-        reject(new ThinkingTimeoutError(timeout));
+        if (!settled) {
+          settled = true;
+          this.abort();
+          reject(new ThinkingTimeoutError(timeout));
+        }
       }, timeout);
 
       const abortHandler = () => {
-        clearTimeout(timeoutId);
-        reject(new ThinkingTimeoutError(timeout));
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeoutId);
+          reject(new ThinkingTimeoutError(timeout));
+        }
       };
 
-      // Check if already aborted
       if (this.abortController?.signal.aborted) {
         clearTimeout(timeoutId);
         reject(new ThinkingTimeoutError(timeout));
@@ -327,14 +372,20 @@ export class Thinker {
 
       operation()
         .then((result) => {
-          clearTimeout(timeoutId);
-          cleanup();
-          resolve(result);
+          if (!settled) {
+            settled = true;
+            clearTimeout(timeoutId);
+            cleanup();
+            resolve(result);
+          }
         })
         .catch((error) => {
-          clearTimeout(timeoutId);
-          cleanup();
-          reject(error);
+          if (!settled) {
+            settled = true;
+            clearTimeout(timeoutId);
+            cleanup();
+            reject(error);
+          }
         });
     });
   }
@@ -372,7 +423,7 @@ export class Thinker {
     // If needs more info, must have clarification question
     if (t.needsMoreInfo && typeof t.clarificationQuestion !== 'string') {
       throw new UnderstandingError(
-        'Invalid thought: needsMoreInfo true but no clarificationQuestion'
+        'Invalid thought: needsMoreInfo true but no clarificationQuestion',
       );
     }
   }
@@ -389,9 +440,6 @@ export class Thinker {
  * @param config - Optional configuration
  * @returns Configured Thinker instance
  */
-export function createThinker(
-  llm: ILLMClient,
-  config?: ThinkerConfig
-): Thinker {
+export function createThinker(llm: ILLMClient, config?: ThinkerConfig): Thinker {
   return new Thinker(llm, config);
 }

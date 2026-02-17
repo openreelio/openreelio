@@ -410,6 +410,7 @@ mod tauri_app {
                 // Project commands
                 $crate::ipc::create_project,
                 $crate::ipc::open_project,
+                $crate::ipc::close_project,
                 $crate::ipc::save_project,
                 $crate::ipc::get_project_info,
                 $crate::ipc::get_project_state,
@@ -709,6 +710,7 @@ mod tauri_app {
             // Project commands
             ipc::create_project,
             ipc::open_project,
+            ipc::close_project,
             ipc::save_project,
             ipc::get_project_info,
             ipc::get_project_state,

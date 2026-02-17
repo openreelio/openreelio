@@ -5,6 +5,8 @@
  * These types define the contract between all layers of the system.
  */
 
+import type { IMemoryStore } from '../ports/IMemoryStore';
+
 // =============================================================================
 // Agent State
 // =============================================================================
@@ -166,6 +168,40 @@ export interface ExecutionRecord {
   timestamp: number;
 }
 
+/**
+ * Failure details for rollback attempts.
+ */
+export interface RollbackFailure {
+  /** Undo tool that failed */
+  tool: string;
+  /** Step ID associated with the original successful operation */
+  sourceStepId: string;
+  /** Failure reason */
+  error: string;
+}
+
+/**
+ * Report emitted when rollback recovery is attempted.
+ */
+export interface RollbackReport {
+  /** Whether rollback was attempted */
+  attempted: boolean;
+  /** Total rollback candidates found */
+  candidateCount: number;
+  /** Number of rollback operations attempted */
+  attemptedCount: number;
+  /** Number of successful rollback operations */
+  succeededCount: number;
+  /** Number of failed rollback operations */
+  failedCount: number;
+  /** Number of skipped rollback operations (validation/missing tool) */
+  skippedCount: number;
+  /** Optional reason when rollback was skipped */
+  reason?: string;
+  /** Failure details for diagnostics */
+  failures: RollbackFailure[];
+}
+
 // =============================================================================
 // Observe Phase Types
 // =============================================================================
@@ -214,6 +250,7 @@ export type AgentEvent =
   | ThinkingStartEvent
   | ThinkingProgressEvent
   | ThinkingCompleteEvent
+  | ClarificationRequiredEvent
   | PlanningStartEvent
   | PlanningProgressEvent
   | PlanningCompleteEvent
@@ -248,6 +285,13 @@ export interface ThinkingProgressEvent {
 
 export interface ThinkingCompleteEvent {
   type: 'thinking_complete';
+  thought: Thought;
+  timestamp: number;
+}
+
+export interface ClarificationRequiredEvent {
+  type: 'clarification_required';
+  question: string;
   thought: Thought;
   timestamp: number;
 }
@@ -352,6 +396,10 @@ export interface SessionSummary {
   duration: number;
   /** Final state description */
   finalState: string;
+  /** Failure reason when session ended unsuccessfully */
+  failureReason?: string;
+  /** Rollback report when recovery was attempted */
+  rollbackReport?: RollbackReport;
 }
 
 // =============================================================================
@@ -398,6 +446,10 @@ export interface AgentContext {
   /** Sequence identifier */
   sequenceId?: string;
 
+  // Language policy
+  /** Language policy for user-facing natural language output */
+  languagePolicy?: LanguagePolicy;
+
   // Timeline state
   /** Current playhead position in seconds */
   playheadPosition: number;
@@ -429,6 +481,23 @@ export interface AgentContext {
   userPreferences: Record<string, unknown>;
   /** User corrections for learning */
   corrections: CorrectionRecord[];
+}
+
+/**
+ * Language policy used by agent prompts.
+ *
+ * This policy controls how the agent generates natural language while keeping
+ * structured command/tool identifiers language-agnostic.
+ */
+export interface LanguagePolicy {
+  /** UI language configured in application settings (BCP-47-like tag) */
+  uiLanguage: string;
+  /** Default output language for natural-language fields */
+  outputLanguage: string;
+  /** Whether the model should infer input language from user text */
+  detectInputLanguage: boolean;
+  /** Whether users can override output language per message */
+  allowUserLanguageOverride: boolean;
 }
 
 /**
@@ -516,6 +585,39 @@ export interface AgenticEngineConfig {
   /** Maximum retry attempts (default: 2) */
   maxRetries: number;
 
+  /** Enable deterministic fast-path parsing before Think/Plan (default: true) */
+  enableFastPath: boolean;
+
+  /** Minimum parser confidence required to execute fast path (default: 0.85) */
+  fastPathConfidenceThreshold: number;
+
+  /** Maximum total plan steps allowed per run across iterations (default: 60) */
+  maxStepsPerRun: number;
+
+  /** Maximum total tool calls allowed per run across iterations (default: 120) */
+  maxToolCallsPerRun: number;
+
+  /** Force approval when a plan contains destructive tools (default: true) */
+  requireApprovalForDestructiveActions: boolean;
+
+  /** Tool names considered destructive and requiring approval (default list) */
+  destructiveToolNames: string[];
+
+  /** Automatically attempt rollback when execution fails (default: true) */
+  enableAutoRollbackOnFailure: boolean;
+
+  /** Maximum rollback operations to attempt per failed run (default: 20) */
+  maxRollbackSteps: number;
+
+  /** Memory store adapter for operation/correction/preference retrieval */
+  memoryStore?: IMemoryStore;
+
+  /** Maximum recent operations loaded into context (default: 20) */
+  memoryRecentOperationsLimit: number;
+
+  /** Maximum corrections loaded into context (default: 20) */
+  memoryCorrectionsLimit: number;
+
   /**
    * Optional approval handler for human-in-the-loop workflows.
    *
@@ -559,6 +661,21 @@ export const DEFAULT_ENGINE_CONFIG: AgenticEngineConfig = {
   autoRetryOnFailure: true,
   maxRetries: 2,
   stopOnError: true,
+  enableFastPath: true,
+  fastPathConfidenceThreshold: 0.85,
+  maxStepsPerRun: 60,
+  maxToolCallsPerRun: 120,
+  requireApprovalForDestructiveActions: true,
+  destructiveToolNames: [
+    'delete_clip',
+    'delete_clips_in_range',
+    'delete_caption',
+  ],
+  enableAutoRollbackOnFailure: true,
+  maxRollbackSteps: 20,
+  memoryStore: undefined,
+  memoryRecentOperationsLimit: 20,
+  memoryCorrectionsLimit: 20,
 };
 
 // =============================================================================
@@ -598,7 +715,7 @@ export function createInitialState(
   sessionId: string,
   input: string,
   context: AgentContext,
-  config: AgenticEngineConfig
+  config: AgenticEngineConfig,
 ): AgentState {
   return {
     sessionId,
@@ -622,6 +739,7 @@ export function createInitialState(
 export function createEmptyContext(projectId: string): AgentContext {
   return {
     projectId,
+    languagePolicy: createLanguagePolicy('en'),
     playheadPosition: 0,
     timelineDuration: 0,
     selectedClips: [],
@@ -645,10 +763,7 @@ export function mergeConfig(partial?: PartialEngineConfig): AgenticEngineConfig 
 /**
  * Check if risk level requires approval
  */
-export function requiresApproval(
-  riskLevel: RiskLevel,
-  threshold: RiskLevel
-): boolean {
+export function requiresApproval(riskLevel: RiskLevel, threshold: RiskLevel): boolean {
   const levels: RiskLevel[] = ['low', 'medium', 'high', 'critical'];
   return levels.indexOf(riskLevel) >= levels.indexOf(threshold);
 }
@@ -659,4 +774,76 @@ export function requiresApproval(
 export function generateId(prefix: string = ''): string {
   const id = crypto.randomUUID();
   return prefix ? `${prefix}_${id}` : id;
+}
+
+/**
+ * Normalize a user or settings language tag into a stable form.
+ *
+ * - Accepts `en`, `ko`, `es`, `en-US`, `zh-Hant`, etc.
+ * - Converts underscores to hyphens.
+ * - Falls back to `en` if input is invalid.
+ */
+export function normalizeLanguageCode(
+  language: string | null | undefined,
+  fallback: string = 'en',
+): string {
+  const normalizedFallback = normalizeLanguageCore(fallback, 'en');
+  return normalizeLanguageCore(language, normalizedFallback);
+}
+
+/**
+ * Create a language policy with normalized codes and safe defaults.
+ */
+export function createLanguagePolicy(
+  uiLanguage: string,
+  overrides: Partial<LanguagePolicy> = {},
+): LanguagePolicy {
+  const resolvedUiLanguage = normalizeLanguageCode(overrides.uiLanguage ?? uiLanguage);
+  return {
+    uiLanguage: resolvedUiLanguage,
+    outputLanguage: normalizeLanguageCode(overrides.outputLanguage ?? resolvedUiLanguage),
+    detectInputLanguage: overrides.detectInputLanguage ?? true,
+    allowUserLanguageOverride: overrides.allowUserLanguageOverride ?? true,
+  };
+}
+
+function normalizeLanguageCore(rawLanguage: string | null | undefined, fallback: string): string {
+  if (!rawLanguage || typeof rawLanguage !== 'string') {
+    return fallback;
+  }
+
+  const compact = rawLanguage.trim().replace(/_/g, '-');
+  if (!compact) {
+    return fallback;
+  }
+
+  const parts = compact.split('-').filter(Boolean);
+  const primary = parts[0]?.toLowerCase();
+
+  if (!primary || !/^[a-z]{2,3}$/.test(primary)) {
+    return fallback;
+  }
+
+  const normalizedParts: string[] = [primary];
+  for (let i = 1; i < parts.length; i += 1) {
+    const part = parts[i];
+    if (/^[a-zA-Z]{2}$/.test(part) || /^[0-9]{3}$/.test(part)) {
+      normalizedParts.push(part.toUpperCase());
+      continue;
+    }
+
+    if (i === 1 && /^[a-zA-Z]{4}$/.test(part)) {
+      normalizedParts.push(part.charAt(0).toUpperCase() + part.slice(1).toLowerCase());
+      continue;
+    }
+
+    if (/^[a-zA-Z0-9]{2,8}$/.test(part)) {
+      normalizedParts.push(part.toLowerCase());
+      continue;
+    }
+
+    return fallback;
+  }
+
+  return normalizedParts.join('-');
 }

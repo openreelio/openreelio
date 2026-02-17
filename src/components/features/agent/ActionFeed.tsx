@@ -16,7 +16,12 @@ import type { AgentEvent, Thought } from '@/agents/engine';
  * Extended event types for backward compatibility
  * Includes both official types and simplified event format
  */
-type ExtendedAgentEvent = AgentEvent | PhaseChangedEvent | ToolCallStartEvent | ToolCallCompleteEvent | ErrorEvent;
+type ExtendedAgentEvent =
+  | AgentEvent
+  | PhaseChangedEvent
+  | ToolCallStartEvent
+  | ToolCallCompleteEvent
+  | ErrorEvent;
 
 interface PhaseChangedEvent {
   type: 'phase_changed';
@@ -86,6 +91,8 @@ function getEventIcon(event: ExtendedAgentEvent): string {
       return '◐';
     case 'thinking_complete':
       return '💭';
+    case 'clarification_required':
+      return '❓';
     case 'planning_complete':
       return '📋';
     case 'tool_call_start':
@@ -117,6 +124,8 @@ function getEventColor(event: ExtendedAgentEvent): string {
     case 'thinking_complete':
     case 'planning_complete':
       return 'text-green-400';
+    case 'clarification_required':
+      return 'text-yellow-400';
     case 'tool_call_start':
     case 'execution_start':
       return 'text-yellow-400';
@@ -150,6 +159,7 @@ function isPhaseEvent(event: ExtendedAgentEvent): boolean {
     'phase_changed',
     'thinking_start',
     'thinking_complete',
+    'clarification_required',
     'planning_start',
     'planning_complete',
   ].includes(event.type);
@@ -187,9 +197,10 @@ function EventItem({ event, compact }: EventItemProps) {
     <div
       className={`
         p-2 rounded-lg
-        ${isError
-          ? 'bg-red-500/10 border border-red-500/20'
-          : 'bg-surface-elevated border border-border-subtle'
+        ${
+          isError
+            ? 'bg-red-500/10 border border-red-500/20'
+            : 'bg-surface-elevated border border-border-subtle'
         }
       `}
     >
@@ -202,9 +213,7 @@ function EventItem({ event, compact }: EventItemProps) {
             </span>
             <span className="text-xs text-text-tertiary">{time}</span>
           </div>
-          {details && (
-            <p className="text-xs text-text-secondary mt-1">{details}</p>
-          )}
+          {details && <p className="text-xs text-text-secondary mt-1">{details}</p>}
         </div>
       </div>
     </div>
@@ -221,6 +230,8 @@ function getEventDescription(event: ExtendedAgentEvent): string {
       return 'Analyzing request...';
     case 'thinking_complete':
       return 'Analysis complete';
+    case 'clarification_required':
+      return 'Clarification required';
     case 'planning_start':
       return 'Creating plan...';
     case 'planning_complete':
@@ -250,6 +261,8 @@ function getEventDetails(event: ExtendedAgentEvent): string | null {
   switch (event.type) {
     case 'thinking_complete':
       return (event.thought as Thought).approach;
+    case 'clarification_required':
+      return event.question;
     case 'tool_call_start':
       return `Args: ${JSON.stringify(event.args)}`;
     case 'tool_call_complete':
@@ -314,10 +327,7 @@ export function ActionFeed({
 
   if (filteredEvents.length === 0) {
     return (
-      <div
-        data-testid="action-feed"
-        className={`p-4 text-center text-text-tertiary ${className}`}
-      >
+      <div data-testid="action-feed" className={`p-4 text-center text-text-tertiary ${className}`}>
         <p className="text-sm">No actions yet</p>
       </div>
     );

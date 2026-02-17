@@ -8,9 +8,10 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useAgenticLoop, trimDuplicatedTailUserMessageForContext } from './useAgenticLoop';
-import type { LLMMessage } from '@/agents/engine';
+import type { ILLMClient, LLMMessage } from '@/agents/engine';
 import { createMockLLMAdapter, createMockToolExecutor } from '@/agents/engine';
 import { useConversationStore } from '@/stores/conversationStore';
+import { isAgenticEngineEnabled } from '@/config/featureFlags';
 
 // Mock the feature flags
 vi.mock('@/config/featureFlags', () => ({
@@ -35,6 +36,7 @@ describe('useAgenticLoop', () => {
   beforeEach(() => {
     mockLLM = createMockLLMAdapter();
     mockToolExecutor = createMockToolExecutor();
+    vi.mocked(isAgenticEngineEnabled).mockReturnValue(true);
   });
 
   afterEach(() => {
@@ -48,7 +50,7 @@ describe('useAgenticLoop', () => {
         useAgenticLoop({
           llmClient: mockLLM,
           toolExecutor: mockToolExecutor,
-        })
+        }),
       );
 
       expect(result.current.phase).toBe('idle');
@@ -67,7 +69,7 @@ describe('useAgenticLoop', () => {
         useAgenticLoop({
           llmClient: mockLLM,
           toolExecutor: mockToolExecutor,
-        })
+        }),
       );
 
       expect(typeof result.current.run).toBe('function');
@@ -84,7 +86,7 @@ describe('useAgenticLoop', () => {
         useAgenticLoop({
           llmClient: mockLLM,
           toolExecutor: mockToolExecutor,
-        })
+        }),
       );
 
       // Reset should work even from initial state
@@ -105,7 +107,7 @@ describe('useAgenticLoop', () => {
         useAgenticLoop({
           llmClient: mockLLM,
           toolExecutor: mockToolExecutor,
-        })
+        }),
       );
 
       act(() => {
@@ -124,7 +126,7 @@ describe('useAgenticLoop', () => {
           llmClient: mockLLM,
           toolExecutor: mockToolExecutor,
           onAbort,
-        })
+        }),
       );
 
       act(() => {
@@ -141,7 +143,7 @@ describe('useAgenticLoop', () => {
         useAgenticLoop({
           llmClient: mockLLM,
           toolExecutor: mockToolExecutor,
-        })
+        }),
       );
 
       // isEnabled should exist in the return value
@@ -160,7 +162,7 @@ describe('useAgenticLoop', () => {
             selectedClips: ['clip-1'],
             playheadPosition: 5.5,
           },
-        })
+        }),
       );
 
       // Hook should initialize without errors
@@ -186,7 +188,7 @@ describe('useAgenticLoop', () => {
         useAgenticLoop({
           llmClient: mockLLM,
           toolExecutor: mockToolExecutor,
-        })
+        }),
       );
 
       // Should not throw when called (even without pending approval)
@@ -202,7 +204,7 @@ describe('useAgenticLoop', () => {
         useAgenticLoop({
           llmClient: mockLLM,
           toolExecutor: mockToolExecutor,
-        })
+        }),
       );
 
       // Should not throw when called (even without pending approval)
@@ -224,10 +226,58 @@ describe('useAgenticLoop', () => {
             maxIterations: 3,
             thinkingTimeout: 30000,
           },
-        })
+        }),
       );
 
       expect(result.current.phase).toBe('idle');
+    });
+  });
+
+  describe('provider pre-flight', () => {
+    it('refreshes provider status for refreshable clients before blocking run', async () => {
+      const refreshStatus = vi.fn(async () => {
+        return { isConfigured: true };
+      });
+
+      const isConfigured = vi.fn(() => false);
+
+      const refreshableClient = {
+        provider: 'test',
+        generateStream: async function* () {
+          yield '';
+        },
+        generateWithTools: async function* () {
+          yield { type: 'done' } as const;
+        },
+        generateStructured: async <T>() => ({}) as T,
+        complete: async () => ({
+          content: '',
+          finishReason: 'stop' as const,
+        }),
+        abort: () => {},
+        isGenerating: () => false,
+        isConfigured,
+        refreshStatus,
+      } satisfies ILLMClient & { refreshStatus: () => Promise<{ isConfigured: boolean }> };
+
+      const { result } = renderHook(() =>
+        useAgenticLoop({
+          llmClient: refreshableClient,
+          toolExecutor: mockToolExecutor,
+        }),
+      );
+
+      expect(result.current.isEnabled).toBe(true);
+
+      let runResult: unknown = null;
+
+      await act(async () => {
+        runResult = await result.current.run('Edit this clip');
+      });
+
+      expect(refreshStatus).toHaveBeenCalledTimes(1);
+      expect(runResult).toBeNull();
+      expect(result.current.error?.message).toContain('AI provider not configured');
     });
   });
 
@@ -248,7 +298,7 @@ describe('useAgenticLoop', () => {
           onError,
           onApprovalRequired,
           onAbort,
-        })
+        }),
       );
 
       // Hook should initialize without errors

@@ -47,6 +47,41 @@ const BAR_HEIGHT_NORMAL = 4;
 /** Seek bar height when hovering */
 const BAR_HEIGHT_HOVER = 6;
 
+function firstFiniteNumber(...candidates: unknown[]): number | null {
+  for (const candidate of candidates) {
+    const value =
+      typeof candidate === 'number'
+        ? candidate
+        : typeof candidate === 'string'
+          ? Number(candidate)
+          : Number.NaN;
+
+    if (Number.isFinite(value)) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function getPointerClientX(e: PointerEvent<HTMLDivElement>): number | null {
+  const nativeEvent = e.nativeEvent as Partial<globalThis.PointerEvent>;
+
+  return firstFiniteNumber(
+    e.clientX,
+    (e as { x?: unknown }).x,
+    e.pageX != null ? e.pageX - window.scrollX : undefined,
+    nativeEvent.clientX,
+    (nativeEvent as { x?: unknown }).x,
+    nativeEvent.pageX != null ? nativeEvent.pageX - window.scrollX : undefined,
+  );
+}
+
+function getPointerId(e: PointerEvent<HTMLDivElement>): number | null {
+  const nativeEvent = e.nativeEvent as Partial<globalThis.PointerEvent>;
+  return firstFiniteNumber(e.pointerId, nativeEvent.pointerId);
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -92,7 +127,7 @@ export function SeekBar({
       const percent = Math.max(0, Math.min(1, x / rect.width));
       return percent * duration;
     },
-    [duration]
+    [duration],
   );
 
   /**
@@ -120,7 +155,7 @@ export function SeekBar({
       const time = getTimeFromEvent(e.clientX);
       onSeek(time);
     },
-    [disabled, onSeek, isDragging, getTimeFromEvent]
+    [disabled, onSeek, isDragging, getTimeFromEvent],
   );
 
   /**
@@ -130,22 +165,32 @@ export function SeekBar({
     (e: PointerEvent<HTMLDivElement>) => {
       if (disabled || !onSeek) return;
 
+      const clientX = getPointerClientX(e);
+      if (clientX === null) {
+        return;
+      }
+
       e.preventDefault();
       e.stopPropagation();
       setIsDragging(true);
 
       // Capture pointer for smooth dragging outside element
       // Guard for test environments (jsdom) that don't support pointer capture
-      const target = e.target as HTMLElement;
-      if (typeof target.setPointerCapture === 'function') {
-        target.setPointerCapture(e.pointerId);
+      const target = e.currentTarget as HTMLElement;
+      const pointerId = getPointerId(e);
+      if (pointerId !== null && typeof target.setPointerCapture === 'function') {
+        try {
+          target.setPointerCapture(pointerId);
+        } catch {
+          // Ignore pointer capture failures in unsupported environments.
+        }
       }
 
       // Seek to clicked position immediately
-      const time = getTimeFromEvent(e.clientX);
+      const time = getTimeFromEvent(clientX);
       onSeek(time);
     },
-    [disabled, onSeek, getTimeFromEvent]
+    [disabled, onSeek, getTimeFromEvent],
   );
 
   /**
@@ -155,9 +200,14 @@ export function SeekBar({
     (e: PointerEvent<HTMLDivElement>) => {
       if (!containerRef.current) return;
 
+      const clientX = getPointerClientX(e);
+      if (clientX === null) {
+        return;
+      }
+
       // Update hover position for preview
-      const position = getPositionFromEvent(e.clientX);
-      const time = getTimeFromEvent(e.clientX);
+      const position = getPositionFromEvent(clientX);
+      const time = getTimeFromEvent(clientX);
       setHoverPosition(position);
       setHoverTime(time);
 
@@ -166,7 +216,7 @@ export function SeekBar({
         onSeek(time);
       }
     },
-    [isDragging, onSeek, disabled, getTimeFromEvent, getPositionFromEvent]
+    [isDragging, onSeek, disabled, getTimeFromEvent, getPositionFromEvent],
   );
 
   /**
@@ -177,13 +227,18 @@ export function SeekBar({
       if (!isDragging) return;
 
       // Guard for test environments (jsdom) that don't support pointer capture
-      const target = e.target as HTMLElement;
-      if (typeof target.releasePointerCapture === 'function') {
-        target.releasePointerCapture(e.pointerId);
+      const target = e.currentTarget as HTMLElement;
+      const pointerId = getPointerId(e);
+      if (pointerId !== null && typeof target.releasePointerCapture === 'function') {
+        try {
+          target.releasePointerCapture(pointerId);
+        } catch {
+          // Ignore pointer capture release errors in unsupported environments.
+        }
       }
       setIsDragging(false);
     },
-    [isDragging]
+    [isDragging],
   );
 
   /**

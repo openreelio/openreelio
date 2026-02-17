@@ -13,13 +13,60 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
 
+vi.mock('./storeAccessor', () => ({
+  getTimelineSnapshot: vi.fn(),
+}));
+
 import { invoke } from '@tauri-apps/api/core';
+import { getTimelineSnapshot } from './storeAccessor';
 
 const mockInvoke = vi.mocked(invoke);
+const mockGetTimelineSnapshot = vi.mocked(getTimelineSnapshot);
 
 describe('editingTools', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetTimelineSnapshot.mockReturnValue({
+      sequenceId: 'seq_001',
+      sequenceName: 'Test',
+      duration: 60,
+      trackCount: 1,
+      clipCount: 2,
+      tracks: [],
+      clips: [
+        {
+          id: 'clip_001',
+          assetId: 'asset_001',
+          trackId: 'track_001',
+          timelineIn: 5,
+          duration: 8,
+          sourceIn: 0,
+          sourceOut: 8,
+          speed: 1,
+          opacity: 1,
+          hasEffects: false,
+          effectCount: 0,
+          label: undefined,
+        },
+        {
+          id: 'clip_002',
+          assetId: 'asset_002',
+          trackId: 'track_001',
+          timelineIn: 18,
+          duration: 6,
+          sourceIn: 0,
+          sourceOut: 6,
+          speed: 1,
+          opacity: 1,
+          hasEffects: false,
+          effectCount: 0,
+          label: undefined,
+        },
+      ],
+      selectedClipIds: [],
+      selectedTrackIds: [],
+      playheadPosition: 0,
+    });
     globalToolRegistry.clear();
     registerEditingTools();
   });
@@ -34,6 +81,7 @@ describe('editingTools', () => {
       expect(globalToolRegistry.has('trim_clip')).toBe(true);
       expect(globalToolRegistry.has('split_clip')).toBe(true);
       expect(globalToolRegistry.has('delete_clip')).toBe(true);
+      expect(globalToolRegistry.has('delete_clips_in_range')).toBe(true);
       expect(globalToolRegistry.has('insert_clip')).toBe(true);
     });
 
@@ -258,6 +306,57 @@ describe('editingTools', () => {
           timelineStart: 0,
         },
       });
+    });
+  });
+
+  describe('delete_clips_in_range', () => {
+    it('should have correct parameters', () => {
+      const tool = globalToolRegistry.get('delete_clips_in_range');
+      expect(tool).toBeDefined();
+      expect(tool?.parameters.required).toContain('sequenceId');
+      expect(tool?.parameters.required).toContain('startTime');
+      expect(tool?.parameters.required).toContain('endTime');
+    });
+
+    it('should remove overlapping clips in descending timeline order', async () => {
+      mockInvoke.mockResolvedValue({ opId: 'op-range', success: true });
+
+      const result = await globalToolRegistry.execute('delete_clips_in_range', {
+        sequenceId: 'seq_001',
+        startTime: 4,
+        endTime: 20,
+      });
+
+      expect(result.success).toBe(true);
+      expect(mockInvoke).toHaveBeenCalledTimes(2);
+      expect(mockInvoke).toHaveBeenNthCalledWith(1, 'execute_command', {
+        commandType: 'RemoveClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          clipId: 'clip_002',
+        },
+      });
+      expect(mockInvoke).toHaveBeenNthCalledWith(2, 'execute_command', {
+        commandType: 'RemoveClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          clipId: 'clip_001',
+        },
+      });
+    });
+
+    it('should reject invalid ranges', async () => {
+      const result = await globalToolRegistry.execute('delete_clips_in_range', {
+        sequenceId: 'seq_001',
+        startTime: 10,
+        endTime: 5,
+      });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Invalid range');
+      expect(mockInvoke).not.toHaveBeenCalled();
     });
   });
 

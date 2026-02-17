@@ -15,12 +15,8 @@ import {
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
-import type { Track, Clip } from '@/types';
-import {
-  createMockClip,
-  createMockTrack,
-  createMockSequence,
-} from '@/test/mocks';
+import type { Track, Clip, Asset } from '@/types';
+import { createMockAsset, createMockClip, createMockTrack, createMockSequence } from '@/test/mocks';
 
 // =============================================================================
 // Test Helpers
@@ -39,14 +35,20 @@ function createTrack(overrides: Partial<Track> & { id: string }): Track {
   });
 }
 
+function createAsset(overrides: Partial<Asset> & { id: string }): Asset {
+  return createMockAsset(overrides);
+}
+
 function setupStores(options: {
   tracks?: Track[];
+  assets?: Asset[];
   selectedClipIds?: string[];
   selectedTrackIds?: string[];
   currentTime?: number;
   duration?: number;
 }) {
   const tracks = options.tracks ?? [];
+  const assets = options.assets ?? [];
   const sequence = createMockSequence({
     id: 'seq_001',
     name: 'Test Sequence',
@@ -56,7 +58,7 @@ function setupStores(options: {
   useProjectStore.setState({
     activeSequenceId: 'seq_001',
     sequences: new Map([['seq_001', sequence]]),
-    assets: new Map(),
+    assets: new Map(assets.map((asset) => [asset.id, asset])),
     isLoaded: true,
   });
 
@@ -72,7 +74,7 @@ function setupStores(options: {
 }
 
 function expectToolSuccess<T>(
-  result: ToolExecutionResult
+  result: ToolExecutionResult,
 ): asserts result is ToolExecutionResult & { success: true; result: T } {
   expect(result.success).toBe(true);
   expect(result.result).not.toBeUndefined();
@@ -118,6 +120,9 @@ describe('analysisTools', () => {
 
   describe('registration', () => {
     it('should register all analysis tools', () => {
+      expect(globalToolRegistry.has('get_asset_catalog')).toBe(true);
+      expect(globalToolRegistry.has('get_unused_assets')).toBe(true);
+      expect(globalToolRegistry.has('get_asset_info')).toBe(true);
       expect(globalToolRegistry.has('get_timeline_info')).toBe(true);
       expect(globalToolRegistry.has('find_clips_by_asset')).toBe(true);
       expect(globalToolRegistry.has('find_gaps')).toBe(true);
@@ -133,22 +138,109 @@ describe('analysisTools', () => {
 
     it('should register tools in analysis category', () => {
       const analysisTools = globalToolRegistry.listByCategory('analysis');
-      expect(analysisTools.length).toBe(11);
+      expect(analysisTools.length).toBe(14);
     });
 
     it('should return correct tool names', () => {
       const names = getAnalysisToolNames();
+      expect(names).toContain('get_asset_catalog');
+      expect(names).toContain('get_unused_assets');
+      expect(names).toContain('get_asset_info');
       expect(names).toContain('get_timeline_info');
       expect(names).toContain('list_all_clips');
       expect(names).toContain('get_playhead_position');
-      expect(names).toHaveLength(11);
+      expect(names).toHaveLength(14);
     });
 
     it('should unregister all tools', () => {
       unregisterAnalysisTools();
+      expect(globalToolRegistry.has('get_asset_catalog')).toBe(false);
       expect(globalToolRegistry.has('get_timeline_info')).toBe(false);
       expect(globalToolRegistry.has('list_all_clips')).toBe(false);
       expect(globalToolRegistry.has('get_playhead_position')).toBe(false);
+    });
+  });
+
+  // ===========================================================================
+  // Asset source-discovery tools
+  // ===========================================================================
+
+  describe('asset source-discovery tools', () => {
+    it('get_asset_catalog should include timeline usage and counts', async () => {
+      const clipA = createClip({ id: 'clipA', assetId: 'video_used' });
+      const clipB = createClip({ id: 'clipB', assetId: 'video_used' });
+
+      setupStores({
+        tracks: [createTrack({ id: 'V1', clips: [clipA, clipB] })],
+        assets: [
+          createAsset({ id: 'video_used', kind: 'video', importedAt: '2026-01-01T00:00:00.000Z' }),
+          createAsset({
+            id: 'video_unused',
+            kind: 'video',
+            importedAt: '2026-01-02T00:00:00.000Z',
+          }),
+          createAsset({
+            id: 'audio_unused',
+            kind: 'audio',
+            importedAt: '2026-01-03T00:00:00.000Z',
+          }),
+        ],
+      });
+
+      const result = await globalToolRegistry.execute('get_asset_catalog', {});
+      const catalog = getToolResult<{
+        totalAssetCount: number;
+        unusedAssetCount: number;
+        assets: Array<{ id: string; timelineClipCount: number; onTimeline: boolean }>;
+      }>(result);
+
+      expect(catalog.totalAssetCount).toBe(3);
+      expect(catalog.unusedAssetCount).toBe(2);
+
+      const used = catalog.assets.find((asset) => asset.id === 'video_used');
+      expect(used?.timelineClipCount).toBe(2);
+      expect(used?.onTimeline).toBe(true);
+    });
+
+    it('get_unused_assets should filter by kind when provided', async () => {
+      const clipA = createClip({ id: 'clipA', assetId: 'video_used' });
+
+      setupStores({
+        tracks: [createTrack({ id: 'V1', clips: [clipA] })],
+        assets: [
+          createAsset({ id: 'video_used', kind: 'video' }),
+          createAsset({ id: 'video_unused', kind: 'video' }),
+          createAsset({ id: 'audio_unused', kind: 'audio' }),
+        ],
+      });
+
+      const allResult = await globalToolRegistry.execute('get_unused_assets', {});
+      const allUnused = getToolResult<Array<{ id: string }>>(allResult);
+      expect(allUnused.map((asset) => asset.id).sort()).toEqual(['audio_unused', 'video_unused']);
+
+      const filteredResult = await globalToolRegistry.execute('get_unused_assets', {
+        kind: 'video',
+      });
+      const videoOnly = getToolResult<Array<{ id: string }>>(filteredResult);
+      expect(videoOnly.map((asset) => asset.id)).toEqual(['video_unused']);
+    });
+
+    it('get_asset_info should return asset details and fail for missing asset', async () => {
+      setupStores({
+        tracks: [],
+        assets: [createAsset({ id: 'asset_1', name: 'broll.mp4', kind: 'video' })],
+      });
+
+      const result = await globalToolRegistry.execute('get_asset_info', { assetId: 'asset_1' });
+      const asset = getToolResult<{ id: string; name: string }>(result);
+      expect(asset.id).toBe('asset_1');
+      expect(asset.name).toBe('broll.mp4');
+
+      const missingResult = await globalToolRegistry.execute('get_asset_info', {
+        assetId: 'missing_asset',
+      });
+      expect(missingResult.success).toBe(false);
+      expect(missingResult.error).toContain('not found');
     });
   });
 
@@ -158,9 +250,21 @@ describe('analysisTools', () => {
 
   describe('get_timeline_info', () => {
     it('should return timeline state with 2 tracks and 3 clips', async () => {
-      const clipA = createClip({ id: 'clipA', assetId: 'asset1', place: { timelineInSec: 0, durationSec: 5 } });
-      const clipB = createClip({ id: 'clipB', assetId: 'asset1', place: { timelineInSec: 5, durationSec: 5 } });
-      const clipC = createClip({ id: 'clipC', assetId: 'asset2', place: { timelineInSec: 0, durationSec: 10 } });
+      const clipA = createClip({
+        id: 'clipA',
+        assetId: 'asset1',
+        place: { timelineInSec: 0, durationSec: 5 },
+      });
+      const clipB = createClip({
+        id: 'clipB',
+        assetId: 'asset1',
+        place: { timelineInSec: 5, durationSec: 5 },
+      });
+      const clipC = createClip({
+        id: 'clipC',
+        assetId: 'asset2',
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
 
       setupStores({
         tracks: [
@@ -202,17 +306,26 @@ describe('analysisTools', () => {
 
   describe('list_all_clips', () => {
     it('should return all clips across all tracks', async () => {
-      const clipA = createClip({ id: 'clipA', assetId: 'asset1', place: { timelineInSec: 0, durationSec: 5 } });
-      const clipB = createClip({ id: 'clipB', assetId: 'asset1', place: { timelineInSec: 5, durationSec: 5 } });
+      const clipA = createClip({
+        id: 'clipA',
+        assetId: 'asset1',
+        place: { timelineInSec: 0, durationSec: 5 },
+      });
+      const clipB = createClip({
+        id: 'clipB',
+        assetId: 'asset1',
+        place: { timelineInSec: 5, durationSec: 5 },
+      });
 
       setupStores({
         tracks: [createTrack({ id: 'V1', clips: [clipA, clipB] })],
       });
 
       const result = await globalToolRegistry.execute('list_all_clips', {});
-      const clips = getToolResult<
-        Array<{ id: string; trackId: string; timelineIn: number; duration: number }>
-      >(result);
+      const clips =
+        getToolResult<Array<{ id: string; trackId: string; timelineIn: number; duration: number }>>(
+          result,
+        );
       expect(clips).toHaveLength(2);
       expect(clips[0].id).toBe('clipA');
       expect(clips[0].trackId).toBe('V1');
@@ -239,9 +352,7 @@ describe('analysisTools', () => {
       });
 
       const result = await globalToolRegistry.execute('list_tracks', {});
-      const tracks = getToolResult<
-        Array<{ id: string; kind: string; clipCount: number }>
-      >(result);
+      const tracks = getToolResult<Array<{ id: string; kind: string; clipCount: number }>>(result);
       expect(tracks).toHaveLength(2);
       expect(tracks[0].id).toBe('V1');
       expect(tracks[0].clipCount).toBe(1);
@@ -308,12 +419,14 @@ describe('analysisTools', () => {
       });
 
       const result = await globalToolRegistry.execute('find_gaps', {});
-      const gaps = getToolResult<Array<{
-        trackId: string;
-        startTime: number;
-        endTime: number;
-        duration: number;
-      }>>(result);
+      const gaps = getToolResult<
+        Array<{
+          trackId: string;
+          startTime: number;
+          endTime: number;
+          duration: number;
+        }>
+      >(result);
       expect(gaps).toHaveLength(1);
       expect(gaps[0]).toEqual({
         trackId: 'V1',

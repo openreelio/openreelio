@@ -46,6 +46,13 @@ export function ThinkingPartRenderer({ part, className = '' }: ThinkingPartRende
             <p className="text-sm text-text-primary">{thought.approach}</p>
           </div>
 
+          {thought.needsMoreInfo && thought.clarificationQuestion && (
+            <div className="p-2 rounded-md bg-yellow-500/10 border border-yellow-500/20">
+              <div className="text-xs font-medium text-yellow-300 mb-1">Clarification Needed</div>
+              <p className="text-sm text-yellow-200">{thought.clarificationQuestion}</p>
+            </div>
+          )}
+
           {thought.requirements.length > 0 && (
             <div>
               <div className="text-xs font-medium text-text-tertiary mb-1">Requirements</div>

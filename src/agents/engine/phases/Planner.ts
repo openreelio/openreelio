@@ -15,7 +15,14 @@
 
 import type { ILLMClient, LLMMessage } from '../ports/ILLMClient';
 import type { IToolExecutor } from '../ports/IToolExecutor';
-import type { AgentContext, Thought, Plan, PlanStep, RiskLevel } from '../core/types';
+import type {
+  AgentContext,
+  LanguagePolicy,
+  Thought,
+  Plan,
+  PlanStep,
+  RiskLevel,
+} from '../core/types';
 import { PlanningTimeoutError, PlanValidationError } from '../core/errors';
 
 // =============================================================================
@@ -74,11 +81,7 @@ export class Planner {
   private readonly config: Required<PlannerConfig>;
   private abortController: AbortController | null = null;
 
-  constructor(
-    llm: ILLMClient,
-    toolExecutor: IToolExecutor,
-    config: PlannerConfig = {}
-  ) {
+  constructor(llm: ILLMClient, toolExecutor: IToolExecutor, config: PlannerConfig = {}) {
     this.llm = llm;
     this.toolExecutor = toolExecutor;
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -107,7 +110,7 @@ export class Planner {
     try {
       const plan = await this.executeWithTimeout(
         () => this.llm.generateStructured<Plan>(messages, schema),
-        this.config.timeout
+        this.config.timeout,
       );
 
       // Validate the plan
@@ -123,7 +126,7 @@ export class Planner {
       }
       throw new PlanValidationError(
         `Failed to generate plan: ${error instanceof Error ? error.message : String(error)}`,
-        []
+        [],
       );
     } finally {
       this.abortController = null;
@@ -142,7 +145,7 @@ export class Planner {
     thought: Thought,
     context: AgentContext,
     onProgress: (chunk: string) => void,
-    history?: LLMMessage[]
+    history?: LLMMessage[],
   ): Promise<Plan> {
     this.abortController = new AbortController();
 
@@ -171,7 +174,7 @@ export class Planner {
     } catch (error) {
       throw new PlanValidationError(
         `Failed to generate plan with streaming: ${error instanceof Error ? error.message : String(error)}`,
-        []
+        [],
       );
     } finally {
       this.abortController = null;
@@ -195,12 +198,14 @@ export class Planner {
   /**
    * Build messages for LLM including system prompt, optional history, and thought context
    */
-  private buildMessages(thought: Thought, context: AgentContext, history?: LLMMessage[]): LLMMessage[] {
+  private buildMessages(
+    thought: Thought,
+    context: AgentContext,
+    history?: LLMMessage[],
+  ): LLMMessage[] {
     const systemPrompt = this.buildSystemPrompt(context);
     const userPrompt = this.buildUserPrompt(thought);
-    const messages: LLMMessage[] = [
-      { role: 'system', content: systemPrompt },
-    ];
+    const messages: LLMMessage[] = [{ role: 'system', content: systemPrompt }];
 
     // Insert conversation history between system prompt and current input
     if (history && history.length > 0) {
@@ -252,6 +257,8 @@ export class Planner {
       }
     }
 
+    this.appendLanguagePolicyInstructions(parts, context.languagePolicy);
+
     parts.push('');
     parts.push('Planning Guidelines:');
     parts.push('1. Break down complex tasks into ordered steps');
@@ -260,8 +267,32 @@ export class Planner {
     parts.push('4. Set requiresApproval=true for high-risk or destructive operations');
     parts.push('5. Provide a rollback strategy in case of failure');
     parts.push(`6. Maximum ${this.config.maxSteps} steps allowed`);
+    parts.push(
+      '7. When the request references source footage discovery or selecting moments, include source-aware analysis steps before edit actions (for example: catalog/unused-asset checks).',
+    );
 
     return parts.join('\n');
+  }
+
+  private appendLanguagePolicyInstructions(parts: string[], languagePolicy?: LanguagePolicy): void {
+    if (!languagePolicy) {
+      return;
+    }
+
+    parts.push('');
+    parts.push('Language Policy:');
+    parts.push(`- UI language: ${languagePolicy.uiLanguage}`);
+    parts.push(`- Default output language: ${languagePolicy.outputLanguage}`);
+    parts.push(
+      `- Detect input language: ${languagePolicy.detectInputLanguage ? 'enabled' : 'disabled'}`,
+    );
+    parts.push(
+      `- User language override: ${languagePolicy.allowUserLanguageOverride ? 'allowed' : 'disallowed'}`,
+    );
+    parts.push(
+      '- Keep natural-language fields (goal, step descriptions, rollback strategy) in the default output language unless user explicitly asks otherwise.',
+    );
+    parts.push('- Never translate tool names, IDs, argument keys, or JSON schema keys.');
   }
 
   /**
@@ -335,13 +366,7 @@ export class Planner {
           description: 'Strategy for rolling back if execution fails',
         },
       },
-      required: [
-        'goal',
-        'steps',
-        'estimatedTotalDuration',
-        'requiresApproval',
-        'rollbackStrategy',
-      ],
+      required: ['goal', 'steps', 'estimatedTotalDuration', 'requiresApproval', 'rollbackStrategy'],
     };
   }
 
@@ -386,10 +411,9 @@ export class Planner {
 
     // Validate step count
     if (steps.length > this.config.maxSteps) {
-      throw new PlanValidationError(
-        `Plan exceeds maximum step limit of ${this.config.maxSteps}`,
-        [`Got ${steps.length} steps, maximum is ${this.config.maxSteps}`]
-      );
+      throw new PlanValidationError(`Plan exceeds maximum step limit of ${this.config.maxSteps}`, [
+        `Got ${steps.length} steps, maximum is ${this.config.maxSteps}`,
+      ]);
     }
 
     // Validate each step
@@ -413,11 +437,7 @@ export class Planner {
   /**
    * Validate a single step
    */
-  private validateStep(
-    step: unknown,
-    index: number,
-    existingIds: Set<string>
-  ): string[] {
+  private validateStep(step: unknown, index: number, existingIds: Set<string>): string[] {
     const errors: string[] = [];
 
     if (!step || typeof step !== 'object') {
@@ -448,7 +468,9 @@ export class Planner {
         const args = (s.args ?? {}) as Record<string, unknown>;
         const validation = this.toolExecutor.validateArgs(s.tool, args);
         if (!validation.valid) {
-          errors.push(`Step ${index}: invalid arguments for '${s.tool}': ${validation.errors.join(', ')}`);
+          errors.push(
+            `Step ${index}: invalid arguments for '${s.tool}': ${validation.errors.join(', ')}`,
+          );
         }
       }
     }
@@ -542,36 +564,61 @@ export class Planner {
   /**
    * Execute operation with timeout
    */
-  private async executeWithTimeout<T>(
-    operation: () => Promise<T>,
-    timeout: number
-  ): Promise<T> {
+  private async executeWithTimeout<T>(operation: () => Promise<T>, timeout: number): Promise<T> {
     return new Promise<T>((resolve, reject) => {
+      let settled = false;
+
       const timeoutId = setTimeout(() => {
-        this.abort();
-        reject(new PlanningTimeoutError(timeout));
+        if (!settled) {
+          settled = true;
+          this.abort();
+          reject(new PlanningTimeoutError(timeout));
+        }
       }, timeout);
 
+      const abortHandler = () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeoutId);
+          reject(new PlanningTimeoutError(timeout));
+        }
+      };
+
       if (this.abortController?.signal.aborted) {
+        settled = true;
         clearTimeout(timeoutId);
         reject(new PlanningTimeoutError(timeout));
         return;
       }
 
+      const signal = this.abortController?.signal;
+      if (signal) {
+        signal.addEventListener('abort', abortHandler);
+      }
+
+      const cleanup = () => {
+        if (signal) {
+          signal.removeEventListener('abort', abortHandler);
+        }
+      };
+
       operation()
         .then((result) => {
-          clearTimeout(timeoutId);
-          resolve(result);
+          if (!settled) {
+            settled = true;
+            clearTimeout(timeoutId);
+            cleanup();
+            resolve(result);
+          }
         })
         .catch((error) => {
-          clearTimeout(timeoutId);
-          reject(error);
+          if (!settled) {
+            settled = true;
+            clearTimeout(timeoutId);
+            cleanup();
+            reject(error);
+          }
         });
-
-      this.abortController?.signal.addEventListener('abort', () => {
-        clearTimeout(timeoutId);
-        reject(new PlanningTimeoutError(timeout));
-      });
     });
   }
 }
@@ -591,7 +638,7 @@ export class Planner {
 export function createPlanner(
   llm: ILLMClient,
   toolExecutor: IToolExecutor,
-  config?: PlannerConfig
+  config?: PlannerConfig,
 ): Planner {
   return new Planner(llm, toolExecutor, config);
 }

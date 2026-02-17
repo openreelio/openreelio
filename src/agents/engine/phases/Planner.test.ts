@@ -6,15 +6,10 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { Planner, createPlanner } from './Planner';
+import { createMockLLMAdapter, type MockLLMAdapter } from '../adapters/llm/MockLLMAdapter';
+import { createMockToolExecutor, type MockToolExecutor } from '../adapters/tools/MockToolExecutor';
 import {
-  createMockLLMAdapter,
-  type MockLLMAdapter,
-} from '../adapters/llm/MockLLMAdapter';
-import {
-  createMockToolExecutor,
-  type MockToolExecutor,
-} from '../adapters/tools/MockToolExecutor';
-import {
+  createLanguagePolicy,
   createEmptyContext,
   type AgentContext,
   type Thought,
@@ -246,9 +241,7 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      await expect(planner.plan(sampleThought, context)).rejects.toThrow(
-        PlanValidationError
-      );
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
     });
 
     it('should validate step dependencies are valid', async () => {
@@ -272,9 +265,7 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      await expect(planner.plan(sampleThought, context)).rejects.toThrow(
-        PlanValidationError
-      );
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
     });
 
     it('should detect circular dependencies', async () => {
@@ -307,9 +298,7 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      await expect(planner.plan(sampleThought, context)).rejects.toThrow(
-        PlanValidationError
-      );
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
     });
 
     it('should include thought context in LLM request', async () => {
@@ -332,7 +321,7 @@ describe('Planner', () => {
       const hasThoughtContent = messages.some(
         (m) =>
           m.content.includes(sampleThought.understanding) ||
-          m.content.includes(sampleThought.approach)
+          m.content.includes(sampleThought.approach),
       );
       expect(hasThoughtContent).toBe(true);
     });
@@ -355,6 +344,33 @@ describe('Planner', () => {
 
       expect(systemMessage?.content).toContain('split_clip');
       expect(systemMessage?.content).toContain('move_clip');
+      expect(systemMessage?.content).toContain('source-aware analysis steps');
+    });
+
+    it('should include language policy instructions in planning prompt', async () => {
+      const mockPlan: Plan = {
+        goal: 'Plan with language policy',
+        steps: [],
+        estimatedTotalDuration: 0,
+        requiresApproval: false,
+        rollbackStrategy: 'N/A',
+      };
+
+      context.languagePolicy = createLanguagePolicy('en', {
+        outputLanguage: 'ko',
+        detectInputLanguage: true,
+      });
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await planner.plan(sampleThought, context);
+
+      const request = mockLLM.getLastRequest();
+      const systemMessage = request?.messages.find((m) => m.role === 'system');
+
+      expect(systemMessage?.content).toContain('Language Policy:');
+      expect(systemMessage?.content).toContain('Default output language: ko');
+      expect(systemMessage?.content).toContain('Never translate tool names, IDs, argument keys');
     });
   });
 
@@ -386,10 +402,8 @@ describe('Planner', () => {
 
       const progressChunks: string[] = [];
 
-      const result = await planner.planWithStreaming(
-        sampleThought,
-        context,
-        (chunk) => progressChunks.push(chunk)
+      const result = await planner.planWithStreaming(sampleThought, context, (chunk) =>
+        progressChunks.push(chunk),
       );
 
       expect(progressChunks.length).toBeGreaterThan(0);
@@ -474,9 +488,9 @@ describe('Planner', () => {
         delay: 100,
       });
 
-      await expect(
-        shortTimeoutPlanner.plan(sampleThought, context)
-      ).rejects.toThrow(PlanningTimeoutError);
+      await expect(shortTimeoutPlanner.plan(sampleThought, context)).rejects.toThrow(
+        PlanningTimeoutError,
+      );
     });
 
     it('should throw PlanValidationError on malformed response', async () => {
@@ -484,9 +498,7 @@ describe('Planner', () => {
         structured: { invalid: 'response' },
       });
 
-      await expect(planner.plan(sampleThought, context)).rejects.toThrow(
-        PlanValidationError
-      );
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
     });
 
     it('should throw on LLM error', async () => {
@@ -579,9 +591,7 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      await expect(
-        customPlanner.plan(sampleThought, context)
-      ).rejects.toThrow(PlanValidationError);
+      await expect(customPlanner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
     });
   });
 
@@ -686,9 +696,7 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      await expect(planner.plan(sampleThought, context)).rejects.toThrow(
-        PlanValidationError
-      );
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
     });
 
     it('should validate tool arguments against schema', async () => {
@@ -711,9 +719,7 @@ describe('Planner', () => {
 
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
-      await expect(planner.plan(sampleThought, context)).rejects.toThrow(
-        PlanValidationError
-      );
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
     });
   });
 });

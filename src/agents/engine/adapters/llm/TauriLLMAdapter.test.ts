@@ -6,10 +6,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import {
-  TauriLLMAdapter,
-  createTauriLLMAdapter,
-} from './TauriLLMAdapter';
+import { TauriLLMAdapter, createTauriLLMAdapter } from './TauriLLMAdapter';
 import type { LLMMessage } from '../../ports/ILLMClient';
 
 // Mock Tauri invoke
@@ -63,6 +60,51 @@ describe('TauriLLMAdapter', () => {
       await adapter.refreshStatus();
       expect(adapter.isConfigured()).toBe(true);
     });
+
+    it('should attempt vault sync when status is not configured', async () => {
+      mockInvoke
+        .mockResolvedValueOnce({
+          providerType: 'openai',
+          isConfigured: false,
+          isAvailable: false,
+          currentModel: null,
+          availableModels: [],
+          errorMessage: 'not configured',
+        })
+        .mockResolvedValueOnce({
+          providerType: 'openai',
+          isConfigured: true,
+          isAvailable: true,
+          currentModel: 'gpt-4.1-mini',
+          availableModels: ['gpt-4.1-mini'],
+          errorMessage: null,
+        });
+
+      const status = await adapter.refreshStatus();
+
+      expect(mockInvoke).toHaveBeenNthCalledWith(1, 'get_ai_provider_status');
+      expect(mockInvoke).toHaveBeenNthCalledWith(2, 'sync_ai_from_vault');
+      expect(status.isConfigured).toBe(true);
+      expect(adapter.isConfigured()).toBe(true);
+    });
+
+    it('should return original status when vault sync fails', async () => {
+      mockInvoke
+        .mockResolvedValueOnce({
+          providerType: 'openai',
+          isConfigured: false,
+          isAvailable: false,
+          currentModel: null,
+          availableModels: [],
+          errorMessage: 'not configured',
+        })
+        .mockRejectedValueOnce(new Error('vault unavailable'));
+
+      const status = await adapter.refreshStatus();
+
+      expect(status.isConfigured).toBe(false);
+      expect(adapter.isConfigured()).toBe(false);
+    });
   });
 
   describe('complete', () => {
@@ -73,17 +115,18 @@ describe('TauriLLMAdapter', () => {
         needsConfirmation: false,
       });
 
-      const messages: LLMMessage[] = [
-        { role: 'user', content: 'Hello' },
-      ];
+      const messages: LLMMessage[] = [{ role: 'user', content: 'Hello' }];
 
       const result = await adapter.complete(messages);
 
-      expect(mockInvoke).toHaveBeenCalledWith('chat_with_ai', expect.objectContaining({
-        messages: expect.arrayContaining([
-          expect.objectContaining({ role: 'user', content: 'Hello' }),
-        ]),
-      }));
+      expect(mockInvoke).toHaveBeenCalledWith(
+        'chat_with_ai',
+        expect.objectContaining({
+          messages: expect.arrayContaining([
+            expect.objectContaining({ role: 'user', content: 'Hello' }),
+          ]),
+        }),
+      );
       expect(result.content).toBe('Hello! How can I help you?');
       expect(result.finishReason).toBe('stop');
     });
@@ -94,25 +137,24 @@ describe('TauriLLMAdapter', () => {
         actions: null,
       });
 
-      const messages: LLMMessage[] = [
-        { role: 'user', content: 'What do I have selected?' },
-      ];
+      const messages: LLMMessage[] = [{ role: 'user', content: 'What do I have selected?' }];
 
       await adapter.complete(messages, {
         systemPrompt: 'You are a helpful assistant.',
       });
 
-      expect(mockInvoke).toHaveBeenCalledWith('chat_with_ai', expect.objectContaining({
-        context: expect.any(Object),
-      }));
+      expect(mockInvoke).toHaveBeenCalledWith(
+        'chat_with_ai',
+        expect.objectContaining({
+          context: expect.any(Object),
+        }),
+      );
     });
 
     it('should handle backend errors', async () => {
       mockInvoke.mockRejectedValueOnce(new Error('No provider configured'));
 
-      const messages: LLMMessage[] = [
-        { role: 'user', content: 'Hello' },
-      ];
+      const messages: LLMMessage[] = [{ role: 'user', content: 'Hello' }];
 
       await expect(adapter.complete(messages)).rejects.toThrow('No provider configured');
     });
@@ -130,9 +172,7 @@ describe('TauriLLMAdapter', () => {
         needsConfirmation: true,
       });
 
-      const messages: LLMMessage[] = [
-        { role: 'user', content: 'Split the clip at 5 seconds' },
-      ];
+      const messages: LLMMessage[] = [{ role: 'user', content: 'Split the clip at 5 seconds' }];
 
       const result = await adapter.complete(messages);
 
@@ -150,9 +190,7 @@ describe('TauriLLMAdapter', () => {
         actions: null,
       });
 
-      const messages: LLMMessage[] = [
-        { role: 'user', content: 'Hello' },
-      ];
+      const messages: LLMMessage[] = [{ role: 'user', content: 'Hello' }];
 
       const chunks: string[] = [];
       for await (const chunk of adapter.generateStream(messages)) {
@@ -165,16 +203,21 @@ describe('TauriLLMAdapter', () => {
     });
 
     it('should handle abort during stream', async () => {
-      mockInvoke.mockImplementation(() =>
-        new Promise((resolve) => setTimeout(() => resolve({
-          message: 'Long response',
-          actions: null,
-        }), 100))
+      mockInvoke.mockImplementation(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(
+              () =>
+                resolve({
+                  message: 'Long response',
+                  actions: null,
+                }),
+              100,
+            ),
+          ),
       );
 
-      const messages: LLMMessage[] = [
-        { role: 'user', content: 'Hello' },
-      ];
+      const messages: LLMMessage[] = [{ role: 'user', content: 'Hello' }];
 
       const chunks: string[] = [];
       const generator = adapter.generateStream(messages);
@@ -202,17 +245,15 @@ describe('TauriLLMAdapter', () => {
         actions: null,
       });
 
-      const messages: LLMMessage[] = [
-        { role: 'user', content: 'List the clips' },
-      ];
+      const messages: LLMMessage[] = [{ role: 'user', content: 'List the clips' }];
 
       const events: unknown[] = [];
       for await (const event of adapter.generateWithTools(messages, [])) {
         events.push(event);
       }
 
-      expect(events.some(e => (e as { type: string }).type === 'text')).toBe(true);
-      expect(events.some(e => (e as { type: string }).type === 'done')).toBe(true);
+      expect(events.some((e) => (e as { type: string }).type === 'text')).toBe(true);
+      expect(events.some((e) => (e as { type: string }).type === 'done')).toBe(true);
     });
 
     it('should yield tool_call events when response has actions', async () => {
@@ -226,16 +267,14 @@ describe('TauriLLMAdapter', () => {
         ],
       });
 
-      const messages: LLMMessage[] = [
-        { role: 'user', content: 'Split at 5s' },
-      ];
+      const messages: LLMMessage[] = [{ role: 'user', content: 'Split at 5s' }];
 
       const events: unknown[] = [];
       for await (const event of adapter.generateWithTools(messages, [])) {
         events.push(event);
       }
 
-      const toolCallEvent = events.find(e => (e as { type: string }).type === 'tool_call');
+      const toolCallEvent = events.find((e) => (e as { type: string }).type === 'tool_call');
       expect(toolCallEvent).toBeDefined();
       expect((toolCallEvent as { name: string }).name).toBe('SplitClip');
     });
@@ -256,9 +295,7 @@ describe('TauriLLMAdapter', () => {
         finishReason: 'stop',
       });
 
-      const messages: LLMMessage[] = [
-        { role: 'user', content: 'Split the clip' },
-      ];
+      const messages: LLMMessage[] = [{ role: 'user', content: 'Split the clip' }];
 
       const schema = {
         type: 'object',
@@ -285,13 +322,9 @@ describe('TauriLLMAdapter', () => {
         finishReason: 'stop',
       });
 
-      const messages: LLMMessage[] = [
-        { role: 'user', content: 'Hello' },
-      ];
+      const messages: LLMMessage[] = [{ role: 'user', content: 'Hello' }];
 
-      await expect(
-        adapter.generateStructured(messages, { type: 'object' })
-      ).rejects.toThrow();
+      await expect(adapter.generateStructured(messages, { type: 'object' })).rejects.toThrow();
     });
   });
 
@@ -308,16 +341,21 @@ describe('TauriLLMAdapter', () => {
     });
 
     it('should return true during generation', async () => {
-      mockInvoke.mockImplementation(() =>
-        new Promise((resolve) => setTimeout(() => resolve({
-          message: 'Response',
-          actions: null,
-        }), 100))
+      mockInvoke.mockImplementation(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(
+              () =>
+                resolve({
+                  message: 'Response',
+                  actions: null,
+                }),
+              100,
+            ),
+          ),
       );
 
-      const messages: LLMMessage[] = [
-        { role: 'user', content: 'Hello' },
-      ];
+      const messages: LLMMessage[] = [{ role: 'user', content: 'Hello' }];
 
       const promise = adapter.complete(messages);
 
@@ -344,18 +382,45 @@ describe('TauriLLMAdapter', () => {
         },
       });
 
-      const messages: LLMMessage[] = [
-        { role: 'user', content: 'Hello' },
-      ];
+      const messages: LLMMessage[] = [{ role: 'user', content: 'Hello' }];
 
       await customAdapter.complete(messages);
 
-      expect(mockInvoke).toHaveBeenCalledWith('chat_with_ai', expect.objectContaining({
-        context: expect.objectContaining({
-          playhead_position: 10,
-          selected_clips: ['clip-1'],
+      expect(mockInvoke).toHaveBeenCalledWith(
+        'chat_with_ai',
+        expect.objectContaining({
+          context: expect.objectContaining({
+            playheadPosition: 10,
+            selectedClips: ['clip-1'],
+          }),
         }),
-      }));
+      );
+    });
+
+    it('should include preferred language in context when configured', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        message: 'Response',
+        actions: null,
+      });
+
+      const customAdapter = createTauriLLMAdapter({
+        defaultContext: {
+          preferredLanguage: 'ko',
+        },
+      });
+
+      const messages: LLMMessage[] = [{ role: 'user', content: 'Hello' }];
+
+      await customAdapter.complete(messages);
+
+      expect(mockInvoke).toHaveBeenCalledWith(
+        'chat_with_ai',
+        expect.objectContaining({
+          context: expect.objectContaining({
+            preferredLanguage: 'ko',
+          }),
+        }),
+      );
     });
   });
 });

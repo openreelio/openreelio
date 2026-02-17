@@ -19,6 +19,8 @@ import {
   ToolExecutionError,
   InvalidArgumentsError,
   DependencyError,
+  StepBudgetExceededError,
+  ToolBudgetExceededError,
   ObservationTimeoutError,
   MaxIterationsError,
   LLMError,
@@ -98,7 +100,10 @@ describe('errors', () => {
 
   describe('UnderstandingError', () => {
     it('should include message and details', () => {
-      const error = new UnderstandingError('Failed to understand: Too ambiguous', 'additional details');
+      const error = new UnderstandingError(
+        'Failed to understand: Too ambiguous',
+        'additional details',
+      );
 
       expect(error.message).toBe('Failed to understand: Too ambiguous');
       expect(error.details).toBe('additional details');
@@ -113,7 +118,9 @@ describe('errors', () => {
     });
 
     it('should accept object as details but not store it', () => {
-      const error = new UnderstandingError('Failed to understand', { originalError: new Error('test') });
+      const error = new UnderstandingError('Failed to understand', {
+        originalError: new Error('test'),
+      });
 
       expect(error.message).toBe('Failed to understand');
       expect(error.details).toBeUndefined();
@@ -227,6 +234,30 @@ describe('errors', () => {
       expect(error.stepId).toBe('step-3');
       expect(error.missingDependencies).toEqual(['step-1', 'step-2']);
       expect(error.recoverable).toBe(false);
+    });
+  });
+
+  describe('StepBudgetExceededError', () => {
+    it('should include max and attempted step counts', () => {
+      const error = new StepBudgetExceededError(10, 13);
+
+      expect(error.maxSteps).toBe(10);
+      expect(error.attemptedSteps).toBe(13);
+      expect(error.phase).toBe('planning');
+      expect(error.recoverable).toBe(true);
+    });
+  });
+
+  describe('ToolBudgetExceededError', () => {
+    it('should include budget context', () => {
+      const error = new ToolBudgetExceededError(20, 20, 'step-9', 'delete_clip');
+
+      expect(error.maxToolCalls).toBe(20);
+      expect(error.usedToolCalls).toBe(20);
+      expect(error.stepId).toBe('step-9');
+      expect(error.toolName).toBe('delete_clip');
+      expect(error.phase).toBe('executing');
+      expect(error.recoverable).toBe(true);
     });
   });
 

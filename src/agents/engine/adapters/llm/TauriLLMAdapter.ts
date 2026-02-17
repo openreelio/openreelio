@@ -27,12 +27,13 @@ import type {
  * Context sent to the backend
  */
 interface TauriAIContext {
-  playhead_position: number;
-  selected_clips: string[];
-  selected_tracks: string[];
-  timeline_duration?: number;
-  asset_ids: string[];
-  track_ids: string[];
+  playheadPosition: number;
+  selectedClips: string[];
+  selectedTracks: string[];
+  timelineDuration?: number;
+  assetIds: string[];
+  trackIds: string[];
+  preferredLanguage?: string;
 }
 
 /**
@@ -98,6 +99,7 @@ export interface TauriLLMAdapterConfig {
     timelineDuration: number;
     assetIds: string[];
     trackIds: string[];
+    preferredLanguage: string;
   }>;
   /** Chunk size for simulated streaming */
   streamChunkSize?: number;
@@ -159,7 +161,7 @@ export class TauriLLMAdapter implements ILLMClient {
    */
   async *generateStream(
     messages: LLMMessage[],
-    options?: GenerateOptions
+    options?: GenerateOptions,
   ): AsyncGenerator<string, void, unknown> {
     this._isGenerating = true;
     this._aborted = false;
@@ -198,7 +200,7 @@ export class TauriLLMAdapter implements ILLMClient {
   async *generateWithTools(
     messages: LLMMessage[],
     _tools: LLMToolDefinition[],
-    options?: GenerateOptions
+    options?: GenerateOptions,
   ): AsyncGenerator<LLMStreamEvent, void, unknown> {
     this._isGenerating = true;
     this._aborted = false;
@@ -252,7 +254,7 @@ export class TauriLLMAdapter implements ILLMClient {
   async generateStructured<T>(
     messages: LLMMessage[],
     schema: Record<string, unknown>,
-    options?: GenerateOptions
+    options?: GenerateOptions,
   ): Promise<T> {
     const schemaInstructions = [
       'Return ONLY a JSON object that strictly matches the JSON Schema.',
@@ -267,25 +269,20 @@ export class TauriLLMAdapter implements ILLMClient {
       {
         ...options,
         jsonMode: true,
-      }
+      },
     );
 
     try {
       return JSON.parse(response.text) as T;
     } catch {
-      throw new Error(
-        `Failed to parse structured response: ${response.text.slice(0, 100)}...`
-      );
+      throw new Error(`Failed to parse structured response: ${response.text.slice(0, 100)}...`);
     }
   }
 
   /**
    * Complete without streaming
    */
-  async complete(
-    messages: LLMMessage[],
-    options?: GenerateOptions
-  ): Promise<LLMCompletionResult> {
+  async complete(messages: LLMMessage[], options?: GenerateOptions): Promise<LLMCompletionResult> {
     this._isGenerating = true;
     this._aborted = false;
 
@@ -343,8 +340,20 @@ export class TauriLLMAdapter implements ILLMClient {
   async refreshStatus(): Promise<TauriProviderStatus> {
     try {
       const status = await invoke<TauriProviderStatus>('get_ai_provider_status');
-      this._isConfigured = status.isConfigured;
-      return status;
+
+      if (status.isConfigured) {
+        this._isConfigured = true;
+        return status;
+      }
+
+      try {
+        const syncedStatus = await invoke<TauriProviderStatus>('sync_ai_from_vault');
+        this._isConfigured = syncedStatus.isConfigured;
+        return syncedStatus;
+      } catch {
+        this._isConfigured = false;
+        return status;
+      }
     } catch (error) {
       this._isConfigured = false;
       throw error;
@@ -367,14 +376,15 @@ export class TauriLLMAdapter implements ILLMClient {
    */
   private async callBackend(
     messages: LLMMessage[],
-    options?: GenerateOptions
+    options?: GenerateOptions,
   ): Promise<TauriAIResponse> {
     // Convert messages to backend format
     const backendMessages: TauriConversationMessage[] = messages.map((m) => ({
       role: m.role,
-      content: m.role === 'system' && options?.systemPrompt
-        ? `${options.systemPrompt}\n\n${m.content}`
-        : m.content,
+      content:
+        m.role === 'system' && options?.systemPrompt
+          ? `${options.systemPrompt}\n\n${m.content}`
+          : m.content,
     }));
 
     // Add system prompt as first message if not present
@@ -387,12 +397,13 @@ export class TauriLLMAdapter implements ILLMClient {
 
     // Build context
     const context: TauriAIContext = {
-      playhead_position: this.config.defaultContext?.playheadPosition ?? 0,
-      selected_clips: this.config.defaultContext?.selectedClips ?? [],
-      selected_tracks: this.config.defaultContext?.selectedTracks ?? [],
-      timeline_duration: this.config.defaultContext?.timelineDuration,
-      asset_ids: this.config.defaultContext?.assetIds ?? [],
-      track_ids: this.config.defaultContext?.trackIds ?? [],
+      playheadPosition: this.config.defaultContext?.playheadPosition ?? 0,
+      selectedClips: this.config.defaultContext?.selectedClips ?? [],
+      selectedTracks: this.config.defaultContext?.selectedTracks ?? [],
+      timelineDuration: this.config.defaultContext?.timelineDuration,
+      assetIds: this.config.defaultContext?.assetIds ?? [],
+      trackIds: this.config.defaultContext?.trackIds ?? [],
+      preferredLanguage: this.config.defaultContext?.preferredLanguage,
     };
 
     // Call backend
@@ -406,7 +417,7 @@ export class TauriLLMAdapter implements ILLMClient {
 
   private async callRawCompletion(
     messages: LLMMessage[],
-    options?: (GenerateOptions & { jsonMode?: boolean })
+    options?: GenerateOptions & { jsonMode?: boolean },
   ): Promise<TauriRawCompletionResponse> {
     // Convert messages to backend DTO format
     const backendMessages: TauriConversationMessage[] = messages.map((m) => ({
@@ -451,8 +462,6 @@ export class TauriLLMAdapter implements ILLMClient {
 /**
  * Create a TauriLLMAdapter instance
  */
-export function createTauriLLMAdapter(
-  config?: TauriLLMAdapterConfig
-): TauriLLMAdapter {
+export function createTauriLLMAdapter(config?: TauriLLMAdapterConfig): TauriLLMAdapter {
   return new TauriLLMAdapter(config);
 }

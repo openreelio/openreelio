@@ -11,6 +11,9 @@ import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import {
   getSelectionContext,
+  getAssetCatalogSnapshot,
+  getAssetSnapshotById,
+  getUnusedAssets,
   getTimelineSnapshot,
   getClipById,
   getTrackById,
@@ -20,12 +23,8 @@ import {
   findGaps,
   findOverlaps,
 } from './storeAccessor';
-import type { Track, Clip } from '@/types';
-import {
-  createMockClip,
-  createMockTrack,
-  createMockSequence,
-} from '@/test/mocks';
+import type { Track, Clip, Asset } from '@/types';
+import { createMockAsset, createMockClip, createMockTrack, createMockSequence } from '@/test/mocks';
 
 // =============================================================================
 // Test Helpers
@@ -42,6 +41,10 @@ function createTrack(overrides: Partial<Track> & { id: string }): Track {
     clips: [],
     ...overrides,
   });
+}
+
+function createAsset(overrides: Partial<Asset> & { id: string }): Asset {
+  return createMockAsset(overrides);
 }
 
 function createSequence(tracks: Track[]) {
@@ -105,6 +108,98 @@ describe('storeAccessor', () => {
   });
 
   // ===========================================================================
+  // Asset catalog helpers
+  // ===========================================================================
+
+  describe('asset catalog helpers', () => {
+    it('should return imported assets with usage counts', () => {
+      const clipA = createClip({ id: 'clipA', assetId: 'asset_video_used' });
+      const clipB = createClip({ id: 'clipB', assetId: 'asset_video_used' });
+      const clipC = createClip({ id: 'clipC', assetId: 'asset_audio_used' });
+
+      const videoUsed = createAsset({
+        id: 'asset_video_used',
+        name: 'used-video.mp4',
+        kind: 'video',
+        importedAt: '2026-01-03T00:00:00.000Z',
+      });
+      const videoUnused = createAsset({
+        id: 'asset_video_unused',
+        name: 'unused-video.mp4',
+        kind: 'video',
+        importedAt: '2026-01-04T00:00:00.000Z',
+      });
+      const audioUsed = createAsset({
+        id: 'asset_audio_used',
+        name: 'used-audio.wav',
+        kind: 'audio',
+        importedAt: '2026-01-02T00:00:00.000Z',
+      });
+
+      setupStores({
+        tracks: [createTrack({ id: 'V1', clips: [clipA, clipB, clipC] })],
+      });
+
+      useProjectStore.setState({
+        assets: new Map([
+          [videoUsed.id, videoUsed],
+          [videoUnused.id, videoUnused],
+          [audioUsed.id, audioUsed],
+        ]),
+      });
+
+      const catalog = getAssetCatalogSnapshot();
+
+      expect(catalog.totalAssetCount).toBe(3);
+      expect(catalog.videoAssetCount).toBe(2);
+      expect(catalog.audioAssetCount).toBe(1);
+      expect(catalog.unusedAssetCount).toBe(1);
+
+      const usedVideo = catalog.assets.find((asset) => asset.id === 'asset_video_used');
+      const unusedVideo = catalog.assets.find((asset) => asset.id === 'asset_video_unused');
+      expect(usedVideo?.timelineClipCount).toBe(2);
+      expect(usedVideo?.onTimeline).toBe(true);
+      expect(unusedVideo?.timelineClipCount).toBe(0);
+      expect(unusedVideo?.onTimeline).toBe(false);
+    });
+
+    it('should return a single asset snapshot by id', () => {
+      const asset = createAsset({ id: 'asset_1', name: 'clip.mp4', kind: 'video' });
+      setupStores({ tracks: [] });
+      useProjectStore.setState({ assets: new Map([[asset.id, asset]]) });
+
+      const found = getAssetSnapshotById('asset_1');
+      const missing = getAssetSnapshotById('missing_asset');
+
+      expect(found).not.toBeNull();
+      expect(found?.id).toBe('asset_1');
+      expect(missing).toBeNull();
+    });
+
+    it('should return only unused assets and support kind filtering', () => {
+      const usedVideo = createAsset({ id: 'video_used', kind: 'video' });
+      const unusedVideo = createAsset({ id: 'video_unused', kind: 'video' });
+      const unusedAudio = createAsset({ id: 'audio_unused', kind: 'audio' });
+
+      const clipA = createClip({ id: 'clipA', assetId: usedVideo.id });
+      setupStores({ tracks: [createTrack({ id: 'V1', clips: [clipA] })] });
+      useProjectStore.setState({
+        assets: new Map([
+          [usedVideo.id, usedVideo],
+          [unusedVideo.id, unusedVideo],
+          [unusedAudio.id, unusedAudio],
+        ]),
+      });
+
+      const allUnused = getUnusedAssets();
+      const videoOnlyUnused = getUnusedAssets('video');
+
+      expect(allUnused.map((asset) => asset.id).sort()).toEqual(['audio_unused', 'video_unused']);
+      expect(videoOnlyUnused.map((asset) => asset.id)).toEqual(['video_unused']);
+    });
+  });
+
+  // ===========================================================================
   // getTimelineSnapshot
   // ===========================================================================
 
@@ -120,9 +215,21 @@ describe('storeAccessor', () => {
     });
 
     it('should return timeline state with 2 tracks and 3 clips', () => {
-      const clipA = createClip({ id: 'clipA', assetId: 'asset1', place: { timelineInSec: 0, durationSec: 5 } });
-      const clipB = createClip({ id: 'clipB', assetId: 'asset1', place: { timelineInSec: 5, durationSec: 5 } });
-      const clipC = createClip({ id: 'clipC', assetId: 'asset2', place: { timelineInSec: 0, durationSec: 10 } });
+      const clipA = createClip({
+        id: 'clipA',
+        assetId: 'asset1',
+        place: { timelineInSec: 0, durationSec: 5 },
+      });
+      const clipB = createClip({
+        id: 'clipB',
+        assetId: 'asset1',
+        place: { timelineInSec: 5, durationSec: 5 },
+      });
+      const clipC = createClip({
+        id: 'clipC',
+        assetId: 'asset2',
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
 
       setupStores({
         tracks: [

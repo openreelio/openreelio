@@ -139,7 +139,13 @@ export interface ConversationMessage {
 }
 
 /** AI proposal status */
-export type ProposalStatus = 'pending' | 'reviewing' | 'approved' | 'rejected' | 'applied' | 'failed';
+export type ProposalStatus =
+  | 'pending'
+  | 'reviewing'
+  | 'approved'
+  | 'rejected'
+  | 'applied'
+  | 'failed';
 
 /** AI proposal */
 export interface AIProposal {
@@ -191,7 +197,9 @@ interface AIState {
   generateEditScript: (intent: string, context?: AIContext) => Promise<EditScript>;
   /** Send a message to AI using conversation mode (unified agent) */
   sendMessage: (message: string, context?: AIContext) => Promise<AIResponse>;
-  applyEditScript: (editScript: EditScript) => Promise<{ success: boolean; appliedOpIds: string[]; errors: string[] }>;
+  applyEditScript: (
+    editScript: EditScript,
+  ) => Promise<{ success: boolean; appliedOpIds: string[]; errors: string[] }>;
   cancelGeneration: () => void;
 
   // Actions - Proposals
@@ -201,7 +209,11 @@ interface AIState {
   clearCurrentProposal: () => void;
 
   // Actions - Chat
-  addChatMessage: (role: 'user' | 'assistant' | 'system', content: string, proposal?: AIProposal) => void;
+  addChatMessage: (
+    role: 'user' | 'assistant' | 'system',
+    content: string,
+    proposal?: AIProposal,
+  ) => void;
   clearChatHistory: () => void;
   loadChatHistoryForProject: (projectId: string) => void;
   setCurrentProjectId: (projectId: string | null) => void;
@@ -223,6 +235,7 @@ export interface AIContext {
   timelineDuration?: number;
   assetIds?: string[];
   trackIds?: string[];
+  preferredLanguage?: string;
 }
 
 // =============================================================================
@@ -233,252 +246,206 @@ export const useAIStore = create<AIState>()(
   subscribeWithSelector(
     persist(
       immer((set, get) => ({
-      // Initial state
-      providerStatus: {
-        providerType: null,
-        isConfigured: false,
-        isAvailable: false,
-        currentModel: null,
-        availableModels: [],
-        errorMessage: null,
-      },
-      isConfiguring: false,
-      isConnecting: false,
-      currentProposal: null,
-      proposalHistory: [],
-      chatMessages: [],
-      isGenerating: false,
-      isCancelled: false,
-      currentProjectId: null,
-      error: null,
+        // Initial state
+        providerStatus: {
+          providerType: null,
+          isConfigured: false,
+          isAvailable: false,
+          currentModel: null,
+          availableModels: [],
+          errorMessage: null,
+        },
+        isConfiguring: false,
+        isConnecting: false,
+        currentProposal: null,
+        proposalHistory: [],
+        chatMessages: [],
+        isGenerating: false,
+        isCancelled: false,
+        currentProjectId: null,
+        error: null,
 
-      // Configure AI provider
-      configureProvider: async (config: ProviderConfig) => {
-        set((state) => {
-          state.isConfiguring = true;
-          state.error = null;
-        });
-
-        try {
-          const status = await invoke<ProviderStatus>('configure_ai_provider', {
-            config: {
-              providerType: config.providerType,
-              apiKey: config.apiKey,
-              baseUrl: config.baseUrl,
-              model: config.model,
-            },
-          });
-
+        // Configure AI provider
+        configureProvider: async (config: ProviderConfig) => {
           set((state) => {
-            state.providerStatus = status;
-            state.isConfiguring = false;
+            state.isConfiguring = true;
+            state.error = null;
           });
 
-          logger.info('AI provider configured', { providerType: config.providerType });
-
-          // Sync to global settings (bidirectional sync)
           try {
-            const { useSettingsStore } = await import('@/stores/settingsStore');
-            const updateSettings = useSettingsStore.getState().updateSettings;
+            const status = await invoke<ProviderStatus>('configure_ai_provider', {
+              config: {
+                providerType: config.providerType,
+                apiKey: config.apiKey,
+                baseUrl: config.baseUrl,
+                model: config.model,
+              },
+            });
 
-            // Build settings update based on provider type
-            const settingsUpdate: Record<string, unknown> = {
-              primaryProvider: config.providerType,
-              primaryModel: config.model ?? status.currentModel,
-            };
+            set((state) => {
+              state.providerStatus = status;
+              state.isConfiguring = false;
+            });
 
-            // Update the appropriate API key field
-            if (config.apiKey) {
-              switch (config.providerType) {
-                case 'openai':
-                  settingsUpdate.openaiApiKey = config.apiKey;
-                  break;
-                case 'anthropic':
-                  settingsUpdate.anthropicApiKey = config.apiKey;
-                  break;
-                case 'gemini':
-                  settingsUpdate.googleApiKey = config.apiKey;
-                  break;
+            logger.info('AI provider configured', { providerType: config.providerType });
+
+            // Sync to global settings (bidirectional sync)
+            try {
+              const { useSettingsStore } = await import('@/stores/settingsStore');
+              const updateSettings = useSettingsStore.getState().updateSettings;
+
+              // Build settings update based on provider type
+              const settingsUpdate: Record<string, unknown> = {
+                primaryProvider: config.providerType,
+                primaryModel: config.model ?? status.currentModel,
+              };
+
+              // Update the appropriate API key field
+              if (config.apiKey) {
+                switch (config.providerType) {
+                  case 'openai':
+                    settingsUpdate.openaiApiKey = config.apiKey;
+                    break;
+                  case 'anthropic':
+                    settingsUpdate.anthropicApiKey = config.apiKey;
+                    break;
+                  case 'gemini':
+                    settingsUpdate.googleApiKey = config.apiKey;
+                    break;
+                }
               }
+
+              if (config.providerType === 'local' && config.baseUrl) {
+                settingsUpdate.ollamaUrl = config.baseUrl;
+              }
+
+              await updateSettings('ai', settingsUpdate);
+              logger.debug('AI settings synced to global settings');
+            } catch (syncError) {
+              // Don't fail the main operation if sync fails
+              logger.warn('Failed to sync AI settings to global settings', { error: syncError });
             }
-
-            if (config.providerType === 'local' && config.baseUrl) {
-              settingsUpdate.ollamaUrl = config.baseUrl;
-            }
-
-            await updateSettings('ai', settingsUpdate);
-            logger.debug('AI settings synced to global settings');
-          } catch (syncError) {
-            // Don't fail the main operation if sync fails
-            logger.warn('Failed to sync AI settings to global settings', { error: syncError });
-          }
-        } catch (error) {
-          set((state) => {
-            state.isConfiguring = false;
-            state.error = error instanceof Error ? error.message : String(error);
-          });
-          throw error;
-        }
-      },
-
-      // Clear AI provider
-      clearProvider: async () => {
-        try {
-          await invoke('clear_ai_provider');
-
-          set((state) => {
-            state.providerStatus = {
-              providerType: null,
-              isConfigured: false,
-              isAvailable: false,
-              currentModel: null,
-              availableModels: [],
-              errorMessage: null,
-            };
-          });
-
-          logger.info('AI provider cleared');
-        } catch (error) {
-          set((state) => {
-            state.error = error instanceof Error ? error.message : String(error);
-          });
-          throw error;
-        }
-      },
-
-      // Test AI connection
-      testConnection: async () => {
-        set((state) => {
-          state.isConnecting = true;
-          state.error = null;
-        });
-
-        try {
-          const result = await invoke<ConnectionTestResult>('test_ai_connection');
-
-          set((state) => {
-            state.isConnecting = false;
-            if (!result.success) {
-              state.error = result.message;
-            }
-          });
-
-          return result;
-        } catch (error) {
-          const errorMsg = error instanceof Error ? error.message : String(error);
-          set((state) => {
-            state.isConnecting = false;
-            state.error = errorMsg;
-          });
-          // Return a failure result instead of throwing
-          return {
-            success: false,
-            provider: 'unknown',
-            model: 'unknown',
-            latencyMs: null,
-            message: errorMsg,
-            errorCode: 'unknown' as const,
-            errorDetails: errorMsg,
-          };
-        }
-      },
-
-      // Get available models for a provider
-      getAvailableModels: async (providerType: ProviderType) => {
-        try {
-          const models = await invoke<string[]>('get_available_ai_models', { providerType });
-          return models;
-        } catch (error) {
-          logger.error('Failed to get available models', { error });
-          return [];
-        }
-      },
-
-      // Refresh provider status
-      refreshProviderStatus: async () => {
-        try {
-          const status = await invoke<ProviderStatus>('get_ai_provider_status');
-
-          set((state) => {
-            state.providerStatus = status;
-          });
-        } catch (error) {
-          logger.error('Failed to refresh provider status', { error });
-        }
-      },
-
-      // Cancel ongoing generation
-      cancelGeneration: () => {
-        // Atomically check and set cancellation flag
-        // This prevents race conditions where cancellation is requested
-        // just as generation completes
-        set((state) => {
-          if (state.isGenerating) {
-            state.isCancelled = true;
-            logger.info('Generation cancellation requested by user');
-          }
-        });
-      },
-
-      // Generate edit script from natural language
-      generateEditScript: async (intent: string, context?: AIContext) => {
-        set((state) => {
-          state.isGenerating = true;
-          state.isCancelled = false;
-          state.error = null;
-        });
-
-        // Add user message to chat
-        get().addChatMessage('user', intent);
-
-        try {
-          const editScript = await invoke<EditScript>('generate_edit_script_with_ai', {
-            intent,
-            context: context ?? {
-              playheadPosition: 0,
-              selectedClips: [],
-              selectedTracks: [],
-            },
-          });
-
-          // Check if cancelled during generation
-          if (get().isCancelled) {
+          } catch (error) {
             set((state) => {
-              state.isCancelled = false;
-              state.isGenerating = false;
+              state.isConfiguring = false;
+              state.error = error instanceof Error ? error.message : String(error);
             });
-            get().addChatMessage('system', 'Generation cancelled.');
-            throw new Error('Generation cancelled');
+            throw error;
           }
+        },
 
-          set((state) => {
-            state.isGenerating = false;
-          });
-
-          // Create proposal first, then add assistant message with it attached
-          get().createProposal(editScript);
-          get().addChatMessage('assistant', editScript.explanation, get().currentProposal ?? undefined);
-
-          return editScript;
-        } catch (error) {
-          // Check if it was a cancellation
-          if (get().isCancelled || (error instanceof Error && error.message === 'Generation cancelled')) {
-            set((state) => {
-              state.isCancelled = false;
-              state.isGenerating = false;
-            });
-            // Only add message if not already added
-            const messages = get().chatMessages;
-            const lastMessage = messages[messages.length - 1];
-            if (!lastMessage || lastMessage.content !== 'Generation cancelled.') {
-              get().addChatMessage('system', 'Generation cancelled.');
-            }
-            throw new Error('Generation cancelled');
-          }
-
-          // Fall back to local intent parsing
+        // Clear AI provider
+        clearProvider: async () => {
           try {
-            const editScript = await invoke<EditScript>('analyze_intent', {
+            await invoke('clear_ai_provider');
+
+            set((state) => {
+              state.providerStatus = {
+                providerType: null,
+                isConfigured: false,
+                isAvailable: false,
+                currentModel: null,
+                availableModels: [],
+                errorMessage: null,
+              };
+            });
+
+            logger.info('AI provider cleared');
+          } catch (error) {
+            set((state) => {
+              state.error = error instanceof Error ? error.message : String(error);
+            });
+            throw error;
+          }
+        },
+
+        // Test AI connection
+        testConnection: async () => {
+          set((state) => {
+            state.isConnecting = true;
+            state.error = null;
+          });
+
+          try {
+            const result = await invoke<ConnectionTestResult>('test_ai_connection');
+
+            set((state) => {
+              state.isConnecting = false;
+              if (!result.success) {
+                state.error = result.message;
+              }
+            });
+
+            return result;
+          } catch (error) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            set((state) => {
+              state.isConnecting = false;
+              state.error = errorMsg;
+            });
+            // Return a failure result instead of throwing
+            return {
+              success: false,
+              provider: 'unknown',
+              model: 'unknown',
+              latencyMs: null,
+              message: errorMsg,
+              errorCode: 'unknown' as const,
+              errorDetails: errorMsg,
+            };
+          }
+        },
+
+        // Get available models for a provider
+        getAvailableModels: async (providerType: ProviderType) => {
+          try {
+            const models = await invoke<string[]>('get_available_ai_models', { providerType });
+            return models;
+          } catch (error) {
+            logger.error('Failed to get available models', { error });
+            return [];
+          }
+        },
+
+        // Refresh provider status
+        refreshProviderStatus: async () => {
+          try {
+            const status = await invoke<ProviderStatus>('get_ai_provider_status');
+
+            set((state) => {
+              state.providerStatus = status;
+            });
+          } catch (error) {
+            logger.error('Failed to refresh provider status', { error });
+          }
+        },
+
+        // Cancel ongoing generation
+        cancelGeneration: () => {
+          // Atomically check and set cancellation flag
+          // This prevents race conditions where cancellation is requested
+          // just as generation completes
+          set((state) => {
+            if (state.isGenerating) {
+              state.isCancelled = true;
+              logger.info('Generation cancellation requested by user');
+            }
+          });
+        },
+
+        // Generate edit script from natural language
+        generateEditScript: async (intent: string, context?: AIContext) => {
+          set((state) => {
+            state.isGenerating = true;
+            state.isCancelled = false;
+            state.error = null;
+          });
+
+          // Add user message to chat
+          get().addChatMessage('user', intent);
+
+          try {
+            const editScript = await invoke<EditScript>('generate_edit_script_with_ai', {
               intent,
               context: context ?? {
                 playheadPosition: 0,
@@ -487,8 +454,35 @@ export const useAIStore = create<AIState>()(
               },
             });
 
-            // Check if cancelled during fallback
+            // Check if cancelled during generation
             if (get().isCancelled) {
+              set((state) => {
+                state.isCancelled = false;
+                state.isGenerating = false;
+              });
+              get().addChatMessage('system', 'Generation cancelled.');
+              throw new Error('Generation cancelled');
+            }
+
+            set((state) => {
+              state.isGenerating = false;
+            });
+
+            // Create proposal first, then add assistant message with it attached
+            get().createProposal(editScript);
+            get().addChatMessage(
+              'assistant',
+              editScript.explanation,
+              get().currentProposal ?? undefined,
+            );
+
+            return editScript;
+          } catch (error) {
+            // Check if it was a cancellation
+            if (
+              get().isCancelled ||
+              (error instanceof Error && error.message === 'Generation cancelled')
+            ) {
               set((state) => {
                 state.isCancelled = false;
                 state.isGenerating = false;
@@ -502,480 +496,523 @@ export const useAIStore = create<AIState>()(
               throw new Error('Generation cancelled');
             }
 
-            set((state) => {
-              state.isGenerating = false;
-            });
+            // Fall back to local intent parsing
+            try {
+              const editScript = await invoke<EditScript>('analyze_intent', {
+                intent,
+                context: context ?? {
+                  playheadPosition: 0,
+                  selectedClips: [],
+                  selectedTracks: [],
+                },
+              });
 
-            // Create proposal first, then add assistant message with it attached
-            get().createProposal(editScript);
-            get().addChatMessage('assistant', editScript.explanation, get().currentProposal ?? undefined);
-
-            return editScript;
-          } catch (fallbackError) {
-            const primaryErrorMessage = error instanceof Error ? error.message : String(error);
-            const fallbackErrorMessage =
-              fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
-            const combinedErrorMessage = `AI generation failed: ${primaryErrorMessage}; fallback failed: ${fallbackErrorMessage}`;
-
-            set((state) => {
-              state.isGenerating = false;
-              state.error = combinedErrorMessage;
-            });
-
-            logger.error('AI generation and fallback both failed', {
-              primaryError: primaryErrorMessage,
-              fallbackError: fallbackErrorMessage,
-            });
-
-            get().addChatMessage(
-              'assistant',
-              `I encountered an error: ${combinedErrorMessage}`
-            );
-
-            throw new Error(combinedErrorMessage);
-          }
-        }
-      },
-
-      // Send message using conversation mode (unified agent)
-      sendMessage: async (message: string, context?: AIContext) => {
-        // Check if provider is configured, if not try to sync from settings first
-        const currentStatus = get().providerStatus;
-        if (!currentStatus.isConfigured) {
-          logger.info('Provider not configured, attempting to sync from settings...');
-          try {
-            await get().syncFromSettings();
-          } catch (syncError) {
-            logger.warn('Failed to auto-sync provider', { error: syncError });
-          }
-
-          // Re-check after sync attempt
-          const updatedStatus = get().providerStatus;
-          if (!updatedStatus.isConfigured) {
-            const errorMsg = 'No AI provider configured. Please configure an API key in Settings.';
-            get().addChatMessage('user', message);
-            get().addChatMessage('system', errorMsg);
-            throw new Error(errorMsg);
-          }
-        }
-
-        set((state) => {
-          state.isGenerating = true;
-          state.isCancelled = false;
-          state.error = null;
-        });
-
-        // Add user message to chat
-        get().addChatMessage('user', message);
-
-        try {
-          // Build conversation history from chat messages
-          const chatHistory = get().chatMessages;
-          const conversationMessages: ConversationMessage[] = chatHistory
-            .filter((msg) => msg.role !== 'system') // Exclude system messages
-            .map((msg) => ({
-              role: msg.role,
-              content: msg.content,
-              timestamp: msg.timestamp,
-              // Include applied actions for context
-              appliedActions: msg.proposal?.status === 'applied'
-                ? msg.proposal.editScript.commands.map((cmd) => ({
-                    commandType: cmd.commandType,
-                    params: cmd.params,
-                    description: cmd.description,
-                  }))
-                : undefined,
-            }));
-
-          // Call unified agent chat endpoint
-          const response = await invoke<AIResponse>('chat_with_ai', {
-            messages: conversationMessages.map((m) => ({
-              role: m.role,
-              content: m.content,
-            })),
-            context: {
-              playheadPosition: context?.playheadPosition ?? 0,
-              selectedClips: context?.selectedClips ?? [],
-              selectedTracks: context?.selectedTracks ?? [],
-              timelineDuration: context?.timelineDuration,
-              assetIds: context?.assetIds ?? [],
-              trackIds: context?.trackIds ?? [],
-            },
-          });
-
-          // Check if cancelled during generation
-          if (get().isCancelled) {
-            set((state) => {
-              state.isCancelled = false;
-              state.isGenerating = false;
-            });
-            get().addChatMessage('system', 'Generation cancelled.');
-            throw new Error('Generation cancelled');
-          }
-
-          set((state) => {
-            state.isGenerating = false;
-          });
-
-          // If response has actions, create a proposal
-          if (response.actions && response.actions.length > 0) {
-            const editScript: EditScript = {
-              intent: message,
-              commands: response.actions.map((a) => ({
-                commandType: a.commandType,
-                params: a.params as Record<string, unknown>,
-                description: a.description,
-              })),
-              requires: [],
-              qcRules: [],
-              risk: response.risk ?? { copyright: 'none', nsfw: 'none' },
-              explanation: response.message,
-            };
-
-            get().createProposal(editScript);
-            get().addChatMessage('assistant', response.message, get().currentProposal ?? undefined);
-          } else {
-            // Pure conversation response (no actions)
-            get().addChatMessage('assistant', response.message);
-          }
-
-          return response;
-        } catch (error) {
-          // Check if it was a cancellation
-          if (get().isCancelled || (error instanceof Error && error.message === 'Generation cancelled')) {
-            set((state) => {
-              state.isCancelled = false;
-              state.isGenerating = false;
-            });
-            throw new Error('Generation cancelled');
-          }
-
-          const errorMessage = error instanceof Error ? error.message : String(error);
-
-          set((state) => {
-            state.isGenerating = false;
-            state.error = errorMessage;
-          });
-
-          logger.error('AI chat failed', { error: errorMessage });
-
-          // Add error message to chat
-          get().addChatMessage(
-            'assistant',
-            `I encountered an error: ${errorMessage}`
-          );
-
-          throw error;
-        }
-      },
-
-      // Apply edit script
-      applyEditScript: async (editScript: EditScript) => {
-        try {
-          const result = await invoke<{ success: boolean; appliedOpIds: string[]; errors: string[] }>(
-            'apply_edit_script',
-            { editScript }
-          );
-
-          if (result.success) {
-            set((state) => {
-              if (state.currentProposal) {
-                const id = state.currentProposal.id;
-                state.currentProposal.status = 'applied';
-                state.currentProposal.appliedOpIds = result.appliedOpIds;
-                // Sync to the embedded proposal in chat messages (Immer structural sharing)
-                const msg = state.chatMessages.find(m => m.proposal?.id === id);
-                if (msg?.proposal) {
-                  msg.proposal.status = 'applied';
-                  msg.proposal.appliedOpIds = result.appliedOpIds;
+              // Check if cancelled during fallback
+              if (get().isCancelled) {
+                set((state) => {
+                  state.isCancelled = false;
+                  state.isGenerating = false;
+                });
+                // Only add message if not already added
+                const messages = get().chatMessages;
+                const lastMessage = messages[messages.length - 1];
+                if (!lastMessage || lastMessage.content !== 'Generation cancelled.') {
+                  get().addChatMessage('system', 'Generation cancelled.');
                 }
-                // Sync to proposalHistory
-                const historyEntry = state.proposalHistory.find(p => p.id === id);
-                if (historyEntry) {
-                  historyEntry.status = 'applied';
-                  historyEntry.appliedOpIds = result.appliedOpIds;
-                }
+                throw new Error('Generation cancelled');
               }
+
+              set((state) => {
+                state.isGenerating = false;
+              });
+
+              // Create proposal first, then add assistant message with it attached
+              get().createProposal(editScript);
+              get().addChatMessage(
+                'assistant',
+                editScript.explanation,
+                get().currentProposal ?? undefined,
+              );
+
+              return editScript;
+            } catch (fallbackError) {
+              const primaryErrorMessage = error instanceof Error ? error.message : String(error);
+              const fallbackErrorMessage =
+                fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+              const combinedErrorMessage = `AI generation failed: ${primaryErrorMessage}; fallback failed: ${fallbackErrorMessage}`;
+
+              set((state) => {
+                state.isGenerating = false;
+                state.error = combinedErrorMessage;
+              });
+
+              logger.error('AI generation and fallback both failed', {
+                primaryError: primaryErrorMessage,
+                fallbackError: fallbackErrorMessage,
+              });
+
+              get().addChatMessage('assistant', `I encountered an error: ${combinedErrorMessage}`);
+
+              throw new Error(combinedErrorMessage);
+            }
+          }
+        },
+
+        // Send message using conversation mode (unified agent)
+        sendMessage: async (message: string, context?: AIContext) => {
+          // Check if provider is configured, if not try to sync from settings first
+          const currentStatus = get().providerStatus;
+          if (!currentStatus.isConfigured) {
+            logger.info('Provider not configured, attempting to sync from settings...');
+            try {
+              await get().syncFromSettings();
+            } catch (syncError) {
+              logger.warn('Failed to auto-sync provider', { error: syncError });
+            }
+
+            // Re-check after sync attempt
+            const updatedStatus = get().providerStatus;
+            if (!updatedStatus.isConfigured) {
+              const errorMsg =
+                'No AI provider configured. Please configure an API key in Settings.';
+              get().addChatMessage('user', message);
+              get().addChatMessage('system', errorMsg);
+              throw new Error(errorMsg);
+            }
+          }
+
+          set((state) => {
+            state.isGenerating = true;
+            state.isCancelled = false;
+            state.error = null;
+          });
+
+          // Add user message to chat
+          get().addChatMessage('user', message);
+
+          try {
+            // Build conversation history from chat messages
+            const chatHistory = get().chatMessages;
+            const conversationMessages: ConversationMessage[] = chatHistory
+              .filter((msg) => msg.role !== 'system') // Exclude system messages
+              .map((msg) => ({
+                role: msg.role,
+                content: msg.content,
+                timestamp: msg.timestamp,
+                // Include applied actions for context
+                appliedActions:
+                  msg.proposal?.status === 'applied'
+                    ? msg.proposal.editScript.commands.map((cmd) => ({
+                        commandType: cmd.commandType,
+                        params: cmd.params,
+                        description: cmd.description,
+                      }))
+                    : undefined,
+              }));
+
+            // Call unified agent chat endpoint
+            const response = await invoke<AIResponse>('chat_with_ai', {
+              messages: conversationMessages.map((m) => ({
+                role: m.role,
+                content: m.content,
+              })),
+              context: {
+                playheadPosition: context?.playheadPosition ?? 0,
+                selectedClips: context?.selectedClips ?? [],
+                selectedTracks: context?.selectedTracks ?? [],
+                timelineDuration: context?.timelineDuration,
+                assetIds: context?.assetIds ?? [],
+                trackIds: context?.trackIds ?? [],
+                preferredLanguage: context?.preferredLanguage,
+              },
             });
-          } else {
+
+            // Check if cancelled during generation
+            if (get().isCancelled) {
+              set((state) => {
+                state.isCancelled = false;
+                state.isGenerating = false;
+              });
+              get().addChatMessage('system', 'Generation cancelled.');
+              throw new Error('Generation cancelled');
+            }
+
             set((state) => {
+              state.isGenerating = false;
+            });
+
+            // If response has actions, create a proposal
+            if (response.actions && response.actions.length > 0) {
+              const editScript: EditScript = {
+                intent: message,
+                commands: response.actions.map((a) => ({
+                  commandType: a.commandType,
+                  params: a.params as Record<string, unknown>,
+                  description: a.description,
+                })),
+                requires: [],
+                qcRules: [],
+                risk: response.risk ?? { copyright: 'none', nsfw: 'none' },
+                explanation: response.message,
+              };
+
+              get().createProposal(editScript);
+              get().addChatMessage(
+                'assistant',
+                response.message,
+                get().currentProposal ?? undefined,
+              );
+            } else {
+              // Pure conversation response (no actions)
+              get().addChatMessage('assistant', response.message);
+            }
+
+            return response;
+          } catch (error) {
+            // Check if it was a cancellation
+            if (
+              get().isCancelled ||
+              (error instanceof Error && error.message === 'Generation cancelled')
+            ) {
+              set((state) => {
+                state.isCancelled = false;
+                state.isGenerating = false;
+              });
+              throw new Error('Generation cancelled');
+            }
+
+            const errorMessage = error instanceof Error ? error.message : String(error);
+
+            set((state) => {
+              state.isGenerating = false;
+              state.error = errorMessage;
+            });
+
+            logger.error('AI chat failed', { error: errorMessage });
+
+            // Add error message to chat
+            get().addChatMessage('assistant', `I encountered an error: ${errorMessage}`);
+
+            throw error;
+          }
+        },
+
+        // Apply edit script
+        applyEditScript: async (editScript: EditScript) => {
+          try {
+            const result = await invoke<{
+              success: boolean;
+              appliedOpIds: string[];
+              errors: string[];
+            }>('apply_edit_script', { editScript });
+
+            if (result.success) {
+              set((state) => {
+                if (state.currentProposal) {
+                  const id = state.currentProposal.id;
+                  state.currentProposal.status = 'applied';
+                  state.currentProposal.appliedOpIds = result.appliedOpIds;
+                  // Sync to the embedded proposal in chat messages (Immer structural sharing)
+                  const msg = state.chatMessages.find((m) => m.proposal?.id === id);
+                  if (msg?.proposal) {
+                    msg.proposal.status = 'applied';
+                    msg.proposal.appliedOpIds = result.appliedOpIds;
+                  }
+                  // Sync to proposalHistory
+                  const historyEntry = state.proposalHistory.find((p) => p.id === id);
+                  if (historyEntry) {
+                    historyEntry.status = 'applied';
+                    historyEntry.appliedOpIds = result.appliedOpIds;
+                  }
+                }
+              });
+            } else {
+              set((state) => {
+                if (state.currentProposal) {
+                  const id = state.currentProposal.id;
+                  const errorMsg = result.errors.join('; ');
+                  state.currentProposal.status = 'failed';
+                  state.currentProposal.error = errorMsg;
+                  // Sync to the embedded proposal in chat messages (Immer structural sharing)
+                  const msg = state.chatMessages.find((m) => m.proposal?.id === id);
+                  if (msg?.proposal) {
+                    msg.proposal.status = 'failed';
+                    msg.proposal.error = errorMsg;
+                  }
+                  // Sync to proposalHistory
+                  const historyEntry = state.proposalHistory.find((p) => p.id === id);
+                  if (historyEntry) {
+                    historyEntry.status = 'failed';
+                    historyEntry.error = errorMsg;
+                  }
+                }
+              });
+            }
+
+            return result;
+          } catch (error) {
+            set((state) => {
+              const errorMsg = error instanceof Error ? error.message : String(error);
+              state.error = errorMsg;
               if (state.currentProposal) {
                 const id = state.currentProposal.id;
-                const errorMsg = result.errors.join('; ');
                 state.currentProposal.status = 'failed';
                 state.currentProposal.error = errorMsg;
                 // Sync to the embedded proposal in chat messages (Immer structural sharing)
-                const msg = state.chatMessages.find(m => m.proposal?.id === id);
+                const msg = state.chatMessages.find((m) => m.proposal?.id === id);
                 if (msg?.proposal) {
                   msg.proposal.status = 'failed';
                   msg.proposal.error = errorMsg;
                 }
                 // Sync to proposalHistory
-                const historyEntry = state.proposalHistory.find(p => p.id === id);
+                const historyEntry = state.proposalHistory.find((p) => p.id === id);
                 if (historyEntry) {
                   historyEntry.status = 'failed';
                   historyEntry.error = errorMsg;
                 }
               }
             });
+            throw error;
+          }
+        },
+
+        // Create proposal
+        createProposal: (editScript: EditScript) => {
+          const proposal: AIProposal = {
+            id: crypto.randomUUID(),
+            editScript,
+            status: 'pending',
+            createdAt: new Date().toISOString(),
+          };
+
+          set((state) => {
+            state.currentProposal = proposal;
+            state.proposalHistory.unshift(proposal);
+            // Keep only last 50 proposals
+            if (state.proposalHistory.length > 50) {
+              state.proposalHistory = state.proposalHistory.slice(0, 50);
+            }
+          });
+        },
+
+        // Approve proposal
+        approveProposal: async (proposalId: string) => {
+          const { currentProposal, applyEditScript } = get();
+
+          if (currentProposal?.id !== proposalId) {
+            throw new Error('Proposal not found or not current');
           }
 
-          return result;
-        } catch (error) {
           set((state) => {
-            const errorMsg = error instanceof Error ? error.message : String(error);
-            state.error = errorMsg;
             if (state.currentProposal) {
-              const id = state.currentProposal.id;
-              state.currentProposal.status = 'failed';
-              state.currentProposal.error = errorMsg;
+              state.currentProposal.status = 'approved';
               // Sync to the embedded proposal in chat messages (Immer structural sharing)
-              const msg = state.chatMessages.find(m => m.proposal?.id === id);
+              const msg = state.chatMessages.find((m) => m.proposal?.id === proposalId);
               if (msg?.proposal) {
-                msg.proposal.status = 'failed';
-                msg.proposal.error = errorMsg;
+                msg.proposal.status = 'approved';
               }
               // Sync to proposalHistory
-              const historyEntry = state.proposalHistory.find(p => p.id === id);
+              const historyEntry = state.proposalHistory.find((p) => p.id === proposalId);
               if (historyEntry) {
-                historyEntry.status = 'failed';
-                historyEntry.error = errorMsg;
+                historyEntry.status = 'approved';
               }
             }
           });
-          throw error;
-        }
-      },
 
-      // Create proposal
-      createProposal: (editScript: EditScript) => {
-        const proposal: AIProposal = {
-          id: crypto.randomUUID(),
-          editScript,
-          status: 'pending',
-          createdAt: new Date().toISOString(),
-        };
+          await applyEditScript(currentProposal.editScript);
+        },
 
-        set((state) => {
-          state.currentProposal = proposal;
-          state.proposalHistory.unshift(proposal);
-          // Keep only last 50 proposals
-          if (state.proposalHistory.length > 50) {
-            state.proposalHistory = state.proposalHistory.slice(0, 50);
-          }
-        });
-      },
-
-      // Approve proposal
-      approveProposal: async (proposalId: string) => {
-        const { currentProposal, applyEditScript } = get();
-
-        if (currentProposal?.id !== proposalId) {
-          throw new Error('Proposal not found or not current');
-        }
-
-        set((state) => {
-          if (state.currentProposal) {
-            state.currentProposal.status = 'approved';
-            // Sync to the embedded proposal in chat messages (Immer structural sharing)
-            const msg = state.chatMessages.find(m => m.proposal?.id === proposalId);
+        // Reject proposal
+        rejectProposal: (proposalId: string) => {
+          set((state) => {
+            if (state.currentProposal?.id === proposalId) {
+              state.currentProposal.status = 'rejected';
+            }
+            const proposal = state.proposalHistory.find((p) => p.id === proposalId);
+            if (proposal) {
+              proposal.status = 'rejected';
+            }
+            // Sync status to the embedded proposal in chat messages
+            const msg = state.chatMessages.find((m) => m.proposal?.id === proposalId);
             if (msg?.proposal) {
-              msg.proposal.status = 'approved';
+              msg.proposal.status = 'rejected';
             }
-            // Sync to proposalHistory
-            const historyEntry = state.proposalHistory.find(p => p.id === proposalId);
-            if (historyEntry) {
-              historyEntry.status = 'approved';
-            }
-          }
-        });
+          });
+        },
 
-        await applyEditScript(currentProposal.editScript);
-      },
+        // Clear current proposal
+        clearCurrentProposal: () => {
+          set((state) => {
+            state.currentProposal = null;
+          });
+        },
 
-      // Reject proposal
-      rejectProposal: (proposalId: string) => {
-        set((state) => {
-          if (state.currentProposal?.id === proposalId) {
-            state.currentProposal.status = 'rejected';
-          }
-          const proposal = state.proposalHistory.find((p) => p.id === proposalId);
-          if (proposal) {
-            proposal.status = 'rejected';
-          }
-          // Sync status to the embedded proposal in chat messages
-          const msg = state.chatMessages.find(m => m.proposal?.id === proposalId);
-          if (msg?.proposal) {
-            msg.proposal.status = 'rejected';
-          }
-        });
-      },
-
-      // Clear current proposal
-      clearCurrentProposal: () => {
-        set((state) => {
-          state.currentProposal = null;
-        });
-      },
-
-      // Add chat message (bridges to conversationStore for unified storage)
-      addChatMessage: (role: 'user' | 'assistant' | 'system', content: string, proposal?: AIProposal) => {
-        const message: ChatMessage = {
-          id: crypto.randomUUID(),
-          role,
-          content,
-          timestamp: new Date().toISOString(),
-          proposal,
-        };
-
-        set((state) => {
-          state.chatMessages.push(message);
-          // Keep only last 100 messages
-          if (state.chatMessages.length > 100) {
-            state.chatMessages = state.chatMessages.slice(-100);
-          }
-        });
-
-        // Bridge: also write to conversationStore for unified access
-        try {
-          const convStore = useConversationStore.getState();
-          if (convStore.activeConversation) {
-            if (role === 'user') {
-              convStore.addUserMessage(content);
-            } else if (role === 'system') {
-              convStore.addSystemMessage(content);
-            } else {
-              // For assistant messages, create a complete message with text
-              const msgId = convStore.startAssistantMessage();
-              convStore.appendPart(msgId, { type: 'text', content });
-              convStore.finalizeMessage(msgId);
-            }
-          } else {
-            logger.debug('Cannot bridge message to conversationStore: no active conversation', {
-              role,
-              contentPreview: content.substring(0, 80),
-            });
-          }
-        } catch (error) {
-          logger.warn('Failed to bridge message to conversationStore', {
+        // Add chat message (bridges to conversationStore for unified storage)
+        addChatMessage: (
+          role: 'user' | 'assistant' | 'system',
+          content: string,
+          proposal?: AIProposal,
+        ) => {
+          const message: ChatMessage = {
+            id: crypto.randomUUID(),
             role,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      },
+            content,
+            timestamp: new Date().toISOString(),
+            proposal,
+          };
 
-      // Clear chat history
-      clearChatHistory: () => {
-        const { currentProjectId } = get();
-        set((state) => {
-          state.chatMessages = [];
-        });
-        // Also clear from localStorage
-        if (currentProjectId) {
-          clearStoredChatHistory(currentProjectId);
-        }
-      },
-
-      // Load chat history for a project
-      loadChatHistoryForProject: (projectId: string) => {
-        const messages = loadChatHistory(projectId);
-        set((state) => {
-          state.chatMessages = messages;
-          state.currentProjectId = projectId;
-        });
-        logger.info('Loaded chat history for project', {
-          projectId,
-          messageCount: messages.length,
-        });
-
-        // Bridge: also load conversation for the project
-        try {
-          useConversationStore.getState().loadForProject(projectId);
-        } catch (error) {
-          logger.warn('Failed to bridge loadForProject to conversationStore', {
-            projectId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      },
-
-      // Set current project ID (without loading history)
-      setCurrentProjectId: (projectId: string | null) => {
-        set((state) => {
-          state.currentProjectId = projectId;
-        });
-      },
-
-      // Set error
-      setError: (error: string | null) => {
-        set((state) => {
-          state.error = error;
-        });
-      },
-
-      // Clear error
-      clearError: () => {
-        set((state) => {
-          state.error = null;
-        });
-      },
-
-      // Sync AI provider from settings and encrypted vault
-      // This calls a backend command that securely retrieves the API key
-      // from the encrypted vault and configures the AI provider
-      syncFromSettings: async () => {
-        try {
-          logger.info('Syncing AI provider from vault...');
-
-          // Call backend to sync from vault - the API key never leaves the backend
-          const status = await invoke<ProviderStatus>('sync_ai_from_vault');
-
-          // Update local state with the result
           set((state) => {
-            state.providerStatus = status;
+            state.chatMessages.push(message);
+            // Keep only last 100 messages
+            if (state.chatMessages.length > 100) {
+              state.chatMessages = state.chatMessages.slice(-100);
+            }
           });
 
-          if (status.isConfigured && status.isAvailable) {
-            logger.info('AI provider synced successfully from vault', {
-              provider: status.providerType,
-              model: status.currentModel,
-            });
-          } else if (status.isConfigured && !status.isAvailable) {
-            logger.warn('AI provider configured but not available', {
-              provider: status.providerType,
-              error: status.errorMessage,
-            });
-          } else {
-            logger.info('AI provider not configured', {
-              provider: status.providerType,
-              message: status.errorMessage,
+          // Bridge: also write to conversationStore for unified access
+          try {
+            const convStore = useConversationStore.getState();
+            if (convStore.activeConversation) {
+              if (role === 'user') {
+                convStore.addUserMessage(content);
+              } else if (role === 'system') {
+                convStore.addSystemMessage(content);
+              } else {
+                // For assistant messages, create a complete message with text
+                const msgId = convStore.startAssistantMessage();
+                try {
+                  convStore.appendPart(msgId, { type: 'text', content });
+                  convStore.finalizeMessage(msgId);
+                } catch (innerError) {
+                  logger.warn('Failed to finalize bridged assistant message', { msgId, error: innerError });
+                }
+              }
+            } else {
+              logger.debug('Cannot bridge message to conversationStore: no active conversation', {
+                role,
+                contentPreview: content.substring(0, 80),
+              });
+            }
+          } catch (error) {
+            logger.warn('Failed to bridge message to conversationStore', {
+              role,
+              error: error instanceof Error ? error.message : String(error),
             });
           }
-        } catch (error) {
-          logger.error('Failed to sync AI provider from vault', { error });
-          // Don't throw - just log the error and leave provider unconfigured
+        },
+
+        // Clear chat history
+        clearChatHistory: () => {
+          const { currentProjectId } = get();
           set((state) => {
-            state.providerStatus = {
-              providerType: null,
-              isConfigured: false,
-              isAvailable: false,
-              currentModel: null,
-              availableModels: [],
-              errorMessage: error instanceof Error ? error.message : String(error),
-            };
+            state.chatMessages = [];
           });
-        }
-      },
-    })),
+          // Also clear from localStorage
+          if (currentProjectId) {
+            clearStoredChatHistory(currentProjectId);
+          }
+        },
+
+        // Load chat history for a project
+        loadChatHistoryForProject: (projectId: string) => {
+          const messages = loadChatHistory(projectId);
+          set((state) => {
+            state.chatMessages = messages;
+            state.currentProjectId = projectId;
+          });
+          logger.info('Loaded chat history for project', {
+            projectId,
+            messageCount: messages.length,
+          });
+
+          // Bridge: also load conversation for the project
+          try {
+            useConversationStore.getState().loadForProject(projectId);
+          } catch (error) {
+            logger.warn('Failed to bridge loadForProject to conversationStore', {
+              projectId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        },
+
+        // Set current project ID (without loading history)
+        setCurrentProjectId: (projectId: string | null) => {
+          set((state) => {
+            state.currentProjectId = projectId;
+          });
+        },
+
+        // Set error
+        setError: (error: string | null) => {
+          set((state) => {
+            state.error = error;
+          });
+        },
+
+        // Clear error
+        clearError: () => {
+          set((state) => {
+            state.error = null;
+          });
+        },
+
+        // Sync AI provider from settings and encrypted vault
+        // This calls a backend command that securely retrieves the API key
+        // from the encrypted vault and configures the AI provider
+        syncFromSettings: async () => {
+          try {
+            logger.info('Syncing AI provider from vault...');
+
+            // Call backend to sync from vault - the API key never leaves the backend
+            const status = await invoke<ProviderStatus>('sync_ai_from_vault');
+
+            // Update local state with the result
+            set((state) => {
+              state.providerStatus = status;
+            });
+
+            if (status.isConfigured && status.isAvailable) {
+              logger.info('AI provider synced successfully from vault', {
+                provider: status.providerType,
+                model: status.currentModel,
+              });
+            } else if (status.isConfigured && !status.isAvailable) {
+              logger.warn('AI provider configured but not available', {
+                provider: status.providerType,
+                error: status.errorMessage,
+              });
+            } else {
+              logger.info('AI provider not configured', {
+                provider: status.providerType,
+                message: status.errorMessage,
+              });
+            }
+          } catch (error) {
+            logger.error('Failed to sync AI provider from vault', { error });
+            // Don't throw - just log the error and leave provider unconfigured
+            set((state) => {
+              state.providerStatus = {
+                providerType: null,
+                isConfigured: false,
+                isAvailable: false,
+                currentModel: null,
+                availableModels: [],
+                errorMessage: error instanceof Error ? error.message : String(error),
+              };
+            });
+          }
+        },
+      })),
       {
         name: 'openreelio-ai-store',
         // Don't persist providerStatus - it will be synced from settingsStore on load
         // This prevents stale state issues where frontend thinks provider is configured
         // but backend (which resets on restart) doesn't have the provider
         partialize: () => ({}),
-      }
-    )
-  )
+      },
+    ),
+  ),
 );
 
 // =============================================================================
@@ -990,7 +1027,7 @@ useAIStore.subscribe(
       debouncedSaveChatHistory(projectId, messages);
     }
   },
-  { equalityFn: (a, b) => a.messages === b.messages && a.projectId === b.projectId }
+  { equalityFn: (a, b) => a.messages === b.messages && a.projectId === b.projectId },
 );
 
 // Cleanup old histories on module load
@@ -1079,7 +1116,9 @@ let aiEventUnlisteners: UnlistenFn[] = [];
 let isSettingUpAIListeners = false;
 
 function isTauriRuntime(): boolean {
-  return typeof (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined';
+  return (
+    typeof (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined'
+  );
 }
 
 /**
@@ -1115,7 +1154,7 @@ export async function setupAIEventListeners(): Promise<void> {
         'ai-completion',
         (event) => {
           logger.info('AI completion event received', { jobId: event.payload.jobId });
-        }
+        },
       );
       newUnlisteners.push(unlistenCompletion);
     } catch (error) {
@@ -1128,7 +1167,7 @@ export async function setupAIEventListeners(): Promise<void> {
         'transcription-complete',
         (event) => {
           logger.info('Transcription complete', { assetId: event.payload.assetId });
-        }
+        },
       );
       newUnlisteners.push(unlistenTranscription);
     } catch (error) {

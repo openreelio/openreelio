@@ -104,11 +104,11 @@ describe('useProject', () => {
       expect(mockSaveProject).toHaveBeenCalled();
     });
 
-    it('provides closeProject action', () => {
+    it('provides closeProject action', async () => {
       const { result } = renderHook(() => useProject());
 
-      act(() => {
-        result.current.closeProject();
+      await act(async () => {
+        await result.current.closeProject();
       });
 
       expect(mockCloseProject).toHaveBeenCalled();

@@ -6,11 +6,9 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { Thinker, createThinker } from './Thinker';
+import { createMockLLMAdapter, type MockLLMAdapter } from '../adapters/llm/MockLLMAdapter';
 import {
-  createMockLLMAdapter,
-  type MockLLMAdapter,
-} from '../adapters/llm/MockLLMAdapter';
-import {
+  createLanguagePolicy,
   createEmptyContext,
   type AgentContext,
   type Thought,
@@ -41,10 +39,7 @@ describe('Thinker', () => {
         } as Thought,
       });
 
-      const result = await thinker.think(
-        'Split the clip at 5 seconds',
-        context
-      );
+      const result = await thinker.think('Split the clip at 5 seconds', context);
 
       expect(result.understanding).toContain('split');
       expect(result.needsMoreInfo).toBe(false);
@@ -86,10 +81,7 @@ describe('Thinker', () => {
         } as Thought,
       });
 
-      const result = await thinker.think(
-        'Cut the first 5 seconds and move it to the end',
-        context
-      );
+      const result = await thinker.think('Cut the first 5 seconds and move it to the end', context);
 
       expect(result.requirements.length).toBeGreaterThanOrEqual(2);
     });
@@ -137,6 +129,55 @@ describe('Thinker', () => {
 
       expect(systemMessage?.content).toContain('split_clip');
       expect(systemMessage?.content).toContain('move_clip');
+      expect(systemMessage?.content).toContain('Source-Aware Policy:');
+    });
+
+    it('should include language policy instructions in system prompt', async () => {
+      mockLLM.setStructuredResponse({
+        structured: {
+          understanding: 'test',
+          requirements: [],
+          uncertainties: [],
+          approach: 'test',
+          needsMoreInfo: false,
+        } as Thought,
+      });
+
+      context.languagePolicy = createLanguagePolicy('en', {
+        outputLanguage: 'es-ES',
+        detectInputLanguage: true,
+      });
+
+      await thinker.think('por favor divide el clip', context);
+
+      const request = mockLLM.getLastRequest();
+      const systemMessage = request?.messages.find((m) => m.role === 'system');
+      expect(systemMessage?.content).toContain('Language Policy:');
+      expect(systemMessage?.content).toContain('Default output language: es-ES');
+      expect(systemMessage?.content).toContain('Never translate IDs, tool names');
+    });
+
+    it('should include clarification policy to avoid unnecessary blocking', async () => {
+      mockLLM.setStructuredResponse({
+        structured: {
+          understanding: 'test',
+          requirements: [],
+          uncertainties: [],
+          approach: 'test',
+          needsMoreInfo: false,
+        } as Thought,
+      });
+
+      await thinker.think('make a 1 minute sample video', context);
+
+      const request = mockLLM.getLastRequest();
+      const systemMessage = request?.messages.find((m) => m.role === 'system');
+
+      expect(systemMessage?.content).toContain('Clarification Policy (important):');
+      expect(systemMessage?.content).toContain('Prefer proceeding with reasonable defaults');
+      expect(systemMessage?.content).toContain(
+        'Set needsMoreInfo=true ONLY when execution would likely fail',
+      );
     });
   });
 
@@ -159,10 +200,8 @@ describe('Thinker', () => {
 
       const progressChunks: string[] = [];
 
-      const result = await thinker.thinkWithStreaming(
-        'test input',
-        context,
-        (chunk) => progressChunks.push(chunk)
+      const result = await thinker.thinkWithStreaming('test input', context, (chunk) =>
+        progressChunks.push(chunk),
       );
 
       expect(progressChunks.length).toBeGreaterThan(0);
@@ -185,9 +224,9 @@ describe('Thinker', () => {
         delay: 100,
       });
 
-      await expect(
-        shortTimeoutThinker.think('test', context)
-      ).rejects.toThrow(ThinkingTimeoutError);
+      await expect(shortTimeoutThinker.think('test', context)).rejects.toThrow(
+        ThinkingTimeoutError,
+      );
     });
 
     it('should throw UnderstandingError on LLM error', async () => {
@@ -195,9 +234,7 @@ describe('Thinker', () => {
         error: new Error('LLM API error'),
       });
 
-      await expect(thinker.think('test', context)).rejects.toThrow(
-        UnderstandingError
-      );
+      await expect(thinker.think('test', context)).rejects.toThrow(UnderstandingError);
     });
 
     it('should handle malformed LLM response', async () => {

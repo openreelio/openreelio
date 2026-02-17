@@ -26,11 +26,7 @@
 // =============================================================================
 // Main Engine
 // =============================================================================
-export {
-  AgenticEngine,
-  createAgenticEngine,
-  type AgentRunResult,
-} from './AgenticEngine';
+export { AgenticEngine, createAgenticEngine, type AgentRunResult } from './AgenticEngine';
 
 // =============================================================================
 // Core Types
@@ -48,10 +44,13 @@ export {
   type PlanStep,
   type Observation,
   type StateChange,
+  type RollbackFailure,
+  type RollbackReport,
   type SessionSummary,
 
   // Context types
   type AgentContext,
+  type LanguagePolicy,
   type TimelineInfo,
   type ClipInfo,
   type AssetInfo,
@@ -64,6 +63,8 @@ export {
   // Factory functions
   createInitialState,
   createEmptyContext,
+  createLanguagePolicy,
+  normalizeLanguageCode,
   mergeConfig,
   requiresApproval,
   generateId,
@@ -93,6 +94,8 @@ export {
   ToolExecutionError,
   InvalidArgumentsError,
   DependencyError,
+  StepBudgetExceededError,
+  ToolBudgetExceededError,
   ObservationTimeoutError,
   ObservationError,
   MaxIterationsError,
@@ -202,17 +205,9 @@ export {
 // =============================================================================
 // Phase Implementations
 // =============================================================================
-export {
-  Thinker,
-  createThinker,
-  type ThinkerConfig,
-} from './phases/Thinker';
+export { Thinker, createThinker, type ThinkerConfig } from './phases/Thinker';
 
-export {
-  Planner,
-  createPlanner,
-  type PlannerConfig,
-} from './phases/Planner';
+export { Planner, createPlanner, type PlannerConfig } from './phases/Planner';
 
 export {
   Executor,
@@ -221,14 +216,11 @@ export {
   type ExecutionProgress,
   type ExecutionPhase,
   type StepExecutionRecord,
+  type ExecutionLimits,
   type ExecutionResult,
 } from './phases/Executor';
 
-export {
-  Observer,
-  createObserver,
-  type ObserverConfig,
-} from './phases/Observer';
+export { Observer, createObserver, type ObserverConfig } from './phases/Observer';
 
 // =============================================================================
 // Adapters
@@ -262,3 +254,8 @@ export {
   ToolRegistryAdapter,
   createToolRegistryAdapter,
 } from './adapters/tools/ToolRegistryAdapter';
+
+export {
+  MemoryManagerAdapter,
+  createMemoryManagerAdapter,
+} from './adapters/memory/MemoryManagerAdapter';
