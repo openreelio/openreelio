@@ -73,6 +73,76 @@ Object.defineProperty(window, 'matchMedia', {
   })),
 });
 
+// Provide PointerEvent support for jsdom-based tests.
+// Vitest + jsdom environments may not expose PointerEvent, which causes
+// fireEvent.pointer* payload fields (clientX, pointerId) to be dropped.
+if (typeof window.PointerEvent === 'undefined') {
+  class MockPointerEvent extends MouseEvent implements PointerEvent {
+    readonly pointerId: number;
+    readonly width: number;
+    readonly height: number;
+    readonly pressure: number;
+    readonly tangentialPressure: number;
+    readonly tiltX: number;
+    readonly tiltY: number;
+    readonly twist: number;
+    readonly altitudeAngle: number;
+    readonly azimuthAngle: number;
+    readonly pointerType: string;
+    readonly isPrimary: boolean;
+
+    constructor(type: string, params: PointerEventInit = {}) {
+      super(type, params);
+
+      this.pointerId = params.pointerId ?? 1;
+      this.width = params.width ?? 1;
+      this.height = params.height ?? 1;
+      this.pressure = params.pressure ?? 0;
+      this.tangentialPressure = params.tangentialPressure ?? 0;
+      this.tiltX = params.tiltX ?? 0;
+      this.tiltY = params.tiltY ?? 0;
+      this.twist = params.twist ?? 0;
+      this.altitudeAngle = 0;
+      this.azimuthAngle = 0;
+      this.pointerType = params.pointerType ?? 'mouse';
+      this.isPrimary = params.isPrimary ?? true;
+    }
+
+    getCoalescedEvents(): PointerEvent[] {
+      return [];
+    }
+
+    getPredictedEvents(): PointerEvent[] {
+      return [];
+    }
+  }
+
+  Object.defineProperty(window, 'PointerEvent', {
+    writable: true,
+    configurable: true,
+    value: MockPointerEvent,
+  });
+  Object.defineProperty(globalThis, 'PointerEvent', {
+    writable: true,
+    configurable: true,
+    value: MockPointerEvent,
+  });
+}
+
+if (typeof HTMLElement.prototype.setPointerCapture !== 'function') {
+  Object.defineProperty(HTMLElement.prototype, 'setPointerCapture', {
+    writable: true,
+    value: () => {},
+  });
+}
+
+if (typeof HTMLElement.prototype.releasePointerCapture !== 'function') {
+  Object.defineProperty(HTMLElement.prototype, 'releasePointerCapture', {
+    writable: true,
+    value: () => {},
+  });
+}
+
 // Mock ResizeObserver for component tests
 class MockResizeObserver {
   observe = vi.fn();
