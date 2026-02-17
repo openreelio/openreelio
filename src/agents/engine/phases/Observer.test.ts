@@ -6,11 +6,9 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { Observer, createObserver } from './Observer';
+import { createMockLLMAdapter, type MockLLMAdapter } from '../adapters/llm/MockLLMAdapter';
 import {
-  createMockLLMAdapter,
-  type MockLLMAdapter,
-} from '../adapters/llm/MockLLMAdapter';
-import {
+  createLanguagePolicy,
   type Plan,
   type Observation,
   type AgentContext,
@@ -61,6 +59,7 @@ describe('Observer', () => {
     failedSteps: [],
     totalDuration: 100,
     aborted: false,
+    toolCallsUsed: 1,
   };
 
   beforeEach(() => {
@@ -87,11 +86,7 @@ describe('Observer', () => {
 
       mockLLM.setStructuredResponse({ structured: mockObservation });
 
-      const result = await observer.observe(
-        successfulPlan,
-        successfulExecution,
-        context
-      );
+      const result = await observer.observe(successfulPlan, successfulExecution, context);
 
       expect(result.goalAchieved).toBe(true);
       expect(result.confidence).toBeGreaterThan(0.8);
@@ -120,16 +115,10 @@ describe('Observer', () => {
 
       mockLLM.setStructuredResponse({ structured: mockObservation });
 
-      const result = await observer.observe(
-        successfulPlan,
-        successfulExecution,
-        context
-      );
+      const result = await observer.observe(successfulPlan, successfulExecution, context);
 
       expect(result.stateChanges).toHaveLength(2);
-      expect(result.stateChanges.some((c) => c.type === 'clip_created')).toBe(
-        true
-      );
+      expect(result.stateChanges.some((c) => c.type === 'clip_created')).toBe(true);
     });
 
     it('should recommend iteration when goal not fully achieved', async () => {
@@ -153,6 +142,7 @@ describe('Observer', () => {
         ],
         totalDuration: 120,
         aborted: false,
+        toolCallsUsed: 2,
       };
 
       const mockObservation: Observation = {
@@ -173,11 +163,7 @@ describe('Observer', () => {
 
       mockLLM.setStructuredResponse({ structured: mockObservation });
 
-      const result = await observer.observe(
-        successfulPlan,
-        partialExecution,
-        context
-      );
+      const result = await observer.observe(successfulPlan, partialExecution, context);
 
       expect(result.goalAchieved).toBe(false);
       expect(result.needsIteration).toBe(true);
@@ -200,11 +186,7 @@ describe('Observer', () => {
 
       const maxIterObserver = createObserver(mockLLM, { maxIterations: 5 });
 
-      const result = await maxIterObserver.observe(
-        successfulPlan,
-        successfulExecution,
-        context
-      );
+      const result = await maxIterObserver.observe(successfulPlan, successfulExecution, context);
 
       expect(result.needsIteration).toBe(false);
     });
@@ -226,9 +208,7 @@ describe('Observer', () => {
       expect(request).toBeDefined();
 
       // Check that plan goal is in the request
-      const hasGoal = request?.messages.some((m) =>
-        m.content.includes(successfulPlan.goal)
-      );
+      const hasGoal = request?.messages.some((m) => m.content.includes(successfulPlan.goal));
       expect(hasGoal).toBe(true);
     });
 
@@ -249,10 +229,35 @@ describe('Observer', () => {
 
       // Check that execution result is in the request
       const hasResult = request?.messages.some(
-        (m) =>
-          m.content.includes('step-1') || m.content.includes('split_clip')
+        (m) => m.content.includes('step-1') || m.content.includes('split_clip'),
       );
       expect(hasResult).toBe(true);
+    });
+
+    it('should include language policy instructions in observer system prompt', async () => {
+      context.languagePolicy = createLanguagePolicy('en', {
+        outputLanguage: 'ja',
+        detectInputLanguage: true,
+      });
+
+      mockLLM.setStructuredResponse({
+        structured: {
+          goalAchieved: true,
+          stateChanges: [],
+          summary: 'Done',
+          confidence: 0.9,
+          needsIteration: false,
+        } as Observation,
+      });
+
+      await observer.observe(successfulPlan, successfulExecution, context);
+
+      const request = mockLLM.getLastRequest();
+      const systemMessage = request?.messages.find((m) => m.role === 'system');
+
+      expect(systemMessage?.content).toContain('Language Policy:');
+      expect(systemMessage?.content).toContain('Default output language: ja');
+      expect(systemMessage?.content).toContain('Never translate IDs, tool names');
     });
   });
 
@@ -279,7 +284,7 @@ describe('Observer', () => {
         successfulPlan,
         successfulExecution,
         context,
-        (chunk) => progressChunks.push(chunk)
+        (chunk) => progressChunks.push(chunk),
       );
 
       expect(progressChunks.length).toBeGreaterThan(0);
@@ -303,7 +308,7 @@ describe('Observer', () => {
       });
 
       await expect(
-        shortTimeoutObserver.observe(successfulPlan, successfulExecution, context)
+        shortTimeoutObserver.observe(successfulPlan, successfulExecution, context),
       ).rejects.toThrow(ObservationTimeoutError);
     });
 
@@ -313,7 +318,7 @@ describe('Observer', () => {
       });
 
       await expect(
-        observer.observe(successfulPlan, successfulExecution, context)
+        observer.observe(successfulPlan, successfulExecution, context),
       ).rejects.toThrow();
     });
 
@@ -323,7 +328,7 @@ describe('Observer', () => {
       });
 
       await expect(
-        observer.observe(successfulPlan, successfulExecution, context)
+        observer.observe(successfulPlan, successfulExecution, context),
       ).rejects.toThrow();
     });
   });
@@ -341,11 +346,7 @@ describe('Observer', () => {
         delay: 1000,
       });
 
-      const promise = observer.observe(
-        successfulPlan,
-        successfulExecution,
-        context
-      );
+      const promise = observer.observe(successfulPlan, successfulExecution, context);
 
       setTimeout(() => observer.abort(), 10);
 
@@ -371,6 +372,7 @@ describe('Observer', () => {
         ],
         totalDuration: 100,
         aborted: false,
+        toolCallsUsed: 2,
       };
 
       mockLLM.setStructuredResponse({
@@ -383,11 +385,7 @@ describe('Observer', () => {
         } as Observation,
       });
 
-      const result = await observer.observe(
-        successfulPlan,
-        partialExecution,
-        context
-      );
+      const result = await observer.observe(successfulPlan, partialExecution, context);
 
       expect(result.confidence).toBeLessThan(0.8);
     });
@@ -403,11 +401,7 @@ describe('Observer', () => {
         } as Observation,
       });
 
-      const result = await observer.observe(
-        successfulPlan,
-        successfulExecution,
-        context
-      );
+      const result = await observer.observe(successfulPlan, successfulExecution, context);
 
       expect(result.confidence).toBeGreaterThan(0.8);
     });
@@ -429,11 +423,7 @@ describe('Observer', () => {
         } as Observation,
       });
 
-      const result = await customObserver.observe(
-        successfulPlan,
-        successfulExecution,
-        context
-      );
+      const result = await customObserver.observe(successfulPlan, successfulExecution, context);
 
       // Observer should prevent iteration when at max
       expect(result.needsIteration).toBe(false);
@@ -452,11 +442,7 @@ describe('Observer', () => {
         } as Observation,
       });
 
-      const result = await observer.observe(
-        successfulPlan,
-        successfulExecution,
-        context
-      );
+      const result = await observer.observe(successfulPlan, successfulExecution, context);
 
       expect(typeof result.goalAchieved).toBe('boolean');
       expect(Array.isArray(result.stateChanges)).toBe(true);
@@ -480,7 +466,7 @@ describe('Observer', () => {
       const result = await observer.observe(
         successfulPlan,
         { ...successfulExecution, success: false },
-        context
+        context,
       );
 
       expect(result.needsIteration).toBe(true);

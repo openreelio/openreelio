@@ -13,7 +13,7 @@
  */
 
 import type { ILLMClient, LLMMessage } from '../ports/ILLMClient';
-import type { Plan, Observation, AgentContext } from '../core/types';
+import type { Plan, Observation, AgentContext, LanguagePolicy } from '../core/types';
 import type { ExecutionResult, StepExecutionRecord } from './Executor';
 import { ObservationTimeoutError, ObservationError } from '../core/errors';
 
@@ -95,7 +95,7 @@ export class Observer {
   async observe(
     plan: Plan,
     execution: ExecutionResult,
-    context: AgentContext
+    context: AgentContext,
   ): Promise<Observation> {
     this.abortController = new AbortController();
 
@@ -105,7 +105,7 @@ export class Observer {
     try {
       const observation = await this.executeWithTimeout(
         () => this.llm.generateStructured<Observation>(messages, schema),
-        this.config.timeout
+        this.config.timeout,
       );
 
       // Validate the observation
@@ -123,7 +123,7 @@ export class Observer {
         throw error;
       }
       throw new ObservationError(
-        `Failed to analyze execution: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to analyze execution: ${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
       this.abortController = null;
@@ -143,7 +143,7 @@ export class Observer {
     plan: Plan,
     execution: ExecutionResult,
     context: AgentContext,
-    onProgress: (chunk: string) => void
+    onProgress: (chunk: string) => void,
   ): Promise<Observation> {
     this.abortController = new AbortController();
 
@@ -165,16 +165,13 @@ export class Observer {
 
       // Get the structured result
       const schema = this.buildObservationSchema();
-      const observation = await this.llm.generateStructured<Observation>(
-        messages,
-        schema
-      );
+      const observation = await this.llm.generateStructured<Observation>(messages, schema);
 
       this.validateObservation(observation);
       return this.applyIterationLimit(observation, context);
     } catch (error) {
       throw new ObservationError(
-        `Failed to analyze execution with streaming: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to analyze execution with streaming: ${error instanceof Error ? error.message : String(error)}`,
       );
     } finally {
       this.abortController = null;
@@ -201,9 +198,9 @@ export class Observer {
   private buildMessages(
     plan: Plan,
     execution: ExecutionResult,
-    context: AgentContext
+    context: AgentContext,
   ): LLMMessage[] {
-    const systemPrompt = this.buildSystemPrompt();
+    const systemPrompt = this.buildSystemPrompt(context);
     const userPrompt = this.buildUserPrompt(plan, execution, context);
 
     return [
@@ -215,10 +212,12 @@ export class Observer {
   /**
    * Build system prompt for observation
    */
-  private buildSystemPrompt(): string {
+  private buildSystemPrompt(context: AgentContext): string {
     if (this.config.systemPromptOverride) {
       return this.config.systemPromptOverride;
     }
+
+    const languageSection = this.buildLanguagePolicySection(context.languagePolicy);
 
     return `You are an AI observer for a video editing application.
 Your task is to analyze the results of an executed plan and determine:
@@ -239,25 +238,37 @@ Confidence Scale:
 - 0.9-1.0: Very confident, clear success or failure
 - 0.7-0.9: Confident, most evidence points to conclusion
 - 0.5-0.7: Uncertain, mixed results
-- 0.0-0.5: Low confidence, unclear outcome`;
+- 0.0-0.5: Low confidence, unclear outcome
+
+${languageSection}`;
+  }
+
+  private buildLanguagePolicySection(languagePolicy?: LanguagePolicy): string {
+    if (!languagePolicy) {
+      return "Language Policy: Use the user's preferred language for natural-language fields.";
+    }
+
+    return [
+      'Language Policy:',
+      `- UI language: ${languagePolicy.uiLanguage}`,
+      `- Default output language: ${languagePolicy.outputLanguage}`,
+      `- Detect input language: ${languagePolicy.detectInputLanguage ? 'enabled' : 'disabled'}`,
+      `- User language override: ${languagePolicy.allowUserLanguageOverride ? 'allowed' : 'disallowed'}`,
+      '- Keep summary, iterationReason, and suggestedAction in the default output language unless user explicitly asks otherwise.',
+      '- Never translate IDs, tool names, command names, or JSON keys.',
+    ].join('\n');
   }
 
   /**
    * Build user prompt with execution details
    */
-  private buildUserPrompt(
-    plan: Plan,
-    execution: ExecutionResult,
-    context: AgentContext
-  ): string {
+  private buildUserPrompt(plan: Plan, execution: ExecutionResult, context: AgentContext): string {
     const parts: string[] = [
       '## Original Goal',
       plan.goal,
       '',
       '## Planned Steps',
-      ...plan.steps.map(
-        (s, i) => `${i + 1}. [${s.id}] ${s.tool}: ${s.description}`
-      ),
+      ...plan.steps.map((s, i) => `${i + 1}. [${s.id}] ${s.tool}: ${s.description}`),
       '',
       '## Execution Summary',
       `Overall Success: ${execution.success}`,
@@ -295,10 +306,7 @@ Confidence Scale:
   /**
    * Format a step result for the prompt
    */
-  private formatStepResult(
-    step: StepExecutionRecord,
-    status: 'SUCCESS' | 'FAILED'
-  ): string {
+  private formatStepResult(step: StepExecutionRecord, status: 'SUCCESS' | 'FAILED'): string {
     const lines = [
       `- [${status}] ${step.stepId}: ${step.tool}`,
       `  Duration: ${step.endTime - step.startTime}ms`,
@@ -372,13 +380,7 @@ Confidence Scale:
           description: 'Suggested action for next iteration (if needsIteration)',
         },
       },
-      required: [
-        'goalAchieved',
-        'stateChanges',
-        'summary',
-        'confidence',
-        'needsIteration',
-      ],
+      required: ['goalAchieved', 'stateChanges', 'summary', 'confidence', 'needsIteration'],
     };
   }
 
@@ -425,10 +427,7 @@ Confidence Scale:
   /**
    * Apply iteration limit to observation
    */
-  private applyIterationLimit(
-    observation: Observation,
-    context: AgentContext
-  ): Observation {
+  private applyIterationLimit(observation: Observation, context: AgentContext): Observation {
     const currentIteration = context.currentIteration ?? 0;
 
     if (currentIteration >= this.config.maxIterations) {
@@ -451,10 +450,7 @@ Confidence Scale:
   /**
    * Execute operation with timeout
    */
-  private async executeWithTimeout<T>(
-    operation: () => Promise<T>,
-    timeout: number
-  ): Promise<T> {
+  private async executeWithTimeout<T>(operation: () => Promise<T>, timeout: number): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       let settled = false;
 
@@ -466,17 +462,37 @@ Confidence Scale:
         }
       }, timeout);
 
+      const abortHandler = () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeoutId);
+          reject(new ObservationTimeoutError(timeout));
+        }
+      };
+
       if (this.abortController?.signal.aborted) {
         clearTimeout(timeoutId);
         reject(new ObservationTimeoutError(timeout));
         return;
       }
 
+      const signal = this.abortController?.signal;
+      if (signal) {
+        signal.addEventListener('abort', abortHandler);
+      }
+
+      const cleanup = () => {
+        if (signal) {
+          signal.removeEventListener('abort', abortHandler);
+        }
+      };
+
       operation()
         .then((result) => {
           if (!settled) {
             settled = true;
             clearTimeout(timeoutId);
+            cleanup();
             resolve(result);
           }
         })
@@ -484,17 +500,10 @@ Confidence Scale:
           if (!settled) {
             settled = true;
             clearTimeout(timeoutId);
+            cleanup();
             reject(error);
           }
         });
-
-      this.abortController?.signal.addEventListener('abort', () => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timeoutId);
-          reject(new ObservationTimeoutError(timeout));
-        }
-      });
     });
   }
 }
@@ -510,9 +519,6 @@ Confidence Scale:
  * @param config - Optional configuration
  * @returns Configured Observer instance
  */
-export function createObserver(
-  llm: ILLMClient,
-  config?: ObserverConfig
-): Observer {
+export function createObserver(llm: ILLMClient, config?: ObserverConfig): Observer {
   return new Observer(llm, config);
 }
