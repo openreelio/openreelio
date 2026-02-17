@@ -709,6 +709,7 @@ mod tauri_app {
             // Project commands
             ipc::create_project,
             ipc::open_project,
+            ipc::close_project,
             ipc::save_project,
             ipc::get_project_info,
             ipc::get_project_state,

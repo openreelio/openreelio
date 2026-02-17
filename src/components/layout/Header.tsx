@@ -151,7 +151,7 @@ export function Header({
     if (isDirty) {
       setShowCloseConfirm(true);
     } else {
-      closeProject();
+      void closeProject();
     }
   }, [isDirty, closeProject]);
 
@@ -161,7 +161,7 @@ export function Header({
     try {
       await saveProject();
       setShowCloseConfirm(false);
-      closeProject();
+      await closeProject();
     } catch (error) {
       logger.error('Failed to save project', { error });
       setSaveStatus('error');
@@ -172,7 +172,7 @@ export function Header({
   // Discard changes and close project
   const handleDiscardAndClose = useCallback(() => {
     setShowCloseConfirm(false);
-    closeProject();
+    void closeProject();
   }, [closeProject]);
 
   // Cancel close action

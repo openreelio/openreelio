@@ -97,7 +97,7 @@ interface ProjectState {
   loadProject: (path: string) => Promise<void>;
   createProject: (name: string, path: string) => Promise<void>;
   saveProject: () => Promise<void>;
-  closeProject: () => void;
+  closeProject: () => Promise<void>;
 
   // Asset actions
   importAsset: (uri?: string) => Promise<string>;
@@ -249,9 +249,19 @@ export const useProjectStore = create<ProjectState>()(
     },
 
     // Close project
-    closeProject: () => {
+    closeProject: async () => {
       // Clear command queue to prevent any pending operations from affecting the next project
       commandQueue.clear();
+
+      // Close the project on the backend first.
+      // Use require_saved=false because the frontend already handles
+      // save/discard confirmation via UnsavedChangesDialog before calling this.
+      try {
+        await invoke('close_project', { requireSaved: false });
+      } catch (error) {
+        // Log but don't block frontend cleanup — the user already decided to close.
+        logger.warn('Backend close_project failed, clearing frontend state anyway', { error });
+      }
 
       set((state) => {
         state.isLoaded = false;

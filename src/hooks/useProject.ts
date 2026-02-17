@@ -35,7 +35,7 @@ export interface UseProjectReturn {
   createProject: (name: string, path: string) => Promise<void>;
   loadProject: (path: string) => Promise<void>;
   saveProject: () => Promise<void>;
-  closeProject: () => void;
+  closeProject: () => Promise<void>;
   importAsset: (uri: string) => Promise<string>;
   removeAsset: (assetId: string) => Promise<void>;
 }
@@ -97,8 +97,8 @@ export function useProject(): UseProjectReturn {
     await storeSaveProject();
   }, [storeSaveProject]);
 
-  const closeProject = useCallback((): void => {
-    storeCloseProject();
+  const closeProject = useCallback(async (): Promise<void> => {
+    await storeCloseProject();
   }, [storeCloseProject]);
 
   const importAsset = useCallback(
