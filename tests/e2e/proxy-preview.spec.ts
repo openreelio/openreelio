@@ -155,13 +155,14 @@ test.describe('Proxy Preview QA', () => {
     });
 
     await page.goto('/');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
     await dismissBlockingFFmpegWarning(page);
     await seedProxyPreviewState(page);
     await dismissBlockingFFmpegWarning(page);
+    await expect(page.getByText('Loading interface...')).toHaveCount(0, { timeout: 20000 });
 
     const player = page.locator('[data-testid="unified-preview-player"]');
-    await expect(player).toBeVisible();
+    await expect(player).toBeVisible({ timeout: 20000 });
     await expect(player).toHaveAttribute('data-mode', 'video');
 
     const proxyVideo = page.locator('[data-testid="proxy-video-clip_proxy_qa_1"]');
