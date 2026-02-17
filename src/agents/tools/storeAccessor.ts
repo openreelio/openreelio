@@ -12,7 +12,7 @@
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
-import type { Clip, Track, Sequence } from '@/types';
+import type { Asset, Clip, Track, Sequence } from '@/types';
 
 // =============================================================================
 // Snapshot Types
@@ -57,6 +57,30 @@ export interface TimelineSnapshot {
   playheadPosition: number;
 }
 
+export interface AssetSnapshot {
+  id: string;
+  name: string;
+  kind: Asset['kind'];
+  uri: string;
+  durationSec?: number;
+  importedAt: string;
+  proxyStatus: Asset['proxyStatus'];
+  timelineClipCount: number;
+  onTimeline: boolean;
+  hasVideoStream: boolean;
+  hasAudioStream: boolean;
+  binId?: string | null;
+}
+
+export interface AssetCatalogSnapshot {
+  totalAssetCount: number;
+  videoAssetCount: number;
+  audioAssetCount: number;
+  imageAssetCount: number;
+  unusedAssetCount: number;
+  assets: AssetSnapshot[];
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -97,6 +121,39 @@ function getActiveSequence(): Sequence | undefined {
   return project.sequences.get(project.activeSequenceId);
 }
 
+function buildAssetUsageCounts(activeSequence: Sequence | undefined): Map<string, number> {
+  const usage = new Map<string, number>();
+  if (!activeSequence) {
+    return usage;
+  }
+
+  for (const track of activeSequence.tracks) {
+    for (const clip of track.clips) {
+      const current = usage.get(clip.assetId) ?? 0;
+      usage.set(clip.assetId, current + 1);
+    }
+  }
+
+  return usage;
+}
+
+function assetToSnapshot(asset: Asset, timelineClipCount: number): AssetSnapshot {
+  return {
+    id: asset.id,
+    name: asset.name,
+    kind: asset.kind,
+    uri: asset.uri,
+    durationSec: asset.durationSec,
+    importedAt: asset.importedAt,
+    proxyStatus: asset.proxyStatus,
+    timelineClipCount,
+    onTimeline: timelineClipCount > 0,
+    hasVideoStream: Boolean(asset.video),
+    hasAudioStream: Boolean(asset.audio),
+    binId: asset.binId,
+  };
+}
+
 // =============================================================================
 // Public API
 // =============================================================================
@@ -121,6 +178,56 @@ export function getSelectionContext(): {
     selectedTrackIds: timeline.selectedTrackIds,
     playheadPosition: playback.currentTime,
   };
+}
+
+/**
+ * Returns a snapshot of imported project assets along with timeline usage.
+ * This enables source-aware workflows (finding imported media not yet on timeline).
+ */
+export function getAssetCatalogSnapshot(): AssetCatalogSnapshot {
+  const project = useProjectStore.getState();
+  const activeSequence = getActiveSequence();
+  const usage = buildAssetUsageCounts(activeSequence);
+
+  const assets = Array.from(project.assets.values())
+    .map((asset) => assetToSnapshot(asset, usage.get(asset.id) ?? 0))
+    .sort((left, right) => {
+      if (left.onTimeline !== right.onTimeline) {
+        return left.onTimeline ? 1 : -1;
+      }
+
+      return Date.parse(right.importedAt) - Date.parse(left.importedAt);
+    });
+
+  const videoAssetCount = assets.filter((asset) => asset.kind === 'video').length;
+  const audioAssetCount = assets.filter((asset) => asset.kind === 'audio').length;
+  const imageAssetCount = assets.filter((asset) => asset.kind === 'image').length;
+  const unusedAssetCount = assets.filter((asset) => !asset.onTimeline).length;
+
+  return {
+    totalAssetCount: assets.length,
+    videoAssetCount,
+    audioAssetCount,
+    imageAssetCount,
+    unusedAssetCount,
+    assets,
+  };
+}
+
+/**
+ * Returns a single asset snapshot by ID, including timeline usage metadata.
+ */
+export function getAssetSnapshotById(assetId: string): AssetSnapshot | null {
+  const catalog = getAssetCatalogSnapshot();
+  return catalog.assets.find((asset) => asset.id === assetId) ?? null;
+}
+
+/**
+ * Returns imported assets that are currently unused on the active timeline.
+ */
+export function getUnusedAssets(kind?: AssetSnapshot['kind']): AssetSnapshot[] {
+  const catalog = getAssetCatalogSnapshot();
+  return catalog.assets.filter((asset) => !asset.onTimeline && (kind ? asset.kind === kind : true));
 }
 
 /**
@@ -246,7 +353,7 @@ export function findClipsByAsset(assetId: string): ClipSnapshot[] {
  */
 export function findGaps(
   trackId?: string,
-  minDuration: number = 0
+  minDuration: number = 0,
 ): Array<{ trackId: string; startTime: number; endTime: number; duration: number }> {
   const activeSequence = getActiveSequence();
   if (!activeSequence) return [];
@@ -258,9 +365,7 @@ export function findGaps(
 
   for (const track of tracksToSearch) {
     // Sort clips by timeline position
-    const sorted = [...track.clips].sort(
-      (a, b) => a.place.timelineInSec - b.place.timelineInSec
-    );
+    const sorted = [...track.clips].sort((a, b) => a.place.timelineInSec - b.place.timelineInSec);
 
     if (sorted.length === 0) continue;
     let maxEndTime = sorted[0].place.timelineInSec + sorted[0].place.durationSec;
@@ -277,7 +382,10 @@ export function findGaps(
           duration: gapDuration,
         });
       }
-      maxEndTime = Math.max(maxEndTime, sorted[i].place.timelineInSec + sorted[i].place.durationSec);
+      maxEndTime = Math.max(
+        maxEndTime,
+        sorted[i].place.timelineInSec + sorted[i].place.durationSec,
+      );
     }
   }
 
@@ -287,9 +395,7 @@ export function findGaps(
 /**
  * Find overlapping clips on a track or all tracks.
  */
-export function findOverlaps(
-  trackId?: string
-): Array<{
+export function findOverlaps(trackId?: string): Array<{
   trackId: string;
   clip1Id: string;
   clip2Id: string;
@@ -314,9 +420,7 @@ export function findOverlaps(
     : activeSequence.tracks;
 
   for (const track of tracksToSearch) {
-    const sorted = [...track.clips].sort(
-      (a, b) => a.place.timelineInSec - b.place.timelineInSec
-    );
+    const sorted = [...track.clips].sort((a, b) => a.place.timelineInSec - b.place.timelineInSec);
 
     for (let i = 0; i < sorted.length; i++) {
       for (let j = i + 1; j < sorted.length; j++) {

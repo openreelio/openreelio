@@ -8,6 +8,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
+import { getTimelineSnapshot } from './storeAccessor';
 
 const logger = createLogger('EditingTools');
 
@@ -236,6 +237,99 @@ const EDITING_TOOLS: ToolDefinition[] = [
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('delete_clip failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // Delete Clips In Range
+  // -------------------------------------------------------------------------
+  {
+    name: 'delete_clips_in_range',
+    description: 'Delete all clips that overlap a given timeline range',
+    category: 'clip',
+    parameters: {
+      type: 'object',
+      properties: {
+        sequenceId: {
+          type: 'string',
+          description: 'The ID of the sequence containing clips',
+        },
+        startTime: {
+          type: 'number',
+          description: 'Range start in seconds',
+        },
+        endTime: {
+          type: 'number',
+          description: 'Range end in seconds',
+        },
+        trackId: {
+          type: 'string',
+          description: 'Optional track ID to limit deletion scope',
+        },
+      },
+      required: ['sequenceId', 'startTime', 'endTime'],
+    },
+    handler: async (args) => {
+      const sequenceId = args.sequenceId as string;
+      const startTime = args.startTime as number;
+      const endTime = args.endTime as number;
+      const trackId = args.trackId as string | undefined;
+
+      if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) {
+        return { success: false, error: 'Invalid range: endTime must be greater than startTime' };
+      }
+
+      try {
+        const snapshot = getTimelineSnapshot();
+        const candidates = snapshot.clips
+          .filter((clip) => (trackId ? clip.trackId === trackId : true))
+          .filter((clip) => {
+            const clipStart = clip.timelineIn;
+            const clipEnd = clip.timelineIn + clip.duration;
+            return clipStart < endTime && clipEnd > startTime;
+          })
+          .sort((a, b) => b.timelineIn - a.timelineIn);
+
+        const removedClipIds: string[] = [];
+        for (const clip of candidates) {
+          await invoke<CommandResult>('execute_command', {
+            commandType: 'RemoveClip',
+            payload: {
+              sequenceId,
+              trackId: clip.trackId,
+              clipId: clip.id,
+            },
+          });
+          removedClipIds.push(clip.id);
+        }
+
+        logger.debug('delete_clips_in_range executed', {
+          sequenceId,
+          trackId,
+          startTime,
+          endTime,
+          removedCount: removedClipIds.length,
+        });
+
+        return {
+          success: true,
+          result: {
+            removedCount: removedClipIds.length,
+            removedClipIds,
+            range: { startTime, endTime, trackId },
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('delete_clips_in_range failed', {
+          error: message,
+          sequenceId,
+          trackId,
+          startTime,
+          endTime,
+        });
         return { success: false, error: message };
       }
     },
