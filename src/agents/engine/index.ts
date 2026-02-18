@@ -56,6 +56,11 @@ export {
   type AssetInfo,
   type TrackInfo,
 
+  // New event types
+  type ToolPermissionRequestEvent,
+  type ToolPermissionResponseEvent,
+  type DoomLoopDetectedEvent,
+
   // Configuration
   type AgenticEngineConfig,
   DEFAULT_ENGINE_CONFIG,
@@ -69,6 +74,24 @@ export {
   requiresApproval,
   generateId,
 } from './core/types';
+
+export {
+  type StepValueReference,
+  type StepReferenceOccurrence,
+  type StepReferenceResolutionError,
+  type StepReferenceResolutionResult,
+  isStepValueReference,
+  collectStepValueReferences,
+  normalizeReferencesForValidation,
+  resolveStepValueReferences,
+  getValueAtReferencePath,
+} from './core/stepReferences';
+
+export {
+  type OrchestrationPlaybookId,
+  type OrchestrationPlaybookMatch,
+  buildOrchestrationPlaybook,
+} from './core/orchestrationPlaybooks';
 
 // =============================================================================
 // Errors
@@ -175,6 +198,7 @@ export {
   type ToolResultPart,
   type ErrorPart,
   type ApprovalPart,
+  type ToolApprovalPart,
   type ConversationRole,
   type TokenUsage,
   type ConversationMessage,

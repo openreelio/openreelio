@@ -21,6 +21,8 @@ export interface ExecutionContext {
   sequenceId?: string;
   /** Session identifier for tracking */
   sessionId: string;
+  /** Expected project state version for optimistic consistency checks */
+  expectedStateVersion?: number;
   /** Whether this is a dry run */
   dryRun?: boolean;
 }
@@ -149,7 +151,7 @@ export interface IToolExecutor {
   execute(
     toolName: string,
     args: Record<string, unknown>,
-    context: ExecutionContext
+    context: ExecutionContext,
   ): Promise<ToolExecutionResult>;
 
   /**
@@ -161,7 +163,7 @@ export interface IToolExecutor {
    */
   executeBatch(
     request: BatchExecutionRequest,
-    context: ExecutionContext
+    context: ExecutionContext,
   ): Promise<BatchExecutionResult>;
 
   /**
@@ -187,10 +189,7 @@ export interface IToolExecutor {
    * @param args - Arguments to validate
    * @returns Validation result
    */
-  validateArgs(
-    toolName: string,
-    args: Record<string, unknown>
-  ): ValidationResult;
+  validateArgs(toolName: string, args: Record<string, unknown>): ValidationResult;
 
   /**
    * Check if a tool exists
@@ -226,7 +225,7 @@ export interface IToolExecutor {
 export function createSuccessResult(
   data: unknown,
   duration: number,
-  sideEffects?: SideEffect[]
+  sideEffects?: SideEffect[],
 ): ToolExecutionResult {
   return {
     success: true,
@@ -240,10 +239,7 @@ export function createSuccessResult(
 /**
  * Create a failed tool result
  */
-export function createFailureResult(
-  error: string,
-  duration: number
-): ToolExecutionResult {
+export function createFailureResult(error: string, duration: number): ToolExecutionResult {
   return {
     success: false,
     error,
@@ -259,7 +255,7 @@ export function createUndoableResult(
   data: unknown,
   duration: number,
   undoOperation: UndoOperation,
-  sideEffects?: SideEffect[]
+  sideEffects?: SideEffect[],
 ): ToolExecutionResult {
   return {
     success: true,
