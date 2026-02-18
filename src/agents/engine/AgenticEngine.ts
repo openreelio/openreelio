@@ -31,6 +31,7 @@ import type {
 } from './core/types';
 import { createInitialState, mergeConfig } from './core/types';
 import {
+  DoomLoopError,
   MaxIterationsError,
   SessionActiveError,
   StepBudgetExceededError,
@@ -104,7 +105,9 @@ export interface AgentRunResult {
 export class AgenticEngine {
   private readonly toolExecutor: IToolExecutor;
   private readonly config: AgenticEngineConfig;
-  private readonly approvalHandler: (plan: Plan) => Promise<boolean>;
+  private readonly approvalHandler: (
+    plan: Plan,
+  ) => Promise<boolean | { approved: boolean; feedback?: string }>;
   private readonly memoryStore?: IMemoryStore;
 
   private readonly thinker: Thinker;
@@ -383,8 +386,16 @@ export class AgenticEngine {
           this.emitEvent(onEvent, { type: 'approval_required', plan, timestamp: Date.now() });
 
           let approved: boolean;
+          let feedback: string | undefined;
           try {
-            approved = await this.approvalHandler(plan);
+            const rawResult = await this.approvalHandler(plan);
+            // Backward compat: handler may return plain boolean
+            if (typeof rawResult === 'boolean') {
+              approved = rawResult;
+            } else {
+              approved = rawResult.approved;
+              feedback = rawResult.feedback;
+            }
           } catch (error) {
             const err = error instanceof Error ? error : new Error(String(error));
             state.error = err;
@@ -403,10 +414,33 @@ export class AgenticEngine {
           this.emitEvent(onEvent, {
             type: 'approval_response',
             approved,
+            reason: feedback,
             timestamp: Date.now(),
           });
 
           if (!approved) {
+            // If feedback was provided, inject as correction for next iteration
+            if (feedback && feedback.trim().length > 0) {
+              contextWithTools = {
+                ...contextWithTools,
+                corrections: [
+                  ...contextWithTools.corrections,
+                  {
+                    original: plan.goal,
+                    corrected: feedback,
+                    context: `Plan rejected by user at iteration ${iteration}`,
+                  },
+                ],
+              };
+              // Continue to next iteration with feedback instead of terminating
+              this.emitEvent(onEvent, {
+                type: 'iteration_complete',
+                iteration,
+                timestamp: Date.now(),
+              });
+              continue;
+            }
+
             state = this.finalizeState(state, 'completed');
             const summary = this.createSummary(state, Date.now() - startTime);
             this.emitEvent(onEvent, { type: 'session_complete', summary, timestamp: Date.now() });
@@ -442,6 +476,11 @@ export class AgenticEngine {
         state.phase = 'executing';
 
         const stepById = new Map<string, PlanStep>(plan.steps.map((s) => [s.id, s]));
+        const executionContextForIteration: ExecutionContext = {
+          ...executionContext,
+          expectedStateVersion:
+            state.context.projectStateVersion ?? executionContext.expectedStateVersion,
+        };
         const remainingToolCalls = this.config.maxToolCallsPerRun - toolCallsUsed;
 
         if (remainingToolCalls <= 0) {
@@ -461,11 +500,60 @@ export class AgenticEngine {
           });
         }
 
+        // Build onBeforeStep handler for per-tool permission checks.
+        // Uses a microtask race to detect if the handler resolves immediately
+        // (auto-allow/deny from stored rules). Events are only emitted when
+        // the handler blocks for user interaction ('ask' case).
+        const onBeforeStep = this.config.toolPermissionHandler
+          ? async (step: PlanStep): Promise<'allow' | 'deny' | 'allow_always'> => {
+              const handler = this.config.toolPermissionHandler!;
+              const decisionPromise = handler(step.tool, step.args, step);
+
+              // Check if handler resolved within a microtask (auto-resolved)
+              let autoResolved = false;
+              let autoDecision: 'allow' | 'deny' | 'allow_always' | undefined;
+
+              void decisionPromise.then((d) => {
+                if (!autoResolved) {
+                  autoResolved = true;
+                  autoDecision = d;
+                }
+              });
+
+              // Yield one microtask to let synchronous resolutions complete
+              await Promise.resolve();
+
+              if (autoResolved && autoDecision !== undefined) {
+                // Auto-resolved from stored rules — no UI events needed
+                return autoDecision;
+              }
+
+              // Handler is blocking (waiting for user) — emit UI events
+              autoResolved = true; // Prevent double-set
+              this.emitEvent(onEvent, {
+                type: 'tool_permission_request',
+                step,
+                timestamp: Date.now(),
+              });
+
+              const decision = await decisionPromise;
+
+              this.emitEvent(onEvent, {
+                type: 'tool_permission_response',
+                step,
+                decision,
+                timestamp: Date.now(),
+              });
+
+              return decision;
+            }
+          : undefined;
+
         let executionResult: ExecutionResult;
         try {
           executionResult = await this.executor.execute(
             plan,
-            executionContext,
+            executionContextForIteration,
             (progress) => {
               const step = progress.stepId ? stepById.get(progress.stepId) : undefined;
               if (!step) return;
@@ -497,10 +585,21 @@ export class AgenticEngine {
                 timestamp: Date.now(),
               });
             },
-            { maxToolCalls: remainingToolCalls },
+            { maxToolCalls: remainingToolCalls, onBeforeStep },
           );
         } catch (error) {
           const err = asError(error);
+
+          // Emit doom loop event if applicable
+          if (error instanceof DoomLoopError) {
+            this.emitEvent(onEvent, {
+              type: 'doom_loop_detected',
+              tool: error.tool,
+              count: error.consecutiveCalls,
+              timestamp: Date.now(),
+            });
+          }
+
           const partialExecutionResult = getPartialExecutionResult(error);
 
           if (partialExecutionResult) {
