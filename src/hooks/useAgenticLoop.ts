@@ -45,6 +45,7 @@ import {
 } from '@/agents/engine';
 import { isAgenticEngineEnabled } from '@/config/featureFlags';
 import { useConversationStore } from '@/stores/conversationStore';
+import { usePermissionStore } from '@/stores/permissionStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores';
@@ -114,8 +115,10 @@ export interface UseAgenticLoopReturn {
   reset: () => void;
   /** Approve pending plan */
   approvePlan: () => void;
-  /** Reject pending plan */
+  /** Reject pending plan with optional feedback */
   rejectPlan: (reason?: string) => void;
+  /** Respond to a tool permission request */
+  approveToolPermission: (decision: 'allow' | 'deny' | 'allow_always') => void;
   /** Retry with last user input */
   retry: () => Promise<AgentRunResult | null>;
 
@@ -147,7 +150,11 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   const engineRef = useRef<ReturnType<typeof createAgenticEngine> | null>(null);
   const abortedRef = useRef(false);
   const approvalResolverRef = useRef<{
-    resolve: (approved: boolean) => void;
+    resolve: (result: { approved: boolean; feedback?: string }) => void;
+  } | null>(null);
+  const toolPermissionResolverRef = useRef<{
+    resolve: (decision: 'allow' | 'deny' | 'allow_always') => void;
+    step: unknown;
   } | null>(null);
   const memoryStoreRef = useRef<IMemoryStore | null>(null);
 
@@ -301,6 +308,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         projectId: context.projectId,
         sequenceId: context.sequenceId,
         sessionId: crypto.randomUUID(),
+        expectedStateVersion: context.projectStateVersion,
       };
 
       try {
@@ -311,9 +319,28 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
           approvalHandler:
             config?.approvalHandler ??
             (async () => {
-              return await new Promise<boolean>((resolve) => {
-                approvalResolverRef.current = { resolve };
-              });
+              return await new Promise<{ approved: boolean; feedback?: string }>(
+                (resolve) => {
+                  approvalResolverRef.current = { resolve };
+                },
+              );
+            }),
+          toolPermissionHandler:
+            config?.toolPermissionHandler ??
+            (async (toolName, _args, step) => {
+              const permission =
+                usePermissionStore.getState().resolvePermission(toolName);
+              if (permission === 'allow') return 'allow';
+              if (permission === 'deny') return 'deny';
+              // 'ask' — show inline approval UI, wait for user response
+              return await new Promise<'allow' | 'deny' | 'allow_always'>(
+                (resolve) => {
+                  toolPermissionResolverRef.current = {
+                    resolve,
+                    step,
+                  };
+                },
+              );
             }),
         });
         engineRef.current = engine;
@@ -358,9 +385,11 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   const abort = useCallback(() => {
     abortedRef.current = true;
     engineRef.current?.abort();
-    // If awaiting approval, unblock the approval promise so the engine can finish aborting.
-    approvalResolverRef.current?.resolve(true);
+    // Unblock pending promises so the engine can finish aborting
+    approvalResolverRef.current?.resolve({ approved: true });
     approvalResolverRef.current = null;
+    toolPermissionResolverRef.current?.resolve('allow');
+    toolPermissionResolverRef.current = null;
     setPhase('aborted');
     setIsRunning(false);
     optionsRef.current.onAbort?.();
@@ -383,15 +412,32 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
 
   // Approval actions
   const approvePlan = useCallback(() => {
-    approvalResolverRef.current?.resolve(true);
+    approvalResolverRef.current?.resolve({ approved: true });
     approvalResolverRef.current = null;
   }, []);
 
-  const rejectPlan = useCallback((_reason?: string) => {
-    void _reason; // Reserved for future use (e.g., logging rejection reason)
-    approvalResolverRef.current?.resolve(false);
+  const rejectPlan = useCallback((reason?: string) => {
+    approvalResolverRef.current?.resolve({
+      approved: false,
+      feedback: reason,
+    });
     approvalResolverRef.current = null;
   }, []);
+
+  // Tool permission actions
+  const approveToolPermission = useCallback(
+    (decision: 'allow' | 'deny' | 'allow_always') => {
+      if (decision === 'allow_always' && toolPermissionResolverRef.current?.step) {
+        const step = toolPermissionResolverRef.current.step as { tool?: string };
+        if (step.tool) {
+          usePermissionStore.getState().allowAlways(step.tool);
+        }
+      }
+      toolPermissionResolverRef.current?.resolve(decision);
+      toolPermissionResolverRef.current = null;
+    },
+    [],
+  );
 
   // Retry with last user input
   const retry = useCallback(async (): Promise<AgentRunResult | null> => {
@@ -428,6 +474,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     reset,
     approvePlan,
     rejectPlan,
+    approveToolPermission,
     retry,
 
     // Feature flag
@@ -453,6 +500,7 @@ export function useAgenticLoopWithStores(
   const selectedClipIds = useTimelineStore((s) => s.selectedClipIds);
   const selectedTrackIds = useTimelineStore((s) => s.selectedTrackIds);
   const activeSequenceId = useProjectStore((s) => s.activeSequenceId);
+  const projectStateVersion = useProjectStore((s) => s.stateVersion);
   const sequences = useProjectStore((s) => s.sequences);
   const assets = useProjectStore((s) => s.assets);
   const uiLanguage = useSettingsStore((s) => s.settings.general.language);
@@ -465,6 +513,7 @@ export function useAgenticLoopWithStores(
       projectId: 'current',
       sequenceId: activeSequenceId ?? undefined,
       languagePolicy: createLanguagePolicy(uiLanguage),
+      projectStateVersion,
       playheadPosition: currentTime,
       timelineDuration: duration,
       selectedClips: selectedClipIds,
@@ -497,6 +546,7 @@ export function useAgenticLoopWithStores(
     selectedClipIds,
     selectedTrackIds,
     activeSequenceId,
+    projectStateVersion,
     sequences,
     assets,
     uiLanguage,
@@ -521,6 +571,7 @@ export function useAgenticLoopWithStores(
       projectId: externalContext?.projectId ?? 'current',
       sequenceId: project.activeSequenceId ?? undefined,
       languagePolicy: createLanguagePolicy(settings.settings.general.language),
+      projectStateVersion: project.stateVersion,
       playheadPosition: playback.currentTime,
       timelineDuration: playback.duration,
       selectedClips: timeline.selectedClipIds,

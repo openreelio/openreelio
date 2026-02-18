@@ -191,6 +191,59 @@ export function useAgentEventHandler() {
         break;
       }
 
+      case 'tool_permission_request': {
+        if (messageIdRef.current) {
+          store.appendPart(messageIdRef.current, {
+            type: 'tool_approval',
+            stepId: event.step.id,
+            tool: event.step.tool,
+            args: event.step.args,
+            description: event.step.description,
+            riskLevel: event.step.riskLevel,
+            status: 'pending',
+          });
+        }
+        break;
+      }
+
+      case 'tool_permission_response': {
+        if (messageIdRef.current) {
+          const conv = store.activeConversation;
+          if (conv) {
+            const msg = conv.messages.find((m) => m.id === messageIdRef.current);
+            if (msg) {
+              const approvalIndex = msg.parts.findIndex(
+                (p) =>
+                  p.type === 'tool_approval' &&
+                  p.stepId === event.step.id &&
+                  p.status === 'pending',
+              );
+              if (approvalIndex >= 0) {
+                store.updatePart(messageIdRef.current, approvalIndex, {
+                  status: event.decision === 'deny' ? 'denied' : 'approved',
+                });
+              }
+            }
+          }
+        }
+        break;
+      }
+
+      case 'doom_loop_detected': {
+        if (messageIdRef.current) {
+          store.appendPart(
+            messageIdRef.current,
+            createErrorPart(
+              'DOOM_LOOP',
+              `Detected repetitive loop: tool "${event.tool}" called ${event.count} times with identical arguments. Stopping execution.`,
+              'executing',
+              false,
+            ),
+          );
+        }
+        break;
+      }
+
       // Ignored events (handled by UI directly)
       case 'thinking_start':
       case 'thinking_progress':
