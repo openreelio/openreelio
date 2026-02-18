@@ -18,6 +18,7 @@ import { playbackController } from '@/services/PlaybackController';
 import type { Sequence, Asset, Clip } from '@/types';
 import { createLogger } from '@/services/logger';
 import { collectPlaybackAudioClips } from '@/utils/audioPlayback';
+import { clampClipPan, clampClipVolumeDb, getClipFadeFactor } from '@/utils/clipAudio';
 
 const logger = createLogger('AudioPlayback');
 
@@ -48,6 +49,7 @@ export interface UseAudioPlaybackReturn {
 interface ScheduledSource {
   source: AudioBufferSourceNode;
   gainNode: GainNode;
+  pannerNode: StereoPannerNode;
   clipId: string;
   startTime: number;
 }
@@ -343,6 +345,7 @@ export function useAudioPlayback({
         scheduled.source.stop();
         scheduled.source.disconnect();
         scheduled.gainNode.disconnect();
+        scheduled.pannerNode.disconnect();
       } catch {
         // Already stopped
       }
@@ -359,7 +362,7 @@ export function useAudioPlayback({
     if (clip.audio?.muted) return 0;
 
     // Convert clip dB to linear and multiply with track volume
-    const clipVolumeDb = clip.audio?.volumeDb ?? 0;
+    const clipVolumeDb = clampClipVolumeDb(clip.audio?.volumeDb ?? 0);
     const clipLinearVolume = Math.pow(10, clipVolumeDb / 20);
 
     return trackVolume * clipLinearVolume;
@@ -473,11 +476,17 @@ export function useAudioPlayback({
           // Create gain node for this clip
           const gainNode = ctx.createGain();
           const clipVolume = calculateClipVolume(clip, trackVolume);
-          gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
+          const clipOffset = Math.max(0, currentTime - clip.place.timelineInSec);
+          const fadeFactor = getClipFadeFactor(clip, clipOffset);
+          gainNode.gain.value = (isMuted ? 0 : volume * clipVolume) * fadeFactor;
 
-          // Connect: source -> gainNode -> masterGain -> destination
+          const pannerNode = ctx.createStereoPanner();
+          pannerNode.pan.value = clampClipPan(clip.audio?.pan ?? 0);
+
+          // Connect: source -> gainNode -> pannerNode -> masterGain -> destination
           source.connect(gainNode);
-          gainNode.connect(masterGainRef.current);
+          gainNode.connect(pannerNode);
+          pannerNode.connect(masterGainRef.current);
 
           // Calculate start timing
           const timeIntoClip = Math.max(0, currentTime - clip.place.timelineInSec);
@@ -496,6 +505,7 @@ export function useAudioPlayback({
           scheduledSourcesRef.current.set(clip.id, {
             source,
             gainNode,
+            pannerNode,
             clipId: clip.id,
             startTime: scheduledStartTime,
           });
@@ -509,6 +519,7 @@ export function useAudioPlayback({
             }
             source.disconnect();
             gainNode.disconnect();
+            pannerNode.disconnect();
           };
         }
 
@@ -523,7 +534,10 @@ export function useAudioPlayback({
           const clipData = audioClips.find((c) => c.clip.id === scheduled.clipId);
           if (clipData) {
             const clipVolume = calculateClipVolume(clipData.clip, clipData.trackVolume);
-            scheduled.gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
+            const clipOffset = Math.max(0, currentTime - clipData.clip.place.timelineInSec);
+            const fadeFactor = getClipFadeFactor(clipData.clip, clipOffset);
+            scheduled.gainNode.gain.value = (isMuted ? 0 : volume * clipVolume) * fadeFactor;
+            scheduled.pannerNode.pan.value = clampClipPan(clipData.clip.audio?.pan ?? 0);
             const updateSpeed = clipData.clip.speed > 0 ? clipData.clip.speed : 1;
             scheduled.source.playbackRate.value = playbackRate * updateSpeed;
           }

@@ -14,9 +14,13 @@
 import { useCallback } from 'react';
 import { useProjectStore } from '@/stores';
 import { useTimelineStore } from '@/stores/timelineStore';
+import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { createLogger } from '@/services/logger';
+import { probeMedia } from '@/utils/ffmpeg';
+import { refreshProjectState } from '@/utils/stateRefreshHelper';
 import type {
   AssetDropData,
+  ClipAudioUpdateData,
   ClipMoveData,
   ClipTrimData,
   ClipSplitData,
@@ -47,6 +51,7 @@ interface TimelineActions {
   handleClipMove: (data: ClipMoveData) => Promise<void>;
   handleClipTrim: (data: ClipTrimData) => Promise<void>;
   handleClipSplit: (data: ClipSplitData) => Promise<void>;
+  handleClipAudioUpdate: (data: ClipAudioUpdateData) => Promise<void>;
   handleAssetDrop: (data: AssetDropData) => Promise<void>;
   handleDeleteClips: (clipIds: string[]) => Promise<void>;
   handleTrackCreate: (data: TrackCreateData) => Promise<void>;
@@ -102,6 +107,28 @@ function getAssetInsertDurationSec(asset: Asset): number {
   }
 
   return DEFAULT_INSERT_CLIP_DURATION_SEC;
+}
+
+async function resolveAssetHasLinkedAudio(asset: Asset): Promise<boolean> {
+  if (asset.kind !== 'video') {
+    return false;
+  }
+
+  if (asset.audio) {
+    return true;
+  }
+
+  try {
+    const mediaInfo = await probeMedia(asset.uri);
+    return Boolean(mediaInfo.audio);
+  } catch (error) {
+    logger.warn('Unable to probe dropped video for audio stream detection', {
+      assetId: asset.id,
+      uri: asset.uri,
+      error,
+    });
+    return false;
+  }
 }
 
 function findClipByAssetAtTimeline(
@@ -526,6 +553,58 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
   );
 
   /**
+   * Handle clip-level audio setting updates.
+   */
+  const handleClipAudioUpdate = useCallback(
+    async (data: ClipAudioUpdateData): Promise<void> => {
+      if (!sequence) {
+        logger.warn('Cannot update clip audio: no sequence');
+        return;
+      }
+
+      const payload: Record<string, unknown> = {
+        sequenceId: data.sequenceId,
+        trackId: data.trackId,
+        clipId: data.clipId,
+      };
+
+      if (data.volumeDb !== undefined) {
+        payload.volumeDb = data.volumeDb;
+      }
+      if (data.pan !== undefined) {
+        payload.pan = data.pan;
+      }
+      if (data.muted !== undefined) {
+        payload.muted = data.muted;
+      }
+      if (data.fadeInSec !== undefined) {
+        payload.fadeInSec = data.fadeInSec;
+      }
+      if (data.fadeOutSec !== undefined) {
+        payload.fadeOutSec = data.fadeOutSec;
+      }
+
+      if (Object.keys(payload).length <= 3) {
+        return;
+      }
+
+      try {
+        await executeCommand({
+          type: 'SetClipAudio',
+          payload,
+        });
+      } catch (error) {
+        logger.error('Failed to update clip audio settings', {
+          error,
+          clipId: data.clipId,
+          trackId: data.trackId,
+        });
+      }
+    },
+    [sequence, executeCommand],
+  );
+
+  /**
    * Handle asset drop onto timeline.
    * State refresh is automatic via executeCommand.
    */
@@ -542,20 +621,79 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           sequenceId: sequence.id,
           trackId: data.trackId,
           assetId: data.assetId,
+          workspaceRelativePath:
+            'workspaceRelativePath' in data ? data.workspaceRelativePath : undefined,
         });
         return;
       }
+
+      let droppedAssetId = data.assetId;
+      let droppedAsset = droppedAssetId ? assets.get(droppedAssetId) : undefined;
+      let droppedAssetKind = droppedAsset?.kind ?? data.assetKind;
+      const workspaceRelativePath =
+        'workspaceRelativePath' in data && typeof data.workspaceRelativePath === 'string'
+          ? data.workspaceRelativePath
+          : undefined;
+
+      const shouldRegisterWorkspaceFile =
+        !!workspaceRelativePath && (!droppedAssetId || droppedAsset == null);
+
+      if (shouldRegisterWorkspaceFile && workspaceRelativePath) {
+        const registerResult = await useWorkspaceStore
+          .getState()
+          .registerFile(workspaceRelativePath);
+
+        if (!registerResult) {
+          logger.warn('Cannot drop workspace file: registration failed', {
+            sequenceId: sequence.id,
+            trackId: data.trackId,
+            workspaceRelativePath,
+          });
+          return;
+        }
+
+        droppedAssetId = registerResult.assetId;
+
+        droppedAsset = useProjectStore.getState().assets.get(droppedAssetId);
+        if (!droppedAsset) {
+          try {
+            const freshState = await refreshProjectState();
+            useProjectStore.setState((draft) => {
+              draft.assets = freshState.assets;
+            });
+            droppedAsset = useProjectStore.getState().assets.get(droppedAssetId);
+          } catch (error) {
+            logger.warn('Failed to refresh project assets after workspace registration', {
+              sequenceId: sequence.id,
+              trackId: data.trackId,
+              workspaceRelativePath,
+              assetId: droppedAssetId,
+              error,
+            });
+          }
+        }
+
+        droppedAssetKind = droppedAsset?.kind ?? data.assetKind;
+      }
+
+      if (!droppedAssetId) {
+        logger.warn('Cannot drop asset: missing asset ID and workspace path', {
+          sequenceId: sequence.id,
+          trackId: data.trackId,
+        });
+        return;
+      }
+
       const targetTrack = sequenceSnapshot.tracks.find((track) => track.id === data.trackId);
-      const droppedAsset = assets.get(data.assetId);
 
       try {
-        if (!droppedAsset || droppedAsset.kind !== 'video') {
+        if (!droppedAsset || droppedAssetKind !== 'video') {
           await executeCommand({
             type: 'InsertClip',
             payload: {
               sequenceId: sequence.id,
               trackId: data.trackId,
-              assetId: data.assetId,
+              assetId: droppedAssetId,
               timelineIn: data.timelinePosition,
             },
           });
@@ -585,7 +723,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           if (!createdTrackId) {
             logger.warn('Unable to auto-create visual track for dropped video asset', {
               sequenceId: sequence.id,
-              assetId: data.assetId,
+              assetId: droppedAssetId,
             });
             return;
           }
@@ -615,7 +753,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           payload: {
             sequenceId: sequence.id,
             trackId: visualTrack.id,
-            assetId: data.assetId,
+            assetId: droppedAssetId,
             timelineIn: data.timelinePosition,
           },
         });
@@ -628,12 +766,15 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           );
           primaryVideoClipId = findClipByAssetAtTimeline(
             postVideoTrack,
-            data.assetId,
+            droppedAssetId,
             data.timelinePosition,
           )?.id;
         }
 
-        if (!droppedAsset.audio) {
+        const latestDroppedAsset =
+          useProjectStore.getState().assets.get(droppedAssetId) ?? droppedAsset;
+        const hasLinkedAudio = await resolveAssetHasLinkedAudio(latestDroppedAsset);
+        if (!hasLinkedAudio) {
           return;
         }
 
@@ -644,7 +785,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
               'Unable to insert linked audio: sequence snapshot unavailable after insert',
               {
                 sequenceId: sequence.id,
-                assetId: data.assetId,
+                assetId: droppedAssetId,
               },
             );
             return;
@@ -676,7 +817,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             if (!createdTrackId) {
               logger.warn('Unable to auto-create audio track for linked audio extraction', {
                 sequenceId: sequence.id,
-                assetId: data.assetId,
+                assetId: droppedAssetId,
               });
               return;
             }
@@ -705,7 +846,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             payload: {
               sequenceId: sequence.id,
               trackId: audioTrack.id,
-              assetId: data.assetId,
+              assetId: droppedAssetId,
               timelineIn: data.timelinePosition,
             },
           });
@@ -713,7 +854,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           if (!primaryVideoClipId) {
             logger.warn('Linked audio inserted, but source video clip ID could not be resolved', {
               sequenceId: sequence.id,
-              assetId: data.assetId,
+              assetId: droppedAssetId,
               videoTrackId: visualTrack.id,
               timelinePosition: data.timelinePosition,
             });
@@ -733,7 +874,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           } catch (muteError) {
             logger.warn('Linked A/V pair inserted, but failed to mute source video clip audio', {
               sequenceId: sequence.id,
-              assetId: data.assetId,
+              assetId: droppedAssetId,
               videoTrackId: visualTrack.id,
               videoClipId: primaryVideoClipId,
               error: muteError,
@@ -743,13 +884,13 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           logger.warn('Primary clip inserted, but linked audio extraction failed', {
             sequenceId: sequence.id,
             trackId: data.trackId,
-            assetId: data.assetId,
+            assetId: droppedAssetId,
             timelinePosition: data.timelinePosition,
             error: audioInsertError,
           });
         }
       } catch (error) {
-        logger.error('Failed to insert clip', { error, assetId: data.assetId });
+        logger.error('Failed to insert clip', { error, assetId: droppedAssetId });
       }
     },
     [sequence, executeCommand, assets, getCurrentSequence],
@@ -972,6 +1113,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleClipMove,
     handleClipTrim,
     handleClipSplit,
+    handleClipAudioUpdate,
     handleAssetDrop,
     handleDeleteClips,
     handleTrackCreate,

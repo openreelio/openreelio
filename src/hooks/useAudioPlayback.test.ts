@@ -54,6 +54,12 @@ class MockGainNode {
   disconnect = vi.fn();
 }
 
+class MockStereoPannerNode {
+  pan = { value: 0 };
+  connect = vi.fn().mockReturnThis();
+  disconnect = vi.fn();
+}
+
 class MockAudioContext {
   state: AudioContextState = 'running';
   currentTime = 0;
@@ -63,6 +69,7 @@ class MockAudioContext {
   close = vi.fn().mockResolvedValue(undefined);
   createBufferSource = vi.fn().mockReturnValue(new MockAudioBufferSourceNode());
   createGain = vi.fn().mockReturnValue(new MockGainNode());
+  createStereoPanner = vi.fn().mockReturnValue(new MockStereoPannerNode());
   decodeAudioData = vi.fn().mockResolvedValue({
     duration: 10,
     numberOfChannels: 2,

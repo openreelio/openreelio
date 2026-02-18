@@ -245,6 +245,10 @@ export interface Asset {
   proxyUrl?: string;
   /** ID of the bin/folder this asset belongs to (null = root) */
   binId?: BinId | null;
+  /** Relative path within project folder (for workspace-discovered files) */
+  relativePath?: string;
+  /** Whether this asset was auto-discovered from workspace scan */
+  workspaceManaged?: boolean;
 }
 
 // =============================================================================
@@ -280,6 +284,70 @@ export function assetNeedsProxy(asset: Asset): boolean {
     asset.video !== undefined &&
     asset.video.height > PROXY_THRESHOLD_HEIGHT
   );
+}
+
+// =============================================================================
+// Workspace Types
+// =============================================================================
+
+/** A file tree entry representing a file or directory in the project workspace */
+export interface FileTreeEntry {
+  /** Relative path within the project folder */
+  relativePath: string;
+  /** Display name */
+  name: string;
+  /** Whether this is a directory */
+  isDirectory: boolean;
+  /** Asset kind (undefined for directories) */
+  kind?: AssetKind;
+  /** File size in bytes (undefined for directories) */
+  fileSize?: number;
+  /** Asset ID if registered as a project asset */
+  assetId?: string;
+  /** Child entries (for directories) */
+  children: FileTreeEntry[];
+}
+
+/** Result of a workspace scan operation */
+export interface WorkspaceScanResult {
+  /** Total number of media files found */
+  totalFiles: number;
+  /** Number of new files discovered */
+  newFiles: number;
+  /** Number of files removed since last scan */
+  removedFiles: number;
+  /** Number of files already registered as assets */
+  registeredFiles: number;
+}
+
+/** Result of registering a workspace file as a project asset */
+export interface RegisterFileResult {
+  /** The generated asset ID */
+  assetId: string;
+  /** The relative path that was registered */
+  relativePath: string;
+  /** Whether this was already registered (returned existing ID) */
+  alreadyRegistered: boolean;
+}
+
+/** Workspace file event from the backend watcher */
+export interface WorkspaceFileEvent {
+  /** Relative path within the project folder */
+  relativePath: string;
+  /** Asset kind (null for removed files) */
+  kind: AssetKind | null;
+}
+
+/** Workspace scan complete event from the backend */
+export interface WorkspaceScanCompleteEvent {
+  /** Total number of media files found */
+  totalFiles: number;
+  /** Number of new files discovered */
+  newFiles: number;
+  /** Number of files removed since last scan */
+  removedFiles: number;
+  /** Number of files already registered as assets */
+  registeredFiles: number;
 }
 
 // =============================================================================
@@ -340,9 +408,16 @@ export interface Transform {
 }
 
 export interface AudioSettings {
+  /** Clip gain in dB (-60 to +6) */
   volumeDb: number;
+  /** Stereo pan (-1.0 left, 1.0 right) */
   pan: number;
+  /** Clip mute state */
   muted: boolean;
+  /** Fade-in duration in timeline seconds */
+  fadeInSec?: number;
+  /** Fade-out duration in timeline seconds */
+  fadeOutSec?: number;
 }
 
 export interface Clip {
@@ -695,6 +770,7 @@ export type CommandType =
   | 'InsertClip'
   | 'SetClipTransform'
   | 'SetClipMute'
+  | 'SetClipAudio'
   | 'SplitClip'
   | 'TrimClip'
   | 'MoveClip'

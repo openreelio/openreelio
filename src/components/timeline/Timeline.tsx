@@ -52,7 +52,7 @@ import { ShotMarkers } from './ShotMarkers';
 import { CaptionEditor } from '@/components/features/captions';
 import { CaptionExportDialog } from '@/components/features/export/CaptionExportDialog';
 import { TimelineOperationsProvider, type TimelineOperations } from './TimelineOperationsContext';
-import type { ClipWaveformConfig, ClipThumbnailConfig } from './Clip';
+import type { ClipWaveformConfig, ClipThumbnailConfig, ClipAudioSettingsPatch } from './Clip';
 import type { TimelineProps } from './types';
 import type { CaptionTrack as CaptionTrackType, Caption } from '@/types';
 import {
@@ -72,6 +72,7 @@ export type {
   ClipSplitData,
   ClipDuplicateData,
   ClipPasteData,
+  ClipAudioUpdateData,
   TrackControlData,
   TrackCreateData,
   CaptionUpdateData,
@@ -190,6 +191,7 @@ export function Timeline({
   onClipSplit,
   onClipDuplicate,
   onClipPaste,
+  onClipAudioUpdate,
   onTrackMuteToggle,
   onTrackLockToggle,
   onTrackVisibilityToggle,
@@ -1030,6 +1032,32 @@ export function Timeline({
 
   const handleSeek = useCallback((time: number) => seekFromTimeRuler(time), [seekFromTimeRuler]);
 
+  const handleClipAudioSettingsChange = useCallback(
+    (trackId: string, clipId: string, patch: ClipAudioSettingsPatch) => {
+      if (!sequence || !onClipAudioUpdate) {
+        return;
+      }
+
+      if (
+        patch.volumeDb === undefined &&
+        patch.pan === undefined &&
+        patch.muted === undefined &&
+        patch.fadeInSec === undefined &&
+        patch.fadeOutSec === undefined
+      ) {
+        return;
+      }
+
+      void onClipAudioUpdate({
+        sequenceId: sequence.id,
+        trackId,
+        clipId,
+        ...patch,
+      });
+    },
+    [sequence, onClipAudioUpdate],
+  );
+
   const handleClipClick = useCallback(
     (clipId: string, modifiers: { ctrlKey: boolean; shiftKey: boolean; metaKey: boolean }) => {
       const selectedIds =
@@ -1492,6 +1520,7 @@ export function Timeline({
       onClipSplit,
       onClipDuplicate,
       onClipPaste,
+      onClipAudioUpdate,
       onTrackMuteToggle,
       onTrackLockToggle,
       onTrackVisibilityToggle,
@@ -1505,6 +1534,7 @@ export function Timeline({
       onClipSplit,
       onClipDuplicate,
       onClipPaste,
+      onClipAudioUpdate,
       onTrackMuteToggle,
       onTrackLockToggle,
       onTrackVisibilityToggle,
@@ -1663,6 +1693,7 @@ export function Timeline({
                     onClipDragStart={handleClipDragStart}
                     onClipDrag={handleClipDrag}
                     onClipDragEnd={handleClipDragEnd}
+                    onClipAudioSettingsChange={handleClipAudioSettingsChange}
                     onSnapPointChange={setActiveSnapPoint}
                     onMuteToggle={createTrackHandler(onTrackMuteToggle)}
                     onLockToggle={createTrackHandler(onTrackLockToggle)}

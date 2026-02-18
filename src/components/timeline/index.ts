@@ -22,6 +22,7 @@ export type {
   ClipSplitData,
   ClipDuplicateData,
   ClipPasteData,
+  ClipAudioUpdateData,
   TrackControlData,
   TimelineProps,
   ClipClickModifiers,

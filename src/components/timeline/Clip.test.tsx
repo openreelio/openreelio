@@ -264,6 +264,97 @@ describe('Clip', () => {
     });
   });
 
+  describe('audio editing controls', () => {
+    it('should render audio editing controls for audio track clips', () => {
+      render(
+        <Clip
+          clip={mockClip}
+          zoom={100}
+          selected={false}
+          trackKind="audio"
+          waveformConfig={{
+            assetId: 'asset_audio_001',
+            inputPath: '/path/to/audio.wav',
+            totalDurationSec: 10,
+            enabled: true,
+          }}
+        />,
+      );
+
+      expect(screen.getByTestId('audio-clip-controls')).toBeInTheDocument();
+      expect(screen.getByTestId('audio-volume-handle')).toBeInTheDocument();
+      expect(screen.getByTestId('audio-fade-in-handle')).toBeInTheDocument();
+      expect(screen.getByTestId('audio-fade-out-handle')).toBeInTheDocument();
+    });
+
+    it('should commit clip volume changes after dragging the volume handle', () => {
+      const onAudioSettingsChange = vi.fn();
+
+      render(
+        <Clip
+          clip={mockClip}
+          zoom={100}
+          selected={false}
+          trackKind="audio"
+          onAudioSettingsChange={onAudioSettingsChange}
+        />,
+      );
+
+      fireEvent.mouseDown(screen.getByTestId('audio-volume-handle'), {
+        clientX: 100,
+        clientY: 32,
+      });
+
+      fireEvent.mouseMove(window, {
+        clientX: 100,
+        clientY: 12,
+      });
+
+      fireEvent.mouseUp(window);
+
+      expect(onAudioSettingsChange).toHaveBeenCalledTimes(1);
+      expect(onAudioSettingsChange).toHaveBeenCalledWith(
+        'clip_001',
+        expect.objectContaining({
+          volumeDb: expect.any(Number),
+        }),
+      );
+    });
+
+    it('should commit fade-in updates after dragging fade-in handle', () => {
+      const onAudioSettingsChange = vi.fn();
+
+      render(
+        <Clip
+          clip={mockClip}
+          zoom={100}
+          selected={false}
+          trackKind="audio"
+          onAudioSettingsChange={onAudioSettingsChange}
+        />,
+      );
+
+      fireEvent.mouseDown(screen.getByTestId('audio-fade-in-handle'), {
+        clientX: 0,
+        clientY: 8,
+      });
+
+      fireEvent.mouseMove(window, {
+        clientX: 100,
+        clientY: 8,
+      });
+
+      fireEvent.mouseUp(window);
+
+      expect(onAudioSettingsChange).toHaveBeenCalledWith(
+        'clip_001',
+        expect.objectContaining({
+          fadeInSec: expect.any(Number),
+        }),
+      );
+    });
+  });
+
   // ===========================================================================
   // Styling Tests
   // ===========================================================================

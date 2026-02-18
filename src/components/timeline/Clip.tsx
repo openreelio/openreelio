@@ -9,11 +9,12 @@ import { useMemo, useRef, useEffect, type MouseEvent } from 'react';
 import { Type } from 'lucide-react';
 import { useClipDrag, type DragPreviewPosition, type ClipDragData } from '@/hooks/useClipDrag';
 import { useWaveformPeaks } from '@/hooks/useWaveformPeaks';
-import type { Clip as ClipType, SnapPoint, Asset } from '@/types';
+import type { Clip as ClipType, SnapPoint, Asset, TrackKind } from '@/types';
 import { isTextClip } from '@/types';
 import { AudioClipWaveform } from './AudioClipWaveform';
 import { WaveformPeaksDisplay } from './WaveformPeaksDisplay';
 import { LazyThumbnailStrip } from './LazyThumbnailStrip';
+import { AudioClipControls, type ClipAudioSettingsPatch } from './AudioClipControls';
 
 // =============================================================================
 // Types
@@ -21,6 +22,7 @@ import { LazyThumbnailStrip } from './LazyThumbnailStrip';
 
 export type { ClipDragData, DragPreviewPosition };
 export type ClipDragType = 'move' | 'trim-left' | 'trim-right';
+export type { ClipAudioSettingsPatch };
 
 /** Modifier keys pressed during click */
 export interface ClickModifiers {
@@ -74,6 +76,10 @@ interface ClipProps {
   waveformConfig?: ClipWaveformConfig;
   /** Thumbnail configuration for video clips */
   thumbnailConfig?: ClipThumbnailConfig;
+  /** Track kind this clip belongs to */
+  trackKind?: TrackKind;
+  /** Commit callback for clip-level audio edits */
+  onAudioSettingsChange?: (clipId: string, patch: ClipAudioSettingsPatch) => void | Promise<void>;
   /** Snap points for intelligent snapping (clip edges, playhead, etc.) */
   snapPoints?: SnapPoint[];
   /** Snap threshold in seconds (distance within which snapping occurs) */
@@ -105,6 +111,8 @@ export function Clip({
   maxSourceDuration,
   waveformConfig,
   thumbnailConfig,
+  trackKind,
+  onAudioSettingsChange,
   snapPoints = [],
   snapThreshold = 0,
   onClick,
@@ -264,6 +272,7 @@ export function Clip({
     !isText && Boolean(waveformConfig?.isVideoSource) && !thumbnailConfig?.enabled;
   const showAudioLabelBackdrop = !isText && !thumbnailConfig?.enabled;
   const allowLabelOverflow = showAudioLabelBackdrop;
+  const showAudioEditorControls = !isText && trackKind === 'audio';
 
   return (
     <div
@@ -310,6 +319,15 @@ export function Clip({
         />
       )}
 
+      {showAudioEditorControls && displayPosition.width > 0 && (
+        <AudioClipControls
+          clip={clip}
+          width={displayPosition.width}
+          disabled={disabled}
+          onCommit={onAudioSettingsChange}
+        />
+      )}
+
       {/* Text Clip Icon (background layer) */}
       {isText && (
         <div className="absolute inset-0 flex items-center justify-center opacity-20 pointer-events-none">
@@ -318,7 +336,9 @@ export function Clip({
       )}
 
       {/* Clip content */}
-      <div className={`h-full p-1 pointer-events-none relative z-10 ${allowLabelOverflow ? 'overflow-visible' : 'overflow-hidden'}`}>
+      <div
+        className={`h-full p-1 pointer-events-none relative z-10 ${allowLabelOverflow ? 'overflow-visible' : 'overflow-hidden'}`}
+      >
         {/* Label */}
         {displayLabel && (
           <span
