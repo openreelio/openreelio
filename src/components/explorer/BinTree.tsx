@@ -155,6 +155,11 @@ export const BinTree = memo(function BinTree({
     event.dataTransfer.effectAllowed = 'move';
   }, []);
 
+  const handleDragEnd = useCallback(() => {
+    setDraggedBinId(null);
+    setDropTargetId(null);
+  }, []);
+
   const handleDragOver = useCallback(
     (binId: BinId, event: React.DragEvent) => {
       event.preventDefault();
@@ -268,6 +273,7 @@ export const BinTree = memo(function BinTree({
             onRename={onRenameBin}
             onCancelEdit={onCancelEdit}
             onDragStart={handleDragStart}
+            onDragEnd={handleDragEnd}
             onDrop={handleDrop}
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
@@ -288,6 +294,7 @@ export const BinTree = memo(function BinTree({
       onRenameBin,
       onCancelEdit,
       handleDragStart,
+      handleDragEnd,
       handleDrop,
       handleDragOver,
       handleDragLeave,

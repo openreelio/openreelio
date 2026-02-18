@@ -32,6 +32,15 @@ describe('workspaceSchemas', () => {
         'relativePath contains control characters',
       );
     });
+
+    it('should reject URI scheme paths', () => {
+      expect(() => parseRelativeWorkspacePath('file:///etc/passwd')).toThrow(
+        'relativePath must not contain a URI scheme',
+      );
+      expect(() => parseRelativeWorkspacePath('http://evil.com/payload')).toThrow(
+        'relativePath must not contain a URI scheme',
+      );
+    });
   });
 
   describe('parseRelativeWorkspacePathList', () => {

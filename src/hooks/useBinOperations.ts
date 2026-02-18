@@ -86,7 +86,12 @@ export function useBinOperations() {
       try {
         const { selectedBinId, bins } = useBinStore.getState();
 
-        // Check if selected bin would be deleted (directly or as a descendant)
+        await executeCommand({
+          type: 'RemoveBin',
+          payload: { binId },
+        });
+
+        // Clear selection only after successful deletion
         if (selectedBinId !== null && selectedBinId === binId) {
           selectBin(null);
         } else if (selectedBinId !== null) {
@@ -95,11 +100,6 @@ export function useBinOperations() {
             selectBin(null);
           }
         }
-
-        await executeCommand({
-          type: 'RemoveBin',
-          payload: { binId },
-        });
       } catch (error) {
         logger.error('Failed to delete bin', { binId, error });
         throw error;

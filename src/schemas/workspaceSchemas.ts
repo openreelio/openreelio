@@ -77,6 +77,9 @@ export const RelativeWorkspacePathSchema = z
   .refine((value) => !WINDOWS_ABSOLUTE_PATH_REGEX.test(value), {
     message: 'relativePath must not be an absolute Windows path',
   })
+  .refine((value) => !/^[a-zA-Z][a-zA-Z0-9+\-.]*:/.test(value), {
+    message: 'relativePath must not contain a URI scheme',
+  })
   .refine((value) => !hasUnsafeRelativeSegments(value), {
     message: 'relativePath contains invalid "." or ".." path segments',
   });

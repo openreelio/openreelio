@@ -63,6 +63,8 @@ export interface BinItemProps {
   onDragOver?: (id: BinId, event: React.DragEvent) => void;
   /** Callback when drag leaves */
   onDragLeave?: (id: BinId, event: React.DragEvent) => void;
+  /** Callback when drag ends (cancelled or completed) */
+  onDragEnd?: () => void;
   /** Additional CSS classes */
   className?: string;
 }
@@ -99,6 +101,7 @@ export const BinItem = memo(function BinItem({
   onDrop,
   onDragOver,
   onDragLeave,
+  onDragEnd,
   className = '',
 }: BinItemProps) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -238,6 +241,7 @@ export const BinItem = memo(function BinItem({
       onContextMenu={handleContextMenu}
       draggable
       onDragStart={handleDragStart}
+      onDragEnd={onDragEnd}
       onDrop={handleDrop}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}

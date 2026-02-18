@@ -166,6 +166,7 @@ export function selectPreferredAudioTrack(
 
 export function getNextTrackName(sequence: Sequence, kind: TrackCreateData['kind']): string {
   const baseLabel = TRACK_KIND_LABEL[kind];
+  const labelPattern = new RegExp(`^${baseLabel}\\s+(\\d+)$`);
   let highestIndex = 0;
 
   for (const track of sequence.tracks) {
@@ -177,7 +178,7 @@ export function getNextTrackName(sequence: Sequence, kind: TrackCreateData['kind
       continue;
     }
 
-    const match = new RegExp(`^${baseLabel}\\s+(\\d+)$`).exec(trimmedName);
+    const match = labelPattern.exec(trimmedName);
     if (match) {
       highestIndex = Math.max(highestIndex, parseInt(match[1], 10));
     }
@@ -305,6 +306,8 @@ export async function runLinkedCompanionCommands<T extends { clipId: string }>(
   }
 }
 
+const CLIP_AUDIO_BASE_KEYS = ['sequenceId', 'trackId', 'clipId'] as const;
+
 export function buildClipAudioPayload(data: ClipAudioUpdateData): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     sequenceId: data.sequenceId,
@@ -332,7 +335,7 @@ export function buildClipAudioPayload(data: ClipAudioUpdateData): Record<string,
 }
 
 export function hasClipAudioUpdates(payload: Record<string, unknown>): boolean {
-  return Object.keys(payload).length > 3;
+  return Object.keys(payload).length > CLIP_AUDIO_BASE_KEYS.length;
 }
 
 export function buildClipDeletionMap(
@@ -342,12 +345,9 @@ export function buildClipDeletionMap(
   const deletionMap: Array<{ clipId: string; trackId: string }> = [];
 
   for (const clipId of clipIds) {
-    for (const track of sequenceSnapshot.tracks) {
-      const clip = track.clips.find((candidate) => candidate.id === clipId);
-      if (clip) {
-        deletionMap.push({ clipId, trackId: track.id });
-        break;
-      }
+    const ref = findClipReference(sequenceSnapshot, clipId);
+    if (ref) {
+      deletionMap.push({ clipId, trackId: ref.track.id });
     }
   }
 

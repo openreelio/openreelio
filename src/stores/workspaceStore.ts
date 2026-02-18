@@ -25,7 +25,7 @@ import {
 
 const logger = createLogger('WorkspaceStore');
 
-const TREE_REFRESH_DEBOUNCE_MS = 120;
+const TREE_REFRESH_COALESCE_MS = 120;
 
 let nextTreeRefreshRequestId = 0;
 let latestTreeRefreshRequestId = 0;
@@ -116,7 +116,7 @@ function scheduleWorkspaceTreeRefresh(reason: string): void {
   scheduledTreeRefreshTimer = setTimeout(() => {
     scheduledTreeRefreshTimer = null;
     void useWorkspaceStore.getState().refreshTree();
-  }, TREE_REFRESH_DEBOUNCE_MS);
+  }, TREE_REFRESH_COALESCE_MS);
 }
 
 function clearScheduledWorkspaceTreeRefresh(): void {
