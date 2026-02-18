@@ -16,7 +16,6 @@ import { useProjectStore } from '@/stores';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { createLogger } from '@/services/logger';
-import { probeMedia } from '@/utils/ffmpeg';
 import { refreshProjectState } from '@/utils/stateRefreshHelper';
 import type {
   AssetDropData,
@@ -28,7 +27,7 @@ import type {
   TrackCreateData,
   CaptionUpdateData,
 } from '@/components/timeline/Timeline';
-import type { Asset, Clip, Sequence, Track } from '@/types';
+import type { Asset, Command, CommandResult, Sequence, Track } from '@/types';
 import {
   buildLinkedMoveTargets,
   buildLinkedTrimTargets,
@@ -36,6 +35,23 @@ import {
   findClipReference,
   getLinkedSplitTargets,
 } from '@/utils/clipLinking';
+import {
+  buildClipAudioPayload,
+  buildClipDeletionMap,
+  ensureSourceClipExistsOrWarn,
+  findClipByAssetAtTimeline,
+  getAssetInsertDurationSec,
+  getDefaultTrackInsertPosition,
+  getNextTrackName,
+  getSequenceSnapshotOrWarn,
+  getClipTimelineDuration,
+  hasClipAudioUpdates,
+  resolveAssetHasLinkedAudio,
+  runLinkedCompanionCommands,
+  selectPreferredAudioTrack,
+  selectPreferredVisualTrack,
+  trackHasOverlap,
+} from '@/hooks/timelineActions/helpers';
 
 const logger = createLogger('TimelineActions');
 
@@ -61,222 +77,163 @@ interface TimelineActions {
   handleUpdateCaption: (data: CaptionUpdateData) => Promise<void>;
 }
 
-const TRACK_KIND_LABEL: Record<TrackCreateData['kind'], string> = {
-  video: 'Video',
-  audio: 'Audio',
-};
+type ExecuteTimelineCommand = (command: Command) => Promise<CommandResult>;
 
-const DEFAULT_INSERT_CLIP_DURATION_SEC = 10;
-const TIMELINE_TIME_EPSILON_SEC = 1e-6;
-
-function getClipTimelineDuration(clip: Clip): number {
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  return (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+interface ResolvedDroppedAssetContext {
+  droppedAssetId: string;
+  droppedAsset: Asset | undefined;
+  droppedAssetKind: Asset['kind'] | undefined;
 }
 
-function rangesOverlap(startA: number, endA: number, startB: number, endB: number): boolean {
-  return startA < endB && endA > startB;
+interface ResolveDroppedAssetContextOptions {
+  data: AssetDropData;
+  sequence: Sequence;
+  assets: Map<string, Asset>;
 }
 
-function trackHasOverlap(
-  track: Track,
-  timelineIn: number,
-  durationSec: number,
-  ignoreClipId?: string,
-): boolean {
-  const candidateEnd = timelineIn + durationSec;
+async function resolveDroppedAssetContext({
+  data,
+  sequence,
+  assets,
+}: ResolveDroppedAssetContextOptions): Promise<ResolvedDroppedAssetContext | null> {
+  let droppedAssetId = data.assetId;
+  let droppedAsset = droppedAssetId ? assets.get(droppedAssetId) : undefined;
+  let droppedAssetKind = droppedAsset?.kind ?? data.assetKind;
+  const workspaceRelativePath =
+    'workspaceRelativePath' in data && typeof data.workspaceRelativePath === 'string'
+      ? data.workspaceRelativePath
+      : undefined;
 
-  return track.clips.some((clip) => {
-    if (ignoreClipId && clip.id === ignoreClipId) {
-      return false;
+  const shouldRegisterWorkspaceFile =
+    !!workspaceRelativePath && (!droppedAssetId || droppedAsset == null);
+
+  if (shouldRegisterWorkspaceFile && workspaceRelativePath) {
+    const registerResult = await useWorkspaceStore.getState().registerFile(workspaceRelativePath);
+
+    if (!registerResult) {
+      logger.warn('Cannot drop workspace file: registration failed', {
+        sequenceId: sequence.id,
+        trackId: data.trackId,
+        workspaceRelativePath,
+      });
+      return null;
     }
 
-    const clipStart = clip.place.timelineInSec;
-    const clipEnd = clipStart + getClipTimelineDuration(clip);
-    return rangesOverlap(timelineIn, candidateEnd, clipStart, clipEnd);
-  });
-}
+    droppedAssetId = registerResult.assetId;
 
-function getAssetInsertDurationSec(asset: Asset): number {
-  if (
-    typeof asset.durationSec === 'number' &&
-    Number.isFinite(asset.durationSec) &&
-    asset.durationSec > 0
-  ) {
-    return asset.durationSec;
+    droppedAsset = useProjectStore.getState().assets.get(droppedAssetId);
+    if (!droppedAsset) {
+      try {
+        const freshState = await refreshProjectState();
+        useProjectStore.setState((draft) => {
+          draft.assets = freshState.assets;
+        });
+        droppedAsset = useProjectStore.getState().assets.get(droppedAssetId);
+      } catch (error) {
+        logger.warn('Failed to refresh project assets after workspace registration', {
+          sequenceId: sequence.id,
+          trackId: data.trackId,
+          workspaceRelativePath,
+          assetId: droppedAssetId,
+          error,
+        });
+      }
+    }
+
+    droppedAssetKind = droppedAsset?.kind ?? data.assetKind;
   }
 
-  return DEFAULT_INSERT_CLIP_DURATION_SEC;
-}
-
-async function resolveAssetHasLinkedAudio(asset: Asset): Promise<boolean> {
-  if (asset.kind !== 'video') {
-    return false;
-  }
-
-  if (asset.audio) {
-    return true;
-  }
-
-  try {
-    const mediaInfo = await probeMedia(asset.uri);
-    return Boolean(mediaInfo.audio);
-  } catch (error) {
-    logger.warn('Unable to probe dropped video for audio stream detection', {
-      assetId: asset.id,
-      uri: asset.uri,
-      error,
+  if (!droppedAssetId) {
+    logger.warn('Cannot drop asset: missing asset ID and workspace path', {
+      sequenceId: sequence.id,
+      trackId: data.trackId,
     });
-    return false;
-  }
-}
-
-function findClipByAssetAtTimeline(
-  track: Track | undefined,
-  assetId: string,
-  timelineInSec: number,
-): Clip | undefined {
-  if (!track) {
-    return undefined;
+    return null;
   }
 
-  return track.clips.find(
-    (clip) =>
-      clip.assetId === assetId &&
-      Math.abs(clip.place.timelineInSec - timelineInSec) <= TIMELINE_TIME_EPSILON_SEC,
-  );
+  return {
+    droppedAssetId,
+    droppedAsset,
+    droppedAssetKind,
+  };
 }
 
-function findAvailableAudioTrack(
-  sequence: Sequence,
-  timelineIn: number,
-  durationSec: number,
-): Track | undefined {
-  return sequence.tracks.find((track) => {
-    if (track.kind !== 'audio' || track.locked) {
-      return false;
-    }
+interface ResolveOrCreateTrackOptions {
+  kind: TrackCreateData['kind'];
+  sequence: Sequence;
+  sequenceSnapshot: Sequence;
+  preferredTrack: Track | undefined;
+  timelineIn: number;
+  durationSec: number;
+  assetId: string;
+  executeCommand: ExecuteTimelineCommand;
+  getCurrentSequence: () => Sequence | null;
+  createTrackFailureMessage: string;
+  snapshotUnavailableMessage: string;
+  missingTrackMessage: string;
+}
 
-    return !trackHasOverlap(track, timelineIn, durationSec);
+async function resolveOrCreateTrack({
+  kind,
+  sequence,
+  sequenceSnapshot,
+  preferredTrack,
+  timelineIn,
+  durationSec,
+  assetId,
+  executeCommand,
+  getCurrentSequence,
+  createTrackFailureMessage,
+  snapshotUnavailableMessage,
+  missingTrackMessage,
+}: ResolveOrCreateTrackOptions): Promise<Track | null> {
+  const selectedTrack =
+    kind === 'video'
+      ? selectPreferredVisualTrack(sequenceSnapshot, preferredTrack, timelineIn, durationSec)
+      : selectPreferredAudioTrack(sequenceSnapshot, preferredTrack, timelineIn, durationSec);
+
+  if (selectedTrack) {
+    return selectedTrack;
+  }
+
+  const createdTrackResult = await executeCommand({
+    type: 'CreateTrack',
+    payload: {
+      sequenceId: sequence.id,
+      kind,
+      name: getNextTrackName(sequenceSnapshot, kind),
+      position: getDefaultTrackInsertPosition(sequenceSnapshot, kind),
+    },
   });
-}
 
-function isVisualTrackKind(trackKind: Track['kind']): boolean {
-  return trackKind === 'video' || trackKind === 'overlay';
-}
-
-function canInsertClipOnTrack(track: Track, timelineIn: number, durationSec: number): boolean {
-  return !track.locked && !trackHasOverlap(track, timelineIn, durationSec);
-}
-
-function findAvailableVisualTrack(
-  sequence: Sequence,
-  timelineIn: number,
-  durationSec: number,
-): Track | undefined {
-  return sequence.tracks.find(
-    (track) =>
-      isVisualTrackKind(track.kind) && canInsertClipOnTrack(track, timelineIn, durationSec),
-  );
-}
-
-function selectPreferredVisualTrack(
-  sequence: Sequence,
-  targetTrack: Track | undefined,
-  timelineIn: number,
-  durationSec: number,
-): Track | undefined {
-  if (
-    targetTrack &&
-    isVisualTrackKind(targetTrack.kind) &&
-    canInsertClipOnTrack(targetTrack, timelineIn, durationSec)
-  ) {
-    return targetTrack;
+  const createdTrackId = createdTrackResult.createdIds[0];
+  if (!createdTrackId) {
+    logger.warn(createTrackFailureMessage, {
+      sequenceId: sequence.id,
+      assetId,
+    });
+    return null;
   }
 
-  return findAvailableVisualTrack(sequence, timelineIn, durationSec);
-}
-
-function selectPreferredAudioTrack(
-  sequence: Sequence,
-  targetTrack: Track | undefined,
-  timelineIn: number,
-  durationSec: number,
-): Track | undefined {
-  if (
-    targetTrack &&
-    targetTrack.kind === 'audio' &&
-    canInsertClipOnTrack(targetTrack, timelineIn, durationSec)
-  ) {
-    return targetTrack;
+  const refreshedSequence = getCurrentSequence();
+  if (!refreshedSequence) {
+    logger.warn(snapshotUnavailableMessage, {
+      sequenceId: sequence.id,
+      createdTrackId,
+    });
+    return null;
   }
 
-  return findAvailableAudioTrack(sequence, timelineIn, durationSec);
-}
-
-function getNextTrackName(sequence: Sequence, kind: TrackCreateData['kind']): string {
-  const baseLabel = TRACK_KIND_LABEL[kind];
-  let highestIndex = 0;
-
-  for (const track of sequence.tracks) {
-    if (track.kind !== kind) continue;
-
-    const trimmedName = track.name.trim();
-    if (trimmedName === baseLabel) {
-      highestIndex = Math.max(highestIndex, 1);
-      continue;
-    }
-
-    const match = new RegExp(`^${baseLabel}\\s+(\\d+)$`).exec(trimmedName);
-    if (match) {
-      highestIndex = Math.max(highestIndex, parseInt(match[1], 10));
-    }
+  const createdTrack = refreshedSequence.tracks.find((track) => track.id === createdTrackId);
+  if (!createdTrack) {
+    logger.warn(missingTrackMessage, {
+      sequenceId: sequence.id,
+      createdTrackId,
+    });
+    return null;
   }
 
-  return `${baseLabel} ${highestIndex + 1}`;
-}
-
-/**
- * Calculates insertion index that matches common NLE lane layout.
- * - New video tracks are inserted above existing video tracks (below overlays).
- * - New audio tracks are appended below existing audio tracks.
- */
-function getDefaultTrackInsertPosition(sequence: Sequence, kind: TrackCreateData['kind']): number {
-  if (kind === 'video') {
-    let firstVideoIndex = -1;
-    let firstLowerLaneIndex = -1;
-
-    for (let index = 0; index < sequence.tracks.length; index += 1) {
-      const track = sequence.tracks[index];
-
-      if (firstVideoIndex === -1 && track.kind === 'video') {
-        firstVideoIndex = index;
-      }
-
-      if (firstLowerLaneIndex === -1 && (track.kind === 'caption' || track.kind === 'audio')) {
-        firstLowerLaneIndex = index;
-      }
-    }
-
-    if (firstVideoIndex !== -1) {
-      return firstVideoIndex;
-    }
-
-    if (firstLowerLaneIndex !== -1) {
-      return firstLowerLaneIndex;
-    }
-
-    return sequence.tracks.length;
-  }
-
-  let lastAudioIndex = -1;
-  for (let index = 0; index < sequence.tracks.length; index += 1) {
-    if (sequence.tracks[index].kind === 'audio') {
-      lastAudioIndex = index;
-    }
-  }
-
-  return lastAudioIndex !== -1 ? lastAudioIndex + 1 : sequence.tracks.length;
+  return createdTrack;
 }
 
 // =============================================================================
@@ -304,32 +261,66 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     return useProjectStore.getState().sequences.get(sequence.id) ?? sequence;
   }, [sequence]);
 
+  const executeTrackToggle = useCallback(
+    async (
+      data: TrackControlData,
+      commandType: 'ToggleTrackMute' | 'ToggleTrackLock' | 'ToggleTrackVisibility',
+      missingSequenceMessage: string,
+      failureMessage: string,
+    ): Promise<void> => {
+      if (!sequence) {
+        logger.warn(missingSequenceMessage);
+        return;
+      }
+
+      try {
+        await executeCommand({
+          type: commandType,
+          payload: {
+            sequenceId: data.sequenceId,
+            trackId: data.trackId,
+          },
+        });
+      } catch (error) {
+        logger.error(failureMessage, { error, trackId: data.trackId });
+      }
+    },
+    [sequence, executeCommand],
+  );
+
   /**
    * Handle clip move operation.
    * State refresh is automatic via executeCommand.
    */
   const handleClipMove = useCallback(
     async (data: ClipMoveData): Promise<void> => {
-      if (!sequence) {
-        logger.warn('Cannot move clip: no sequence');
-        return;
-      }
-
-      const sequenceSnapshot = getCurrentSequence();
+      const sequenceSnapshot = getSequenceSnapshotOrWarn({
+        sequence,
+        getCurrentSequence,
+        logger,
+        missingSequenceMessage: 'Cannot move clip: no sequence',
+        missingSnapshotMessage: 'Cannot move clip: sequence snapshot unavailable',
+        missingSnapshotContext: {
+          sequenceId: data.sequenceId,
+          clipId: data.clipId,
+        },
+      });
       if (!sequenceSnapshot) {
-        logger.warn('Cannot move clip: sequence snapshot unavailable', {
-          sequenceId: data.sequenceId,
-          clipId: data.clipId,
-        });
         return;
       }
 
-      const sourceClipRef = findClipReference(sequenceSnapshot, data.clipId);
-      if (!sourceClipRef) {
-        logger.warn('Cannot move clip: source clip no longer exists', {
-          sequenceId: data.sequenceId,
+      if (
+        !ensureSourceClipExistsOrWarn({
+          sequenceSnapshot,
           clipId: data.clipId,
-        });
+          logger,
+          missingClipMessage: 'Cannot move clip: source clip no longer exists',
+          missingClipContext: {
+            sequenceId: data.sequenceId,
+            clipId: data.clipId,
+          },
+        })
+      ) {
         return;
       }
 
@@ -350,53 +341,52 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           },
         });
 
-        for (const linkedMove of linkedMoveTargets) {
-          const latestSequence = getCurrentSequence();
-          if (!latestSequence) {
-            break;
-          }
+        await runLinkedCompanionCommands(
+          linkedMoveTargets,
+          getCurrentSequence,
+          async (linkedMove, latestSequence): Promise<void> => {
+            const linkedClipRef = findClipReference(latestSequence, linkedMove.clipId);
+            if (!linkedClipRef) {
+              return;
+            }
 
-          const linkedClipRef = findClipReference(latestSequence, linkedMove.clipId);
-          if (!linkedClipRef) {
-            continue;
-          }
+            const linkedClipDuration = getClipTimelineDuration(linkedClipRef.clip);
+            const targetTrack = latestSequence.tracks.find(
+              (track) => track.id === linkedMove.trackId,
+            );
+            if (!targetTrack) {
+              return;
+            }
 
-          const linkedClipDuration = getClipTimelineDuration(linkedClipRef.clip);
-          const targetTrack = latestSequence.tracks.find(
-            (track) => track.id === linkedMove.trackId,
-          );
-          if (!targetTrack) {
-            continue;
-          }
+            const hasOverlap = trackHasOverlap(
+              targetTrack,
+              linkedMove.newTimelineIn,
+              linkedClipDuration,
+              linkedMove.clipId,
+            );
 
-          const hasOverlap = trackHasOverlap(
-            targetTrack,
-            linkedMove.newTimelineIn,
-            linkedClipDuration,
-            linkedMove.clipId,
-          );
+            if (hasOverlap) {
+              logger.warn('Linked companion move skipped due to overlap', {
+                sequenceId: data.sequenceId,
+                sourceClipId: data.clipId,
+                linkedClipId: linkedMove.clipId,
+                targetTrackId: linkedMove.trackId,
+                newTimelineIn: linkedMove.newTimelineIn,
+              });
+              return;
+            }
 
-          if (hasOverlap) {
-            logger.warn('Linked companion move skipped due to overlap', {
-              sequenceId: data.sequenceId,
-              sourceClipId: data.clipId,
-              linkedClipId: linkedMove.clipId,
-              targetTrackId: linkedMove.trackId,
-              newTimelineIn: linkedMove.newTimelineIn,
+            await executeCommand({
+              type: 'MoveClip',
+              payload: {
+                sequenceId: data.sequenceId,
+                trackId: linkedMove.trackId,
+                clipId: linkedMove.clipId,
+                newTimelineIn: linkedMove.newTimelineIn,
+              },
             });
-            continue;
-          }
-
-          await executeCommand({
-            type: 'MoveClip',
-            payload: {
-              sequenceId: data.sequenceId,
-              trackId: linkedMove.trackId,
-              clipId: linkedMove.clipId,
-              newTimelineIn: linkedMove.newTimelineIn,
-            },
-          });
-        }
+          },
+        );
       } catch (error) {
         logger.error('Failed to move clip', { error, clipId: data.clipId });
       }
@@ -410,26 +400,33 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
    */
   const handleClipTrim = useCallback(
     async (data: ClipTrimData): Promise<void> => {
-      if (!sequence) {
-        logger.warn('Cannot trim clip: no sequence');
-        return;
-      }
-
-      const sequenceSnapshot = getCurrentSequence();
+      const sequenceSnapshot = getSequenceSnapshotOrWarn({
+        sequence,
+        getCurrentSequence,
+        logger,
+        missingSequenceMessage: 'Cannot trim clip: no sequence',
+        missingSnapshotMessage: 'Cannot trim clip: sequence snapshot unavailable',
+        missingSnapshotContext: {
+          sequenceId: data.sequenceId,
+          clipId: data.clipId,
+        },
+      });
       if (!sequenceSnapshot) {
-        logger.warn('Cannot trim clip: sequence snapshot unavailable', {
-          sequenceId: data.sequenceId,
-          clipId: data.clipId,
-        });
         return;
       }
 
-      const sourceClipRef = findClipReference(sequenceSnapshot, data.clipId);
-      if (!sourceClipRef) {
-        logger.warn('Cannot trim clip: source clip no longer exists', {
-          sequenceId: data.sequenceId,
+      if (
+        !ensureSourceClipExistsOrWarn({
+          sequenceSnapshot,
           clipId: data.clipId,
-        });
+          logger,
+          missingClipMessage: 'Cannot trim clip: source clip no longer exists',
+          missingClipContext: {
+            sequenceId: data.sequenceId,
+            clipId: data.clipId,
+          },
+        })
+      ) {
         return;
       }
 
@@ -451,28 +448,23 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           },
         });
 
-        for (const linkedTrim of linkedTrimTargets) {
-          const latestSequence = getCurrentSequence();
-          if (!latestSequence) {
-            break;
-          }
-
-          if (!findClipReference(latestSequence, linkedTrim.clipId)) {
-            continue;
-          }
-
-          await executeCommand({
-            type: 'TrimClip',
-            payload: {
-              sequenceId: linkedTrim.sequenceId,
-              trackId: linkedTrim.trackId,
-              clipId: linkedTrim.clipId,
-              newSourceIn: linkedTrim.newSourceIn,
-              newSourceOut: linkedTrim.newSourceOut,
-              newTimelineIn: linkedTrim.newTimelineIn,
-            },
-          });
-        }
+        await runLinkedCompanionCommands(
+          linkedTrimTargets,
+          getCurrentSequence,
+          async (linkedTrim): Promise<void> => {
+            await executeCommand({
+              type: 'TrimClip',
+              payload: {
+                sequenceId: linkedTrim.sequenceId,
+                trackId: linkedTrim.trackId,
+                clipId: linkedTrim.clipId,
+                newSourceIn: linkedTrim.newSourceIn,
+                newSourceOut: linkedTrim.newSourceOut,
+                newTimelineIn: linkedTrim.newTimelineIn,
+              },
+            });
+          },
+        );
       } catch (error) {
         logger.error('Failed to trim clip', { error, clipId: data.clipId });
       }
@@ -486,26 +478,33 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
    */
   const handleClipSplit = useCallback(
     async (data: ClipSplitData): Promise<void> => {
-      if (!sequence) {
-        logger.warn('Cannot split clip: no sequence');
-        return;
-      }
-
-      const sequenceSnapshot = getCurrentSequence();
+      const sequenceSnapshot = getSequenceSnapshotOrWarn({
+        sequence,
+        getCurrentSequence,
+        logger,
+        missingSequenceMessage: 'Cannot split clip: no sequence',
+        missingSnapshotMessage: 'Cannot split clip: sequence snapshot unavailable',
+        missingSnapshotContext: {
+          sequenceId: data.sequenceId,
+          clipId: data.clipId,
+        },
+      });
       if (!sequenceSnapshot) {
-        logger.warn('Cannot split clip: sequence snapshot unavailable', {
-          sequenceId: data.sequenceId,
-          clipId: data.clipId,
-        });
         return;
       }
 
-      const sourceClipRef = findClipReference(sequenceSnapshot, data.clipId);
-      if (!sourceClipRef) {
-        logger.warn('Cannot split clip: source clip no longer exists', {
-          sequenceId: data.sequenceId,
+      if (
+        !ensureSourceClipExistsOrWarn({
+          sequenceSnapshot,
           clipId: data.clipId,
-        });
+          logger,
+          missingClipMessage: 'Cannot split clip: source clip no longer exists',
+          missingClipContext: {
+            sequenceId: data.sequenceId,
+            clipId: data.clipId,
+          },
+        })
+      ) {
         return;
       }
 
@@ -525,26 +524,21 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           },
         });
 
-        for (const linkedSplit of linkedSplitTargets) {
-          const latestSequence = getCurrentSequence();
-          if (!latestSequence) {
-            break;
-          }
-
-          if (!findClipReference(latestSequence, linkedSplit.clipId)) {
-            continue;
-          }
-
-          await executeCommand({
-            type: 'SplitClip',
-            payload: {
-              sequenceId: data.sequenceId,
-              trackId: linkedSplit.trackId,
-              clipId: linkedSplit.clipId,
-              splitTime: data.splitTime,
-            },
-          });
-        }
+        await runLinkedCompanionCommands(
+          linkedSplitTargets,
+          getCurrentSequence,
+          async (linkedSplit): Promise<void> => {
+            await executeCommand({
+              type: 'SplitClip',
+              payload: {
+                sequenceId: data.sequenceId,
+                trackId: linkedSplit.trackId,
+                clipId: linkedSplit.clipId,
+                splitTime: data.splitTime,
+              },
+            });
+          },
+        );
       } catch (error) {
         logger.error('Failed to split clip', { error, clipId: data.clipId });
       }
@@ -562,29 +556,8 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         return;
       }
 
-      const payload: Record<string, unknown> = {
-        sequenceId: data.sequenceId,
-        trackId: data.trackId,
-        clipId: data.clipId,
-      };
-
-      if (data.volumeDb !== undefined) {
-        payload.volumeDb = data.volumeDb;
-      }
-      if (data.pan !== undefined) {
-        payload.pan = data.pan;
-      }
-      if (data.muted !== undefined) {
-        payload.muted = data.muted;
-      }
-      if (data.fadeInSec !== undefined) {
-        payload.fadeInSec = data.fadeInSec;
-      }
-      if (data.fadeOutSec !== undefined) {
-        payload.fadeOutSec = data.fadeOutSec;
-      }
-
-      if (Object.keys(payload).length <= 3) {
+      const payload = buildClipAudioPayload(data);
+      if (!hasClipAudioUpdates(payload)) {
         return;
       }
 
@@ -610,79 +583,35 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
    */
   const handleAssetDrop = useCallback(
     async (data: AssetDropData): Promise<void> => {
-      if (!sequence) {
-        logger.warn('Cannot drop asset: no sequence');
-        return;
-      }
-
-      const sequenceSnapshot = getCurrentSequence();
-      if (!sequenceSnapshot) {
-        logger.warn('Cannot drop asset: sequence snapshot unavailable', {
-          sequenceId: sequence.id,
+      const sequenceSnapshot = getSequenceSnapshotOrWarn({
+        sequence,
+        getCurrentSequence,
+        logger,
+        missingSequenceMessage: 'Cannot drop asset: no sequence',
+        missingSnapshotMessage: 'Cannot drop asset: sequence snapshot unavailable',
+        missingSnapshotContext: {
+          sequenceId: sequence?.id,
           trackId: data.trackId,
           assetId: data.assetId,
           workspaceRelativePath:
             'workspaceRelativePath' in data ? data.workspaceRelativePath : undefined,
-        });
+        },
+      });
+
+      if (!sequence || !sequenceSnapshot) {
         return;
       }
 
-      let droppedAssetId = data.assetId;
-      let droppedAsset = droppedAssetId ? assets.get(droppedAssetId) : undefined;
-      let droppedAssetKind = droppedAsset?.kind ?? data.assetKind;
-      const workspaceRelativePath =
-        'workspaceRelativePath' in data && typeof data.workspaceRelativePath === 'string'
-          ? data.workspaceRelativePath
-          : undefined;
-
-      const shouldRegisterWorkspaceFile =
-        !!workspaceRelativePath && (!droppedAssetId || droppedAsset == null);
-
-      if (shouldRegisterWorkspaceFile && workspaceRelativePath) {
-        const registerResult = await useWorkspaceStore
-          .getState()
-          .registerFile(workspaceRelativePath);
-
-        if (!registerResult) {
-          logger.warn('Cannot drop workspace file: registration failed', {
-            sequenceId: sequence.id,
-            trackId: data.trackId,
-            workspaceRelativePath,
-          });
-          return;
-        }
-
-        droppedAssetId = registerResult.assetId;
-
-        droppedAsset = useProjectStore.getState().assets.get(droppedAssetId);
-        if (!droppedAsset) {
-          try {
-            const freshState = await refreshProjectState();
-            useProjectStore.setState((draft) => {
-              draft.assets = freshState.assets;
-            });
-            droppedAsset = useProjectStore.getState().assets.get(droppedAssetId);
-          } catch (error) {
-            logger.warn('Failed to refresh project assets after workspace registration', {
-              sequenceId: sequence.id,
-              trackId: data.trackId,
-              workspaceRelativePath,
-              assetId: droppedAssetId,
-              error,
-            });
-          }
-        }
-
-        droppedAssetKind = droppedAsset?.kind ?? data.assetKind;
-      }
-
-      if (!droppedAssetId) {
-        logger.warn('Cannot drop asset: missing asset ID and workspace path', {
-          sequenceId: sequence.id,
-          trackId: data.trackId,
-        });
+      const droppedAssetContext = await resolveDroppedAssetContext({
+        data,
+        sequence,
+        assets,
+      });
+      if (!droppedAssetContext) {
         return;
       }
+
+      const { droppedAssetId, droppedAsset, droppedAssetKind } = droppedAssetContext;
 
       const targetTrack = sequenceSnapshot.tracks.find((track) => track.id === data.trackId);
 
@@ -701,51 +630,23 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         }
 
         const clipDurationSec = getAssetInsertDurationSec(droppedAsset);
-        let visualTrack = selectPreferredVisualTrack(
+        const visualTrack = await resolveOrCreateTrack({
+          kind: 'video',
+          sequence,
           sequenceSnapshot,
-          targetTrack,
-          data.timelinePosition,
-          clipDurationSec,
-        );
-
+          preferredTrack: targetTrack,
+          timelineIn: data.timelinePosition,
+          durationSec: clipDurationSec,
+          assetId: droppedAssetId,
+          executeCommand,
+          getCurrentSequence,
+          createTrackFailureMessage: 'Unable to auto-create visual track for dropped video asset',
+          snapshotUnavailableMessage:
+            'Created visual track cannot be resolved: sequence snapshot unavailable',
+          missingTrackMessage: 'Created visual track not found after state refresh',
+        });
         if (!visualTrack) {
-          const createdTrackResult = await executeCommand({
-            type: 'CreateTrack',
-            payload: {
-              sequenceId: sequence.id,
-              kind: 'video',
-              name: getNextTrackName(sequenceSnapshot, 'video'),
-              position: getDefaultTrackInsertPosition(sequenceSnapshot, 'video'),
-            },
-          });
-
-          const createdTrackId = createdTrackResult.createdIds[0];
-          if (!createdTrackId) {
-            logger.warn('Unable to auto-create visual track for dropped video asset', {
-              sequenceId: sequence.id,
-              assetId: droppedAssetId,
-            });
-            return;
-          }
-
-          const refreshedSequence = getCurrentSequence();
-          if (!refreshedSequence) {
-            logger.warn('Created visual track cannot be resolved: sequence snapshot unavailable', {
-              sequenceId: sequence.id,
-              createdTrackId,
-            });
-            return;
-          }
-
-          visualTrack = refreshedSequence.tracks.find((track) => track.id === createdTrackId);
-
-          if (!visualTrack) {
-            logger.warn('Created visual track not found after state refresh', {
-              sequenceId: sequence.id,
-              createdTrackId,
-            });
-            return;
-          }
+          return;
         }
 
         const primaryVideoInsertResult = await executeCommand({
@@ -773,7 +674,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
 
         const latestDroppedAsset =
           useProjectStore.getState().assets.get(droppedAssetId) ?? droppedAsset;
-        const hasLinkedAudio = await resolveAssetHasLinkedAudio(latestDroppedAsset);
+        const hasLinkedAudio = await resolveAssetHasLinkedAudio(latestDroppedAsset, logger);
         if (!hasLinkedAudio) {
           return;
         }
@@ -795,50 +696,24 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             (track) => track.id === data.trackId,
           );
 
-          let audioTrack = selectPreferredAudioTrack(
-            postVideoInsertSequence,
-            latestTargetTrack,
-            data.timelinePosition,
-            clipDurationSec,
-          );
-
+          const audioTrack = await resolveOrCreateTrack({
+            kind: 'audio',
+            sequence,
+            sequenceSnapshot: postVideoInsertSequence,
+            preferredTrack: latestTargetTrack,
+            timelineIn: data.timelinePosition,
+            durationSec: clipDurationSec,
+            assetId: droppedAssetId,
+            executeCommand,
+            getCurrentSequence,
+            createTrackFailureMessage:
+              'Unable to auto-create audio track for linked audio extraction',
+            snapshotUnavailableMessage:
+              'Created audio track cannot be resolved: sequence snapshot unavailable',
+            missingTrackMessage: 'Created audio track not found after state refresh',
+          });
           if (!audioTrack) {
-            const createdTrackResult = await executeCommand({
-              type: 'CreateTrack',
-              payload: {
-                sequenceId: sequence.id,
-                kind: 'audio',
-                name: getNextTrackName(postVideoInsertSequence, 'audio'),
-                position: getDefaultTrackInsertPosition(postVideoInsertSequence, 'audio'),
-              },
-            });
-
-            const createdTrackId = createdTrackResult.createdIds[0];
-            if (!createdTrackId) {
-              logger.warn('Unable to auto-create audio track for linked audio extraction', {
-                sequenceId: sequence.id,
-                assetId: droppedAssetId,
-              });
-              return;
-            }
-
-            const refreshedSequence = getCurrentSequence();
-            if (!refreshedSequence) {
-              logger.warn('Created audio track cannot be resolved: sequence snapshot unavailable', {
-                sequenceId: sequence.id,
-                createdTrackId,
-              });
-              return;
-            }
-            audioTrack = refreshedSequence.tracks.find((track) => track.id === createdTrackId);
-
-            if (!audioTrack) {
-              logger.warn('Created audio track not found after state refresh', {
-                sequenceId: sequence.id,
-                createdTrackId,
-              });
-              return;
-            }
+            return;
           }
 
           await executeCommand({
@@ -923,17 +798,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         ? expandClipIdsWithLinkedCompanions(sequenceSnapshot, clipIds)
         : clipIds;
 
-      // Build deletion map upfront to avoid stale sequence references
-      const deletionMap: Array<{ clipId: string; trackId: string }> = [];
-      for (const clipId of clipIdsToDelete) {
-        for (const track of sequenceSnapshot.tracks) {
-          const clip = track.clips.find((c) => c.id === clipId);
-          if (clip) {
-            deletionMap.push({ clipId, trackId: track.id });
-            break;
-          }
-        }
-      }
+      const deletionMap = buildClipDeletionMap(sequenceSnapshot, clipIdsToDelete);
 
       if (deletionMap.length === 0) {
         logger.warn('No clips found to delete', { clipIds: clipIdsToDelete });
@@ -1006,24 +871,14 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
    */
   const handleTrackMuteToggle = useCallback(
     async (data: TrackControlData): Promise<void> => {
-      if (!sequence) {
-        logger.warn('Cannot toggle track mute: no sequence');
-        return;
-      }
-
-      try {
-        await executeCommand({
-          type: 'ToggleTrackMute',
-          payload: {
-            sequenceId: data.sequenceId,
-            trackId: data.trackId,
-          },
-        });
-      } catch (error) {
-        logger.error('Failed to toggle track mute', { error, trackId: data.trackId });
-      }
+      await executeTrackToggle(
+        data,
+        'ToggleTrackMute',
+        'Cannot toggle track mute: no sequence',
+        'Failed to toggle track mute',
+      );
     },
-    [sequence, executeCommand],
+    [executeTrackToggle],
   );
 
   /**
@@ -1032,24 +887,14 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
    */
   const handleTrackLockToggle = useCallback(
     async (data: TrackControlData): Promise<void> => {
-      if (!sequence) {
-        logger.warn('Cannot toggle track lock: no sequence');
-        return;
-      }
-
-      try {
-        await executeCommand({
-          type: 'ToggleTrackLock',
-          payload: {
-            sequenceId: data.sequenceId,
-            trackId: data.trackId,
-          },
-        });
-      } catch (error) {
-        logger.error('Failed to toggle track lock', { error, trackId: data.trackId });
-      }
+      await executeTrackToggle(
+        data,
+        'ToggleTrackLock',
+        'Cannot toggle track lock: no sequence',
+        'Failed to toggle track lock',
+      );
     },
-    [sequence, executeCommand],
+    [executeTrackToggle],
   );
 
   /**
@@ -1058,24 +903,14 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
    */
   const handleTrackVisibilityToggle = useCallback(
     async (data: TrackControlData): Promise<void> => {
-      if (!sequence) {
-        logger.warn('Cannot toggle track visibility: no sequence');
-        return;
-      }
-
-      try {
-        await executeCommand({
-          type: 'ToggleTrackVisibility',
-          payload: {
-            sequenceId: data.sequenceId,
-            trackId: data.trackId,
-          },
-        });
-      } catch (error) {
-        logger.error('Failed to toggle track visibility', { error, trackId: data.trackId });
-      }
+      await executeTrackToggle(
+        data,
+        'ToggleTrackVisibility',
+        'Cannot toggle track visibility: no sequence',
+        'Failed to toggle track visibility',
+      );
     },
-    [sequence, executeCommand],
+    [executeTrackToggle],
   );
 
   /**
