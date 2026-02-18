@@ -765,8 +765,8 @@ mod tests {
             .with_relative_path("linked.mp4")
             .as_workspace_managed();
 
-        let mut cmd =
-            ImportAssetCommand::from_asset(asset).with_project_root(project_dir.path().to_path_buf());
+        let mut cmd = ImportAssetCommand::from_asset(asset)
+            .with_project_root(project_dir.path().to_path_buf());
 
         let err = cmd.execute(&mut state).unwrap_err();
         assert!(matches!(err, CoreError::ValidationError(_)));

@@ -238,17 +238,18 @@ pub async fn register_workspace_files(
     let mut normalized_paths = Vec::with_capacity(relative_paths.len());
 
     for raw_relative_path in relative_paths {
-        let relative_path = match normalize_relative_workspace_path(&project_root, &raw_relative_path) {
-            Ok(path) => path,
-            Err(error) => {
-                tracing::warn!(
-                    path = %raw_relative_path,
-                    error = %error,
-                    "Skipping invalid workspace registration path"
-                );
-                continue;
-            }
-        };
+        let relative_path =
+            match normalize_relative_workspace_path(&project_root, &raw_relative_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %raw_relative_path,
+                        error = %error,
+                        "Skipping invalid workspace registration path"
+                    );
+                    continue;
+                }
+            };
 
         if !seen_paths.insert(relative_path.clone()) {
             tracing::debug!(
@@ -264,7 +265,6 @@ pub async fn register_workspace_files(
     let mut results = Vec::with_capacity(normalized_paths.len());
 
     for relative_path in normalized_paths {
-
         let asset_kind = match ensure_index_entry_for_registration(&service, &relative_path) {
             Ok(kind) => kind,
             Err(error) => {
@@ -507,10 +507,7 @@ fn has_invalid_relative_segments(path: &str) -> bool {
 
 fn looks_like_windows_absolute_path(path: &str) -> bool {
     let bytes = path.as_bytes();
-    bytes.len() >= 3
-        && bytes[1] == b':'
-        && bytes[2] == b'/'
-        && bytes[0].is_ascii_alphabetic()
+    bytes.len() >= 3 && bytes[1] == b':' && bytes[2] == b'/' && bytes[0].is_ascii_alphabetic()
 }
 
 /// Convert internal FileTreeEntry to DTO
@@ -589,11 +586,9 @@ mod tests {
         let result = normalize_relative_workspace_path(dir.path(), "../outside.mp4");
 
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .contains("relativePath contains invalid '.' or '..' segments")
-        );
+        assert!(result
+            .unwrap_err()
+            .contains("relativePath contains invalid '.' or '..' segments"));
     }
 
     #[test]
@@ -604,11 +599,9 @@ mod tests {
 
         let result = normalize_relative_workspace_path(dir.path(), &absolute.to_string_lossy());
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .contains("relativePath must be a project-relative path")
-        );
+        assert!(result
+            .unwrap_err()
+            .contains("relativePath must be a project-relative path"));
     }
 
     #[test]
@@ -617,11 +610,9 @@ mod tests {
         let result = normalize_relative_workspace_path(dir.path(), "footage/clip\n.mp4");
 
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .contains("relativePath contains control characters")
-        );
+        assert!(result
+            .unwrap_err()
+            .contains("relativePath contains control characters"));
     }
 
     #[test]
