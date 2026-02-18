@@ -110,7 +110,12 @@ export interface PlanStep {
   id: string;
   /** Tool name to execute */
   tool: string;
-  /** Arguments to pass to the tool */
+  /**
+   * Arguments to pass to the tool.
+   *
+   * Supports literal values and step output references using:
+   * `{ "$fromStep": "<step-id>", "$path": "data.<fieldPath>", "$default"?: unknown }`
+   */
   args: Record<string, unknown>;
   /** Human-readable description */
   description: string;
@@ -259,6 +264,9 @@ export type AgentEvent =
   | ExecutionStartEvent
   | ExecutionProgressEvent
   | ExecutionCompleteEvent
+  | ToolPermissionRequestEvent
+  | ToolPermissionResponseEvent
+  | DoomLoopDetectedEvent
   | ObservationCompleteEvent
   | IterationCompleteEvent
   | SessionCompleteEvent
@@ -343,6 +351,26 @@ export interface ExecutionCompleteEvent {
   type: 'execution_complete';
   step: PlanStep;
   result: ToolResult;
+  timestamp: number;
+}
+
+export interface ToolPermissionRequestEvent {
+  type: 'tool_permission_request';
+  step: PlanStep;
+  timestamp: number;
+}
+
+export interface ToolPermissionResponseEvent {
+  type: 'tool_permission_response';
+  step: PlanStep;
+  decision: 'allow' | 'deny' | 'allow_always';
+  timestamp: number;
+}
+
+export interface DoomLoopDetectedEvent {
+  type: 'doom_loop_detected';
+  tool: string;
+  count: number;
   timestamp: number;
 }
 
@@ -451,6 +479,8 @@ export interface AgentContext {
   languagePolicy?: LanguagePolicy;
 
   // Timeline state
+  /** Project store state version used for optimistic consistency checks */
+  projectStateVersion?: number;
   /** Current playhead position in seconds */
   playheadPosition: number;
   /** Total timeline duration in seconds */
@@ -623,8 +653,25 @@ export interface AgenticEngineConfig {
    *
    * If provided, the engine will pause when a plan requires approval and await
    * this handler's response before proceeding.
+   *
+   * When returning an object with `feedback`, the feedback text is injected
+   * as a correction into the context for the next Think iteration.
    */
-  approvalHandler?: (plan: Plan) => Promise<boolean>;
+  approvalHandler?: (plan: Plan) => Promise<boolean | { approved: boolean; feedback?: string }>;
+
+  /**
+   * Optional per-tool permission handler.
+   *
+   * Called before each tool execution. Returns:
+   * - 'allow': proceed with execution
+   * - 'deny': skip this step
+   * - 'allow_always': proceed and auto-allow this tool for the session
+   */
+  toolPermissionHandler?: (
+    toolName: string,
+    args: Record<string, unknown>,
+    step: PlanStep,
+  ) => Promise<'allow' | 'deny' | 'allow_always'>;
 
   /** Stop execution on the first tool error (default: true) */
   stopOnError?: boolean;
@@ -666,11 +713,7 @@ export const DEFAULT_ENGINE_CONFIG: AgenticEngineConfig = {
   maxStepsPerRun: 60,
   maxToolCallsPerRun: 120,
   requireApprovalForDestructiveActions: true,
-  destructiveToolNames: [
-    'delete_clip',
-    'delete_clips_in_range',
-    'delete_caption',
-  ],
+  destructiveToolNames: ['delete_clip', 'delete_clips_in_range', 'delete_caption'],
   enableAutoRollbackOnFailure: true,
   maxRollbackSteps: 20,
   memoryStore: undefined,

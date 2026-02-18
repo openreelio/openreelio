@@ -1,17 +1,17 @@
 /**
  * useProjectHandlers Hook
  *
- * Manages project creation and opening operations with unsaved changes handling.
- * Extracts project handling logic from App.tsx for better separation of concerns.
+ * Manages project opening operations with unsaved changes handling.
+ * Uses a folder-based workspace model where any folder can be opened as a project.
+ * If the folder doesn't contain project files, they are initialized automatically.
  *
  * Features:
  * - Atomic project lifecycle operations with mutex protection
  * - Unsaved changes confirmation before destructive operations
- * - Path validation and sanitization for security
  * - Recent projects list management
  */
 
-import { useCallback, useState, useRef } from 'react';
+import { useCallback, useRef } from 'react';
 import { open, confirm } from '@tauri-apps/plugin-dialog';
 import { useProjectStore } from '@/stores';
 import { createLogger } from '@/services/logger';
@@ -21,7 +21,6 @@ import {
   removeRecentProjectByPath,
   type RecentProject,
 } from '@/utils/recentProjects';
-import { buildProjectPath, validateProjectName } from '@/utils/projectPath';
 import { getUserFriendlyError } from '@/utils/errorMessages';
 import type { ToastVariant } from '@/components/ui';
 
@@ -31,12 +30,6 @@ const logger = createLogger('useProjectHandlers');
 // Types
 // =============================================================================
 
-export interface ProjectCreateData {
-  name: string;
-  path: string;
-  format?: string;
-}
-
 export interface UseProjectHandlersOptions {
   /** Callback to update recent projects list */
   setRecentProjects: (projects: RecentProject[]) => void;
@@ -45,18 +38,8 @@ export interface UseProjectHandlersOptions {
 }
 
 export interface UseProjectHandlersResult {
-  /** Whether project creation dialog should be shown */
-  showCreateDialog: boolean;
-  /** Whether a project creation is in progress */
-  isCreatingProject: boolean;
-  /** Open the project creation dialog */
-  handleNewProject: () => void;
-  /** Handle project creation from dialog */
-  handleCreateProject: (data: ProjectCreateData) => Promise<void>;
-  /** Cancel project creation */
-  handleCancelCreate: () => void;
-  /** Open a project from path or show file picker */
-  handleOpenProject: (path?: string) => Promise<void>;
+  /** Open a folder as project (shows folder picker or uses provided path) */
+  handleOpenFolder: (path?: string) => Promise<void>;
 }
 
 // =============================================================================
@@ -64,21 +47,15 @@ export interface UseProjectHandlersResult {
 // =============================================================================
 
 /**
- * Hook for managing project creation and opening operations.
+ * Hook for managing project opening operations using folder-based workspace model.
  *
  * Handles:
- * - Creating new projects with validation
- * - Opening existing projects
+ * - Opening any folder as a project (auto-initializes if needed)
  * - Checking for unsaved changes before operations
  * - Managing recent projects list
  *
  * @example
- * const {
- *   showCreateDialog,
- *   handleNewProject,
- *   handleOpenProject,
- * } = useProjectHandlers({
- *   recentProjects,
+ * const { handleOpenFolder } = useProjectHandlers({
  *   setRecentProjects,
  *   addToast,
  * });
@@ -87,118 +64,66 @@ export function useProjectHandlers({
   setRecentProjects,
   addToast,
 }: UseProjectHandlersOptions): UseProjectHandlersResult {
-  const { createProject, loadProject } = useProjectStore();
-
-  // Project creation dialog state
-  const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const [isCreatingProject, setIsCreatingProject] = useState(false);
+  const { openOrInitProject } = useProjectStore();
 
   // Mutex to prevent concurrent project operations
-  // This prevents race conditions when user rapidly clicks create/open
+  // This prevents race conditions when user rapidly clicks buttons
   const operationInProgressRef = useRef(false);
 
-  // Open the project creation dialog
-  const handleNewProject = useCallback(() => {
-    setShowCreateDialog(true);
-  }, []);
+  /**
+   * Checks for unsaved changes and prompts the user to save.
+   * Returns true if it's safe to proceed, false if user cancelled.
+   */
+  const confirmUnsavedChanges = useCallback(
+    async (actionLabel: string): Promise<boolean> => {
+      const { isDirty: hasUnsavedChanges, meta: currentMeta } = useProjectStore.getState();
 
-  // Cancel project creation
-  const handleCancelCreate = useCallback(() => {
-    setShowCreateDialog(false);
-  }, []);
-
-  // Handle project creation from dialog
-  const handleCreateProject = useCallback(
-    async (data: ProjectCreateData) => {
-      // Prevent concurrent operations
-      if (operationInProgressRef.current) {
-        logger.warn('Project operation already in progress');
-        addToast('Please wait for the current operation to complete', 'warning');
-        return;
+      if (!hasUnsavedChanges || !currentMeta?.path) {
+        return true;
       }
 
-      operationInProgressRef.current = true;
+      const shouldSave = await confirm(
+        `You have unsaved changes in the current project. Do you want to save before ${actionLabel}?`,
+        {
+          title: 'Unsaved Changes',
+          kind: 'warning',
+          okLabel: 'Save and Continue',
+          cancelLabel: 'Discard Changes',
+        },
+      );
 
-      try {
-        // Re-check state immediately before any action to minimize race window
-        const { isDirty: hasUnsavedChanges, meta: currentMeta } = useProjectStore.getState();
-
-        if (hasUnsavedChanges && currentMeta?.path) {
-          const shouldSave = await confirm(
-            'You have unsaved changes in the current project. Do you want to save before creating a new project?',
+      if (shouldSave) {
+        try {
+          // Re-verify dirty state hasn't changed during dialog
+          const latestState = useProjectStore.getState();
+          if (latestState.isDirty && latestState.meta?.path) {
+            await latestState.saveProject();
+            addToast('Project saved', 'success');
+          }
+        } catch (saveError) {
+          logger.error('Failed to save current project', { error: saveError });
+          const forceProceed = await confirm(
+            `Failed to save the current project. ${actionLabel.charAt(0).toUpperCase() + actionLabel.slice(1)} anyway?`,
             {
-              title: 'Unsaved Changes',
-              kind: 'warning',
-              okLabel: 'Save and Continue',
-              cancelLabel: 'Discard Changes',
+              title: 'Save Failed',
+              kind: 'error',
+              okLabel: 'Continue Anyway',
+              cancelLabel: 'Cancel',
             },
           );
-
-          if (shouldSave) {
-            try {
-              // Re-verify dirty state hasn't changed during dialog
-              const latestState = useProjectStore.getState();
-              if (latestState.isDirty && latestState.meta?.path) {
-                await latestState.saveProject();
-                addToast('Project saved', 'success');
-              }
-            } catch (saveError) {
-              logger.error('Failed to save current project', { error: saveError });
-              const forceCreate = await confirm(
-                'Failed to save the current project. Create new project anyway?',
-                {
-                  title: 'Save Failed',
-                  kind: 'error',
-                  okLabel: 'Create Anyway',
-                  cancelLabel: 'Cancel',
-                },
-              );
-              if (!forceCreate) {
-                return;
-              }
-            }
+          if (!forceProceed) {
+            return false;
           }
         }
-
-        setIsCreatingProject(true);
-
-        // Validate and sanitize project name to prevent path traversal
-        const validation = validateProjectName(data.name);
-
-        // Show warning if name was modified
-        if (validation.errors.length > 0 && validation.sanitized) {
-          // Log validation warnings but continue with sanitized name
-          logger.warn('Project name validation warnings', { errors: validation.errors });
-        }
-
-        // Build safe project path using validated name
-        const projectPath = buildProjectPath(data.path, data.name);
-        const projectName = validation.sanitized || data.name;
-
-        await createProject(projectName, projectPath);
-
-        // Add to recent projects
-        const updated = addRecentProject({
-          name: projectName,
-          path: projectPath,
-        });
-        setRecentProjects(updated);
-        setShowCreateDialog(false);
-        addToast(`Project "${projectName}" created successfully`, 'success');
-      } catch (error) {
-        logger.error('Failed to create project', { error });
-        const friendlyMessage = getUserFriendlyError(error);
-        addToast(`Could not create the project. ${friendlyMessage}`, 'error');
-      } finally {
-        setIsCreatingProject(false);
-        operationInProgressRef.current = false;
       }
+
+      return true;
     },
-    [createProject, addToast, setRecentProjects],
+    [addToast],
   );
 
-  // Open a project from path or show file picker
-  const handleOpenProject = useCallback(
+  // Open a folder as project (shows folder picker if no path provided)
+  const handleOpenFolder = useCallback(
     async (path?: string) => {
       // Prevent concurrent operations
       if (operationInProgressRef.current) {
@@ -210,57 +135,20 @@ export function useProjectHandlers({
       operationInProgressRef.current = true;
 
       try {
-        // Re-check state immediately before any action to minimize race window
-        const {
-          isDirty: hasUnsavedChanges,
-          meta: currentMeta,
-        } = useProjectStore.getState();
-
-        if (hasUnsavedChanges && currentMeta?.path) {
-          const shouldSave = await confirm(
-            'You have unsaved changes in the current project. Do you want to save before opening another project?',
-            {
-              title: 'Unsaved Changes',
-              kind: 'warning',
-              okLabel: 'Save and Continue',
-              cancelLabel: 'Discard Changes',
-            },
-          );
-
-          if (shouldSave) {
-            try {
-              // Re-verify dirty state hasn't changed during dialog
-              const latestState = useProjectStore.getState();
-              if (latestState.isDirty && latestState.meta?.path) {
-                await latestState.saveProject();
-                addToast('Project saved', 'success');
-              }
-            } catch (saveError) {
-              logger.error('Failed to save current project', { error: saveError });
-              const forceOpen = await confirm(
-                'Failed to save the current project. Open new project anyway?',
-                {
-                  title: 'Save Failed',
-                  kind: 'error',
-                  okLabel: 'Open Anyway',
-                  cancelLabel: 'Cancel',
-                },
-              );
-              if (!forceOpen) {
-                return;
-              }
-            }
-          }
+        // Check for unsaved changes
+        const canProceed = await confirmUnsavedChanges('opening another project');
+        if (!canProceed) {
+          return;
         }
 
         let projectPath = path;
 
         if (!projectPath) {
-          // Open file picker for project file
+          // Open folder picker
           const selectedPath = await open({
             directory: true,
             multiple: false,
-            title: 'Open Project',
+            title: 'Open Folder',
           });
 
           if (selectedPath && typeof selectedPath === 'string') {
@@ -270,7 +158,7 @@ export function useProjectHandlers({
 
         if (projectPath) {
           try {
-            await loadProject(projectPath);
+            await openOrInitProject(projectPath);
             // Add to recent projects
             const folderName = projectPath.split(/[/\\]/).pop() || 'Untitled';
             const updated = addRecentProject({
@@ -284,11 +172,10 @@ export function useProjectHandlers({
             const rawMessage = error instanceof Error ? error.message : String(error);
             const friendlyMessage = getUserFriendlyError(error);
 
-            // If project not found, offer to remove from recent projects
+            // If path not found, offer to remove from recent projects
             if (
               rawMessage.toLowerCase().includes('not found') ||
-              rawMessage.toLowerCase().includes('no such file') ||
-              rawMessage.toLowerCase().includes('project.json')
+              rawMessage.toLowerCase().includes('no such file')
             ) {
               addToast(`${friendlyMessage} The project may have been moved or deleted.`, 'error');
               // Remove the invalid project from recent projects
@@ -303,15 +190,10 @@ export function useProjectHandlers({
         operationInProgressRef.current = false;
       }
     },
-    [loadProject, addToast, setRecentProjects],
+    [openOrInitProject, addToast, setRecentProjects, confirmUnsavedChanges],
   );
 
   return {
-    showCreateDialog,
-    isCreatingProject,
-    handleNewProject,
-    handleCreateProject,
-    handleCancelCreate,
-    handleOpenProject,
+    handleOpenFolder,
   };
 }

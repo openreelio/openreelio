@@ -56,6 +56,7 @@ describe('types', () => {
 
       expect(context.projectId).toBe(projectId);
       expect(context.languagePolicy).toEqual(createLanguagePolicy('en'));
+      expect(context.projectStateVersion).toBeUndefined();
       expect(context.playheadPosition).toBe(0);
       expect(context.timelineDuration).toBe(0);
       expect(context.selectedClips).toEqual([]);

@@ -6,20 +6,13 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import {
-  ToolRegistryAdapter,
-  createToolRegistryAdapter,
-} from './ToolRegistryAdapter';
+import { ToolRegistryAdapter, createToolRegistryAdapter } from './ToolRegistryAdapter';
 import { ToolRegistry, type ToolDefinition } from '@/agents/ToolRegistry';
 import type { ExecutionContext } from '../../ports/IToolExecutor';
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
-import {
-  createMockClip,
-  createMockTrack,
-  createMockSequence,
-} from '@/test/mocks';
+import { createMockAsset, createMockClip, createMockTrack, createMockSequence } from '@/test/mocks';
 
 describe('ToolRegistryAdapter', () => {
   let registry: ToolRegistry;
@@ -30,6 +23,17 @@ describe('ToolRegistryAdapter', () => {
   let analyzeVideoTool: ToolDefinition;
 
   beforeEach(() => {
+    useProjectStore.setState({
+      isLoaded: false,
+      meta: null,
+      stateVersion: 0,
+      activeSequenceId: null,
+      sequences: new Map(),
+      assets: new Map(),
+    });
+    useTimelineStore.setState({ selectedClipIds: [], selectedTrackIds: [] });
+    usePlaybackStore.setState({ currentTime: 0, duration: 0 });
+
     // Create fresh tool definitions with mocks in each test
     splitClipTool = {
       name: 'split_clip',
@@ -93,23 +97,19 @@ describe('ToolRegistryAdapter', () => {
       const result = await adapter.execute(
         'split_clip',
         { clipId: 'clip-1', atTimelineSec: 5 },
-        executionContext
+        executionContext,
       );
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual({ newClipId: 'clip-2' });
       expect(splitClipTool.handler).toHaveBeenCalledWith(
         { clipId: 'clip-1', atTimelineSec: 5 },
-        expect.any(Object)
+        expect.any(Object),
       );
     });
 
     it('should return failure for non-existent tool', async () => {
-      const result = await adapter.execute(
-        'non_existent_tool',
-        {},
-        executionContext
-      );
+      const result = await adapter.execute('non_existent_tool', {}, executionContext);
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('not found');
@@ -135,10 +135,153 @@ describe('ToolRegistryAdapter', () => {
       const result = await adapter.execute(
         'split_clip',
         { clipId: 'clip-1', atTimelineSec: 5 },
-        executionContext
+        executionContext,
       );
 
       expect(result.duration).toBeGreaterThanOrEqual(0);
+    });
+
+    it('should fail fast when expected state version is stale', async () => {
+      useProjectStore.setState({
+        isLoaded: true,
+        meta: {
+          id: 'project-1',
+          name: 'Test',
+          path: '/tmp/test.orio',
+          createdAt: new Date().toISOString(),
+          modifiedAt: new Date().toISOString(),
+        },
+        stateVersion: 3,
+      });
+
+      const result = await adapter.execute(
+        'split_clip',
+        { clipId: 'clip-1', atTimelineSec: 5 },
+        {
+          ...executionContext,
+          expectedStateVersion: 2,
+        },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('REV_CONFLICT');
+      expect(splitClipTool.handler).not.toHaveBeenCalled();
+    });
+
+    it('should allow read-only tools even when expected state version is stale', async () => {
+      useProjectStore.setState({
+        isLoaded: true,
+        meta: {
+          id: 'project-1',
+          name: 'Test',
+          path: '/tmp/test.orio',
+          createdAt: new Date().toISOString(),
+          modifiedAt: new Date().toISOString(),
+        },
+        stateVersion: 7,
+      });
+
+      const readOnlyTool: ToolDefinition = {
+        name: 'get_selection_snapshot',
+        description: 'Read-only selection inspection',
+        category: 'analysis',
+        parameters: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+        handler: vi.fn().mockResolvedValue({ success: true, result: { selected: [] } }),
+      };
+      registry.register(readOnlyTool);
+
+      const result = await adapter.execute(
+        'get_selection_snapshot',
+        {},
+        {
+          ...executionContext,
+          expectedStateVersion: 3,
+        },
+      );
+
+      expect(result.success).toBe(true);
+      expect(readOnlyTool.handler).toHaveBeenCalledTimes(1);
+    });
+
+    it('should reject placeholder or unknown IDs before tool execution', async () => {
+      const clip = createMockClip({
+        id: 'clip_real',
+        assetId: 'asset_real',
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
+      const track = createMockTrack({
+        id: 'track_real',
+        kind: 'video',
+        name: 'Video 1',
+        clips: [clip],
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        name: 'Main Sequence',
+        tracks: [track],
+      });
+      const asset = createMockAsset({
+        id: 'asset_real',
+        name: 'concert.mp4',
+        kind: 'video',
+      });
+
+      useProjectStore.setState({
+        isLoaded: true,
+        meta: {
+          id: 'project-1',
+          name: 'Test',
+          path: '/tmp/test.orio',
+          createdAt: new Date().toISOString(),
+          modifiedAt: new Date().toISOString(),
+        },
+        stateVersion: 10,
+        activeSequenceId: 'seq_001',
+        sequences: new Map([['seq_001', sequence]]),
+        assets: new Map([['asset_real', asset]]),
+      });
+
+      const insertTool: ToolDefinition = {
+        name: 'insert_clip',
+        description: 'Insert clip from asset',
+        category: 'clip',
+        parameters: {
+          type: 'object',
+          properties: {
+            sequenceId: { type: 'string', description: 'Sequence ID' },
+            trackId: { type: 'string', description: 'Track ID' },
+            assetId: { type: 'string', description: 'Asset ID' },
+            timelineStart: { type: 'number', description: 'Timeline start' },
+          },
+          required: ['sequenceId', 'trackId', 'assetId', 'timelineStart'],
+        },
+        handler: vi.fn().mockResolvedValue({ success: true, result: { ok: true } }),
+      };
+      registry.register(insertTool);
+
+      const result = await adapter.execute(
+        'insert_clip',
+        {
+          sequenceId: 'seq_001',
+          trackId: 'video_1',
+          assetId: 'asset_id_from_catalog',
+          timelineStart: 0,
+        },
+        {
+          ...executionContext,
+          sequenceId: 'seq_001',
+          expectedStateVersion: 10,
+        },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('PRECONDITION_FAILED');
+      expect(result.error).toContain('placeholder');
+      expect(insertTool.handler).not.toHaveBeenCalled();
     });
   });
 
@@ -153,7 +296,7 @@ describe('ToolRegistryAdapter', () => {
           mode: 'sequential',
           stopOnError: false,
         },
-        executionContext
+        executionContext,
       );
 
       expect(result.success).toBe(true);
@@ -181,7 +324,7 @@ describe('ToolRegistryAdapter', () => {
           mode: 'sequential',
           stopOnError: true,
         },
-        executionContext
+        executionContext,
       );
 
       expect(result.success).toBe(false);
@@ -199,7 +342,7 @@ describe('ToolRegistryAdapter', () => {
           mode: 'parallel',
           stopOnError: false,
         },
-        executionContext
+        executionContext,
       );
 
       expect(result.success).toBe(true);

@@ -26,6 +26,7 @@ import {
   type ClipDragData,
   type DragPreviewPosition,
   type ClickModifiers,
+  type ClipAudioSettingsPatch,
   type ClipWaveformConfig,
   type ClipThumbnailConfig,
 } from './Clip';
@@ -77,6 +78,12 @@ interface TrackProps {
   onClipClick?: (clipId: string, modifiers: ClickModifiers) => void;
   /** Clip double-click handler */
   onClipDoubleClick?: (clipId: string) => void;
+  /** Clip audio settings commit handler */
+  onClipAudioSettingsChange?: (
+    trackId: string,
+    clipId: string,
+    patch: ClipAudioSettingsPatch,
+  ) => void;
   /** Clip drag start handler */
   onClipDragStart?: (trackId: string, data: ClipDragData) => void;
   /** Clip drag handler - receives computed preview position directly */
@@ -139,6 +146,7 @@ export function Track({
   onVisibilityToggle,
   onClipClick,
   onClipDoubleClick,
+  onClipAudioSettingsChange,
   onClipDragStart,
   onClipDrag,
   onClipDragEnd,
@@ -287,6 +295,10 @@ export function Track({
               disabled={track.locked}
               waveformConfig={getClipWaveformConfig?.(clip.id, clip.assetId)}
               thumbnailConfig={getClipThumbnailConfig?.(clip.id, clip.assetId, track.kind)}
+              trackKind={track.kind}
+              onAudioSettingsChange={(clipId, patch) =>
+                onClipAudioSettingsChange?.(track.id, clipId, patch)
+              }
               snapPoints={snapPoints}
               snapThreshold={snapThreshold}
               onClick={onClipClick}

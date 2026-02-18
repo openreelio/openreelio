@@ -5,9 +5,10 @@
  * Handles adding, editing, and styling captions/subtitles.
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
+import { executeAgentCommand } from './commandExecutor';
+import type { CommandResult } from '@/types';
 
 const logger = createLogger('CaptionTools');
 
@@ -15,10 +16,7 @@ const logger = createLogger('CaptionTools');
 // Types
 // =============================================================================
 
-interface CommandResult {
-  opId: string;
-  success: boolean;
-  error?: string;
+interface CaptionCommandResult extends CommandResult {
   captionId?: string;
 }
 
@@ -55,23 +53,21 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         },
         style: {
           type: 'object',
-          description: 'Optional caption style (fontSize, fontFamily, color, backgroundColor, position)',
+          description:
+            'Optional caption style (fontSize, fontFamily, color, backgroundColor, position)',
         },
       },
       required: ['sequenceId', 'text', 'startTime', 'endTime'],
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'AddCaption',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            text: args.text as string,
-            startTime: args.startTime as number,
-            endTime: args.endTime as number,
-            style: args.style as Record<string, unknown> | undefined,
-          },
-        });
+        const result = (await executeAgentCommand('AddCaption', {
+          sequenceId: args.sequenceId as string,
+          text: args.text as string,
+          startTime: args.startTime as number,
+          endTime: args.endTime as number,
+          style: args.style as Record<string, unknown> | undefined,
+        })) as CaptionCommandResult;
 
         logger.debug('add_caption executed', {
           opId: result.opId,
@@ -121,15 +117,12 @@ const CAPTION_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'UpdateCaption',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            captionId: args.captionId as string,
-            text: args.text as string,
-            startTime: args.startTime as number | undefined,
-            endTime: args.endTime as number | undefined,
-          },
+        const result = await executeAgentCommand('UpdateCaption', {
+          sequenceId: args.sequenceId as string,
+          captionId: args.captionId as string,
+          text: args.text as string,
+          startTime: args.startTime as number | undefined,
+          endTime: args.endTime as number | undefined,
         });
 
         logger.debug('update_caption executed', { opId: result.opId });
@@ -165,12 +158,9 @@ const CAPTION_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'DeleteCaption',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            captionId: args.captionId as string,
-          },
+        const result = await executeAgentCommand('DeleteCaption', {
+          sequenceId: args.sequenceId as string,
+          captionId: args.captionId as string,
         });
 
         logger.debug('delete_caption executed', { opId: result.opId });
@@ -234,13 +224,10 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         if (args.backgroundColor !== undefined) styleProps.backgroundColor = args.backgroundColor;
         if (args.position !== undefined) styleProps.position = args.position;
 
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'StyleCaption',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            captionId: args.captionId as string,
-            style: styleProps,
-          },
+        const result = await executeAgentCommand('StyleCaption', {
+          sequenceId: args.sequenceId as string,
+          captionId: args.captionId as string,
+          style: styleProps,
         });
 
         logger.debug('style_caption executed', { opId: result.opId });

@@ -1,16 +1,17 @@
 /**
  * AgenticSidebarContent Component
  *
- * Content for the AI sidebar when the agentic engine is enabled.
+ * Content for the AI sidebar. Always uses the agentic engine.
  * Uses useAgenticLoopWithStores for real store integration.
  */
 
-import { useMemo, useCallback } from 'react';
-import { AgenticChat } from './AgenticChat';
+import { useMemo, useCallback, useEffect, useRef } from 'react';
+import { AgenticChat, type AgenticChatHandle } from './AgenticChat';
 import { createTauriLLMAdapter } from '@/agents/engine/adapters/llm/TauriLLMAdapter';
 import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRegistryAdapter';
 import { globalToolRegistry } from '@/agents';
 import { initializeAgentSystem } from '@/stores/aiStore';
+import { useNewChat } from '@/hooks/useNewChat';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('AgenticSidebarContent');
@@ -24,6 +25,8 @@ export interface AgenticSidebarContentProps {
   visible?: boolean;
   /** Callback when a session completes */
   onSessionComplete?: () => void;
+  /** Register new chat handler with parent */
+  onRegisterNewChat?: (handler: () => void, canCreate: boolean) => void;
   /** Optional className */
   className?: string;
 }
@@ -35,6 +38,7 @@ export interface AgenticSidebarContentProps {
 export function AgenticSidebarContent({
   visible = true,
   onSessionComplete,
+  onRegisterNewChat,
   className = '',
 }: AgenticSidebarContentProps) {
   // ===========================================================================
@@ -53,6 +57,25 @@ export function AgenticSidebarContent({
   }, []);
 
   // ===========================================================================
+  // Chat Handle Ref (for abort/isRunning access)
+  // ===========================================================================
+
+  const chatHandleRef = useRef<AgenticChatHandle>(null);
+
+  // ===========================================================================
+  // New Chat Hook
+  // ===========================================================================
+
+  const { newChat, canCreateNew } = useNewChat({
+    abort: () => chatHandleRef.current?.abort(),
+  });
+
+  // Register new chat handler with parent (AISidebar)
+  useEffect(() => {
+    onRegisterNewChat?.(newChat, canCreateNew);
+  }, [onRegisterNewChat, newChat, canCreateNew]);
+
+  // ===========================================================================
   // Handlers
   // ===========================================================================
 
@@ -61,7 +84,7 @@ export function AgenticSidebarContent({
       logger.info('Agentic session completed', { result });
       onSessionComplete?.();
     },
-    [onSessionComplete]
+    [onSessionComplete],
   );
 
   const handleError = useCallback((error: Error) => {
@@ -86,6 +109,7 @@ export function AgenticSidebarContent({
       className={`flex flex-col flex-1 overflow-hidden ${className}`}
     >
       <AgenticChat
+        ref={chatHandleRef}
         llmClient={llmClient}
         toolExecutor={toolExecutor}
         onSubmit={handleSubmit}

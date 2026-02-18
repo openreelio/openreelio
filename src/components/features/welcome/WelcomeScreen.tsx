@@ -2,11 +2,11 @@
  * WelcomeScreen Component
  *
  * Initial screen shown when no project is loaded.
- * Provides options to create new project or open existing one.
+ * Provides option to open a folder as a project or select from recent projects.
  */
 
 import { useCallback, useMemo } from 'react';
-import { FolderOpen, Plus, Clock, Film, Trash2 } from 'lucide-react';
+import { FolderOpen, Clock, Film, Trash2 } from 'lucide-react';
 
 // =============================================================================
 // Types
@@ -29,10 +29,8 @@ const MAX_DISPLAY_PROJECTS = 5;
 
 /** WelcomeScreen component props */
 export interface WelcomeScreenProps {
-  /** Callback when user wants to create new project */
-  onNewProject: () => void;
-  /** Callback when user wants to open a project (optionally with path) */
-  onOpenProject: (path?: string) => void;
+  /** Callback when user wants to open a folder (optionally with path for recent projects) */
+  onOpenFolder: (path?: string) => void;
   /** List of recently opened projects */
   recentProjects?: RecentProject[];
   /** Whether an operation is in progress */
@@ -52,8 +50,7 @@ export interface WelcomeScreenProps {
 // =============================================================================
 
 export function WelcomeScreen({
-  onNewProject,
-  onOpenProject,
+  onOpenFolder,
   recentProjects = [],
   isLoading = false,
   version = '0.1.0',
@@ -77,19 +74,15 @@ export function WelcomeScreen({
   // Handlers
   // ===========================================================================
 
-  const handleNewProject = useCallback(() => {
-    onNewProject();
-  }, [onNewProject]);
-
-  const handleOpenProject = useCallback(() => {
-    onOpenProject();
-  }, [onOpenProject]);
+  const handleOpenFolder = useCallback(() => {
+    onOpenFolder();
+  }, [onOpenFolder]);
 
   const handleRecentProjectClick = useCallback(
     (path: string) => {
-      onOpenProject(path);
+      onOpenFolder(path);
     },
-    [onOpenProject]
+    [onOpenFolder]
   );
 
   const handleClearRecentProjects = useCallback(() => {
@@ -134,28 +127,17 @@ export function WelcomeScreen({
         </p>
       </div>
 
-      {/* Action Buttons */}
-      <div className="flex flex-col sm:flex-row gap-3 sm:gap-4 mb-8 sm:mb-12 w-full sm:w-auto px-4 sm:px-0">
+      {/* Action Button */}
+      <div className="flex mb-8 sm:mb-12 w-full sm:w-auto px-4 sm:px-0">
         <button
-          data-testid="new-project-button"
-          aria-label="Create a new project"
+          data-testid="open-folder-button"
+          aria-label="Open a folder as project"
           disabled={isLoading}
-          onClick={handleNewProject}
-          className="flex items-center justify-center gap-3 px-6 py-4 bg-primary-600 hover:bg-primary-700 disabled:bg-primary-800 disabled:cursor-not-allowed text-white rounded-lg transition-colors shadow-md"
-        >
-          <Plus className="w-5 h-5" />
-          <span className="font-medium">New Project</span>
-        </button>
-
-        <button
-          data-testid="open-project-button"
-          aria-label="Open an existing project"
-          disabled={isLoading}
-          onClick={handleOpenProject}
-          className="flex items-center justify-center gap-3 px-6 py-4 bg-editor-panel hover:bg-editor-sidebar border border-editor-border text-editor-text rounded-lg transition-colors shadow-md"
+          onClick={handleOpenFolder}
+          className="flex items-center justify-center gap-3 px-8 py-4 bg-primary-600 hover:bg-primary-700 disabled:bg-primary-800 disabled:cursor-not-allowed text-white rounded-lg transition-colors shadow-md w-full sm:w-auto"
         >
           <FolderOpen className="w-5 h-5" />
-          <span className="font-medium">Open Project</span>
+          <span className="font-medium">Open Folder</span>
         </button>
       </div>
 

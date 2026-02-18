@@ -11,6 +11,7 @@ import { useTimelineActions } from './useTimelineActions';
 import { useProjectStore } from '@/stores';
 import { _resetCommandQueueForTesting } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
+import { probeMedia } from '@/utils/ffmpeg';
 import type { Sequence, Track, Clip, Asset } from '@/types';
 
 // Mock the logger - define mock fn inline to avoid hoisting issues
@@ -28,7 +29,24 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
 
+vi.mock('@/utils/ffmpeg', () => ({
+  probeMedia: vi.fn(),
+}));
+
+const workspaceStoreMocks = vi.hoisted(() => ({
+  registerFile: vi.fn(),
+}));
+
+vi.mock('@/stores/workspaceStore', () => ({
+  useWorkspaceStore: {
+    getState: () => ({
+      registerFile: workspaceStoreMocks.registerFile,
+    }),
+  },
+}));
+
 const mockedInvoke = invoke as ReturnType<typeof vi.fn>;
+const mockedProbeMedia = vi.mocked(probeMedia);
 
 // =============================================================================
 // Test Fixtures
@@ -128,6 +146,14 @@ describe('useTimelineActions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetCommandQueueForTesting();
+    workspaceStoreMocks.registerFile.mockReset();
+    mockedProbeMedia.mockResolvedValue({
+      durationSec: 0,
+      format: 'unknown',
+      sizeBytes: 0,
+      audio: undefined,
+      video: undefined,
+    });
     useTimelineStore.setState({ linkedSelectionEnabled: true });
     // Reset projectStore
     useProjectStore.setState({
@@ -198,6 +224,63 @@ describe('useTimelineActions', () => {
   });
 
   // ===========================================================================
+  // Clip Audio Update Tests
+  // ===========================================================================
+
+  describe('handleClipAudioUpdate', () => {
+    it('should execute SetClipAudio command with updated clip audio fields', async () => {
+      const clip = createMockClip({ id: 'clip_audio_001' });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [createMockTrack({ id: 'track_a1', kind: 'audio', clips: [clip] })],
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_audio_001',
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleClipAudioUpdate({
+          sequenceId: 'seq_001',
+          trackId: 'track_a1',
+          clipId: 'clip_audio_001',
+          volumeDb: -6,
+          fadeInSec: 1.25,
+          fadeOutSec: 0.75,
+        });
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'SetClipAudio',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_a1',
+          clipId: 'clip_audio_001',
+          volumeDb: -6,
+          fadeInSec: 1.25,
+          fadeOutSec: 0.75,
+        },
+      });
+    });
+  });
+
+  // ===========================================================================
   // Asset Drop Tests
   // ===========================================================================
 
@@ -246,6 +329,125 @@ describe('useTimelineActions', () => {
           trackId: 'track_001',
           assetId: 'asset_001',
           timelineIn: 5.0,
+        },
+      });
+    });
+
+    it('should register workspace file before inserting when dropped from files tab', async () => {
+      const track = createMockTrack({ id: 'track_001' });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [track],
+      });
+      const workspaceAsset = createMockAsset({
+        id: 'asset_workspace_001',
+        kind: 'image',
+        name: 'logo.png',
+      });
+
+      workspaceStoreMocks.registerFile.mockResolvedValue({
+        assetId: 'asset_workspace_001',
+        relativePath: 'images/logo.png',
+        alreadyRegistered: false,
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_workspace_001',
+            createdIds: ['clip_001'],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [workspaceAsset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          workspaceRelativePath: 'images/logo.png',
+          assetKind: 'image',
+          trackId: 'track_001',
+          timelinePosition: 5,
+        });
+      });
+
+      expect(workspaceStoreMocks.registerFile).toHaveBeenCalledWith('images/logo.png');
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'InsertClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          assetId: 'asset_workspace_001',
+          timelineIn: 5,
+        },
+      });
+    });
+
+    it('should re-register workspace file when drop payload has stale assetId', async () => {
+      const track = createMockTrack({ id: 'track_001' });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [track],
+      });
+      const workspaceAsset = createMockAsset({
+        id: 'asset_workspace_002',
+        kind: 'image',
+        name: 'stale-recovered.png',
+      });
+
+      workspaceStoreMocks.registerFile.mockResolvedValue({
+        assetId: 'asset_workspace_002',
+        relativePath: 'images/stale-recovered.png',
+        alreadyRegistered: false,
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_workspace_002',
+            createdIds: ['clip_002'],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [workspaceAsset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          assetId: 'asset_stale_legacy',
+          workspaceRelativePath: 'images/stale-recovered.png',
+          assetKind: 'image',
+          trackId: 'track_001',
+          timelinePosition: 7,
+        });
+      });
+
+      expect(workspaceStoreMocks.registerFile).toHaveBeenCalledWith('images/stale-recovered.png');
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'InsertClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          assetId: 'asset_workspace_002',
+          timelineIn: 7,
         },
       });
     });
@@ -324,6 +526,88 @@ describe('useTimelineActions', () => {
           muted: true,
         },
       });
+      expect(executeCalls[1]).toEqual({
+        commandType: 'InsertClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_a1',
+          assetId: 'asset_001',
+          timelineIn: 3,
+        },
+      });
+    });
+
+    it('should probe media for audio when metadata is missing and still split A/V by default', async () => {
+      const videoTrack = createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' });
+      const audioTrack = createMockTrack({ id: 'track_a1', kind: 'audio', name: 'Audio 1' });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [videoTrack, audioTrack],
+      });
+      const asset = createMockAsset({
+        id: 'asset_001',
+        kind: 'video',
+        durationSec: 12,
+        audio: undefined,
+      });
+
+      mockedProbeMedia.mockResolvedValueOnce({
+        durationSec: 12,
+        format: 'mov,mp4,m4a,3gp,3g2,mj2',
+        sizeBytes: 1024,
+        video: {
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          codec: 'h264',
+          pixelFormat: 'yuv420p',
+        },
+        audio: {
+          sampleRate: 48000,
+          channels: 2,
+          codec: 'aac',
+        },
+      });
+
+      useProjectStore.setState({
+        assets: new Map([[asset.id, asset]]),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          const call = args as { commandType: string; payload: Record<string, unknown> };
+          executeCalls.push(call);
+          return Promise.resolve({
+            opId: `op_${executeCalls.length}`,
+            createdIds: [`clip_${executeCalls.length}`],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [asset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          assetId: 'asset_001',
+          trackId: 'track_v1',
+          timelinePosition: 3,
+        });
+      });
+
+      expect(mockedProbeMedia).toHaveBeenCalledWith('/path/to/video.mp4');
+      expect(executeCalls).toHaveLength(3);
       expect(executeCalls[1]).toEqual({
         commandType: 'InsertClip',
         payload: {

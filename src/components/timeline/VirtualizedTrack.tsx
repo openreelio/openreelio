@@ -33,6 +33,7 @@ import {
   type ClipDragData,
   type DragPreviewPosition,
   type ClickModifiers,
+  type ClipAudioSettingsPatch,
   type ClipWaveformConfig,
 } from './Clip';
 // Direct import instead of barrel to avoid bundling all hooks
@@ -71,6 +72,12 @@ export interface VirtualizedTrackProps {
   onClipClick?: (clipId: string, modifiers: ClickModifiers) => void;
   /** Clip double-click handler */
   onClipDoubleClick?: (clipId: string) => void;
+  /** Clip audio settings commit handler */
+  onClipAudioSettingsChange?: (
+    trackId: string,
+    clipId: string,
+    patch: ClipAudioSettingsPatch,
+  ) => void;
   /** Clip drag start handler */
   onClipDragStart?: (trackId: string, data: ClipDragData) => void;
   /** Clip drag handler */
@@ -114,6 +121,7 @@ export const VirtualizedTrack = memo(function VirtualizedTrack({
   onVisibilityToggle,
   onClipClick,
   onClipDoubleClick,
+  onClipAudioSettingsChange,
   onClipDragStart,
   onClipDrag,
   onClipDragEnd,
@@ -159,8 +167,10 @@ export const VirtualizedTrack = memo(function VirtualizedTrack({
   };
 
   // Get virtualized clips
-  const { visibleClips, totalClips, renderedClips, isVirtualized } =
-    useVirtualizedClips(clips, virtualizationConfig);
+  const { visibleClips, totalClips, renderedClips, isVirtualized } = useVirtualizedClips(
+    clips,
+    virtualizationConfig,
+  );
 
   // Calculate track content width based on duration and zoom
   const contentWidth = duration * zoom;
@@ -171,21 +181,21 @@ export const VirtualizedTrack = memo(function VirtualizedTrack({
     (data: ClipDragData) => {
       onClipDragStart?.(track.id, data);
     },
-    [track.id, onClipDragStart]
+    [track.id, onClipDragStart],
   );
 
   const handleClipDrag = useCallback(
     (data: ClipDragData, previewPosition: DragPreviewPosition) => {
       onClipDrag?.(track.id, data, previewPosition);
     },
-    [track.id, onClipDrag]
+    [track.id, onClipDrag],
   );
 
   const handleClipDragEnd = useCallback(
     (data: ClipDragData, finalPosition: DragPreviewPosition) => {
       onClipDragEnd?.(track.id, data, finalPosition);
     },
-    [track.id, onClipDragEnd]
+    [track.id, onClipDragEnd],
   );
 
   return (
@@ -285,6 +295,10 @@ export const VirtualizedTrack = memo(function VirtualizedTrack({
               selected={selectedClipIds.includes(clip.id)}
               disabled={track.locked}
               waveformConfig={getClipWaveformConfig?.(clip.id, clip.assetId)}
+              trackKind={track.kind}
+              onAudioSettingsChange={(clipId, patch) =>
+                onClipAudioSettingsChange?.(track.id, clipId, patch)
+              }
               onClick={onClipClick}
               onDoubleClick={onClipDoubleClick}
               onDragStart={handleClipDragStart}

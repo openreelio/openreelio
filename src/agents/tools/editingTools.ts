@@ -5,22 +5,185 @@
  * These tools wrap IPC commands to enable AI-driven editing operations.
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
-import { getTimelineSnapshot } from './storeAccessor';
+import { getTimelineSnapshot, findWorkspaceFile } from './storeAccessor';
+import { executeAgentCommand } from './commandExecutor';
+import { useProjectStore } from '@/stores/projectStore';
+import { useWorkspaceStore } from '@/stores/workspaceStore';
+import { probeMedia } from '@/utils/ffmpeg';
+import { refreshProjectState } from '@/utils/stateRefreshHelper';
+import type { Asset, Sequence, Track } from '@/types';
 
 const logger = createLogger('EditingTools');
+const DEFAULT_INSERT_CLIP_DURATION_SEC = 10;
+
+function getAssetInsertDurationSec(asset: Asset): number {
+  if (
+    typeof asset.durationSec === 'number' &&
+    Number.isFinite(asset.durationSec) &&
+    asset.durationSec > 0
+  ) {
+    return asset.durationSec;
+  }
+
+  return DEFAULT_INSERT_CLIP_DURATION_SEC;
+}
+
+function trackHasOverlap(track: Track, timelineIn: number, durationSec: number): boolean {
+  const end = timelineIn + durationSec;
+  return track.clips.some((clip) => {
+    const clipStart = clip.place.timelineInSec;
+    const clipEnd = clip.place.timelineInSec + clip.place.durationSec;
+    return timelineIn < clipEnd && end > clipStart;
+  });
+}
+
+function canInsertClipOnTrack(track: Track, timelineIn: number, durationSec: number): boolean {
+  return !track.locked && !trackHasOverlap(track, timelineIn, durationSec);
+}
+
+function findAvailableAudioTrack(
+  sequence: Sequence,
+  timelineIn: number,
+  durationSec: number,
+): Track | undefined {
+  return sequence.tracks.find(
+    (track) => track.kind === 'audio' && canInsertClipOnTrack(track, timelineIn, durationSec),
+  );
+}
+
+function getNextAudioTrackName(sequence: Sequence): string {
+  const baseLabel = 'Audio';
+  let highestIndex = 0;
+
+  for (const track of sequence.tracks) {
+    if (track.kind !== 'audio') {
+      continue;
+    }
+
+    const trimmedName = track.name.trim();
+    if (trimmedName === baseLabel) {
+      highestIndex = Math.max(highestIndex, 1);
+      continue;
+    }
+
+    const match = /^Audio\s+(\d+)$/.exec(trimmedName);
+    if (match) {
+      highestIndex = Math.max(highestIndex, parseInt(match[1], 10));
+    }
+  }
+
+  return `${baseLabel} ${highestIndex + 1}`;
+}
+
+function getDefaultAudioTrackInsertPosition(sequence: Sequence): number {
+  let lastAudioIndex = -1;
+  for (let index = 0; index < sequence.tracks.length; index += 1) {
+    if (sequence.tracks[index].kind === 'audio') {
+      lastAudioIndex = index;
+    }
+  }
+
+  return lastAudioIndex !== -1 ? lastAudioIndex + 1 : sequence.tracks.length;
+}
+
+async function resolveAssetHasLinkedAudio(asset: Asset): Promise<boolean> {
+  if (asset.kind !== 'video') {
+    return false;
+  }
+
+  if (asset.audio) {
+    return true;
+  }
+
+  try {
+    const mediaInfo = await probeMedia(asset.uri);
+    return Boolean(mediaInfo.audio);
+  } catch (error) {
+    logger.warn('Unable to probe inserted video for audio stream detection', {
+      assetId: asset.id,
+      uri: asset.uri,
+      error,
+    });
+    return false;
+  }
+}
 
 // =============================================================================
-// Types
+// Shared Helpers
 // =============================================================================
 
-/** Result from execute_command IPC */
-interface CommandResult {
-  opId: string;
-  success: boolean;
-  error?: string;
+/**
+ * Handles linked audio extraction after inserting a video clip.
+ * If the video has an audio stream, creates a separate audio clip on an
+ * audio track and mutes the video clip's embedded audio.
+ */
+async function handleLinkedAudio(
+  asset: Asset,
+  sequenceId: string,
+  videoTrackId: string,
+  videoClipId: string | undefined,
+  timelineStart: number,
+): Promise<void> {
+  const shouldAutoExtractLinkedAudio = true;
+  if (asset.kind !== 'video' || !shouldAutoExtractLinkedAudio) return;
+
+  const hasLinkedAudio = await resolveAssetHasLinkedAudio(asset);
+  if (!hasLinkedAudio) return;
+
+  const durationSec = getAssetInsertDurationSec(asset);
+  const project = useProjectStore.getState();
+  const sequence = project.sequences.get(sequenceId);
+  if (!sequence) return;
+
+  let audioTrack = findAvailableAudioTrack(sequence, timelineStart, durationSec);
+
+  if (!audioTrack) {
+    const createTrackResult = await executeAgentCommand('CreateTrack', {
+      sequenceId,
+      kind: 'audio',
+      name: getNextAudioTrackName(sequence),
+      position: getDefaultAudioTrackInsertPosition(sequence),
+    });
+
+    const createdTrackId = createTrackResult.createdIds[0];
+    if (createdTrackId) {
+      const refreshedProject = useProjectStore.getState();
+      const refreshedSequence = refreshedProject.sequences.get(sequenceId);
+      audioTrack = refreshedSequence?.tracks.find((track) => track.id === createdTrackId);
+    }
+  }
+
+  if (!audioTrack) return;
+
+  await executeAgentCommand('InsertClip', {
+    sequenceId,
+    trackId: audioTrack.id,
+    assetId: asset.id,
+    timelineStart,
+  });
+
+  if (videoClipId) {
+    try {
+      await executeAgentCommand('SetClipMute', {
+        sequenceId,
+        trackId: videoTrackId,
+        clipId: videoClipId,
+        muted: true,
+      });
+    } catch (muteError) {
+      logger.error('Failed to mute source video clip audio after linked audio insertion', {
+        sequenceId,
+        trackId: videoTrackId,
+        clipId: videoClipId,
+        error: muteError,
+      });
+      throw new Error(
+        `Linked audio inserted but failed to mute original video clip audio: ${muteError instanceof Error ? muteError.message : String(muteError)}`,
+      );
+    }
+  }
 }
 
 // =============================================================================
@@ -63,15 +226,12 @@ const EDITING_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'MoveClip',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string,
-            newTimelineIn: args.newTimelineIn as number,
-            newTrackId: args.newTrackId as string | undefined,
-          },
+        const result = await executeAgentCommand('MoveClip', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
+          newTimelineIn: args.newTimelineIn as number,
+          newTrackId: args.newTrackId as string | undefined,
         });
 
         logger.debug('move_clip executed', { opId: result.opId });
@@ -123,16 +283,13 @@ const EDITING_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'TrimClip',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string,
-            newSourceIn: args.newSourceIn as number | undefined,
-            newSourceOut: args.newSourceOut as number | undefined,
-            newTimelineIn: args.newTimelineIn as number | undefined,
-          },
+        const result = await executeAgentCommand('TrimClip', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
+          newSourceIn: args.newSourceIn as number | undefined,
+          newSourceOut: args.newSourceOut as number | undefined,
+          newTimelineIn: args.newTimelineIn as number | undefined,
         });
 
         logger.debug('trim_clip executed', { opId: result.opId });
@@ -176,14 +333,11 @@ const EDITING_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'SplitClip',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string,
-            splitTime: args.splitTime as number,
-          },
+        const result = await executeAgentCommand('SplitClip', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
+          splitTime: args.splitTime as number,
         });
 
         logger.debug('split_clip executed', { opId: result.opId });
@@ -223,13 +377,10 @@ const EDITING_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'RemoveClip',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string,
-          },
+        const result = await executeAgentCommand('RemoveClip', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
         });
 
         logger.debug('delete_clip executed', { opId: result.opId });
@@ -295,13 +446,10 @@ const EDITING_TOOLS: ToolDefinition[] = [
         const removedClipIds: string[] = [];
         for (const clip of candidates) {
           try {
-            await invoke<CommandResult>('execute_command', {
-              commandType: 'RemoveClip',
-              payload: {
-                sequenceId,
-                trackId: clip.trackId,
-                clipId: clip.id,
-              },
+            await executeAgentCommand('RemoveClip', {
+              sequenceId,
+              trackId: clip.trackId,
+              clipId: clip.id,
             });
             removedClipIds.push(clip.id);
           } catch (error) {
@@ -384,21 +532,167 @@ const EDITING_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'InsertClip',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            assetId: args.assetId as string,
-            timelineStart: args.timelineStart as number,
-          },
+        const sequenceId = args.sequenceId as string;
+        const trackId = args.trackId as string;
+        const assetId = args.assetId as string;
+        const timelineStart = args.timelineStart as number;
+
+        const result = await executeAgentCommand('InsertClip', {
+          sequenceId,
+          trackId,
+          assetId,
+          timelineStart,
         });
+
+        const project = useProjectStore.getState();
+        const asset = project.assets.get(assetId);
+        const targetTrack = project.sequences
+          .get(sequenceId)
+          ?.tracks.find((track) => track.id === trackId);
+        const shouldAutoExtractLinkedAudio = targetTrack ? targetTrack.kind !== 'audio' : true;
+
+        if (asset && shouldAutoExtractLinkedAudio) {
+          try {
+            await handleLinkedAudio(asset, sequenceId, trackId, result.createdIds[0], timelineStart);
+          } catch (linkedAudioError) {
+            const msg = linkedAudioError instanceof Error ? linkedAudioError.message : String(linkedAudioError);
+            logger.error('insert_clip: linked audio handling failed', { error: msg });
+            return { success: false, error: msg };
+          }
+        }
 
         logger.debug('insert_clip executed', { opId: result.opId });
         return { success: true, result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('insert_clip failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // Insert Clip From File (workspace-aware)
+  // -------------------------------------------------------------------------
+  {
+    name: 'insert_clip_from_file',
+    description:
+      'Insert a clip from a workspace file by its relative path or name. Automatically registers the file as a project asset if not already registered, then inserts it onto the timeline. This is the preferred way to add workspace files to the timeline.',
+    category: 'clip',
+    parameters: {
+      type: 'object',
+      properties: {
+        file: {
+          type: 'string',
+          description:
+            'Relative path or file name within the workspace (e.g., "footage/interview.mp4" or "interview.mp4")',
+        },
+        sequenceId: {
+          type: 'string',
+          description: 'The ID of the sequence to insert into',
+        },
+        trackId: {
+          type: 'string',
+          description: 'The ID of the track to insert into',
+        },
+        timelineStart: {
+          type: 'number',
+          description: 'Timeline position in seconds where the clip should start',
+        },
+      },
+      required: ['file', 'sequenceId', 'trackId', 'timelineStart'],
+    },
+    handler: async (args) => {
+      try {
+        const file = args.file as string;
+        const sequenceId = args.sequenceId as string;
+        const trackId = args.trackId as string;
+        const timelineStart = args.timelineStart as number;
+
+        // 1. Find the file in the workspace
+        const matches = findWorkspaceFile(file);
+        if (matches.length === 0) {
+          return {
+            success: false,
+            error: `No workspace file found matching "${file}". Use get_workspace_files to see available files.`,
+          };
+        }
+
+        // Prefer exact relativePath match, then first result
+        const exactMatch = matches.find((m) => m.relativePath === file);
+        const targetFile = exactMatch ?? matches[0];
+
+        // 2. Get or register the asset ID
+        let assetId = targetFile.assetId;
+
+        if (!assetId) {
+          // Auto-register the file
+          const registerResult = await useWorkspaceStore
+            .getState()
+            .registerFile(targetFile.relativePath);
+
+          if (!registerResult) {
+            return {
+              success: false,
+              error: `Failed to register workspace file "${targetFile.relativePath}"`,
+            };
+          }
+          assetId = registerResult.assetId;
+
+          if (!useProjectStore.getState().assets.has(assetId)) {
+            try {
+              const freshState = await refreshProjectState();
+              useProjectStore.setState((draft) => {
+                draft.assets = freshState.assets;
+              });
+            } catch (error) {
+              logger.warn('Could not refresh project assets after workspace auto-registration', {
+                file: targetFile.relativePath,
+                assetId,
+                error,
+              });
+            }
+          }
+        }
+
+        // 3. Insert the clip
+        const result = await executeAgentCommand('InsertClip', {
+          sequenceId,
+          trackId,
+          assetId,
+          timelineStart,
+        });
+
+        // 4. Handle linked audio for video files
+        const project = useProjectStore.getState();
+        const asset = project.assets.get(assetId);
+        if (asset) {
+          try {
+            await handleLinkedAudio(asset, sequenceId, trackId, result.createdIds[0], timelineStart);
+          } catch (linkedAudioError) {
+            const msg = linkedAudioError instanceof Error ? linkedAudioError.message : String(linkedAudioError);
+            logger.error('insert_clip_from_file: linked audio handling failed', { error: msg });
+            return { success: false, error: msg };
+          }
+        }
+
+        logger.debug('insert_clip_from_file executed', {
+          file: targetFile.relativePath,
+          assetId,
+        });
+
+        return {
+          success: true,
+          result: {
+            ...result,
+            assetId,
+            relativePath: targetFile.relativePath,
+            wasAutoRegistered: !targetFile.registered,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('insert_clip_from_file failed', { error: message });
         return { success: false, error: message };
       }
     },

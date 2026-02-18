@@ -8,7 +8,11 @@ import { createLogger } from '@/services/logger';
 
 const logger = createLogger('Stores');
 
-export { useProjectStore, setupProxyEventListeners, cleanupProxyEventListeners } from './projectStore';
+export {
+  useProjectStore,
+  setupProxyEventListeners,
+  cleanupProxyEventListeners,
+} from './projectStore';
 export { useTimelineStore } from './timelineStore';
 export { useJobsStore } from './jobsStore';
 export { usePlaybackStore } from './playbackStore';
@@ -17,12 +21,7 @@ export { useSettingsStore } from './settingsStore';
 export { useBinStore } from './binStore';
 export type { BinState, BinActions, BinStore } from './binStore';
 export { useEditorToolStore, TOOL_CONFIGS, getToolCursor } from './editorToolStore';
-export type {
-  EditorTool,
-  ToolConfig,
-  ClipboardItem,
-  EditorToolStore,
-} from './editorToolStore';
+export type { EditorTool, ToolConfig, ClipboardItem, EditorToolStore } from './editorToolStore';
 
 export {
   useShortcutStore,
@@ -95,11 +94,7 @@ export {
   useIsModalOpen,
   useCurrentModal,
 } from './modalStore';
-export type {
-  ModalState,
-  OpenableModal,
-  ModalStore,
-} from './modalStore';
+export type { ModalState, OpenableModal, ModalStore } from './modalStore';
 
 export {
   useRenderQueueStore,
@@ -123,8 +118,23 @@ export type {
 export { useUIStore } from './uiStore';
 export type { SettingsTab } from './uiStore';
 
+export {
+  useWorkspaceStore,
+  setupWorkspaceEventListeners,
+  cleanupWorkspaceEventListeners,
+  selectFileTree,
+  selectIsScanning,
+  selectRegisteringPathCounts,
+  selectScanResult,
+  selectWorkspaceError,
+} from './workspaceStore';
+
 export { useConversationStore } from './conversationStore';
-export type { ConversationState, ConversationActions, ConversationStore } from './conversationStore';
+export type {
+  ConversationState,
+  ConversationActions,
+  ConversationStore,
+} from './conversationStore';
 
 export { usePreviewStore, MIN_ZOOM, MAX_ZOOM, ZOOM_STEP, ZOOM_PRESETS } from './previewStore';
 export type { ZoomMode, PreviewState, PreviewActions, PreviewStore } from './previewStore';
@@ -136,11 +146,7 @@ export {
   useSessionHistory,
   useAgentPreferences,
 } from './agentStore';
-export type {
-  SessionState,
-  SessionSummary,
-  AgentPreferences,
-} from './agentStore';
+export type { SessionState, SessionSummary, AgentPreferences } from './agentStore';
 
 // =============================================================================
 // Global Store Reset
@@ -161,6 +167,7 @@ import { useRenderQueueStore } from './renderQueueStore';
 import { useConversationStore } from './conversationStore';
 import { usePreviewStore } from './previewStore';
 import { useAgentStore } from './agentStore';
+import { useWorkspaceStore, cleanupWorkspaceEventListeners } from './workspaceStore';
 
 /**
  * Reset all project-related stores to their initial state.
@@ -183,6 +190,8 @@ export function resetProjectStores(): void {
   useConversationStore.getState().clearConversation();
   usePreviewStore.getState().resetView();
   useAgentStore.getState().reset();
+  useWorkspaceStore.getState().reset();
+  cleanupWorkspaceEventListeners();
 
   logger.info('All project stores reset');
 }

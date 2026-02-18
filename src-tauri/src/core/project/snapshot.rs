@@ -187,7 +187,10 @@ impl Snapshot {
 
     /// Gets the default snapshot path for a project directory
     pub fn default_path(project_dir: &Path) -> PathBuf {
-        project_dir.join("snapshot.json")
+        project_dir
+            .join(".openreelio")
+            .join("state")
+            .join("snapshot.json")
     }
 }
 
@@ -308,7 +311,7 @@ mod tests {
     fn test_default_path() {
         let project_dir = Path::new("/projects/my_project");
         let path = Snapshot::default_path(project_dir);
-        assert_eq!(path, project_dir.join("snapshot.json"));
+        assert_eq!(path, project_dir.join(".openreelio/state/snapshot.json"));
     }
 
     #[test]

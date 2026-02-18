@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
     project::ProjectState,
-    timeline::{Clip, ClipPlace, ClipRange, Track, Transform},
+    timeline::{AudioSettings, Clip, ClipPlace, ClipRange, Track, Transform},
     AssetId, ClipId, CoreError, CoreResult, SequenceId, TimeSec, TrackId,
 };
 
@@ -905,6 +905,210 @@ impl Command for SetClipMuteCommand {
 }
 
 // =============================================================================
+// SetClipAudioCommand
+// =============================================================================
+
+const MIN_CLIP_VOLUME_DB: f32 = -60.0;
+const MAX_CLIP_VOLUME_DB: f32 = 6.0;
+
+/// Command to set clip-level audio settings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetClipAudioCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub volume_db: Option<f32>,
+    pub pan: Option<f32>,
+    pub muted: Option<bool>,
+    pub fade_in_sec: Option<TimeSec>,
+    pub fade_out_sec: Option<TimeSec>,
+    #[serde(skip)]
+    previous_audio: Option<AudioSettings>,
+}
+
+impl SetClipAudioCommand {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        sequence_id: &str,
+        track_id: &str,
+        clip_id: &str,
+        volume_db: Option<f32>,
+        pan: Option<f32>,
+        muted: Option<bool>,
+        fade_in_sec: Option<TimeSec>,
+        fade_out_sec: Option<TimeSec>,
+    ) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            volume_db,
+            pan,
+            muted,
+            fade_in_sec,
+            fade_out_sec,
+            previous_audio: None,
+        }
+    }
+
+    fn clamp_volume_db(value: f32) -> f32 {
+        value.clamp(MIN_CLIP_VOLUME_DB, MAX_CLIP_VOLUME_DB)
+    }
+
+    fn clamp_pan(value: f32) -> f32 {
+        value.clamp(-1.0, 1.0)
+    }
+
+    fn clamp_fade_duration(value: TimeSec, clip_duration: TimeSec) -> TimeSec {
+        value.clamp(0.0, clip_duration.max(0.0))
+    }
+
+    fn normalize_fade_pair(clip: &mut Clip, fade_in_updated: bool, fade_out_updated: bool) {
+        let clip_duration = clip.duration().max(0.0);
+
+        clip.audio.fade_in_sec = Self::clamp_fade_duration(clip.audio.fade_in_sec, clip_duration);
+        clip.audio.fade_out_sec = Self::clamp_fade_duration(clip.audio.fade_out_sec, clip_duration);
+
+        let total_fade = clip.audio.fade_in_sec + clip.audio.fade_out_sec;
+        if total_fade <= clip_duration {
+            return;
+        }
+
+        if fade_in_updated && !fade_out_updated {
+            clip.audio.fade_in_sec = (clip_duration - clip.audio.fade_out_sec).max(0.0);
+            return;
+        }
+
+        clip.audio.fade_out_sec = (clip_duration - clip.audio.fade_in_sec).max(0.0);
+    }
+}
+
+impl Command for SetClipAudioCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if self.volume_db.is_none()
+            && self.pan.is_none()
+            && self.muted.is_none()
+            && self.fade_in_sec.is_none()
+            && self.fade_out_sec.is_none()
+        {
+            return Err(CoreError::InvalidCommand(
+                "SetClipAudio requires at least one audio field".to_string(),
+            ));
+        }
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        let clip = track
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        self.previous_audio = Some(clip.audio.clone());
+
+        if let Some(volume_db) = self.volume_db {
+            if !volume_db.is_finite() {
+                return Err(CoreError::InvalidCommand(
+                    "volumeDb must be a finite number".to_string(),
+                ));
+            }
+            clip.audio.volume_db = Self::clamp_volume_db(volume_db);
+        }
+
+        if let Some(pan) = self.pan {
+            if !pan.is_finite() {
+                return Err(CoreError::InvalidCommand(
+                    "pan must be a finite number".to_string(),
+                ));
+            }
+            clip.audio.pan = Self::clamp_pan(pan);
+        }
+
+        if let Some(muted) = self.muted {
+            clip.audio.muted = muted;
+        }
+
+        if let Some(fade_in_sec) = self.fade_in_sec {
+            if !is_valid_time_sec(fade_in_sec) {
+                return Err(CoreError::InvalidCommand(
+                    "fadeInSec must be a finite, non-negative number".to_string(),
+                ));
+            }
+            clip.audio.fade_in_sec = fade_in_sec;
+        }
+
+        if let Some(fade_out_sec) = self.fade_out_sec {
+            if !is_valid_time_sec(fade_out_sec) {
+                return Err(CoreError::InvalidCommand(
+                    "fadeOutSec must be a finite, non-negative number".to_string(),
+                ));
+            }
+            clip.audio.fade_out_sec = fade_out_sec;
+        }
+
+        Self::normalize_fade_pair(
+            clip,
+            self.fade_in_sec.is_some(),
+            self.fade_out_sec.is_some(),
+        );
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(previous_audio) = &self.previous_audio else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) else {
+            return Ok(());
+        };
+
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.audio = previous_audio.clone();
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetClipAudio"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "volumeDb": self.volume_db,
+            "pan": self.pan,
+            "muted": self.muted,
+            "fadeInSec": self.fade_in_sec,
+            "fadeOutSec": self.fade_out_sec,
+        })
+    }
+}
+
+// =============================================================================
 // SetClipTransformCommand
 // =============================================================================
 
@@ -1724,5 +1928,47 @@ mod tests {
         mute_cmd.undo(&mut state).unwrap();
 
         assert!(!state.sequences[&seq_id].tracks[0].clips[0].audio.muted);
+    }
+
+    #[test]
+    fn test_set_clip_audio_command_updates_and_undoes() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        let mut audio_cmd = SetClipAudioCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            Some(24.0),
+            Some(2.0),
+            Some(true),
+            Some(8.0),
+            Some(8.0),
+        );
+        audio_cmd.execute(&mut state).unwrap();
+
+        let audio = &state.sequences[&seq_id].tracks[0].clips[0].audio;
+        assert_eq!(audio.volume_db, MAX_CLIP_VOLUME_DB);
+        assert_eq!(audio.pan, 1.0);
+        assert!(audio.muted);
+        assert_eq!(audio.fade_in_sec, 8.0);
+        assert_eq!(audio.fade_out_sec, 2.0);
+
+        audio_cmd.undo(&mut state).unwrap();
+
+        let restored = &state.sequences[&seq_id].tracks[0].clips[0].audio;
+        assert_eq!(restored.volume_db, 0.0);
+        assert_eq!(restored.pan, 0.0);
+        assert!(!restored.muted);
+        assert_eq!(restored.fade_in_sec, 0.0);
+        assert_eq!(restored.fade_out_sec, 0.0);
     }
 }

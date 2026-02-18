@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use tauri::{AppHandle, Emitter};
 
+use crate::core::assets::AssetKind;
 use crate::core::commands::{CommandResult, StateChange};
 
 // =============================================================================
@@ -56,6 +57,14 @@ pub mod event_names {
     pub const JOB_COMPLETED: &str = "job:completed";
     /// Job failed event
     pub const JOB_FAILED: &str = "job:failed";
+    /// Workspace file added event
+    pub const WORKSPACE_FILE_ADDED: &str = "workspace:file-added";
+    /// Workspace file removed event
+    pub const WORKSPACE_FILE_REMOVED: &str = "workspace:file-removed";
+    /// Workspace file modified event
+    pub const WORKSPACE_FILE_MODIFIED: &str = "workspace:file-modified";
+    /// Workspace scan complete event
+    pub const WORKSPACE_SCAN_COMPLETE: &str = "workspace:scan-complete";
 }
 
 // =============================================================================
@@ -308,6 +317,34 @@ pub struct TranscriptionCompleteEvent {
 }
 
 // =============================================================================
+// Workspace Events
+// =============================================================================
+
+/// Workspace file event payload (for added/removed/modified).
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceFileEvent {
+    /// Relative path within the project folder
+    pub relative_path: String,
+    /// Asset kind (video, audio, image, etc.) — None for removed files
+    pub kind: Option<AssetKind>,
+}
+
+/// Workspace scan complete event payload.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceScanCompleteEvent {
+    /// Total number of media files found
+    pub total_files: usize,
+    /// Number of new files discovered
+    pub new_files: usize,
+    /// Number of files removed since last scan
+    pub removed_files: usize,
+    /// Number of files already registered as assets
+    pub registered_files: usize,
+}
+
+// =============================================================================
 // Event Emitter
 // =============================================================================
 
@@ -549,6 +586,62 @@ impl EventEmitter {
         app.emit(event_names::JOB_FAILED, &event)
             .map_err(|e| format!("Failed to emit job failed event: {}", e))
     }
+
+    /// Emits a workspace file added event
+    pub fn emit_workspace_file_added(
+        app: &AppHandle,
+        relative_path: &str,
+        kind: Option<AssetKind>,
+    ) -> Result<(), String> {
+        let event = WorkspaceFileEvent {
+            relative_path: relative_path.to_string(),
+            kind,
+        };
+        app.emit(event_names::WORKSPACE_FILE_ADDED, &event)
+            .map_err(|e| format!("Failed to emit workspace file added event: {}", e))
+    }
+
+    /// Emits a workspace file removed event
+    pub fn emit_workspace_file_removed(app: &AppHandle, relative_path: &str) -> Result<(), String> {
+        let event = WorkspaceFileEvent {
+            relative_path: relative_path.to_string(),
+            kind: None,
+        };
+        app.emit(event_names::WORKSPACE_FILE_REMOVED, &event)
+            .map_err(|e| format!("Failed to emit workspace file removed event: {}", e))
+    }
+
+    /// Emits a workspace file modified event
+    pub fn emit_workspace_file_modified(
+        app: &AppHandle,
+        relative_path: &str,
+        kind: Option<AssetKind>,
+    ) -> Result<(), String> {
+        let event = WorkspaceFileEvent {
+            relative_path: relative_path.to_string(),
+            kind,
+        };
+        app.emit(event_names::WORKSPACE_FILE_MODIFIED, &event)
+            .map_err(|e| format!("Failed to emit workspace file modified event: {}", e))
+    }
+
+    /// Emits a workspace scan complete event
+    pub fn emit_workspace_scan_complete(
+        app: &AppHandle,
+        total_files: usize,
+        new_files: usize,
+        removed_files: usize,
+        registered_files: usize,
+    ) -> Result<(), String> {
+        let event = WorkspaceScanCompleteEvent {
+            total_files,
+            new_files,
+            removed_files,
+            registered_files,
+        };
+        app.emit(event_names::WORKSPACE_SCAN_COMPLETE, &event)
+            .map_err(|e| format!("Failed to emit workspace scan complete event: {}", e))
+    }
 }
 
 // =============================================================================
@@ -613,5 +706,48 @@ mod tests {
         assert!(json.contains("job_001"));
         assert!(json.contains("75.5"));
         assert!(json.contains("Rendering frame"));
+    }
+
+    #[test]
+    fn test_workspace_file_event_serialization() {
+        let event = WorkspaceFileEvent {
+            relative_path: "footage/interview.mp4".to_string(),
+            kind: Some(AssetKind::Video),
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("relativePath"));
+        assert!(json.contains("footage/interview.mp4"));
+        assert!(json.contains("Video"));
+    }
+
+    #[test]
+    fn test_workspace_file_event_removed_has_no_kind() {
+        let event = WorkspaceFileEvent {
+            relative_path: "old_file.mp4".to_string(),
+            kind: None,
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("old_file.mp4"));
+        assert!(json.contains("null"));
+    }
+
+    #[test]
+    fn test_workspace_scan_complete_event() {
+        let event = WorkspaceScanCompleteEvent {
+            total_files: 42,
+            new_files: 10,
+            removed_files: 2,
+            registered_files: 30,
+        };
+
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("totalFiles"));
+        assert!(json.contains("42"));
+        assert!(json.contains("newFiles"));
+        assert!(json.contains("10"));
+        assert!(json.contains("removedFiles"));
+        assert!(json.contains("registeredFiles"));
     }
 }

@@ -5,23 +5,37 @@
  * Centralized to avoid duplication and improve maintainability.
  */
 
-import type { Sequence } from '@/types';
+import type { Sequence, AssetKind } from '@/types';
 
 // =============================================================================
 // Asset Drop Types
 // =============================================================================
 
+type AssetDropSource =
+  | {
+      /** ID of an already-registered asset */
+      assetId: string;
+      /** Relative workspace path for files tab drops (not used for asset drops) */
+      workspaceRelativePath?: never;
+    }
+  | {
+      /** ID may be populated when a workspace file is already registered */
+      assetId?: string;
+      /** Relative path for workspace file drops */
+      workspaceRelativePath: string;
+    };
+
 /**
- * Data passed when an asset is dropped on the timeline.
+ * Data passed when an asset or workspace file is dropped on the timeline.
  */
-export interface AssetDropData {
-  /** ID of the dropped asset */
-  assetId: string;
+export type AssetDropData = AssetDropSource & {
   /** ID of the track where asset was dropped */
   trackId: string;
   /** Timeline position in seconds where asset was dropped */
   timelinePosition: number;
-}
+  /** Asset kind hint for workspace file drops before registration */
+  assetKind?: AssetKind;
+};
 
 // =============================================================================
 // Clip Operation Types
@@ -125,6 +139,28 @@ export interface ClipPasteData {
 }
 
 /**
+ * Data for updating clip-level audio settings.
+ */
+export interface ClipAudioUpdateData {
+  /** ID of the sequence containing the clip */
+  sequenceId: string;
+  /** ID of the track containing the clip */
+  trackId: string;
+  /** ID of the clip being updated */
+  clipId: string;
+  /** Updated clip gain in dB */
+  volumeDb?: number;
+  /** Updated clip pan value (-1.0 to 1.0) */
+  pan?: number;
+  /** Updated clip mute state */
+  muted?: boolean;
+  /** Updated fade-in duration in seconds */
+  fadeInSec?: number;
+  /** Updated fade-out duration in seconds */
+  fadeOutSec?: number;
+}
+
+/**
  * Data for updating a caption.
  */
 export interface CaptionUpdateData {
@@ -200,6 +236,8 @@ export interface TimelineProps {
   onClipDuplicate?: (data: ClipDuplicateData) => void;
   /** Callback when clip is pasted */
   onClipPaste?: (data: ClipPasteData) => void;
+  /** Callback when clip audio settings are updated */
+  onClipAudioUpdate?: (data: ClipAudioUpdateData) => void | Promise<void>;
   /** Callback when track mute is toggled */
   onTrackMuteToggle?: (data: TrackControlData) => void;
   /** Callback when track lock is toggled */

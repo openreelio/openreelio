@@ -25,6 +25,7 @@ import type {
   ClipSplitData,
   ClipDuplicateData,
   ClipPasteData,
+  ClipAudioUpdateData,
   TrackControlData,
 } from './types';
 
@@ -51,6 +52,8 @@ export interface TimelineOperations {
   onClipDuplicate?: (data: ClipDuplicateData) => void;
   /** Callback when clip is pasted */
   onClipPaste?: (data: ClipPasteData) => void;
+  /** Callback when clip audio settings are updated */
+  onClipAudioUpdate?: (data: ClipAudioUpdateData) => void;
   /** Callback when track mute is toggled */
   onTrackMuteToggle?: (data: TrackControlData) => void;
   /** Callback when track lock is toggled */

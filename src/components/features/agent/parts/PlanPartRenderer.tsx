@@ -9,7 +9,7 @@ import type { PlanPart } from '@/agents/engine/core/conversation';
 interface PlanPartRendererProps {
   part: PlanPart;
   onApprove?: () => void;
-  onReject?: () => void;
+  onReject?: (reason?: string) => void;
   className?: string;
 }
 
@@ -95,7 +95,7 @@ export function PlanPartRenderer({
           )}
           {onReject && (
             <button
-              onClick={onReject}
+              onClick={() => onReject()}
               className="px-3 py-1 text-xs bg-red-600 hover:bg-red-500 text-white rounded transition-colors"
               data-testid="plan-reject-btn"
             >

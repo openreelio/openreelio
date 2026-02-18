@@ -15,7 +15,6 @@ import type { Asset } from './AssetList';
 
 const mockUseProjectStore = vi.fn();
 const mockUseBinStore = vi.fn();
-const mockUseAssetImport = vi.fn();
 const mockConvertFileSrc = vi.fn((path: string) => `asset://${path}`);
 
 vi.mock('@tauri-apps/api/core', () => ({
@@ -25,10 +24,19 @@ vi.mock('@tauri-apps/api/core', () => ({
 vi.mock('@/stores', () => ({
   useProjectStore: (...args: unknown[]) => mockUseProjectStore(...args),
   useBinStore: (...args: unknown[]) => mockUseBinStore(...args),
+  useWorkspaceStore: (selector: (state: unknown) => unknown) => {
+    const state = {
+      fileTree: [],
+      isScanning: false,
+      registeringPathCounts: {},
+      scanWorkspace: vi.fn(),
+      registerFile: vi.fn(),
+    };
+    return selector(state);
+  },
 }));
 
 vi.mock('@/hooks', () => ({
-  useAssetImport: () => mockUseAssetImport(),
   useBinOperations: () => ({
     createBin: vi.fn(),
     renameBin: vi.fn(),
@@ -66,6 +74,11 @@ const mockAssets = new Map(
 // Tests
 // =============================================================================
 
+function renderProjectExplorer() {
+  render(<ProjectExplorer />);
+  fireEvent.click(screen.getByTestId('tab-assets'));
+}
+
 describe('ProjectExplorer', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -87,13 +100,6 @@ describe('ProjectExplorer', () => {
       cancelEditing: vi.fn(),
       getBinsArray: vi.fn(() => []),
     });
-    mockUseAssetImport.mockReturnValue({
-      importFiles: vi.fn(),
-      importFromUris: vi.fn(),
-      isImporting: false,
-      error: null,
-      clearError: vi.fn(),
-    });
   });
 
   // ===========================================================================
@@ -102,29 +108,33 @@ describe('ProjectExplorer', () => {
 
   describe('rendering', () => {
     it('should render project explorer container', () => {
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
       expect(screen.getByTestId('project-explorer')).toBeInTheDocument();
     });
 
     it('should render header with title', () => {
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
       expect(screen.getByText('Project')).toBeInTheDocument();
     });
 
-    it('should render import button', () => {
+    it('should not render legacy import button', () => {
+      renderProjectExplorer();
+      expect(screen.queryByTestId('import-button')).not.toBeInTheDocument();
+    });
+
+    it('should render workspace scan button in files tab', () => {
       render(<ProjectExplorer />);
-      expect(screen.getByTestId('import-button')).toBeInTheDocument();
-      expect(screen.getByLabelText('Import asset')).toBeInTheDocument();
+      expect(screen.getByTestId('scan-workspace-button')).toBeInTheDocument();
     });
 
     it('should render search input', () => {
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
       expect(screen.getByTestId('asset-search')).toBeInTheDocument();
       expect(screen.getByPlaceholderText('Search assets...')).toBeInTheDocument();
     });
 
     it('should render filter tabs', () => {
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
       expect(screen.getByTestId('filter-all')).toBeInTheDocument();
       expect(screen.getByTestId('filter-video')).toBeInTheDocument();
       expect(screen.getByTestId('filter-audio')).toBeInTheDocument();
@@ -132,7 +142,7 @@ describe('ProjectExplorer', () => {
     });
 
     it('should render asset list', () => {
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
       expect(screen.getByTestId('asset-list')).toBeInTheDocument();
     });
 
@@ -159,7 +169,7 @@ describe('ProjectExplorer', () => {
         removeAsset: vi.fn(),
       });
 
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       const thumbnail = screen.getByTestId('asset-thumbnail');
       expect(thumbnail).toHaveAttribute('src', 'asset://localhost/C%3A%5Cthumbs%5C001.jpg');
@@ -189,7 +199,7 @@ describe('ProjectExplorer', () => {
         removeAsset: vi.fn(),
       });
 
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       expect(mockConvertFileSrc).toHaveBeenCalled();
       const convertedInput = mockConvertFileSrc.mock.calls[0][0] as string;
@@ -212,7 +222,7 @@ describe('ProjectExplorer', () => {
         removeAsset: vi.fn(),
       });
 
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
       expect(screen.getByTestId('asset-list-loading')).toBeInTheDocument();
     });
   });
@@ -223,7 +233,7 @@ describe('ProjectExplorer', () => {
 
   describe('search', () => {
     it('should filter assets when typing in search', () => {
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       const searchInput = screen.getByTestId('asset-search');
       fireEvent.change(searchInput, { target: { value: 'video' } });
@@ -233,7 +243,7 @@ describe('ProjectExplorer', () => {
     });
 
     it('should clear search when clear button clicked', () => {
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       const searchInput = screen.getByTestId('asset-search');
       fireEvent.change(searchInput, { target: { value: 'video' } });
@@ -251,7 +261,7 @@ describe('ProjectExplorer', () => {
 
   describe('filtering', () => {
     it('should filter by video when video tab clicked', () => {
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       fireEvent.click(screen.getByTestId('filter-video'));
 
@@ -260,7 +270,7 @@ describe('ProjectExplorer', () => {
     });
 
     it('should filter by audio when audio tab clicked', () => {
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       fireEvent.click(screen.getByTestId('filter-audio'));
 
@@ -269,7 +279,7 @@ describe('ProjectExplorer', () => {
     });
 
     it('should show all assets when all tab clicked', () => {
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       // First filter by video
       fireEvent.click(screen.getByTestId('filter-video'));
@@ -280,7 +290,7 @@ describe('ProjectExplorer', () => {
     });
 
     it('should highlight active filter tab', () => {
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       fireEvent.click(screen.getByTestId('filter-video'));
 
@@ -303,7 +313,7 @@ describe('ProjectExplorer', () => {
         removeAsset: vi.fn(),
       });
 
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       fireEvent.click(screen.getByText('video1.mp4'));
       expect(selectAsset).toHaveBeenCalledWith('asset_001');
@@ -320,7 +330,7 @@ describe('ProjectExplorer', () => {
         removeAsset: vi.fn(),
       });
 
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       const items = screen.getAllByTestId('asset-item');
       expect(items[0]).toHaveClass('bg-primary-500/20');
@@ -330,79 +340,12 @@ describe('ProjectExplorer', () => {
   });
 
   // ===========================================================================
-  // Import Tests
-  // ===========================================================================
-
-  describe('import', () => {
-    it('should call importFiles when import button clicked', () => {
-      const importFiles = vi.fn();
-      mockUseAssetImport.mockReturnValue({
-        importFiles,
-        importFromUris: vi.fn(),
-        isImporting: false,
-        error: null,
-        clearError: vi.fn(),
-      });
-
-      render(<ProjectExplorer />);
-
-      fireEvent.click(screen.getByTestId('import-button'));
-      expect(importFiles).toHaveBeenCalled();
-    });
-
-    it('should disable import button when importing', () => {
-      mockUseAssetImport.mockReturnValue({
-        importFiles: vi.fn(),
-        importFromUris: vi.fn(),
-        isImporting: true,
-        error: null,
-        clearError: vi.fn(),
-      });
-
-      render(<ProjectExplorer />);
-
-      expect(screen.getByTestId('import-button')).toBeDisabled();
-    });
-
-    it('should show error message when import fails', () => {
-      mockUseAssetImport.mockReturnValue({
-        importFiles: vi.fn(),
-        importFromUris: vi.fn(),
-        isImporting: false,
-        error: '1 file(s) failed to import',
-        clearError: vi.fn(),
-      });
-
-      render(<ProjectExplorer />);
-
-      expect(screen.getByTestId('import-error')).toBeInTheDocument();
-      expect(screen.getByText('1 file(s) failed to import')).toBeInTheDocument();
-    });
-
-    it('should call clearError when dismiss button clicked', () => {
-      const clearError = vi.fn();
-      mockUseAssetImport.mockReturnValue({
-        importFiles: vi.fn(),
-        importFromUris: vi.fn(),
-        isImporting: false,
-        error: 'Some error',
-        clearError,
-      });
-
-      render(<ProjectExplorer />);
-
-      fireEvent.click(screen.getByLabelText('Dismiss error'));
-      expect(clearError).toHaveBeenCalled();
-    });
-  });
-
-  // ===========================================================================
   // View Mode Tests
   // ===========================================================================
 
   describe('view modes', () => {
     it('should toggle between list and grid view', () => {
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       // Default is list view
       expect(screen.getByTestId('asset-list')).toHaveClass('flex-col');
@@ -424,28 +367,30 @@ describe('ProjectExplorer', () => {
   describe('empty state', () => {
     it('should show empty state when no assets', () => {
       mockUseProjectStore.mockReturnValue({
-        assets: [],
+        assets: new Map(),
         isLoading: false,
         selectedAssetId: null,
         selectAsset: vi.fn(),
         removeAsset: vi.fn(),
       });
 
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
       expect(screen.getByTestId('asset-list-empty')).toBeInTheDocument();
     });
 
-    it('should show import prompt in empty state', () => {
+    it('should show workspace prompt in empty state', () => {
       mockUseProjectStore.mockReturnValue({
-        assets: [],
+        assets: new Map(),
         isLoading: false,
         selectedAssetId: null,
         selectAsset: vi.fn(),
         removeAsset: vi.fn(),
       });
 
-      render(<ProjectExplorer />);
-      expect(screen.getByText('Import media to get started')).toBeInTheDocument();
+      renderProjectExplorer();
+      expect(
+        screen.getByText('Scan workspace and register files to get started'),
+      ).toBeInTheDocument();
     });
   });
 
@@ -455,7 +400,7 @@ describe('ProjectExplorer', () => {
 
   describe('keyboard navigation', () => {
     it('should focus search on Ctrl+F', () => {
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       const explorer = screen.getByTestId('project-explorer');
       fireEvent.keyDown(explorer, { key: 'f', ctrlKey: true });
@@ -472,7 +417,7 @@ describe('ProjectExplorer', () => {
         removeAsset: vi.fn(),
       });
 
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       const explorer = screen.getByTestId('project-explorer');
       fireEvent.keyDown(explorer, { key: 'Delete' });
@@ -491,7 +436,7 @@ describe('ProjectExplorer', () => {
         removeAsset,
       });
 
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       const explorer = screen.getByTestId('project-explorer');
       fireEvent.keyDown(explorer, { key: 'Delete' });
@@ -512,7 +457,7 @@ describe('ProjectExplorer', () => {
         removeAsset,
       });
 
-      render(<ProjectExplorer />);
+      renderProjectExplorer();
 
       const explorer = screen.getByTestId('project-explorer');
       fireEvent.keyDown(explorer, { key: 'Delete' });
@@ -522,94 +467,6 @@ describe('ProjectExplorer', () => {
 
       expect(removeAsset).not.toHaveBeenCalled();
       expect(screen.queryByTestId('confirm-dialog')).not.toBeInTheDocument();
-    });
-  });
-
-  // ===========================================================================
-  // Drag and Drop Tests
-  // ===========================================================================
-
-  describe('drag and drop', () => {
-    it('should show drop zone on drag enter with files', () => {
-      render(<ProjectExplorer />);
-
-      const explorer = screen.getByTestId('project-explorer');
-      const dataTransfer = {
-        types: ['Files'],
-      };
-      fireEvent.dragEnter(explorer, { dataTransfer });
-
-      expect(screen.getByTestId('drop-zone')).toBeInTheDocument();
-    });
-
-    it('should hide drop zone on drag leave', () => {
-      render(<ProjectExplorer />);
-
-      const explorer = screen.getByTestId('project-explorer');
-      const dataTransfer = {
-        types: ['Files'],
-      };
-      fireEvent.dragEnter(explorer, { dataTransfer });
-      fireEvent.dragLeave(explorer);
-
-      expect(screen.queryByTestId('drop-zone')).not.toBeInTheDocument();
-    });
-
-    it('should call importFromUris on file drop', () => {
-      const importFromUris = vi.fn();
-      mockUseAssetImport.mockReturnValue({
-        importFiles: vi.fn(),
-        importFromUris,
-        isImporting: false,
-        error: null,
-        clearError: vi.fn(),
-      });
-
-      render(<ProjectExplorer />);
-
-      const explorer = screen.getByTestId('project-explorer');
-
-      // Create a mock file drop event
-      const mockFile = new File(['content'], 'video.mp4', { type: 'video/mp4' });
-      const dataTransfer = {
-        files: [mockFile],
-        types: ['Files'],
-      };
-
-      fireEvent.drop(explorer, { dataTransfer });
-
-      // Note: The component needs to extract paths from files
-      // This test verifies that drop events are handled
-      expect(importFromUris).toHaveBeenCalled();
-    });
-
-    it('should hide drop zone after drop', () => {
-      const importFromUris = vi.fn();
-      mockUseAssetImport.mockReturnValue({
-        importFiles: vi.fn(),
-        importFromUris,
-        isImporting: false,
-        error: null,
-        clearError: vi.fn(),
-      });
-
-      render(<ProjectExplorer />);
-
-      const explorer = screen.getByTestId('project-explorer');
-      const enterDataTransfer = {
-        types: ['Files'],
-      };
-      fireEvent.dragEnter(explorer, { dataTransfer: enterDataTransfer });
-
-      const mockFile = new File(['content'], 'video.mp4', { type: 'video/mp4' });
-      const dropDataTransfer = {
-        files: [mockFile],
-        types: ['Files'],
-      };
-
-      fireEvent.drop(explorer, { dataTransfer: dropDataTransfer });
-
-      expect(screen.queryByTestId('drop-zone')).not.toBeInTheDocument();
     });
   });
 });

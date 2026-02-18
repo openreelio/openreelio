@@ -75,9 +75,7 @@ vi.mock('@/stores', () => ({
       tracks: [
         {
           id: 'track_001',
-          clips: [
-            { place: { timelineInSec: 0, durationSec: 120 } },
-          ],
+          clips: [{ place: { timelineInSec: 0, durationSec: 120 } }],
         },
       ],
     };
@@ -119,6 +117,14 @@ vi.mock('@/stores', () => ({
     };
     return selector(state);
   },
+}));
+
+vi.mock('@/components/features/agent', () => ({
+  AgenticSidebarContent: ({ className }: { className?: string }) => (
+    <div data-testid="agentic-sidebar-content" className={className}>
+      Agentic Sidebar Content
+    </div>
+  ),
 }));
 
 // =============================================================================
@@ -222,37 +228,16 @@ describe('AISidebar', () => {
   });
 
   describe('Child Components', () => {
-    it('renders ChatHistory component when expanded', () => {
+    it('renders agentic sidebar content when expanded', () => {
       renderAISidebar({ collapsed: false });
 
-      expect(screen.getByTestId('chat-history')).toBeInTheDocument();
-    });
-
-    it('renders ContextPanel component when expanded', () => {
-      renderAISidebar({ collapsed: false });
-
-      expect(screen.getByTestId('context-panel')).toBeInTheDocument();
-    });
-
-    it('renders ChatInput component when expanded', () => {
-      renderAISidebar({ collapsed: false });
-
-      expect(screen.getByTestId('chat-input')).toBeInTheDocument();
+      expect(screen.getByTestId('agentic-sidebar-content')).toBeInTheDocument();
     });
 
     it('does not render child components when collapsed', () => {
       renderAISidebar({ collapsed: true });
 
-      expect(screen.queryByTestId('chat-history')).not.toBeInTheDocument();
-      expect(screen.queryByTestId('context-panel')).not.toBeInTheDocument();
-      expect(screen.queryByTestId('quick-actions-bar')).not.toBeInTheDocument();
-      expect(screen.queryByTestId('chat-input')).not.toBeInTheDocument();
-    });
-
-    it('renders QuickActionsBar component when expanded', () => {
-      renderAISidebar({ collapsed: false });
-
-      expect(screen.getByTestId('quick-actions-bar')).toBeInTheDocument();
+      expect(screen.queryByTestId('agentic-sidebar-content')).not.toBeInTheDocument();
     });
   });
 

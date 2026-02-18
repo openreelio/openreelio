@@ -60,13 +60,16 @@ const SUPPORTED_ASSET_KINDS: ReadonlySet<AssetKind> = new Set([
 ]);
 
 interface ParsedAssetDragData {
-  id: string;
+  assetId?: string;
+  workspaceRelativePath?: string;
   kind?: AssetKind;
 }
 
 function hasSupportedDataType(dataTransfer: DataTransfer): boolean {
   return (
-    dataTransfer.types.includes('application/json') || dataTransfer.types.includes('text/plain')
+    dataTransfer.types.includes('application/json') ||
+    dataTransfer.types.includes('text/plain') ||
+    dataTransfer.types.includes('application/x-workspace-file')
   );
 }
 
@@ -77,6 +80,11 @@ function isAssetKind(value: unknown): value is AssetKind {
 function parseDraggedAssetData(dataTransfer: DataTransfer): ParsedAssetDragData | null {
   let jsonData = dataTransfer.getData('application/json');
   const textData = dataTransfer.getData('text/plain');
+  const workspaceFileData = dataTransfer.getData('application/x-workspace-file');
+
+  if (!jsonData && workspaceFileData) {
+    jsonData = JSON.stringify({ workspaceRelativePath: workspaceFileData });
+  }
 
   if (!jsonData && textData) {
     jsonData = JSON.stringify({ id: textData });
@@ -87,20 +95,42 @@ function parseDraggedAssetData(dataTransfer: DataTransfer): ParsedAssetDragData 
   }
 
   try {
-    const parsed = JSON.parse(jsonData) as { id?: unknown; kind?: unknown };
-    if (typeof parsed.id !== 'string') {
-      return null;
-    }
-    const id = parsed.id.trim();
-    if (id.length === 0) {
+    const parsed = JSON.parse(jsonData) as {
+      id?: unknown;
+      assetId?: unknown;
+      workspaceRelativePath?: unknown;
+      kind?: unknown;
+    };
+
+    const normalizedAssetIdValue =
+      typeof parsed.id === 'string'
+        ? parsed.id
+        : typeof parsed.assetId === 'string'
+          ? parsed.assetId
+          : undefined;
+    const assetId = normalizedAssetIdValue?.trim();
+
+    const normalizedWorkspacePathValue =
+      typeof parsed.workspaceRelativePath === 'string'
+        ? parsed.workspaceRelativePath
+        : typeof workspaceFileData === 'string' && workspaceFileData.length > 0
+          ? workspaceFileData
+          : undefined;
+    const workspaceRelativePath = normalizedWorkspacePathValue?.trim();
+
+    if (!assetId && !workspaceRelativePath) {
       return null;
     }
 
     return {
-      id,
+      ...(assetId ? { assetId } : {}),
+      ...(workspaceRelativePath ? { workspaceRelativePath } : {}),
       kind: isAssetKind(parsed.kind) ? parsed.kind : undefined,
     };
   } catch {
+    if (workspaceFileData.trim().length > 0) {
+      return { workspaceRelativePath: workspaceFileData.trim() };
+    }
     return null;
   }
 }
@@ -113,7 +143,11 @@ function resolveAssetKind(
     return parsedData.kind;
   }
 
-  return assets?.get(parsedData.id)?.kind;
+  if (!parsedData.assetId) {
+    return undefined;
+  }
+
+  return assets?.get(parsedData.assetId)?.kind;
 }
 
 // =============================================================================
@@ -254,6 +288,13 @@ export function useAssetDrop({
         return;
       }
 
+      if (!parsedData.assetId && !parsedData.workspaceRelativePath) {
+        logger.warn(
+          'Drop ignored: parsed drop data missing both assetId and workspaceRelativePath',
+        );
+        return;
+      }
+
       // Calculate timeline position from X coordinate
       const target = e.currentTarget as HTMLElement;
       const rect = target.getBoundingClientRect();
@@ -304,7 +345,8 @@ export function useAssetDrop({
       const assetKind = resolveAssetKind(parsedData, assets);
       if (assetKind && !isAssetCompatibleWithTrack(assetKind, track.kind)) {
         logger.warn('Drop ignored: incompatible asset type for target track', {
-          assetId: parsedData.id,
+          assetId: parsedData.assetId,
+          workspaceRelativePath: parsedData.workspaceRelativePath,
           assetKind,
           trackId: track.id,
           trackKind: track.kind,
@@ -313,13 +355,32 @@ export function useAssetDrop({
       }
 
       logger.info('Asset drop accepted', {
-        assetId: parsedData.id,
+        assetId: parsedData.assetId,
+        workspaceRelativePath: parsedData.workspaceRelativePath,
+        assetKind,
         trackId: track.id,
         timelinePosition,
       });
 
+      if (parsedData.workspaceRelativePath) {
+        onAssetDrop({
+          ...(parsedData.assetId ? { assetId: parsedData.assetId } : {}),
+          ...(assetKind ? { assetKind } : {}),
+          workspaceRelativePath: parsedData.workspaceRelativePath,
+          trackId: track.id,
+          timelinePosition,
+        });
+        return;
+      }
+
+      if (!parsedData.assetId) {
+        logger.warn('Drop ignored: asset drop has no assetId');
+        return;
+      }
+
       onAssetDrop({
-        assetId: parsedData.id,
+        ...(assetKind ? { assetKind } : {}),
+        assetId: parsedData.assetId,
         trackId: track.id,
         timelinePosition,
       });

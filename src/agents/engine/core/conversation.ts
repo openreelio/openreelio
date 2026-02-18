@@ -90,6 +90,19 @@ export interface ApprovalPart {
 }
 
 /**
+ * Per-tool approval request part (inline permission check)
+ */
+export interface ToolApprovalPart {
+  type: 'tool_approval';
+  stepId: string;
+  tool: string;
+  args: Record<string, unknown>;
+  description: string;
+  riskLevel: RiskLevel;
+  status: 'pending' | 'approved' | 'denied';
+}
+
+/**
  * Union of all message part types
  */
 export type MessagePart =
@@ -99,7 +112,8 @@ export type MessagePart =
   | ToolCallPart
   | ToolResultPart
   | ErrorPart
-  | ApprovalPart;
+  | ApprovalPart
+  | ToolApprovalPart;
 
 // =============================================================================
 // Conversation Message
@@ -332,6 +346,11 @@ export function toSimpleLLMMessage(msg: ConversationMessage): LLMMessage {
       case 'approval':
         textParts.push(`[Approval] Plan ${part.status}: ${part.plan.goal}`);
         break;
+      case 'tool_approval':
+        textParts.push(
+          `[Tool Approval] ${part.tool} ${part.status}: ${part.description}`
+        );
+        break;
     }
   }
 
@@ -401,6 +420,12 @@ export function isValidMessagePart(part: unknown): part is MessagePart {
         p.plan != null &&
         typeof p.plan === 'object' &&
         ['pending', 'approved', 'rejected'].includes(p.status as string)
+      );
+    case 'tool_approval':
+      return (
+        typeof p.stepId === 'string' &&
+        typeof p.tool === 'string' &&
+        ['pending', 'approved', 'denied'].includes(p.status as string)
       );
     default:
       return false;

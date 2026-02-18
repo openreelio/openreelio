@@ -138,7 +138,7 @@ describe('analysisTools', () => {
 
     it('should register tools in analysis category', () => {
       const analysisTools = globalToolRegistry.listByCategory('analysis');
-      expect(analysisTools.length).toBe(14);
+      expect(analysisTools.length).toBe(17);
     });
 
     it('should return correct tool names', () => {
@@ -149,7 +149,10 @@ describe('analysisTools', () => {
       expect(names).toContain('get_timeline_info');
       expect(names).toContain('list_all_clips');
       expect(names).toContain('get_playhead_position');
-      expect(names).toHaveLength(14);
+      expect(names).toContain('get_workspace_files');
+      expect(names).toContain('find_workspace_file');
+      expect(names).toContain('get_unregistered_files');
+      expect(names).toHaveLength(17);
     });
 
     it('should unregister all tools', () => {

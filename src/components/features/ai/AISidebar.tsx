@@ -5,17 +5,12 @@
  * Includes toggle, resize, keyboard shortcuts, and provider status.
  */
 
-import { useEffect, useCallback, useRef } from 'react';
+import { useEffect, useCallback, useRef, useState } from 'react';
 import { Bot, Settings, ChevronRight, ChevronLeft, Plus, Zap } from 'lucide-react';
 import { useAIStore } from '@/stores/aiStore';
-import { useProjectStore, useUIStore } from '@/stores';
+import { useUIStore } from '@/stores';
 import { AIErrorBoundary } from '@/components/shared/FeatureErrorBoundaries';
-import { ChatHistory } from './ChatHistory';
-import { ChatInput } from './ChatInput';
-import { ContextPanel } from './ContextPanel';
-import { QuickActionsBar } from './QuickActionsBar';
 import { AgenticSidebarContent } from '@/components/features/agent';
-import { isAgenticEngineEnabled } from '@/config/featureFlags';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('AISidebar');
@@ -56,38 +51,33 @@ export function AISidebar({
   const resizeHandleRef = useRef<HTMLDivElement>(null);
   const isResizingRef = useRef(false);
 
+  // New Chat handler, registered by AgenticSidebarContent
+  const [newChatHandler, setNewChatHandler] = useState<{
+    handler: () => void;
+    canCreate: boolean;
+  }>({ handler: () => {}, canCreate: false });
+
+  const onRegisterNewChat = useCallback(
+    (handler: () => void, canCreate: boolean) => {
+      setNewChatHandler({ handler, canCreate });
+    },
+    [],
+  );
+
   // Global settings dialog
   const openSettings = useUIStore((state) => state.openSettings);
 
   // Get provider status from store
   const providerStatus = useAIStore((state) => state.providerStatus);
-  const loadChatHistoryForProject = useAIStore((state) => state.loadChatHistoryForProject);
-  const currentProjectId = useAIStore((state) => state.currentProjectId);
   const syncFromSettings = useAIStore((state) => state.syncFromSettings);
-  const clearChatHistory = useAIStore((state) => state.clearChatHistory);
-  const chatMessages = useAIStore((state) => state.chatMessages);
-  const isGenerating = useAIStore((state) => state.isGenerating);
-
-  // Get active sequence ID to use as project identifier for chat persistence
-  const activeSequenceId = useProjectStore((state) => state.activeSequenceId);
 
   // Sync provider from global settings on mount
-  // Always sync because backend AIGateway is reset on app restart
-  // but frontend persist state may still show isConfigured=true
   useEffect(() => {
     syncFromSettings().catch((error) => {
       logger.warn('Failed to sync AI provider from global settings', { error });
     });
-    // Only run on mount
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Load chat history when project changes
-  useEffect(() => {
-    if (activeSequenceId && activeSequenceId !== currentProjectId) {
-      loadChatHistoryForProject(activeSequenceId);
-    }
-  }, [activeSequenceId, currentProjectId, loadChatHistoryForProject]);
 
   // Handle keyboard shortcut (Ctrl+/ or Cmd+/)
   useEffect(() => {
@@ -114,7 +104,6 @@ export function AISidebar({
       const handleMouseMove = (moveEvent: MouseEvent) => {
         if (!isResizingRef.current) return;
 
-        // Calculate new width (sidebar is on right, so subtract movement)
         const deltaX = startX - moveEvent.clientX;
         const newWidth = Math.min(
           Math.max(startWidth + deltaX, MIN_WIDTH),
@@ -185,18 +174,14 @@ export function AISidebar({
         <div className="flex items-center gap-2">
           <Bot className="w-5 h-5 text-purple-400" />
           <h2 className="text-sm font-medium text-editor-text">AI Assistant</h2>
-          {/* Agentic mode indicator */}
-          {isAgenticEngineEnabled() && (
-            <span
-              data-testid="agentic-mode-indicator"
-              className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium bg-purple-500/20 text-purple-300 rounded"
-              title="Agentic Engine Mode (Think-Plan-Act-Observe)"
-            >
-              <Zap className="w-2.5 h-2.5" />
-              Agent
-            </span>
-          )}
-          {/* Provider status indicator */}
+          <span
+            data-testid="agentic-mode-indicator"
+            className="flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium bg-purple-500/20 text-purple-300 rounded"
+            title="Agentic Engine Mode (Think-Plan-Act-Observe)"
+          >
+            <Zap className="w-2.5 h-2.5" />
+            Agent
+          </span>
           <div
             data-testid="provider-status"
             className={`w-2 h-2 rounded-full ${getProviderStatusColor()} ring-2 ring-offset-1 ring-offset-editor-sidebar/50 ring-transparent`}
@@ -212,11 +197,11 @@ export function AISidebar({
 
         {/* Actions */}
         <div className="flex items-center gap-0.5">
-          {/* New chat button */}
           <button
             type="button"
-            onClick={clearChatHistory}
-            disabled={chatMessages.length === 0 || isGenerating}
+            data-testid="new-chat-btn"
+            onClick={newChatHandler.handler}
+            disabled={!newChatHandler.canCreate}
             className="p-1.5 rounded-md hover:bg-editor-surface transition-colors text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
             aria-label="New conversation"
             title="New conversation"
@@ -224,7 +209,6 @@ export function AISidebar({
             <Plus className="w-4 h-4" />
           </button>
 
-          {/* Settings button - opens global settings with AI tab */}
           <button
             type="button"
             onClick={() => openSettings('ai')}
@@ -235,7 +219,6 @@ export function AISidebar({
             <Settings className="w-4 h-4" />
           </button>
 
-          {/* Collapse button */}
           <button
             type="button"
             onClick={onToggle}
@@ -256,32 +239,13 @@ export function AISidebar({
             logger.error('AI Sidebar error caught by boundary', { error });
           }}
         >
-          {/* Conditionally render Agentic or Legacy chat based on feature flag */}
-          {isAgenticEngineEnabled() ? (
-            <>
-              {/* Agentic Engine Mode */}
-              <AgenticSidebarContent className="flex-1" />
-            </>
-          ) : (
-            <>
-              {/* Legacy Chat Mode */}
-              {/* Chat history - takes remaining space */}
-              <ChatHistory />
-
-              {/* Context panel */}
-              <ContextPanel />
-
-              {/* Quick actions */}
-              <QuickActionsBar />
-
-              {/* Chat input */}
-              <ChatInput />
-            </>
-          )}
+          <AgenticSidebarContent
+            className="flex-1"
+            onRegisterNewChat={onRegisterNewChat}
+          />
         </AIErrorBoundary>
       )}
 
     </aside>
   );
 }
-

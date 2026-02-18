@@ -28,6 +28,8 @@ import {
 } from '@/utils/requestDeduplicator';
 import { refreshProjectState, applyProjectState } from '@/utils/stateRefreshHelper';
 import { useBinStore } from '@/stores/binStore';
+import { useWorkspaceStore, setupWorkspaceEventListeners } from '@/stores/workspaceStore';
+import { useSettingsStore } from '@/stores/settingsStore';
 
 const logger = createLogger('ProjectStore');
 
@@ -77,6 +79,8 @@ interface ProjectMeta {
   path: string;
   createdAt: string;
   modifiedAt: string;
+  /** Format version: 1 = legacy (import-only), 2 = workspace-enabled */
+  formatVersion?: number;
 }
 
 interface ProjectState {
@@ -96,6 +100,7 @@ interface ProjectState {
   // Actions
   loadProject: (path: string) => Promise<void>;
   createProject: (name: string, path: string) => Promise<void>;
+  openOrInitProject: (path: string) => Promise<void>;
   saveProject: () => Promise<void>;
   closeProject: () => Promise<void>;
 
@@ -169,6 +174,18 @@ export const useProjectStore = create<ProjectState>()(
 
         // Sync bins to bin store
         useBinStore.getState().setBins(projectState.bins);
+
+        // Initialize workspace: setup event listeners and auto-scan
+        setupWorkspaceEventListeners();
+        const { workspace: wsSettings } = useSettingsStore.getState().settings;
+        if (wsSettings.autoScanOnOpen) {
+          useWorkspaceStore
+            .getState()
+            .scanWorkspace()
+            .catch((err) => {
+              logger.warn('Workspace auto-scan failed', { error: String(err) });
+            });
+        }
       } catch (error) {
         set((state) => {
           state.isLoading = false;
@@ -213,6 +230,9 @@ export const useProjectStore = create<ProjectState>()(
 
         // Sync bins to bin store (empty for new project)
         useBinStore.getState().setBins(projectState.bins);
+
+        // Initialize workspace event listeners for new project
+        setupWorkspaceEventListeners();
       } catch (error) {
         // Reset to clean state on any failure
         set((state) => {
@@ -226,6 +246,59 @@ export const useProjectStore = create<ProjectState>()(
         });
         // Also reset bin store
         useBinStore.getState().reset();
+        throw error;
+      }
+    },
+
+    // Open folder as project (initialize if needed)
+    openOrInitProject: async (path: string) => {
+      set((state) => {
+        state.isLoading = true;
+        state.error = null;
+      });
+
+      try {
+        const projectInfo = await invoke<ProjectMeta>('open_or_init_project', { path });
+
+        // Load full project state including assets, sequences, and bins
+        const projectState = await refreshProjectState();
+
+        set((state) => {
+          state.isLoaded = true;
+          state.isLoading = false;
+          state.meta = projectInfo;
+          state.isDirty = false;
+          state.selectedAssetId = null;
+
+          // Populate assets
+          state.assets = projectState.assets;
+
+          // Populate sequences
+          state.sequences = projectState.sequences;
+
+          // Set active sequence
+          state.activeSequenceId = projectState.activeSequenceId;
+        });
+
+        // Sync bins to bin store
+        useBinStore.getState().setBins(projectState.bins);
+
+        // Initialize workspace: setup event listeners and auto-scan
+        setupWorkspaceEventListeners();
+        const { workspace: wsSettings } = useSettingsStore.getState().settings;
+        if (wsSettings.autoScanOnOpen) {
+          useWorkspaceStore
+            .getState()
+            .scanWorkspace()
+            .catch((err) => {
+              logger.warn('Workspace auto-scan failed', { error: String(err) });
+            });
+        }
+      } catch (error) {
+        set((state) => {
+          state.isLoading = false;
+          state.error = error instanceof Error ? error.message : String(error);
+        });
         throw error;
       }
     },
@@ -344,6 +417,17 @@ export const useProjectStore = create<ProjectState>()(
             state.selectedAssetId = null;
           }
         });
+
+        // Sync Files tab registration indicators after backend index updates.
+        useWorkspaceStore
+          .getState()
+          .refreshTree()
+          .catch((err) => {
+            logger.warn('Failed to refresh workspace tree after asset removal', {
+              assetId,
+              error: String(err),
+            });
+          });
       } catch (error) {
         set((state) => {
           state.error = error instanceof Error ? error.message : String(error);

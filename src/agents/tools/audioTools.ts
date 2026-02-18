@@ -5,21 +5,11 @@
  * Handles volume, fades, muting, and audio normalization.
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
+import { executeAgentCommand } from './commandExecutor';
 
 const logger = createLogger('AudioTools');
-
-// =============================================================================
-// Types
-// =============================================================================
-
-interface CommandResult {
-  opId: string;
-  success: boolean;
-  error?: string;
-}
 
 // =============================================================================
 // Tool Definitions
@@ -57,14 +47,11 @@ const AUDIO_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'AdjustVolume',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string | undefined,
-            volume: args.volume as number,
-          },
+        const result = await executeAgentCommand('AdjustVolume', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string | undefined,
+          volume: args.volume as number,
         });
 
         logger.debug('adjust_volume executed', { opId: result.opId });
@@ -108,15 +95,12 @@ const AUDIO_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'AddAudioFade',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string,
-            fadeType: 'in',
-            duration: args.duration as number,
-          },
+        const result = await executeAgentCommand('AddAudioFade', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
+          fadeType: 'in',
+          duration: args.duration as number,
         });
 
         logger.debug('add_fade_in executed', { opId: result.opId });
@@ -160,15 +144,12 @@ const AUDIO_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'AddAudioFade',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string,
-            fadeType: 'out',
-            duration: args.duration as number,
-          },
+        const result = await executeAgentCommand('AddAudioFade', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
+          fadeType: 'out',
+          duration: args.duration as number,
         });
 
         logger.debug('add_fade_out executed', { opId: result.opId });
@@ -212,14 +193,11 @@ const AUDIO_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'SetClipMute',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string,
-            muted: args.muted as boolean,
-          },
+        const result = await executeAgentCommand('SetClipMute', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
+          muted: args.muted as boolean,
         });
 
         logger.debug('mute_clip executed', { opId: result.opId });
@@ -259,13 +237,10 @@ const AUDIO_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'SetTrackMute',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            muted: args.muted as boolean,
-          },
+        const result = await executeAgentCommand('SetTrackMute', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          muted: args.muted as boolean,
         });
 
         logger.debug('mute_track executed', { opId: result.opId });
@@ -309,14 +284,11 @@ const AUDIO_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'NormalizeAudio',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string,
-            targetLevel: (args.targetLevel as number | undefined) ?? -3,
-          },
+        const result = await executeAgentCommand('NormalizeAudio', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
+          targetLevel: (args.targetLevel as number | undefined) ?? -3,
         });
 
         logger.debug('normalize_audio executed', { opId: result.opId });

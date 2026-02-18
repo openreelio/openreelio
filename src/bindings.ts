@@ -5,3080 +5,3467 @@
 
 /** user-defined commands **/
 
-
 export const commands = {
-/**
- * Creates a new project
- * 
- * This function uses atomic operations to prevent TOCTOU race conditions:
- * 1. Creates a lock file to prevent concurrent project creation
- * 2. Verifies directory state while holding the lock
- * 3. Creates project files atomically
- */
-async createProject(name: string, path: string) : Promise<Result<ProjectInfo, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("create_project", { name, path }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Opens an existing project
- */
-async openProject(path: string) : Promise<Result<ProjectInfo, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("open_project", { path }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Saves the current project
- * 
- * After a successful save, the project's `is_dirty` flag is reset to `false`,
- * allowing users to close or open another project without warnings.
- */
-async saveProject() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("save_project") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets current project info
- */
-async getProjectInfo() : Promise<Result<ProjectInfo | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_project_info") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets the full project state for frontend sync
- */
-async getProjectState() : Promise<Result<ProjectStateDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_project_state") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Imports an asset into the project
- * 
- * Automatically queues proxy generation job for video assets > 720p.
- * Returns the job_id if a proxy job was queued.
- */
-async importAsset(uri: string) : Promise<Result<AssetImportResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("import_asset", { uri }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets all assets in the project
- */
-async getAssets() : Promise<Result<Asset[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_assets") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Removes an asset from the project
- */
-async removeAsset(assetId: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("remove_asset", { assetId }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Generates thumbnail for an asset and updates the asset's thumbnail URL
- */
-async generateAssetThumbnail(assetId: string) : Promise<Result<string | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("generate_asset_thumbnail", { assetId }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Generates a proxy video for an asset for smooth preview playback
- */
-async generateProxyForAsset(assetId: string) : Promise<Result<string | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("generate_proxy_for_asset", { assetId }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Updates the proxy status and URL for an asset
- * 
- * Called by the frontend when receiving `asset:proxy-ready` or `asset:proxy-failed` events.
- */
-async updateAssetProxy(assetId: string, proxyUrl: string | null, proxyStatus: ProxyStatus) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_asset_proxy", { assetId, proxyUrl, proxyStatus }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets all sequences in the project
- */
-async getSequences() : Promise<Result<Sequence[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_sequences") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Creates a new sequence
- */
-async createSequence(name: string, format: string) : Promise<Result<Sequence, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("create_sequence", { name, format }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets a specific sequence by ID
- */
-async getSequence(sequenceId: string) : Promise<Result<Sequence, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_sequence", { sequenceId }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Executes an edit command
- */
-async executeCommand(commandType: string, payload: JsonValue) : Promise<Result<CommandResultDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("execute_command", { commandType, payload }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Undoes the last command
- */
-async undo() : Promise<Result<UndoRedoResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("undo") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Redoes the last undone command
- */
-async redo() : Promise<Result<UndoRedoResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("redo") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Checks if undo is available
- */
-async canUndo() : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("can_undo") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Checks if redo is available
- */
-async canRedo() : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("can_redo") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets all jobs from the worker pool (both active and queued)
- */
-async getJobs() : Promise<Result<JobInfoDto[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_jobs") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Submits a new job to the worker pool
- */
-async submitJob(jobType: string, priority: string | null, payload: JsonValue) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("submit_job", { jobType, priority, payload }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets a specific job by ID
- */
-async getJob(jobId: string) : Promise<Result<JobInfoDto | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_job", { jobId }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Cancels a job by ID
- */
-async cancelJob(jobId: string) : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("cancel_job", { jobId }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets the current queue statistics
- */
-async getJobStats() : Promise<Result<JsonValue, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_job_stats") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Starts final render export
- * 
- * This command validates the export settings before starting the render,
- * and reports real-time progress via Tauri events.
- */
-async startRender(sequenceId: string, outputPath: string, preset: string) : Promise<Result<RenderStartResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("start_render", { sequenceId, outputPath, preset }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Analyzes user intent and generates an EditScript
- */
-async analyzeIntent(intent: string, context: AIContextDto) : Promise<Result<EditScriptDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("analyze_intent", { intent, context }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Creates a Proposal from an EditScript and stores it for review
- */
-async createProposal(editScript: EditScriptDto) : Promise<Result<ProposalDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("create_proposal", { editScript }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Applies an EditScript by executing its commands
- */
-async applyEditScript(editScript: EditScriptDto) : Promise<Result<ApplyEditScriptResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("apply_edit_script", { editScript }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Validates an EditScript without executing
- */
-async validateEditScript(editScript: EditScriptDto) : Promise<Result<ValidationResultDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("validate_edit_script", { editScript }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Configures an AI provider
- */
-async configureAiProvider(config: ProviderConfigDto) : Promise<Result<ProviderStatusDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("configure_ai_provider", { config }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets the current AI provider status
- */
-async getAiProviderStatus() : Promise<Result<ProviderStatusDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_ai_provider_status") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Clears the current AI provider
- */
-async clearAiProvider() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("clear_ai_provider") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Syncs AI provider configuration from settings and encrypted vault
- * 
- * This command:
- * 1. Reads the primary provider from settings
- * 2. Retrieves the corresponding API key from the encrypted credential vault
- * 3. Configures the AI provider with these credentials
- * 
- * The API key never leaves the backend, maintaining security.
- */
-async syncAiFromVault() : Promise<Result<ProviderStatusDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("sync_ai_from_vault") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Tests the AI connection by making a simple request with detailed results
- */
-async testAiConnection() : Promise<Result<ConnectionTestResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("test_ai_connection") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Generates an EditScript from natural language using the AI provider
- */
-async generateEditScriptWithAi(intent: string, context: AIContextDto) : Promise<Result<EditScriptDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("generate_edit_script_with_ai", { intent, context }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Perform a raw completion using the configured AI provider.
- * 
- * Unlike `chat_with_ai`, this does not apply the unified-agent system prompt and does not parse
- * the output into an `AIResponse`. This is intended for the frontend agentic engine, which
- * supplies its own prompts and schemas.
- */
-async completeWithAiRaw(messages: ConversationMessageDto[], options: AICompletionOptionsDto | null) : Promise<Result<AICompletionResponseDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("complete_with_ai_raw", { messages, options }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Chat with AI using conversation history (unified agent mode)
- * 
- * This endpoint supports natural conversation and optional edit commands.
- * The AI will decide whether to respond conversationally or execute edits.
- */
-async chatWithAi(messages: ConversationMessageDto[], context: AIContextDto) : Promise<Result<AIResponseDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("chat_with_ai", { messages, context }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets available AI models for a provider type
- */
-async getAvailableAiModels(providerType: string) : Promise<Result<string[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_available_ai_models", { providerType }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Check if FFmpeg is available and return its status
- */
-async checkFfmpeg() : Promise<Result<FFmpegStatus, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("check_ffmpeg") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Extract a single frame from a video
- */
-async extractFrame(inputPath: string, timeSec: number, outputPath: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("extract_frame", { inputPath, timeSec, outputPath }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Generate a thumbnail for a video file
- */
-async generateThumbnail(inputPath: string, outputPath: string, width: number | null, height: number | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("generate_thumbnail", { inputPath, outputPath, width, height }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Probe media file to get information
- */
-async probeMedia(inputPath: string) : Promise<Result<MediaInfo, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("probe_media", { inputPath }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Generate audio waveform image
- */
-async generateWaveform(inputPath: string, outputPath: string, width: number, height: number) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("generate_waveform", { inputPath, outputPath, width, height }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets memory statistics from the backend
- */
-async getMemoryStats() : Promise<Result<MemoryStatsDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_memory_stats") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Triggers memory cleanup (shrink pools, evict expired cache)
- */
-async triggerMemoryCleanup() : Promise<Result<MemoryCleanupResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("trigger_memory_cleanup") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Checks if transcription is available
- */
-async isTranscriptionAvailable() : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("is_transcription_available") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Transcribes an asset's audio content
- * 
- * This command extracts audio from the asset, runs Whisper transcription,
- * and returns the transcribed text with timestamps.
- */
-async transcribeAsset(assetId: string, options: TranscriptionOptionsDto | null) : Promise<Result<TranscriptionResultDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("transcribe_asset", { assetId, options }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Submits a transcription job to the worker pool
- */
-async submitTranscriptionJob(assetId: string, options: TranscriptionOptionsDto | null) : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("submit_transcription_job", { assetId, options }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Searches assets using SQLite-based search engine (always available)
- * 
- * This command performs search across transcripts and shots stored in the
- * project's index database. Unlike Meilisearch, this is always available
- * without additional feature flags.
- */
-async searchAssets(query: SearchQueryDto) : Promise<Result<SearchResponseDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("search_assets", { query }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Checks if Meilisearch is available and ready.
- * 
- * This is a best-effort check that may attempt lazy sidecar startup.
- */
-async isMeilisearchAvailable() : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("is_meilisearch_available") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Performs a full-text search using Meilisearch
- */
-async searchContent(query: string, options: SearchOptionsDto | null) : Promise<Result<SearchResultsDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("search_content", { query, options }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Indexes an asset in Meilisearch
- */
-async indexAssetForSearch(assetId: string, name: string, path: string, kind: string, duration: number | null, tags: string[] | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("index_asset_for_search", { assetId, name, path, kind, duration, tags }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Indexes transcript segments for an asset
- */
-async indexTranscriptsForSearch(assetId: string, segments: TranscriptionSegmentDto[], language: string | null) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("index_transcripts_for_search", { assetId, segments, language }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Removes an asset and its transcripts from the search index
- */
-async removeAssetFromSearch(assetId: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("remove_asset_from_search", { assetId }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets annotation for an asset
- * 
- * Returns the annotation data if it exists, along with the analysis status.
- */
-async getAnnotation(assetId: string) : Promise<Result<GetAnnotationResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_annotation", { assetId }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Analyzes an asset using the specified provider
- * 
- * Performs analysis and stores results in the annotation store.
- */
-async analyzeAsset(request: AnalyzeAssetRequest) : Promise<Result<AnalyzeAssetResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("analyze_asset", { request }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Estimates cost for analysis
- * 
- * Returns cost estimate for cloud providers, None for local providers.
- */
-async estimateAnalysisCost(assetId: string, provider: AnalysisProvider, analysisTypes: AnalysisType[]) : Promise<Result<CostEstimate | null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("estimate_analysis_cost", { assetId, provider, analysisTypes }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Deletes annotation for an asset
- */
-async deleteAnnotation(assetId: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_annotation", { assetId }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Lists all annotated asset IDs
- */
-async listAnnotations() : Promise<Result<string[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("list_annotations") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets analysis status for an asset
- */
-async getAnalysisStatus(assetId: string) : Promise<Result<AnalysisStatus, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_analysis_status", { assetId }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets available analysis providers
- */
-async getAvailableProviders() : Promise<Result<ProviderCapabilities[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_available_providers") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Configures Google Cloud API key
- */
-async configureCloudProvider(apiKey: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("configure_cloud_provider", { apiKey }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Removes Google Cloud API key configuration
- */
-async removeCloudProvider() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("remove_cloud_provider") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets application settings
- */
-async getSettings() : Promise<Result<AppSettingsDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_settings") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Saves application settings
- */
-async setSettings(settings: AppSettingsDto) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("set_settings", { settings }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Updates a partial section of settings (merge with existing)
- */
-async updateSettings(partial: JsonValue) : Promise<Result<AppSettingsDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("update_settings", { partial }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Resets settings to defaults
- */
-async resetSettings() : Promise<Result<AppSettingsDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reset_settings") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Stores an API key securely in the encrypted vault
- * 
- * The API key is encrypted at rest using XChaCha20-Poly1305 and stored
- * in a secure vault file. Keys are never stored in plaintext.
- */
-async storeCredential(provider: string, apiKey: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("store_credential", { provider, apiKey }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Checks if a credential exists in the vault (without retrieving it)
- */
-async hasCredential(provider: string) : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("has_credential", { provider }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Deletes a credential from the vault
- */
-async deleteCredential(provider: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("delete_credential", { provider }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets the status of all credentials (which ones are configured)
- */
-async getCredentialStatus() : Promise<Result<CredentialStatusDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("get_credential_status") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Submit a video generation job.
- * 
- * Returns the job handle and estimated cost. Does not block until completion.
- */
-async submitVideoGeneration(request: SubmitVideoGenerationRequest) : Promise<Result<SubmitVideoGenerationResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("submit_video_generation", { request }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Poll the status of a video generation job.
- */
-async pollGenerationJob(providerJobId: string) : Promise<Result<PollGenerationJobResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("poll_generation_job", { providerJobId }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Cancel a running video generation job.
- */
-async cancelGenerationJob(providerJobId: string) : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("cancel_generation_job", { providerJobId }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Estimate the cost of a video generation request.
- */
-async estimateGenerationCost(quality: string, durationSec: number) : Promise<Result<EstimateGenerationCostResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("estimate_generation_cost", { quality, durationSec }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Download a completed generated video to the project directory.
- */
-async downloadGeneratedVideo(providerJobId: string) : Promise<Result<DownloadGeneratedVideoResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("download_generated_video", { providerJobId }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Configure the Seedance provider by storing the API key.
- */
-async configureSeedanceProvider(apiKey: string, baseUrl: string | null) : Promise<Result<ConfigureSeedanceProviderResponse, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("configure_seedance_provider", { apiKey, baseUrl }) };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Checks for available updates
- */
-async checkForUpdates() : Promise<Result<UpdateCheckResultDto, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("check_for_updates") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-},
-/**
- * Gets current app version
- */
-async getCurrentVersion() : Promise<string> {
-    return await TAURI_INVOKE("get_current_version");
-},
-/**
- * Relaunches the application.
- * 
- * This is intentionally implemented on the Rust side to avoid depending on a
- * separate process plugin on the frontend.
- */
-async relaunchApp() : Promise<void> {
-    await TAURI_INVOKE("relaunch_app");
-},
-/**
- * Downloads and installs an update
- * Returns true if restart is needed
- */
-async downloadAndInstallUpdate() : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("download_and_install_update") };
-} catch (e) {
-    return { status: "error", error: e  as any };
-}
-}
-}
+  /**
+   * Creates a new project
+   *
+   * This function uses atomic operations to prevent TOCTOU race conditions:
+   * 1. Creates a lock file to prevent concurrent project creation
+   * 2. Verifies directory state while holding the lock
+   * 3. Creates project files atomically
+   */
+  async createProject(name: string, path: string): Promise<Result<ProjectInfo, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('create_project', { name, path }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Opens an existing project
+   */
+  async openProject(path: string): Promise<Result<ProjectInfo, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('open_project', { path }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Saves the current project
+   *
+   * After a successful save, the project's `is_dirty` flag is reset to `false`,
+   * allowing users to close or open another project without warnings.
+   */
+  async saveProject(): Promise<Result<null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('save_project') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets current project info
+   */
+  async getProjectInfo(): Promise<Result<ProjectInfo | null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_project_info') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets the full project state for frontend sync
+   */
+  async getProjectState(): Promise<Result<ProjectStateDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_project_state') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Imports an asset into the project
+   *
+   * Automatically queues proxy generation job for video assets > 720p.
+   * Returns the job_id if a proxy job was queued.
+   */
+  async importAsset(uri: string): Promise<Result<AssetImportResult, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('import_asset', { uri }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets all assets in the project
+   */
+  async getAssets(): Promise<Result<Asset[], string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_assets') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Removes an asset from the project
+   */
+  async removeAsset(assetId: string): Promise<Result<null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('remove_asset', { assetId }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Generates thumbnail for an asset and updates the asset's thumbnail URL
+   */
+  async generateAssetThumbnail(assetId: string): Promise<Result<string | null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('generate_asset_thumbnail', { assetId }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Generates a proxy video for an asset for smooth preview playback
+   */
+  async generateProxyForAsset(assetId: string): Promise<Result<string | null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('generate_proxy_for_asset', { assetId }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Updates the proxy status and URL for an asset
+   *
+   * Called by the frontend when receiving `asset:proxy-ready` or `asset:proxy-failed` events.
+   */
+  async updateAssetProxy(
+    assetId: string,
+    proxyUrl: string | null,
+    proxyStatus: ProxyStatus,
+  ): Promise<Result<null, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('update_asset_proxy', { assetId, proxyUrl, proxyStatus }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets all sequences in the project
+   */
+  async getSequences(): Promise<Result<Sequence[], string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_sequences') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Creates a new sequence
+   */
+  async createSequence(name: string, format: string): Promise<Result<Sequence, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('create_sequence', { name, format }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets a specific sequence by ID
+   */
+  async getSequence(sequenceId: string): Promise<Result<Sequence, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_sequence', { sequenceId }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Executes an edit command
+   */
+  async executeCommand(
+    commandType: string,
+    payload: JsonValue,
+  ): Promise<Result<CommandResultDto, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('execute_command', { commandType, payload }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Undoes the last command
+   */
+  async undo(): Promise<Result<UndoRedoResult, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('undo') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Redoes the last undone command
+   */
+  async redo(): Promise<Result<UndoRedoResult, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('redo') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Checks if undo is available
+   */
+  async canUndo(): Promise<Result<boolean, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('can_undo') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Checks if redo is available
+   */
+  async canRedo(): Promise<Result<boolean, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('can_redo') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets all jobs from the worker pool (both active and queued)
+   */
+  async getJobs(): Promise<Result<JobInfoDto[], string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_jobs') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Submits a new job to the worker pool
+   */
+  async submitJob(
+    jobType: string,
+    priority: string | null,
+    payload: JsonValue,
+  ): Promise<Result<string, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('submit_job', { jobType, priority, payload }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets a specific job by ID
+   */
+  async getJob(jobId: string): Promise<Result<JobInfoDto | null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_job', { jobId }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Cancels a job by ID
+   */
+  async cancelJob(jobId: string): Promise<Result<boolean, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('cancel_job', { jobId }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets the current queue statistics
+   */
+  async getJobStats(): Promise<Result<JsonValue, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_job_stats') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Starts final render export
+   *
+   * This command validates the export settings before starting the render,
+   * and reports real-time progress via Tauri events.
+   */
+  async startRender(
+    sequenceId: string,
+    outputPath: string,
+    preset: string,
+  ): Promise<Result<RenderStartResult, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('start_render', { sequenceId, outputPath, preset }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Analyzes user intent and generates an EditScript
+   */
+  async analyzeIntent(
+    intent: string,
+    context: AIContextDto,
+  ): Promise<Result<EditScriptDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('analyze_intent', { intent, context }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Creates a Proposal from an EditScript and stores it for review
+   */
+  async createProposal(editScript: EditScriptDto): Promise<Result<ProposalDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('create_proposal', { editScript }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Applies an EditScript by executing its commands
+   */
+  async applyEditScript(editScript: EditScriptDto): Promise<Result<ApplyEditScriptResult, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('apply_edit_script', { editScript }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Validates an EditScript without executing
+   */
+  async validateEditScript(
+    editScript: EditScriptDto,
+  ): Promise<Result<ValidationResultDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('validate_edit_script', { editScript }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Configures an AI provider
+   */
+  async configureAiProvider(config: ProviderConfigDto): Promise<Result<ProviderStatusDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('configure_ai_provider', { config }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets the current AI provider status
+   */
+  async getAiProviderStatus(): Promise<Result<ProviderStatusDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_ai_provider_status') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Clears the current AI provider
+   */
+  async clearAiProvider(): Promise<Result<null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('clear_ai_provider') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Syncs AI provider configuration from settings and encrypted vault
+   *
+   * This command:
+   * 1. Reads the primary provider from settings
+   * 2. Retrieves the corresponding API key from the encrypted credential vault
+   * 3. Configures the AI provider with these credentials
+   *
+   * The API key never leaves the backend, maintaining security.
+   */
+  async syncAiFromVault(): Promise<Result<ProviderStatusDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('sync_ai_from_vault') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Tests the AI connection by making a simple request with detailed results
+   */
+  async testAiConnection(): Promise<Result<ConnectionTestResult, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('test_ai_connection') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Generates an EditScript from natural language using the AI provider
+   */
+  async generateEditScriptWithAi(
+    intent: string,
+    context: AIContextDto,
+  ): Promise<Result<EditScriptDto, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('generate_edit_script_with_ai', { intent, context }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Perform a raw completion using the configured AI provider.
+   *
+   * Unlike `chat_with_ai`, this does not apply the unified-agent system prompt and does not parse
+   * the output into an `AIResponse`. This is intended for the frontend agentic engine, which
+   * supplies its own prompts and schemas.
+   */
+  async completeWithAiRaw(
+    messages: ConversationMessageDto[],
+    options: AICompletionOptionsDto | null,
+  ): Promise<Result<AICompletionResponseDto, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('complete_with_ai_raw', { messages, options }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Chat with AI using conversation history (unified agent mode)
+   *
+   * This endpoint supports natural conversation and optional edit commands.
+   * The AI will decide whether to respond conversationally or execute edits.
+   */
+  async chatWithAi(
+    messages: ConversationMessageDto[],
+    context: AIContextDto,
+  ): Promise<Result<AIResponseDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('chat_with_ai', { messages, context }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets available AI models for a provider type
+   */
+  async getAvailableAiModels(providerType: string): Promise<Result<string[], string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('get_available_ai_models', { providerType }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Check if FFmpeg is available and return its status
+   */
+  async checkFfmpeg(): Promise<Result<FFmpegStatus, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('check_ffmpeg') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Extract a single frame from a video
+   */
+  async extractFrame(
+    inputPath: string,
+    timeSec: number,
+    outputPath: string,
+  ): Promise<Result<null, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('extract_frame', { inputPath, timeSec, outputPath }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Generate a thumbnail for a video file
+   */
+  async generateThumbnail(
+    inputPath: string,
+    outputPath: string,
+    width: number | null,
+    height: number | null,
+  ): Promise<Result<null, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('generate_thumbnail', { inputPath, outputPath, width, height }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Probe media file to get information
+   */
+  async probeMedia(inputPath: string): Promise<Result<MediaInfo, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('probe_media', { inputPath }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Generate audio waveform image
+   */
+  async generateWaveform(
+    inputPath: string,
+    outputPath: string,
+    width: number,
+    height: number,
+  ): Promise<Result<null, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('generate_waveform', { inputPath, outputPath, width, height }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets memory statistics from the backend
+   */
+  async getMemoryStats(): Promise<Result<MemoryStatsDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_memory_stats') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Triggers memory cleanup (shrink pools, evict expired cache)
+   */
+  async triggerMemoryCleanup(): Promise<Result<MemoryCleanupResult, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('trigger_memory_cleanup') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Checks if transcription is available
+   */
+  async isTranscriptionAvailable(): Promise<Result<boolean, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('is_transcription_available') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Transcribes an asset's audio content
+   *
+   * This command extracts audio from the asset, runs Whisper transcription,
+   * and returns the transcribed text with timestamps.
+   */
+  async transcribeAsset(
+    assetId: string,
+    options: TranscriptionOptionsDto | null,
+  ): Promise<Result<TranscriptionResultDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('transcribe_asset', { assetId, options }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Submits a transcription job to the worker pool
+   */
+  async submitTranscriptionJob(
+    assetId: string,
+    options: TranscriptionOptionsDto | null,
+  ): Promise<Result<string, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('submit_transcription_job', { assetId, options }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Searches assets using SQLite-based search engine (always available)
+   *
+   * This command performs search across transcripts and shots stored in the
+   * project's index database. Unlike Meilisearch, this is always available
+   * without additional feature flags.
+   */
+  async searchAssets(query: SearchQueryDto): Promise<Result<SearchResponseDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('search_assets', { query }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Checks if Meilisearch is available and ready.
+   *
+   * This is a best-effort check that may attempt lazy sidecar startup.
+   */
+  async isMeilisearchAvailable(): Promise<Result<boolean, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('is_meilisearch_available') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Performs a full-text search using Meilisearch
+   */
+  async searchContent(
+    query: string,
+    options: SearchOptionsDto | null,
+  ): Promise<Result<SearchResultsDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('search_content', { query, options }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Indexes an asset in Meilisearch
+   */
+  async indexAssetForSearch(
+    assetId: string,
+    name: string,
+    path: string,
+    kind: string,
+    duration: number | null,
+    tags: string[] | null,
+  ): Promise<Result<null, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('index_asset_for_search', {
+          assetId,
+          name,
+          path,
+          kind,
+          duration,
+          tags,
+        }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Indexes transcript segments for an asset
+   */
+  async indexTranscriptsForSearch(
+    assetId: string,
+    segments: TranscriptionSegmentDto[],
+    language: string | null,
+  ): Promise<Result<null, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('index_transcripts_for_search', { assetId, segments, language }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Removes an asset and its transcripts from the search index
+   */
+  async removeAssetFromSearch(assetId: string): Promise<Result<null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('remove_asset_from_search', { assetId }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets annotation for an asset
+   *
+   * Returns the annotation data if it exists, along with the analysis status.
+   */
+  async getAnnotation(assetId: string): Promise<Result<GetAnnotationResponse, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_annotation', { assetId }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Analyzes an asset using the specified provider
+   *
+   * Performs analysis and stores results in the annotation store.
+   */
+  async analyzeAsset(request: AnalyzeAssetRequest): Promise<Result<AnalyzeAssetResponse, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('analyze_asset', { request }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Estimates cost for analysis
+   *
+   * Returns cost estimate for cloud providers, None for local providers.
+   */
+  async estimateAnalysisCost(
+    assetId: string,
+    provider: AnalysisProvider,
+    analysisTypes: AnalysisType[],
+  ): Promise<Result<CostEstimate | null, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('estimate_analysis_cost', { assetId, provider, analysisTypes }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Deletes annotation for an asset
+   */
+  async deleteAnnotation(assetId: string): Promise<Result<null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('delete_annotation', { assetId }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Lists all annotated asset IDs
+   */
+  async listAnnotations(): Promise<Result<string[], string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('list_annotations') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets analysis status for an asset
+   */
+  async getAnalysisStatus(assetId: string): Promise<Result<AnalysisStatus, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_analysis_status', { assetId }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets available analysis providers
+   */
+  async getAvailableProviders(): Promise<Result<ProviderCapabilities[], string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_available_providers') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Configures Google Cloud API key
+   */
+  async configureCloudProvider(apiKey: string): Promise<Result<null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('configure_cloud_provider', { apiKey }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Removes Google Cloud API key configuration
+   */
+  async removeCloudProvider(): Promise<Result<null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('remove_cloud_provider') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets application settings
+   */
+  async getSettings(): Promise<Result<AppSettingsDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_settings') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Saves application settings
+   */
+  async setSettings(settings: AppSettingsDto): Promise<Result<null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('set_settings', { settings }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Updates a partial section of settings (merge with existing)
+   */
+  async updateSettings(partial: JsonValue): Promise<Result<AppSettingsDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('update_settings', { partial }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Resets settings to defaults
+   */
+  async resetSettings(): Promise<Result<AppSettingsDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('reset_settings') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Stores an API key securely in the encrypted vault
+   *
+   * The API key is encrypted at rest using XChaCha20-Poly1305 and stored
+   * in a secure vault file. Keys are never stored in plaintext.
+   */
+  async storeCredential(provider: string, apiKey: string): Promise<Result<null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('store_credential', { provider, apiKey }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Checks if a credential exists in the vault (without retrieving it)
+   */
+  async hasCredential(provider: string): Promise<Result<boolean, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('has_credential', { provider }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Deletes a credential from the vault
+   */
+  async deleteCredential(provider: string): Promise<Result<null, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('delete_credential', { provider }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets the status of all credentials (which ones are configured)
+   */
+  async getCredentialStatus(): Promise<Result<CredentialStatusDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('get_credential_status') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Submit a video generation job.
+   *
+   * Returns the job handle and estimated cost. Does not block until completion.
+   */
+  async submitVideoGeneration(
+    request: SubmitVideoGenerationRequest,
+  ): Promise<Result<SubmitVideoGenerationResponse, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('submit_video_generation', { request }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Poll the status of a video generation job.
+   */
+  async pollGenerationJob(
+    providerJobId: string,
+  ): Promise<Result<PollGenerationJobResponse, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('poll_generation_job', { providerJobId }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Cancel a running video generation job.
+   */
+  async cancelGenerationJob(providerJobId: string): Promise<Result<boolean, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('cancel_generation_job', { providerJobId }) };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Estimate the cost of a video generation request.
+   */
+  async estimateGenerationCost(
+    quality: string,
+    durationSec: number,
+  ): Promise<Result<EstimateGenerationCostResponse, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('estimate_generation_cost', { quality, durationSec }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Download a completed generated video to the project directory.
+   */
+  async downloadGeneratedVideo(
+    providerJobId: string,
+  ): Promise<Result<DownloadGeneratedVideoResponse, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('download_generated_video', { providerJobId }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Configure the Seedance provider by storing the API key.
+   */
+  async configureSeedanceProvider(
+    apiKey: string,
+    baseUrl: string | null,
+  ): Promise<Result<ConfigureSeedanceProviderResponse, string>> {
+    try {
+      return {
+        status: 'ok',
+        data: await TAURI_INVOKE('configure_seedance_provider', { apiKey, baseUrl }),
+      };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Checks for available updates
+   */
+  async checkForUpdates(): Promise<Result<UpdateCheckResultDto, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('check_for_updates') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+  /**
+   * Gets current app version
+   */
+  async getCurrentVersion(): Promise<string> {
+    return await TAURI_INVOKE('get_current_version');
+  },
+  /**
+   * Relaunches the application.
+   *
+   * This is intentionally implemented on the Rust side to avoid depending on a
+   * separate process plugin on the frontend.
+   */
+  async relaunchApp(): Promise<void> {
+    await TAURI_INVOKE('relaunch_app');
+  },
+  /**
+   * Downloads and installs an update
+   * Returns true if restart is needed
+   */
+  async downloadAndInstallUpdate(): Promise<Result<boolean, string>> {
+    try {
+      return { status: 'ok', data: await TAURI_INVOKE('download_and_install_update') };
+    } catch (e) {
+      return { status: 'error', error: e as any };
+    }
+  },
+};
 
 /** user-defined events **/
 
-
-
 /** user-defined constants **/
-
-
 
 /** user-defined types **/
 
 /**
  * Options for raw AI completion (no AIResponse parsing).
  */
-export type AICompletionOptionsDto = { 
-/**
- * System prompt override
- */
-systemPrompt: string | null; 
-/**
- * Model override
- */
-model: string | null; 
-/**
- * Max tokens
- */
-maxTokens: number | null; 
-/**
- * Temperature
- */
-temperature: number | null; 
-/**
- * Whether to enable JSON mode (provider-dependent)
- */
-jsonMode: boolean | null }
+export type AICompletionOptionsDto = {
+  /**
+   * System prompt override
+   */
+  systemPrompt: string | null;
+  /**
+   * Model override
+   */
+  model: string | null;
+  /**
+   * Max tokens
+   */
+  maxTokens: number | null;
+  /**
+   * Temperature
+   */
+  temperature: number | null;
+  /**
+   * Whether to enable JSON mode (provider-dependent)
+   */
+  jsonMode: boolean | null;
+};
 /**
  * Raw completion response from the configured provider.
  */
-export type AICompletionResponseDto = { text: string; model: string; usage: AICompletionUsageDto; finishReason: string }
+export type AICompletionResponseDto = {
+  text: string;
+  model: string;
+  usage: AICompletionUsageDto;
+  finishReason: string;
+};
 /**
  * Token usage for a raw completion.
  */
-export type AICompletionUsageDto = { promptTokens: number; completionTokens: number; totalTokens: number }
+export type AICompletionUsageDto = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+};
 /**
  * Context information for AI intent analysis.
  */
-export type AIContextDto = { 
-/**
- * Current playhead position in seconds
- */
-playheadPosition: number; 
-/**
- * IDs of currently selected clips
- */
-selectedClips: string[]; 
-/**
- * IDs of currently selected tracks
- */
-selectedTracks: string[]; 
-/**
- * Nearby transcript text for context
- */
-transcriptContext: string | null; 
-/**
- * Timeline duration in seconds
- */
-timelineDuration: number | null; 
-/**
- * Available asset IDs
- */
-assetIds?: string[]; 
-/**
- * Available track IDs
- */
-trackIds?: string[] }
+export type AIContextDto = {
+  /**
+   * Current playhead position in seconds
+   */
+  playheadPosition: number;
+  /**
+   * IDs of currently selected clips
+   */
+  selectedClips: string[];
+  /**
+   * IDs of currently selected tracks
+   */
+  selectedTracks: string[];
+  /**
+   * Nearby transcript text for context
+   */
+  transcriptContext: string | null;
+  /**
+   * Timeline duration in seconds
+   */
+  timelineDuration: number | null;
+  /**
+   * Available asset IDs
+   */
+  assetIds?: string[];
+  /**
+   * Available track IDs
+   */
+  trackIds?: string[];
+};
 /**
  * AI intent classification
  */
-export type AIIntentDto = { 
-/**
- * Intent type: chat, edit, query, clarify
- */
-type: string; 
-/**
- * Confidence score
- */
-confidence: number }
+export type AIIntentDto = {
+  /**
+   * Intent type: chat, edit, query, clarify
+   */
+  type: string;
+  /**
+   * Confidence score
+   */
+  confidence: number;
+};
 /**
  * AI response with optional actions
  */
-export type AIResponseDto = { 
-/**
- * Conversational response text
- */
-message: string; 
-/**
- * Edit actions to execute (if any)
- */
-actions: EditActionDto[] | null; 
-/**
- * Whether user confirmation is needed
- */
-needsConfirmation: boolean | null; 
-/**
- * AI's understanding of the intent
- */
-intent: AIIntentDto | null }
-export type AISettingsDto = { primaryProvider: ProviderTypeDto; primaryModel: string; visionProvider: ProviderTypeDto | null; visionModel: string | null; openaiApiKey: string | null; anthropicApiKey: string | null; googleApiKey: string | null; ollamaUrl: string | null; temperature: number; maxTokens: number; frameExtractionRate: number; monthlyBudgetCents: number | null; perRequestLimitCents: number; currentMonthUsageCents: number; currentUsageMonth: number | null; autoAnalyzeOnImport: boolean; autoCaptionOnImport: boolean; proposalReviewMode: ProposalReviewModeDto; cacheDurationHours: number; localOnlyMode: boolean; seedanceApiKey?: string | null; videoGenProvider?: string | null; videoGenDefaultQuality?: string; videoGenBudgetCents?: number | null; videoGenPerRequestLimitCents?: number }
+export type AIResponseDto = {
+  /**
+   * Conversational response text
+   */
+  message: string;
+  /**
+   * Edit actions to execute (if any)
+   */
+  actions: EditActionDto[] | null;
+  /**
+   * Whether user confirmation is needed
+   */
+  needsConfirmation: boolean | null;
+  /**
+   * AI's understanding of the intent
+   */
+  intent: AIIntentDto | null;
+};
+export type AISettingsDto = {
+  primaryProvider: ProviderTypeDto;
+  primaryModel: string;
+  visionProvider: ProviderTypeDto | null;
+  visionModel: string | null;
+  openaiApiKey: string | null;
+  anthropicApiKey: string | null;
+  googleApiKey: string | null;
+  ollamaUrl: string | null;
+  temperature: number;
+  maxTokens: number;
+  frameExtractionRate: number;
+  monthlyBudgetCents: number | null;
+  perRequestLimitCents: number;
+  currentMonthUsageCents: number;
+  currentUsageMonth: number | null;
+  autoAnalyzeOnImport: boolean;
+  autoCaptionOnImport: boolean;
+  proposalReviewMode: ProposalReviewModeDto;
+  cacheDurationHours: number;
+  localOnlyMode: boolean;
+  seedanceApiKey?: string | null;
+  videoGenProvider?: string | null;
+  videoGenDefaultQuality?: string;
+  videoGenBudgetCents?: number | null;
+  videoGenPerRequestLimitCents?: number;
+};
 /**
  * Provider that performed the analysis
  */
-export type AnalysisProvider = 
-/**
- * FFmpeg-based local analysis (shots only)
- */
-"ffmpeg" | 
-/**
- * Whisper-based local transcription (future plugin)
- */
-"whisper" | 
-/**
- * Google Cloud Video Intelligence / Vision API
- */
-"google_cloud" | 
-/**
- * Custom/unknown provider
- */
-{ custom: string }
+export type AnalysisProvider =
+  /**
+   * FFmpeg-based local analysis (shots only)
+   */
+  | 'ffmpeg'
+  /**
+   * Whisper-based local transcription (future plugin)
+   */
+  | 'whisper'
+  /**
+   * Google Cloud Video Intelligence / Vision API
+   */
+  | 'google_cloud'
+  /**
+   * Custom/unknown provider
+   */
+  | { custom: string };
 /**
  * Response from analysis
  */
-export type AnalysisResponse = { 
-/**
- * Shot detection results
- */
-shots?: AnalysisResult<ShotResult> | null; 
-/**
- * Transcription results
- */
-transcript?: AnalysisResult<TranscriptSegment> | null; 
-/**
- * Object detection results
- */
-objects?: AnalysisResult<ObjectDetection> | null; 
-/**
- * Face detection results
- */
-faces?: AnalysisResult<FaceDetection> | null; 
-/**
- * Text detection results
- */
-textOcr?: AnalysisResult<TextDetection> | null; 
-/**
- * Total cost in cents (for cloud providers)
- */
-totalCostCents: number }
+export type AnalysisResponse = {
+  /**
+   * Shot detection results
+   */
+  shots?: AnalysisResult<ShotResult> | null;
+  /**
+   * Transcription results
+   */
+  transcript?: AnalysisResult<TranscriptSegment> | null;
+  /**
+   * Object detection results
+   */
+  objects?: AnalysisResult<ObjectDetection> | null;
+  /**
+   * Face detection results
+   */
+  faces?: AnalysisResult<FaceDetection> | null;
+  /**
+   * Text detection results
+   */
+  textOcr?: AnalysisResult<TextDetection> | null;
+  /**
+   * Total cost in cents (for cloud providers)
+   */
+  totalCostCents: number;
+};
 /**
  * Generic wrapper for analysis results of a specific type
  */
-export type AnalysisResult<T> = { 
-/**
- * Provider that performed the analysis
- */
-provider: AnalysisProvider; 
-/**
- * ISO 8601 timestamp when analysis was performed
- */
-analyzedAt: string; 
-/**
- * Configuration used for analysis
- */
-config: JsonValue; 
-/**
- * Cost in cents (for cloud providers)
- */
-costCents?: number | null; 
-/**
- * Analysis results
- */
-results: T[] }
+export type AnalysisResult<T> = {
+  /**
+   * Provider that performed the analysis
+   */
+  provider: AnalysisProvider;
+  /**
+   * ISO 8601 timestamp when analysis was performed
+   */
+  analyzedAt: string;
+  /**
+   * Configuration used for analysis
+   */
+  config: JsonValue;
+  /**
+   * Cost in cents (for cloud providers)
+   */
+  costCents?: number | null;
+  /**
+   * Analysis results
+   */
+  results: T[];
+};
 /**
  * Container for all analysis results for an asset
  */
-export type AnalysisResults = { 
-/**
- * Shot/scene detection results
- */
-shots?: AnalysisResult<ShotResult> | null; 
-/**
- * Transcription results
- */
-transcript?: AnalysisResult<TranscriptSegment> | null; 
-/**
- * Object detection results
- */
-objects?: AnalysisResult<ObjectDetection> | null; 
-/**
- * Face detection results
- */
-faces?: AnalysisResult<FaceDetection> | null; 
-/**
- * Text detection (OCR) results
- */
-textOcr?: AnalysisResult<TextDetection> | null }
+export type AnalysisResults = {
+  /**
+   * Shot/scene detection results
+   */
+  shots?: AnalysisResult<ShotResult> | null;
+  /**
+   * Transcription results
+   */
+  transcript?: AnalysisResult<TranscriptSegment> | null;
+  /**
+   * Object detection results
+   */
+  objects?: AnalysisResult<ObjectDetection> | null;
+  /**
+   * Face detection results
+   */
+  faces?: AnalysisResult<FaceDetection> | null;
+  /**
+   * Text detection (OCR) results
+   */
+  textOcr?: AnalysisResult<TextDetection> | null;
+};
 /**
  * Status of analysis for an asset
  */
-export type AnalysisStatus = 
-/**
- * No analysis has been performed
- */
-"notAnalyzed" | 
-/**
- * Analysis is in progress
- */
-"inProgress" | 
-/**
- * Analysis completed successfully
- */
-"completed" | 
-/**
- * Analysis is stale (asset changed)
- */
-"stale" | 
-/**
- * Analysis failed
- */
-"failed"
+export type AnalysisStatus =
+  /**
+   * No analysis has been performed
+   */
+  | 'notAnalyzed'
+  /**
+   * Analysis is in progress
+   */
+  | 'inProgress'
+  /**
+   * Analysis completed successfully
+   */
+  | 'completed'
+  /**
+   * Analysis is stale (asset changed)
+   */
+  | 'stale'
+  /**
+   * Analysis failed
+   */
+  | 'failed';
 /**
  * Types of analysis that can be performed on an asset
  */
-export type AnalysisType = 
-/**
- * Shot/scene boundary detection
- */
-"shots" | 
-/**
- * Speech-to-text transcription
- */
-"transcript" | 
-/**
- * Object detection in frames
- */
-"objects" | 
-/**
- * Face detection and recognition
- */
-"faces" | 
-/**
- * Text detection (OCR)
- */
-"textOcr"
+export type AnalysisType =
+  /**
+   * Shot/scene boundary detection
+   */
+  | 'shots'
+  /**
+   * Speech-to-text transcription
+   */
+  | 'transcript'
+  /**
+   * Object detection in frames
+   */
+  | 'objects'
+  /**
+   * Face detection and recognition
+   */
+  | 'faces'
+  /**
+   * Text detection (OCR)
+   */
+  | 'textOcr';
 /**
  * Request for analyze_asset command
  */
-export type AnalyzeAssetRequest = { 
-/**
- * Asset ID to analyze
- */
-assetId: string; 
-/**
- * Provider to use
- */
-provider: AnalysisProvider; 
-/**
- * Analysis types to perform
- */
-analysisTypes: AnalysisType[]; 
-/**
- * Shot detection config (optional)
- */
-shotConfig?: ShotDetectionConfig | null }
+export type AnalyzeAssetRequest = {
+  /**
+   * Asset ID to analyze
+   */
+  assetId: string;
+  /**
+   * Provider to use
+   */
+  provider: AnalysisProvider;
+  /**
+   * Analysis types to perform
+   */
+  analysisTypes: AnalysisType[];
+  /**
+   * Shot detection config (optional)
+   */
+  shotConfig?: ShotDetectionConfig | null;
+};
 /**
  * Response for analyze_asset command
  */
-export type AnalyzeAssetResponse = { 
-/**
- * Updated annotation
- */
-annotation: AssetAnnotation; 
-/**
- * Analysis response with results
- */
-response: AnalysisResponse }
+export type AnalyzeAssetResponse = {
+  /**
+   * Updated annotation
+   */
+  annotation: AssetAnnotation;
+  /**
+   * Analysis response with results
+   */
+  response: AnalysisResponse;
+};
 /**
  * DTO for app settings (mirrors Rust AppSettings)
  */
-export type AppSettingsDto = { version: number; general: GeneralSettingsDto; editor: EditorSettingsDto; playback: PlaybackSettingsDto; export: ExportSettingsDto; appearance: AppearanceSettingsDto; shortcuts: ShortcutSettingsDto; autoSave: AutoSaveSettingsDto; performance: PerformanceSettingsDto; ai: AISettingsDto }
-export type AppearanceSettingsDto = { theme: string; accentColor: string; uiScale: number; showStatusBar: boolean; compactMode: boolean }
+export type AppSettingsDto = {
+  version: number;
+  general: GeneralSettingsDto;
+  editor: EditorSettingsDto;
+  playback: PlaybackSettingsDto;
+  export: ExportSettingsDto;
+  appearance: AppearanceSettingsDto;
+  shortcuts: ShortcutSettingsDto;
+  autoSave: AutoSaveSettingsDto;
+  performance: PerformanceSettingsDto;
+  ai: AISettingsDto;
+};
+export type AppearanceSettingsDto = {
+  theme: string;
+  accentColor: string;
+  uiScale: number;
+  showStatusBar: boolean;
+  compactMode: boolean;
+};
 /**
  * Result of applying an EditScript.
  */
-export type ApplyEditScriptResult = { 
-/**
- * Whether all commands were applied successfully
- */
-success: boolean; 
-/**
- * Operation IDs of successfully applied commands
- */
-appliedOpIds: string[]; 
-/**
- * Error messages for failed commands
- */
-errors: string[] }
+export type ApplyEditScriptResult = {
+  /**
+   * Whether all commands were applied successfully
+   */
+  success: boolean;
+  /**
+   * Operation IDs of successfully applied commands
+   */
+  appliedOpIds: string[];
+  /**
+   * Error messages for failed commands
+   */
+  errors: string[];
+};
 /**
  * Main Asset structure
  */
-export type Asset = { 
-/**
- * Unique identifier (ULID)
- */
-id: string; 
-/**
- * Type of asset
- */
-kind: AssetKind; 
-/**
- * Display name
- */
-name: string; 
-/**
- * File path or URI
- */
-uri: string; 
-/**
- * SHA256 hash of file content
- */
-hash: string; 
-/**
- * Duration in seconds (for video/audio)
- */
-durationSec?: number | null; 
-/**
- * File size in bytes
- */
-fileSize: number; 
-/**
- * Import timestamp (ISO 8601)
- */
-importedAt: string; 
-/**
- * Video-specific metadata
- */
-video?: VideoInfo | null; 
-/**
- * Audio-specific metadata
- */
-audio?: AudioInfo | null; 
-/**
- * License information
- */
-license: LicenseInfo; 
-/**
- * User-defined tags
- */
-tags: string[]; 
-/**
- * Thumbnail URL (via Tauri asset protocol)
- */
-thumbnailUrl?: string | null; 
-/**
- * Proxy video generation status
- */
-proxyStatus?: ProxyStatus; 
-/**
- * Proxy video URL for preview playback (via Tauri asset protocol)
- */
-proxyUrl?: string | null; 
-/**
- * Bin (folder) ID for organizing the asset
- */
-binId?: string | null }
+export type Asset = {
+  /**
+   * Unique identifier (ULID)
+   */
+  id: string;
+  /**
+   * Type of asset
+   */
+  kind: AssetKind;
+  /**
+   * Display name
+   */
+  name: string;
+  /**
+   * File path or URI
+   */
+  uri: string;
+  /**
+   * SHA256 hash of file content
+   */
+  hash: string;
+  /**
+   * Duration in seconds (for video/audio)
+   */
+  durationSec?: number | null;
+  /**
+   * File size in bytes
+   */
+  fileSize: number;
+  /**
+   * Import timestamp (ISO 8601)
+   */
+  importedAt: string;
+  /**
+   * Video-specific metadata
+   */
+  video?: VideoInfo | null;
+  /**
+   * Audio-specific metadata
+   */
+  audio?: AudioInfo | null;
+  /**
+   * License information
+   */
+  license: LicenseInfo;
+  /**
+   * User-defined tags
+   */
+  tags: string[];
+  /**
+   * Thumbnail URL (via Tauri asset protocol)
+   */
+  thumbnailUrl?: string | null;
+  /**
+   * Proxy video generation status
+   */
+  proxyStatus?: ProxyStatus;
+  /**
+   * Proxy video URL for preview playback (via Tauri asset protocol)
+   */
+  proxyUrl?: string | null;
+  /**
+   * Bin (folder) ID for organizing the asset
+   */
+  binId?: string | null;
+};
 /**
  * Complete annotation data for an asset
  */
-export type AssetAnnotation = { 
-/**
- * Schema version
- */
-version: string; 
-/**
- * Asset ID this annotation belongs to
- */
-assetId: string; 
-/**
- * SHA256 hash of the asset file (for staleness detection)
- */
-assetHash: string; 
-/**
- * ISO 8601 timestamp when annotation was created
- */
-createdAt: string; 
-/**
- * ISO 8601 timestamp when annotation was last updated
- */
-updatedAt: string; 
-/**
- * Analysis results
- */
-analysis: AnalysisResults }
+export type AssetAnnotation = {
+  /**
+   * Schema version
+   */
+  version: string;
+  /**
+   * Asset ID this annotation belongs to
+   */
+  assetId: string;
+  /**
+   * SHA256 hash of the asset file (for staleness detection)
+   */
+  assetHash: string;
+  /**
+   * ISO 8601 timestamp when annotation was created
+   */
+  createdAt: string;
+  /**
+   * ISO 8601 timestamp when annotation was last updated
+   */
+  updatedAt: string;
+  /**
+   * Analysis results
+   */
+  analysis: AnalysisResults;
+};
 /**
  * Asset event payload.
  */
-export type AssetEvent = { 
-/**
- * Asset ID
- */
-assetId: string }
+export type AssetEvent = {
+  /**
+   * Asset ID
+   */
+  assetId: string;
+};
 /**
  * Result of importing an asset into the project.
  */
-export type AssetImportResult = { 
-/**
- * Generated asset ID (ULID)
- */
-assetId: string; 
-/**
- * Asset display name (from filename)
- */
-name: string; 
-/**
- * Operation ID for undo/redo tracking
- */
-opId: string; 
-/**
- * Background job ID for proxy/thumbnail generation (if any)
- */
-jobId: string | null }
+export type AssetImportResult = {
+  /**
+   * Generated asset ID (ULID)
+   */
+  assetId: string;
+  /**
+   * Asset display name (from filename)
+   */
+  name: string;
+  /**
+   * Operation ID for undo/redo tracking
+   */
+  opId: string;
+  /**
+   * Background job ID for proxy/thumbnail generation (if any)
+   */
+  jobId: string | null;
+};
 /**
  * Asset type enumeration
  */
-export type AssetKind = "video" | "audio" | "image" | "subtitle" | "font" | "effectPreset" | "memePack"
+export type AssetKind =
+  | 'video'
+  | 'audio'
+  | 'image'
+  | 'subtitle'
+  | 'font'
+  | 'effectPreset'
+  | 'memePack';
 /**
  * Search result for an asset.
  */
-export type AssetSearchResultDto = { 
-/**
- * Asset ID
- */
-id: string; 
-/**
- * Asset display name
- */
-name: string; 
-/**
- * File path
- */
-path: string; 
-/**
- * Asset kind ("video", "audio", "image", etc.)
- */
-kind: string; 
-/**
- * Duration in seconds (for video/audio)
- */
-duration: number | null; 
-/**
- * Associated tags
- */
-tags: string[] }
+export type AssetSearchResultDto = {
+  /**
+   * Asset ID
+   */
+  id: string;
+  /**
+   * Asset display name
+   */
+  name: string;
+  /**
+   * File path
+   */
+  path: string;
+  /**
+   * Asset kind ("video", "audio", "image", etc.)
+   */
+  kind: string;
+  /**
+   * Duration in seconds (for video/audio)
+   */
+  duration: number | null;
+  /**
+   * Associated tags
+   */
+  tags: string[];
+};
 /**
  * Audio-specific metadata
  */
-export type AudioInfo = { 
-/**
- * Sample rate in Hz
- */
-sampleRate: number; 
-/**
- * Number of audio channels
- */
-channels: number; 
-/**
- * Audio codec (e.g., "aac", "mp3")
- */
-codec: string; 
-/**
- * Bitrate in bps (optional)
- */
-bitrate?: number | null }
+export type AudioInfo = {
+  /**
+   * Sample rate in Hz
+   */
+  sampleRate: number;
+  /**
+   * Number of audio channels
+   */
+  channels: number;
+  /**
+   * Audio codec (e.g., "aac", "mp3")
+   */
+  codec: string;
+  /**
+   * Bitrate in bps (optional)
+   */
+  bitrate?: number | null;
+};
 /**
  * Audio settings for clips
  */
-export type AudioSettings = { 
-/**
- * Volume in dB (-60 to +6)
- */
-volumeDb: number; 
-/**
- * Pan (-1.0 left, 0.0 center, 1.0 right)
- */
-pan: number; 
-/**
- * Whether audio is muted
- */
-muted: boolean }
+export type AudioSettings = {
+  /**
+   * Volume in dB (-60 to +6)
+   */
+  volumeDb: number;
+  /**
+   * Pan (-1.0 left, 0.0 center, 1.0 right)
+   */
+  pan: number;
+  /**
+   * Whether audio is muted
+   */
+  muted: boolean;
+  /**
+   * Fade-in duration in timeline seconds
+   */
+  fadeInSec: number;
+  /**
+   * Fade-out duration in timeline seconds
+   */
+  fadeOutSec: number;
+};
 /**
  * Audio stream information.
  */
-export type AudioStreamInfo = { 
-/**
- * Sample rate in Hz
- */
-sampleRate: number; 
-/**
- * Number of channels
- */
-channels: number; 
-/**
- * Codec name (e.g., "aac", "mp3")
- */
-codec: string; 
-/**
- * Bitrate in bits/s (if available)
- */
-bitrate: number | null }
-export type AutoSaveSettingsDto = { enabled: boolean; intervalSeconds: number; backupCount: number }
+export type AudioStreamInfo = {
+  /**
+   * Sample rate in Hz
+   */
+  sampleRate: number;
+  /**
+   * Number of channels
+   */
+  channels: number;
+  /**
+   * Codec name (e.g., "aac", "mp3")
+   */
+  codec: string;
+  /**
+   * Bitrate in bits/s (if available)
+   */
+  bitrate: number | null;
+};
+export type AutoSaveSettingsDto = {
+  enabled: boolean;
+  intervalSeconds: number;
+  backupCount: number;
+};
 /**
  * A bin (folder) for organizing media assets
  */
-export type Bin = { 
-/**
- * Unique bin identifier
- */
-id: string; 
-/**
- * Bin name (display name)
- */
-name: string; 
-/**
- * Parent bin ID (None for root-level bins)
- */
-parentId?: string | null; 
-/**
- * Visual color for the bin
- */
-color?: BinColor; 
-/**
- * Creation timestamp (ISO 8601)
- */
-createdAt: string; 
-/**
- * Whether the bin is expanded in the UI
- */
-expanded?: boolean }
+export type Bin = {
+  /**
+   * Unique bin identifier
+   */
+  id: string;
+  /**
+   * Bin name (display name)
+   */
+  name: string;
+  /**
+   * Parent bin ID (None for root-level bins)
+   */
+  parentId?: string | null;
+  /**
+   * Visual color for the bin
+   */
+  color?: BinColor;
+  /**
+   * Creation timestamp (ISO 8601)
+   */
+  createdAt: string;
+  /**
+   * Whether the bin is expanded in the UI
+   */
+  expanded?: boolean;
+};
 /**
  * Available colors for bin visual identification
  */
-export type BinColor = "gray" | "red" | "orange" | "yellow" | "green" | "blue" | "purple" | "pink"
+export type BinColor = 'gray' | 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | 'pink';
 /**
  * Blend mode for video tracks
  */
-export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "add"
+export type BlendMode = 'normal' | 'multiply' | 'screen' | 'overlay' | 'add';
 /**
  * Bounding box for detected objects
  */
-export type BoundingBox = { 
-/**
- * Normalized left coordinate (0.0 - 1.0)
- */
-left: number; 
-/**
- * Normalized top coordinate (0.0 - 1.0)
- */
-top: number; 
-/**
- * Normalized width (0.0 - 1.0)
- */
-width: number; 
-/**
- * Normalized height (0.0 - 1.0)
- */
-height: number }
+export type BoundingBox = {
+  /**
+   * Normalized left coordinate (0.0 - 1.0)
+   */
+  left: number;
+  /**
+   * Normalized top coordinate (0.0 - 1.0)
+   */
+  top: number;
+  /**
+   * Normalized width (0.0 - 1.0)
+   */
+  width: number;
+  /**
+   * Normalized height (0.0 - 1.0)
+   */
+  height: number;
+};
 /**
  * Cache usage statistics.
  */
-export type CacheStatsDto = { 
-/**
- * Number of entries in cache
- */
-entryCount: number; 
-/**
- * Total cache size in bytes
- */
-totalSizeBytes: number; 
-/**
- * Cache hit count
- */
-hits: number; 
-/**
- * Cache miss count
- */
-misses: number; 
-/**
- * Number of evicted entries
- */
-evictions: number; 
-/**
- * Cache hit rate (0.0 - 1.0)
- */
-hitRate: number }
+export type CacheStatsDto = {
+  /**
+   * Number of entries in cache
+   */
+  entryCount: number;
+  /**
+   * Total cache size in bytes
+   */
+  totalSizeBytes: number;
+  /**
+   * Cache hit count
+   */
+  hits: number;
+  /**
+   * Cache miss count
+   */
+  misses: number;
+  /**
+   * Number of evicted entries
+   */
+  evictions: number;
+  /**
+   * Cache hit rate (0.0 - 1.0)
+   */
+  hitRate: number;
+};
 /**
  * Canvas size
  */
-export type Canvas = { width: number; height: number }
+export type Canvas = { width: number; height: number };
 /**
  * Clip (media segment on timeline)
  */
-export type Clip = { id: string; assetId: string; 
-/**
- * Range within the source asset
- */
-range: ClipRange; 
-/**
- * Placement on the timeline
- */
-place: ClipPlace; transform: Transform; 
-/**
- * Opacity (0.0 - 1.0)
- */
-opacity: number; 
-/**
- * Playback speed (1.0 = normal)
- */
-speed: number; effects: string[]; audio: AudioSettings; 
-/**
- * Optional label for organization
- */
-label?: string | null; 
-/**
- * Optional color for UI
- */
-color?: Color | null }
+export type Clip = {
+  id: string;
+  assetId: string;
+  /**
+   * Range within the source asset
+   */
+  range: ClipRange;
+  /**
+   * Placement on the timeline
+   */
+  place: ClipPlace;
+  transform: Transform;
+  /**
+   * Opacity (0.0 - 1.0)
+   */
+  opacity: number;
+  /**
+   * Playback speed (1.0 = normal)
+   */
+  speed: number;
+  effects: string[];
+  audio: AudioSettings;
+  /**
+   * Optional label for organization
+   */
+  label?: string | null;
+  /**
+   * Optional color for UI
+   */
+  color?: Color | null;
+};
 /**
  * Clip event payload.
  */
-export type ClipEvent = { 
-/**
- * Clip ID
- */
-clipId: string; 
-/**
- * Parent sequence ID
- */
-sequenceId: string | null; 
-/**
- * Parent track ID
- */
-trackId: string | null }
+export type ClipEvent = {
+  /**
+   * Clip ID
+   */
+  clipId: string;
+  /**
+   * Parent sequence ID
+   */
+  sequenceId: string | null;
+  /**
+   * Parent track ID
+   */
+  trackId: string | null;
+};
 /**
  * Clip placement on timeline
  */
-export type ClipPlace = { 
-/**
- * Start time on timeline (seconds)
- */
-timelineInSec: number; 
-/**
- * Duration on timeline (seconds) - may differ from source due to speed
- */
-durationSec: number }
+export type ClipPlace = {
+  /**
+   * Start time on timeline (seconds)
+   */
+  timelineInSec: number;
+  /**
+   * Duration on timeline (seconds) - may differ from source due to speed
+   */
+  durationSec: number;
+};
 /**
  * Clip range within source asset
  */
-export type ClipRange = { 
-/**
- * Start time within source (seconds)
- */
-sourceInSec: number; 
-/**
- * End time within source (seconds)
- */
-sourceOutSec: number }
+export type ClipRange = {
+  /**
+   * Start time within source (seconds)
+   */
+  sourceInSec: number;
+  /**
+   * End time within source (seconds)
+   */
+  sourceOutSec: number;
+};
 /**
  * Color (RGBA)
  */
-export type Color = { 
-/**
- * Red (0.0 ~ 1.0)
- */
-r: number; 
-/**
- * Green (0.0 ~ 1.0)
- */
-g: number; 
-/**
- * Blue (0.0 ~ 1.0)
- */
-b: number; 
-/**
- * Alpha (0.0 ~ 1.0, optional)
- */
-a?: number | null }
+export type Color = {
+  /**
+   * Red (0.0 ~ 1.0)
+   */
+  r: number;
+  /**
+   * Green (0.0 ~ 1.0)
+   */
+  g: number;
+  /**
+   * Blue (0.0 ~ 1.0)
+   */
+  b: number;
+  /**
+   * Alpha (0.0 ~ 1.0, optional)
+   */
+  a?: number | null;
+};
 /**
  * Result of executing an edit command.
  */
-export type CommandResultDto = { 
-/**
- * Operation ID for tracking in undo/redo history
- */
-opId: string; 
-/**
- * IDs of entities created by this command
- */
-createdIds: string[]; 
-/**
- * IDs of entities deleted by this command
- */
-deletedIds: string[] }
+export type CommandResultDto = {
+  /**
+   * Operation ID for tracking in undo/redo history
+   */
+  opId: string;
+  /**
+   * IDs of entities created by this command
+   */
+  createdIds: string[];
+  /**
+   * IDs of entities deleted by this command
+   */
+  deletedIds: string[];
+};
 /**
  * Response for configure_seedance_provider
  */
-export type ConfigureSeedanceProviderResponse = { isAvailable: boolean }
+export type ConfigureSeedanceProviderResponse = { isAvailable: boolean };
 /**
  * Error codes for connection test failures
  */
-export type ConnectionErrorCode = 
-/**
- * No provider configured
- */
-"not_configured" | 
-/**
- * Invalid API key or authentication failed
- */
-"invalid_credentials" | 
-/**
- * Rate limit exceeded
- */
-"rate_limited" | 
-/**
- * Network error (timeout, DNS, connection refused)
- */
-"network_error" | 
-/**
- * Provider service unavailable
- */
-"service_unavailable" | 
-/**
- * Unknown error
- */
-"unknown"
+export type ConnectionErrorCode =
+  /**
+   * No provider configured
+   */
+  | 'not_configured'
+  /**
+   * Invalid API key or authentication failed
+   */
+  | 'invalid_credentials'
+  /**
+   * Rate limit exceeded
+   */
+  | 'rate_limited'
+  /**
+   * Network error (timeout, DNS, connection refused)
+   */
+  | 'network_error'
+  /**
+   * Provider service unavailable
+   */
+  | 'service_unavailable'
+  /**
+   * Unknown error
+   */
+  | 'unknown';
 /**
  * Result of a connection test
  */
-export type ConnectionTestResult = { 
-/**
- * Whether the connection test succeeded
- */
-success: boolean; 
-/**
- * Provider type that was tested
- */
-provider: string; 
-/**
- * Model name that was tested
- */
-model: string; 
-/**
- * Latency in milliseconds (only present on success)
- */
-latencyMs: number | null; 
-/**
- * Human-readable message
- */
-message: string; 
-/**
- * Error code (only present on failure)
- */
-errorCode: ConnectionErrorCode | null; 
-/**
- * Detailed error message (only present on failure)
- */
-errorDetails: string | null }
+export type ConnectionTestResult = {
+  /**
+   * Whether the connection test succeeded
+   */
+  success: boolean;
+  /**
+   * Provider type that was tested
+   */
+  provider: string;
+  /**
+   * Model name that was tested
+   */
+  model: string;
+  /**
+   * Latency in milliseconds (only present on success)
+   */
+  latencyMs: number | null;
+  /**
+   * Human-readable message
+   */
+  message: string;
+  /**
+   * Error code (only present on failure)
+   */
+  errorCode: ConnectionErrorCode | null;
+  /**
+   * Detailed error message (only present on failure)
+   */
+  errorDetails: string | null;
+};
 /**
  * Message for conversation history
  */
-export type ConversationMessageDto = { 
-/**
- * Role: user, assistant, or system
- */
-role: string; 
-/**
- * Message content
- */
-content: string }
+export type ConversationMessageDto = {
+  /**
+   * Role: user, assistant, or system
+   */
+  role: string;
+  /**
+   * Message content
+   */
+  content: string;
+};
 /**
  * Cost breakdown for a single analysis type
  */
-export type CostBreakdownItem = { 
-/**
- * Analysis type
- */
-analysisType: AnalysisType; 
-/**
- * Estimated cost in cents
- */
-costCents: number; 
-/**
- * Rate description (e.g., "$0.05/min")
- */
-rateDescription: string }
+export type CostBreakdownItem = {
+  /**
+   * Analysis type
+   */
+  analysisType: AnalysisType;
+  /**
+   * Estimated cost in cents
+   */
+  costCents: number;
+  /**
+   * Rate description (e.g., "$0.05/min")
+   */
+  rateDescription: string;
+};
 /**
  * Cost estimate for analysis
  */
-export type CostEstimate = { 
-/**
- * Provider for the estimate
- */
-provider: AnalysisProvider; 
-/**
- * Requested analysis types
- */
-analysisTypes: AnalysisType[]; 
-/**
- * Estimated cost in cents
- */
-estimatedCostCents: number; 
-/**
- * Asset duration in seconds (for reference)
- */
-assetDurationSec: number; 
-/**
- * Breakdown by analysis type
- */
-breakdown: CostBreakdownItem[] }
+export type CostEstimate = {
+  /**
+   * Provider for the estimate
+   */
+  provider: AnalysisProvider;
+  /**
+   * Requested analysis types
+   */
+  analysisTypes: AnalysisType[];
+  /**
+   * Estimated cost in cents
+   */
+  estimatedCostCents: number;
+  /**
+   * Asset duration in seconds (for reference)
+   */
+  assetDurationSec: number;
+  /**
+   * Breakdown by analysis type
+   */
+  breakdown: CostBreakdownItem[];
+};
 /**
  * Status of credentials for each provider
  */
-export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google: boolean; seedance: boolean }
+export type CredentialStatusDto = {
+  openai: boolean;
+  anthropic: boolean;
+  google: boolean;
+  seedance: boolean;
+};
 /**
  * Response for download_generated_video
  */
-export type DownloadGeneratedVideoResponse = { outputPath: string }
+export type DownloadGeneratedVideoResponse = { outputPath: string };
 /**
  * Edit action from AI
  */
-export type EditActionDto = { 
-/**
- * Command type
- */
-commandType: string; 
-/**
- * Command parameters as JSON
- */
-params: JsonValue; 
-/**
- * Human-readable description
- */
-description: string | null }
+export type EditActionDto = {
+  /**
+   * Command type
+   */
+  commandType: string;
+  /**
+   * Command parameters as JSON
+   */
+  params: JsonValue;
+  /**
+   * Human-readable description
+   */
+  description: string | null;
+};
 /**
  * A single edit command within an EditScript.
  */
-export type EditCommandDto = { 
-/**
- * Command type (e.g., "InsertClip", "SplitClip")
- */
-commandType: string; 
-/**
- * Command parameters as JSON
- */
-params: JsonValue; 
-/**
- * Human-readable description of what this command does
- */
-description: string | null }
+export type EditCommandDto = {
+  /**
+   * Command type (e.g., "InsertClip", "SplitClip")
+   */
+  commandType: string;
+  /**
+   * Command parameters as JSON
+   */
+  params: JsonValue;
+  /**
+   * Human-readable description of what this command does
+   */
+  description: string | null;
+};
 /**
  * AI-generated edit script containing commands to execute.
  */
-export type EditScriptDto = { 
-/**
- * Original user intent/prompt
- */
-intent: string; 
-/**
- * List of edit commands to execute
- */
-commands: EditCommandDto[]; 
-/**
- * External requirements (assets to fetch, etc.)
- */
-requires: RequirementDto[]; 
-/**
- * QC rules to apply after execution
- */
-qcRules: string[]; 
-/**
- * Risk assessment for the edit
- */
-risk: RiskAssessmentDto; 
-/**
- * Human-readable explanation of the edit
- */
-explanation: string; 
-/**
- * Preview plan for the edit
- */
-previewPlan: PreviewPlanDto | null }
-export type EditorSettingsDto = { defaultTimelineZoom: number; snapToGrid: boolean; snapTolerance: number; showClipThumbnails: boolean; showAudioWaveforms: boolean; rippleEditDefault: boolean }
+export type EditScriptDto = {
+  /**
+   * Original user intent/prompt
+   */
+  intent: string;
+  /**
+   * List of edit commands to execute
+   */
+  commands: EditCommandDto[];
+  /**
+   * External requirements (assets to fetch, etc.)
+   */
+  requires: RequirementDto[];
+  /**
+   * QC rules to apply after execution
+   */
+  qcRules: string[];
+  /**
+   * Risk assessment for the edit
+   */
+  risk: RiskAssessmentDto;
+  /**
+   * Human-readable explanation of the edit
+   */
+  explanation: string;
+  /**
+   * Preview plan for the edit
+   */
+  previewPlan: PreviewPlanDto | null;
+};
+export type EditorSettingsDto = {
+  defaultTimelineZoom: number;
+  snapToGrid: boolean;
+  snapTolerance: number;
+  showClipThumbnails: boolean;
+  showAudioWaveforms: boolean;
+  rippleEditDefault: boolean;
+};
 /**
  * Response for estimate_generation_cost
  */
-export type EstimateGenerationCostResponse = { estimatedCents: number; quality: string; durationSec: number }
-export type ExportSettingsDto = { defaultFormat: string; defaultVideoCodec: string; defaultAudioCodec: string; defaultExportLocation: string | null; openFolderAfterExport: boolean }
+export type EstimateGenerationCostResponse = {
+  estimatedCents: number;
+  quality: string;
+  durationSec: number;
+};
+export type ExportSettingsDto = {
+  defaultFormat: string;
+  defaultVideoCodec: string;
+  defaultAudioCodec: string;
+  defaultExportLocation: string | null;
+  openFolderAfterExport: boolean;
+};
 /**
  * FFmpeg availability and version information.
  */
-export type FFmpegStatus = { 
-/**
- * Whether FFmpeg is available
- */
-available: boolean; 
-/**
- * FFmpeg version string (if available)
- */
-version: string | null; 
-/**
- * Whether using bundled FFmpeg (vs system)
- */
-isBundled: boolean; 
-/**
- * Path to ffmpeg executable
- */
-ffmpegPath: string | null; 
-/**
- * Path to ffprobe executable
- */
-ffprobePath: string | null }
+export type FFmpegStatus = {
+  /**
+   * Whether FFmpeg is available
+   */
+  available: boolean;
+  /**
+   * FFmpeg version string (if available)
+   */
+  version: string | null;
+  /**
+   * Whether using bundled FFmpeg (vs system)
+   */
+  isBundled: boolean;
+  /**
+   * Path to ffmpeg executable
+   */
+  ffmpegPath: string | null;
+  /**
+   * Path to ffprobe executable
+   */
+  ffprobePath: string | null;
+};
 /**
  * A detected face in a frame
  */
-export type FaceDetection = { 
-/**
- * Time in seconds when face was detected
- */
-timeSec: number; 
-/**
- * Detection confidence (0.0 - 1.0)
- */
-confidence: number; 
-/**
- * Bounding box
- */
-boundingBox: BoundingBox; 
-/**
- * Detected emotions (if available)
- */
-emotions: string[]; 
-/**
- * Face ID for tracking (if available)
- */
-faceId?: string | null }
-export type GeneralSettingsDto = { language: string; showWelcomeOnStartup: boolean; hasCompletedSetup: boolean; recentProjectsLimit: number; checkUpdatesOnStartup: boolean; defaultProjectLocation: string | null }
+export type FaceDetection = {
+  /**
+   * Time in seconds when face was detected
+   */
+  timeSec: number;
+  /**
+   * Detection confidence (0.0 - 1.0)
+   */
+  confidence: number;
+  /**
+   * Bounding box
+   */
+  boundingBox: BoundingBox;
+  /**
+   * Detected emotions (if available)
+   */
+  emotions: string[];
+  /**
+   * Face ID for tracking (if available)
+   */
+  faceId?: string | null;
+};
+export type GeneralSettingsDto = {
+  language: string;
+  showWelcomeOnStartup: boolean;
+  hasCompletedSetup: boolean;
+  recentProjectsLimit: number;
+  checkUpdatesOnStartup: boolean;
+  defaultProjectLocation: string | null;
+};
 /**
  * Response for get_annotation command
  */
-export type GetAnnotationResponse = { 
-/**
- * Annotation data (null if not found)
- */
-annotation: AssetAnnotation | null; 
-/**
- * Analysis status
- */
-status: AnalysisStatus }
+export type GetAnnotationResponse = {
+  /**
+   * Annotation data (null if not found)
+   */
+  annotation: AssetAnnotation | null;
+  /**
+   * Analysis status
+   */
+  status: AnalysisStatus;
+};
 /**
  * History (undo/redo) state event payload.
  */
-export type HistoryChangedEvent = { 
-/**
- * Whether undo is available
- */
-canUndo: boolean; 
-/**
- * Whether redo is available
- */
-canRedo: boolean; 
-/**
- * Number of operations in undo stack
- */
-undoCount: number; 
-/**
- * Number of operations in redo stack
- */
-redoCount: number }
+export type HistoryChangedEvent = {
+  /**
+   * Whether undo is available
+   */
+  canUndo: boolean;
+  /**
+   * Whether redo is available
+   */
+  canRedo: boolean;
+  /**
+   * Number of operations in undo stack
+   */
+  undoCount: number;
+  /**
+   * Number of operations in redo stack
+   */
+  redoCount: number;
+};
 /**
  * Job completed event payload.
  */
-export type JobCompletedEvent = { 
-/**
- * Job ID
- */
-jobId: string; 
-/**
- * Result data (job-specific)
- */
-result: JsonValue | null }
+export type JobCompletedEvent = {
+  /**
+   * Job ID
+   */
+  jobId: string;
+  /**
+   * Result data (job-specific)
+   */
+  result: JsonValue | null;
+};
 /**
  * Job failed event payload.
  */
-export type JobFailedEvent = { 
-/**
- * Job ID
- */
-jobId: string; 
-/**
- * Error message
- */
-error: string }
+export type JobFailedEvent = {
+  /**
+   * Job ID
+   */
+  jobId: string;
+  /**
+   * Error message
+   */
+  error: string;
+};
 /**
  * Background job information.
  */
-export type JobInfoDto = { 
-/**
- * Unique job ID
- */
-id: string; 
-/**
- * Job type (e.g., "proxy_generation", "transcription")
- */
-jobType: string; 
-/**
- * Priority level ("background", "normal", "preview", "user_request")
- */
-priority: string; 
-/**
- * Current job status
- */
-status: JobStatusDto; 
-/**
- * ISO 8601 creation timestamp
- */
-createdAt: string; 
-/**
- * ISO 8601 completion timestamp (if completed)
- */
-completedAt: string | null }
+export type JobInfoDto = {
+  /**
+   * Unique job ID
+   */
+  id: string;
+  /**
+   * Job type (e.g., "proxy_generation", "transcription")
+   */
+  jobType: string;
+  /**
+   * Priority level ("background", "normal", "preview", "user_request")
+   */
+  priority: string;
+  /**
+   * Current job status
+   */
+  status: JobStatusDto;
+  /**
+   * ISO 8601 creation timestamp
+   */
+  createdAt: string;
+  /**
+   * ISO 8601 completion timestamp (if completed)
+   */
+  completedAt: string | null;
+};
 /**
  * Job progress event payload.
  */
-export type JobProgressEvent = { 
-/**
- * Job ID
- */
-jobId: string; 
-/**
- * Progress percentage (0-100)
- */
-progress: number; 
-/**
- * Current status message
- */
-message: string | null }
+export type JobProgressEvent = {
+  /**
+   * Job ID
+   */
+  jobId: string;
+  /**
+   * Progress percentage (0-100)
+   */
+  progress: number;
+  /**
+   * Current status message
+   */
+  message: string | null;
+};
 /**
  * Job execution status.
  */
-export type JobStatusDto = 
-/**
- * Job is waiting in queue
- */
-{ type: "queued" } | 
-/**
- * Job is currently executing
- */
-{ type: "running"; progress: number; message: string | null } | 
-/**
- * Job completed successfully
- */
-{ type: "completed"; result: JsonValue } | 
-/**
- * Job failed with error
- */
-{ type: "failed"; error: string } | 
-/**
- * Job was cancelled by user
- */
-{ type: "cancelled" }
-export type JsonValue = null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue }
+export type JobStatusDto =
+  /**
+   * Job is waiting in queue
+   */
+  | { type: 'queued' }
+  /**
+   * Job is currently executing
+   */
+  | { type: 'running'; progress: number; message: string | null }
+  /**
+   * Job completed successfully
+   */
+  | { type: 'completed'; result: JsonValue }
+  /**
+   * Job failed with error
+   */
+  | { type: 'failed'; error: string }
+  /**
+   * Job was cancelled by user
+   */
+  | { type: 'cancelled' };
+export type JsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | JsonValue[]
+  | { [key in string]: JsonValue };
 /**
  * License information for an asset
  */
-export type LicenseInfo = { 
-/**
- * Source of the asset
- */
-source: LicenseSource; 
-/**
- * Provider name (e.g., "Pexels", "Pixabay")
- */
-provider?: string | null; 
-/**
- * Type of license
- */
-licenseType: LicenseType; 
-/**
- * Path to license proof file
- */
-proofPath?: string | null; 
-/**
- * Allowed uses (e.g., ["commercial", "personal"])
- */
-allowedUse: string[]; 
-/**
- * License expiration date (ISO 8601)
- */
-expiresAt?: string | null }
+export type LicenseInfo = {
+  /**
+   * Source of the asset
+   */
+  source: LicenseSource;
+  /**
+   * Provider name (e.g., "Pexels", "Pixabay")
+   */
+  provider?: string | null;
+  /**
+   * Type of license
+   */
+  licenseType: LicenseType;
+  /**
+   * Path to license proof file
+   */
+  proofPath?: string | null;
+  /**
+   * Allowed uses (e.g., ["commercial", "personal"])
+   */
+  allowedUse: string[];
+  /**
+   * License expiration date (ISO 8601)
+   */
+  expiresAt?: string | null;
+};
 /**
  * License source type
  */
-export type LicenseSource = "user" | "stockProvider" | "generated" | "plugin"
+export type LicenseSource = 'user' | 'stockProvider' | 'generated' | 'plugin';
 /**
  * License type enumeration
  */
-export type LicenseType = "royalty_free" | "cc_0" | "cc_by" | "cc_by_sa" | "editorial" | "custom" | "unknown"
+export type LicenseType =
+  | 'royalty_free'
+  | 'cc_0'
+  | 'cc_by'
+  | 'cc_by_sa'
+  | 'editorial'
+  | 'custom'
+  | 'unknown';
 /**
  * Timeline marker
  */
-export type Marker = { id: string; timeSec: number; label: string; color: Color; markerType: MarkerType }
+export type Marker = {
+  id: string;
+  timeSec: number;
+  label: string;
+  color: Color;
+  markerType: MarkerType;
+};
 /**
  * Marker type enumeration
  */
-export type MarkerType = "generic" | "chapter" | "hook" | "cta" | "todo"
+export type MarkerType = 'generic' | 'chapter' | 'hook' | 'cta' | 'todo';
 /**
  * Media information extracted by FFprobe.
  */
-export type MediaInfo = { 
-/**
- * Duration in seconds
- */
-durationSec: number; 
-/**
- * Video stream info (if present)
- */
-video: VideoStreamInfo | null; 
-/**
- * Audio stream info (if present)
- */
-audio: AudioStreamInfo | null; 
-/**
- * Container format
- */
-format: string; 
-/**
- * File size in bytes
- */
-sizeBytes: number }
+export type MediaInfo = {
+  /**
+   * Duration in seconds
+   */
+  durationSec: number;
+  /**
+   * Video stream info (if present)
+   */
+  video: VideoStreamInfo | null;
+  /**
+   * Audio stream info (if present)
+   */
+  audio: AudioStreamInfo | null;
+  /**
+   * Container format
+   */
+  format: string;
+  /**
+   * File size in bytes
+   */
+  sizeBytes: number;
+};
 /**
  * Result of memory cleanup operation.
  */
-export type MemoryCleanupResult = { 
-/**
- * Bytes freed from pool shrink
- */
-poolBytesFreed: number; 
-/**
- * Cache entries evicted
- */
-cacheEntriesEvicted: number; 
-/**
- * Total bytes freed
- */
-totalBytesFreed: number }
+export type MemoryCleanupResult = {
+  /**
+   * Bytes freed from pool shrink
+   */
+  poolBytesFreed: number;
+  /**
+   * Cache entries evicted
+   */
+  cacheEntriesEvicted: number;
+  /**
+   * Total bytes freed
+   */
+  totalBytesFreed: number;
+};
 /**
  * Memory usage statistics.
  */
-export type MemoryStatsDto = { 
-/**
- * Memory pool statistics
- */
-poolStats: PoolStatsDto; 
-/**
- * Cache statistics
- */
-cacheStats: CacheStatsDto; 
-/**
- * Total allocated bytes (Rust side)
- */
-allocatedBytes: number; 
-/**
- * System memory info (if available)
- */
-systemMemory: SystemMemoryDto | null }
+export type MemoryStatsDto = {
+  /**
+   * Memory pool statistics
+   */
+  poolStats: PoolStatsDto;
+  /**
+   * Cache statistics
+   */
+  cacheStats: CacheStatsDto;
+  /**
+   * Total allocated bytes (Rust side)
+   */
+  allocatedBytes: number;
+  /**
+   * System memory info (if available)
+   */
+  systemMemory: SystemMemoryDto | null;
+};
 /**
  * A detected object in a frame
  */
-export type ObjectDetection = { 
-/**
- * Time in seconds when object was detected
- */
-timeSec: number; 
-/**
- * Object labels/categories
- */
-labels: string[]; 
-/**
- * Detection confidence (0.0 - 1.0)
- */
-confidence: number; 
-/**
- * Bounding box (if available)
- */
-boundingBox?: BoundingBox | null }
-export type PerformanceSettingsDto = { hardwareAcceleration: boolean; proxyGeneration: boolean; proxyResolution: string; maxConcurrentJobs: number; memoryLimitMb: number; cacheSizeMb: number }
-export type PlaybackSettingsDto = { defaultVolume: number; loopPlayback: boolean; previewQuality: string; audioScrubbing: boolean }
+export type ObjectDetection = {
+  /**
+   * Time in seconds when object was detected
+   */
+  timeSec: number;
+  /**
+   * Object labels/categories
+   */
+  labels: string[];
+  /**
+   * Detection confidence (0.0 - 1.0)
+   */
+  confidence: number;
+  /**
+   * Bounding box (if available)
+   */
+  boundingBox?: BoundingBox | null;
+};
+export type PerformanceSettingsDto = {
+  hardwareAcceleration: boolean;
+  proxyGeneration: boolean;
+  proxyResolution: string;
+  maxConcurrentJobs: number;
+  memoryLimitMb: number;
+  cacheSizeMb: number;
+};
+export type PlaybackSettingsDto = {
+  defaultVolume: number;
+  loopPlayback: boolean;
+  previewQuality: string;
+  audioScrubbing: boolean;
+};
 /**
  * 2D coordinates (normalized or pixel)
  */
-export type Point2D = { x: number; y: number }
+export type Point2D = { x: number; y: number };
 /**
  * Response for poll_generation_job
  */
-export type PollGenerationJobResponse = { status: string; progress: number | null; message: string | null; downloadUrl: string | null; durationSec: number | null; hasAudio: boolean | null; error: string | null }
+export type PollGenerationJobResponse = {
+  status: string;
+  progress: number | null;
+  message: string | null;
+  downloadUrl: string | null;
+  durationSec: number | null;
+  hasAudio: boolean | null;
+  error: string | null;
+};
 /**
  * Memory pool statistics.
  */
-export type PoolStatsDto = { 
-/**
- * Total number of memory blocks in pool
- */
-totalBlocks: number; 
-/**
- * Number of currently allocated blocks
- */
-allocatedBlocks: number; 
-/**
- * Total pool size in bytes
- */
-totalSizeBytes: number; 
-/**
- * Currently used size in bytes
- */
-usedSizeBytes: number; 
-/**
- * Total allocation requests
- */
-allocationCount: number; 
-/**
- * Total release operations
- */
-releaseCount: number; 
-/**
- * Allocations served from pool
- */
-poolHits: number; 
-/**
- * Allocations that required new allocation
- */
-poolMisses: number; 
-/**
- * Hit rate (0.0 - 1.0)
- */
-hitRate: number }
+export type PoolStatsDto = {
+  /**
+   * Total number of memory blocks in pool
+   */
+  totalBlocks: number;
+  /**
+   * Number of currently allocated blocks
+   */
+  allocatedBlocks: number;
+  /**
+   * Total pool size in bytes
+   */
+  totalSizeBytes: number;
+  /**
+   * Currently used size in bytes
+   */
+  usedSizeBytes: number;
+  /**
+   * Total allocation requests
+   */
+  allocationCount: number;
+  /**
+   * Total release operations
+   */
+  releaseCount: number;
+  /**
+   * Allocations served from pool
+   */
+  poolHits: number;
+  /**
+   * Allocations that required new allocation
+   */
+  poolMisses: number;
+  /**
+   * Hit rate (0.0 - 1.0)
+   */
+  hitRate: number;
+};
 /**
  * Preview plan for an EditScript.
  */
-export type PreviewPlanDto = { 
-/**
- * Time ranges to preview
- */
-ranges: PreviewRangeDto[]; 
-/**
- * Whether full render is needed
- */
-fullRender: boolean }
+export type PreviewPlanDto = {
+  /**
+   * Time ranges to preview
+   */
+  ranges: PreviewRangeDto[];
+  /**
+   * Whether full render is needed
+   */
+  fullRender: boolean;
+};
 /**
  * A time range for preview.
  */
-export type PreviewRangeDto = { 
-/**
- * Start time in seconds
- */
-startSec: number; 
-/**
- * End time in seconds
- */
-endSec: number }
+export type PreviewRangeDto = {
+  /**
+   * Start time in seconds
+   */
+  startSec: number;
+  /**
+   * End time in seconds
+   */
+  endSec: number;
+};
 /**
  * Project information returned when creating or opening a project.
  */
-export type ProjectInfo = { 
-/**
- * Unique project identifier (ULID format)
- */
-id: string; 
-/**
- * Human-readable project name
- */
-name: string; 
-/**
- * Absolute path to project directory
- */
-path: string; 
-/**
- * ISO 8601 timestamp of project creation
- */
-createdAt: string }
+export type ProjectInfo = {
+  /**
+   * Unique project identifier (ULID format)
+   */
+  id: string;
+  /**
+   * Human-readable project name
+   */
+  name: string;
+  /**
+   * Absolute path to project directory
+   */
+  path: string;
+  /**
+   * ISO 8601 timestamp of project creation
+   */
+  createdAt: string;
+};
 /**
  * Project metadata information.
  */
-export type ProjectMetaDto = { 
-/**
- * Project display name
- */
-name: string; 
-/**
- * Project format version
- */
-version: string; 
-/**
- * ISO 8601 creation timestamp
- */
-createdAt: string; 
-/**
- * ISO 8601 last modification timestamp
- */
-modifiedAt: string; 
-/**
- * Optional project description
- */
-description: string | null; 
-/**
- * Optional author name
- */
-author: string | null }
+export type ProjectMetaDto = {
+  /**
+   * Project display name
+   */
+  name: string;
+  /**
+   * Project format version
+   */
+  version: string;
+  /**
+   * ISO 8601 creation timestamp
+   */
+  createdAt: string;
+  /**
+   * ISO 8601 last modification timestamp
+   */
+  modifiedAt: string;
+  /**
+   * Optional project description
+   */
+  description: string | null;
+  /**
+   * Optional author name
+   */
+  author: string | null;
+};
 /**
  * Project opened event payload.
  */
-export type ProjectOpenedEvent = { 
-/**
- * Project name
- */
-name: string; 
-/**
- * Project path
- */
-path: string }
+export type ProjectOpenedEvent = {
+  /**
+   * Project name
+   */
+  name: string;
+  /**
+   * Project path
+   */
+  path: string;
+};
 /**
  * Project saved event payload.
  */
-export type ProjectSavedEvent = { 
-/**
- * Project path
- */
-path: string; 
-/**
- * ISO 8601 timestamp
- */
-timestamp: string }
+export type ProjectSavedEvent = {
+  /**
+   * Project path
+   */
+  path: string;
+  /**
+   * ISO 8601 timestamp
+   */
+  timestamp: string;
+};
 /**
  * Full project state for frontend synchronization.
  */
-export type ProjectStateDto = { 
-/**
- * Project metadata
- */
-meta: ProjectMetaDto; 
-/**
- * All assets in the project
- */
-assets: Asset[]; 
-/**
- * All sequences in the project
- */
-sequences: Sequence[]; 
-/**
- * All bins (folders) in the project
- */
-bins: Bin[]; 
-/**
- * Currently active sequence ID
- */
-activeSequenceId: string | null; 
-/**
- * Whether project has unsaved changes
- */
-isDirty: boolean }
+export type ProjectStateDto = {
+  /**
+   * Project metadata
+   */
+  meta: ProjectMetaDto;
+  /**
+   * All assets in the project
+   */
+  assets: Asset[];
+  /**
+   * All sequences in the project
+   */
+  sequences: Sequence[];
+  /**
+   * All bins (folders) in the project
+   */
+  bins: Bin[];
+  /**
+   * Currently active sequence ID
+   */
+  activeSequenceId: string | null;
+  /**
+   * Whether project has unsaved changes
+   */
+  isDirty: boolean;
+};
 /**
  * AI proposal awaiting user approval.
  */
-export type ProposalDto = { 
-/**
- * Unique proposal ID
- */
-id: string; 
-/**
- * The edit script to be applied
- */
-editScript: EditScriptDto; 
-/**
- * Current status ("pending", "applied", "rejected")
- */
-status: string; 
-/**
- * ISO 8601 creation timestamp
- */
-createdAt: string; 
-/**
- * Job ID for preview generation (if any)
- */
-previewJobId: string | null; 
-/**
- * Operation IDs if proposal was applied
- */
-appliedOpIds: string[] | null }
+export type ProposalDto = {
+  /**
+   * Unique proposal ID
+   */
+  id: string;
+  /**
+   * The edit script to be applied
+   */
+  editScript: EditScriptDto;
+  /**
+   * Current status ("pending", "applied", "rejected")
+   */
+  status: string;
+  /**
+   * ISO 8601 creation timestamp
+   */
+  createdAt: string;
+  /**
+   * Job ID for preview generation (if any)
+   */
+  previewJobId: string | null;
+  /**
+   * Operation IDs if proposal was applied
+   */
+  appliedOpIds: string[] | null;
+};
 /**
  * Proposal review mode for settings DTO
  */
-export type ProposalReviewModeDto = "always" | "smart" | "auto_apply"
+export type ProposalReviewModeDto = 'always' | 'smart' | 'auto_apply';
 /**
  * Capabilities of an analysis provider
  */
-export type ProviderCapabilities = { 
-/**
- * Provider identifier
- */
-provider: AnalysisProvider; 
-/**
- * Supported analysis types
- */
-supportedTypes: AnalysisType[]; 
-/**
- * Whether the provider requires network access
- */
-requiresNetwork: boolean; 
-/**
- * Whether the provider has associated costs
- */
-hasCost: boolean; 
-/**
- * Human-readable description
- */
-description: string }
+export type ProviderCapabilities = {
+  /**
+   * Provider identifier
+   */
+  provider: AnalysisProvider;
+  /**
+   * Supported analysis types
+   */
+  supportedTypes: AnalysisType[];
+  /**
+   * Whether the provider requires network access
+   */
+  requiresNetwork: boolean;
+  /**
+   * Whether the provider has associated costs
+   */
+  hasCost: boolean;
+  /**
+   * Human-readable description
+   */
+  description: string;
+};
 /**
  * AI provider configuration DTO
  */
-export type ProviderConfigDto = { 
-/**
- * Provider type: "openai", "anthropic", or "local"
- */
-providerType: string; 
-/**
- * API key (for cloud providers)
- */
-apiKey: string | null; 
-/**
- * Base URL (for custom endpoints or local models)
- */
-baseUrl: string | null; 
-/**
- * Model to use
- */
-model: string | null }
+export type ProviderConfigDto = {
+  /**
+   * Provider type: "openai", "anthropic", or "local"
+   */
+  providerType: string;
+  /**
+   * API key (for cloud providers)
+   */
+  apiKey: string | null;
+  /**
+   * Base URL (for custom endpoints or local models)
+   */
+  baseUrl: string | null;
+  /**
+   * Model to use
+   */
+  model: string | null;
+};
 /**
  * AI provider status DTO
  */
-export type ProviderStatusDto = { 
-/**
- * Provider type (openai, anthropic, local)
- */
-providerType: string | null; 
-/**
- * Whether a provider is configured
- */
-isConfigured: boolean; 
-/**
- * Whether the provider is available
- */
-isAvailable: boolean; 
-/**
- * Current model being used
- */
-currentModel: string | null; 
-/**
- * Available models for this provider
- */
-availableModels: string[]; 
-/**
- * Error message if any
- */
-errorMessage: string | null }
+export type ProviderStatusDto = {
+  /**
+   * Provider type (openai, anthropic, local)
+   */
+  providerType: string | null;
+  /**
+   * Whether a provider is configured
+   */
+  isConfigured: boolean;
+  /**
+   * Whether the provider is available
+   */
+  isAvailable: boolean;
+  /**
+   * Current model being used
+   */
+  currentModel: string | null;
+  /**
+   * Available models for this provider
+   */
+  availableModels: string[];
+  /**
+   * Error message if any
+   */
+  errorMessage: string | null;
+};
 /**
  * AI provider type for settings DTO
  */
-export type ProviderTypeDto = "openai" | "anthropic" | "gemini" | "local"
+export type ProviderTypeDto = 'openai' | 'anthropic' | 'gemini' | 'local';
 /**
  * Proxy video generation status
- * 
+ *
  * Tracks the lifecycle of proxy video generation for preview playback.
  * Videos larger than 720p automatically trigger proxy generation on import.
  */
-export type ProxyStatus = 
-/**
- * No proxy needed (video <= 720p or non-video asset)
- */
-"notNeeded" | 
-/**
- * Proxy generation is queued/pending
- */
-"pending" | 
-/**
- * Proxy is currently being generated
- */
-"generating" | 
-/**
- * Proxy generation completed successfully
- */
-"ready" | 
-/**
- * Proxy generation failed
- */
-"failed"
+export type ProxyStatus =
+  /**
+   * No proxy needed (video <= 720p or non-video asset)
+   */
+  | 'notNeeded'
+  /**
+   * Proxy generation is queued/pending
+   */
+  | 'pending'
+  /**
+   * Proxy is currently being generated
+   */
+  | 'generating'
+  /**
+   * Proxy generation completed successfully
+   */
+  | 'ready'
+  /**
+   * Proxy generation failed
+   */
+  | 'failed';
 /**
  * Ratio (for fps, aspect ratio, etc.)
  */
-export type Ratio = { 
-/**
- * Numerator
- */
-num: number; 
-/**
- * Denominator
- */
-den: number }
+export type Ratio = {
+  /**
+   * Numerator
+   */
+  num: number;
+  /**
+   * Denominator
+   */
+  den: number;
+};
 /**
  * Result of starting a render export job.
  */
-export type RenderStartResult = { 
-/**
- * Job ID for tracking render progress
- */
-jobId: string; 
-/**
- * Output file path
- */
-outputPath: string; 
-/**
- * Initial status ("started")
- */
-status: string }
+export type RenderStartResult = {
+  /**
+   * Job ID for tracking render progress
+   */
+  jobId: string;
+  /**
+   * Output file path
+   */
+  outputPath: string;
+  /**
+   * Initial status ("started")
+   */
+  status: string;
+};
 /**
  * External requirement for an EditScript (e.g., asset to fetch).
  */
-export type RequirementDto = { 
-/**
- * Requirement type (e.g., "assetSearch", "assetGenerate")
- */
-kind: string; 
-/**
- * Search query or generation prompt
- */
-query: string | null; 
-/**
- * Provider to use (e.g., "unsplash", "pexels")
- */
-provider: string | null; 
-/**
- * Additional parameters
- */
-params: JsonValue | null }
+export type RequirementDto = {
+  /**
+   * Requirement type (e.g., "assetSearch", "assetGenerate")
+   */
+  kind: string;
+  /**
+   * Search query or generation prompt
+   */
+  query: string | null;
+  /**
+   * Provider to use (e.g., "unsplash", "pexels")
+   */
+  provider: string | null;
+  /**
+   * Additional parameters
+   */
+  params: JsonValue | null;
+};
 /**
  * Risk assessment for an AI-generated edit.
  */
-export type RiskAssessmentDto = { 
-/**
- * Copyright risk level ("none", "low", "medium", "high")
- */
-copyright: string; 
-/**
- * NSFW risk level ("none", "possible", "likely")
- */
-nsfw: string }
+export type RiskAssessmentDto = {
+  /**
+   * Copyright risk level ("none", "low", "medium", "high")
+   */
+  copyright: string;
+  /**
+   * NSFW risk level ("none", "possible", "likely")
+   */
+  nsfw: string;
+};
 /**
  * Options for full-text search queries.
  */
-export type SearchOptionsDto = { 
-/**
- * Maximum number of results per index
- */
-limit: number | null; 
-/**
- * Offset for pagination
- */
-offset: number | null; 
-/**
- * Filter by asset IDs
- */
-assetIds: string[] | null; 
-/**
- * Filter by project ID
- */
-projectId: string | null; 
-/**
- * Search only specific indexes ("assets", "transcripts")
- */
-indexes: string[] | null }
+export type SearchOptionsDto = {
+  /**
+   * Maximum number of results per index
+   */
+  limit: number | null;
+  /**
+   * Offset for pagination
+   */
+  offset: number | null;
+  /**
+   * Filter by asset IDs
+   */
+  assetIds: string[] | null;
+  /**
+   * Filter by project ID
+   */
+  projectId: string | null;
+  /**
+   * Search only specific indexes ("assets", "transcripts")
+   */
+  indexes: string[] | null;
+};
 /**
  * Search query parameters for SQLite-based search
  */
-export type SearchQueryDto = { 
-/**
- * Text to search for
- */
-text: string | null; 
-/**
- * Search modality: "text", "visual", "audio", "hybrid"
- */
-modality: string | null; 
-/**
- * Duration filter: [min, max] in seconds
- */
-durationRange: [number, number] | null; 
-/**
- * Filter by specific asset IDs
- */
-assetIds: string[] | null; 
-/**
- * Minimum quality score (0.0 - 1.0)
- */
-minQuality: number | null; 
-/**
- * Maximum number of results
- */
-limit: number | null }
+export type SearchQueryDto = {
+  /**
+   * Text to search for
+   */
+  text: string | null;
+  /**
+   * Search modality: "text", "visual", "audio", "hybrid"
+   */
+  modality: string | null;
+  /**
+   * Duration filter: [min, max] in seconds
+   */
+  durationRange: [number, number] | null;
+  /**
+   * Filter by specific asset IDs
+   */
+  assetIds: string[] | null;
+  /**
+   * Minimum quality score (0.0 - 1.0)
+   */
+  minQuality: number | null;
+  /**
+   * Maximum number of results
+   */
+  limit: number | null;
+};
 /**
  * Search response with results and metadata
  */
-export type SearchResponseDto = { 
-/**
- * Search results
- */
-results: SearchResultDto[]; 
-/**
- * Total number of results found
- */
-total: number; 
-/**
- * Query processing time in milliseconds
- */
-processingTimeMs: number }
+export type SearchResponseDto = {
+  /**
+   * Search results
+   */
+  results: SearchResultDto[];
+  /**
+   * Total number of results found
+   */
+  total: number;
+  /**
+   * Query processing time in milliseconds
+   */
+  processingTimeMs: number;
+};
 /**
  * A single search result from SQLite search
  */
-export type SearchResultDto = { 
-/**
- * Asset ID
- */
-assetId: string; 
-/**
- * Start time in seconds
- */
-startSec: number; 
-/**
- * End time in seconds
- */
-endSec: number; 
-/**
- * Relevance score (0.0 - 1.0)
- */
-score: number; 
-/**
- * Reasons for the match
- */
-reasons: string[]; 
-/**
- * Thumbnail URI (if available)
- */
-thumbnailUri: string | null; 
-/**
- * Source of the match: "transcript", "shot", "audio", "multiple", "unknown"
- */
-source: string }
+export type SearchResultDto = {
+  /**
+   * Asset ID
+   */
+  assetId: string;
+  /**
+   * Start time in seconds
+   */
+  startSec: number;
+  /**
+   * End time in seconds
+   */
+  endSec: number;
+  /**
+   * Relevance score (0.0 - 1.0)
+   */
+  score: number;
+  /**
+   * Reasons for the match
+   */
+  reasons: string[];
+  /**
+   * Thumbnail URI (if available)
+   */
+  thumbnailUri: string | null;
+  /**
+   * Source of the match: "transcript", "shot", "audio", "multiple", "unknown"
+   */
+  source: string;
+};
 /**
  * Combined search results from all indexes.
  */
-export type SearchResultsDto = { 
-/**
- * Matching assets
- */
-assets: AssetSearchResultDto[]; 
-/**
- * Matching transcript segments
- */
-transcripts: TranscriptSearchResultDto[]; 
-/**
- * Total asset matches (estimated)
- */
-assetTotal: number | null; 
-/**
- * Total transcript matches (estimated)
- */
-transcriptTotal: number | null; 
-/**
- * Query processing time in milliseconds
- */
-processingTimeMs: number }
+export type SearchResultsDto = {
+  /**
+   * Matching assets
+   */
+  assets: AssetSearchResultDto[];
+  /**
+   * Matching transcript segments
+   */
+  transcripts: TranscriptSearchResultDto[];
+  /**
+   * Total asset matches (estimated)
+   */
+  assetTotal: number | null;
+  /**
+   * Total transcript matches (estimated)
+   */
+  transcriptTotal: number | null;
+  /**
+   * Query processing time in milliseconds
+   */
+  processingTimeMs: number;
+};
 /**
  * Sequence (timeline container)
  * Uses denormalized structure - tracks are stored directly, not as IDs
  */
-export type Sequence = { id: string; name: string; format: SequenceFormat; 
-/**
- * Tracks stored directly for efficient Event Sourcing
- */
-tracks: Track[]; markers: Marker[]; createdAt: string; modifiedAt: string }
+export type Sequence = {
+  id: string;
+  name: string;
+  format: SequenceFormat;
+  /**
+   * Tracks stored directly for efficient Event Sourcing
+   */
+  tracks: Track[];
+  markers: Marker[];
+  createdAt: string;
+  modifiedAt: string;
+};
 /**
  * Sequence format specification
  */
-export type SequenceFormat = { 
-/**
- * Canvas size
- */
-canvas: Canvas; 
-/**
- * Frame rate
- */
-fps: Ratio; 
-/**
- * Audio sample rate in Hz
- */
-audioSampleRate: number; 
-/**
- * Number of audio channels
- */
-audioChannels: number }
-export type ShortcutSettingsDto = { customShortcuts: { [key in string]: string } }
+export type SequenceFormat = {
+  /**
+   * Canvas size
+   */
+  canvas: Canvas;
+  /**
+   * Frame rate
+   */
+  fps: Ratio;
+  /**
+   * Audio sample rate in Hz
+   */
+  audioSampleRate: number;
+  /**
+   * Number of audio channels
+   */
+  audioChannels: number;
+};
+export type ShortcutSettingsDto = { customShortcuts: { [key in string]: string } };
 /**
  * Configuration for shot detection
  */
-export type ShotDetectionConfig = { 
-/**
- * Scene change threshold (0.0 - 1.0)
- * Lower = more sensitive (more shots detected)
- */
-threshold?: number; 
-/**
- * Minimum shot duration in seconds
- */
-minDurationSec?: number; 
-/**
- * Generate keyframe thumbnails
- */
-generateKeyframes?: boolean }
+export type ShotDetectionConfig = {
+  /**
+   * Scene change threshold (0.0 - 1.0)
+   * Lower = more sensitive (more shots detected)
+   */
+  threshold?: number;
+  /**
+   * Minimum shot duration in seconds
+   */
+  minDurationSec?: number;
+  /**
+   * Generate keyframe thumbnails
+   */
+  generateKeyframes?: boolean;
+};
 /**
  * A detected shot/scene boundary
  */
-export type ShotResult = { 
-/**
- * Start time in seconds
- */
-startSec: number; 
-/**
- * End time in seconds
- */
-endSec: number; 
-/**
- * Detection confidence (0.0 - 1.0)
- */
-confidence: number; 
-/**
- * Optional keyframe thumbnail path
- */
-keyframePath?: string | null }
+export type ShotResult = {
+  /**
+   * Start time in seconds
+   */
+  startSec: number;
+  /**
+   * End time in seconds
+   */
+  endSec: number;
+  /**
+   * Detection confidence (0.0 - 1.0)
+   */
+  confidence: number;
+  /**
+   * Optional keyframe thumbnail path
+   */
+  keyframePath?: string | null;
+};
 /**
  * State change types for event broadcasting.
  */
-export type StateChange = 
-/**
- * A new clip was created
- */
-{ type: "clipCreated"; clip_id: string } | 
-/**
- * An existing clip was modified
- */
-{ type: "clipModified"; clip_id: string } | 
-/**
- * A clip was deleted
- */
-{ type: "clipDeleted"; clip_id: string } | 
-/**
- * A new track was created
- */
-{ type: "trackCreated"; track_id: string } | 
-/**
- * An existing track was modified
- */
-{ type: "trackModified"; track_id: string } | 
-/**
- * A track was deleted
- */
-{ type: "trackDeleted"; track_id: string } | 
-/**
- * A new asset was imported
- */
-{ type: "assetAdded"; asset_id: string } | 
-/**
- * An existing asset was modified
- */
-{ type: "assetModified"; asset_id: string } | 
-/**
- * An asset was removed from the project
- */
-{ type: "assetRemoved"; asset_id: string } | 
-/**
- * A new caption was created
- */
-{ type: "captionCreated"; caption_id: string } | 
-/**
- * An existing caption was modified
- */
-{ type: "captionModified"; caption_id: string } | 
-/**
- * A caption was deleted
- */
-{ type: "captionDeleted"; caption_id: string } | 
-/**
- * An effect was applied to a clip (legacy alias for EffectAdded)
- */
-{ type: "effectApplied"; effect_id: string } | 
-/**
- * A new effect was added to a clip
- */
-{ type: "effectAdded"; effect_id: string; clip_id: string } | 
-/**
- * An effect was updated
- */
-{ type: "effectUpdated"; effect_id: string } | 
-/**
- * An effect was removed from a clip
- */
-{ type: "effectRemoved"; effect_id: string } | 
-/**
- * A new sequence was created
- */
-{ type: "sequenceCreated"; sequence_id: string } | 
-/**
- * An existing sequence was modified
- */
-{ type: "sequenceModified"; sequence_id: string }
+export type StateChange =
+  /**
+   * A new clip was created
+   */
+  | { type: 'clipCreated'; clip_id: string }
+  /**
+   * An existing clip was modified
+   */
+  | { type: 'clipModified'; clip_id: string }
+  /**
+   * A clip was deleted
+   */
+  | { type: 'clipDeleted'; clip_id: string }
+  /**
+   * A new track was created
+   */
+  | { type: 'trackCreated'; track_id: string }
+  /**
+   * An existing track was modified
+   */
+  | { type: 'trackModified'; track_id: string }
+  /**
+   * A track was deleted
+   */
+  | { type: 'trackDeleted'; track_id: string }
+  /**
+   * A new asset was imported
+   */
+  | { type: 'assetAdded'; asset_id: string }
+  /**
+   * An existing asset was modified
+   */
+  | { type: 'assetModified'; asset_id: string }
+  /**
+   * An asset was removed from the project
+   */
+  | { type: 'assetRemoved'; asset_id: string }
+  /**
+   * A new caption was created
+   */
+  | { type: 'captionCreated'; caption_id: string }
+  /**
+   * An existing caption was modified
+   */
+  | { type: 'captionModified'; caption_id: string }
+  /**
+   * A caption was deleted
+   */
+  | { type: 'captionDeleted'; caption_id: string }
+  /**
+   * An effect was applied to a clip (legacy alias for EffectAdded)
+   */
+  | { type: 'effectApplied'; effect_id: string }
+  /**
+   * A new effect was added to a clip
+   */
+  | { type: 'effectAdded'; effect_id: string; clip_id: string }
+  /**
+   * An effect was updated
+   */
+  | { type: 'effectUpdated'; effect_id: string }
+  /**
+   * An effect was removed from a clip
+   */
+  | { type: 'effectRemoved'; effect_id: string }
+  /**
+   * A new sequence was created
+   */
+  | { type: 'sequenceCreated'; sequence_id: string }
+  /**
+   * An existing sequence was modified
+   */
+  | { type: 'sequenceModified'; sequence_id: string };
 /**
  * Generic state change event payload.
  */
-export type StateChangedEvent = { 
-/**
- * Operation ID that caused the change
- */
-opId: string; 
-/**
- * List of state changes
- */
-changes: StateChange[]; 
-/**
- * Created entity IDs
- */
-createdIds: string[]; 
-/**
- * Deleted entity IDs
- */
-deletedIds: string[] }
+export type StateChangedEvent = {
+  /**
+   * Operation ID that caused the change
+   */
+  opId: string;
+  /**
+   * List of state changes
+   */
+  changes: StateChange[];
+  /**
+   * Created entity IDs
+   */
+  createdIds: string[];
+  /**
+   * Deleted entity IDs
+   */
+  deletedIds: string[];
+};
 /**
  * Request for submit_video_generation
  */
-export type SubmitVideoGenerationRequest = { prompt: string; mode?: string; quality?: string; durationSec?: number; negativePrompt: string | null; referenceImages?: string[]; referenceVideos?: string[]; referenceAudio?: string[]; aspectRatio?: string; seed: number | null; lipSyncLanguage: string | null }
+export type SubmitVideoGenerationRequest = {
+  prompt: string;
+  mode?: string;
+  quality?: string;
+  durationSec?: number;
+  negativePrompt: string | null;
+  referenceImages?: string[];
+  referenceVideos?: string[];
+  referenceAudio?: string[];
+  aspectRatio?: string;
+  seed: number | null;
+  lipSyncLanguage: string | null;
+};
 /**
  * Response for submit_video_generation
  */
-export type SubmitVideoGenerationResponse = { jobId: string; providerJobId: string; estimatedCostCents: number }
+export type SubmitVideoGenerationResponse = {
+  jobId: string;
+  providerJobId: string;
+  estimatedCostCents: number;
+};
 /**
  * System memory information.
  */
-export type SystemMemoryDto = { 
-/**
- * Total physical memory in bytes
- */
-totalBytes: number; 
-/**
- * Available memory in bytes
- */
-availableBytes: number; 
-/**
- * Used memory in bytes
- */
-usedBytes: number; 
-/**
- * Usage percentage (0-100)
- */
-usagePercent: number }
+export type SystemMemoryDto = {
+  /**
+   * Total physical memory in bytes
+   */
+  totalBytes: number;
+  /**
+   * Available memory in bytes
+   */
+  availableBytes: number;
+  /**
+   * Used memory in bytes
+   */
+  usedBytes: number;
+  /**
+   * Usage percentage (0-100)
+   */
+  usagePercent: number;
+};
 /**
  * Detected text in a frame
  */
-export type TextDetection = { 
-/**
- * Time in seconds when text was detected
- */
-timeSec: number; 
-/**
- * Detected text content
- */
-text: string; 
-/**
- * Detection confidence (0.0 - 1.0)
- */
-confidence: number; 
-/**
- * Bounding box
- */
-boundingBox?: BoundingBox | null; 
-/**
- * Detected language code
- */
-language?: string | null }
+export type TextDetection = {
+  /**
+   * Time in seconds when text was detected
+   */
+  timeSec: number;
+  /**
+   * Detected text content
+   */
+  text: string;
+  /**
+   * Detection confidence (0.0 - 1.0)
+   */
+  confidence: number;
+  /**
+   * Bounding box
+   */
+  boundingBox?: BoundingBox | null;
+  /**
+   * Detected language code
+   */
+  language?: string | null;
+};
 /**
  * Track (contains clips directly for denormalized storage)
  */
-export type Track = { id: string; kind: TrackKind; name: string; 
-/**
- * Clips stored directly for efficient Event Sourcing
- */
-clips: Clip[]; blendMode: BlendMode; muted: boolean; locked: boolean; visible: boolean; 
-/**
- * Volume for audio tracks (0.0 - 2.0, 1.0 = 100%)
- */
-volume: number }
+export type Track = {
+  id: string;
+  kind: TrackKind;
+  name: string;
+  /**
+   * Clips stored directly for efficient Event Sourcing
+   */
+  clips: Clip[];
+  blendMode: BlendMode;
+  muted: boolean;
+  locked: boolean;
+  visible: boolean;
+  /**
+   * Volume for audio tracks (0.0 - 2.0, 1.0 = 100%)
+   */
+  volume: number;
+};
 /**
  * Track event payload.
  */
-export type TrackEvent = { 
-/**
- * Track ID
- */
-trackId: string; 
-/**
- * Parent sequence ID
- */
-sequenceId: string | null }
+export type TrackEvent = {
+  /**
+   * Track ID
+   */
+  trackId: string;
+  /**
+   * Parent sequence ID
+   */
+  sequenceId: string | null;
+};
 /**
  * Track type/kind enumeration
  */
-export type TrackKind = "video" | "audio" | "caption" | "overlay"
+export type TrackKind = 'video' | 'audio' | 'caption' | 'overlay';
 /**
  * Search result for a transcript segment.
  */
-export type TranscriptSearchResultDto = { 
-/**
- * Segment ID
- */
-id: string; 
-/**
- * Parent asset ID
- */
-assetId: string; 
-/**
- * Matched text content
- */
-text: string; 
-/**
- * Start time in seconds
- */
-startTime: number; 
-/**
- * End time in seconds
- */
-endTime: number; 
-/**
- * Language code
- */
-language: string | null }
+export type TranscriptSearchResultDto = {
+  /**
+   * Segment ID
+   */
+  id: string;
+  /**
+   * Parent asset ID
+   */
+  assetId: string;
+  /**
+   * Matched text content
+   */
+  text: string;
+  /**
+   * Start time in seconds
+   */
+  startTime: number;
+  /**
+   * End time in seconds
+   */
+  endTime: number;
+  /**
+   * Language code
+   */
+  language: string | null;
+};
 /**
  * A transcribed speech segment
  */
-export type TranscriptSegment = { 
-/**
- * Start time in seconds
- */
-startSec: number; 
-/**
- * End time in seconds
- */
-endSec: number; 
-/**
- * Transcribed text
- */
-text: string; 
-/**
- * Transcription confidence (0.0 - 1.0)
- */
-confidence: number; 
-/**
- * Detected language code (e.g., "en", "ko")
- */
-language?: string | null; 
-/**
- * Speaker ID (if speaker diarization is enabled)
- */
-speakerId?: string | null }
+export type TranscriptSegment = {
+  /**
+   * Start time in seconds
+   */
+  startSec: number;
+  /**
+   * End time in seconds
+   */
+  endSec: number;
+  /**
+   * Transcribed text
+   */
+  text: string;
+  /**
+   * Transcription confidence (0.0 - 1.0)
+   */
+  confidence: number;
+  /**
+   * Detected language code (e.g., "en", "ko")
+   */
+  language?: string | null;
+  /**
+   * Speaker ID (if speaker diarization is enabled)
+   */
+  speakerId?: string | null;
+};
 /**
  * Options for transcription request.
  */
-export type TranscriptionOptionsDto = { 
-/**
- * Language code (e.g., "en", "ko") or "auto" for detection
- */
-language: string | null; 
-/**
- * Whether to translate to English
- */
-translate: boolean | null; 
-/**
- * Whisper model to use ("tiny", "base", "small", "medium", "large")
- */
-model: string | null }
+export type TranscriptionOptionsDto = {
+  /**
+   * Language code (e.g., "en", "ko") or "auto" for detection
+   */
+  language: string | null;
+  /**
+   * Whether to translate to English
+   */
+  translate: boolean | null;
+  /**
+   * Whisper model to use ("tiny", "base", "small", "medium", "large")
+   */
+  model: string | null;
+};
 /**
  * Result of speech-to-text transcription.
  */
-export type TranscriptionResultDto = { 
-/**
- * Detected or specified language code
- */
-language: string; 
-/**
- * Transcribed segments with timestamps
- */
-segments: TranscriptionSegmentDto[]; 
-/**
- * Total audio duration in seconds
- */
-duration: number; 
-/**
- * Full transcription text (all segments concatenated)
- */
-fullText: string }
+export type TranscriptionResultDto = {
+  /**
+   * Detected or specified language code
+   */
+  language: string;
+  /**
+   * Transcribed segments with timestamps
+   */
+  segments: TranscriptionSegmentDto[];
+  /**
+   * Total audio duration in seconds
+   */
+  duration: number;
+  /**
+   * Full transcription text (all segments concatenated)
+   */
+  fullText: string;
+};
 /**
  * A single transcription segment with timing.
  */
-export type TranscriptionSegmentDto = { 
-/**
- * Start time in seconds
- */
-startTime: number; 
-/**
- * End time in seconds
- */
-endTime: number; 
-/**
- * Transcribed text for this segment
- */
-text: string }
+export type TranscriptionSegmentDto = {
+  /**
+   * Start time in seconds
+   */
+  startTime: number;
+  /**
+   * End time in seconds
+   */
+  endTime: number;
+  /**
+   * Transcribed text for this segment
+   */
+  text: string;
+};
 /**
  * 2D Transform for clips
  */
-export type Transform = { 
-/**
- * Position (normalized 0.0-1.0, center = 0.5, 0.5)
- */
-position: Point2D; 
-/**
- * Scale (1.0 = 100%)
- */
-scale: Point2D; 
-/**
- * Rotation in degrees
- */
-rotationDeg: number; 
-/**
- * Anchor point (normalized 0.0-1.0)
- */
-anchor: Point2D }
+export type Transform = {
+  /**
+   * Position (normalized 0.0-1.0, center = 0.5, 0.5)
+   */
+  position: Point2D;
+  /**
+   * Scale (1.0 = 100%)
+   */
+  scale: Point2D;
+  /**
+   * Rotation in degrees
+   */
+  rotationDeg: number;
+  /**
+   * Anchor point (normalized 0.0-1.0)
+   */
+  anchor: Point2D;
+};
 /**
  * Result of an undo or redo operation.
  */
-export type UndoRedoResult = { 
-/**
- * Whether the operation was successful
- */
-success: boolean; 
-/**
- * Whether more undo operations are available
- */
-canUndo: boolean; 
-/**
- * Whether more redo operations are available
- */
-canRedo: boolean }
+export type UndoRedoResult = {
+  /**
+   * Whether the operation was successful
+   */
+  success: boolean;
+  /**
+   * Whether more undo operations are available
+   */
+  canUndo: boolean;
+  /**
+   * Whether more redo operations are available
+   */
+  canRedo: boolean;
+};
 /**
  * DTO for update check result
  */
-export type UpdateCheckResultDto = { status: string; version: string | null; notes: string | null; date: string | null; message: string | null }
+export type UpdateCheckResultDto = {
+  status: string;
+  version: string | null;
+  notes: string | null;
+  date: string | null;
+  message: string | null;
+};
 /**
  * Result of validating an EditScript.
  */
-export type ValidationResultDto = { 
-/**
- * Whether the EditScript is valid
- */
-isValid: boolean; 
-/**
- * Critical issues that prevent execution
- */
-issues: string[]; 
-/**
- * Non-critical warnings
- */
-warnings: string[] }
+export type ValidationResultDto = {
+  /**
+   * Whether the EditScript is valid
+   */
+  isValid: boolean;
+  /**
+   * Critical issues that prevent execution
+   */
+  issues: string[];
+  /**
+   * Non-critical warnings
+   */
+  warnings: string[];
+};
 /**
  * Video-specific metadata
  */
-export type VideoInfo = { 
-/**
- * Width in pixels
- */
-width: number; 
-/**
- * Height in pixels
- */
-height: number; 
-/**
- * Frame rate
- */
-fps: Ratio; 
-/**
- * Video codec (e.g., "h264", "hevc")
- */
-codec: string; 
-/**
- * Bitrate in bps (optional)
- */
-bitrate?: number | null; 
-/**
- * Whether the video has alpha channel
- */
-hasAlpha: boolean }
+export type VideoInfo = {
+  /**
+   * Width in pixels
+   */
+  width: number;
+  /**
+   * Height in pixels
+   */
+  height: number;
+  /**
+   * Frame rate
+   */
+  fps: Ratio;
+  /**
+   * Video codec (e.g., "h264", "hevc")
+   */
+  codec: string;
+  /**
+   * Bitrate in bps (optional)
+   */
+  bitrate?: number | null;
+  /**
+   * Whether the video has alpha channel
+   */
+  hasAlpha: boolean;
+};
 /**
  * Video stream information.
  */
-export type VideoStreamInfo = { 
-/**
- * Width in pixels
- */
-width: number; 
-/**
- * Height in pixels
- */
-height: number; 
-/**
- * Frame rate (frames per second)
- */
-fps: number; 
-/**
- * Codec name (e.g., "h264", "vp9")
- */
-codec: string; 
-/**
- * Pixel format
- */
-pixelFormat: string; 
-/**
- * Bitrate in bits/s (if available)
- */
-bitrate: number | null }
+export type VideoStreamInfo = {
+  /**
+   * Width in pixels
+   */
+  width: number;
+  /**
+   * Height in pixels
+   */
+  height: number;
+  /**
+   * Frame rate (frames per second)
+   */
+  fps: number;
+  /**
+   * Codec name (e.g., "h264", "vp9")
+   */
+  codec: string;
+  /**
+   * Pixel format
+   */
+  pixelFormat: string;
+  /**
+   * Bitrate in bits/s (if available)
+   */
+  bitrate: number | null;
+};
 
 /** tauri-specta globals **/
 
-import {
-	invoke as TAURI_INVOKE,
-	Channel as TAURI_CHANNEL,
-} from "@tauri-apps/api/core";
-import * as TAURI_API_EVENT from "@tauri-apps/api/event";
-import { type WebviewWindow as __WebviewWindow__ } from "@tauri-apps/api/webviewWindow";
+import { invoke as TAURI_INVOKE, Channel as TAURI_CHANNEL } from '@tauri-apps/api/core';
+import * as TAURI_API_EVENT from '@tauri-apps/api/event';
+import { type WebviewWindow as __WebviewWindow__ } from '@tauri-apps/api/webviewWindow';
 
 type __EventObj__<T> = {
-	listen: (
-		cb: TAURI_API_EVENT.EventCallback<T>,
-	) => ReturnType<typeof TAURI_API_EVENT.listen<T>>;
-	once: (
-		cb: TAURI_API_EVENT.EventCallback<T>,
-	) => ReturnType<typeof TAURI_API_EVENT.once<T>>;
-	emit: null extends T
-		? (payload?: T) => ReturnType<typeof TAURI_API_EVENT.emit>
-		: (payload: T) => ReturnType<typeof TAURI_API_EVENT.emit>;
+  listen: (cb: TAURI_API_EVENT.EventCallback<T>) => ReturnType<typeof TAURI_API_EVENT.listen<T>>;
+  once: (cb: TAURI_API_EVENT.EventCallback<T>) => ReturnType<typeof TAURI_API_EVENT.once<T>>;
+  emit: null extends T
+    ? (payload?: T) => ReturnType<typeof TAURI_API_EVENT.emit>
+    : (payload: T) => ReturnType<typeof TAURI_API_EVENT.emit>;
 };
 
-export type Result<T, E> =
-	| { status: "ok"; data: T }
-	| { status: "error"; error: E };
+export type Result<T, E> = { status: 'ok'; data: T } | { status: 'error'; error: E };
 
-function __makeEvents__<T extends Record<string, any>>(
-	mappings: Record<keyof T, string>,
-) {
-	return new Proxy(
-		{} as unknown as {
-			[K in keyof T]: __EventObj__<T[K]> & {
-				(handle: __WebviewWindow__): __EventObj__<T[K]>;
-			};
-		},
-		{
-			get: (_, event) => {
-				const name = mappings[event as keyof T];
+function __makeEvents__<T extends Record<string, any>>(mappings: Record<keyof T, string>) {
+  return new Proxy(
+    {} as unknown as {
+      [K in keyof T]: __EventObj__<T[K]> & {
+        (handle: __WebviewWindow__): __EventObj__<T[K]>;
+      };
+    },
+    {
+      get: (_, event) => {
+        const name = mappings[event as keyof T];
 
-				return new Proxy((() => {}) as any, {
-					apply: (_, __, [window]: [__WebviewWindow__]) => ({
-						listen: (arg: any) => window.listen(name, arg),
-						once: (arg: any) => window.once(name, arg),
-						emit: (arg: any) => window.emit(name, arg),
-					}),
-					get: (_, command: keyof __EventObj__<any>) => {
-						switch (command) {
-							case "listen":
-								return (arg: any) => TAURI_API_EVENT.listen(name, arg);
-							case "once":
-								return (arg: any) => TAURI_API_EVENT.once(name, arg);
-							case "emit":
-								return (arg: any) => TAURI_API_EVENT.emit(name, arg);
-						}
-					},
-				});
-			},
-		},
-	);
+        return new Proxy((() => {}) as any, {
+          apply: (_, __, [window]: [__WebviewWindow__]) => ({
+            listen: (arg: any) => window.listen(name, arg),
+            once: (arg: any) => window.once(name, arg),
+            emit: (arg: any) => window.emit(name, arg),
+          }),
+          get: (_, command: keyof __EventObj__<any>) => {
+            switch (command) {
+              case 'listen':
+                return (arg: any) => TAURI_API_EVENT.listen(name, arg);
+              case 'once':
+                return (arg: any) => TAURI_API_EVENT.once(name, arg);
+              case 'emit':
+                return (arg: any) => TAURI_API_EVENT.emit(name, arg);
+            }
+          },
+        });
+      },
+    },
+  );
 }

@@ -18,6 +18,7 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 import type { Sequence, Asset, Clip, Effect } from '@/types';
 import { createLogger } from '@/services/logger';
 import { collectPlaybackAudioClips } from '@/utils/audioPlayback';
+import { clampClipPan, clampClipVolumeDb, getClipFadeFactor } from '@/utils/clipAudio';
 import {
   createAudioEffectNode,
   updateAudioEffectNode,
@@ -59,6 +60,7 @@ export interface UseAudioPlaybackWithEffectsReturn {
 interface ScheduledSource {
   source: AudioBufferSourceNode;
   gainNode: GainNode;
+  pannerNode: StereoPannerNode;
   effectNodes: AudioEffectNode[];
   clipId: string;
   startTime: number;
@@ -80,6 +82,8 @@ const RESCHEDULE_INTERVAL = 0.25;
 const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_BASE_DELAY_MS = 1000;
 const RETRY_MAX_DELAY_MS = 10000;
+const SEEK_DETECTION_DELTA_THRESHOLD = 0.1;
+const PLAYBACK_PROGRESS_TOLERANCE = 0.08;
 
 // =============================================================================
 // Helper Functions
@@ -127,6 +131,9 @@ export function useAudioPlaybackWithEffects({
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioBuffersRef = useRef<Map<string, AudioBuffer>>(new Map());
   const scheduledSourcesRef = useRef<Map<string, ScheduledSource>>(new Map());
+  const scheduleVersionRef = useRef(0);
+  const isSchedulingRef = useRef(false);
+  const rescheduleRequestedRef = useRef(false);
   const masterGainRef = useRef<GainNode | null>(null);
   const [isAudioReady, setIsAudioReady] = useState(false);
   const lastScheduleTimeRef = useRef(0);
@@ -137,6 +144,15 @@ export function useAudioPlaybackWithEffects({
 
   // Playback state
   const { currentTime, isPlaying, volume, isMuted, playbackRate } = usePlaybackStore();
+  const isPlayingRef = useRef(isPlaying);
+
+  const getLiveIsPlaying = useCallback((): boolean => {
+    return isPlayingRef.current;
+  }, []);
+
+  useEffect(() => {
+    isPlayingRef.current = isPlaying;
+  }, [isPlaying]);
 
   // -------------------------------------------------------------------------
   // Audio Context Initialization
@@ -351,11 +367,15 @@ export function useAudioPlaybackWithEffects({
   // -------------------------------------------------------------------------
 
   const stopAllSources = useCallback(() => {
+    scheduleVersionRef.current += 1;
+    rescheduleRequestedRef.current = false;
+
     scheduledSourcesRef.current.forEach((scheduled) => {
       try {
         scheduled.source.stop();
         scheduled.source.disconnect();
         scheduled.gainNode.disconnect();
+        scheduled.pannerNode.disconnect();
 
         // Disconnect effect nodes
         for (const effectNode of scheduled.effectNodes) {
@@ -379,7 +399,7 @@ export function useAudioPlaybackWithEffects({
   const calculateClipVolume = useCallback((clip: Clip, trackVolume: number): number => {
     if (clip.audio?.muted) return 0;
 
-    const clipVolumeDb = clip.audio?.volumeDb ?? 0;
+    const clipVolumeDb = clampClipVolumeDb(clip.audio?.volumeDb ?? 0);
     const clipLinearVolume = Math.pow(10, clipVolumeDb / 20);
 
     return trackVolume * clipLinearVolume;
@@ -391,102 +411,146 @@ export function useAudioPlaybackWithEffects({
 
   const scheduleAudioClips = useCallback(async () => {
     if (!audioContextRef.current || !masterGainRef.current || !enabled) return;
-    if (!isPlaying) return;
+    if (!isPlaying || !getLiveIsPlaying()) return;
 
-    const ctx = audioContextRef.current;
-    const now = ctx.currentTime;
-
-    if (now - lastScheduleTimeRef.current < RESCHEDULE_INTERVAL) return;
-    lastScheduleTimeRef.current = now;
-
-    const audioClips = getAudioClips();
-
-    for (const { clip, asset, trackVolume, trackMuted } of audioClips) {
-      if (trackMuted) continue;
-
-      const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-      const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-      const clipEnd = clip.place.timelineInSec + clipDuration;
-
-      if (currentTime >= clipEnd) continue;
-      if (clip.place.timelineInSec > currentTime + SCHEDULE_AHEAD_TIME) continue;
-      if (scheduledSourcesRef.current.has(clip.id)) continue;
-
-      const audioUrl = asset.proxyUrl || asset.uri;
-      const audioBuffer = await loadAudioBuffer(asset.id, audioUrl);
-      if (!audioBuffer) continue;
-
-      // Create source node
-      const source = ctx.createBufferSource();
-      source.buffer = audioBuffer;
-      source.playbackRate.value = playbackRate * safeSpeed;
-
-      // Create gain node for this clip with global volume/mute applied
-      const gainNode = ctx.createGain();
-      const clipVolume = calculateClipVolume(clip, trackVolume);
-      gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
-
-      // Create effect chain for this clip
-      const effectNodes = createEffectChainForClip(clip, ctx);
-
-      // Connect the audio graph:
-      // source -> gainNode -> [effectChain] -> masterGain
-      source.connect(gainNode);
-
-      if (effectNodes.length > 0) {
-        gainNode.connect(effectNodes[0].node);
-        effectNodes[effectNodes.length - 1].node.connect(masterGainRef.current);
-      } else {
-        gainNode.connect(masterGainRef.current);
-      }
-
-      // Calculate timing
-      const timeIntoClip = Math.max(0, currentTime - clip.place.timelineInSec);
-      const sourceOffset = clip.range.sourceInSec + timeIntoClip * safeSpeed;
-      const startDelay = Math.max(0, clip.place.timelineInSec - currentTime);
-      const remainingSourceDuration = clip.range.sourceOutSec - sourceOffset;
-      const audioDuration = Math.max(0, remainingSourceDuration);
-
-      const scheduledStartTime = now + startDelay;
-      source.start(scheduledStartTime, sourceOffset, audioDuration);
-
-      // Track the scheduled source with effect nodes
-      scheduledSourcesRef.current.set(clip.id, {
-        source,
-        gainNode,
-        effectNodes,
-        clipId: clip.id,
-        startTime: scheduledStartTime,
-      });
-
-      // Clean up when source ends
-      source.onended = () => {
-        const scheduled = scheduledSourcesRef.current.get(clip.id);
-        if (scheduled) {
-          scheduled.source.disconnect();
-          scheduled.gainNode.disconnect();
-          for (const effectNode of scheduled.effectNodes) {
-            try {
-              effectNode.node.disconnect();
-            } catch {
-              // Already disconnected
-            }
-          }
-        }
-        scheduledSourcesRef.current.delete(clip.id);
-      };
+    if (isSchedulingRef.current) {
+      rescheduleRequestedRef.current = true;
+      return;
     }
 
-    // Update playback rate and clip volume on existing sources
-    scheduledSourcesRef.current.forEach((scheduled) => {
-      const clipData = audioClips.find((c) => c.clip.id === scheduled.clipId);
-      if (clipData) {
-        const clipVolume = calculateClipVolume(clipData.clip, clipData.trackVolume);
-        scheduled.gainNode.gain.value = isMuted ? 0 : volume * clipVolume;
-        const updateSpeed = clipData.clip.speed > 0 ? clipData.clip.speed : 1;
-        scheduled.source.playbackRate.value = playbackRate * updateSpeed;
-      }
-    });
+    isSchedulingRef.current = true;
+
+    try {
+      schedulingPass: do {
+        rescheduleRequestedRef.current = false;
+
+        if (!audioContextRef.current || !masterGainRef.current || !enabled || !getLiveIsPlaying()) {
+          break;
+        }
+
+        const scheduleVersion = scheduleVersionRef.current;
+        const ctx = audioContextRef.current;
+        const now = ctx.currentTime;
+
+        if (now - lastScheduleTimeRef.current < RESCHEDULE_INTERVAL) {
+          continue;
+        }
+        lastScheduleTimeRef.current = now;
+
+        const audioClips = getAudioClips();
+
+        for (const { clip, asset, trackVolume, trackMuted } of audioClips) {
+          if (trackMuted) continue;
+
+          const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+          const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+          const clipEnd = clip.place.timelineInSec + clipDuration;
+
+          if (currentTime >= clipEnd) continue;
+          if (clip.place.timelineInSec > currentTime + SCHEDULE_AHEAD_TIME) continue;
+          if (scheduledSourcesRef.current.has(clip.id)) continue;
+
+          const audioUrl = asset.proxyUrl || asset.uri;
+          const audioBuffer = await loadAudioBuffer(asset.id, audioUrl);
+          if (!audioBuffer) continue;
+
+          if (
+            scheduleVersion !== scheduleVersionRef.current ||
+            !audioContextRef.current ||
+            !masterGainRef.current ||
+            !enabled ||
+            !getLiveIsPlaying()
+          ) {
+            rescheduleRequestedRef.current = enabled && getLiveIsPlaying();
+            continue schedulingPass;
+          }
+
+          if (scheduledSourcesRef.current.has(clip.id)) {
+            continue;
+          }
+
+          const source = ctx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.playbackRate.value = Math.max(0.001, playbackRate) * safeSpeed;
+
+          const gainNode = ctx.createGain();
+          const clipVolume = calculateClipVolume(clip, trackVolume);
+          const clipOffset = Math.max(0, currentTime - clip.place.timelineInSec);
+          const fadeFactor = getClipFadeFactor(clip, clipOffset);
+          gainNode.gain.value = (isMuted ? 0 : volume * clipVolume) * fadeFactor;
+
+          const pannerNode = ctx.createStereoPanner();
+          pannerNode.pan.value = clampClipPan(clip.audio?.pan ?? 0);
+
+          const effectNodes = createEffectChainForClip(clip, ctx);
+
+          source.connect(gainNode);
+          gainNode.connect(pannerNode);
+
+          if (effectNodes.length > 0) {
+            pannerNode.connect(effectNodes[0].node);
+            effectNodes[effectNodes.length - 1].node.connect(masterGainRef.current);
+          } else {
+            pannerNode.connect(masterGainRef.current);
+          }
+
+          const timeIntoClip = Math.max(0, currentTime - clip.place.timelineInSec);
+          const sourceOffset = clip.range.sourceInSec + timeIntoClip * safeSpeed;
+          const startDelay = Math.max(0, clip.place.timelineInSec - currentTime);
+          const remainingSourceDuration = clip.range.sourceOutSec - sourceOffset;
+          const audioDuration = Math.max(0, remainingSourceDuration);
+
+          const scheduledStartTime = now + startDelay;
+          source.start(scheduledStartTime, sourceOffset, audioDuration);
+
+          scheduledSourcesRef.current.set(clip.id, {
+            source,
+            gainNode,
+            pannerNode,
+            effectNodes,
+            clipId: clip.id,
+            startTime: scheduledStartTime,
+          });
+
+          source.onended = () => {
+            const active = scheduledSourcesRef.current.get(clip.id);
+            if (active?.source === source) {
+              scheduledSourcesRef.current.delete(clip.id);
+            }
+            source.disconnect();
+            gainNode.disconnect();
+            pannerNode.disconnect();
+            for (const effectNode of effectNodes) {
+              try {
+                effectNode.node.disconnect();
+              } catch {
+                // Already disconnected
+              }
+            }
+          };
+        }
+
+        if (scheduleVersion !== scheduleVersionRef.current) {
+          rescheduleRequestedRef.current = enabled && getLiveIsPlaying();
+          continue;
+        }
+
+        scheduledSourcesRef.current.forEach((scheduled) => {
+          const clipData = audioClips.find((c) => c.clip.id === scheduled.clipId);
+          if (clipData) {
+            const clipVolume = calculateClipVolume(clipData.clip, clipData.trackVolume);
+            const clipOffset = Math.max(0, currentTime - clipData.clip.place.timelineInSec);
+            const fadeFactor = getClipFadeFactor(clipData.clip, clipOffset);
+            scheduled.gainNode.gain.value = (isMuted ? 0 : volume * clipVolume) * fadeFactor;
+            scheduled.pannerNode.pan.value = clampClipPan(clipData.clip.audio?.pan ?? 0);
+            const updateSpeed = clipData.clip.speed > 0 ? clipData.clip.speed : 1;
+            scheduled.source.playbackRate.value = Math.max(0.001, playbackRate) * updateSpeed;
+          }
+        });
+      } while (rescheduleRequestedRef.current);
+    } finally {
+      isSchedulingRef.current = false;
+    }
   }, [
     enabled,
     isPlaying,
@@ -498,6 +562,7 @@ export function useAudioPlaybackWithEffects({
     loadAudioBuffer,
     calculateClipVolume,
     createEffectChainForClip,
+    getLiveIsPlaying,
   ]);
 
   // -------------------------------------------------------------------------
@@ -576,20 +641,34 @@ export function useAudioPlaybackWithEffects({
 
   // Handle seek
   const lastSeekTimeRef = useRef(currentTime);
+  const lastSeekTimestampRef = useRef(Date.now());
   useEffect(() => {
     if (!enabled) return;
 
-    const timeDiff = Math.abs(currentTime - lastSeekTimeRef.current);
-    if (timeDiff < 0.1) return;
+    const now = Date.now();
+    const previousTime = lastSeekTimeRef.current;
+    const previousTimestamp = lastSeekTimestampRef.current;
+    const timeDiff = Math.abs(currentTime - previousTime);
+    const timestampDiff = (now - previousTimestamp) / 1000;
+
     lastSeekTimeRef.current = currentTime;
+    lastSeekTimestampRef.current = now;
+
+    if (timeDiff < SEEK_DETECTION_DELTA_THRESHOLD || timestampDiff <= 0) return;
+
+    if (!isPlaying) return;
+
+    const expectedDelta = Math.abs(playbackRate) * timestampDiff;
+    const tolerance = Math.max(PLAYBACK_PROGRESS_TOLERANCE, expectedDelta * 0.35);
+    const isLikelyNaturalPlayback = timeDiff <= expectedDelta + tolerance;
+
+    if (isLikelyNaturalPlayback) return;
 
     stopAllSources();
 
-    if (isPlaying) {
-      lastScheduleTimeRef.current = 0;
-      void scheduleAudioClips();
-    }
-  }, [enabled, currentTime, isPlaying, stopAllSources, scheduleAudioClips]);
+    lastScheduleTimeRef.current = 0;
+    void scheduleAudioClips();
+  }, [enabled, currentTime, isPlaying, playbackRate, stopAllSources, scheduleAudioClips]);
 
   // Master gain kept at unity — global volume/mute is already applied per-clip
   useEffect(() => {

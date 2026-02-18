@@ -31,6 +31,7 @@ pub mod template;
 pub mod text;
 pub mod timeline;
 pub mod update;
+pub mod workspace;
 
 // Re-export common types
 mod types;

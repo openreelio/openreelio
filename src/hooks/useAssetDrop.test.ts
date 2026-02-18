@@ -165,6 +165,22 @@ describe('useAssetDrop', () => {
       expect(result.current.isDraggingOver).toBe(true);
     });
 
+    it('should set isDraggingOver to true for workspace file drags', () => {
+      const { result } = renderHook(() => useAssetDrop(defaultOptions));
+      const event = createMockDragEvent('dragenter', {
+        dataTransferTypes: ['application/x-workspace-file'],
+        dataTransferData: {
+          'application/x-workspace-file': 'footage/interview.mp4',
+        },
+      });
+
+      act(() => {
+        result.current.handleDragEnter(event);
+      });
+
+      expect(result.current.isDraggingOver).toBe(true);
+    });
+
     it('should not set isDraggingOver for unsupported data types', () => {
       const { result } = renderHook(() => useAssetDrop(defaultOptions));
       const event = createMockDragEvent('dragenter', {
@@ -339,6 +355,55 @@ describe('useAssetDrop', () => {
       });
 
       expect(onAssetDrop).toHaveBeenCalledWith(expect.objectContaining({ assetId: 'asset-2' }));
+    });
+
+    it('should pass workspaceRelativePath for workspace file drops', () => {
+      const onAssetDrop = vi.fn();
+      const { result } = renderHook(() => useAssetDrop({ ...defaultOptions, onAssetDrop }));
+
+      const event = createMockDragEvent('drop', {
+        dataTransferTypes: ['application/json', 'application/x-workspace-file'],
+        dataTransferData: {
+          'application/json': JSON.stringify({
+            workspaceRelativePath: 'footage/interview.mp4',
+            kind: 'video',
+          }),
+          'application/x-workspace-file': 'footage/interview.mp4',
+        },
+      });
+
+      act(() => {
+        result.current.handleDrop(event);
+      });
+
+      expect(onAssetDrop).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceRelativePath: 'footage/interview.mp4',
+          assetKind: 'video',
+        }),
+      );
+    });
+
+    it('should parse workspace file payload without JSON metadata', () => {
+      const onAssetDrop = vi.fn();
+      const { result } = renderHook(() => useAssetDrop({ ...defaultOptions, onAssetDrop }));
+
+      const event = createMockDragEvent('drop', {
+        dataTransferTypes: ['application/x-workspace-file'],
+        dataTransferData: {
+          'application/x-workspace-file': 'audio/voiceover.wav',
+        },
+      });
+
+      act(() => {
+        result.current.handleDrop(event);
+      });
+
+      expect(onAssetDrop).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceRelativePath: 'audio/voiceover.wav',
+        }),
+      );
     });
 
     it('should not call onAssetDrop when dropping on locked track', () => {

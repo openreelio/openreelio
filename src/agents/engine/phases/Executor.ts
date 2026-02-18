@@ -23,6 +23,7 @@ import {
   ToolBudgetExceededError,
 } from '../core/errors';
 import { DoomLoopDetector } from '../core/DoomLoopDetector';
+import { getValueAtReferencePath, resolveStepValueReferences } from '../core/stepReferences';
 import { isRetryableToolFailure } from './executionFailureUtils';
 
 // =============================================================================
@@ -116,6 +117,12 @@ export interface ExecutionErrorWithPartialResult extends Error {
 export interface ExecutionLimits {
   /** Maximum number of tool call attempts allowed for this execution */
   maxToolCalls?: number;
+  /**
+   * Optional pre-step permission check.
+   * Called before each step execution. Returns 'allow', 'deny', or 'allow_always'.
+   * If 'deny', the step is skipped with a "permission denied" result.
+   */
+  onBeforeStep?: (step: PlanStep) => Promise<'allow' | 'deny' | 'allow_always'>;
 }
 
 /**
@@ -192,6 +199,7 @@ export class Executor {
     const startTime = Date.now();
     const completedSteps: StepExecutionRecord[] = [];
     const failedSteps: StepExecutionRecord[] = [];
+    const completedRecordsByStepId = new Map<string, StepExecutionRecord>();
     const completedStepIds = new Set<string>();
     let toolCallsUsed = 0;
 
@@ -242,18 +250,96 @@ export class Executor {
           message: step.description,
         });
 
+        const resolvedStep = this.resolveStepArguments(step, completedRecordsByStepId);
+        if (!resolvedStep.ok) {
+          const failedRecord: StepExecutionRecord = {
+            stepId: step.id,
+            tool: step.tool,
+            args: step.args,
+            result: {
+              success: false,
+              error: resolvedStep.error,
+              duration: 0,
+            },
+            startTime: Date.now(),
+            endTime: Date.now(),
+            retryCount: 0,
+          };
+          failedSteps.push(failedRecord);
+
+          this.emitProgress(onProgress, {
+            phase: 'step_failed',
+            stepId: step.id,
+            stepIndex: i,
+            totalSteps: plan.steps.length,
+            completedCount: completedSteps.length,
+            failedCount: failedSteps.length,
+            message: failedRecord.result.error,
+            result: failedRecord.result,
+          });
+
+          if (this.config.stopOnError) {
+            break;
+          }
+
+          continue;
+        }
+
+        const executableStep: PlanStep = {
+          ...step,
+          args: resolvedStep.args,
+        };
+
+        // Per-tool permission check
+        if (limits.onBeforeStep) {
+          const decision = await limits.onBeforeStep(executableStep);
+          if (decision === 'deny') {
+            const deniedRecord: StepExecutionRecord = {
+              stepId: executableStep.id,
+              tool: executableStep.tool,
+              args: executableStep.args,
+              result: {
+                success: false,
+                error: `Permission denied for tool: ${executableStep.tool}`,
+                duration: 0,
+              },
+              startTime: Date.now(),
+              endTime: Date.now(),
+              retryCount: 0,
+            };
+            failedSteps.push(deniedRecord);
+
+            this.emitProgress(onProgress, {
+              phase: 'step_failed',
+              stepId: step.id,
+              stepIndex: i,
+              totalSteps: plan.steps.length,
+              completedCount: completedSteps.length,
+              failedCount: failedSteps.length,
+              message: deniedRecord.result.error,
+              result: deniedRecord.result,
+            });
+
+            if (this.config.stopOnError) {
+              break;
+            }
+            continue;
+          }
+          // 'allow' and 'allow_always' both proceed
+        }
+
         // Check for doom loop before execution
-        if (this.doomLoopDetector.check(step.tool, step.args)) {
-          throw new DoomLoopError(step.tool, 3);
+        if (this.doomLoopDetector.check(executableStep.tool, executableStep.args)) {
+          throw new DoomLoopError(executableStep.tool, 3);
         }
 
         // Execute the step
         let record: StepExecutionRecord;
         try {
-          record = await this.executeStep(step, context, consumeToolCallBudget);
+          record = await this.executeStep(executableStep, context, consumeToolCallBudget);
         } catch (error) {
           const err = error instanceof Error ? error : new Error(String(error));
-          const failedRecord = this.createFailedRecordFromError(step, err);
+          const failedRecord = this.createFailedRecordFromError(executableStep, err);
           failedSteps.push(failedRecord);
 
           this.emitProgress(onProgress, {
@@ -277,7 +363,7 @@ export class Executor {
               aborted: this.isAborted,
               toolCallsUsed,
             },
-            step,
+            executableStep,
           );
 
           throw err;
@@ -285,11 +371,12 @@ export class Executor {
 
         if (record.result.success) {
           completedSteps.push(record);
-          completedStepIds.add(step.id);
+          completedStepIds.add(executableStep.id);
+          completedRecordsByStepId.set(executableStep.id, record);
 
           this.emitProgress(onProgress, {
             phase: 'step_completed',
-            stepId: step.id,
+            stepId: executableStep.id,
             stepIndex: i,
             totalSteps: plan.steps.length,
             completedCount: completedSteps.length,
@@ -301,7 +388,7 @@ export class Executor {
 
           this.emitProgress(onProgress, {
             phase: 'step_failed',
-            stepId: step.id,
+            stepId: executableStep.id,
             stepIndex: i,
             totalSteps: plan.steps.length,
             completedCount: completedSteps.length,
@@ -373,6 +460,55 @@ export class Executor {
     annotated.partialResult = partialResult;
     annotated.failingStepId = step.id;
     annotated.failingTool = step.tool;
+  }
+
+  private resolveStepArguments(
+    step: PlanStep,
+    completedRecordsByStepId: Map<string, StepExecutionRecord>,
+  ): { ok: true; args: Record<string, unknown> } | { ok: false; error: string } {
+    const result = resolveStepValueReferences(step.args, (reference) => {
+      const sourceRecord = completedRecordsByStepId.get(reference.$fromStep);
+      if (!sourceRecord) {
+        return {
+          ok: false,
+          reason: `Referenced step '${reference.$fromStep}' has not completed yet`,
+        };
+      }
+
+      const resolved = getValueAtReferencePath(sourceRecord.result, reference.$path);
+      if (resolved.found) {
+        return { ok: true, value: resolved.value };
+      }
+
+      if (Object.prototype.hasOwnProperty.call(reference, '$default')) {
+        return { ok: true, value: reference.$default };
+      }
+
+      return {
+        ok: false,
+        reason: `Path '${reference.$path}' was not found in step '${reference.$fromStep}' result`,
+      };
+    });
+
+    if (result.errors.length > 0) {
+      const first = result.errors[0];
+      return {
+        ok: false,
+        error: `Unable to resolve reference at '${first.sourcePath}': ${first.reason}`,
+      };
+    }
+
+    if (!result.value || typeof result.value !== 'object' || Array.isArray(result.value)) {
+      return {
+        ok: false,
+        error: `Resolved arguments for step '${step.id}' are not a valid object`,
+      };
+    }
+
+    return {
+      ok: true,
+      args: result.value as Record<string, unknown>,
+    };
   }
 
   /**

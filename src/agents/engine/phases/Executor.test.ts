@@ -215,6 +215,198 @@ describe('Executor', () => {
 
       await expect(executor.execute(badPlan, executionContext)).rejects.toThrow(DependencyError);
     });
+
+    it('Given a step output reference, When execution reaches dependent step, Then args resolve from prior tool result', async () => {
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'check_generation_status',
+          description: 'Check generation status',
+          category: 'analysis',
+          riskLevel: 'low',
+          supportsUndo: false,
+          parallelizable: true,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            jobId: { type: 'string' },
+          },
+        },
+        required: ['jobId'],
+        result: {
+          success: true,
+          data: {
+            assetId: 'asset-generated-1',
+          },
+          duration: 10,
+        },
+      });
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'insert_clip',
+          description: 'Insert generated clip',
+          category: 'editing',
+          riskLevel: 'low',
+          supportsUndo: true,
+          parallelizable: false,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            sequenceId: { type: 'string' },
+            trackId: { type: 'string' },
+            assetId: { type: 'string' },
+            timelineStart: { type: 'number' },
+          },
+        },
+        required: ['sequenceId', 'trackId', 'assetId', 'timelineStart'],
+        executor: async (args) => {
+          const assetId = args.assetId;
+          if (typeof assetId !== 'string') {
+            return { success: false, error: 'assetId must resolve to string', duration: 10 };
+          }
+
+          return {
+            success: true,
+            data: { clipId: 'clip-from-generated', assetId },
+            duration: 10,
+          };
+        },
+      });
+
+      const orchestrationPlan: Plan = {
+        goal: 'Place generated asset on timeline',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'check_generation_status',
+            args: { jobId: 'job-123' },
+            description: 'Read generation output',
+            riskLevel: 'low',
+            estimatedDuration: 50,
+          },
+          {
+            id: 'step-2',
+            tool: 'insert_clip',
+            args: {
+              sequenceId: 'sequence-1',
+              trackId: 'track-1',
+              assetId: { $fromStep: 'step-1', $path: 'data.assetId' },
+              timelineStart: 12,
+            },
+            description: 'Insert generated asset',
+            riskLevel: 'low',
+            estimatedDuration: 120,
+            dependsOn: ['step-1'],
+          },
+        ],
+        estimatedTotalDuration: 170,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo insert',
+      };
+
+      const result = await executor.execute(orchestrationPlan, executionContext);
+
+      expect(result.success).toBe(true);
+      expect(result.completedSteps).toHaveLength(2);
+
+      const insertExecutions = mockToolExecutor.getExecutionsFor('insert_clip');
+      expect(insertExecutions).toHaveLength(1);
+      expect(insertExecutions[0]?.args.assetId).toBe('asset-generated-1');
+    });
+
+    it('Given an unresolved step reference path, When executing dependent step, Then execution fails before tool call', async () => {
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'check_generation_status',
+          description: 'Check generation status',
+          category: 'analysis',
+          riskLevel: 'low',
+          supportsUndo: false,
+          parallelizable: true,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            jobId: { type: 'string' },
+          },
+        },
+        required: ['jobId'],
+        result: {
+          success: true,
+          data: {
+            status: 'completed',
+          },
+          duration: 10,
+        },
+      });
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'insert_clip',
+          description: 'Insert generated clip',
+          category: 'editing',
+          riskLevel: 'low',
+          supportsUndo: true,
+          parallelizable: false,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            sequenceId: { type: 'string' },
+            trackId: { type: 'string' },
+            assetId: { type: 'string' },
+            timelineStart: { type: 'number' },
+          },
+        },
+        required: ['sequenceId', 'trackId', 'assetId', 'timelineStart'],
+        result: {
+          success: true,
+          data: { clipId: 'clip-1' },
+          duration: 10,
+        },
+      });
+
+      const orchestrationPlan: Plan = {
+        goal: 'Place generated asset on timeline',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'check_generation_status',
+            args: { jobId: 'job-123' },
+            description: 'Read generation output',
+            riskLevel: 'low',
+            estimatedDuration: 50,
+          },
+          {
+            id: 'step-2',
+            tool: 'insert_clip',
+            args: {
+              sequenceId: 'sequence-1',
+              trackId: 'track-1',
+              assetId: { $fromStep: 'step-1', $path: 'data.assetId' },
+              timelineStart: 12,
+            },
+            description: 'Insert generated asset',
+            riskLevel: 'low',
+            estimatedDuration: 120,
+            dependsOn: ['step-1'],
+          },
+        ],
+        estimatedTotalDuration: 170,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo insert',
+      };
+
+      const result = await executor.execute(orchestrationPlan, executionContext);
+
+      expect(result.success).toBe(false);
+      expect(result.completedSteps).toHaveLength(1);
+      expect(result.failedSteps).toHaveLength(1);
+      expect(result.failedSteps[0]?.result.error).toContain('Unable to resolve reference');
+      expect(mockToolExecutor.getExecutionsFor('insert_clip')).toHaveLength(0);
+    });
   });
 
   describe('error handling', () => {

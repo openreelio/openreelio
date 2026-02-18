@@ -691,7 +691,7 @@ impl CommandExecutor {
             "RemoveClip" | "DeleteClip" => OpKind::ClipRemove,
             "MoveClip" => OpKind::ClipMove,
             "TrimClip" => OpKind::ClipTrim,
-            "SetClipMute" | "SetClipTransform" => OpKind::ClipUpdate,
+            "SetClipMute" | "SetClipTransform" | "SetClipAudio" => OpKind::ClipUpdate,
             "SplitClip" => OpKind::ClipSplit,
             "AddTrack" | "InsertTrack" => OpKind::TrackAdd,
             "RemoveTrack" | "DeleteTrack" => OpKind::TrackRemove,

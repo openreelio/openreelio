@@ -40,6 +40,14 @@ pub struct ProjectMeta {
     /// Author name
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    /// Format version: 1 = legacy (import-only), 2 = workspace-enabled
+    /// Defaults to 1 for backward compatibility with existing projects.
+    #[serde(default = "default_format_version")]
+    pub format_version: u32,
+}
+
+fn default_format_version() -> u32 {
+    1
 }
 
 impl ProjectMeta {
@@ -54,6 +62,7 @@ impl ProjectMeta {
             modified_at: now,
             description: None,
             author: None,
+            format_version: 2,
         }
     }
 
@@ -213,6 +222,9 @@ impl ProjectState {
             OpKind::BinRename => self.apply_bin_rename(op)?,
             OpKind::BinMove => self.apply_bin_move(op)?,
             OpKind::BinUpdateColor => self.apply_bin_update_color(op)?,
+
+            // Workspace operations (metadata-only, no state change needed)
+            OpKind::WorkspaceScan => {}
 
             // Batch operations
             OpKind::Batch => self.apply_batch(op)?,
@@ -777,6 +789,93 @@ impl ProjectState {
                         ));
                     }
                 }
+
+                if let Some(volume_value) = op.payload.get("volumeDb") {
+                    if volume_value.is_null() {
+                        // no-op: null means no change
+                    } else if let Some(volume_db) = volume_value.as_f64() {
+                        if !volume_db.is_finite() {
+                            return Err(CoreError::InvalidCommand(
+                                "Invalid volumeDb value (expected finite number)".to_string(),
+                            ));
+                        }
+                        clip.audio.volume_db = (volume_db as f32).clamp(-60.0, 6.0);
+                    } else {
+                        return Err(CoreError::InvalidCommand(
+                            "Invalid volumeDb value (expected number)".to_string(),
+                        ));
+                    }
+                }
+
+                if let Some(pan_value) = op.payload.get("pan") {
+                    if pan_value.is_null() {
+                        // no-op: null means no change
+                    } else if let Some(pan) = pan_value.as_f64() {
+                        if !pan.is_finite() {
+                            return Err(CoreError::InvalidCommand(
+                                "Invalid pan value (expected finite number)".to_string(),
+                            ));
+                        }
+                        clip.audio.pan = (pan as f32).clamp(-1.0, 1.0);
+                    } else {
+                        return Err(CoreError::InvalidCommand(
+                            "Invalid pan value (expected number)".to_string(),
+                        ));
+                    }
+                }
+
+                let mut fade_in_updated = false;
+                if let Some(fade_in_value) = op.payload.get("fadeInSec") {
+                    if fade_in_value.is_null() {
+                        // no-op: null means no change
+                    } else if let Some(fade_in_sec) = fade_in_value.as_f64() {
+                        if !fade_in_sec.is_finite() || fade_in_sec < 0.0 {
+                            return Err(CoreError::InvalidCommand(
+                                "Invalid fadeInSec value (expected non-negative number)"
+                                    .to_string(),
+                            ));
+                        }
+                        clip.audio.fade_in_sec = fade_in_sec;
+                        fade_in_updated = true;
+                    } else {
+                        return Err(CoreError::InvalidCommand(
+                            "Invalid fadeInSec value (expected number)".to_string(),
+                        ));
+                    }
+                }
+
+                let mut fade_out_updated = false;
+                if let Some(fade_out_value) = op.payload.get("fadeOutSec") {
+                    if fade_out_value.is_null() {
+                        // no-op: null means no change
+                    } else if let Some(fade_out_sec) = fade_out_value.as_f64() {
+                        if !fade_out_sec.is_finite() || fade_out_sec < 0.0 {
+                            return Err(CoreError::InvalidCommand(
+                                "Invalid fadeOutSec value (expected non-negative number)"
+                                    .to_string(),
+                            ));
+                        }
+                        clip.audio.fade_out_sec = fade_out_sec;
+                        fade_out_updated = true;
+                    } else {
+                        return Err(CoreError::InvalidCommand(
+                            "Invalid fadeOutSec value (expected number)".to_string(),
+                        ));
+                    }
+                }
+
+                let clip_duration = clip.duration().max(0.0);
+                clip.audio.fade_in_sec = clip.audio.fade_in_sec.clamp(0.0, clip_duration);
+                clip.audio.fade_out_sec = clip.audio.fade_out_sec.clamp(0.0, clip_duration);
+
+                if clip.audio.fade_in_sec + clip.audio.fade_out_sec > clip_duration {
+                    if fade_in_updated && !fade_out_updated {
+                        clip.audio.fade_in_sec = (clip_duration - clip.audio.fade_out_sec).max(0.0);
+                    } else {
+                        clip.audio.fade_out_sec = (clip_duration - clip.audio.fade_in_sec).max(0.0);
+                    }
+                }
+
                 // Apply transform change if present
                 if let Some(transform_val) = op.payload.get("transform") {
                     if transform_val.is_null() {

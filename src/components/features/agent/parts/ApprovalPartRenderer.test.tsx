@@ -78,8 +78,13 @@ describe('ApprovalPartRenderer', () => {
     const user = userEvent.setup();
     render(<ApprovalPartRenderer part={part} onReject={onReject} />);
 
+    // First click shows the feedback textarea
     await user.click(screen.getByTestId('approval-reject-btn'));
+    expect(onReject).not.toHaveBeenCalled();
+    expect(screen.getByTestId('approval-feedback-input')).toBeInTheDocument();
 
+    // Use "Reject without feedback" to complete the rejection flow
+    await user.click(screen.getByTestId('approval-reject-no-feedback-btn'));
     expect(onReject).toHaveBeenCalledTimes(1);
   });
 

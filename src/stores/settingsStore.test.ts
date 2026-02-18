@@ -104,6 +104,12 @@ const DEFAULT_SETTINGS: AppSettings = {
     cacheDurationHours: 24,
     localOnlyMode: false, seedanceApiKey: null, videoGenProvider: null, videoGenDefaultQuality: 'pro', videoGenBudgetCents: null, videoGenPerRequestLimitCents: 100,
   },
+  workspace: {
+    autoScanOnOpen: true,
+    watchingEnabled: true,
+    autoRegisterOnUse: true,
+    scanDepthLimit: 10,
+  },
 };
 
 describe('settingsStore', () => {

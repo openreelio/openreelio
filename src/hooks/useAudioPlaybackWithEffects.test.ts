@@ -170,6 +170,16 @@ class MockAudioContext {
   } as AudioBuffer);
 }
 
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 // =============================================================================
 // Test Data Factories
 // =============================================================================
@@ -304,7 +314,7 @@ describe('useAudioPlaybackWithEffects', () => {
         useAudioPlaybackWithEffects({
           sequence,
           assets,
-        })
+        }),
       );
 
       expect(result.current.initAudio).toBeDefined();
@@ -323,7 +333,7 @@ describe('useAudioPlaybackWithEffects', () => {
           sequence,
           assets,
           getEffectById,
-        })
+        }),
       );
 
       expect(result.current.initAudio).toBeDefined();
@@ -359,7 +369,7 @@ describe('useAudioPlaybackWithEffects', () => {
           sequence,
           assets,
           getEffectById,
-        })
+        }),
       );
 
       await act(async () => {
@@ -419,7 +429,7 @@ describe('useAudioPlaybackWithEffects', () => {
           sequence,
           assets,
           getEffectById,
-        })
+        }),
       );
 
       await act(async () => {
@@ -464,7 +474,7 @@ describe('useAudioPlaybackWithEffects', () => {
           sequence,
           assets,
           getEffectById,
-        })
+        }),
       );
 
       await act(async () => {
@@ -486,7 +496,7 @@ describe('useAudioPlaybackWithEffects', () => {
         useAudioPlaybackWithEffects({
           sequence,
           assets,
-        })
+        }),
       );
 
       expect(result.current.updateClipEffect).toBeDefined();
@@ -519,7 +529,7 @@ describe('useAudioPlaybackWithEffects', () => {
           sequence,
           assets,
           getEffectById,
-        })
+        }),
       );
 
       await act(async () => {
@@ -571,7 +581,7 @@ describe('useAudioPlaybackWithEffects', () => {
           sequence,
           assets,
           getEffectById,
-        })
+        }),
       );
 
       await act(async () => {
@@ -580,6 +590,103 @@ describe('useAudioPlaybackWithEffects', () => {
 
       // Should not throw and should be ready
       expect(result.current.isAudioReady).toBe(true);
+    });
+  });
+
+  describe('Scheduling Resilience', () => {
+    it('does not schedule stale audio after pause during pending load', async () => {
+      mockContext.currentTime = 1;
+      const sequence = createMockSequence();
+      const asset = createMockAsset();
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      const pendingFetch = createDeferred<Response>();
+      const fetchSpy = vi.fn().mockImplementation(() => pendingFetch.promise);
+      global.fetch = fetchSpy as unknown as typeof fetch;
+
+      mockPlaybackStore.isPlaying = true;
+
+      const { result, rerender, unmount } = renderHook(() =>
+        useAudioPlaybackWithEffects({ sequence, assets }),
+      );
+
+      await act(async () => {
+        await result.current.initAudio();
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(fetchSpy).toHaveBeenCalled();
+
+      mockPlaybackStore.isPlaying = false;
+      rerender();
+
+      await act(async () => {
+        pendingFetch.resolve({
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          arrayBuffer: async () => new ArrayBuffer(16),
+        } as Response);
+
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(mockContext.createBufferSource).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('does not reschedule sources during natural playback progression', async () => {
+      mockContext.currentTime = 1;
+      const createdSources: MockAudioBufferSourceNode[] = [];
+      mockContext.createBufferSource = vi.fn().mockImplementation(() => {
+        const source = new MockAudioBufferSourceNode();
+        createdSources.push(source);
+        return source;
+      });
+
+      const sequence = createMockSequence();
+      const asset = createMockAsset();
+      const assets = new Map<string, Asset>([[asset.id, asset]]);
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        arrayBuffer: async () => new ArrayBuffer(16),
+      });
+
+      mockPlaybackStore.isPlaying = true;
+      mockPlaybackStore.currentTime = 0;
+
+      const { result, rerender, unmount } = renderHook(() =>
+        useAudioPlaybackWithEffects({ sequence, assets }),
+      );
+
+      await act(async () => {
+        await result.current.initAudio();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      const initialSourceCount = createdSources.length;
+      expect(initialSourceCount).toBeGreaterThanOrEqual(1);
+
+      for (const t of [0.03, 0.06, 0.09, 0.12, 0.15, 0.18, 0.21]) {
+        mockPlaybackStore.currentTime = t;
+        rerender();
+        await act(async () => {
+          await Promise.resolve();
+        });
+      }
+
+      expect(createdSources.length).toBe(initialSourceCount);
+      expect(createdSources[0].stop).not.toHaveBeenCalled();
+
+      unmount();
     });
   });
 
@@ -602,7 +709,7 @@ describe('useAudioPlaybackWithEffects', () => {
           sequence,
           assets,
           getEffectById,
-        })
+        }),
       );
 
       await act(async () => {
@@ -634,7 +741,7 @@ describe('useAudioPlaybackWithEffects', () => {
             assets,
             getEffectById,
           }),
-        { initialProps: { sequence } }
+        { initialProps: { sequence } },
       );
 
       await act(async () => {
@@ -669,7 +776,7 @@ describe('useAudioPlaybackWithEffects', () => {
         useAudioPlaybackWithEffects({
           sequence,
           assets,
-        })
+        }),
       );
 
       await act(async () => {
@@ -695,7 +802,7 @@ describe('useAudioPlaybackWithEffects', () => {
           sequence,
           assets,
           getEffectById,
-        })
+        }),
       );
 
       await act(async () => {
@@ -731,7 +838,7 @@ describe('useAudioPlaybackWithEffects', () => {
           sequence,
           assets,
           getEffectById,
-        })
+        }),
       );
 
       await act(async () => {

@@ -194,6 +194,126 @@ describe('AgenticEngine', () => {
       expect(result.finalState.thought?.approach).toContain('fast path');
     });
 
+    it('should resolve step-reference args for orchestration plans before downstream execution', async () => {
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'check_generation_status',
+          description: 'Check generation status',
+          category: 'analysis',
+          riskLevel: 'low',
+          supportsUndo: false,
+          parallelizable: true,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            jobId: { type: 'string' },
+          },
+        },
+        required: ['jobId'],
+        result: {
+          success: true,
+          data: { assetId: 'asset-generated-42' },
+          duration: 10,
+        },
+      });
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'insert_clip',
+          description: 'Insert asset clip',
+          category: 'editing',
+          riskLevel: 'low',
+          supportsUndo: true,
+          parallelizable: false,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            sequenceId: { type: 'string' },
+            trackId: { type: 'string' },
+            assetId: { type: 'string' },
+            timelineStart: { type: 'number' },
+          },
+        },
+        required: ['sequenceId', 'trackId', 'assetId', 'timelineStart'],
+        executor: async (args) => {
+          if (typeof args.assetId !== 'string') {
+            return { success: false, error: 'assetId must be string', duration: 10 };
+          }
+
+          return {
+            success: true,
+            data: { clipId: 'clip-generated', assetId: args.assetId },
+            duration: 10,
+          };
+        },
+      });
+
+      const orchestrationThought: Thought = {
+        understanding: 'Place generated video on timeline',
+        requirements: ['Generated asset result', 'timeline insertion'],
+        uncertainties: [],
+        approach: 'Read generation output and insert the asset',
+        needsMoreInfo: false,
+      };
+
+      const orchestrationPlan: Plan = {
+        goal: 'Insert generated asset',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'check_generation_status',
+            args: { jobId: 'job-42' },
+            description: 'Load generation output',
+            riskLevel: 'low',
+            estimatedDuration: 50,
+          },
+          {
+            id: 'step-2',
+            tool: 'insert_clip',
+            args: {
+              sequenceId: 'sequence-1',
+              trackId: 'track-1',
+              assetId: { $fromStep: 'step-1', $path: 'data.assetId' },
+              timelineStart: 0,
+            },
+            description: 'Insert generated asset',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+            dependsOn: ['step-1'],
+          },
+        ],
+        estimatedTotalDuration: 150,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo insert',
+      };
+
+      let callCount = 0;
+      vi.spyOn(mockLLM, 'generateStructured').mockImplementation(async () => {
+        callCount += 1;
+        if (callCount === 1) return orchestrationThought;
+        if (callCount === 2) return orchestrationPlan;
+        return mockObservation;
+      });
+
+      const result = await engine.run(
+        'Insert generated asset onto the timeline',
+        agentContext,
+        executionContext,
+      );
+
+      expect(result.success).toBe(true);
+      expect(
+        mockToolExecutor.wasToolCalledWith('insert_clip', {
+          sequenceId: 'sequence-1',
+          trackId: 'track-1',
+          assetId: 'asset-generated-42',
+          timelineStart: 0,
+        }),
+      ).toBe(true);
+    });
+
     it('should emit events throughout the process', async () => {
       let callCount = 0;
       vi.spyOn(mockLLM, 'generateStructured').mockImplementation(async () => {
@@ -871,7 +991,7 @@ describe('AgenticEngine', () => {
       expect(result.observation?.summary).toContain('Stopped automatic retries');
     });
 
-    it('Given repeated terminal failures without state progress, When observer keeps requesting retries, Then engine stops on second identical failure', async () => {
+    it('Given deterministic track-resolution failure, When observer keeps requesting retries, Then engine stops immediately', async () => {
       agentContext.availableTracks = [
         {
           id: 'track-1',
@@ -941,7 +1061,7 @@ describe('AgenticEngine', () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.iterations).toBe(2);
+      expect(result.iterations).toBe(1);
       expect(result.observation?.needsIteration).toBe(false);
       expect(result.observation?.summary).toContain('Stopped automatic retries');
     });

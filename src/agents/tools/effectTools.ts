@@ -5,21 +5,11 @@
  * Handles adding, removing, and adjusting video/audio effects.
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
+import { executeAgentCommand } from './commandExecutor';
 
 const logger = createLogger('EffectTools');
-
-// =============================================================================
-// Types
-// =============================================================================
-
-interface CommandResult {
-  opId: string;
-  success: boolean;
-  error?: string;
-}
 
 // =============================================================================
 // Tool Definitions
@@ -61,15 +51,12 @@ const EFFECT_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'AddEffect',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string,
-            effectType: args.effectType as string,
-            parameters: (args.parameters as Record<string, unknown>) ?? {},
-          },
+        const result = await executeAgentCommand('AddEffect', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
+          effectType: args.effectType as string,
+          parameters: (args.parameters as Record<string, unknown>) ?? {},
         });
 
         logger.debug('add_effect executed', { opId: result.opId });
@@ -113,14 +100,11 @@ const EFFECT_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'RemoveEffect',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string,
-            effectId: args.effectId as string,
-          },
+        const result = await executeAgentCommand('RemoveEffect', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
+          effectId: args.effectId as string,
         });
 
         logger.debug('remove_effect executed', { opId: result.opId });
@@ -172,16 +156,13 @@ const EFFECT_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'AdjustEffectParam',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string,
-            effectId: args.effectId as string,
-            paramName: args.paramName as string,
-            paramValue: args.paramValue as number,
-          },
+        const result = await executeAgentCommand('AdjustEffectParam', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
+          effectId: args.effectId as string,
+          paramName: args.paramName as string,
+          paramValue: args.paramValue as number,
         });
 
         logger.debug('adjust_effect_param executed', { opId: result.opId });
@@ -229,15 +210,12 @@ const EFFECT_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'CopyEffects',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            sourceTrackId: args.sourceTrackId as string,
-            sourceClipId: args.sourceClipId as string,
-            targetTrackId: args.targetTrackId as string,
-            targetClipId: args.targetClipId as string,
-          },
+        const result = await executeAgentCommand('CopyEffects', {
+          sequenceId: args.sequenceId as string,
+          sourceTrackId: args.sourceTrackId as string,
+          sourceClipId: args.sourceClipId as string,
+          targetTrackId: args.targetTrackId as string,
+          targetClipId: args.targetClipId as string,
         });
 
         logger.debug('copy_effects executed', { opId: result.opId });
@@ -277,13 +255,10 @@ const EFFECT_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'ResetEffects',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string,
-          },
+        const result = await executeAgentCommand('ResetEffects', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
         });
 
         logger.debug('reset_effects executed', { opId: result.opId });
