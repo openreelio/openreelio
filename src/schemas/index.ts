@@ -72,3 +72,23 @@ export {
   type Requirement,
   type RiskAssessment,
 } from './commandSchemas';
+
+export {
+  RelativeWorkspacePathSchema,
+  RelativeWorkspacePathListSchema,
+  WorkspaceScanResultSchema,
+  WorkspaceTreeSchema,
+  RegisterFileResultSchema,
+  RegisterFileResultsSchema,
+  WorkspaceFileEventSchema,
+  WorkspaceScanCompleteEventSchema,
+  parseRelativeWorkspacePath,
+  parseRelativeWorkspacePathList,
+  parseWorkspaceScanResult,
+  parseWorkspaceTree,
+  parseRegisterFileResult,
+  parseRegisterFileResults,
+  parseWorkspaceFileEvent,
+  parseWorkspaceScanCompleteEvent,
+  WORKSPACE_SCHEMA_LIMITS,
+} from './workspaceSchemas';
