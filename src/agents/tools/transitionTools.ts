@@ -5,21 +5,11 @@
  * Handles adding, removing, and adjusting transitions between clips.
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
+import { executeAgentCommand } from './commandExecutor';
 
 const logger = createLogger('TransitionTools');
-
-// =============================================================================
-// Types
-// =============================================================================
-
-interface CommandResult {
-  opId: string;
-  success: boolean;
-  error?: string;
-}
 
 // =============================================================================
 // Tool Definitions
@@ -62,15 +52,12 @@ const TRANSITION_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'AddTransition',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            clipId: args.clipId as string,
-            transitionType: args.transitionType as string,
-            duration: args.duration as number,
-          },
+        const result = await executeAgentCommand('AddTransition', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          clipId: args.clipId as string,
+          transitionType: args.transitionType as string,
+          duration: args.duration as number,
         });
 
         logger.debug('add_transition executed', { opId: result.opId });
@@ -110,13 +97,10 @@ const TRANSITION_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'RemoveTransition',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            transitionId: args.transitionId as string,
-          },
+        const result = await executeAgentCommand('RemoveTransition', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          transitionId: args.transitionId as string,
         });
 
         logger.debug('remove_transition executed', { opId: result.opId });
@@ -160,14 +144,11 @@ const TRANSITION_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'SetTransitionDuration',
-          payload: {
-            sequenceId: args.sequenceId as string,
-            trackId: args.trackId as string,
-            transitionId: args.transitionId as string,
-            duration: args.duration as number,
-          },
+        const result = await executeAgentCommand('SetTransitionDuration', {
+          sequenceId: args.sequenceId as string,
+          trackId: args.trackId as string,
+          transitionId: args.transitionId as string,
+          duration: args.duration as number,
         });
 
         logger.debug('set_transition_duration executed', { opId: result.opId });

@@ -12,7 +12,8 @@
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
-import type { Asset, Clip, Track, Sequence } from '@/types';
+import { useWorkspaceStore } from '@/stores/workspaceStore';
+import type { Asset, AssetKind, Clip, FileTreeEntry, Track, Sequence } from '@/types';
 
 // =============================================================================
 // Snapshot Types
@@ -45,6 +46,7 @@ export interface TrackSnapshot {
 }
 
 export interface TimelineSnapshot {
+  stateVersion: number;
   sequenceId: string | null;
   sequenceName: string;
   duration: number;
@@ -73,6 +75,7 @@ export interface AssetSnapshot {
 }
 
 export interface AssetCatalogSnapshot {
+  stateVersion: number;
   totalAssetCount: number;
   videoAssetCount: number;
   audioAssetCount: number;
@@ -163,6 +166,7 @@ function assetToSnapshot(asset: Asset, timelineClipCount: number): AssetSnapshot
  * Returns only selectedClipIds, selectedTrackIds, playheadPosition, and sequenceId.
  */
 export function getSelectionContext(): {
+  stateVersion: number;
   sequenceId: string | null;
   selectedClipIds: string[];
   selectedTrackIds: string[];
@@ -173,6 +177,7 @@ export function getSelectionContext(): {
   const playback = usePlaybackStore.getState();
 
   return {
+    stateVersion: project.stateVersion,
     sequenceId: project.activeSequenceId,
     selectedClipIds: timeline.selectedClipIds,
     selectedTrackIds: timeline.selectedTrackIds,
@@ -205,6 +210,7 @@ export function getAssetCatalogSnapshot(): AssetCatalogSnapshot {
   const unusedAssetCount = assets.filter((asset) => !asset.onTimeline).length;
 
   return {
+    stateVersion: project.stateVersion,
     totalAssetCount: assets.length,
     videoAssetCount,
     audioAssetCount,
@@ -254,6 +260,7 @@ export function getTimelineSnapshot(): TimelineSnapshot {
   }
 
   return {
+    stateVersion: project.stateVersion,
     sequenceId: project.activeSequenceId,
     sequenceName: activeSequence?.name ?? '',
     duration: playback.duration,
@@ -447,4 +454,71 @@ export function findOverlaps(trackId?: string): Array<{
   }
 
   return overlaps;
+}
+
+// =============================================================================
+// Workspace Accessors
+// =============================================================================
+
+export interface WorkspaceFileSnapshot {
+  relativePath: string;
+  name: string;
+  kind: AssetKind | undefined;
+  fileSize: number | undefined;
+  assetId: string | undefined;
+  registered: boolean;
+}
+
+/**
+ * Flatten workspace file tree into a flat list of leaf (non-directory) entries.
+ */
+function flattenFileTree(entries: FileTreeEntry[]): FileTreeEntry[] {
+  const result: FileTreeEntry[] = [];
+  for (const entry of entries) {
+    if (entry.isDirectory) {
+      result.push(...flattenFileTree(entry.children));
+    } else {
+      result.push(entry);
+    }
+  }
+  return result;
+}
+
+/**
+ * Get all workspace files as a flat list of snapshots.
+ * Optionally filter by asset kind.
+ */
+export function getWorkspaceFiles(kind?: AssetKind): WorkspaceFileSnapshot[] {
+  const { fileTree } = useWorkspaceStore.getState();
+  const flat = flattenFileTree(fileTree);
+
+  return flat
+    .filter((f) => (kind ? f.kind === kind : true))
+    .map((f) => ({
+      relativePath: f.relativePath,
+      name: f.name,
+      kind: f.kind,
+      fileSize: f.fileSize,
+      assetId: f.assetId,
+      registered: f.assetId != null,
+    }));
+}
+
+/**
+ * Get workspace files that are NOT yet registered as project assets.
+ */
+export function getUnregisteredWorkspaceFiles(kind?: AssetKind): WorkspaceFileSnapshot[] {
+  return getWorkspaceFiles(kind).filter((f) => !f.registered);
+}
+
+/**
+ * Find workspace files by name (case-insensitive substring match).
+ */
+export function findWorkspaceFile(query: string): WorkspaceFileSnapshot[] {
+  const lowerQuery = query.toLowerCase();
+  return getWorkspaceFiles().filter(
+    (f) =>
+      f.name.toLowerCase().includes(lowerQuery) ||
+      f.relativePath.toLowerCase().includes(lowerQuery),
+  );
 }
