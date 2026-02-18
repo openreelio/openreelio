@@ -160,6 +160,18 @@ export interface AISettings {
   videoGenPerRequestLimitCents: number;
 }
 
+/** Workspace settings for file discovery and management */
+export interface WorkspaceSettings {
+  /** Auto-scan workspace when a project is opened */
+  autoScanOnOpen: boolean;
+  /** Watch for file changes in the workspace */
+  watchingEnabled: boolean;
+  /** Auto-register workspace files when first used */
+  autoRegisterOnUse: boolean;
+  /** Maximum directory depth for scanning */
+  scanDepthLimit: number;
+}
+
 /** Complete application settings */
 export interface AppSettings {
   version: number;
@@ -172,6 +184,7 @@ export interface AppSettings {
   autoSave: AutoSaveSettings;
   performance: PerformanceSettings;
   ai: AISettings;
+  workspace: WorkspaceSettings;
 }
 
 type SettingsSectionKey = Exclude<keyof AppSettings, 'version'>;
@@ -299,6 +312,12 @@ const DEFAULT_SETTINGS: AppSettings = {
     videoGenBudgetCents: null,
     videoGenPerRequestLimitCents: 100,
   },
+  workspace: {
+    autoScanOnOpen: true,
+    watchingEnabled: true,
+    autoRegisterOnUse: true,
+    scanDepthLimit: 10,
+  },
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -352,6 +371,10 @@ function coerceAppSettings(value: unknown): AppSettings {
         ...(isRecord(value.performance) ? value.performance : {}),
       },
       ai: { ...DEFAULT_SETTINGS.ai, ...(isRecord(value.ai) ? value.ai : {}) },
+      workspace: {
+        ...DEFAULT_SETTINGS.workspace,
+        ...(isRecord(value.workspace) ? value.workspace : {}),
+      },
     } as AppSettings;
   }
 

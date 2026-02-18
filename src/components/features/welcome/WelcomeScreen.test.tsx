@@ -1,7 +1,7 @@
 /**
  * WelcomeScreen Component Tests
  *
- * TDD: RED phase - Write failing tests first
+ * Tests for the folder-based workspace welcome screen.
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -18,8 +18,7 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({
 }));
 
 describe('WelcomeScreen', () => {
-  const mockOnNewProject = vi.fn();
-  const mockOnOpenProject = vi.fn();
+  const mockOnOpenFolder = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -31,10 +30,7 @@ describe('WelcomeScreen', () => {
 
   it('renders the welcome screen with logo and title', () => {
     render(
-      <WelcomeScreen
-        onNewProject={mockOnNewProject}
-        onOpenProject={mockOnOpenProject}
-      />
+      <WelcomeScreen onOpenFolder={mockOnOpenFolder} />
     );
 
     expect(screen.getByTestId('welcome-screen')).toBeInTheDocument();
@@ -42,62 +38,29 @@ describe('WelcomeScreen', () => {
     expect(screen.getByText(/AI-powered video editing/i)).toBeInTheDocument();
   });
 
-  it('renders New Project button', () => {
+  it('renders Open Folder button', () => {
     render(
-      <WelcomeScreen
-        onNewProject={mockOnNewProject}
-        onOpenProject={mockOnOpenProject}
-      />
+      <WelcomeScreen onOpenFolder={mockOnOpenFolder} />
     );
 
-    const newProjectBtn = screen.getByTestId('new-project-button');
-    expect(newProjectBtn).toBeInTheDocument();
-    expect(newProjectBtn).toHaveTextContent(/new project/i);
-  });
-
-  it('renders Open Project button', () => {
-    render(
-      <WelcomeScreen
-        onNewProject={mockOnNewProject}
-        onOpenProject={mockOnOpenProject}
-      />
-    );
-
-    const openProjectBtn = screen.getByTestId('open-project-button');
-    expect(openProjectBtn).toBeInTheDocument();
-    expect(openProjectBtn).toHaveTextContent(/open project/i);
+    const openFolderBtn = screen.getByTestId('open-folder-button');
+    expect(openFolderBtn).toBeInTheDocument();
+    expect(openFolderBtn).toHaveTextContent(/open folder/i);
   });
 
   // ===========================================================================
   // Interaction Tests
   // ===========================================================================
 
-  it('calls onNewProject when New Project button is clicked', () => {
+  it('calls onOpenFolder when Open Folder button is clicked', () => {
     render(
-      <WelcomeScreen
-        onNewProject={mockOnNewProject}
-        onOpenProject={mockOnOpenProject}
-      />
+      <WelcomeScreen onOpenFolder={mockOnOpenFolder} />
     );
 
-    const newProjectBtn = screen.getByTestId('new-project-button');
-    fireEvent.click(newProjectBtn);
+    const openFolderBtn = screen.getByTestId('open-folder-button');
+    fireEvent.click(openFolderBtn);
 
-    expect(mockOnNewProject).toHaveBeenCalledTimes(1);
-  });
-
-  it('calls onOpenProject when Open Project button is clicked', () => {
-    render(
-      <WelcomeScreen
-        onNewProject={mockOnNewProject}
-        onOpenProject={mockOnOpenProject}
-      />
-    );
-
-    const openProjectBtn = screen.getByTestId('open-project-button');
-    fireEvent.click(openProjectBtn);
-
-    expect(mockOnOpenProject).toHaveBeenCalledTimes(1);
+    expect(mockOnOpenFolder).toHaveBeenCalledTimes(1);
   });
 
   // ===========================================================================
@@ -112,8 +75,7 @@ describe('WelcomeScreen', () => {
 
     render(
       <WelcomeScreen
-        onNewProject={mockOnNewProject}
-        onOpenProject={mockOnOpenProject}
+        onOpenFolder={mockOnOpenFolder}
         recentProjects={recentProjects}
       />
     );
@@ -126,8 +88,7 @@ describe('WelcomeScreen', () => {
   it('does not render recent projects section when empty', () => {
     render(
       <WelcomeScreen
-        onNewProject={mockOnNewProject}
-        onOpenProject={mockOnOpenProject}
+        onOpenFolder={mockOnOpenFolder}
         recentProjects={[]}
       />
     );
@@ -135,15 +96,14 @@ describe('WelcomeScreen', () => {
     expect(screen.queryByTestId('recent-projects-section')).not.toBeInTheDocument();
   });
 
-  it('calls onOpenProject with path when recent project is clicked', () => {
+  it('calls onOpenFolder with path when recent project is clicked', () => {
     const recentProjects = [
       { id: '1', name: 'Project A', path: '/path/to/a', lastOpened: '2024-01-01' },
     ];
 
     render(
       <WelcomeScreen
-        onNewProject={mockOnNewProject}
-        onOpenProject={mockOnOpenProject}
+        onOpenFolder={mockOnOpenFolder}
         recentProjects={recentProjects}
       />
     );
@@ -151,48 +111,39 @@ describe('WelcomeScreen', () => {
     const projectItem = screen.getByTestId('recent-project-1');
     fireEvent.click(projectItem);
 
-    expect(mockOnOpenProject).toHaveBeenCalledWith('/path/to/a');
+    expect(mockOnOpenFolder).toHaveBeenCalledWith('/path/to/a');
   });
 
   // ===========================================================================
   // Loading State Tests
   // ===========================================================================
 
-  it('disables buttons when loading', () => {
+  it('disables button when loading', () => {
     render(
       <WelcomeScreen
-        onNewProject={mockOnNewProject}
-        onOpenProject={mockOnOpenProject}
+        onOpenFolder={mockOnOpenFolder}
         isLoading={true}
       />
     );
 
-    expect(screen.getByTestId('new-project-button')).toBeDisabled();
-    expect(screen.getByTestId('open-project-button')).toBeDisabled();
+    expect(screen.getByTestId('open-folder-button')).toBeDisabled();
   });
 
   // ===========================================================================
   // Accessibility Tests
   // ===========================================================================
 
-  it('has proper aria labels for buttons', () => {
+  it('has proper aria label for button', () => {
     render(
-      <WelcomeScreen
-        onNewProject={mockOnNewProject}
-        onOpenProject={mockOnOpenProject}
-      />
+      <WelcomeScreen onOpenFolder={mockOnOpenFolder} />
     );
 
-    expect(screen.getByTestId('new-project-button')).toHaveAttribute('aria-label');
-    expect(screen.getByTestId('open-project-button')).toHaveAttribute('aria-label');
+    expect(screen.getByTestId('open-folder-button')).toHaveAttribute('aria-label');
   });
 
   it('has proper role for main container', () => {
     render(
-      <WelcomeScreen
-        onNewProject={mockOnNewProject}
-        onOpenProject={mockOnOpenProject}
-      />
+      <WelcomeScreen onOpenFolder={mockOnOpenFolder} />
     );
 
     expect(screen.getByTestId('welcome-screen')).toHaveAttribute('role', 'main');

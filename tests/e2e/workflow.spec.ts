@@ -77,31 +77,15 @@ async function dismissBlockingFFmpegWarning(page: Page): Promise<void> {
   await expect(warning).toBeHidden({ timeout: LOAD_TIMEOUT });
 }
 
-async function createNewProject(page: Page, projectName: string): Promise<boolean> {
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+async function createNewProject(page: Page, _projectName: string): Promise<boolean> {
   await dismissBlockingFFmpegWarning(page);
 
-  // Click new project button
-  const newProjectButton = page.locator(
-    '[data-testid="new-project-button"], button:has-text("New Project")',
+  // Click open folder button (folder-based workspace model)
+  const openFolderButton = page.locator(
+    '[data-testid="open-folder-button"], button:has-text("Open Folder")',
   );
-  await newProjectButton.click();
-
-  // Fill project details
-  const nameInput = page.locator('[data-testid="project-name-input"], input[name="projectName"]');
-  if (await nameInput.isVisible()) {
-    await nameInput.fill(projectName);
-  }
-
-  // Submit
-  const createButton = page.locator(
-    '[data-testid="create-button"], [data-testid="create-project-submit"], button:has-text("Create")',
-  );
-  if (await createButton.isVisible()) {
-    if (!(await createButton.isEnabled())) {
-      return false;
-    }
-    await createButton.click();
-  }
+  await openFolderButton.click();
 
   // Wait for timeline to be visible
   await expect(

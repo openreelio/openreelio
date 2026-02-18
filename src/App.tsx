@@ -35,11 +35,6 @@ const WelcomeScreen = lazy(async () => {
   return { default: module.WelcomeScreen };
 });
 
-const ProjectCreationDialog = lazy(async () => {
-  const module = await import('./components/features/project');
-  return { default: module.ProjectCreationDialog };
-});
-
 const SetupWizard = lazy(async () => {
   const module = await import('./components/features/setup');
   return { default: module.SetupWizard };
@@ -92,15 +87,8 @@ function App(): JSX.Element {
   // App version (fetched from backend)
   const [appVersion, setAppVersion] = useState('0.1.0');
 
-  // Project handlers (creation, opening)
-  const {
-    showCreateDialog,
-    isCreatingProject,
-    handleNewProject,
-    handleCreateProject,
-    handleCancelCreate,
-    handleOpenProject,
-  } = useProjectHandlers({
+  // Project handlers (folder-based workflow)
+  const { handleOpenFolder } = useProjectHandlers({
     setRecentProjects,
     addToast,
   });
@@ -227,20 +215,13 @@ function App(): JSX.Element {
         <UpdateBanner checkOnMount={settingsLoaded && general.checkUpdatesOnStartup} />
         <Suspense fallback={<ScreenLoadingFallback />}>
           <WelcomeScreen
-            onNewProject={handleNewProject}
-            onOpenProject={(path) => void handleOpenProject(path)}
+            onOpenFolder={(path) => void handleOpenFolder(path)}
             recentProjects={recentProjects}
-            isLoading={isLoading || isCreatingProject}
+            isLoading={isLoading}
             version={appVersion}
             showDontShowOption={settingsLoaded}
             onDontShowAgain={handleDontShowWelcome}
             onClearRecentProjects={handleClearRecentProjects}
-          />
-          <ProjectCreationDialog
-            isOpen={showCreateDialog}
-            onCancel={handleCancelCreate}
-            onCreate={(data) => void handleCreateProject(data)}
-            isCreating={isCreatingProject}
           />
         </Suspense>
         <FFmpegWarning

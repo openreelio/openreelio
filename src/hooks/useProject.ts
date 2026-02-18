@@ -36,7 +36,6 @@ export interface UseProjectReturn {
   loadProject: (path: string) => Promise<void>;
   saveProject: () => Promise<void>;
   closeProject: () => Promise<void>;
-  importAsset: (uri: string) => Promise<string>;
   removeAsset: (assetId: string) => Promise<void>;
 }
 
@@ -70,7 +69,6 @@ export function useProject(): UseProjectReturn {
   const storeLoadProject = useProjectStore((state) => state.loadProject);
   const storeSaveProject = useProjectStore((state) => state.saveProject);
   const storeCloseProject = useProjectStore((state) => state.closeProject);
-  const storeImportAsset = useProjectStore((state) => state.importAsset);
   const storeRemoveAsset = useProjectStore((state) => state.removeAsset);
 
   // Computed values
@@ -83,14 +81,14 @@ export function useProject(): UseProjectReturn {
     async (name: string, path: string): Promise<void> => {
       await storeCreateProject(name, path);
     },
-    [storeCreateProject]
+    [storeCreateProject],
   );
 
   const loadProject = useCallback(
     async (path: string): Promise<void> => {
       await storeLoadProject(path);
     },
-    [storeLoadProject]
+    [storeLoadProject],
   );
 
   const saveProject = useCallback(async (): Promise<void> => {
@@ -101,18 +99,11 @@ export function useProject(): UseProjectReturn {
     await storeCloseProject();
   }, [storeCloseProject]);
 
-  const importAsset = useCallback(
-    async (uri: string): Promise<string> => {
-      return await storeImportAsset(uri);
-    },
-    [storeImportAsset]
-  );
-
   const removeAsset = useCallback(
     async (assetId: string): Promise<void> => {
       await storeRemoveAsset(assetId);
     },
-    [storeRemoveAsset]
+    [storeRemoveAsset],
   );
 
   return {
@@ -133,7 +124,6 @@ export function useProject(): UseProjectReturn {
     loadProject,
     saveProject,
     closeProject,
-    importAsset,
     removeAsset,
   };
 }

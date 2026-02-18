@@ -13,7 +13,6 @@ const mockCreateProject = vi.fn();
 const mockLoadProject = vi.fn();
 const mockSaveProject = vi.fn();
 const mockCloseProject = vi.fn();
-const mockImportAsset = vi.fn();
 const mockRemoveAsset = vi.fn();
 
 vi.mock('@/stores', () => ({
@@ -32,7 +31,6 @@ vi.mock('@/stores', () => ({
       loadProject: mockLoadProject,
       saveProject: mockSaveProject,
       closeProject: mockCloseProject,
-      importAsset: mockImportAsset,
       removeAsset: mockRemoveAsset,
       selectAsset: vi.fn(),
       getActiveSequence: vi.fn(),
@@ -116,16 +114,6 @@ describe('useProject', () => {
   });
 
   describe('asset operations', () => {
-    it('provides importAsset action', async () => {
-      const { result } = renderHook(() => useProject());
-
-      await act(async () => {
-        await result.current.importAsset('/path/to/file.mp4');
-      });
-
-      expect(mockImportAsset).toHaveBeenCalledWith('/path/to/file.mp4');
-    });
-
     it('provides removeAsset action', async () => {
       const { result } = renderHook(() => useProject());
 
