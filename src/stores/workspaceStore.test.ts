@@ -2,7 +2,11 @@
  * Workspace Store Tests
  */
 
-import { useWorkspaceStore } from './workspaceStore';
+import {
+  cleanupWorkspaceEventListeners,
+  setupWorkspaceEventListeners,
+  useWorkspaceStore,
+} from './workspaceStore';
 
 // Mock Tauri API
 vi.mock('@tauri-apps/api/core', () => ({
@@ -26,12 +30,30 @@ vi.mock('@/services/logger', () => ({
 }));
 
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import type { FileTreeEntry, WorkspaceScanResult } from '@/types';
 
 const mockInvoke = vi.mocked(invoke);
+const mockListen = vi.mocked(listen);
 
-beforeEach(() => {
+function createDeferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+beforeEach(async () => {
+  await cleanupWorkspaceEventListeners();
   useWorkspaceStore.getState().reset();
+  vi.useRealTimers();
   vi.clearAllMocks();
 });
 
@@ -83,6 +105,19 @@ describe('workspaceStore', () => {
       expect(state.isScanning).toBe(false);
       expect(state.error).toBe('Scan failed: permission denied');
     });
+
+    it('should reject malformed scan payloads defensively', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        totalFiles: '5',
+        newFiles: 3,
+        removedFiles: 0,
+        registeredFiles: 2,
+      });
+
+      await useWorkspaceStore.getState().scanWorkspace();
+
+      expect(useWorkspaceStore.getState().error).toContain('Invalid workspace scan result payload');
+    });
   });
 
   describe('refreshTree', () => {
@@ -121,6 +156,47 @@ describe('workspaceStore', () => {
 
       const state = useWorkspaceStore.getState();
       expect(state.error).toBe('No project open');
+    });
+
+    it('should keep latest tree when responses arrive out of order', async () => {
+      const firstTree: FileTreeEntry[] = [
+        {
+          relativePath: 'old',
+          name: 'old',
+          isDirectory: true,
+          children: [],
+        },
+      ];
+      const secondTree: FileTreeEntry[] = [
+        {
+          relativePath: 'new',
+          name: 'new',
+          isDirectory: true,
+          children: [],
+        },
+      ];
+
+      const first = createDeferred<FileTreeEntry[]>();
+      const second = createDeferred<FileTreeEntry[]>();
+
+      let treeCallCount = 0;
+      mockInvoke.mockImplementation(async (cmd) => {
+        if (cmd !== 'get_workspace_tree') {
+          return [];
+        }
+        treeCallCount += 1;
+        return treeCallCount === 1 ? first.promise : second.promise;
+      });
+
+      const refreshA = useWorkspaceStore.getState().refreshTree();
+      const refreshB = useWorkspaceStore.getState().refreshTree();
+
+      second.resolve(secondTree);
+      await refreshB;
+      first.resolve(firstTree);
+      await refreshA;
+
+      expect(useWorkspaceStore.getState().fileTree).toEqual(secondTree);
     });
   });
 
@@ -172,6 +248,52 @@ describe('workspaceStore', () => {
       expect(result).toBeNull();
       expect(useWorkspaceStore.getState().error).toBe('File not found');
     });
+
+    it('should reject traversal attempts before IPC call', async () => {
+      const result = await useWorkspaceStore.getState().registerFile('../outside.mp4');
+
+      expect(result).toBeNull();
+      expect(mockInvoke).not.toHaveBeenCalled();
+      expect(useWorkspaceStore.getState().error).toContain(
+        'relativePath contains invalid "." or ".."',
+      );
+    });
+
+    it('should dedupe concurrent registration calls for same path', async () => {
+      const deferred = createDeferred<{
+        assetId: string;
+        relativePath: string;
+        alreadyRegistered: boolean;
+      }>();
+
+      mockInvoke.mockImplementation(async (cmd) => {
+        if (cmd === 'register_workspace_file') {
+          return deferred.promise;
+        }
+        if (cmd === 'get_workspace_tree') {
+          return [];
+        }
+        return null;
+      });
+
+      const first = useWorkspaceStore.getState().registerFile('clip.mp4');
+      const second = useWorkspaceStore.getState().registerFile(' clip.mp4 ');
+
+      expect(mockInvoke).toHaveBeenCalledTimes(1);
+      expect(mockInvoke).toHaveBeenCalledWith('register_workspace_file', {
+        relativePath: 'clip.mp4',
+      });
+
+      deferred.resolve({
+        assetId: 'asset-clip',
+        relativePath: 'clip.mp4',
+        alreadyRegistered: false,
+      });
+
+      const [firstResult, secondResult] = await Promise.all([first, second]);
+      expect(firstResult).toEqual(secondResult);
+      expect(useWorkspaceStore.getState().registeringPathCounts).toEqual({});
+    });
   });
 
   describe('registerFiles', () => {
@@ -213,6 +335,41 @@ describe('workspaceStore', () => {
       const results = await useWorkspaceStore.getState().registerFiles(['a.mp4']);
 
       expect(results).toEqual([]);
+    });
+
+    it('should reject malformed batch input before backend call', async () => {
+      const results = await useWorkspaceStore.getState().registerFiles(['a.mp4', '../escape.mp4']);
+
+      expect(results).toEqual([]);
+      expect(mockInvoke).not.toHaveBeenCalled();
+      expect(useWorkspaceStore.getState().error).toContain('Invalid relativePaths');
+    });
+  });
+
+  describe('event listeners', () => {
+    it('should coalesce refreshes and ignore invalid watcher payloads', async () => {
+      vi.useFakeTimers();
+
+      mockInvoke.mockResolvedValue([]);
+      await setupWorkspaceEventListeners();
+
+      const fileAddedHandler = mockListen.mock.calls.find(
+        (call) => call[0] === 'workspace:file-added',
+      )?.[1];
+      expect(fileAddedHandler).toBeDefined();
+
+      fileAddedHandler?.({ payload: { relativePath: '../escape.mp4', kind: 'video' } } as never);
+      fileAddedHandler?.({ payload: { relativePath: 'footage/clip.mp4', kind: 'video' } } as never);
+      fileAddedHandler?.({ payload: { relativePath: 'footage/clip.mp4', kind: 'video' } } as never);
+
+      expect(mockInvoke).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(150);
+      expect(mockInvoke).toHaveBeenCalledTimes(1);
+      expect(mockInvoke).toHaveBeenCalledWith('get_workspace_tree', undefined);
+
+      await cleanupWorkspaceEventListeners();
+      expect(useWorkspaceStore.getState().isWatching).toBe(false);
     });
   });
 

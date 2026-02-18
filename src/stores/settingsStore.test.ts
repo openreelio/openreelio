@@ -102,7 +102,12 @@ const DEFAULT_SETTINGS: AppSettings = {
     autoCaptionOnImport: false,
     proposalReviewMode: 'always',
     cacheDurationHours: 24,
-    localOnlyMode: false, seedanceApiKey: null, videoGenProvider: null, videoGenDefaultQuality: 'pro', videoGenBudgetCents: null, videoGenPerRequestLimitCents: 100,
+    localOnlyMode: false,
+    seedanceApiKey: null,
+    videoGenProvider: null,
+    videoGenDefaultQuality: 'pro',
+    videoGenBudgetCents: null,
+    videoGenPerRequestLimitCents: 100,
   },
   workspace: {
     autoScanOnOpen: true,
@@ -126,6 +131,11 @@ describe('settingsStore', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    // Reset internal debounce state to prevent cross-test interference
+    const store = useSettingsStore.getState();
+    if ('_resetInternalState' in store) {
+      (store as { _resetInternalState: () => void })._resetInternalState();
+    }
   });
 
   describe('loadSettings', () => {
@@ -146,6 +156,41 @@ describe('settingsStore', () => {
       expect(result.current.settings.general.language).toBe('ko');
       expect(result.current.isLoaded).toBe(true);
       expect(result.current.error).toBeNull();
+    });
+
+    it('should restore workspace defaults when backend omits workspace section', async () => {
+      const backendSettings: Partial<AppSettings> = { ...DEFAULT_SETTINGS };
+      delete backendSettings.workspace;
+      mockInvoke.mockResolvedValueOnce(backendSettings);
+
+      const { result } = renderHook(() => useSettingsStore());
+
+      await act(async () => {
+        await result.current.loadSettings();
+      });
+
+      expect(result.current.settings.workspace).toEqual(DEFAULT_SETTINGS.workspace);
+      expect(result.current.settings.workspace.autoScanOnOpen).toBe(true);
+    });
+
+    it('should merge partial workspace settings with defaults', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        ...DEFAULT_SETTINGS,
+        workspace: {
+          autoScanOnOpen: false,
+        },
+      });
+
+      const { result } = renderHook(() => useSettingsStore());
+
+      await act(async () => {
+        await result.current.loadSettings();
+      });
+
+      expect(result.current.settings.workspace.autoScanOnOpen).toBe(false);
+      expect(result.current.settings.workspace.watchingEnabled).toBe(true);
+      expect(result.current.settings.workspace.autoRegisterOnUse).toBe(true);
+      expect(result.current.settings.workspace.scanDepthLimit).toBe(10);
     });
 
     it('should handle load error gracefully', async () => {
@@ -480,7 +525,6 @@ describe('settingsStore', () => {
       });
     });
   });
-
 });
 
 // =============================================================================
@@ -514,6 +558,7 @@ describe('settingsStore - Persist Merge Behavior', () => {
     expect(result.current.settings.shortcuts).toBeDefined();
     expect(result.current.settings.autoSave).toBeDefined();
     expect(result.current.settings.performance).toBeDefined();
+    expect(result.current.settings.workspace).toBeDefined();
   });
 
   it('should have checkUpdatesOnStartup defined in general settings', () => {
@@ -675,4 +720,161 @@ describe('settingsStore - Destructive Tests', () => {
     });
   });
 
+  describe('Destroy Lifecycle', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('should reject pending updates when destroyed', async () => {
+      const { result } = renderHook(() => useSettingsStore());
+
+      let caughtError: unknown = null;
+      act(() => {
+        const promise = result.current.updateSettings('general', { language: 'ko' });
+        promise.catch((e) => {
+          caughtError = e;
+        });
+      });
+
+      // Destroy before debounce fires
+      act(() => {
+        result.current.destroy();
+      });
+
+      // Wait for rejections to propagate
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      expect(caughtError).toBeInstanceOf(Error);
+      expect((caughtError as Error).message).toBe('Store destroyed');
+    });
+
+    it('should skip updates after destroy', async () => {
+      const { result } = renderHook(() => useSettingsStore());
+
+      act(() => {
+        result.current.destroy();
+      });
+
+      // updateSettings should bail out silently
+      await act(async () => {
+        await result.current.updateSettings('general', { language: 'ko' });
+      });
+
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should skip flush after destroy', async () => {
+      const { result } = renderHook(() => useSettingsStore());
+
+      // Start a debounced update and capture its promise to avoid unhandled rejection
+      let updatePromise: Promise<void> | undefined;
+      act(() => {
+        updatePromise = result.current.updateSettings('general', { language: 'ko' });
+      });
+
+      act(() => {
+        result.current.destroy();
+      });
+
+      // The pending update promise should reject with "Store destroyed"
+      await expect(updatePromise).rejects.toThrow('Store destroyed');
+
+      // flushPendingUpdates should not call invoke after destroy
+      await act(async () => {
+        await result.current.flushPendingUpdates();
+      });
+
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Malformed Backend Data', () => {
+    it('should use defaults when backend returns null', async () => {
+      mockInvoke.mockResolvedValueOnce(null);
+
+      const { result } = renderHook(() => useSettingsStore());
+
+      await act(async () => {
+        await result.current.loadSettings();
+      });
+
+      expect(result.current.settings.version).toBe(1);
+      expect(result.current.settings.general.language).toBe('en');
+    });
+
+    it('should use defaults when backend returns wrong type', async () => {
+      mockInvoke.mockResolvedValueOnce('not an object');
+
+      const { result } = renderHook(() => useSettingsStore());
+
+      await act(async () => {
+        await result.current.loadSettings();
+      });
+
+      expect(result.current.settings.version).toBe(1);
+    });
+
+    it('should use defaults when backend returns object without version', async () => {
+      mockInvoke.mockResolvedValueOnce({ general: { language: 'ko' } });
+
+      const { result } = renderHook(() => useSettingsStore());
+
+      await act(async () => {
+        await result.current.loadSettings();
+      });
+
+      // No version field, so falls back to defaults
+      expect(result.current.settings.general.language).toBe('en');
+    });
+
+    it('should merge valid sections when some are malformed', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        version: 1,
+        general: { language: 'ko', showWelcomeOnStartup: false },
+        editor: 'not an object', // malformed
+      });
+
+      const { result } = renderHook(() => useSettingsStore());
+
+      await act(async () => {
+        await result.current.loadSettings();
+      });
+
+      expect(result.current.settings.general.language).toBe('ko');
+      // editor should fall back to defaults because isRecord('not an object') === false
+      expect(result.current.settings.editor.snapToGrid).toBe(true);
+    });
+  });
+
+  describe('Concurrent Save Resilience', () => {
+    it('should serialize concurrent saves without data loss', async () => {
+      let callCount = 0;
+      mockInvoke.mockImplementation(() => {
+        callCount++;
+        return new Promise((resolve) => setTimeout(resolve, 50));
+      });
+
+      const { result } = renderHook(() => useSettingsStore());
+
+      // Launch multiple saves concurrently
+      const saves: Promise<void>[] = [];
+      for (let i = 0; i < 5; i++) {
+        saves.push(result.current.saveSettings());
+      }
+
+      await act(async () => {
+        await Promise.all(saves);
+      });
+
+      // All saves should execute (serialized via queue)
+      expect(callCount).toBe(5);
+      expect(result.current.isSaving).toBe(false);
+    });
+  });
 });

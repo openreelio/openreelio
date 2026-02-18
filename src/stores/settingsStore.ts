@@ -324,61 +324,43 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function isAppSettings(value: unknown): value is AppSettings {
-  if (!isRecord(value)) return false;
-  if (typeof value.version !== 'number') return false;
-  const requiredSections = [
-    'general',
-    'editor',
-    'playback',
-    'export',
-    'appearance',
-    'shortcuts',
-    'autoSave',
-    'performance',
-    'ai',
-  ];
-  return requiredSections.every((key) => key in value);
-}
-
 function coerceAppSettings(value: unknown): AppSettings {
-  if (isAppSettings(value)) return value;
-
-  // Handle partial settings from backend (e.g., during migration)
-  if (isRecord(value) && typeof value.version === 'number') {
-    return {
-      ...DEFAULT_SETTINGS,
-      ...(value as Partial<AppSettings>),
-      // Ensure all sections exist with defaults
-      general: { ...DEFAULT_SETTINGS.general, ...(isRecord(value.general) ? value.general : {}) },
-      editor: { ...DEFAULT_SETTINGS.editor, ...(isRecord(value.editor) ? value.editor : {}) },
-      playback: { ...DEFAULT_SETTINGS.playback, ...(isRecord(value.playback) ? value.playback : {}) },
-      export: { ...DEFAULT_SETTINGS.export, ...(isRecord(value.export) ? value.export : {}) },
-      appearance: {
-        ...DEFAULT_SETTINGS.appearance,
-        ...(isRecord(value.appearance) ? value.appearance : {}),
-      },
-      shortcuts: {
-        ...DEFAULT_SETTINGS.shortcuts,
-        ...(isRecord(value.shortcuts) ? value.shortcuts : {}),
-      },
-      autoSave: {
-        ...DEFAULT_SETTINGS.autoSave,
-        ...(isRecord(value.autoSave) ? value.autoSave : {}),
-      },
-      performance: {
-        ...DEFAULT_SETTINGS.performance,
-        ...(isRecord(value.performance) ? value.performance : {}),
-      },
-      ai: { ...DEFAULT_SETTINGS.ai, ...(isRecord(value.ai) ? value.ai : {}) },
-      workspace: {
-        ...DEFAULT_SETTINGS.workspace,
-        ...(isRecord(value.workspace) ? value.workspace : {}),
-      },
-    } as AppSettings;
+  if (!isRecord(value) || typeof value.version !== 'number') {
+    return DEFAULT_SETTINGS;
   }
 
-  return DEFAULT_SETTINGS;
+  // Always merge with defaults to tolerate backend/frontend schema drift.
+  // The backend currently does not persist `workspace`, so this prevents
+  // workspace-dependent features from crashing when settings are loaded.
+  return {
+    ...DEFAULT_SETTINGS,
+    ...(value as Partial<AppSettings>),
+    general: { ...DEFAULT_SETTINGS.general, ...(isRecord(value.general) ? value.general : {}) },
+    editor: { ...DEFAULT_SETTINGS.editor, ...(isRecord(value.editor) ? value.editor : {}) },
+    playback: { ...DEFAULT_SETTINGS.playback, ...(isRecord(value.playback) ? value.playback : {}) },
+    export: { ...DEFAULT_SETTINGS.export, ...(isRecord(value.export) ? value.export : {}) },
+    appearance: {
+      ...DEFAULT_SETTINGS.appearance,
+      ...(isRecord(value.appearance) ? value.appearance : {}),
+    },
+    shortcuts: {
+      ...DEFAULT_SETTINGS.shortcuts,
+      ...(isRecord(value.shortcuts) ? value.shortcuts : {}),
+    },
+    autoSave: {
+      ...DEFAULT_SETTINGS.autoSave,
+      ...(isRecord(value.autoSave) ? value.autoSave : {}),
+    },
+    performance: {
+      ...DEFAULT_SETTINGS.performance,
+      ...(isRecord(value.performance) ? value.performance : {}),
+    },
+    ai: { ...DEFAULT_SETTINGS.ai, ...(isRecord(value.ai) ? value.ai : {}) },
+    workspace: {
+      ...DEFAULT_SETTINGS.workspace,
+      ...(isRecord(value.workspace) ? value.workspace : {}),
+    },
+  } as AppSettings;
 }
 
 // =============================================================================
