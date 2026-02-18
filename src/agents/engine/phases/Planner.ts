@@ -24,6 +24,11 @@ import type {
   RiskLevel,
 } from '../core/types';
 import { PlanningTimeoutError, PlanValidationError } from '../core/errors';
+import {
+  collectStepValueReferences,
+  normalizeReferencesForValidation,
+} from '../core/stepReferences';
+import { buildOrchestrationPlaybook } from '../core/orchestrationPlaybooks';
 
 // =============================================================================
 // Types
@@ -52,6 +57,25 @@ const DEFAULT_CONFIG: Required<PlannerConfig> = {
   approvalRequiredRisks: ['high', 'critical'],
   systemPromptOverride: '',
 };
+
+const ID_PLACEHOLDER_PATTERNS: RegExp[] = [
+  /(?:^|[_-])(placeholder|example|sample|dummy|temp|todo|tbd|unknown)(?:$|[_-])/i,
+  /_from_(catalog|list|lookup|response|result)/i,
+  /^asset_id(?:_|$)/i,
+];
+
+const TRACK_ALIAS_PATTERNS: RegExp[] = [/^(video|audio)_[0-9]+$/i];
+const CONTEXT_LIST_LIMIT = 40;
+
+const ORCHESTRATION_PLAYBOOK_LINES: string[] = [
+  'Orchestration Playbooks (use when request matches):',
+  '- Playbook: B-roll + music + subtitles',
+  '  1) Discover usable source assets/tracks, 2) place B-roll clips, 3) add/adjust music bed, 4) add timed captions.',
+  '- Playbook: Generate then place on timeline',
+  '  1) generate_video, 2) check_generation_status, 3) insert_clip or insert_clip_from_file when output is ready.',
+  '- Playbook: Workspace file onboarding',
+  '  1) find/get workspace files, 2) register or insert via insert_clip_from_file, 3) apply timing/audio/caption polish.',
+];
 
 // =============================================================================
 // Planner Class
@@ -104,6 +128,12 @@ export class Planner {
   async plan(thought: Thought, context: AgentContext, history?: LLMMessage[]): Promise<Plan> {
     this.abortController = new AbortController();
 
+    const playbookMatch = buildOrchestrationPlaybook(thought, context, this.toolExecutor);
+    if (playbookMatch) {
+      this.validatePlan(playbookMatch.plan, context);
+      return playbookMatch.plan;
+    }
+
     const messages = this.buildMessages(thought, context, history);
     const schema = this.buildPlanSchema();
 
@@ -114,7 +144,7 @@ export class Planner {
       );
 
       // Validate the plan
-      this.validatePlan(plan);
+      this.validatePlan(plan, context);
 
       return plan;
     } catch (error) {
@@ -149,6 +179,13 @@ export class Planner {
   ): Promise<Plan> {
     this.abortController = new AbortController();
 
+    const playbookMatch = buildOrchestrationPlaybook(thought, context, this.toolExecutor);
+    if (playbookMatch) {
+      onProgress(`Using deterministic orchestration playbook: ${playbookMatch.id}`);
+      this.validatePlan(playbookMatch.plan, context);
+      return playbookMatch.plan;
+    }
+
     const messages = this.buildMessages(thought, context, history);
 
     try {
@@ -169,7 +206,7 @@ export class Planner {
       const schema = this.buildPlanSchema();
       const plan = await this.llm.generateStructured<Plan>(messages, schema);
 
-      this.validatePlan(plan);
+      this.validatePlan(plan, context);
       return plan;
     } catch (error) {
       throw new PlanValidationError(
@@ -231,6 +268,7 @@ export class Planner {
       'Current Context:',
       `- Project ID: ${context.projectId || '(unknown)'}`,
       context.sequenceId ? `- Sequence ID: ${context.sequenceId}` : '- Sequence ID: (none)',
+      `- Project state version: ${context.projectStateVersion ?? '(unknown)'}`,
       `- Playhead position: ${context.playheadPosition} seconds`,
       `- Timeline duration: ${context.timelineDuration} seconds`,
       context.selectedClips.length > 0
@@ -239,11 +277,35 @@ export class Planner {
       context.selectedTracks.length > 0
         ? `- Selected tracks: ${context.selectedTracks.join(', ')}`
         : '- Selected tracks: (none)',
-      `- Available assets: ${context.availableAssets.length}`,
-      `- Available tracks: ${context.availableTracks.length}`,
       '',
       'Available Tools:',
     ];
+
+    if (context.availableAssets.length === 0) {
+      parts.push('- Available assets: (none)');
+    } else {
+      parts.push(`- Available assets (${context.availableAssets.length}):`);
+      for (const asset of context.availableAssets.slice(0, CONTEXT_LIST_LIMIT)) {
+        parts.push(`  - ${asset.id} (${asset.type}) ${asset.name}`);
+      }
+      if (context.availableAssets.length > CONTEXT_LIST_LIMIT) {
+        const omittedCount = context.availableAssets.length - CONTEXT_LIST_LIMIT;
+        parts.push(`  - ... ${omittedCount} more asset IDs omitted for brevity`);
+      }
+    }
+
+    if (context.availableTracks.length === 0) {
+      parts.push('- Available tracks: (none)');
+    } else {
+      parts.push(`- Available tracks (${context.availableTracks.length}):`);
+      for (const track of context.availableTracks.slice(0, CONTEXT_LIST_LIMIT)) {
+        parts.push(`  - ${track.id} (${track.type}, clips=${track.clipCount}) ${track.name}`);
+      }
+      if (context.availableTracks.length > CONTEXT_LIST_LIMIT) {
+        const omittedCount = context.availableTracks.length - CONTEXT_LIST_LIMIT;
+        parts.push(`  - ... ${omittedCount} more track IDs omitted for brevity`);
+      }
+    }
 
     // Add available tools with descriptions
     const tools = this.toolExecutor.getAvailableTools();
@@ -270,6 +332,17 @@ export class Planner {
     parts.push(
       '7. When the request references source footage discovery or selecting moments, include source-aware analysis steps before edit actions (for example: catalog/unused-asset checks).',
     );
+    parts.push(
+      '8. Never invent or normalize IDs. Always copy exact IDs from analysis output (no placeholders like asset_id_from_catalog or aliases like video_1).',
+    );
+    parts.push(
+      '9. When a step needs data from an earlier step, bind the argument using a step reference object: {"$fromStep":"<step-id>","$path":"data.<fieldPath>"}.',
+    );
+    parts.push(
+      '10. Every step that uses a step reference must include dependsOn entries for all referenced step IDs.',
+    );
+    parts.push('');
+    parts.push(...ORCHESTRATION_PLAYBOOK_LINES);
 
     return parts.join('\n');
   }
@@ -377,7 +450,7 @@ export class Planner {
   /**
    * Validate the generated plan
    */
-  private validatePlan(plan: unknown): asserts plan is Plan {
+  private validatePlan(plan: unknown, context: AgentContext): asserts plan is Plan {
     const errors: string[] = [];
 
     // Basic structure validation
@@ -419,9 +492,12 @@ export class Planner {
     // Validate each step
     const stepIds = new Set<string>();
     for (let i = 0; i < steps.length; i++) {
-      const stepErrors = this.validateStep(steps[i], i, stepIds);
+      const stepErrors = this.validateStep(steps[i], i, stepIds, context);
       errors.push(...stepErrors);
     }
+
+    const stepReferenceErrors = this.validateStepReferences(steps as PlanStep[]);
+    errors.push(...stepReferenceErrors);
 
     if (errors.length > 0) {
       throw new PlanValidationError('Step validation failed', errors);
@@ -437,7 +513,12 @@ export class Planner {
   /**
    * Validate a single step
    */
-  private validateStep(step: unknown, index: number, existingIds: Set<string>): string[] {
+  private validateStep(
+    step: unknown,
+    index: number,
+    existingIds: Set<string>,
+    context: AgentContext,
+  ): string[] {
     const errors: string[] = [];
 
     if (!step || typeof step !== 'object') {
@@ -466,13 +547,24 @@ export class Planner {
       } else {
         // Validate tool arguments
         const args = (s.args ?? {}) as Record<string, unknown>;
-        const validation = this.toolExecutor.validateArgs(s.tool, args);
+        const argsForValidation = this.normalizeArgsForValidation(s.tool, args);
+        const validation = this.toolExecutor.validateArgs(s.tool, argsForValidation);
         if (!validation.valid) {
           errors.push(
             `Step ${index}: invalid arguments for '${s.tool}': ${validation.errors.join(', ')}`,
           );
         }
       }
+    }
+
+    if (typeof s.tool === 'string') {
+      const contextBindingErrors = this.validateContextBoundArguments(
+        index,
+        s.tool,
+        s.args,
+        context,
+      );
+      errors.push(...contextBindingErrors);
     }
 
     if (typeof s.description !== 'string') {
@@ -488,6 +580,140 @@ export class Planner {
     }
 
     return errors;
+  }
+
+  private validateContextBoundArguments(
+    index: number,
+    toolName: string,
+    rawArgs: unknown,
+    context: AgentContext,
+  ): string[] {
+    if (!rawArgs || typeof rawArgs !== 'object') {
+      return [];
+    }
+
+    const args = rawArgs as Record<string, unknown>;
+    const errors: string[] = [];
+
+    for (const [key, value] of Object.entries(args)) {
+      if (!key.endsWith('Id') || typeof value !== 'string') {
+        continue;
+      }
+
+      if (this.isPlaceholderId(value, key)) {
+        errors.push(
+          `Step ${index}: '${toolName}' uses placeholder-like ${key}='${value}'. Use exact IDs from analysis results.`,
+        );
+      }
+    }
+
+    const knownTrackIds = new Set(context.availableTracks.map((track) => track.id));
+    for (const key of ['trackId', 'newTrackId', 'sourceTrackId', 'targetTrackId']) {
+      const value = args[key];
+      if (typeof value === 'string' && knownTrackIds.size > 0 && !knownTrackIds.has(value)) {
+        errors.push(
+          `Step ${index}: '${toolName}' references unknown ${key}='${value}' for current context.`,
+        );
+      }
+    }
+
+    const knownAssetIds = new Set(context.availableAssets.map((asset) => asset.id));
+    for (const key of ['assetId', 'sourceAssetId', 'targetAssetId']) {
+      const value = args[key];
+      if (typeof value === 'string' && knownAssetIds.size > 0 && !knownAssetIds.has(value)) {
+        errors.push(
+          `Step ${index}: '${toolName}' references unknown ${key}='${value}' for current context.`,
+        );
+      }
+    }
+
+    if (
+      typeof args.sequenceId === 'string' &&
+      typeof context.sequenceId === 'string' &&
+      context.sequenceId.length > 0 &&
+      args.sequenceId !== context.sequenceId
+    ) {
+      errors.push(
+        `Step ${index}: '${toolName}' sequenceId='${args.sequenceId}' does not match active sequence '${context.sequenceId}'.`,
+      );
+    }
+
+    return errors;
+  }
+
+  private normalizeArgsForValidation(
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Record<string, unknown> {
+    const toolDefinition = this.toolExecutor.getToolDefinition(toolName);
+    const normalized = normalizeReferencesForValidation(args, toolDefinition?.parameters);
+
+    if (!normalized || typeof normalized !== 'object' || Array.isArray(normalized)) {
+      return args;
+    }
+
+    return normalized as Record<string, unknown>;
+  }
+
+  private validateStepReferences(steps: PlanStep[]): string[] {
+    const errors: string[] = [];
+    const knownStepIds = new Set(steps.map((step) => step.id));
+
+    steps.forEach((step, index) => {
+      const references = collectStepValueReferences(step.args);
+      if (references.length === 0) {
+        return;
+      }
+
+      const dependencies = new Set(step.dependsOn ?? []);
+
+      for (const occurrence of references) {
+        const { reference } = occurrence;
+
+        if (!knownStepIds.has(reference.$fromStep)) {
+          errors.push(
+            `Step ${index}: reference at '${occurrence.sourcePath}' points to unknown step '${reference.$fromStep}'.`,
+          );
+          continue;
+        }
+
+        if (reference.$fromStep === step.id) {
+          errors.push(
+            `Step ${index}: reference at '${occurrence.sourcePath}' cannot target the same step '${step.id}'.`,
+          );
+        }
+
+        if (!dependencies.has(reference.$fromStep)) {
+          errors.push(
+            `Step ${index}: reference at '${occurrence.sourcePath}' requires dependsOn to include '${reference.$fromStep}'.`,
+          );
+        }
+
+        const usesDataContract = /^data(?:\.|\[|$)/.test(reference.$path);
+        if (!usesDataContract) {
+          errors.push(
+            `Step ${index}: reference at '${occurrence.sourcePath}' must read from 'data.*' to use tool output contracts.`,
+          );
+        }
+      }
+    });
+
+    return errors;
+  }
+
+  private isPlaceholderId(value: string, key: string): boolean {
+    if (ID_PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(value))) {
+      return true;
+    }
+
+    if (
+      key.toLowerCase().includes('track') &&
+      TRACK_ALIAS_PATTERNS.some((pattern) => pattern.test(value))
+    ) {
+      return true;
+    }
+
+    return false;
   }
 
   /**

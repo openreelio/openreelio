@@ -93,6 +93,27 @@ describe('Planner', () => {
       },
       required: ['sequenceId'],
     });
+
+    mockToolExecutor.registerTool({
+      info: {
+        name: 'insert_clip',
+        description: 'Insert an asset clip into timeline',
+        category: 'editing',
+        riskLevel: 'low',
+        supportsUndo: true,
+        parallelizable: false,
+      },
+      parameters: {
+        type: 'object',
+        properties: {
+          sequenceId: { type: 'string' },
+          trackId: { type: 'string' },
+          assetId: { type: 'string' },
+          timelineStart: { type: 'number' },
+        },
+      },
+      required: ['sequenceId', 'trackId', 'assetId', 'timelineStart'],
+    });
   });
 
   describe('plan', () => {
@@ -174,6 +195,217 @@ describe('Planner', () => {
       expect(result.steps).toHaveLength(3);
       expect(result.steps[1].dependsOn).toContain('step-1');
       expect(result.steps[2].dependsOn).toContain('step-2');
+    });
+
+    it('Given B-roll/music/subtitle intent, When required tools are available, Then planner uses deterministic orchestration playbook', async () => {
+      context.sequenceId = 'seq-active';
+      context.playheadPosition = 10;
+      context.timelineDuration = 90;
+      context.availableTracks = [
+        { id: 'track-video-1', name: 'Video 1', type: 'video', clipCount: 0 },
+        { id: 'track-audio-1', name: 'Audio 1', type: 'audio', clipCount: 0 },
+      ];
+      context.availableAssets = [
+        { id: 'asset-video-1', name: 'broll.mp4', type: 'video', duration: 8 },
+        { id: 'asset-audio-1', name: 'bed.mp3', type: 'audio', duration: 20 },
+      ];
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'get_unused_assets',
+          description: 'List unused assets',
+          category: 'analysis',
+          riskLevel: 'low',
+          supportsUndo: false,
+          parallelizable: true,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            kind: { type: 'string' },
+          },
+        },
+        required: [],
+      });
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'add_caption',
+          description: 'Add subtitle caption',
+          category: 'utility',
+          riskLevel: 'low',
+          supportsUndo: true,
+          parallelizable: false,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            sequenceId: { type: 'string' },
+            text: { type: 'string' },
+            startTime: { type: 'number' },
+            endTime: { type: 'number' },
+          },
+        },
+        required: ['sequenceId', 'text', 'startTime', 'endTime'],
+      });
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'adjust_volume',
+          description: 'Adjust track volume',
+          category: 'audio',
+          riskLevel: 'low',
+          supportsUndo: true,
+          parallelizable: false,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            sequenceId: { type: 'string' },
+            trackId: { type: 'string' },
+            volume: { type: 'number' },
+          },
+        },
+        required: ['sequenceId', 'trackId', 'volume'],
+      });
+
+      const thought: Thought = {
+        understanding: 'Build a B-roll montage with background music and subtitles',
+        requirements: ['B-roll', 'music bed', 'subtitles'],
+        uncertainties: [],
+        approach: 'Orchestrate in one run',
+        needsMoreInfo: false,
+      };
+
+      const result = await planner.plan(thought, context);
+
+      expect(result.goal).toContain('B-roll');
+      expect(result.steps.some((step) => step.id === 'playbook_insert_broll_clip')).toBe(true);
+      expect(result.steps.some((step) => step.id === 'playbook_add_supporting_subtitle')).toBe(
+        true,
+      );
+      expect(mockLLM.getRequestCount()).toBe(0);
+    });
+
+    it('Given generate-and-place intent, When generation tools are available, Then planner returns approval-required deterministic playbook', async () => {
+      context.sequenceId = 'seq-active';
+      context.playheadPosition = 6;
+      context.timelineDuration = 90;
+      context.availableTracks = [
+        { id: 'track-video-1', name: 'Video 1', type: 'video', clipCount: 0 },
+      ];
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'generate_video',
+          description: 'Generate video asset',
+          category: 'generation',
+          riskLevel: 'high',
+          supportsUndo: false,
+          parallelizable: false,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            prompt: { type: 'string' },
+            mode: { type: 'string' },
+            quality: { type: 'string' },
+            durationSec: { type: 'number' },
+          },
+        },
+        required: ['prompt'],
+      });
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'check_generation_status',
+          description: 'Check generation status',
+          category: 'utility',
+          riskLevel: 'low',
+          supportsUndo: false,
+          parallelizable: true,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            jobId: { type: 'string' },
+          },
+        },
+        required: ['jobId'],
+      });
+
+      const thought: Thought = {
+        understanding: 'Generate a video and insert it on timeline',
+        requirements: ['ai generation', 'timeline insertion'],
+        uncertainties: [],
+        approach: 'Generate then place',
+        needsMoreInfo: false,
+      };
+
+      const result = await planner.plan(thought, context);
+
+      expect(result.requiresApproval).toBe(true);
+      expect(result.steps[0]?.tool).toBe('generate_video');
+      expect(result.steps[1]?.args.jobId).toMatchObject({
+        $fromStep: 'playbook_generate_video',
+      });
+      expect(mockLLM.getRequestCount()).toBe(0);
+    });
+
+    it('Given orchestration-like intent but missing required tools, When planning, Then planner falls back to LLM planning', async () => {
+      context.sequenceId = 'seq-active';
+      context.availableTracks = [
+        { id: 'track-video-1', name: 'Video 1', type: 'video', clipCount: 0 },
+      ];
+      context.availableAssets = [
+        { id: 'asset-video-1', name: 'broll.mp4', type: 'video', duration: 8 },
+      ];
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'get_unused_assets',
+          description: 'List unused assets',
+          category: 'analysis',
+          riskLevel: 'low',
+          supportsUndo: false,
+          parallelizable: true,
+        },
+        parameters: { type: 'object', properties: {} },
+        required: [],
+      });
+
+      // add_caption intentionally omitted to force fallback
+      const llmPlan: Plan = {
+        goal: 'Fallback plan from LLM',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'split_clip',
+            args: { clipId: 'clip-1', position: 5 },
+            description: 'Fallback split',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+        ],
+        estimatedTotalDuration: 100,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo',
+      };
+
+      mockLLM.setStructuredResponse({ structured: llmPlan });
+
+      const thought: Thought = {
+        understanding: 'Build a B-roll montage with background music and subtitles',
+        requirements: ['B-roll', 'music bed', 'subtitles'],
+        uncertainties: [],
+        approach: 'Orchestrate in one run',
+        needsMoreInfo: false,
+      };
+
+      const result = await planner.plan(thought, context);
+
+      expect(result.goal).toBe('Fallback plan from LLM');
+      expect(mockLLM.getRequestCount()).toBe(1);
     });
 
     it('should flag plan requiring approval for high risk tools', async () => {
@@ -345,6 +577,125 @@ describe('Planner', () => {
       expect(systemMessage?.content).toContain('split_clip');
       expect(systemMessage?.content).toContain('move_clip');
       expect(systemMessage?.content).toContain('source-aware analysis steps');
+    });
+
+    it('should include concrete asset and track IDs in context prompt', async () => {
+      const mockPlan: Plan = {
+        goal: 'Insert clip using known IDs',
+        steps: [],
+        estimatedTotalDuration: 0,
+        requiresApproval: false,
+        rollbackStrategy: 'N/A',
+      };
+
+      context.availableAssets = [
+        {
+          id: '01ASSETVIDEO001',
+          name: 'intro.mp4',
+          type: 'video',
+          duration: 12,
+        },
+      ];
+      context.availableTracks = [
+        {
+          id: '01TRACKVIDEO001',
+          name: 'Video 1',
+          type: 'video',
+          clipCount: 2,
+        },
+      ];
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await planner.plan(sampleThought, context);
+
+      const request = mockLLM.getLastRequest();
+      const systemMessage = request?.messages.find((m) => m.role === 'system');
+
+      expect(systemMessage?.content).toContain('Available assets (1):');
+      expect(systemMessage?.content).toContain('01ASSETVIDEO001');
+      expect(systemMessage?.content).toContain('Available tracks (1):');
+      expect(systemMessage?.content).toContain('01TRACKVIDEO001');
+    });
+
+    it('Given orchestration intent, When planner builds system prompt, Then playbook guidance is included', async () => {
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'add_caption',
+          description: 'Add timeline caption',
+          category: 'utility',
+          riskLevel: 'low',
+          supportsUndo: true,
+          parallelizable: false,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            sequenceId: { type: 'string' },
+            text: { type: 'string' },
+            startTime: { type: 'number' },
+            endTime: { type: 'number' },
+          },
+        },
+        required: ['sequenceId', 'text', 'startTime', 'endTime'],
+      });
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'adjust_volume',
+          description: 'Adjust audio volume',
+          category: 'audio',
+          riskLevel: 'low',
+          supportsUndo: true,
+          parallelizable: false,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            sequenceId: { type: 'string' },
+            trackId: { type: 'string' },
+            volume: { type: 'number' },
+          },
+        },
+        required: ['sequenceId', 'trackId', 'volume'],
+      });
+
+      const orchestrationThought: Thought = {
+        understanding: 'Create a B-roll montage with background music and subtitles',
+        requirements: ['B-roll', 'music bed', 'subtitles'],
+        uncertainties: [],
+        approach: 'Orchestrate source discovery, insert clips, mix music, and add captions',
+        needsMoreInfo: false,
+      };
+
+      const mockPlan: Plan = {
+        goal: 'Orchestrate montage package',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'split_clip',
+            args: { clipId: 'clip-1', position: 5 },
+            description: 'Placeholder step for prompt capture',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+        ],
+        estimatedTotalDuration: 100,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await planner.plan(orchestrationThought, context);
+
+      const request = mockLLM.getLastRequest();
+      const systemMessage = request?.messages.find((m) => m.role === 'system');
+
+      expect(systemMessage?.content).toContain('Orchestration Playbooks');
+      expect(systemMessage?.content).toContain('B-roll + music + subtitles');
+      expect(systemMessage?.content).toContain('Generate then place on timeline');
+      expect(systemMessage?.content).toContain('"$fromStep"');
     });
 
     it('should include language policy instructions in planning prompt', async () => {
@@ -715,6 +1066,227 @@ describe('Planner', () => {
         estimatedTotalDuration: 100,
         requiresApproval: false,
         rollbackStrategy: 'N/A',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
+    });
+
+    it('should reject placeholder-like IDs in plan arguments', async () => {
+      context.sequenceId = 'seq_active';
+      context.availableTracks = [
+        {
+          id: '01TRACKREAL',
+          name: 'Video 1',
+          type: 'video',
+          clipCount: 1,
+        },
+      ];
+      context.availableAssets = [
+        {
+          id: '01ASSETREAL',
+          name: 'concert.mp4',
+          type: 'video',
+          duration: 30,
+        },
+      ];
+
+      const mockPlan: Plan = {
+        goal: 'Insert clip with unresolved IDs',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'insert_clip',
+            args: {
+              sequenceId: 'seq_active',
+              trackId: 'video_1',
+              assetId: 'asset_id_from_catalog',
+              timelineStart: 0,
+            },
+            description: 'Insert clip with placeholder IDs',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+        ],
+        estimatedTotalDuration: 100,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
+    });
+
+    it('should reject IDs that are not in known context resources', async () => {
+      context.sequenceId = 'seq_active';
+      context.availableTracks = [
+        {
+          id: '01TRACKREAL',
+          name: 'Video 1',
+          type: 'video',
+          clipCount: 1,
+        },
+      ];
+      context.availableAssets = [
+        {
+          id: '01ASSETREAL',
+          name: 'concert.mp4',
+          type: 'video',
+          duration: 30,
+        },
+      ];
+
+      const mockPlan: Plan = {
+        goal: 'Insert clip with unknown track',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'insert_clip',
+            args: {
+              sequenceId: 'seq_active',
+              trackId: '01TRACKUNKNOWN',
+              assetId: '01ASSETREAL',
+              timelineStart: 0,
+            },
+            description: 'Insert clip into non-existent track',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+        ],
+        estimatedTotalDuration: 100,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
+    });
+
+    it('Given step reference args without dependsOn binding, When validating plan, Then planner rejects unresolved orchestration contract', async () => {
+      context.sequenceId = 'seq_active';
+      context.availableTracks = [
+        {
+          id: '01TRACKREAL',
+          name: 'Video 1',
+          type: 'video',
+          clipCount: 1,
+        },
+      ];
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'check_generation_status',
+          description: 'Check generation status',
+          category: 'utility',
+          riskLevel: 'low',
+          supportsUndo: false,
+          parallelizable: true,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            jobId: { type: 'string' },
+          },
+        },
+        required: ['jobId'],
+      });
+
+      const mockPlan: Plan = {
+        goal: 'Insert generated asset',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'check_generation_status',
+            args: { jobId: 'job-1' },
+            description: 'Fetch generated asset status',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+          {
+            id: 'step-2',
+            tool: 'insert_clip',
+            args: {
+              sequenceId: 'seq_active',
+              trackId: '01TRACKREAL',
+              assetId: { $fromStep: 'step-1', $path: 'data.assetId' },
+              timelineStart: 0,
+            },
+            description: 'Insert generated asset onto timeline',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+        ],
+        estimatedTotalDuration: 200,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await expect(planner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
+    });
+
+    it('Given step reference path outside data contract, When validating plan, Then planner rejects non-contract reference usage', async () => {
+      context.sequenceId = 'seq_active';
+      context.availableTracks = [
+        {
+          id: '01TRACKREAL',
+          name: 'Video 1',
+          type: 'video',
+          clipCount: 1,
+        },
+      ];
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'check_generation_status',
+          description: 'Check generation status',
+          category: 'utility',
+          riskLevel: 'low',
+          supportsUndo: false,
+          parallelizable: true,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            jobId: { type: 'string' },
+          },
+        },
+        required: ['jobId'],
+      });
+
+      const mockPlan: Plan = {
+        goal: 'Insert generated asset',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'check_generation_status',
+            args: { jobId: 'job-1' },
+            description: 'Fetch generated asset status',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+          {
+            id: 'step-2',
+            tool: 'insert_clip',
+            args: {
+              sequenceId: 'seq_active',
+              trackId: '01TRACKREAL',
+              assetId: { $fromStep: 'step-1', $path: 'assetId' },
+              timelineStart: 0,
+            },
+            description: 'Insert generated asset onto timeline',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+            dependsOn: ['step-1'],
+          },
+        ],
+        estimatedTotalDuration: 200,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo',
       };
 
       mockLLM.setStructuredResponse({ structured: mockPlan });

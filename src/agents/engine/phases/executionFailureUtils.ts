@@ -36,9 +36,17 @@ const CLIP_NOT_FOUND_PATTERNS: RegExp[] = [
   /timeline is empty/i,
 ];
 
-const TRACK_NOT_FOUND_PATTERNS: RegExp[] = [/track not found/i, /unknown track/i];
-const SEQUENCE_NOT_FOUND_PATTERNS: RegExp[] = [/sequence not found/i, /unknown sequence/i];
-const ASSET_NOT_FOUND_PATTERNS: RegExp[] = [/asset not found/i, /file not found/i];
+const TRACK_NOT_FOUND_PATTERNS: RegExp[] = [/track[^\n]*not found/i, /unknown track/i];
+const SEQUENCE_NOT_FOUND_PATTERNS: RegExp[] = [/sequence[^\n]*not found/i, /unknown sequence/i];
+const ASSET_NOT_FOUND_PATTERNS: RegExp[] = [/asset[^\n]*not found/i, /file not found/i];
+const PRECONDITION_FAILURE_PATTERNS: RegExp[] = [
+  /precondition_failed/i,
+  /preflight/i,
+  /rev_conflict/i,
+  /stale context/i,
+  /placeholder/i,
+  /alias/i,
+];
 
 const CLIP_EDIT_TOOL_NAMES = new Set([
   'split_clip',
@@ -124,6 +132,49 @@ export function detectImmediateTerminalFailure(
 ): TerminalFailureGuidance | null {
   if (execution.failedSteps.length === 0 || didExecutionMutateState(execution)) {
     return null;
+  }
+
+  const preconditionFailure = execution.failedSteps.find((step) =>
+    matchesAnyPattern(step.result.error, PRECONDITION_FAILURE_PATTERNS),
+  );
+
+  if (preconditionFailure) {
+    return {
+      reason:
+        'Execution stopped because plan arguments no longer match the current timeline state.',
+      suggestedAction:
+        'Refresh timeline context, re-run analysis tools, and retry with exact current IDs.',
+      failureSignature: `precondition:${normalizeToolFailure(preconditionFailure.result.error)}`,
+    };
+  }
+
+  const deterministicNotFound = execution.failedSteps.find((step) => {
+    if (isRetryableToolFailure(step.result.error)) {
+      return false;
+    }
+
+    return (
+      matchesAnyPattern(step.result.error, TRACK_NOT_FOUND_PATTERNS) ||
+      matchesAnyPattern(step.result.error, SEQUENCE_NOT_FOUND_PATTERNS) ||
+      matchesAnyPattern(step.result.error, ASSET_NOT_FOUND_PATTERNS)
+    );
+  });
+
+  if (deterministicNotFound) {
+    const normalizedFailure = normalizeToolFailure(deterministicNotFound.result.error);
+    return {
+      reason: describeFailureReason({
+        tool: deterministicNotFound.tool,
+        normalizedError: normalizedFailure,
+        signature: `${deterministicNotFound.tool.toLowerCase()}:${normalizedFailure}`,
+      }),
+      suggestedAction: suggestAction({
+        tool: deterministicNotFound.tool,
+        normalizedError: normalizedFailure,
+        signature: `${deterministicNotFound.tool.toLowerCase()}:${normalizedFailure}`,
+      }),
+      failureSignature: `precondition:${normalizedFailure}`,
+    };
   }
 
   const timelineClipCount = getTimelineClipCount(context);
