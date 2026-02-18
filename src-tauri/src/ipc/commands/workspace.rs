@@ -11,8 +11,8 @@ use tauri::State;
 
 use crate::core::assets::{Asset, AssetKind, AudioInfo, VideoInfo};
 use crate::core::workspace::index::IndexEntry;
-use crate::core::workspace::service::{FileTreeEntry, WorkspaceService};
 use crate::core::workspace::path_resolver;
+use crate::core::workspace::service::{FileTreeEntry, WorkspaceService};
 use crate::core::CoreError;
 use crate::AppState;
 
@@ -79,8 +79,7 @@ pub async fn scan_workspace(state: State<'_, AppState>) -> Result<WorkspaceScanR
         .as_ref()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    let service = WorkspaceService::open(project.path.clone())
-        .map_err(|e| e.to_ipc_error())?;
+    let service = WorkspaceService::open(project.path.clone()).map_err(|e| e.to_ipc_error())?;
 
     let result = service.initial_scan().map_err(|e| e.to_ipc_error())?;
 
@@ -111,8 +110,7 @@ pub async fn get_workspace_tree(
         .as_ref()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    let service = WorkspaceService::open(project.path.clone())
-        .map_err(|e| e.to_ipc_error())?;
+    let service = WorkspaceService::open(project.path.clone()).map_err(|e| e.to_ipc_error())?;
 
     let tree = service.get_file_tree().map_err(|e| e.to_ipc_error())?;
     Ok(tree.into_iter().map(convert_tree_entry).collect())
@@ -136,8 +134,7 @@ pub async fn register_workspace_file(
     let relative_path = normalize_relative_workspace_path(&project_root, &relative_path)?;
 
     // Check if already registered in the workspace index
-    let service = WorkspaceService::open(project_root.clone())
-        .map_err(|e| e.to_ipc_error())?;
+    let service = WorkspaceService::open(project_root.clone()).map_err(|e| e.to_ipc_error())?;
     let asset_kind = ensure_index_entry_for_registration(&service, &relative_path)?;
 
     if let Some(entry) = service
@@ -175,8 +172,7 @@ pub async fn register_workspace_file(
     // Create import command with kind validated by workspace scanner/index.
     let asset = create_asset_for_kind(&name, &relative_path, asset_kind);
 
-    let command = ImportAssetCommand::from_asset(asset)
-        .with_project_root(project_root.clone());
+    let command = ImportAssetCommand::from_asset(asset).with_project_root(project_root.clone());
 
     let asset_id = command.asset_id().to_string();
 
@@ -223,24 +219,23 @@ pub async fn register_workspace_files(
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
     let project_root = project.path.clone();
-    let service = WorkspaceService::open(project_root.clone())
-        .map_err(|e| e.to_ipc_error())?;
+    let service = WorkspaceService::open(project_root.clone()).map_err(|e| e.to_ipc_error())?;
 
     let mut results = Vec::with_capacity(relative_paths.len());
 
     for raw_relative_path in relative_paths {
-        let relative_path = match normalize_relative_workspace_path(&project_root, &raw_relative_path)
-        {
-            Ok(path) => path,
-            Err(error) => {
-                tracing::warn!(
-                    path = %raw_relative_path,
-                    error = %error,
-                    "Skipping invalid workspace registration path"
-                );
-                continue;
-            }
-        };
+        let relative_path =
+            match normalize_relative_workspace_path(&project_root, &raw_relative_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %raw_relative_path,
+                        error = %error,
+                        "Skipping invalid workspace registration path"
+                    );
+                    continue;
+                }
+            };
 
         let asset_kind = match ensure_index_entry_for_registration(&service, &relative_path) {
             Ok(kind) => kind,
@@ -288,8 +283,7 @@ pub async fn register_workspace_files(
 
         let asset = create_asset_for_kind(&name, &relative_path, asset_kind);
 
-        let command = ImportAssetCommand::from_asset(asset)
-            .with_project_root(project_root.clone());
+        let command = ImportAssetCommand::from_asset(asset).with_project_root(project_root.clone());
 
         let asset_id = command.asset_id().to_string();
 
@@ -352,7 +346,9 @@ fn create_asset_for_kind(name: &str, relative_path: &str, kind: AssetKind) -> As
         }
     };
 
-    asset.with_relative_path(relative_path).as_workspace_managed()
+    asset
+        .with_relative_path(relative_path)
+        .as_workspace_managed()
 }
 
 fn ensure_index_entry_for_registration(
@@ -402,7 +398,10 @@ fn ensure_index_entry_for_registration(
     };
 
     let result_kind = entry.kind.clone();
-    service.index().upsert(&entry).map_err(|e| e.to_ipc_error())?;
+    service
+        .index()
+        .upsert(&entry)
+        .map_err(|e| e.to_ipc_error())?;
     Ok(result_kind)
 }
 
@@ -423,11 +422,17 @@ fn normalize_relative_workspace_path(
     }
 
     if !absolute_path.exists() {
-        return Err(format!("Workspace file not found: {}", absolute_path.display()));
+        return Err(format!(
+            "Workspace file not found: {}",
+            absolute_path.display()
+        ));
     }
 
     if !absolute_path.is_file() {
-        return Err(format!("Workspace path is not a file: {}", absolute_path.display()));
+        return Err(format!(
+            "Workspace path is not a file: {}",
+            absolute_path.display()
+        ));
     }
 
     path_resolver::to_relative(project_root, &absolute_path)
@@ -477,9 +482,7 @@ mod tests {
         let result = ensure_index_entry_for_registration(&service, "notes.txt");
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .contains("not a supported media asset"));
+        assert!(result.unwrap_err().contains("not a supported media asset"));
     }
 
     #[test]
@@ -517,11 +520,15 @@ mod tests {
 
     #[test]
     fn create_asset_for_kind_handles_non_av_kinds_without_video_metadata() {
-        let asset = create_asset_for_kind("captions.srt", "captions/captions.srt", AssetKind::Subtitle);
+        let asset =
+            create_asset_for_kind("captions.srt", "captions/captions.srt", AssetKind::Subtitle);
 
         assert_eq!(asset.kind, AssetKind::Subtitle);
         assert!(asset.workspace_managed);
-        assert_eq!(asset.relative_path.as_deref(), Some("captions/captions.srt"));
+        assert_eq!(
+            asset.relative_path.as_deref(),
+            Some("captions/captions.srt")
+        );
         assert!(asset.video.is_none());
         assert!(asset.audio.is_none());
     }

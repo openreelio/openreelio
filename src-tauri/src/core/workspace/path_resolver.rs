@@ -104,7 +104,10 @@ mod tests {
     fn test_resolve_relative_path() {
         let root = Path::new("/projects/my-video");
         let result = resolve_to_absolute(root, "footage/interview.mp4");
-        assert_eq!(result, PathBuf::from("/projects/my-video/footage/interview.mp4"));
+        assert_eq!(
+            result,
+            PathBuf::from("/projects/my-video/footage/interview.mp4")
+        );
     }
 
     #[test]

@@ -133,10 +133,7 @@ impl AssetIndex {
                 params![relative_path],
             )
             .map_err(|e| {
-                crate::core::CoreError::Internal(format!(
-                    "Failed to remove workspace file: {}",
-                    e
-                ))
+                crate::core::CoreError::Internal(format!("Failed to remove workspace file: {}", e))
             })?;
         Ok(())
     }
@@ -177,10 +174,7 @@ impl AssetIndex {
         let entries = stmt
             .query_map([], row_to_entry)
             .map_err(|e| {
-                crate::core::CoreError::Internal(format!(
-                    "Failed to query workspace files: {}",
-                    e
-                ))
+                crate::core::CoreError::Internal(format!("Failed to query workspace files: {}", e))
             })?
             .filter_map(|r| r.ok())
             .collect();
@@ -288,10 +282,7 @@ impl AssetIndex {
         self.conn
             .execute("DELETE FROM workspace_files", [])
             .map_err(|e| {
-                crate::core::CoreError::Internal(format!(
-                    "Failed to clear workspace index: {}",
-                    e
-                ))
+                crate::core::CoreError::Internal(format!("Failed to clear workspace index: {}", e))
             })?;
         Ok(())
     }
@@ -304,10 +295,7 @@ impl AssetIndex {
             })
             .map(|c| c as usize)
             .map_err(|e| {
-                crate::core::CoreError::Internal(format!(
-                    "Failed to count workspace files: {}",
-                    e
-                ))
+                crate::core::CoreError::Internal(format!("Failed to count workspace files: {}", e))
             })
     }
 }
@@ -400,7 +388,8 @@ mod tests {
         idx.upsert(&entry).unwrap();
 
         // Register the file
-        idx.mark_registered("footage/clip.mp4", "asset-123").unwrap();
+        idx.mark_registered("footage/clip.mp4", "asset-123")
+            .unwrap();
 
         // Upsert again without asset_id — should preserve existing
         let updated = make_entry("footage/clip.mp4", AssetKind::Video);
@@ -478,7 +467,8 @@ mod tests {
     #[test]
     fn test_get_by_asset_id() {
         let idx = AssetIndex::open_in_memory().unwrap();
-        idx.upsert(&make_entry("clip.mp4", AssetKind::Video)).unwrap();
+        idx.upsert(&make_entry("clip.mp4", AssetKind::Video))
+            .unwrap();
         idx.mark_registered("clip.mp4", "asset-xyz").unwrap();
 
         let found = idx.get_by_asset_id("asset-xyz").unwrap().unwrap();
@@ -490,7 +480,8 @@ mod tests {
     #[test]
     fn test_mark_registered() {
         let idx = AssetIndex::open_in_memory().unwrap();
-        idx.upsert(&make_entry("clip.mp4", AssetKind::Video)).unwrap();
+        idx.upsert(&make_entry("clip.mp4", AssetKind::Video))
+            .unwrap();
 
         idx.mark_registered("clip.mp4", "asset-123").unwrap();
 
@@ -501,7 +492,8 @@ mod tests {
     #[test]
     fn test_unmark_registered() {
         let idx = AssetIndex::open_in_memory().unwrap();
-        idx.upsert(&make_entry("clip.mp4", AssetKind::Video)).unwrap();
+        idx.upsert(&make_entry("clip.mp4", AssetKind::Video))
+            .unwrap();
         idx.mark_registered("clip.mp4", "asset-123").unwrap();
 
         idx.unmark_registered("clip.mp4").unwrap();
@@ -551,7 +543,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let idx = AssetIndex::open(dir.path()).unwrap();
 
-        idx.upsert(&make_entry("test.mp4", AssetKind::Video)).unwrap();
+        idx.upsert(&make_entry("test.mp4", AssetKind::Video))
+            .unwrap();
         assert_eq!(idx.count().unwrap(), 1);
 
         // Verify the database file was created

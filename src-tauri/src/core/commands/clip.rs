@@ -964,16 +964,11 @@ impl SetClipAudioCommand {
         value.clamp(0.0, clip_duration.max(0.0))
     }
 
-    fn normalize_fade_pair(
-        clip: &mut Clip,
-        fade_in_updated: bool,
-        fade_out_updated: bool,
-    ) {
+    fn normalize_fade_pair(clip: &mut Clip, fade_in_updated: bool, fade_out_updated: bool) {
         let clip_duration = clip.duration().max(0.0);
 
         clip.audio.fade_in_sec = Self::clamp_fade_duration(clip.audio.fade_in_sec, clip_duration);
-        clip.audio.fade_out_sec =
-            Self::clamp_fade_duration(clip.audio.fade_out_sec, clip_duration);
+        clip.audio.fade_out_sec = Self::clamp_fade_duration(clip.audio.fade_out_sec, clip_duration);
 
         let total_fade = clip.audio.fade_in_sec + clip.audio.fade_out_sec;
         if total_fade <= clip_duration {

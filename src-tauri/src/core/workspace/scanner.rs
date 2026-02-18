@@ -18,15 +18,11 @@ use super::ignore::IgnoreRules;
 fn media_kind_from_extension(ext: &str) -> Option<AssetKind> {
     match ext.to_lowercase().as_str() {
         // Video
-        "mp4" | "mov" | "avi" | "mkv" | "webm" | "m4v" | "wmv" | "flv" => {
-            Some(AssetKind::Video)
-        }
+        "mp4" | "mov" | "avi" | "mkv" | "webm" | "m4v" | "wmv" | "flv" => Some(AssetKind::Video),
         // Audio
         "mp3" | "wav" | "aac" | "ogg" | "flac" | "m4a" | "wma" => Some(AssetKind::Audio),
         // Image
-        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tiff" | "svg" => {
-            Some(AssetKind::Image)
-        }
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tiff" | "svg" => Some(AssetKind::Image),
         // Subtitle
         "srt" | "vtt" | "ass" | "ssa" | "sub" => Some(AssetKind::Subtitle),
         // Font

@@ -139,9 +139,7 @@ impl IgnoreRules {
     /// The path should be relative to the project root, using forward slashes.
     pub fn is_ignored(&self, relative_path: &Path) -> bool {
         // Normalize to forward slashes for consistent matching
-        let path_str = relative_path
-            .to_string_lossy()
-            .replace('\\', "/");
+        let path_str = relative_path.to_string_lossy().replace('\\', "/");
 
         // Check both the path and the path with trailing slash (for directory matching)
         if self.globset.is_match(&path_str) {
@@ -315,11 +313,7 @@ mod tests {
     #[test]
     fn test_deeply_nested_paths() {
         let rules = IgnoreRules::defaults();
-        assert!(rules.is_ignored(Path::new(
-            "node_modules/deep/nested/package/file.js"
-        )));
-        assert!(!rules.is_ignored(Path::new(
-            "footage/deep/nested/folder/clip.mp4"
-        )));
+        assert!(rules.is_ignored(Path::new("node_modules/deep/nested/package/file.js")));
+        assert!(!rules.is_ignored(Path::new("footage/deep/nested/folder/clip.mp4")));
     }
 }

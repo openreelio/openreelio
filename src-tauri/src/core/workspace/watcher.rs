@@ -81,10 +81,7 @@ impl WorkspaceWatcher {
                             }
 
                             // Only process media files
-                            let ext = path
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .unwrap_or("");
+                            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
                             if !is_media_extension(ext) {
                                 continue;
@@ -150,11 +147,38 @@ impl WorkspaceWatcher {
 fn is_media_extension(ext: &str) -> bool {
     matches!(
         ext.to_lowercase().as_str(),
-        "mp4" | "mov" | "avi" | "mkv" | "webm" | "m4v" | "wmv" | "flv"
-            | "mp3" | "wav" | "aac" | "ogg" | "flac" | "m4a" | "wma"
-            | "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tiff" | "svg"
-            | "srt" | "vtt" | "ass" | "ssa" | "sub"
-            | "ttf" | "otf" | "woff" | "woff2"
+        "mp4"
+            | "mov"
+            | "avi"
+            | "mkv"
+            | "webm"
+            | "m4v"
+            | "wmv"
+            | "flv"
+            | "mp3"
+            | "wav"
+            | "aac"
+            | "ogg"
+            | "flac"
+            | "m4a"
+            | "wma"
+            | "jpg"
+            | "jpeg"
+            | "png"
+            | "gif"
+            | "bmp"
+            | "webp"
+            | "tiff"
+            | "svg"
+            | "srt"
+            | "vtt"
+            | "ass"
+            | "ssa"
+            | "sub"
+            | "ttf"
+            | "otf"
+            | "woff"
+            | "woff2"
     )
 }
 
@@ -193,8 +217,7 @@ mod tests {
         let rules = Arc::new(IgnoreRules::defaults());
         let (tx, _rx) = mpsc::unbounded_channel();
 
-        let mut watcher =
-            WorkspaceWatcher::start(dir.path().to_path_buf(), rules, tx).unwrap();
+        let mut watcher = WorkspaceWatcher::start(dir.path().to_path_buf(), rules, tx).unwrap();
 
         // Give the watcher time to start
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -209,8 +232,7 @@ mod tests {
         let rules = Arc::new(IgnoreRules::defaults());
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let _watcher =
-            WorkspaceWatcher::start(dir.path().to_path_buf(), rules, tx).unwrap();
+        let _watcher = WorkspaceWatcher::start(dir.path().to_path_buf(), rules, tx).unwrap();
 
         // Wait for watcher to initialize
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -241,8 +263,7 @@ mod tests {
         let rules = Arc::new(IgnoreRules::defaults());
         let (tx, mut rx) = mpsc::unbounded_channel();
 
-        let _watcher =
-            WorkspaceWatcher::start(dir.path().to_path_buf(), rules, tx).unwrap();
+        let _watcher = WorkspaceWatcher::start(dir.path().to_path_buf(), rules, tx).unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 

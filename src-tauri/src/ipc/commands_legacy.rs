@@ -18,8 +18,7 @@ use crate::core::{
         RemoveEffectCommand, RemoveMaskCommand, RemoveTextClipCommand, RenameBinCommand,
         SetBinColorCommand, SetClipAudioCommand, SetClipMuteCommand, SetClipTransformCommand,
         SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand, UpdateAssetCommand,
-        UpdateEffectCommand,
-        UpdateMaskCommand, UpdateTextCommand,
+        UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
     },
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
     fs::{
@@ -691,12 +690,10 @@ pub async fn open_or_init_project(
             folder_name,
             project_path.display()
         );
-        tokio::task::spawn_blocking(move || {
-            ActiveProject::create(&folder_name, project_path_clone)
-        })
-        .await
-        .map_err(|e| format!("Project creation task failed: {e}"))?
-        .map_err(|e| e.to_ipc_error())?
+        tokio::task::spawn_blocking(move || ActiveProject::create(&folder_name, project_path_clone))
+            .await
+            .map_err(|e| format!("Project creation task failed: {e}"))?
+            .map_err(|e| e.to_ipc_error())?
     };
 
     let assets_for_scope: Vec<Asset> = project.state.assets.values().cloned().collect();
@@ -892,15 +889,13 @@ pub async fn import_asset(
         // Determine if the URI is relative (workspace file) or absolute (external file)
         let is_relative = uri.starts_with("./")
             || uri.starts_with("../")
-            || (!uri.starts_with('/')
-                && !uri.contains(":\\")
-                && !uri.contains(":/"));
+            || (!uri.starts_with('/') && !uri.contains(":\\") && !uri.contains(":/"));
 
         let (resolved_uri, relative_path) = if is_relative {
             // Workspace-relative path: resolve against project root
             let abs_path = path_resolver::resolve_to_absolute(&project_root, &uri);
-            let rel = path_resolver::to_relative(&project_root, &abs_path)
-                .unwrap_or_else(|| uri.clone());
+            let rel =
+                path_resolver::to_relative(&project_root, &abs_path).unwrap_or_else(|| uri.clone());
             (abs_path.to_string_lossy().to_string(), Some(rel))
         } else {
             // Absolute path: check if it's inside the project

@@ -212,9 +212,7 @@ impl WorkspaceService {
     pub fn handle_event(&self, event: &WorkspaceEvent) -> CoreResult<()> {
         match event {
             WorkspaceEvent::FileAdded(rel_path) | WorkspaceEvent::FileModified(rel_path) => {
-                if let Some(discovered) =
-                    self.scanner.scan_path(std::path::Path::new(rel_path))
-                {
+                if let Some(discovered) = self.scanner.scan_path(std::path::Path::new(rel_path)) {
                     let now = chrono::Utc::now().timestamp();
                     let modified_at = discovered
                         .modified_at

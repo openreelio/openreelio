@@ -91,10 +91,7 @@ impl ActiveProject {
         project_root.join("snapshot.json")
     }
 
-    fn move_state_file_if_needed(
-        src: &Path,
-        dst: &Path,
-    ) -> crate::core::CoreResult<()> {
+    fn move_state_file_if_needed(src: &Path, dst: &Path) -> crate::core::CoreResult<()> {
         use std::cmp::Ordering;
 
         fn read_ops_line_count(path: &Path) -> Option<usize> {
@@ -1314,8 +1311,7 @@ mod tests {
         )
         .unwrap();
         legacy_meta["name"] = serde_json::Value::String("Legacy Preferred".to_string());
-        legacy_meta["modifiedAt"] =
-            serde_json::Value::String("2999-01-01T00:00:00Z".to_string());
+        legacy_meta["modifiedAt"] = serde_json::Value::String("2999-01-01T00:00:00Z".to_string());
         std::fs::write(
             project_path.join("project.json"),
             serde_json::to_vec_pretty(&legacy_meta).unwrap(),
@@ -1325,10 +1321,9 @@ mod tests {
         let reopened = ActiveProject::open(project_path.clone()).unwrap();
         assert_eq!(reopened.path, project_path);
 
-        let migrated_meta: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(state_dir.join("project.json")).unwrap(),
-        )
-        .unwrap();
+        let migrated_meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state_dir.join("project.json")).unwrap())
+                .unwrap();
         assert_eq!(migrated_meta["name"], "Legacy Preferred");
         assert_eq!(migrated_meta["modifiedAt"], "2999-01-01T00:00:00Z");
 
@@ -1358,13 +1353,11 @@ mod tests {
         )
         .unwrap();
 
-        let mut hidden_meta: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(state_dir.join("project.json")).unwrap(),
-        )
-        .unwrap();
+        let mut hidden_meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state_dir.join("project.json")).unwrap())
+                .unwrap();
         hidden_meta["name"] = serde_json::Value::String("Hidden Preferred".to_string());
-        hidden_meta["modifiedAt"] =
-            serde_json::Value::String("2999-01-01T00:00:00Z".to_string());
+        hidden_meta["modifiedAt"] = serde_json::Value::String("2999-01-01T00:00:00Z".to_string());
         std::fs::write(
             state_dir.join("project.json"),
             serde_json::to_vec_pretty(&hidden_meta).unwrap(),
@@ -1374,10 +1367,9 @@ mod tests {
         let reopened = ActiveProject::open(project_path.clone()).unwrap();
         assert_eq!(reopened.path, project_path);
 
-        let persisted_meta: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(state_dir.join("project.json")).unwrap(),
-        )
-        .unwrap();
+        let persisted_meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(state_dir.join("project.json")).unwrap())
+                .unwrap();
         assert_eq!(persisted_meta["name"], "Hidden Preferred");
         assert_eq!(persisted_meta["modifiedAt"], "2999-01-01T00:00:00Z");
 

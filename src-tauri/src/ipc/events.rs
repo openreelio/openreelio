@@ -602,10 +602,7 @@ impl EventEmitter {
     }
 
     /// Emits a workspace file removed event
-    pub fn emit_workspace_file_removed(
-        app: &AppHandle,
-        relative_path: &str,
-    ) -> Result<(), String> {
+    pub fn emit_workspace_file_removed(app: &AppHandle, relative_path: &str) -> Result<(), String> {
         let event = WorkspaceFileEvent {
             relative_path: relative_path.to_string(),
             kind: None,

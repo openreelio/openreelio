@@ -711,8 +711,8 @@ mod tests {
             .with_relative_path("footage/clip.mp4")
             .as_workspace_managed();
 
-        let mut cmd = ImportAssetCommand::from_asset(asset)
-            .with_project_root(dir.path().to_path_buf());
+        let mut cmd =
+            ImportAssetCommand::from_asset(asset).with_project_root(dir.path().to_path_buf());
 
         let result = cmd.execute(&mut state).unwrap();
         assert_eq!(result.created_ids.len(), 1);
