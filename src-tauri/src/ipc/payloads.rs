@@ -90,6 +90,19 @@ pub struct SetClipMutePayload {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetClipAudioPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub volume_db: Option<f32>,
+    pub pan: Option<f32>,
+    pub muted: Option<bool>,
+    pub fade_in_sec: Option<TimeSec>,
+    pub fade_out_sec: Option<TimeSec>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SplitClipPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
@@ -480,6 +493,9 @@ pub enum CommandPayload {
     #[serde(alias = "setClipMute", alias = "SetClipMute")]
     SetClipMute(SetClipMutePayload),
 
+    #[serde(alias = "setClipAudio", alias = "SetClipAudio")]
+    SetClipAudio(SetClipAudioPayload),
+
     #[serde(alias = "setTrackBlendMode", alias = "SetTrackBlendMode")]
     SetTrackBlendMode(SetTrackBlendModePayload),
 
@@ -658,6 +674,25 @@ mod tests {
         assert!(
             matches!(parsed, Ok(CommandPayload::SetClipMute(_))),
             "expected SetClipMute to parse, got: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_set_clip_audio_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "clipId": "clip_001",
+            "volumeDb": -6.0,
+            "pan": 0.2,
+            "fadeInSec": 1.25,
+            "fadeOutSec": 0.75,
+        });
+
+        let parsed = CommandPayload::parse("SetClipAudio".to_string(), payload);
+        assert!(
+            matches!(parsed, Ok(CommandPayload::SetClipAudio(_))),
+            "expected SetClipAudio to parse, got: {parsed:?}"
         );
     }
 

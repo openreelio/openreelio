@@ -496,6 +496,12 @@ pub struct AudioSettings {
     pub pan: f32,
     /// Whether audio is muted
     pub muted: bool,
+    /// Fade-in duration in timeline seconds
+    #[serde(default)]
+    pub fade_in_sec: TimeSec,
+    /// Fade-out duration in timeline seconds
+    #[serde(default)]
+    pub fade_out_sec: TimeSec,
 }
 
 impl Default for AudioSettings {
@@ -504,6 +510,8 @@ impl Default for AudioSettings {
             volume_db: 0.0,
             pan: 0.0,
             muted: false,
+            fade_in_sec: 0.0,
+            fade_out_sec: 0.0,
         }
     }
 }

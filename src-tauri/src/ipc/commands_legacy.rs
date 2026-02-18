@@ -1520,6 +1520,16 @@ pub async fn execute_command(
             &p.clip_id,
             p.muted,
         )),
+        CommandPayload::SetClipAudio(p) => Box::new(SetClipAudioCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            &p.clip_id,
+            p.volume_db,
+            p.pan,
+            p.muted,
+            p.fade_in_sec,
+            p.fade_out_sec,
+        )),
         CommandPayload::SetTrackBlendMode(p) => Box::new(SetTrackBlendModeCommand::new(
             &p.sequence_id,
             &p.track_id,
@@ -2347,6 +2357,7 @@ pub async fn apply_edit_script(
                 | "TrimClip"
                 | "MoveClip"
                 | "SetClipMute"
+                | "SetClipAudio"
                 | "CreateTrack"
                 | "createTrack"
                 | "AddTrack"
@@ -2372,6 +2383,7 @@ pub async fn apply_edit_script(
             "SplitClip"
                 | "SetClipTransform"
                 | "SetClipMute"
+                | "SetClipAudio"
                 | "DeleteClip"
                 | "RemoveClip"
                 | "TrimClip"
@@ -2484,6 +2496,16 @@ pub async fn apply_edit_script(
                 &p.track_id,
                 &p.clip_id,
                 p.muted,
+            )),
+            CommandPayload::SetClipAudio(p) => Box::new(SetClipAudioCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.volume_db,
+                p.pan,
+                p.muted,
+                p.fade_in_sec,
+                p.fade_out_sec,
             )),
             CommandPayload::SetTrackBlendMode(p) => Box::new(SetTrackBlendModeCommand::new(
                 &p.sequence_id,
