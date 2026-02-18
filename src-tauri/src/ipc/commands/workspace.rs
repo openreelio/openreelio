@@ -3,6 +3,8 @@
 //! Tauri commands for workspace-based asset management:
 //! scanning, file tree, file registration, and watching.
 
+use std::collections::HashSet;
+use std::path::Path;
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
@@ -15,6 +17,9 @@ use crate::core::workspace::path_resolver;
 use crate::core::workspace::service::{FileTreeEntry, WorkspaceService};
 use crate::core::CoreError;
 use crate::AppState;
+
+const MAX_BATCH_REGISTRATION_PATHS: usize = 500;
+const MAX_RELATIVE_PATH_LENGTH: usize = 4096;
 
 // =============================================================================
 // Response Types
@@ -221,21 +226,44 @@ pub async fn register_workspace_files(
     let project_root = project.path.clone();
     let service = WorkspaceService::open(project_root.clone()).map_err(|e| e.to_ipc_error())?;
 
-    let mut results = Vec::with_capacity(relative_paths.len());
+    if relative_paths.len() > MAX_BATCH_REGISTRATION_PATHS {
+        return Err(format!(
+            "Too many workspace paths in one registration request (max: {}, got: {})",
+            MAX_BATCH_REGISTRATION_PATHS,
+            relative_paths.len()
+        ));
+    }
+
+    let mut seen_paths: HashSet<String> = HashSet::with_capacity(relative_paths.len());
+    let mut normalized_paths = Vec::with_capacity(relative_paths.len());
 
     for raw_relative_path in relative_paths {
-        let relative_path =
-            match normalize_relative_workspace_path(&project_root, &raw_relative_path) {
-                Ok(path) => path,
-                Err(error) => {
-                    tracing::warn!(
-                        path = %raw_relative_path,
-                        error = %error,
-                        "Skipping invalid workspace registration path"
-                    );
-                    continue;
-                }
-            };
+        let relative_path = match normalize_relative_workspace_path(&project_root, &raw_relative_path) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    path = %raw_relative_path,
+                    error = %error,
+                    "Skipping invalid workspace registration path"
+                );
+                continue;
+            }
+        };
+
+        if !seen_paths.insert(relative_path.clone()) {
+            tracing::debug!(
+                path = %relative_path,
+                "Skipping duplicate workspace registration path in batch"
+            );
+            continue;
+        }
+
+        normalized_paths.push(relative_path);
+    }
+
+    let mut results = Vec::with_capacity(normalized_paths.len());
+
+    for relative_path in normalized_paths {
 
         let asset_kind = match ensure_index_entry_for_registration(&service, &relative_path) {
             Ok(kind) => kind,
@@ -414,7 +442,34 @@ fn normalize_relative_workspace_path(
         return Err("relativePath is empty".to_string());
     }
 
+    if trimmed.len() > MAX_RELATIVE_PATH_LENGTH {
+        return Err(format!(
+            "relativePath exceeds {} characters",
+            MAX_RELATIVE_PATH_LENGTH
+        ));
+    }
+
+    if trimmed.chars().any(|character| character.is_control()) {
+        return Err("relativePath contains control characters".to_string());
+    }
+
+    if trimmed.contains("://") {
+        return Err("relativePath must not contain URI schemes".to_string());
+    }
+
     let normalized = trimmed.replace('\\', "/");
+
+    if Path::new(&normalized).is_absolute()
+        || normalized.starts_with('/')
+        || looks_like_windows_absolute_path(&normalized)
+    {
+        return Err("relativePath must be a project-relative path".to_string());
+    }
+
+    if has_invalid_relative_segments(&normalized) {
+        return Err("relativePath contains invalid '.' or '..' segments".to_string());
+    }
+
     let absolute_path = project_root.join(&normalized);
 
     if !path_resolver::is_inside_project(project_root, &absolute_path) {
@@ -435,8 +490,27 @@ fn normalize_relative_workspace_path(
         ));
     }
 
-    path_resolver::to_relative(project_root, &absolute_path)
-        .ok_or_else(|| "Failed to normalize workspace relative path".to_string())
+    let relative = path_resolver::to_relative(project_root, &absolute_path)
+        .ok_or_else(|| "Failed to normalize workspace relative path".to_string())?;
+
+    if has_invalid_relative_segments(&relative) {
+        return Err("normalized relativePath contains invalid segments".to_string());
+    }
+
+    Ok(relative)
+}
+
+fn has_invalid_relative_segments(path: &str) -> bool {
+    path.split('/')
+        .any(|segment| segment.is_empty() || segment == "." || segment == "..")
+}
+
+fn looks_like_windows_absolute_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[1] == b':'
+        && bytes[2] == b'/'
+        && bytes[0].is_ascii_alphabetic()
 }
 
 /// Convert internal FileTreeEntry to DTO
@@ -515,7 +589,39 @@ mod tests {
         let result = normalize_relative_workspace_path(dir.path(), "../outside.mp4");
 
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("escapes the project root"));
+        assert!(
+            result
+                .unwrap_err()
+                .contains("relativePath contains invalid '.' or '..' segments")
+        );
+    }
+
+    #[test]
+    fn normalize_relative_workspace_path_rejects_absolute_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let absolute = dir.path().join("clip.mp4");
+        std::fs::write(&absolute, "video").unwrap();
+
+        let result = normalize_relative_workspace_path(dir.path(), &absolute.to_string_lossy());
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("relativePath must be a project-relative path")
+        );
+    }
+
+    #[test]
+    fn normalize_relative_workspace_path_rejects_control_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = normalize_relative_workspace_path(dir.path(), "footage/clip\n.mp4");
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .contains("relativePath contains control characters")
+        );
     }
 
     #[test]
