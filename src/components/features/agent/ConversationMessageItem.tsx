@@ -17,6 +17,7 @@ import { ToolCallPartRenderer } from './parts/ToolCallPartRenderer';
 import { ToolResultPartRenderer } from './parts/ToolResultPartRenderer';
 import { ErrorPartRenderer } from './parts/ErrorPartRenderer';
 import { ApprovalPartRenderer } from './parts/ApprovalPartRenderer';
+import { ToolApprovalPartRenderer } from './parts/ToolApprovalPartRenderer';
 
 // =============================================================================
 // Types
@@ -25,8 +26,11 @@ import { ApprovalPartRenderer } from './parts/ApprovalPartRenderer';
 interface ConversationMessageItemProps {
   message: ConversationMessage;
   onApprove?: () => void;
-  onReject?: () => void;
+  onReject?: (reason?: string) => void;
   onRetry?: () => void;
+  onToolAllow?: () => void;
+  onToolAllowAlways?: () => void;
+  onToolDeny?: () => void;
   className?: string;
 }
 
@@ -34,10 +38,19 @@ interface ConversationMessageItemProps {
 // Part Renderer Dispatch
 // =============================================================================
 
+interface PartCallbacks {
+  onApprove?: () => void;
+  onReject?: (reason?: string) => void;
+  onRetry?: () => void;
+  onToolAllow?: () => void;
+  onToolAllowAlways?: () => void;
+  onToolDeny?: () => void;
+}
+
 function renderPart(
   part: MessagePart,
   index: number,
-  callbacks: { onApprove?: () => void; onReject?: () => void; onRetry?: () => void }
+  callbacks: PartCallbacks,
 ): React.ReactNode {
   const key = `${part.type}-${index}`;
 
@@ -70,6 +83,16 @@ function renderPart(
           onReject={callbacks.onReject}
         />
       );
+    case 'tool_approval':
+      return (
+        <ToolApprovalPartRenderer
+          key={key}
+          part={part}
+          onAllow={callbacks.onToolAllow}
+          onAllowAlways={callbacks.onToolAllowAlways}
+          onDeny={callbacks.onToolDeny}
+        />
+      );
     default:
       return null;
   }
@@ -84,6 +107,9 @@ export function ConversationMessageItem({
   onApprove,
   onReject,
   onRetry,
+  onToolAllow,
+  onToolAllowAlways,
+  onToolDeny,
   className = '',
 }: ConversationMessageItemProps) {
   const isUser = message.role === 'user';
@@ -138,7 +164,14 @@ export function ConversationMessageItem({
     >
       <div className="max-w-[85%] space-y-2">
         {message.parts.map((part, i) =>
-          renderPart(part, i, { onApprove, onReject, onRetry })
+          renderPart(part, i, {
+            onApprove,
+            onReject,
+            onRetry,
+            onToolAllow,
+            onToolAllowAlways,
+            onToolDeny,
+          })
         )}
         <span className="text-xs text-text-tertiary block">
           {new Date(message.timestamp).toLocaleTimeString()}
