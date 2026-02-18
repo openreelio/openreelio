@@ -471,7 +471,7 @@ export function useAudioPlaybackWithEffects({
 
           const source = ctx.createBufferSource();
           source.buffer = audioBuffer;
-          source.playbackRate.value = playbackRate * safeSpeed;
+          source.playbackRate.value = Math.max(0.001, playbackRate) * safeSpeed;
 
           const gainNode = ctx.createGain();
           const clipVolume = calculateClipVolume(clip, trackVolume);
@@ -544,7 +544,7 @@ export function useAudioPlaybackWithEffects({
             scheduled.gainNode.gain.value = (isMuted ? 0 : volume * clipVolume) * fadeFactor;
             scheduled.pannerNode.pan.value = clampClipPan(clipData.clip.audio?.pan ?? 0);
             const updateSpeed = clipData.clip.speed > 0 ? clipData.clip.speed : 1;
-            scheduled.source.playbackRate.value = playbackRate * updateSpeed;
+            scheduled.source.playbackRate.value = Math.max(0.001, playbackRate) * updateSpeed;
           }
         });
       } while (rescheduleRequestedRef.current);

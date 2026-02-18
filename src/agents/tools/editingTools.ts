@@ -173,12 +173,15 @@ async function handleLinkedAudio(
         muted: true,
       });
     } catch (muteError) {
-      logger.warn('Inserted linked audio but failed to mute source video clip audio', {
+      logger.error('Failed to mute source video clip audio after linked audio insertion', {
         sequenceId,
         trackId: videoTrackId,
         clipId: videoClipId,
         error: muteError,
       });
+      throw new Error(
+        `Linked audio inserted but failed to mute original video clip audio: ${muteError instanceof Error ? muteError.message : String(muteError)}`,
+      );
     }
   }
 }
@@ -549,7 +552,13 @@ const EDITING_TOOLS: ToolDefinition[] = [
         const shouldAutoExtractLinkedAudio = targetTrack ? targetTrack.kind !== 'audio' : true;
 
         if (asset && shouldAutoExtractLinkedAudio) {
-          await handleLinkedAudio(asset, sequenceId, trackId, result.createdIds[0], timelineStart);
+          try {
+            await handleLinkedAudio(asset, sequenceId, trackId, result.createdIds[0], timelineStart);
+          } catch (linkedAudioError) {
+            const msg = linkedAudioError instanceof Error ? linkedAudioError.message : String(linkedAudioError);
+            logger.error('insert_clip: linked audio handling failed', { error: msg });
+            return { success: false, error: msg };
+          }
         }
 
         logger.debug('insert_clip executed', { opId: result.opId });
@@ -658,7 +667,13 @@ const EDITING_TOOLS: ToolDefinition[] = [
         const project = useProjectStore.getState();
         const asset = project.assets.get(assetId);
         if (asset) {
-          await handleLinkedAudio(asset, sequenceId, trackId, result.createdIds[0], timelineStart);
+          try {
+            await handleLinkedAudio(asset, sequenceId, trackId, result.createdIds[0], timelineStart);
+          } catch (linkedAudioError) {
+            const msg = linkedAudioError instanceof Error ? linkedAudioError.message : String(linkedAudioError);
+            logger.error('insert_clip_from_file: linked audio handling failed', { error: msg });
+            return { success: false, error: msg };
+          }
         }
 
         logger.debug('insert_clip_from_file executed', {
