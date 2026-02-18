@@ -22,6 +22,9 @@ use crate::core::{
 pub struct ImportAssetCommand {
     /// The asset to import
     pub asset: Asset,
+    /// Project root for resolving relative paths (set by IPC layer, not serialized)
+    #[serde(skip)]
+    pub project_root: Option<std::path::PathBuf>,
 }
 
 impl ImportAssetCommand {
@@ -45,7 +48,10 @@ impl ImportAssetCommand {
             _ => Asset::new_video(name, uri, VideoInfo::default()),
         };
 
-        Self { asset }
+        Self {
+            asset,
+            project_root: None,
+        }
     }
 
     /// Returns the asset ID for external reference
@@ -57,6 +63,7 @@ impl ImportAssetCommand {
     pub fn video(name: &str, uri: &str, video_info: VideoInfo) -> Self {
         Self {
             asset: Asset::new_video(name, uri, video_info),
+            project_root: None,
         }
     }
 
@@ -64,6 +71,7 @@ impl ImportAssetCommand {
     pub fn audio(name: &str, uri: &str, audio_info: AudioInfo) -> Self {
         Self {
             asset: Asset::new_audio(name, uri, audio_info),
+            project_root: None,
         }
     }
 
@@ -71,12 +79,16 @@ impl ImportAssetCommand {
     pub fn image(name: &str, uri: &str, width: u32, height: u32) -> Self {
         Self {
             asset: Asset::new_image(name, uri, width, height),
+            project_root: None,
         }
     }
 
     /// Creates a new import asset command from an existing asset
     pub fn from_asset(asset: Asset) -> Self {
-        Self { asset }
+        Self {
+            asset,
+            project_root: None,
+        }
     }
 
     /// Sets the duration
@@ -120,16 +132,35 @@ impl ImportAssetCommand {
         self.asset = self.asset.with_audio_info(audio_info);
         self
     }
+
+    /// Sets the project root for resolving relative paths
+    pub fn with_project_root(mut self, root: std::path::PathBuf) -> Self {
+        self.project_root = Some(root);
+        self
+    }
 }
 
 impl Command for ImportAssetCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
-        // This is a security boundary: UI/AI can attempt to import a URL or an invalid path.
+        // Security boundary: UI/AI can attempt to import a URL or an invalid path.
         // We validate at the command level so all call sites (IPC, AI, plugins) are protected.
-        let validated_path = validate_local_input_path(&self.asset.uri, "asset.uri")
-            .map_err(CoreError::ValidationError)?;
-        // Normalize to a trimmed absolute path string.
-        self.asset.uri = validated_path.to_string_lossy().to_string();
+        if let Some(rel_path) = &self.asset.relative_path {
+            // Workspace file: resolve relative to project root
+            let project_root = self.project_root.as_ref().ok_or_else(|| {
+                CoreError::ValidationError(
+                    "project_root required for workspace-relative imports".to_string(),
+                )
+            })?;
+            let abs_path = project_root.join(rel_path);
+            let validated = validate_local_input_path(&abs_path.to_string_lossy(), "asset.uri")
+                .map_err(CoreError::ValidationError)?;
+            self.asset.uri = validated.to_string_lossy().to_string();
+        } else {
+            // External file: existing behavior (absolute path validation)
+            let validated_path = validate_local_input_path(&self.asset.uri, "asset.uri")
+                .map_err(CoreError::ValidationError)?;
+            self.asset.uri = validated_path.to_string_lossy().to_string();
+        }
 
         let asset_id = self.asset.id.clone();
 
@@ -662,5 +693,115 @@ mod tests {
         );
         let err = cmd.execute(&mut state).unwrap_err();
         assert!(matches!(err, CoreError::ValidationError(_)));
+    }
+
+    // =========================================================================
+    // Workspace-Relative Path Tests
+    // =========================================================================
+
+    #[test]
+    fn test_import_with_relative_path() {
+        let mut state = create_test_state();
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("footage")).unwrap();
+        let file_path = dir.path().join("footage/clip.mp4");
+        std::fs::write(&file_path, b"video data").unwrap();
+
+        let asset = Asset::new_video("clip.mp4", "", VideoInfo::default())
+            .with_relative_path("footage/clip.mp4")
+            .as_workspace_managed();
+
+        let mut cmd = ImportAssetCommand::from_asset(asset)
+            .with_project_root(dir.path().to_path_buf());
+
+        let result = cmd.execute(&mut state).unwrap();
+        assert_eq!(result.created_ids.len(), 1);
+
+        let imported = state.assets.values().next().unwrap();
+        assert_eq!(imported.relative_path, Some("footage/clip.mp4".to_string()));
+        assert!(imported.workspace_managed);
+        // URI should be resolved to absolute path
+        assert!(imported.uri.contains("footage"));
+    }
+
+    #[test]
+    fn test_import_with_relative_path_missing_project_root() {
+        let mut state = create_test_state();
+
+        let asset = Asset::new_video("clip.mp4", "", VideoInfo::default())
+            .with_relative_path("footage/clip.mp4");
+
+        let mut cmd = ImportAssetCommand::from_asset(asset);
+        // No project_root set
+        let err = cmd.execute(&mut state).unwrap_err();
+        assert!(matches!(err, CoreError::ValidationError(_)));
+    }
+
+    #[test]
+    fn test_import_without_relative_path_backward_compat() {
+        let mut state = create_test_state();
+        let (_dir, uri) = create_temp_asset_file("video.mp4");
+
+        // Classic import without relative_path — should work as before
+        let mut cmd = ImportAssetCommand::video("video.mp4", &uri, VideoInfo::default());
+        let result = cmd.execute(&mut state).unwrap();
+
+        let imported = state.assets.get(&result.created_ids[0]).unwrap();
+        assert!(imported.relative_path.is_none());
+        assert!(!imported.workspace_managed);
+    }
+
+    #[test]
+    fn test_asset_serialization_with_new_fields() {
+        let asset = Asset::new_video("clip.mp4", "/path/clip.mp4", VideoInfo::default())
+            .with_relative_path("footage/clip.mp4")
+            .as_workspace_managed();
+
+        let json = serde_json::to_string(&asset).unwrap();
+        let parsed: Asset = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.relative_path, Some("footage/clip.mp4".to_string()));
+        assert!(parsed.workspace_managed);
+    }
+
+    #[test]
+    fn test_asset_deserialization_backward_compat() {
+        // Simulate old JSON without the new fields
+        let old_json = r#"{
+            "id": "01ABC",
+            "kind": "video",
+            "name": "old.mp4",
+            "uri": "/path/old.mp4",
+            "hash": "",
+            "fileSize": 0,
+            "importedAt": "2024-01-01T00:00:00Z",
+            "license": { "source": "user", "licenseType": "unknown", "allowedUse": [] },
+            "tags": [],
+            "proxyStatus": "notNeeded"
+        }"#;
+
+        let asset: Asset = serde_json::from_str(old_json).unwrap();
+        assert!(asset.relative_path.is_none());
+        assert!(!asset.workspace_managed);
+    }
+
+    #[test]
+    fn test_asset_resolved_path_with_relative() {
+        let asset = Asset::new_video("clip.mp4", "/abs/path/clip.mp4", VideoInfo::default())
+            .with_relative_path("footage/clip.mp4");
+
+        let resolved = asset.resolved_path(std::path::Path::new("/project"));
+        assert_eq!(
+            resolved,
+            std::path::PathBuf::from("/project/footage/clip.mp4")
+        );
+    }
+
+    #[test]
+    fn test_asset_resolved_path_without_relative() {
+        let asset = Asset::new_video("clip.mp4", "/abs/path/clip.mp4", VideoInfo::default());
+
+        let resolved = asset.resolved_path(std::path::Path::new("/project"));
+        assert_eq!(resolved, std::path::PathBuf::from("/abs/path/clip.mp4"));
     }
 }

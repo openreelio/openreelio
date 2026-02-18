@@ -430,6 +430,7 @@ mod tests {
                 version: "0.1.0".to_string(),
                 description: None,
                 author: None,
+                format_version: 2,
             },
             assets: HashMap::new(),
             sequences: HashMap::new(),

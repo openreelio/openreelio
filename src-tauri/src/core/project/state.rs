@@ -40,6 +40,14 @@ pub struct ProjectMeta {
     /// Author name
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
+    /// Format version: 1 = legacy (import-only), 2 = workspace-enabled
+    /// Defaults to 1 for backward compatibility with existing projects.
+    #[serde(default = "default_format_version")]
+    pub format_version: u32,
+}
+
+fn default_format_version() -> u32 {
+    1
 }
 
 impl ProjectMeta {
@@ -54,6 +62,7 @@ impl ProjectMeta {
             modified_at: now,
             description: None,
             author: None,
+            format_version: 2,
         }
     }
 
@@ -213,6 +222,9 @@ impl ProjectState {
             OpKind::BinRename => self.apply_bin_rename(op)?,
             OpKind::BinMove => self.apply_bin_move(op)?,
             OpKind::BinUpdateColor => self.apply_bin_update_color(op)?,
+
+            // Workspace operations (metadata-only, no state change needed)
+            OpKind::WorkspaceScan => {}
 
             // Batch operations
             OpKind::Batch => self.apply_batch(op)?,

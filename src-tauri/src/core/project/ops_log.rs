@@ -65,6 +65,9 @@ pub enum OpKind {
     BinMove,
     BinUpdateColor,
 
+    // Workspace operations
+    WorkspaceScan,
+
     // Batch operations
     Batch,
 }

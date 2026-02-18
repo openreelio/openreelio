@@ -3,7 +3,7 @@
 //! This module provides safe primitives for writing files in a crash-tolerant way.
 //!
 //! Why this exists:
-//! - Snapshots (`snapshot.json`) and metadata (`project.json`) are critical to recoverability.
+//! - Snapshots and metadata are critical to recoverability.
 //! - A partial write (power loss, crash) must not leave the project unrecoverable.
 //! - Windows semantics differ from Unix for rename-over-existing; we handle both.
 
@@ -130,7 +130,8 @@ pub fn validate_local_input_path(path: &str, label: &str) -> Result<PathBuf, Str
 /// This is used by IPC entry points that open projects to ensure:
 /// - The path is non-empty
 /// - The path is absolute
-/// - The directory exists and looks like an OpenReelio project (`project.json` and/or `ops.jsonl`)
+/// - The directory exists and looks like an OpenReelio project
+///   (legacy root files or hidden `.openreelio/state` files, including snapshot-only recovery)
 /// - The returned path is canonicalized to reduce ambiguity and avoid scope mismatches
 pub fn validate_existing_project_dir(path: &str, label: &str) -> Result<PathBuf, String> {
     let trimmed = path.trim();
@@ -154,9 +155,21 @@ pub fn validate_existing_project_dir(path: &str, label: &str) -> Result<PathBuf,
     }
 
     // Require basic project shape to avoid opening an arbitrary directory.
+    // Support both legacy root-level files and hidden state layout.
     let has_project_json = pb.join("project.json").exists();
     let has_ops_log = pb.join("ops.jsonl").exists();
-    if !has_project_json && !has_ops_log {
+    let has_snapshot = pb.join("snapshot.json").exists();
+    let hidden_state_dir = pb.join(".openreelio").join("state");
+    let has_hidden_project_json = hidden_state_dir.join("project.json").exists();
+    let has_hidden_ops_log = hidden_state_dir.join("ops.jsonl").exists();
+    let has_hidden_snapshot = hidden_state_dir.join("snapshot.json").exists();
+    if !has_project_json
+        && !has_ops_log
+        && !has_snapshot
+        && !has_hidden_project_json
+        && !has_hidden_ops_log
+        && !has_hidden_snapshot
+    {
         return Err(format!(
             "{label} is not a valid OpenReelio project directory: {}",
             pb.display()
@@ -529,6 +542,57 @@ mod tests {
         atomic_write_bytes(&path, b"two").unwrap();
         let second = std::fs::read_to_string(&path).unwrap();
         assert_eq!(second, "two");
+    }
+
+    #[test]
+    fn test_validate_existing_project_dir_accepts_hidden_state_layout() {
+        let dir = TempDir::new().unwrap();
+        let state_dir = dir.path().join(".openreelio").join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("project.json"), "{}").unwrap();
+        std::fs::write(state_dir.join("ops.jsonl"), "").unwrap();
+
+        let project_path = dir.path().to_string_lossy().to_string();
+        let result = validate_existing_project_dir(&project_path, "Project path");
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_existing_project_dir_accepts_hidden_snapshot_only() {
+        let dir = TempDir::new().unwrap();
+        let state_dir = dir.path().join(".openreelio").join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("snapshot.json"), "{}").unwrap();
+
+        let project_path = dir.path().to_string_lossy().to_string();
+        let result = validate_existing_project_dir(&project_path, "Project path");
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_existing_project_dir_accepts_legacy_layout() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("project.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("ops.jsonl"), "").unwrap();
+
+        let project_path = dir.path().to_string_lossy().to_string();
+        let result = validate_existing_project_dir(&project_path, "Project path");
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_existing_project_dir_rejects_non_project_directory() {
+        let dir = TempDir::new().unwrap();
+        let project_path = dir.path().to_string_lossy().to_string();
+
+        let result = validate_existing_project_dir(&project_path, "Project path");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("is not a valid OpenReelio project directory"));
     }
 
     // =========================================================================

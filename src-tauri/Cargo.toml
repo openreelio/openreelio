@@ -108,6 +108,12 @@ futures = { version = "0.3", optional = true }
 wasmtime = "27"
 wasmtime-wasi = "27"
 
+# Workspace filesystem scanning and watching
+notify = { version = "7", features = ["macos_fsevent"] }
+notify-debouncer-mini = "0.5"
+walkdir = "2"
+globset = "0.4"
+
 # FFmpeg bundler and AI providers (optional)
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"], optional = true }
 sha2 = { version = "0.10", optional = true }
@@ -115,7 +121,6 @@ zip = { version = "2.2", optional = true }
 flate2 = { version = "1.0", optional = true }
 tar = { version = "0.4", optional = true }
 xz2 = { version = "0.1", optional = true }
-walkdir = { version = "2", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
@@ -133,7 +138,6 @@ bundled-ffmpeg = [
     "dep:flate2",
     "dep:tar",
     "dep:xz2",
-    "dep:walkdir",
 ]
 # Enable Whisper transcription support
 whisper = ["dep:whisper-rs"]

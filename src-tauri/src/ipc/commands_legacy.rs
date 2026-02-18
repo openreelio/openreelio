@@ -16,8 +16,9 @@ use crate::core::{
         CreateSequenceCommand, ImportAssetCommand, InsertClipCommand, MoveBinCommand,
         MoveClipCommand, RemoveAssetCommand, RemoveBinCommand, RemoveClipCommand,
         RemoveEffectCommand, RemoveMaskCommand, RemoveTextClipCommand, RenameBinCommand,
-        SetBinColorCommand, SetClipMuteCommand, SetClipTransformCommand, SetTrackBlendModeCommand,
-        SplitClipCommand, TrimClipCommand, UpdateAssetCommand, UpdateEffectCommand,
+        SetBinColorCommand, SetClipAudioCommand, SetClipMuteCommand, SetClipTransformCommand,
+        SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand, UpdateAssetCommand,
+        UpdateEffectCommand,
         UpdateMaskCommand, UpdateTextCommand,
     },
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
@@ -453,10 +454,21 @@ pub async fn create_project(
                     ));
                 }
 
-                // Check for existing project files (our own files).
+                // Check for existing project files (legacy root layout or hidden state layout).
                 let has_project_json = project_path_for_create.join("project.json").exists();
                 let has_ops_log = project_path_for_create.join("ops.jsonl").exists();
-                if has_project_json || has_ops_log {
+                let has_snapshot = project_path_for_create.join("snapshot.json").exists();
+                let state_dir = project_path_for_create.join(".openreelio").join("state");
+                let has_hidden_project_json = state_dir.join("project.json").exists();
+                let has_hidden_ops_log = state_dir.join("ops.jsonl").exists();
+                let has_hidden_snapshot = state_dir.join("snapshot.json").exists();
+                if has_project_json
+                    || has_ops_log
+                    || has_snapshot
+                    || has_hidden_project_json
+                    || has_hidden_ops_log
+                    || has_hidden_snapshot
+                {
                     return Err(format!(
                         "A project already exists at: {}",
                         project_path_for_create.display()
@@ -588,6 +600,132 @@ pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<Pr
     Ok(info)
 }
 
+/// Opens a folder as a project, initializing project files if they don't exist.
+///
+/// This is the primary entry point for the folder-based workspace workflow:
+/// - If the folder already contains project state files (legacy or hidden layout),
+///   it opens as an existing project.
+/// - If the folder is empty or contains only media files (no project files), it initializes
+///   a new project in-place, deriving the project name from the folder name.
+///
+/// This replaces the old two-step "create project" flow (name + parent → subfolder).
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state), fields(project_path = %path))]
+pub async fn open_or_init_project(
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<ProjectInfo, String> {
+    // If another project is open, refuse to replace it if it has unsaved changes.
+    let previous_scope = {
+        let guard = state.project.lock().await;
+        if let Some(p) = guard.as_ref() {
+            if p.state.is_dirty {
+                return Err("A project is already open with unsaved changes. Save it before opening another project.".to_string());
+            }
+
+            let assets: Vec<Asset> = p.state.assets.values().cloned().collect();
+            Some((p.path.clone(), assets))
+        } else {
+            None
+        }
+    };
+
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("Project path is empty".to_string());
+    }
+
+    let project_path = PathBuf::from(trimmed);
+    if !project_path.is_absolute() {
+        return Err(format!(
+            "Project path must be absolute: {}",
+            project_path.display()
+        ));
+    }
+
+    // Check if the directory exists; create it if not.
+    if !project_path.exists() {
+        std::fs::create_dir_all(&project_path)
+            .map_err(|e| format!("Failed to create directory: {e}"))?;
+    } else if !project_path.is_dir() {
+        return Err(format!(
+            "Path is not a directory: {}",
+            project_path.display()
+        ));
+    }
+
+    // Determine whether this is an existing project or needs initialization.
+    let has_project_json = project_path.join("project.json").exists();
+    let has_ops_log = project_path.join("ops.jsonl").exists();
+    let has_snapshot = project_path.join("snapshot.json").exists();
+    let hidden_state_dir = project_path.join(".openreelio").join("state");
+    let has_hidden_project_json = hidden_state_dir.join("project.json").exists();
+    let has_hidden_ops_log = hidden_state_dir.join("ops.jsonl").exists();
+    let has_hidden_snapshot = hidden_state_dir.join("snapshot.json").exists();
+    let is_existing_project = has_project_json
+        || has_ops_log
+        || has_snapshot
+        || has_hidden_project_json
+        || has_hidden_ops_log
+        || has_hidden_snapshot;
+
+    let project_path_clone = project_path.clone();
+    let project = if is_existing_project {
+        // Open the existing project.
+        tracing::info!("Opening existing project at {}", project_path.display());
+        tokio::task::spawn_blocking(move || ActiveProject::open(project_path_clone))
+            .await
+            .map_err(|e| format!("Project open task failed: {e}"))?
+            .map_err(|e| e.to_ipc_error())?
+    } else {
+        // Initialize a new project in this folder.
+        // Derive the project name from the folder name.
+        let folder_name = project_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("Untitled Project")
+            .to_string();
+        tracing::info!(
+            "Initializing new project '{}' at {}",
+            folder_name,
+            project_path.display()
+        );
+        tokio::task::spawn_blocking(move || {
+            ActiveProject::create(&folder_name, project_path_clone)
+        })
+        .await
+        .map_err(|e| format!("Project creation task failed: {e}"))?
+        .map_err(|e| e.to_ipc_error())?
+    };
+
+    let assets_for_scope: Vec<Asset> = project.state.assets.values().cloned().collect();
+    let project_path_canon =
+        std::fs::canonicalize(&project.path).unwrap_or_else(|_| project.path.clone());
+
+    let info = ProjectInfo {
+        id: project.state.meta.id.clone(),
+        name: project.state.meta.name.clone(),
+        path: project_path_canon.to_string_lossy().to_string(),
+        created_at: project.state.meta.created_at.clone(),
+    };
+
+    // Store in app state
+    let mut guard = state.project.lock().await;
+
+    // Replace the existing project (if any) after forbidding its asset protocol scope.
+    if let Some((old_path, old_assets)) = previous_scope {
+        forbid_project_asset_protocol(&state, &old_path, &old_assets);
+    }
+
+    *guard = Some(project);
+
+    // Allowlist the project directory for asset protocol.
+    allow_project_asset_protocol(&state, &project_path_canon, &assets_for_scope);
+
+    Ok(info)
+}
+
 /// Closes the current project, optionally requiring it to be saved.
 #[tauri::command]
 #[specta::specta]
@@ -628,13 +766,14 @@ pub async fn save_project(state: State<'_, AppState>) -> Result<(), String> {
     use crate::core::project::Snapshot;
 
     let started_at = std::time::Instant::now();
-    let (project_path, state_snapshot, last_op_id_before) = {
+    let (snapshot_path, meta_path, state_snapshot, last_op_id_before) = {
         let guard = state.project.lock().await;
         let project = guard
             .as_ref()
             .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
         (
-            project.path.clone(),
+            project.snapshot_path.clone(),
+            project.meta_path.clone(),
             project.state.clone(),
             project.state.last_op_id.clone(),
         )
@@ -642,7 +781,6 @@ pub async fn save_project(state: State<'_, AppState>) -> Result<(), String> {
 
     // Perform disk IO on a blocking worker thread.
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let snapshot_path = Snapshot::default_path(&project_path);
         Snapshot::save(
             &snapshot_path,
             &state_snapshot,
@@ -650,7 +788,6 @@ pub async fn save_project(state: State<'_, AppState>) -> Result<(), String> {
         )
         .map_err(|e| e.to_ipc_error())?;
 
-        let meta_path = project_path.join("project.json");
         crate::core::fs::atomic_write_json_pretty(&meta_path, &state_snapshot.meta)
             .map_err(|e| e.to_ipc_error())?;
 
@@ -741,6 +878,7 @@ pub async fn import_asset(
     ffmpeg_state: State<'_, SharedFFmpegState>,
 ) -> Result<AssetImportResult, String> {
     use crate::core::assets::requires_proxy;
+    use crate::core::workspace::path_resolver;
 
     // Phase 1: Import asset (holds project lock)
     let (asset_id, name, op_id, needs_proxy) = {
@@ -749,8 +887,35 @@ pub async fn import_asset(
             .as_mut()
             .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-        // Create import command - use centralized path validation
-        let path = validate_local_input_path(&uri, "Asset path")?;
+        let project_root = project.path.clone();
+
+        // Determine if the URI is relative (workspace file) or absolute (external file)
+        let is_relative = uri.starts_with("./")
+            || uri.starts_with("../")
+            || (!uri.starts_with('/')
+                && !uri.contains(":\\")
+                && !uri.contains(":/"));
+
+        let (resolved_uri, relative_path) = if is_relative {
+            // Workspace-relative path: resolve against project root
+            let abs_path = path_resolver::resolve_to_absolute(&project_root, &uri);
+            let rel = path_resolver::to_relative(&project_root, &abs_path)
+                .unwrap_or_else(|| uri.clone());
+            (abs_path.to_string_lossy().to_string(), Some(rel))
+        } else {
+            // Absolute path: check if it's inside the project
+            let abs_path = PathBuf::from(&uri);
+            if path_resolver::is_inside_project(&project_root, &abs_path) {
+                let rel = path_resolver::to_relative(&project_root, &abs_path)
+                    .unwrap_or_else(|| uri.clone());
+                (uri.clone(), Some(rel))
+            } else {
+                (uri.clone(), None)
+            }
+        };
+
+        // Validate the resolved path
+        let path = validate_local_input_path(&resolved_uri, "Asset path")?;
         state.allow_asset_protocol_file(&path);
         let name = path
             .file_name()
@@ -758,7 +923,14 @@ pub async fn import_asset(
             .unwrap_or_else(|| "Unknown".to_string());
 
         // Extract metadata using FFprobe (via shared FFmpeg state) for accurate duration
-        let mut command = ImportAssetCommand::new(&name, &uri);
+        let mut command = ImportAssetCommand::new(&name, &resolved_uri);
+
+        // Set relative path and project root for workspace files
+        if let Some(ref rel_path) = relative_path {
+            command = command.with_project_root(project_root);
+            command.asset.relative_path = Some(rel_path.clone());
+            command.asset.workspace_managed = true;
+        }
 
         // Get FFmpeg runner and probe the media file
         let ffmpeg_guard = ffmpeg_state.read().await;
@@ -1354,11 +1526,25 @@ pub async fn remove_asset(asset_id: String, state: State<'_, AppState>) -> Resul
         .as_mut()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
+    let project_path = project.path.clone();
+
     let command = RemoveAssetCommand::new(&asset_id);
     project
         .executor
         .execute(Box::new(command), &mut project.state)
         .map_err(|e| e.to_ipc_error())?;
+
+    // Keep workspace registration index in sync. This prevents stale `assetId`
+    // references in the Files tab after asset deletion.
+    if let Ok(service) = crate::core::workspace::service::WorkspaceService::open(project_path) {
+        if let Err(e) = service.index().unmark_registered_by_asset_id(&asset_id) {
+            tracing::warn!(
+                asset_id = %asset_id,
+                error = %e,
+                "Failed to clear workspace registration after asset removal"
+            );
+        }
+    }
 
     Ok(())
 }

@@ -57,6 +57,9 @@ pub mod annotations;
 // Video generation commands (Seedance 2.0 integration)
 pub mod video_generation;
 
+// Workspace commands (workspace scanning, file tree, registration)
+pub mod workspace;
+
 // Placeholder for future extracted modules
 // pub mod settings;
 
@@ -72,3 +75,6 @@ pub use annotations::*;
 
 // Re-export video generation commands
 pub use video_generation::*;
+
+// Re-export workspace commands
+pub use workspace::*;

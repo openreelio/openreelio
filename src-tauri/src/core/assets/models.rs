@@ -219,6 +219,15 @@ pub struct Asset {
     /// Bin (folder) ID for organizing the asset
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bin_id: Option<String>,
+
+    /// Relative path within project folder (for workspace-discovered files).
+    /// When set, this is the canonical reference. `uri` becomes a resolved cache.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relative_path: Option<String>,
+
+    /// Whether this asset was auto-discovered from workspace scan
+    #[serde(default)]
+    pub workspace_managed: bool,
 }
 
 impl Asset {
@@ -263,6 +272,8 @@ impl Asset {
             proxy_status: ProxyStatus::NotNeeded,
             proxy_url: None,
             bin_id: None,
+            relative_path: None,
+            workspace_managed: false,
         }
     }
 
@@ -285,6 +296,8 @@ impl Asset {
             proxy_status: ProxyStatus::NotNeeded,
             proxy_url: None,
             bin_id: None,
+            relative_path: None,
+            workspace_managed: false,
         }
     }
 
@@ -323,6 +336,8 @@ impl Asset {
             proxy_status: ProxyStatus::NotNeeded,
             proxy_url: None,
             bin_id: None,
+            relative_path: None,
+            workspace_managed: false,
         }
     }
 
@@ -423,6 +438,27 @@ impl Asset {
     pub fn with_audio_info(mut self, audio_info: AudioInfo) -> Self {
         self.audio = Some(audio_info);
         self
+    }
+
+    /// Sets the relative path within the project workspace
+    pub fn with_relative_path(mut self, path: &str) -> Self {
+        self.relative_path = Some(path.to_string());
+        self
+    }
+
+    /// Marks this asset as workspace-managed
+    pub fn as_workspace_managed(mut self) -> Self {
+        self.workspace_managed = true;
+        self
+    }
+
+    /// Resolves the actual file path, preferring relative_path over uri
+    pub fn resolved_path(&self, project_root: &std::path::Path) -> std::path::PathBuf {
+        if let Some(rel) = &self.relative_path {
+            project_root.join(rel)
+        } else {
+            std::path::PathBuf::from(&self.uri)
+        }
     }
 }
 

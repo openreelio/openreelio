@@ -12,7 +12,7 @@
 pub mod core;
 pub mod ipc;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 // NOTE: Unit tests in this repository intentionally avoid linking the Tauri runtime.
 // On some Windows environments, dynamic dependencies of the webview stack can prevent
@@ -48,6 +48,12 @@ use crate::core::{
 pub struct ActiveProject {
     /// Project directory path
     pub path: PathBuf,
+    /// Directory containing persistent project state files (ops/snapshot/meta)
+    pub state_dir: PathBuf,
+    /// Absolute path to the project metadata file
+    pub meta_path: PathBuf,
+    /// Absolute path to the project snapshot file
+    pub snapshot_path: PathBuf,
     /// Project state (in-memory)
     pub state: ProjectState,
     /// Command executor with undo/redo
@@ -57,6 +63,255 @@ pub struct ActiveProject {
 }
 
 impl ActiveProject {
+    fn default_state_dir(project_root: &Path) -> PathBuf {
+        project_root.join(".openreelio").join("state")
+    }
+
+    fn state_ops_path(state_dir: &Path) -> PathBuf {
+        state_dir.join("ops.jsonl")
+    }
+
+    fn state_meta_path(state_dir: &Path) -> PathBuf {
+        state_dir.join("project.json")
+    }
+
+    fn state_snapshot_path(state_dir: &Path) -> PathBuf {
+        state_dir.join("snapshot.json")
+    }
+
+    fn legacy_ops_path(project_root: &Path) -> PathBuf {
+        project_root.join("ops.jsonl")
+    }
+
+    fn legacy_meta_path(project_root: &Path) -> PathBuf {
+        project_root.join("project.json")
+    }
+
+    fn legacy_snapshot_path(project_root: &Path) -> PathBuf {
+        project_root.join("snapshot.json")
+    }
+
+    fn move_state_file_if_needed(
+        src: &Path,
+        dst: &Path,
+    ) -> crate::core::CoreResult<()> {
+        use std::cmp::Ordering;
+
+        fn read_ops_line_count(path: &Path) -> Option<usize> {
+            let file = std::fs::File::open(path).ok()?;
+            let reader = std::io::BufReader::new(file);
+            let count = std::io::BufRead::lines(reader)
+                .map_while(Result::ok)
+                .filter(|line| !line.trim().is_empty())
+                .count();
+            Some(count)
+        }
+
+        fn read_snapshot_op_count(path: &Path) -> Option<u64> {
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+            value
+                .get("opCount")
+                .or_else(|| value.get("op_count"))
+                .and_then(|v| v.as_u64().or_else(|| v.as_i64().map(|n| n.max(0) as u64)))
+        }
+
+        fn read_project_modified_unix_ms(path: &Path) -> Option<i64> {
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+            let modified = value
+                .get("modifiedAt")
+                .or_else(|| value.get("modified_at"))
+                .or_else(|| value.get("createdAt"))
+                .or_else(|| value.get("created_at"))?
+                .as_str()?;
+            let parsed = chrono::DateTime::parse_from_rfc3339(modified).ok()?;
+            Some(parsed.timestamp_millis())
+        }
+
+        fn compare_state_freshness_by_content(src: &Path, dst: &Path) -> Option<Ordering> {
+            let file_name = dst.file_name()?.to_string_lossy();
+            match file_name.as_ref() {
+                "ops.jsonl" => Some(read_ops_line_count(src)?.cmp(&read_ops_line_count(dst)?)),
+                "snapshot.json" => {
+                    Some(read_snapshot_op_count(src)?.cmp(&read_snapshot_op_count(dst)?))
+                }
+                "project.json" => Some(
+                    read_project_modified_unix_ms(src)?.cmp(&read_project_modified_unix_ms(dst)?),
+                ),
+                _ => None,
+            }
+        }
+
+        fn files_are_identical(left: &Path, right: &Path) -> bool {
+            let left_meta = match std::fs::metadata(left) {
+                Ok(meta) => meta,
+                Err(_) => return false,
+            };
+            let right_meta = match std::fs::metadata(right) {
+                Ok(meta) => meta,
+                Err(_) => return false,
+            };
+            if left_meta.len() != right_meta.len() {
+                return false;
+            }
+
+            let mut left_file = match std::fs::File::open(left) {
+                Ok(file) => file,
+                Err(_) => return false,
+            };
+            let mut right_file = match std::fs::File::open(right) {
+                Ok(file) => file,
+                Err(_) => return false,
+            };
+
+            let mut left_buf = [0u8; 8192];
+            let mut right_buf = [0u8; 8192];
+
+            loop {
+                let left_read = match std::io::Read::read(&mut left_file, &mut left_buf) {
+                    Ok(read) => read,
+                    Err(_) => return false,
+                };
+                let right_read = match std::io::Read::read(&mut right_file, &mut right_buf) {
+                    Ok(read) => read,
+                    Err(_) => return false,
+                };
+
+                if left_read != right_read {
+                    return false;
+                }
+                if left_read == 0 {
+                    return true;
+                }
+                if left_buf[..left_read] != right_buf[..right_read] {
+                    return false;
+                }
+            }
+        }
+
+        if !src.exists() {
+            return Ok(());
+        }
+
+        if let Some(parent) = dst.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        if dst.exists() {
+            enum ExistingTargetAction {
+                PromoteSource,
+                CleanupStaleSource,
+                KeepBoth,
+            }
+
+            let source_modified = std::fs::metadata(src).and_then(|m| m.modified()).ok();
+            let target_modified = std::fs::metadata(dst).and_then(|m| m.modified()).ok();
+            let content_order = compare_state_freshness_by_content(src, dst);
+            let action = match content_order {
+                Some(Ordering::Greater) => ExistingTargetAction::PromoteSource,
+                Some(Ordering::Less) => ExistingTargetAction::CleanupStaleSource,
+                Some(Ordering::Equal) => {
+                    if files_are_identical(src, dst) {
+                        ExistingTargetAction::CleanupStaleSource
+                    } else {
+                        match (source_modified, target_modified) {
+                            (Some(source), Some(target)) if source > target => {
+                                ExistingTargetAction::PromoteSource
+                            }
+                            (Some(source), Some(target)) if source < target => {
+                                ExistingTargetAction::CleanupStaleSource
+                            }
+                            _ => ExistingTargetAction::KeepBoth,
+                        }
+                    }
+                }
+                None => match (source_modified, target_modified) {
+                    (Some(source), Some(target)) if source > target => {
+                        ExistingTargetAction::PromoteSource
+                    }
+                    (Some(source), Some(target)) if source < target => {
+                        ExistingTargetAction::CleanupStaleSource
+                    }
+                    (Some(_), Some(_)) => {
+                        if files_are_identical(src, dst) {
+                            ExistingTargetAction::CleanupStaleSource
+                        } else {
+                            ExistingTargetAction::KeepBoth
+                        }
+                    }
+                    (Some(_), None) => ExistingTargetAction::PromoteSource,
+                    _ => ExistingTargetAction::KeepBoth,
+                },
+            };
+
+            match action {
+                ExistingTargetAction::PromoteSource => {
+                    std::fs::copy(src, dst).map_err(crate::core::CoreError::IoError)?;
+                    tracing::info!(
+                        from = %src.display(),
+                        to = %dst.display(),
+                        "Promoted newer legacy project state file"
+                    );
+                    if let Err(remove_err) = std::fs::remove_file(src) {
+                        tracing::warn!(
+                            from = %src.display(),
+                            error = %remove_err,
+                            "Failed to remove legacy project state file"
+                        );
+                    }
+                }
+                ExistingTargetAction::CleanupStaleSource => {
+                    tracing::debug!(
+                        from = %src.display(),
+                        to = %dst.display(),
+                        "Discarding stale legacy project state file"
+                    );
+                    if let Err(remove_err) = std::fs::remove_file(src) {
+                        tracing::warn!(
+                            from = %src.display(),
+                            error = %remove_err,
+                            "Failed to remove stale legacy project state file"
+                        );
+                    }
+                }
+                ExistingTargetAction::KeepBoth => {
+                    tracing::warn!(
+                        from = %src.display(),
+                        to = %dst.display(),
+                        "Unable to compare legacy and hidden state file timestamps; keeping both"
+                    );
+                }
+            }
+
+            return Ok(());
+        }
+
+        match std::fs::rename(src, dst) {
+            Ok(()) => Ok(()),
+            Err(rename_err) => {
+                // Cross-volume or antivirus interference can make rename fail on Windows.
+                // Fallback to copy + best-effort remove.
+                std::fs::copy(src, dst).map_err(crate::core::CoreError::IoError)?;
+                if let Err(remove_err) = std::fs::remove_file(src) {
+                    tracing::warn!(
+                        from = %src.display(),
+                        to = %dst.display(),
+                        error = %remove_err,
+                        "Copied legacy project state file but failed to remove original"
+                    );
+                }
+                tracing::debug!(
+                    from = %src.display(),
+                    to = %dst.display(),
+                    error = %rename_err,
+                    "Legacy project state migrated via copy fallback"
+                );
+                Ok(())
+            }
+        }
+    }
+
     /// Creates a new project with default sequence and tracks
     ///
     /// The default sequence is created via Command to ensure proper ops log recording.
@@ -66,11 +321,12 @@ impl ActiveProject {
 
         // Create project directory if it doesn't exist
         std::fs::create_dir_all(&path)?;
-        // Ensure app-managed workspace exists (proxy/frames/cache, etc.).
-        // This also makes it safe to allowlist the directory for the asset protocol.
-        std::fs::create_dir_all(path.join(".openreelio"))?;
+        let state_dir = Self::default_state_dir(&path);
+        std::fs::create_dir_all(&state_dir)?;
 
-        let ops_path = path.join("ops.jsonl");
+        let ops_path = Self::state_ops_path(&state_dir);
+        let snapshot_path = Self::state_snapshot_path(&state_dir);
+        let meta_path = Self::state_meta_path(&state_dir);
 
         // Start with empty state - default sequence will be added via Command
         let mut state = ProjectState::new_empty(name);
@@ -91,15 +347,16 @@ impl ActiveProject {
         executor.clear_history();
 
         // Save initial snapshot (includes the default sequence from command)
-        let snapshot_path = Snapshot::default_path(&path);
         Snapshot::save(&snapshot_path, &state, state.last_op_id.as_deref())?;
 
-        // Save project.json metadata
-        let meta_path = path.join("project.json");
+        // Save project metadata
         crate::core::fs::atomic_write_json_pretty(&meta_path, &state.meta)?;
 
         Ok(Self {
             path,
+            state_dir,
+            meta_path,
+            snapshot_path,
             state,
             executor,
             ops_log,
@@ -108,12 +365,53 @@ impl ActiveProject {
 
     /// Opens an existing project
     pub fn open(path: PathBuf) -> crate::core::CoreResult<Self> {
-        // Best-effort ensure app-managed workspace exists for older projects.
-        let _ = std::fs::create_dir_all(path.join(".openreelio"));
+        let state_dir = Self::default_state_dir(&path);
+        std::fs::create_dir_all(&state_dir)?;
 
-        let ops_path = path.join("ops.jsonl");
-        let snapshot_path = Snapshot::default_path(&path);
-        let meta_path = path.join("project.json");
+        let mut ops_path = Self::state_ops_path(&state_dir);
+        let mut snapshot_path = Self::state_snapshot_path(&state_dir);
+        let mut meta_path = Self::state_meta_path(&state_dir);
+
+        let legacy_ops_path = Self::legacy_ops_path(&path);
+        let legacy_snapshot_path = Self::legacy_snapshot_path(&path);
+        let legacy_meta_path = Self::legacy_meta_path(&path);
+
+        // One-time migration from legacy root files to the hidden state directory.
+        if let Err(e) = Self::move_state_file_if_needed(&legacy_ops_path, &ops_path) {
+            tracing::warn!(
+                error = %e,
+                from = %legacy_ops_path.display(),
+                to = %ops_path.display(),
+                "Failed to migrate legacy ops log"
+            );
+            if !ops_path.exists() && legacy_ops_path.exists() {
+                ops_path = legacy_ops_path;
+            }
+        }
+
+        if let Err(e) = Self::move_state_file_if_needed(&legacy_snapshot_path, &snapshot_path) {
+            tracing::warn!(
+                error = %e,
+                from = %legacy_snapshot_path.display(),
+                to = %snapshot_path.display(),
+                "Failed to migrate legacy snapshot"
+            );
+            if !snapshot_path.exists() && legacy_snapshot_path.exists() {
+                snapshot_path = legacy_snapshot_path;
+            }
+        }
+
+        if let Err(e) = Self::move_state_file_if_needed(&legacy_meta_path, &meta_path) {
+            tracing::warn!(
+                error = %e,
+                from = %legacy_meta_path.display(),
+                to = %meta_path.display(),
+                "Failed to migrate legacy project metadata"
+            );
+            if !meta_path.exists() && legacy_meta_path.exists() {
+                meta_path = legacy_meta_path;
+            }
+        }
 
         // Load project metadata (used as fallback if no snapshot exists)
         let meta: ProjectMeta = if meta_path.exists() {
@@ -145,6 +443,9 @@ impl ActiveProject {
 
         Ok(Self {
             path,
+            state_dir,
+            meta_path,
+            snapshot_path,
             state,
             executor,
             ops_log,
@@ -157,16 +458,14 @@ impl ActiveProject {
     /// This ensures the project can be closed or replaced without warnings.
     pub fn save(&mut self) -> crate::core::CoreResult<()> {
         // Save snapshot
-        let snapshot_path = Snapshot::default_path(&self.path);
         Snapshot::save(
-            &snapshot_path,
+            &self.snapshot_path,
             &self.state,
             self.state.last_op_id.as_deref(),
         )?;
 
-        // Save project.json metadata
-        let meta_path = self.path.join("project.json");
-        crate::core::fs::atomic_write_json_pretty(&meta_path, &self.state.meta)?;
+        // Save project metadata
+        crate::core::fs::atomic_write_json_pretty(&self.meta_path, &self.state.meta)?;
 
         // Reset dirty flag after successful save
         self.state.is_dirty = false;
@@ -410,6 +709,7 @@ mod tauri_app {
                 // Project commands
                 $crate::ipc::create_project,
                 $crate::ipc::open_project,
+                $crate::ipc::open_or_init_project,
                 $crate::ipc::close_project,
                 $crate::ipc::save_project,
                 $crate::ipc::get_project_info,
@@ -506,6 +806,11 @@ mod tauri_app {
                 $crate::ipc::get_current_version,
                 $crate::ipc::relaunch_app,
                 $crate::ipc::download_and_install_update,
+                // Workspace commands
+                $crate::ipc::scan_workspace,
+                $crate::ipc::get_workspace_tree,
+                $crate::ipc::register_workspace_file,
+                $crate::ipc::register_workspace_files,
             ]
         };
     }
@@ -710,6 +1015,7 @@ mod tauri_app {
             // Project commands
             ipc::create_project,
             ipc::open_project,
+            ipc::open_or_init_project,
             ipc::close_project,
             ipc::save_project,
             ipc::get_project_info,
@@ -811,6 +1117,11 @@ mod tauri_app {
             ipc::get_current_version,
             ipc::relaunch_app,
             ipc::download_and_install_update,
+            // Workspace commands
+            ipc::scan_workspace,
+            ipc::get_workspace_tree,
+            ipc::register_workspace_file,
+            ipc::register_workspace_files,
         ])
         .run(tauri::generate_context!());
 
@@ -839,11 +1150,14 @@ mod tests {
         let project_path = temp_dir.path().join("test_project");
 
         let project = ActiveProject::create("Test Project", project_path.clone()).unwrap();
+        let state_dir = project_path.join(".openreelio/state");
 
         assert_eq!(project.state.meta.name, "Test Project");
         assert_eq!(project.path, project_path);
-        assert!(project_path.join("project.json").exists());
-        assert!(project_path.join("snapshot.json").exists());
+        assert_eq!(project.state_dir, state_dir);
+        assert!(state_dir.join("project.json").exists());
+        assert!(state_dir.join("snapshot.json").exists());
+        assert!(state_dir.join("ops.jsonl").exists());
     }
 
     #[test]
@@ -870,7 +1184,11 @@ mod tests {
         drop(project);
 
         // Corrupt the snapshot file
-        std::fs::write(project_path.join("snapshot.json"), "{not valid json").unwrap();
+        std::fs::write(
+            project_path.join(".openreelio/state/snapshot.json"),
+            "{not valid json",
+        )
+        .unwrap();
 
         // Open should still succeed by replaying ops.jsonl
         let opened = ActiveProject::open(project_path).unwrap();
@@ -933,5 +1251,138 @@ mod tests {
             !reopened.state.is_dirty,
             "is_dirty should be false after reopen"
         );
+    }
+
+    #[test]
+    fn test_active_project_open_migrates_legacy_root_state_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("legacy_project");
+
+        // Create using current layout, then move files back to legacy root to simulate
+        // pre-migration projects.
+        let project = ActiveProject::create("Legacy Project", project_path.clone()).unwrap();
+        drop(project);
+
+        let state_dir = project_path.join(".openreelio/state");
+        std::fs::rename(state_dir.join("ops.jsonl"), project_path.join("ops.jsonl")).unwrap();
+        std::fs::rename(
+            state_dir.join("project.json"),
+            project_path.join("project.json"),
+        )
+        .unwrap();
+        std::fs::rename(
+            state_dir.join("snapshot.json"),
+            project_path.join("snapshot.json"),
+        )
+        .unwrap();
+
+        let reopened = ActiveProject::open(project_path.clone()).unwrap();
+        assert_eq!(reopened.state.meta.name, "Legacy Project");
+
+        // Legacy files should be moved into hidden state directory.
+        assert!(state_dir.join("ops.jsonl").exists());
+        assert!(state_dir.join("project.json").exists());
+        assert!(state_dir.join("snapshot.json").exists());
+        assert!(!project_path.join("ops.jsonl").exists());
+        assert!(!project_path.join("project.json").exists());
+        assert!(!project_path.join("snapshot.json").exists());
+    }
+
+    #[test]
+    fn test_active_project_open_prefers_newer_legacy_state_files_when_both_exist() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("legacy_conflict_project");
+
+        let project = ActiveProject::create("Initial Name", project_path.clone()).unwrap();
+        drop(project);
+
+        let state_dir = project_path.join(".openreelio/state");
+        std::fs::copy(state_dir.join("ops.jsonl"), project_path.join("ops.jsonl")).unwrap();
+        std::fs::copy(
+            state_dir.join("project.json"),
+            project_path.join("project.json"),
+        )
+        .unwrap();
+        std::fs::copy(
+            state_dir.join("snapshot.json"),
+            project_path.join("snapshot.json"),
+        )
+        .unwrap();
+
+        let mut legacy_meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(project_path.join("project.json")).unwrap(),
+        )
+        .unwrap();
+        legacy_meta["name"] = serde_json::Value::String("Legacy Preferred".to_string());
+        legacy_meta["modifiedAt"] =
+            serde_json::Value::String("2999-01-01T00:00:00Z".to_string());
+        std::fs::write(
+            project_path.join("project.json"),
+            serde_json::to_vec_pretty(&legacy_meta).unwrap(),
+        )
+        .unwrap();
+
+        let reopened = ActiveProject::open(project_path.clone()).unwrap();
+        assert_eq!(reopened.path, project_path);
+
+        let migrated_meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(state_dir.join("project.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(migrated_meta["name"], "Legacy Preferred");
+        assert_eq!(migrated_meta["modifiedAt"], "2999-01-01T00:00:00Z");
+
+        assert!(!project_path.join("ops.jsonl").exists());
+        assert!(!project_path.join("project.json").exists());
+        assert!(!project_path.join("snapshot.json").exists());
+    }
+
+    #[test]
+    fn test_active_project_open_discards_stale_legacy_state_files() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("legacy_stale_project");
+
+        let project = ActiveProject::create("Initial Name", project_path.clone()).unwrap();
+        drop(project);
+
+        let state_dir = project_path.join(".openreelio/state");
+        std::fs::copy(state_dir.join("ops.jsonl"), project_path.join("ops.jsonl")).unwrap();
+        std::fs::copy(
+            state_dir.join("project.json"),
+            project_path.join("project.json"),
+        )
+        .unwrap();
+        std::fs::copy(
+            state_dir.join("snapshot.json"),
+            project_path.join("snapshot.json"),
+        )
+        .unwrap();
+
+        let mut hidden_meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(state_dir.join("project.json")).unwrap(),
+        )
+        .unwrap();
+        hidden_meta["name"] = serde_json::Value::String("Hidden Preferred".to_string());
+        hidden_meta["modifiedAt"] =
+            serde_json::Value::String("2999-01-01T00:00:00Z".to_string());
+        std::fs::write(
+            state_dir.join("project.json"),
+            serde_json::to_vec_pretty(&hidden_meta).unwrap(),
+        )
+        .unwrap();
+
+        let reopened = ActiveProject::open(project_path.clone()).unwrap();
+        assert_eq!(reopened.path, project_path);
+
+        let persisted_meta: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(state_dir.join("project.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted_meta["name"], "Hidden Preferred");
+        assert_eq!(persisted_meta["modifiedAt"], "2999-01-01T00:00:00Z");
+
+        assert!(!project_path.join("ops.jsonl").exists());
+        assert!(!project_path.join("project.json").exists());
+        assert!(!project_path.join("snapshot.json").exists());
     }
 }
