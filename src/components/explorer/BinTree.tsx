@@ -18,12 +18,7 @@
 import { memo, useMemo, useCallback, useState } from 'react';
 import { FolderPlus, Home } from 'lucide-react';
 import { BinItem } from './BinItem';
-import {
-  buildBinTree,
-  getAssetsInBin,
-  sortBins,
-  type BinTreeNode,
-} from '@/utils/binUtils';
+import { buildBinTree, sortBins, type BinTreeNode } from '@/utils/binUtils';
 import type { Bin, BinId, Asset } from '@/types';
 
 // =============================================================================
@@ -91,20 +86,60 @@ export const BinTree = memo(function BinTree({
   const sortedBins = useMemo(() => sortBins(bins), [bins]);
   const tree = useMemo(() => buildBinTree(sortedBins), [sortedBins]);
 
-  // Calculate asset counts for each bin
+  // Precompute child bin relationship for recursive aggregation
+  const childBinsByParent = useMemo(() => {
+    const relationship = new Map<BinId | null, BinId[]>();
+
+    for (const bin of bins) {
+      const parentId = bin.parentId ?? null;
+      const children = relationship.get(parentId) ?? [];
+      children.push(bin.id);
+      relationship.set(parentId, children);
+    }
+
+    return relationship;
+  }, [bins]);
+
+  // Calculate recursive asset counts for each bin
   const assetCounts = useMemo(() => {
+    const directCounts = new Map<BinId | null, number>();
+
+    for (const asset of assets) {
+      const targetBinId = asset.binId ?? null;
+      directCounts.set(targetBinId, (directCounts.get(targetBinId) ?? 0) + 1);
+    }
+
+    const totals = new Map<BinId | null, number>();
+
+    const computeTotalAssets = (binId: BinId | null): number => {
+      const cached = totals.get(binId);
+      if (cached !== undefined) {
+        return cached;
+      }
+
+      const directAssetCount = directCounts.get(binId) ?? 0;
+      const children = childBinsByParent.get(binId) ?? [];
+
+      const totalAssetCount = children.reduce((sum, childBinId) => {
+        return sum + computeTotalAssets(childBinId);
+      }, directAssetCount);
+
+      totals.set(binId, totalAssetCount);
+      return totalAssetCount;
+    };
+
     const counts = new Map<BinId | null, number>();
 
-    // Count root assets
-    counts.set(null, getAssetsInBin(null, assets).length);
+    // Root represents all assets
+    counts.set(null, computeTotalAssets(null));
 
-    // Count assets in each bin
+    // Each bin includes all descendant assets
     for (const bin of bins) {
-      counts.set(bin.id, getAssetsInBin(bin.id, assets).length);
+      counts.set(bin.id, computeTotalAssets(bin.id));
     }
 
     return counts;
-  }, [bins, assets]);
+  }, [bins, assets, childBinsByParent]);
 
   // ===========================================================================
   // Handlers
@@ -120,25 +155,63 @@ export const BinTree = memo(function BinTree({
     event.dataTransfer.effectAllowed = 'move';
   }, []);
 
-  const handleDragOver = useCallback((binId: BinId, event: React.DragEvent) => {
-    event.preventDefault();
+  const handleDragOver = useCallback(
+    (binId: BinId, event: React.DragEvent) => {
+      event.preventDefault();
 
-    // Check if dragging a bin
-    const draggedBin = event.dataTransfer.types.includes('application/x-bin-id');
-    const draggedAsset = event.dataTransfer.types.includes('application/x-asset-id');
+      // Check if dragging a bin
+      const draggedBin = event.dataTransfer.types.includes('application/x-bin-id');
+      const draggedAsset = event.dataTransfer.types.includes('application/x-asset-id');
 
-    if (draggedBin || draggedAsset) {
-      // Don't allow dropping on self
-      if (draggedBinId !== binId) {
-        setDropTargetId(binId);
-        event.dataTransfer.dropEffect = 'move';
+      if (draggedBin || draggedAsset) {
+        // Don't allow dropping on self
+        if (draggedBinId !== binId) {
+          setDropTargetId(binId);
+          event.dataTransfer.dropEffect = 'move';
+        }
       }
-    }
-  }, [draggedBinId]);
+    },
+    [draggedBinId],
+  );
 
   const handleDragLeave = useCallback(() => {
     setDropTargetId(null);
   }, []);
+
+  const handleRootDragOver = useCallback((event: React.DragEvent) => {
+    event.preventDefault();
+
+    const draggedBin = event.dataTransfer.types.includes('application/x-bin-id');
+    const draggedAsset = event.dataTransfer.types.includes('application/x-asset-id');
+
+    if (draggedBin || draggedAsset) {
+      event.dataTransfer.dropEffect = 'move';
+    }
+  }, []);
+
+  const handleRootDrop = useCallback(
+    (event: React.DragEvent) => {
+      event.preventDefault();
+      setDraggedBinId(null);
+      setDropTargetId(null);
+
+      try {
+        const droppedBinId = event.dataTransfer.getData('application/x-bin-id');
+        if (droppedBinId) {
+          onMoveBin?.(droppedBinId, null);
+          return;
+        }
+
+        const droppedAssetId = event.dataTransfer.getData('application/x-asset-id');
+        if (droppedAssetId) {
+          onMoveAssetToBin?.(droppedAssetId, null);
+        }
+      } catch {
+        // dataTransfer.getData can throw in certain browser states
+      }
+    },
+    [onMoveBin, onMoveAssetToBin],
+  );
 
   const handleDrop = useCallback(
     (binId: BinId, event: React.DragEvent) => {
@@ -146,20 +219,24 @@ export const BinTree = memo(function BinTree({
       setDraggedBinId(null);
       setDropTargetId(null);
 
-      // Check for bin drop
-      const droppedBinId = event.dataTransfer.getData('application/x-bin-id');
-      if (droppedBinId && droppedBinId !== binId) {
-        onMoveBin?.(droppedBinId, binId);
-        return;
-      }
+      try {
+        // Check for bin drop
+        const droppedBinId = event.dataTransfer.getData('application/x-bin-id');
+        if (droppedBinId && droppedBinId !== binId) {
+          onMoveBin?.(droppedBinId, binId);
+          return;
+        }
 
-      // Check for asset drop
-      const droppedAssetId = event.dataTransfer.getData('application/x-asset-id');
-      if (droppedAssetId) {
-        onMoveAssetToBin?.(droppedAssetId, binId);
+        // Check for asset drop
+        const droppedAssetId = event.dataTransfer.getData('application/x-asset-id');
+        if (droppedAssetId) {
+          onMoveAssetToBin?.(droppedAssetId, binId);
+        }
+      } catch {
+        // dataTransfer.getData can throw in certain browser states
       }
     },
-    [onMoveBin, onMoveAssetToBin]
+    [onMoveBin, onMoveAssetToBin],
   );
 
   // ===========================================================================
@@ -195,8 +272,7 @@ export const BinTree = memo(function BinTree({
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
           />
-          {isExpanded &&
-            node.children.map((child) => renderBinNode(child, depth + 1))}
+          {isExpanded && node.children.map((child) => renderBinNode(child, depth + 1))}
         </div>
       );
     },
@@ -215,7 +291,7 @@ export const BinTree = memo(function BinTree({
       handleDrop,
       handleDragOver,
       handleDragLeave,
-    ]
+    ],
   );
 
   // ===========================================================================
@@ -252,12 +328,14 @@ export const BinTree = memo(function BinTree({
               ${selectedBinId === null ? 'bg-primary-500/20' : 'hover:bg-surface-active'}
             `}
             onClick={handleRootClick}
+            onDragOver={handleRootDragOver}
+            onDrop={handleRootDrop}
           >
             <Home className="w-4 h-4 text-editor-text-muted" />
             <span className="text-sm text-editor-text">All Assets</span>
-            {assetCounts.get(null) !== undefined && assetCounts.get(null)! > 0 && (
+            {(assetCounts.get(null) ?? 0) > 0 && (
               <span className="px-1.5 py-0.5 text-[10px] font-medium bg-surface-highest text-editor-text-muted rounded-full">
-                {assetCounts.get(null)}
+                {assetCounts.get(null) ?? 0}
               </span>
             )}
           </div>

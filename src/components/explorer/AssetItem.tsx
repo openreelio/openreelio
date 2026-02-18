@@ -26,6 +26,7 @@ export interface AssetData {
   thumbnail?: string;
   resolution?: Resolution;
   fileSize?: number;
+  importedAt?: string;
 }
 
 export interface AssetItemProps {
@@ -120,20 +121,24 @@ export function AssetItem({
       e.preventDefault();
       onContextMenu?.(e, asset);
     },
-    [asset, onContextMenu]
+    [asset, onContextMenu],
   );
 
   const handleDragStart = useCallback(
     (e: DragEvent) => {
       if (e.dataTransfer) {
         // Set data in multiple formats for compatibility
-        e.dataTransfer.setData('application/json', JSON.stringify({ id: asset.id, name: asset.name, kind: asset.kind }));
+        e.dataTransfer.setData('application/x-asset-id', asset.id);
+        e.dataTransfer.setData(
+          'application/json',
+          JSON.stringify({ id: asset.id, name: asset.name, kind: asset.kind }),
+        );
         e.dataTransfer.setData('text/plain', asset.id);
         e.dataTransfer.effectAllowed = 'copyMove';
       }
       onDragStart?.(asset);
     },
-    [asset, onDragStart]
+    [asset, onDragStart],
   );
 
   // ===========================================================================
@@ -199,10 +204,15 @@ export function AssetItem({
 
       {/* Info */}
       <div className="flex-1 min-w-0">
-        <div className="text-sm text-text-primary truncate" title={asset.name}>{asset.name}</div>
+        <div className="text-sm text-text-primary truncate" title={asset.name}>
+          {asset.name}
+        </div>
         {/* Metadata Row */}
         {(asset.duration !== undefined || asset.resolution || asset.fileSize !== undefined) && (
-          <div data-testid="asset-metadata" className="flex items-center gap-1 text-xs text-text-secondary flex-wrap">
+          <div
+            data-testid="asset-metadata"
+            className="flex items-center gap-1 text-xs text-text-secondary flex-wrap"
+          >
             {asset.duration !== undefined && (
               <span data-testid="asset-duration">{formatDuration(asset.duration)}</span>
             )}

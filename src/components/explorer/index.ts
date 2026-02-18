@@ -10,6 +10,15 @@ export type { AssetListProps, Asset, ViewMode, SortBy, SortOrder } from './Asset
 
 export { ProjectExplorer } from './ProjectExplorer';
 
+export { BinTree } from './BinTree';
+export type { BinTreeProps } from './BinTree';
+
+export { BinItem } from './BinItem';
+export type { BinItemProps } from './BinItem';
+
+export { BinContextMenu } from './BinContextMenu';
+export type { BinContextMenuProps } from './BinContextMenu';
+
 export { FileTree } from './FileTree';
 export type { FileTreeProps } from './FileTree';
 
