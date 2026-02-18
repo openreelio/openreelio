@@ -5,6 +5,13 @@
  */
 
 export { ConfirmDialog, type ConfirmDialogProps, type ConfirmDialogVariant } from './ConfirmDialog';
+export {
+  ContextMenu,
+  type ContextMenuProps,
+  type MenuItem,
+  type MenuDivider,
+  type MenuItemOrDivider,
+} from './ContextMenu';
 export { FFmpegWarning, type FFmpegWarningProps } from './FFmpegWarning';
 export {
   Skeleton,

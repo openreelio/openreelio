@@ -19,12 +19,7 @@ export {
   type LogHandler,
 } from './logger';
 
-export {
-  FrameCache,
-  frameCache,
-  type FrameCacheConfig,
-  type CacheStats,
-} from './frameCache';
+export { FrameCache, frameCache, type FrameCacheConfig, type CacheStats } from './frameCache';
 
 export {
   createAudioEffectNode,
@@ -66,3 +61,12 @@ export {
   type FrameStats,
   type SessionStats,
 } from './playbackMonitor';
+
+export {
+  fetchWorkspaceTreeFromBackend,
+  parseRelativeWorkspacePath,
+  parseRelativeWorkspacePathList,
+  registerWorkspaceFileInBackend,
+  registerWorkspaceFilesInBackend,
+  scanWorkspaceFromBackend,
+} from './workspaceGateway';

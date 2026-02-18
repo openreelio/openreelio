@@ -33,6 +33,11 @@ import { useSettingsStore } from '@/stores/settingsStore';
 
 const logger = createLogger('ProjectStore');
 
+function shouldAutoScanWorkspaceOnOpen(): boolean {
+  const workspaceSettings = useSettingsStore.getState().settings.workspace;
+  return workspaceSettings?.autoScanOnOpen ?? true;
+}
+
 // =============================================================================
 // Test Utilities
 // =============================================================================
@@ -177,8 +182,7 @@ export const useProjectStore = create<ProjectState>()(
 
         // Initialize workspace: setup event listeners and auto-scan
         setupWorkspaceEventListeners();
-        const { workspace: wsSettings } = useSettingsStore.getState().settings;
-        if (wsSettings.autoScanOnOpen) {
+        if (shouldAutoScanWorkspaceOnOpen()) {
           useWorkspaceStore
             .getState()
             .scanWorkspace()
@@ -285,8 +289,7 @@ export const useProjectStore = create<ProjectState>()(
 
         // Initialize workspace: setup event listeners and auto-scan
         setupWorkspaceEventListeners();
-        const { workspace: wsSettings } = useSettingsStore.getState().settings;
-        if (wsSettings.autoScanOnOpen) {
+        if (shouldAutoScanWorkspaceOnOpen()) {
           useWorkspaceStore
             .getState()
             .scanWorkspace()

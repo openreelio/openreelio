@@ -92,8 +92,8 @@ export function AssetList({
           comparison = a.name.localeCompare(b.name);
           break;
         case 'date':
-          // Date sorting requires a date field - fallback to name if not available
-          comparison = a.name.localeCompare(b.name);
+          comparison =
+            (Date.parse(a.importedAt ?? '') || 0) - (Date.parse(b.importedAt ?? '') || 0);
           break;
         case 'duration':
           comparison = (a.duration || 0) - (b.duration || 0);

@@ -11,7 +11,11 @@
 import { useCallback } from 'react';
 import { useProjectStore } from '@/stores/projectStore';
 import { useBinStore } from '@/stores/binStore';
+import { getBinDescendants } from '@/utils/binUtils';
+import { createLogger } from '@/services/logger';
 import type { BinColor } from '@/types';
+
+const logger = createLogger('BinOperations');
 
 /**
  * Hook for bin operations that persist to the backend.
@@ -66,7 +70,7 @@ export function useBinOperations() {
         }
         return null;
       } catch (error) {
-        console.error('Failed to create bin:', error);
+        logger.error('Failed to create bin', { name, parentId, error });
         throw error;
       }
     },
@@ -75,24 +79,29 @@ export function useBinOperations() {
 
   /**
    * Deletes a bin and all its children from the backend.
+   * Clears selection if the selected bin is the target or a descendant.
    */
   const deleteBin = useCallback(
     async (binId: string) => {
       try {
-        // Clear selection if deleting selected bin
-        const selectedBinId = useBinStore.getState().selectedBinId;
-
-        // Check if selected bin would be deleted
-        if (selectedBinId === binId) {
-          selectBin(null);
-        }
+        const { selectedBinId, bins } = useBinStore.getState();
 
         await executeCommand({
           type: 'RemoveBin',
           payload: { binId },
         });
+
+        // Clear selection only after successful deletion
+        if (selectedBinId !== null && selectedBinId === binId) {
+          selectBin(null);
+        } else if (selectedBinId !== null) {
+          const descendants = getBinDescendants(binId, Array.from(bins.values()));
+          if (descendants.has(selectedBinId)) {
+            selectBin(null);
+          }
+        }
       } catch (error) {
-        console.error('Failed to delete bin:', error);
+        logger.error('Failed to delete bin', { binId, error });
         throw error;
       }
     },
@@ -110,7 +119,7 @@ export function useBinOperations() {
           payload: { binId, name: newName },
         });
       } catch (error) {
-        console.error('Failed to rename bin:', error);
+        logger.error('Failed to rename bin', { binId, newName, error });
         throw error;
       }
     },
@@ -131,7 +140,7 @@ export function useBinOperations() {
           },
         });
       } catch (error) {
-        console.error('Failed to move bin:', error);
+        logger.error('Failed to move bin', { binId, newParentId, error });
         throw error;
       }
     },
@@ -149,7 +158,7 @@ export function useBinOperations() {
           payload: { binId, color },
         });
       } catch (error) {
-        console.error('Failed to set bin color:', error);
+        logger.error('Failed to set bin color', { binId, color, error });
         throw error;
       }
     },
@@ -170,7 +179,7 @@ export function useBinOperations() {
           },
         });
       } catch (error) {
-        console.error('Failed to move asset to bin:', error);
+        logger.error('Failed to move asset to bin', { assetId, binId, error });
         throw error;
       }
     },

@@ -5,6 +5,7 @@
  */
 
 import {
+  useEffect,
   useState,
   useCallback,
   useRef,
@@ -17,11 +18,6 @@ import {
   Plus,
   Search,
   X,
-  Film,
-  Music,
-  Image as ImageIcon,
-  LayoutList,
-  LayoutGrid,
   FolderPlus,
   ChevronDown,
   ChevronRight,
@@ -35,11 +31,13 @@ import { useTranscriptionWithIndexing, useBinOperations } from '@/hooks';
 import { createLogger } from '@/services/logger';
 import { refreshProjectState } from '@/utils/stateRefreshHelper';
 import { normalizeFileUriToPath } from '@/utils/uri';
+import { getBinDescendants } from '@/utils/binUtils';
 import { BinTree } from './BinTree';
-import { AssetList, type Asset, type ViewMode } from './AssetList';
+import { BinContextMenu } from './BinContextMenu';
+import { AssetList, type Asset } from './AssetList';
 import { FileTree } from './FileTree';
-import type { AssetKind, AssetData } from './AssetItem';
-import type { Asset as ProjectAsset, FileTreeEntry } from '@/types';
+import type { AssetData } from './AssetItem';
+import type { Asset as ProjectAsset, FileTreeEntry, BinColor } from '@/types';
 import { ConfirmDialog } from '@/components/ui';
 import {
   AssetContextMenu,
@@ -52,14 +50,6 @@ import {
 // =============================================================================
 
 type ExplorerTab = 'files' | 'assets';
-
-type FilterType = 'all' | AssetKind;
-
-interface FilterTab {
-  key: FilterType;
-  label: string;
-  icon?: React.ReactNode;
-}
 
 function safeDecodeURIComponent(input: string): string {
   try {
@@ -108,14 +98,16 @@ export function ProjectExplorer() {
   const { assets, isLoading, selectedAssetId, selectAsset, removeAsset } = useProjectStore();
 
   // Bin Store (UI state only)
-  const { selectedBinId, editingBinId, selectBin, toggleExpand, cancelEditing, getBinsArray } =
-    useBinStore();
+  const { selectedBinId, editingBinId, selectBin, toggleExpand, cancelEditing } = useBinStore();
+  const bins = useBinStore((state) => state.bins);
 
   // Bin Operations (persisted to backend)
   const {
     createBin: createBinAsync,
+    deleteBin: deleteBinAsync,
     renameBin: renameBinAsync,
     moveBin: moveBinAsync,
+    setBinColor: setBinColorAsync,
     moveAssetToBin: moveAssetToBinAsync,
   } = useBinOperations();
 
@@ -131,6 +123,17 @@ export function ProjectExplorer() {
     position: { x: number; y: number };
   } | null>(null);
 
+  // Bin context menu state
+  const [binContextMenu, setBinContextMenu] = useState<{
+    binId: string;
+    binName: string;
+    binColor: BinColor;
+    position: { x: number; y: number };
+  } | null>(null);
+
+  // Bin delete confirmation state
+  const [binToDelete, setBinToDelete] = useState<{ id: string; name: string } | null>(null);
+
   // Transcription dialog state
   const [transcriptionAsset, setTranscriptionAsset] = useState<AssetData | null>(null);
 
@@ -141,17 +144,34 @@ export function ProjectExplorer() {
   // Track which assets are being transcribed
   const [transcribingAssets, setTranscribingAssets] = useState<Set<string>>(new Set());
 
+  // Stable bins array derived from bins Map (avoids new array every render)
+  const binsArray = useMemo(() => Array.from(bins.values()), [bins]);
+
+  const selectedBinScope = useMemo<Set<string> | null>(() => {
+    // Root means "All Assets"
+    if (selectedBinId === null) {
+      return null;
+    }
+
+    const descendantIds = getBinDescendants(selectedBinId, binsArray);
+    descendantIds.add(selectedBinId);
+    return descendantIds;
+  }, [selectedBinId, binsArray]);
+
   const assetList = useMemo<Asset[]>(() => {
     return Array.from(assets.values())
       .filter((asset: ProjectAsset) => {
-        // Filter by selected bin (null means root, undefined or missing binId goes to root)
-        const assetBinId = asset.binId ?? null;
-        if (selectedBinId !== null && assetBinId !== selectedBinId) {
-          return false;
+        // Folder-centric filtering
+        // - Root (selectedBinId === null): show all assets
+        // - Bin selected: show assets from selected bin + descendants
+        if (selectedBinScope !== null) {
+          if (!asset.binId) {
+            return false;
+          }
+
+          return selectedBinScope.has(asset.binId);
         }
-        if (selectedBinId === null && assetBinId !== null) {
-          return false;
-        }
+
         return true;
       })
       .map((asset: ProjectAsset): Asset | null => {
@@ -176,15 +196,14 @@ export function ProjectExplorer() {
             ? { resolution: { width: asset.video.width, height: asset.video.height } }
             : {}),
           ...(asset.fileSize != null ? { fileSize: asset.fileSize } : {}),
+          ...(asset.importedAt != null ? { importedAt: asset.importedAt } : {}),
         };
       })
       .filter((asset): asset is Asset => asset !== null);
-  }, [assets, selectedBinId]);
+  }, [assets, selectedBinScope]);
 
   // Local state
   const [searchQuery, setSearchQuery] = useState('');
-  const [filter, setFilter] = useState<FilterType>('all');
-  const [viewMode, setViewMode] = useState<ViewMode>('list');
 
   // ===========================================================================
   // Handlers
@@ -197,10 +216,6 @@ export function ProjectExplorer() {
   const handleClearSearch = useCallback(() => {
     setSearchQuery('');
     searchInputRef.current?.focus();
-  }, []);
-
-  const handleFilterChange = useCallback((newFilter: FilterType) => {
-    setFilter(newFilter);
   }, []);
 
   const handleAssetSelect = useCallback(
@@ -347,11 +362,99 @@ export function ProjectExplorer() {
     setShowBinTree((prev) => !prev);
   }, []);
 
+  // ===========================================================================
+  // Bin Context Menu Handlers
+  // ===========================================================================
+
+  const handleBinContextMenu = useCallback(
+    (binId: string, event: React.MouseEvent) => {
+      const bin = bins.get(binId);
+      if (!bin) return;
+
+      setBinContextMenu({
+        binId,
+        binName: bin.name,
+        binColor: bin.color,
+        position: { x: event.clientX, y: event.clientY },
+      });
+    },
+    [bins],
+  );
+
+  const handleCloseBinContextMenu = useCallback(() => {
+    setBinContextMenu(null);
+  }, []);
+
+  const handleBinContextCreateSubfolder = useCallback(
+    (parentBinId: string) => {
+      handleCreateBin(parentBinId);
+    },
+    [handleCreateBin],
+  );
+
+  const handleBinContextRename = useCallback(
+    (binId: string) => {
+      useBinStore.getState().startEditing(binId);
+    },
+    [],
+  );
+
+  const handleBinContextSetColor = useCallback(
+    (binId: string, color: BinColor) => {
+      setBinColorAsync(binId, color).catch((error) => {
+        logger.error('Failed to set bin color', { binId, color, error });
+      });
+    },
+    [setBinColorAsync],
+  );
+
+  const handleBinContextDelete = useCallback(
+    (binId: string) => {
+      const bin = bins.get(binId);
+      setBinToDelete({ id: binId, name: bin?.name ?? 'Folder' });
+    },
+    [bins],
+  );
+
+  const handleConfirmBinDelete = useCallback(() => {
+    if (binToDelete) {
+      deleteBinAsync(binToDelete.id).catch((error) => {
+        logger.error('Failed to delete bin', { binId: binToDelete.id, error });
+      });
+      setBinToDelete(null);
+    }
+  }, [binToDelete, deleteBinAsync]);
+
+  const handleCancelBinDelete = useCallback(() => {
+    setBinToDelete(null);
+  }, []);
+
   // Convert assets Map to array for BinTree
   const assetsArray = useMemo(() => Array.from(assets.values()), [assets]);
 
-  // Get bins array for BinTree
-  const binsArray = getBinsArray();
+  const selectedBinName = useMemo(() => {
+    if (selectedBinId === null) {
+      return 'All Assets';
+    }
+
+    return binsArray.find((bin) => bin.id === selectedBinId)?.name ?? 'Folder';
+  }, [selectedBinId, binsArray]);
+
+  // Keep selection aligned with the currently visible folder scope
+  useEffect(() => {
+    if (!selectedAssetId) {
+      return;
+    }
+
+    if (selectedBinScope === null) {
+      return;
+    }
+
+    const selectedAsset = assets.get(selectedAssetId);
+    if (!selectedAsset?.binId || !selectedBinScope.has(selectedAsset.binId)) {
+      selectAsset(null);
+    }
+  }, [selectedAssetId, selectedBinScope, assets, selectAsset]);
 
   // ===========================================================================
   // Workspace Handlers
@@ -372,7 +475,17 @@ export function ProjectExplorer() {
         return;
       }
 
-      const result = await registerFile(entry.relativePath);
+      let result;
+      try {
+        result = await registerFile(entry.relativePath);
+      } catch (error) {
+        logger.error('Failed to register workspace file', {
+          relativePath: entry.relativePath,
+          error,
+        });
+        return;
+      }
+
       if (!result) {
         return;
       }
@@ -398,25 +511,16 @@ export function ProjectExplorer() {
   );
 
   // ===========================================================================
-  // Filter Tabs
-  // ===========================================================================
-
-  const filterTabs: FilterTab[] = useMemo(
-    () => [
-      { key: 'all', label: 'All' },
-      { key: 'video', label: 'Video', icon: <Film className="w-3 h-3" /> },
-      { key: 'audio', label: 'Audio', icon: <Music className="w-3 h-3" /> },
-      { key: 'image', label: 'Image', icon: <ImageIcon className="w-3 h-3" /> },
-    ],
-    [],
-  );
-
-  // ===========================================================================
   // Empty State Message
   // ===========================================================================
 
-  const emptyMessage =
-    assetList.length === 0 ? 'Scan workspace and register files to get started' : 'No assets';
+  const emptyMessage = useMemo(() => {
+    if (selectedBinId !== null) {
+      return 'No assets in this folder';
+    }
+
+    return assets.size === 0 ? 'Scan workspace and register files to get started' : 'No assets';
+  }, [selectedBinId, assets]);
 
   // ===========================================================================
   // Asset to Delete Name
@@ -572,6 +676,7 @@ export function ProjectExplorer() {
                   showRoot
                   onSelectBin={handleSelectBin}
                   onToggleExpand={toggleExpand}
+                  onContextMenu={handleBinContextMenu}
                   onCreateBin={handleCreateBin}
                   onRenameBin={handleRenameBin}
                   onCancelEdit={cancelEditing}
@@ -582,43 +687,20 @@ export function ProjectExplorer() {
             )}
           </div>
 
-          {/* Filter Tabs and View Mode */}
-          <div className="flex items-center justify-between p-2 border-b border-editor-border">
-            <div className="flex gap-1 flex-wrap">
-              {filterTabs.map((tab) => (
-                <button
-                  key={tab.key}
-                  data-testid={`filter-${tab.key}`}
-                  className={`
-                flex items-center gap-1 px-2 py-1 text-xs rounded transition-colors
-                ${filter === tab.key ? 'bg-primary-500 text-white' : 'hover:bg-surface-active text-text-secondary'}
-              `}
-                  onClick={() => handleFilterChange(tab.key)}
-                >
-                  {tab.icon}
-                  <span>{tab.label}</span>
-                </button>
-              ))}
+          {/* Folder Scope Summary */}
+          <div className="flex items-center justify-between px-2 py-1.5 border-b border-editor-border bg-surface-active/30">
+            <div className="flex items-center gap-1.5 text-xs text-editor-text-muted">
+              <FolderOpen className="w-3.5 h-3.5" />
+              <span data-testid="selected-folder-label" className="truncate max-w-[180px]">
+                {selectedBinName}
+              </span>
             </div>
-
-            <div className="flex gap-1 flex-shrink-0">
-              <button
-                data-testid="view-mode-list"
-                className={`p-1 rounded transition-colors ${viewMode === 'list' ? 'bg-surface-highest' : 'hover:bg-surface-active'}`}
-                onClick={() => setViewMode('list')}
-                aria-label="List view"
-              >
-                <LayoutList className="w-4 h-4" />
-              </button>
-              <button
-                data-testid="view-mode-grid"
-                className={`p-1 rounded transition-colors ${viewMode === 'grid' ? 'bg-surface-highest' : 'hover:bg-surface-active'}`}
-                onClick={() => setViewMode('grid')}
-                aria-label="Grid view"
-              >
-                <LayoutGrid className="w-4 h-4" />
-              </button>
-            </div>
+            <span
+              data-testid="selected-folder-asset-count"
+              className="px-1.5 py-0.5 text-[10px] font-medium bg-surface-highest text-editor-text-muted rounded-full"
+            >
+              {assetList.length}
+            </span>
           </div>
 
           {/* Asset List */}
@@ -636,9 +718,7 @@ export function ProjectExplorer() {
                 assets={assetList}
                 isLoading={isLoading}
                 selectedAssetId={selectedAssetId}
-                filter={filter}
                 searchQuery={searchQuery}
-                viewMode={viewMode}
                 onSelect={handleAssetSelect}
                 onContextMenu={handleAssetContextMenu}
               />
@@ -671,6 +751,33 @@ export function ProjectExplorer() {
           isTranscribing={transcribingAssets.has(contextMenu.asset.id)}
         />
       )}
+
+      {/* Bin Context Menu */}
+      {binContextMenu && (
+        <BinContextMenu
+          binId={binContextMenu.binId}
+          binName={binContextMenu.binName}
+          binColor={binContextMenu.binColor}
+          position={binContextMenu.position}
+          onClose={handleCloseBinContextMenu}
+          onCreateSubfolder={handleBinContextCreateSubfolder}
+          onRename={handleBinContextRename}
+          onSetColor={handleBinContextSetColor}
+          onDelete={handleBinContextDelete}
+        />
+      )}
+
+      {/* Bin Delete Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={binToDelete !== null}
+        title="Delete Folder"
+        message={`Are you sure you want to delete "${binToDelete?.name ?? ''}"? Assets in this folder will be moved to the root.`}
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        variant="danger"
+        onConfirm={handleConfirmBinDelete}
+        onCancel={handleCancelBinDelete}
+      />
 
       {/* Transcription Dialog */}
       {transcriptionAsset && (

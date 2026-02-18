@@ -213,6 +213,35 @@ describe('BinTree', () => {
 
       expect(screen.queryByTestId('bin-asset-count')).not.toBeInTheDocument();
     });
+
+    it('should include descendant assets in parent bin count', () => {
+      const bins = [
+        createMockBin({ id: 'parent', name: 'Parent' }),
+        createMockBin({ id: 'child', name: 'Child', parentId: 'parent' }),
+      ];
+      const assets = [
+        createMockAsset({ id: 'asset_parent', binId: 'parent' }),
+        createMockAsset({ id: 'asset_child', binId: 'child' }),
+      ];
+
+      render(<BinTree bins={bins} assets={assets} />);
+
+      const parentItem = screen.getByTestId('bin-item-parent');
+      expect(within(parentItem).getByTestId('bin-asset-count')).toHaveTextContent('2');
+    });
+
+    it('should show all assets in root badge', () => {
+      const bins = [createMockBin({ id: 'bin1', name: 'Footage' })];
+      const assets = [
+        createMockAsset({ id: 'asset_root', binId: null }),
+        createMockAsset({ id: 'asset_in_bin', binId: 'bin1' }),
+      ];
+
+      render(<BinTree bins={bins} assets={assets} showRoot={true} />);
+
+      const root = screen.getByTestId('bin-tree-root');
+      expect(within(root).getByText('2')).toBeInTheDocument();
+    });
   });
 
   // ===========================================================================
@@ -277,14 +306,7 @@ describe('BinTree', () => {
       const onRenameBin = vi.fn();
       const bins = [createMockBin({ id: 'bin1', name: 'Old Name' })];
 
-      render(
-        <BinTree
-          bins={bins}
-          assets={[]}
-          editingBinId="bin1"
-          onRenameBin={onRenameBin}
-        />
-      );
+      render(<BinTree bins={bins} assets={[]} editingBinId="bin1" onRenameBin={onRenameBin} />);
 
       const input = screen.getByTestId('bin-name-input');
       fireEvent.change(input, { target: { value: 'New Name' } });
@@ -301,10 +323,7 @@ describe('BinTree', () => {
   describe('drag and drop', () => {
     it('should call onMoveBin when bin dropped on another', () => {
       const onMoveBin = vi.fn();
-      const bins = [
-        createMockBin({ id: 'bin1' }),
-        createMockBin({ id: 'bin2' }),
-      ];
+      const bins = [createMockBin({ id: 'bin1' }), createMockBin({ id: 'bin2' })];
 
       render(<BinTree bins={bins} assets={[]} onMoveBin={onMoveBin} />);
 
@@ -344,6 +363,28 @@ describe('BinTree', () => {
 
       expect(onMoveAssetToBin).toHaveBeenCalledWith('asset1', 'bin1');
     });
+
+    it('should call onMoveAssetToBin with null when dropped on root', () => {
+      const onMoveAssetToBin = vi.fn();
+      const bins = [createMockBin({ id: 'bin1' })];
+
+      render(
+        <BinTree bins={bins} assets={[]} showRoot={true} onMoveAssetToBin={onMoveAssetToBin} />,
+      );
+
+      const root = screen.getByTestId('bin-tree-root');
+
+      fireEvent.drop(root, {
+        dataTransfer: {
+          getData: (type: string) => {
+            if (type === 'application/x-asset-id') return 'asset1';
+            return '';
+          },
+        },
+      });
+
+      expect(onMoveAssetToBin).toHaveBeenCalledWith('asset1', null);
+    });
   });
 
   // ===========================================================================
@@ -364,6 +405,127 @@ describe('BinTree', () => {
       expect(within(items[0]).getByText('Apple')).toBeInTheDocument();
       expect(within(items[1]).getByText('Mango')).toBeInTheDocument();
       expect(within(items[2]).getByText('Zebra')).toBeInTheDocument();
+    });
+  });
+
+  // ===========================================================================
+  // Edge Case & Destructive Tests
+  // ===========================================================================
+
+  describe('edge cases', () => {
+    it('should handle deeply nested hierarchy (3+ levels)', () => {
+      const bins = [
+        createMockBin({ id: 'root', name: 'Root', expanded: true }),
+        createMockBin({ id: 'child', name: 'Child', parentId: 'root', expanded: true }),
+        createMockBin({ id: 'grandchild', name: 'Grandchild', parentId: 'child' }),
+      ];
+
+      render(<BinTree bins={bins} assets={[]} />);
+
+      expect(screen.getByText('Root')).toBeInTheDocument();
+      expect(screen.getByText('Child')).toBeInTheDocument();
+      expect(screen.getByText('Grandchild')).toBeInTheDocument();
+    });
+
+    it('should aggregate asset counts across deep nesting', () => {
+      const bins = [
+        createMockBin({ id: 'root', name: 'Root', expanded: true }),
+        createMockBin({ id: 'child', name: 'Child', parentId: 'root', expanded: true }),
+        createMockBin({ id: 'grandchild', name: 'Grandchild', parentId: 'child' }),
+      ];
+      const assets = [
+        createMockAsset({ id: 'a1', binId: 'root' }),
+        createMockAsset({ id: 'a2', binId: 'child' }),
+        createMockAsset({ id: 'a3', binId: 'grandchild' }),
+      ];
+
+      render(<BinTree bins={bins} assets={assets} />);
+
+      // Root should show 3 (1 direct + 1 child + 1 grandchild)
+      const rootItem = screen.getByTestId('bin-item-root');
+      expect(within(rootItem).getByTestId('bin-asset-count')).toHaveTextContent('3');
+    });
+
+    it('should handle bins with no name gracefully', () => {
+      const bins = [createMockBin({ id: 'bin1', name: '' })];
+
+      render(<BinTree bins={bins} assets={[]} />);
+
+      // Should still render the bin item even with empty name
+      expect(screen.getByTestId('bin-item-bin1')).toBeInTheDocument();
+    });
+
+    it('should handle large number of bins', () => {
+      const bins = Array.from({ length: 50 }, (_, i) =>
+        createMockBin({ id: `bin-${i}`, name: `Bin ${i}` }),
+      );
+
+      render(<BinTree bins={bins} assets={[]} />);
+
+      expect(screen.getAllByTestId(/^bin-item-/)).toHaveLength(50);
+    });
+
+    it('should handle orphaned bins (parent does not exist)', () => {
+      const bins = [createMockBin({ id: 'orphan', name: 'Orphan', parentId: 'nonexistent' })];
+
+      // Should not crash; orphan is rendered at root level by buildBinTree
+      expect(() => render(<BinTree bins={bins} assets={[]} />)).not.toThrow();
+    });
+
+    it('should show root asset count including unassigned assets', () => {
+      const bins = [createMockBin({ id: 'bin1' })];
+      const assets = [
+        createMockAsset({ id: 'unassigned1', binId: null }),
+        createMockAsset({ id: 'unassigned2', binId: null }),
+        createMockAsset({ id: 'inBin', binId: 'bin1' }),
+      ];
+
+      render(<BinTree bins={bins} assets={assets} showRoot />);
+
+      const root = screen.getByTestId('bin-tree-root');
+      // Root should count all assets: 2 unassigned + 1 in bin
+      expect(within(root).getByText('3')).toBeInTheDocument();
+    });
+
+    it('should not allow dropping a bin on itself', () => {
+      const onMoveBin = vi.fn();
+      const bins = [createMockBin({ id: 'bin1' })];
+
+      render(<BinTree bins={bins} assets={[]} onMoveBin={onMoveBin} />);
+
+      const bin1 = screen.getByTestId('bin-item-bin1');
+
+      fireEvent.dragStart(bin1, {
+        dataTransfer: { setData: vi.fn() },
+      });
+
+      fireEvent.drop(bin1, {
+        dataTransfer: { getData: () => 'bin1' },
+      });
+
+      expect(onMoveBin).not.toHaveBeenCalled();
+    });
+
+    it('should handle drag events when dataTransfer.getData throws', () => {
+      const onMoveBin = vi.fn();
+      const bins = [createMockBin({ id: 'bin1' })];
+
+      render(<BinTree bins={bins} assets={[]} onMoveBin={onMoveBin} />);
+
+      const bin1 = screen.getByTestId('bin-item-bin1');
+
+      // getData throwing should be caught gracefully
+      expect(() => {
+        fireEvent.drop(bin1, {
+          dataTransfer: {
+            getData: () => {
+              throw new Error('Security restriction');
+            },
+          },
+        });
+      }).not.toThrow();
+
+      expect(onMoveBin).not.toHaveBeenCalled();
     });
   });
 });

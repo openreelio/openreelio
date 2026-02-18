@@ -133,6 +133,22 @@ describe('AssetItem', () => {
       fireEvent.dragStart(screen.getByTestId('asset-item'));
       expect(onDragStart).toHaveBeenCalledWith(defaultAsset);
     });
+
+    it('should include asset id in custom drag payload', () => {
+      render(<AssetItem asset={defaultAsset} />);
+
+      const setData = vi.fn();
+      const item = screen.getByTestId('asset-item');
+
+      fireEvent.dragStart(item, {
+        dataTransfer: {
+          setData,
+          effectAllowed: 'copyMove',
+        },
+      });
+
+      expect(setData).toHaveBeenCalledWith('application/x-asset-id', 'asset_001');
+    });
   });
 
   // ===========================================================================
@@ -242,6 +258,85 @@ describe('AssetItem', () => {
     it('should not display file size when not provided', () => {
       render(<AssetItem asset={defaultAsset} />);
       expect(screen.queryByTestId('asset-filesize')).not.toBeInTheDocument();
+    });
+  });
+
+  // ===========================================================================
+  // Keyboard Interaction Tests
+  // ===========================================================================
+
+  describe('keyboard interactions', () => {
+    it('should call onClick when Enter is pressed', () => {
+      const onClick = vi.fn();
+      render(<AssetItem asset={defaultAsset} onClick={onClick} />);
+
+      fireEvent.keyDown(screen.getByTestId('asset-item'), { key: 'Enter' });
+      expect(onClick).toHaveBeenCalledWith(defaultAsset);
+    });
+
+    it('should call onClick when Space is pressed', () => {
+      const onClick = vi.fn();
+      render(<AssetItem asset={defaultAsset} onClick={onClick} />);
+
+      fireEvent.keyDown(screen.getByTestId('asset-item'), { key: ' ' });
+      expect(onClick).toHaveBeenCalledWith(defaultAsset);
+    });
+
+    it('should not call onClick for other keys', () => {
+      const onClick = vi.fn();
+      render(<AssetItem asset={defaultAsset} onClick={onClick} />);
+
+      fireEvent.keyDown(screen.getByTestId('asset-item'), { key: 'Escape' });
+      expect(onClick).not.toHaveBeenCalled();
+    });
+  });
+
+  // ===========================================================================
+  // Edge Case Tests
+  // ===========================================================================
+
+  describe('edge cases', () => {
+    it('should handle zero duration', () => {
+      const asset = { ...defaultAsset, duration: 0 };
+      render(<AssetItem asset={asset} />);
+      expect(screen.getByTestId('asset-duration')).toHaveTextContent('0:00');
+    });
+
+    it('should handle very long duration', () => {
+      const asset = { ...defaultAsset, duration: 86400 }; // 24 hours
+      render(<AssetItem asset={asset} />);
+      expect(screen.getByTestId('asset-duration')).toHaveTextContent('24:00:00');
+    });
+
+    it('should handle very long filename', () => {
+      const longName = 'a'.repeat(200) + '.mp4';
+      const asset = { ...defaultAsset, name: longName };
+      render(<AssetItem asset={asset} />);
+      expect(screen.getByText(longName)).toBeInTheDocument();
+    });
+
+    it('should handle special characters in filename', () => {
+      const specialName = 'video (1) [final] #2.mp4';
+      const asset = { ...defaultAsset, name: specialName };
+      render(<AssetItem asset={asset} />);
+      expect(screen.getByText(specialName)).toBeInTheDocument();
+    });
+
+    it('should handle zero file size', () => {
+      const asset = { ...defaultAsset, fileSize: 0 };
+      render(<AssetItem asset={asset} />);
+      expect(screen.getByTestId('asset-filesize')).toHaveTextContent('0 B');
+    });
+
+    it('should not call handlers when no callbacks provided', () => {
+      render(<AssetItem asset={defaultAsset} />);
+
+      // Should not throw when clicking without handlers
+      expect(() => {
+        fireEvent.click(screen.getByTestId('asset-item'));
+        fireEvent.doubleClick(screen.getByTestId('asset-item'));
+        fireEvent.contextMenu(screen.getByTestId('asset-item'));
+      }).not.toThrow();
     });
   });
 

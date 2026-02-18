@@ -167,6 +167,36 @@ describe('AssetList', () => {
       expect(items[0]).toHaveTextContent('video1.mp4');
       expect(items[2]).toHaveTextContent('audio1.mp3');
     });
+
+    it('should sort by date using importedAt field', () => {
+      const datedAssets = [
+        { ...mockAssets[0], importedAt: '2024-03-01T00:00:00Z' },
+        { ...mockAssets[1], importedAt: '2024-01-01T00:00:00Z' },
+        { ...mockAssets[2], importedAt: '2024-02-01T00:00:00Z' },
+      ];
+
+      render(<AssetList assets={datedAssets} sortBy="date" sortOrder="asc" />);
+
+      const items = screen.getAllByTestId('asset-item');
+      expect(items[0]).toHaveTextContent('audio1.mp3');
+      expect(items[1]).toHaveTextContent('image1.jpg');
+      expect(items[2]).toHaveTextContent('video1.mp4');
+    });
+
+    it('should sort by date descending', () => {
+      const datedAssets = [
+        { ...mockAssets[0], importedAt: '2024-03-01T00:00:00Z' },
+        { ...mockAssets[1], importedAt: '2024-01-01T00:00:00Z' },
+        { ...mockAssets[2], importedAt: '2024-02-01T00:00:00Z' },
+      ];
+
+      render(<AssetList assets={datedAssets} sortBy="date" sortOrder="desc" />);
+
+      const items = screen.getAllByTestId('asset-item');
+      expect(items[0]).toHaveTextContent('video1.mp4');
+      expect(items[1]).toHaveTextContent('image1.jpg');
+      expect(items[2]).toHaveTextContent('audio1.mp3');
+    });
   });
 
   // ===========================================================================
@@ -194,6 +224,68 @@ describe('AssetList', () => {
 
       fireEvent.contextMenu(screen.getAllByTestId('asset-item')[0]);
       expect(onContextMenu).toHaveBeenCalled();
+    });
+  });
+
+  // ===========================================================================
+  // Edge Case & Destructive Tests
+  // ===========================================================================
+
+  describe('edge cases', () => {
+    it('should handle empty search query (show all)', () => {
+      render(<AssetList assets={mockAssets} searchQuery="" />);
+
+      expect(screen.getAllByTestId('asset-item')).toHaveLength(3);
+    });
+
+    it('should handle search with no results', () => {
+      render(<AssetList assets={mockAssets} searchQuery="nonexistent-file-xyz" />);
+
+      expect(screen.getByTestId('asset-list-empty')).toBeInTheDocument();
+    });
+
+    it('should handle case-insensitive search', () => {
+      render(<AssetList assets={mockAssets} searchQuery="VIDEO" />);
+
+      expect(screen.getAllByTestId('asset-item')).toHaveLength(1);
+      expect(screen.getByText('video1.mp4')).toBeInTheDocument();
+    });
+
+    it('should handle single asset', () => {
+      render(<AssetList assets={[mockAssets[0]]} />);
+
+      expect(screen.getAllByTestId('asset-item')).toHaveLength(1);
+    });
+
+    it('should handle assets with undefined importedAt for date sorting', () => {
+      const undatedAssets = [
+        { ...mockAssets[0] },
+        { ...mockAssets[1], importedAt: '2024-01-01T00:00:00Z' },
+      ];
+
+      // Should not crash when sorting by date with missing dates
+      expect(() => {
+        render(<AssetList assets={undatedAssets} sortBy="date" sortOrder="asc" />);
+      }).not.toThrow();
+    });
+
+    it('should display default empty message when no assets', () => {
+      render(<AssetList assets={[]} />);
+
+      expect(screen.getByText('No assets')).toBeInTheDocument();
+    });
+
+    it('should handle rapid filter changes without errors', () => {
+      const { rerender } = render(<AssetList assets={mockAssets} filter="video" />);
+
+      rerender(<AssetList assets={mockAssets} filter="audio" />);
+      expect(screen.getAllByTestId('asset-item')).toHaveLength(1);
+
+      rerender(<AssetList assets={mockAssets} filter="image" />);
+      expect(screen.getAllByTestId('asset-item')).toHaveLength(1);
+
+      rerender(<AssetList assets={mockAssets} />);
+      expect(screen.getAllByTestId('asset-item')).toHaveLength(3);
     });
   });
 });

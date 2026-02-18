@@ -7,18 +7,31 @@
 
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type {
-  FileTreeEntry,
-  WorkspaceScanResult,
-  RegisterFileResult,
-  WorkspaceFileEvent,
-  WorkspaceScanCompleteEvent,
-} from '@/types';
+import type { FileTreeEntry, WorkspaceScanResult, RegisterFileResult } from '@/types';
 import { createLogger } from '@/services/logger';
+import {
+  fetchWorkspaceTreeFromBackend,
+  parseRelativeWorkspacePath,
+  parseRelativeWorkspacePathList,
+  registerWorkspaceFileInBackend,
+  registerWorkspaceFilesInBackend,
+  scanWorkspaceFromBackend,
+} from '@/services/workspaceGateway';
+import {
+  parseWorkspaceFileEvent,
+  parseWorkspaceScanCompleteEvent,
+} from '@/schemas/workspaceSchemas';
 
 const logger = createLogger('WorkspaceStore');
+
+const TREE_REFRESH_COALESCE_MS = 120;
+
+let nextTreeRefreshRequestId = 0;
+let latestTreeRefreshRequestId = 0;
+let scheduledTreeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+const inFlightSingleFileRegistrations = new Map<string, Promise<RegisterFileResult | null>>();
 
 // =============================================================================
 // Types
@@ -67,10 +80,6 @@ const initialState: WorkspaceState = {
   error: null,
 };
 
-function normalizeRelativePath(relativePath: string): string {
-  return relativePath.trim().replace(/\\/g, '/');
-}
-
 function beginRegistration(
   registeringPathCounts: Record<string, number>,
   relativePaths: string[],
@@ -94,6 +103,29 @@ function completeRegistration(
   }
 }
 
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function scheduleWorkspaceTreeRefresh(reason: string): void {
+  if (scheduledTreeRefreshTimer !== null) {
+    logger.debug('Coalescing workspace tree refresh request', { reason });
+    return;
+  }
+
+  scheduledTreeRefreshTimer = setTimeout(() => {
+    scheduledTreeRefreshTimer = null;
+    void useWorkspaceStore.getState().refreshTree();
+  }, TREE_REFRESH_COALESCE_MS);
+}
+
+function clearScheduledWorkspaceTreeRefresh(): void {
+  if (scheduledTreeRefreshTimer !== null) {
+    clearTimeout(scheduledTreeRefreshTimer);
+    scheduledTreeRefreshTimer = null;
+  }
+}
+
 // =============================================================================
 // Store
 // =============================================================================
@@ -109,7 +141,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       });
 
       try {
-        const result = await invoke<WorkspaceScanResult>('scan_workspace');
+        const result = await scanWorkspaceFromBackend();
         logger.info('Workspace scan complete', {
           totalFiles: result.totalFiles,
           newFiles: result.newFiles,
@@ -123,7 +155,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
         // Refresh tree after scan
         await get().refreshTree();
       } catch (error) {
-        const message = typeof error === 'string' ? error : String(error);
+        const message = toErrorMessage(error);
         logger.error('Workspace scan failed', { error: message });
         set((state) => {
           state.isScanning = false;
@@ -133,65 +165,103 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
     },
 
     refreshTree: async () => {
+      const requestId = ++nextTreeRefreshRequestId;
+      latestTreeRefreshRequestId = requestId;
+
+      const timerLabel = `workspace.refreshTree.${requestId}`;
+      logger.time(timerLabel);
+
       try {
-        const tree = await invoke<FileTreeEntry[]>('get_workspace_tree');
+        const tree = await fetchWorkspaceTreeFromBackend();
+
+        if (requestId !== latestTreeRefreshRequestId) {
+          logger.warn('Discarding stale workspace tree response', {
+            requestId,
+            latestTreeRefreshRequestId,
+          });
+          return;
+        }
+
         set((state) => {
           state.fileTree = tree;
+          state.error = null;
         });
       } catch (error) {
-        const message = typeof error === 'string' ? error : String(error);
+        const message = toErrorMessage(error);
         logger.error('Failed to refresh workspace tree', { error: message });
         set((state) => {
           state.error = message;
         });
+      } finally {
+        logger.timeEnd(timerLabel);
       }
     },
 
     registerFile: async (relativePath: string) => {
-      const normalizedPath = normalizeRelativePath(relativePath);
-      if (normalizedPath.length === 0) {
-        const message = 'relativePath is empty';
-        set((state) => {
-          state.error = message;
-        });
-        return null;
-      }
-
-      set((state) => {
-        beginRegistration(state.registeringPathCounts, [normalizedPath]);
-        state.error = null;
-      });
-
+      let normalizedPath: string;
       try {
-        const result = await invoke<RegisterFileResult>('register_workspace_file', {
-          relativePath: normalizedPath,
-        });
-        logger.info('Registered workspace file', {
-          relativePath: result.relativePath,
-          assetId: result.assetId,
-        });
-
-        // Refresh tree to update registration status
-        await get().refreshTree();
-        return result;
+        normalizedPath = parseRelativeWorkspacePath(relativePath);
       } catch (error) {
-        const message = typeof error === 'string' ? error : String(error);
-        logger.error('Failed to register workspace file', { error: message });
+        const message = toErrorMessage(error);
         set((state) => {
           state.error = message;
         });
         return null;
-      } finally {
-        set((state) => {
-          completeRegistration(state.registeringPathCounts, [normalizedPath]);
-        });
       }
+
+      const inFlight = inFlightSingleFileRegistrations.get(normalizedPath);
+      if (inFlight) {
+        logger.debug('Reusing in-flight workspace registration', { relativePath: normalizedPath });
+        return inFlight;
+      }
+
+      const registrationPromise = (async () => {
+        set((state) => {
+          beginRegistration(state.registeringPathCounts, [normalizedPath]);
+          state.error = null;
+        });
+
+        try {
+          const result = await registerWorkspaceFileInBackend(normalizedPath);
+          logger.info('Registered workspace file', {
+            relativePath: result.relativePath,
+            assetId: result.assetId,
+          });
+
+          // Refresh tree to update registration status
+          await get().refreshTree();
+          return result;
+        } catch (error) {
+          const message = toErrorMessage(error);
+          logger.error('Failed to register workspace file', { error: message });
+          set((state) => {
+            state.error = message;
+          });
+          return null;
+        } finally {
+          set((state) => {
+            completeRegistration(state.registeringPathCounts, [normalizedPath]);
+          });
+          inFlightSingleFileRegistrations.delete(normalizedPath);
+        }
+      })();
+
+      inFlightSingleFileRegistrations.set(normalizedPath, registrationPromise);
+      return registrationPromise;
     },
 
     registerFiles: async (relativePaths: string[]) => {
-      const normalizedPaths = Array.from(
-        new Set(relativePaths.map(normalizeRelativePath).filter((path) => path.length > 0)),
-      );
+      let normalizedPaths: string[];
+      try {
+        normalizedPaths = parseRelativeWorkspacePathList(relativePaths);
+      } catch (error) {
+        const message = toErrorMessage(error);
+        logger.error('Invalid workspace registration batch', { error: message });
+        set((state) => {
+          state.error = message;
+        });
+        return [];
+      }
 
       if (normalizedPaths.length === 0) {
         return [];
@@ -203,16 +273,17 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       });
 
       try {
-        const results = await invoke<RegisterFileResult[]>('register_workspace_files', {
-          relativePaths: normalizedPaths,
+        const results = await registerWorkspaceFilesInBackend(normalizedPaths);
+        logger.info('Registered workspace files', {
+          requestedCount: normalizedPaths.length,
+          importedCount: results.length,
         });
-        logger.info('Registered workspace files', { count: results.length });
 
         // Refresh tree to update registration status
         await get().refreshTree();
         return results;
       } catch (error) {
-        const message = typeof error === 'string' ? error : String(error);
+        const message = toErrorMessage(error);
         logger.error('Failed to register workspace files', { error: message });
         set((state) => {
           state.error = message;
@@ -226,6 +297,10 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
     },
 
     reset: () => {
+      inFlightSingleFileRegistrations.clear();
+      nextTreeRefreshRequestId = 0;
+      latestTreeRefreshRequestId = 0;
+      clearScheduledWorkspaceTreeRefresh();
       set(initialState);
     },
   })),
@@ -242,63 +317,115 @@ export async function setupWorkspaceEventListeners(): Promise<void> {
   // Clean up any existing listeners
   await cleanupWorkspaceEventListeners();
 
-  const store = useWorkspaceStore.getState();
+  const scopedUnlisteners: UnlistenFn[] = [];
 
-  const unlistenFileAdded = await listen<WorkspaceFileEvent>(
-    'workspace:file-added',
-    ({ payload }) => {
-      logger.debug('File added', { relativePath: payload.relativePath });
-      store.refreshTree();
-    },
-  );
+  try {
+    const unlistenFileAdded = await listen<unknown>('workspace:file-added', ({ payload }) => {
+      try {
+        const event = parseWorkspaceFileEvent(payload);
+        logger.debug('Workspace file added event', { relativePath: event.relativePath });
+        scheduleWorkspaceTreeRefresh('workspace:file-added');
+      } catch (error) {
+        logger.warn('Ignoring invalid workspace:file-added payload', {
+          error: toErrorMessage(error),
+        });
+      }
+    });
+    scopedUnlisteners.push(unlistenFileAdded);
 
-  const unlistenFileRemoved = await listen<WorkspaceFileEvent>(
-    'workspace:file-removed',
-    ({ payload }) => {
-      logger.debug('File removed', { relativePath: payload.relativePath });
-      store.refreshTree();
-    },
-  );
+    const unlistenFileRemoved = await listen<unknown>('workspace:file-removed', ({ payload }) => {
+      try {
+        const event = parseWorkspaceFileEvent(payload);
+        logger.debug('Workspace file removed event', { relativePath: event.relativePath });
+        scheduleWorkspaceTreeRefresh('workspace:file-removed');
+      } catch (error) {
+        logger.warn('Ignoring invalid workspace:file-removed payload', {
+          error: toErrorMessage(error),
+        });
+      }
+    });
+    scopedUnlisteners.push(unlistenFileRemoved);
 
-  const unlistenFileModified = await listen<WorkspaceFileEvent>(
-    'workspace:file-modified',
-    ({ payload }) => {
-      logger.debug('File modified', { relativePath: payload.relativePath });
-      store.refreshTree();
-    },
-  );
+    const unlistenFileModified = await listen<unknown>('workspace:file-modified', ({ payload }) => {
+      try {
+        const event = parseWorkspaceFileEvent(payload);
+        logger.debug('Workspace file modified event', { relativePath: event.relativePath });
+        scheduleWorkspaceTreeRefresh('workspace:file-modified');
+      } catch (error) {
+        logger.warn('Ignoring invalid workspace:file-modified payload', {
+          error: toErrorMessage(error),
+        });
+      }
+    });
+    scopedUnlisteners.push(unlistenFileModified);
 
-  const unlistenScanComplete = await listen<WorkspaceScanCompleteEvent>(
-    'workspace:scan-complete',
-    ({ payload }) => {
-      logger.info('Scan complete event', {
-        totalFiles: payload.totalFiles,
-        newFiles: payload.newFiles,
-      });
-      useWorkspaceStore.setState({
-        scanResult: payload,
-        isScanning: false,
-      });
-      store.refreshTree();
-    },
-  );
+    const unlistenScanComplete = await listen<unknown>('workspace:scan-complete', ({ payload }) => {
+      try {
+        const event = parseWorkspaceScanCompleteEvent(payload);
 
-  unlistenFunctions = [
-    unlistenFileAdded,
-    unlistenFileRemoved,
-    unlistenFileModified,
-    unlistenScanComplete,
-  ];
+        logger.info('Workspace scan complete event', {
+          totalFiles: event.totalFiles,
+          newFiles: event.newFiles,
+          removedFiles: event.removedFiles,
+          registeredFiles: event.registeredFiles,
+        });
 
-  logger.info('Workspace event listeners setup');
+        useWorkspaceStore.setState({
+          scanResult: event,
+          isScanning: false,
+          error: null,
+        });
+
+        scheduleWorkspaceTreeRefresh('workspace:scan-complete');
+      } catch (error) {
+        logger.warn('Ignoring invalid workspace:scan-complete payload', {
+          error: toErrorMessage(error),
+        });
+      }
+    });
+    scopedUnlisteners.push(unlistenScanComplete);
+
+    unlistenFunctions = scopedUnlisteners;
+    useWorkspaceStore.setState({
+      isWatching: true,
+      error: null,
+    });
+
+    logger.info('Workspace event listeners setup');
+  } catch (error) {
+    for (const unlisten of scopedUnlisteners) {
+      try {
+        unlisten();
+      } catch {
+        // Ignore cleanup errors in setup rollback.
+      }
+    }
+
+    const message = toErrorMessage(error);
+    useWorkspaceStore.setState({
+      isWatching: false,
+      error: message,
+    });
+
+    logger.error('Failed to setup workspace event listeners', { error: message });
+    throw error;
+  }
 }
 
 /** Cleanup workspace event listeners */
 export async function cleanupWorkspaceEventListeners(): Promise<void> {
   for (const unlisten of unlistenFunctions) {
-    unlisten();
+    try {
+      unlisten();
+    } catch (error) {
+      logger.warn('Failed to clean up workspace listener', {
+        error: toErrorMessage(error),
+      });
+    }
   }
   unlistenFunctions = [];
+  clearScheduledWorkspaceTreeRefresh();
+  useWorkspaceStore.setState({ isWatching: false });
 }
 
 // =============================================================================

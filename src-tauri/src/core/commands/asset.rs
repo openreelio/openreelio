@@ -9,6 +9,7 @@ use crate::core::{
     commands::{Command, CommandResult, StateChange},
     fs::validate_local_input_path,
     project::ProjectState,
+    workspace::path_resolver,
     AssetId, CoreError, CoreResult,
 };
 
@@ -154,6 +155,14 @@ impl Command for ImportAssetCommand {
             let abs_path = project_root.join(rel_path);
             let validated = validate_local_input_path(&abs_path.to_string_lossy(), "asset.uri")
                 .map_err(CoreError::ValidationError)?;
+
+            if !path_resolver::is_inside_project(project_root, &validated) {
+                return Err(CoreError::ValidationError(format!(
+                    "workspace-relative asset resolves outside project root: {}",
+                    validated.display()
+                )));
+            }
+
             self.asset.uri = validated.to_string_lossy().to_string();
         } else {
             // External file: existing behavior (absolute path validation)
@@ -735,6 +744,36 @@ mod tests {
         // No project_root set
         let err = cmd.execute(&mut state).unwrap_err();
         assert!(matches!(err, CoreError::ValidationError(_)));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_import_with_relative_path_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let mut state = create_test_state();
+        let project_dir = tempfile::TempDir::new().unwrap();
+        let external_dir = tempfile::TempDir::new().unwrap();
+
+        let external_file = external_dir.path().join("outside.mp4");
+        std::fs::write(&external_file, b"external data").unwrap();
+
+        let linked_file = project_dir.path().join("linked.mp4");
+        symlink(&external_file, &linked_file).unwrap();
+
+        let asset = Asset::new_video("linked.mp4", "", VideoInfo::default())
+            .with_relative_path("linked.mp4")
+            .as_workspace_managed();
+
+        let mut cmd = ImportAssetCommand::from_asset(asset)
+            .with_project_root(project_dir.path().to_path_buf());
+
+        let err = cmd.execute(&mut state).unwrap_err();
+        assert!(matches!(err, CoreError::ValidationError(_)));
+
+        if let CoreError::ValidationError(message) = err {
+            assert!(message.contains("outside project root"));
+        }
     }
 
     #[test]
