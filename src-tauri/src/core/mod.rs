@@ -6,7 +6,6 @@
 pub mod ai;
 pub mod annotations;
 pub mod assets;
-pub mod bins;
 pub mod captions;
 pub mod commands;
 pub mod credentials;

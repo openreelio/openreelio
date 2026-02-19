@@ -117,7 +117,7 @@ impl Snapshot {
     }
 
     /// Restores project state from snapshot data
-    fn restore_state_from_snapshot(snapshot: SnapshotState) -> CoreResult<ProjectState> {
+    pub fn restore_state_from_snapshot(snapshot: SnapshotState) -> CoreResult<ProjectState> {
         use crate::core::{assets::Asset, timeline::Sequence};
         use std::collections::HashMap;
 
@@ -135,17 +135,29 @@ impl Snapshot {
             }
         }
 
-        Ok(ProjectState {
+        let mut state = ProjectState {
             meta: snapshot.meta,
             assets,
             sequences,
             effects: std::collections::HashMap::new(), // Effects loaded from ops replay
-            bins: std::collections::HashMap::new(),    // Bins loaded from ops replay
             active_sequence_id: snapshot.active_sequence_id,
             last_op_id: None, // Will be set from snapshot metadata
             op_count: 0,      // Will be updated when replaying ops
             is_dirty: false,
-        })
+        };
+
+        // Migration: format_version < 3 → clear deprecated bin_id on all assets
+        if state.meta.format_version < 3 {
+            for asset in state.assets.values_mut() {
+                asset.bin_id = None;
+            }
+            state.meta.format_version = 3;
+            tracing::info!(
+                "Migrated project snapshot to format_version 3 (removed bin references)"
+            );
+        }
+
+        Ok(state)
     }
 
     /// Loads project from snapshot, then applies any new operations from ops log
@@ -447,5 +459,55 @@ mod tests {
 
         assert_eq!(data.version, "1.0.0");
         assert!(!data.created_at.is_empty());
+    }
+
+    #[test]
+    fn test_snapshot_migration_clears_bin_id() {
+        // Create a snapshot state with old format_version and bin_id on assets
+        let mut meta = ProjectMeta::new("test");
+        meta.format_version = 1; // old format
+
+        let snapshot = SnapshotState {
+            meta,
+            assets: vec![serde_json::json!({
+                "id": "asset1",
+                "kind": "video",
+                "name": "test.mp4",
+                "uri": "/test.mp4",
+                "hash": "",
+                "fileSize": 0,
+                "importedAt": "2024-01-01T00:00:00Z",
+                "license": {"source": "user", "licenseType": "unknown", "allowedUse": []},
+                "tags": [],
+                "proxyStatus": "notNeeded",
+                "binId": "old-bin-123"
+            })],
+            sequences: vec![],
+            active_sequence_id: None,
+        };
+
+        let state = Snapshot::restore_state_from_snapshot(snapshot).unwrap();
+
+        // Migration should have cleared bin_id and set format_version to 3
+        assert_eq!(state.meta.format_version, 3);
+        let asset = state.assets.get("asset1").unwrap();
+        assert_eq!(asset.bin_id, None);
+    }
+
+    #[test]
+    fn test_snapshot_migration_skipped_for_current_version() {
+        // format_version >= 3 should not trigger migration
+        let mut meta = ProjectMeta::new("test");
+        meta.format_version = 3;
+
+        let snapshot = SnapshotState {
+            meta,
+            assets: vec![],
+            sequences: vec![],
+            active_sequence_id: None,
+        };
+
+        let state = Snapshot::restore_state_from_snapshot(snapshot).unwrap();
+        assert_eq!(state.meta.format_version, 3);
     }
 }

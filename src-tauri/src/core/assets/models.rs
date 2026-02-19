@@ -216,8 +216,8 @@ pub struct Asset {
     /// Proxy video URL for preview playback (via Tauri asset protocol)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proxy_url: Option<String>,
-    /// Bin (folder) ID for organizing the asset
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Deprecated: bin_id is no longer used. Kept for backward deserialization compatibility.
+    #[serde(default, skip_serializing)]
     pub bin_id: Option<String>,
 
     /// Relative path within project folder (for workspace-discovered files).
@@ -228,6 +228,11 @@ pub struct Asset {
     /// Whether this asset was auto-discovered from workspace scan
     #[serde(default)]
     pub workspace_managed: bool,
+
+    /// Whether the file is missing from disk (deleted externally or via delete command
+    /// while still referenced by clips)
+    #[serde(default)]
+    pub missing: bool,
 }
 
 impl Asset {
@@ -274,6 +279,7 @@ impl Asset {
             bin_id: None,
             relative_path: None,
             workspace_managed: false,
+            missing: false,
         }
     }
 
@@ -298,6 +304,7 @@ impl Asset {
             bin_id: None,
             relative_path: None,
             workspace_managed: false,
+            missing: false,
         }
     }
 
@@ -338,6 +345,7 @@ impl Asset {
             bin_id: None,
             relative_path: None,
             workspace_managed: false,
+            missing: false,
         }
     }
 

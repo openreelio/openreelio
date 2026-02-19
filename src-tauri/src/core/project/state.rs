@@ -9,11 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{
     assets::Asset,
-    bins::Bin,
     effects::Effect,
     project::{OpKind, Operation, OpsLog},
     timeline::{BlendMode, Clip, Sequence, Track},
-    AssetId, BinId, CoreError, CoreResult, EffectId, SequenceId,
+    AssetId, CoreError, CoreResult, EffectId, SequenceId,
 };
 
 // =============================================================================
@@ -40,7 +39,7 @@ pub struct ProjectMeta {
     /// Author name
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<String>,
-    /// Format version: 1 = legacy (import-only), 2 = workspace-enabled
+    /// Format version: 1 = legacy (import-only), 2 = workspace-enabled, 3 = bins removed
     /// Defaults to 1 for backward compatibility with existing projects.
     #[serde(default = "default_format_version")]
     pub format_version: u32,
@@ -62,7 +61,7 @@ impl ProjectMeta {
             modified_at: now,
             description: None,
             author: None,
-            format_version: 2,
+            format_version: 3,
         }
     }
 
@@ -92,8 +91,6 @@ pub struct ProjectState {
     pub sequences: HashMap<SequenceId, Sequence>,
     /// All effects indexed by ID
     pub effects: HashMap<EffectId, Effect>,
-    /// All bins (folders) indexed by ID
-    pub bins: HashMap<BinId, Bin>,
     /// Currently active sequence ID
     pub active_sequence_id: Option<SequenceId>,
     /// Last applied operation ID
@@ -130,7 +127,6 @@ impl ProjectState {
             assets: HashMap::new(),
             sequences,
             effects: HashMap::new(),
-            bins: HashMap::new(),
             active_sequence_id: Some(seq_id),
             last_op_id: None,
             op_count: 0,
@@ -145,7 +141,6 @@ impl ProjectState {
             assets: HashMap::new(),
             sequences: HashMap::new(),
             effects: HashMap::new(),
-            bins: HashMap::new(),
             active_sequence_id: None,
             last_op_id: None,
             op_count: 0,
@@ -160,7 +155,6 @@ impl ProjectState {
             assets: HashMap::new(),
             sequences: HashMap::new(),
             effects: HashMap::new(),
-            bins: HashMap::new(),
             active_sequence_id: None,
             last_op_id: None,
             op_count: 0,
@@ -216,12 +210,17 @@ impl ProjectState {
             OpKind::ProjectCreate => self.apply_project_create(op)?,
             OpKind::ProjectSettings => self.apply_project_settings(op)?,
 
-            // Bin operations
-            OpKind::BinCreate => self.apply_bin_create(op)?,
-            OpKind::BinRemove => self.apply_bin_remove(op)?,
-            OpKind::BinRename => self.apply_bin_rename(op)?,
-            OpKind::BinMove => self.apply_bin_move(op)?,
-            OpKind::BinUpdateColor => self.apply_bin_update_color(op)?,
+            // Bin operations (deprecated - no-ops for backward compatibility)
+            OpKind::BinCreate
+            | OpKind::BinRemove
+            | OpKind::BinRename
+            | OpKind::BinMove
+            | OpKind::BinUpdateColor => {
+                tracing::debug!(op_kind = ?op.kind, "Ignoring deprecated bin operation");
+            }
+
+            // Filesystem operations (state changes handled by command execution)
+            OpKind::FolderCreate | OpKind::FileRename | OpKind::FileMove | OpKind::FileDelete => {}
 
             // Workspace operations (metadata-only, no state change needed)
             OpKind::WorkspaceScan => {}
@@ -1250,109 +1249,6 @@ impl ProjectState {
             self.meta.author = Some(author.to_string());
         }
         Ok(())
-    }
-
-    // =========================================================================
-    // Bin Operation Handlers
-    // =========================================================================
-
-    fn apply_bin_create(&mut self, op: &Operation) -> CoreResult<()> {
-        let bin: Bin = serde_json::from_value(op.payload.clone())
-            .map_err(|e| CoreError::InvalidCommand(format!("Invalid bin data: {}", e)))?;
-        self.bins.insert(bin.id.clone(), bin);
-        Ok(())
-    }
-
-    fn apply_bin_remove(&mut self, op: &Operation) -> CoreResult<()> {
-        let bin_id = op.payload["binId"]
-            .as_str()
-            .ok_or_else(|| CoreError::InvalidCommand("Missing binId".to_string()))?;
-
-        // Get all descendants to remove recursively
-        let descendants = self.get_bin_descendants(bin_id);
-
-        // Remove bin and all descendants
-        self.bins.remove(bin_id);
-        for desc_id in &descendants {
-            self.bins.remove(desc_id);
-        }
-
-        // Update assets that were in removed bins - move them to root
-        for asset in self.assets.values_mut() {
-            if let Some(ref asset_bin_id) = asset.bin_id {
-                if asset_bin_id == bin_id || descendants.contains(asset_bin_id) {
-                    asset.bin_id = None;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn apply_bin_rename(&mut self, op: &Operation) -> CoreResult<()> {
-        let bin_id = op.payload["binId"]
-            .as_str()
-            .ok_or_else(|| CoreError::InvalidCommand("Missing binId".to_string()))?;
-        let new_name = op.payload["name"]
-            .as_str()
-            .ok_or_else(|| CoreError::InvalidCommand("Missing name".to_string()))?;
-
-        if let Some(bin) = self.bins.get_mut(bin_id) {
-            bin.rename(new_name);
-        }
-        Ok(())
-    }
-
-    fn apply_bin_move(&mut self, op: &Operation) -> CoreResult<()> {
-        let bin_id = op.payload["binId"]
-            .as_str()
-            .ok_or_else(|| CoreError::InvalidCommand("Missing binId".to_string()))?;
-
-        let new_parent_id = op.payload["parentId"].as_str().map(|s| s.to_string());
-
-        // Check for circular reference
-        if crate::core::bins::would_create_cycle(bin_id, new_parent_id.as_deref(), &self.bins) {
-            return Err(CoreError::InvalidCommand(
-                "Cannot move bin: would create circular reference".to_string(),
-            ));
-        }
-
-        if let Some(bin) = self.bins.get_mut(bin_id) {
-            bin.move_to(new_parent_id);
-        }
-        Ok(())
-    }
-
-    fn apply_bin_update_color(&mut self, op: &Operation) -> CoreResult<()> {
-        let bin_id = op.payload["binId"]
-            .as_str()
-            .ok_or_else(|| CoreError::InvalidCommand("Missing binId".to_string()))?;
-
-        let color: crate::core::bins::BinColor =
-            serde_json::from_value(op.payload["color"].clone())
-                .map_err(|e| CoreError::InvalidCommand(format!("Invalid color: {}", e)))?;
-
-        if let Some(bin) = self.bins.get_mut(bin_id) {
-            bin.color = color;
-        }
-        Ok(())
-    }
-
-    /// Gets all descendant bin IDs of a given bin
-    fn get_bin_descendants(&self, bin_id: &str) -> Vec<BinId> {
-        let mut descendants = Vec::new();
-        let mut to_check = vec![bin_id.to_string()];
-
-        while let Some(current_id) = to_check.pop() {
-            for (id, bin) in &self.bins {
-                if bin.parent_id.as_deref() == Some(&current_id) {
-                    descendants.push(id.clone());
-                    to_check.push(id.clone());
-                }
-            }
-        }
-
-        descendants
     }
 
     // =========================================================================
@@ -2679,5 +2575,46 @@ mod tests {
         ));
 
         assert!(matches!(result, Err(CoreError::InvalidCommand(_))));
+    }
+
+    #[test]
+    fn test_deprecated_bin_ops_replay_as_noop() {
+        let mut state = ProjectState::new_empty("test");
+
+        // Simulate replaying old bin operations from ops.jsonl
+        let bin_ops = vec![
+            Operation::with_id(
+                "op1",
+                OpKind::BinCreate,
+                serde_json::json!({"id": "bin1", "name": "footage"}),
+            ),
+            Operation::with_id(
+                "op2",
+                OpKind::BinRename,
+                serde_json::json!({"id": "bin1", "name": "footage_v2"}),
+            ),
+            Operation::with_id("op3", OpKind::BinRemove, serde_json::json!({"id": "bin1"})),
+            Operation::with_id(
+                "op4",
+                OpKind::BinMove,
+                serde_json::json!({"id": "bin1", "parentId": "bin2"}),
+            ),
+            Operation::with_id(
+                "op5",
+                OpKind::BinUpdateColor,
+                serde_json::json!({"id": "bin1", "color": "#ff0000"}),
+            ),
+        ];
+
+        // All bin ops should succeed (as no-ops) without panicking
+        for op in &bin_ops {
+            state
+                .apply_operation(op)
+                .expect("Bin op should be a no-op, not an error");
+        }
+
+        // State should have no bins (field removed) but should still be valid
+        assert!(state.assets.is_empty());
+        assert_eq!(state.op_count, 5);
     }
 }
