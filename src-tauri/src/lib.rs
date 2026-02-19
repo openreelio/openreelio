@@ -806,8 +806,7 @@ mod tauri_app {
                 // Workspace commands
                 $crate::ipc::scan_workspace,
                 $crate::ipc::get_workspace_tree,
-                $crate::ipc::register_workspace_file,
-                $crate::ipc::register_workspace_files,
+                $crate::ipc::reveal_in_explorer,
             ]
         };
     }
@@ -1117,8 +1116,7 @@ mod tauri_app {
             // Workspace commands
             ipc::scan_workspace,
             ipc::get_workspace_tree,
-            ipc::register_workspace_file,
-            ipc::register_workspace_files,
+            ipc::reveal_in_explorer,
         ])
         .run(tauri::generate_context!());
 

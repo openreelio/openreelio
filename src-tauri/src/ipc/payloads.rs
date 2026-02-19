@@ -2,7 +2,7 @@ use crate::core::effects::{EffectType, ParamValue};
 use crate::core::masks::{MaskBlendMode, MaskShape};
 use crate::core::text::TextClipData;
 use crate::core::timeline::{BlendMode, TrackKind, Transform};
-use crate::core::{AssetId, BinId, ClipId, EffectId, MaskId, SequenceId, TimeSec, TrackId};
+use crate::core::{AssetId, ClipId, EffectId, MaskId, SequenceId, TimeSec, TrackId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -411,53 +411,33 @@ pub struct RemoveTextClipPayload {
 }
 
 // =============================================================================
-// Bin/Folder Payloads
+// Filesystem Payloads
 // =============================================================================
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CreateBinPayload {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_id: Option<BinId>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub color: Option<String>,
+pub struct CreateFolderPayload {
+    pub relative_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RemoveBinPayload {
-    pub bin_id: BinId,
+pub struct RenameFilePayload {
+    pub old_relative_path: String,
+    pub new_name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RenameBinPayload {
-    pub bin_id: BinId,
-    pub name: String,
+pub struct MoveFilePayload {
+    pub source_path: String,
+    pub dest_folder_path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct MoveBinPayload {
-    pub bin_id: BinId,
-    /// New parent bin ID (null for root level)
-    pub parent_id: Option<BinId>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SetBinColorPayload {
-    pub bin_id: BinId,
-    pub color: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct MoveAssetToBinPayload {
-    pub asset_id: AssetId,
-    /// Target bin ID (null to move to root)
-    pub bin_id: Option<BinId>,
+pub struct DeleteFilePayload {
+    pub relative_path: String,
 }
 
 // =============================================================================
@@ -553,29 +533,18 @@ pub enum CommandPayload {
     #[serde(alias = "removeTextClip", alias = "RemoveTextClip")]
     RemoveTextClip(RemoveTextClipPayload),
 
-    // Bin/Folder commands
-    #[serde(alias = "createBin", alias = "CreateBin")]
-    CreateBin(CreateBinPayload),
+    // Filesystem commands
+    #[serde(alias = "createFolder", alias = "CreateFolder")]
+    CreateFolder(CreateFolderPayload),
 
-    #[serde(
-        alias = "removeBin",
-        alias = "RemoveBin",
-        alias = "deleteBin",
-        alias = "DeleteBin"
-    )]
-    RemoveBin(RemoveBinPayload),
+    #[serde(alias = "renameFile", alias = "RenameFile")]
+    RenameFile(RenameFilePayload),
 
-    #[serde(alias = "renameBin", alias = "RenameBin")]
-    RenameBin(RenameBinPayload),
+    #[serde(alias = "moveFile", alias = "MoveFile")]
+    MoveFile(MoveFilePayload),
 
-    #[serde(alias = "moveBin", alias = "MoveBin")]
-    MoveBin(MoveBinPayload),
-
-    #[serde(alias = "setBinColor", alias = "SetBinColor")]
-    SetBinColor(SetBinColorPayload),
-
-    #[serde(alias = "moveAssetToBin", alias = "MoveAssetToBin")]
-    MoveAssetToBin(MoveAssetToBinPayload),
+    #[serde(alias = "deleteFile", alias = "DeleteFile")]
+    DeleteFile(DeleteFilePayload),
 }
 
 impl CommandPayload {
