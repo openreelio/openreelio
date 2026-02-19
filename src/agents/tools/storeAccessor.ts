@@ -71,7 +71,6 @@ export interface AssetSnapshot {
   onTimeline: boolean;
   hasVideoStream: boolean;
   hasAudioStream: boolean;
-  binId?: string | null;
 }
 
 export interface AssetCatalogSnapshot {
@@ -153,7 +152,6 @@ function assetToSnapshot(asset: Asset, timelineClipCount: number): AssetSnapshot
     onTimeline: timelineClipCount > 0,
     hasVideoStream: Boolean(asset.video),
     hasAudioStream: Boolean(asset.audio),
-    binId: asset.binId,
   };
 }
 
