@@ -298,6 +298,49 @@ impl AssetIndex {
                 crate::core::CoreError::Internal(format!("Failed to count workspace files: {}", e))
             })
     }
+
+    /// Update the relative path for an entry, preserving all other fields.
+    /// Used when a file is renamed/moved on disk.
+    pub fn update_relative_path(&self, old_path: &str, new_path: &str) -> CoreResult<()> {
+        self.conn
+            .execute(
+                "UPDATE workspace_files SET relative_path = ?1 WHERE relative_path = ?2",
+                params![new_path, old_path],
+            )
+            .map_err(|e| {
+                crate::core::CoreError::Internal(format!(
+                    "Failed to update workspace file path: {}",
+                    e
+                ))
+            })?;
+        Ok(())
+    }
+
+    /// Get all entries that have been registered with an asset_id
+    pub fn get_all_registered(&self) -> CoreResult<Vec<IndexEntry>> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT relative_path, kind, file_size, modified_at, asset_id, indexed_at, metadata_extracted
+                 FROM workspace_files WHERE asset_id IS NOT NULL ORDER BY relative_path",
+            )
+            .map_err(|e| {
+                crate::core::CoreError::Internal(format!(
+                    "Failed to prepare get_all_registered query: {}",
+                    e
+                ))
+            })?;
+
+        let entries = stmt
+            .query_map([], row_to_entry)
+            .map_err(|e| {
+                crate::core::CoreError::Internal(format!("Failed to query registered files: {}", e))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+
+        Ok(entries)
+    }
 }
 
 /// Convert an AssetKind to a string for SQLite storage
