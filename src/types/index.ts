@@ -32,9 +32,6 @@ export type JobId = string;
 /** Sequence unique identifier (ULID) */
 export type SequenceId = string;
 
-/** Bin/Folder unique identifier (ULID) */
-export type BinId = string;
-
 /** Mask unique identifier (ULID) */
 export type MaskId = string;
 
@@ -243,38 +240,12 @@ export interface Asset {
   proxyStatus: ProxyStatus;
   /** Proxy video URL for preview playback */
   proxyUrl?: string;
-  /** ID of the bin/folder this asset belongs to (null = root) */
-  binId?: BinId | null;
+  /** Whether the backing file is missing from disk */
+  missing?: boolean;
   /** Relative path within project folder (for workspace-discovered files) */
   relativePath?: string;
   /** Whether this asset was auto-discovered from workspace scan */
   workspaceManaged?: boolean;
-}
-
-// =============================================================================
-// Bin/Folder Types
-// =============================================================================
-
-/** Color for bin visual identification */
-export type BinColor = 'gray' | 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'purple' | 'pink';
-
-/**
- * Bin (Folder) for organizing assets in the Project Explorer.
- * Bins can be nested to create a hierarchical structure.
- */
-export interface Bin {
-  /** Unique identifier */
-  id: BinId;
-  /** Display name */
-  name: string;
-  /** Parent bin ID (null = root level) */
-  parentId: BinId | null;
-  /** Visual color for identification */
-  color: BinColor;
-  /** When the bin was created */
-  createdAt: string;
-  /** Whether the bin is expanded in the UI */
-  expanded?: boolean;
 }
 
 /** Check if an asset requires proxy generation based on video dimensions */
@@ -304,6 +275,8 @@ export interface FileTreeEntry {
   fileSize?: number;
   /** Asset ID if registered as a project asset */
   assetId?: string;
+  /** Whether the file is missing from disk */
+  missing?: boolean;
   /** Child entries (for directories) */
   children: FileTreeEntry[];
 }
@@ -318,6 +291,8 @@ export interface WorkspaceScanResult {
   removedFiles: number;
   /** Number of files already registered as assets */
   registeredFiles: number;
+  /** Number of files auto-registered during this scan */
+  autoRegisteredFiles: number;
 }
 
 /** Result of registering a workspace file as a project asset */
@@ -348,6 +323,8 @@ export interface WorkspaceScanCompleteEvent {
   removedFiles: number;
   /** Number of files already registered as assets */
   registeredFiles: number;
+  /** Number of files auto-registered during this scan */
+  autoRegisteredFiles: number;
 }
 
 // =============================================================================
@@ -760,13 +737,11 @@ export function isTextClip(assetId: string): boolean {
 
 export type CommandType =
   | 'ImportAsset'
-  // Bin/Project explorer commands
-  | 'CreateBin'
-  | 'RemoveBin'
-  | 'RenameBin'
-  | 'MoveBin'
-  | 'SetBinColor'
-  | 'MoveAssetToBin'
+  // Filesystem commands
+  | 'CreateFolder'
+  | 'RenameFile'
+  | 'MoveFile'
+  | 'DeleteFile'
   | 'InsertClip'
   | 'SetClipTransform'
   | 'SetClipMute'

@@ -68,6 +68,7 @@ describe('workspaceSchemas', () => {
         newFiles: 2,
         removedFiles: 1,
         registeredFiles: 5,
+        autoRegisteredFiles: 2,
       });
 
       expect(parsed).toEqual({
@@ -75,6 +76,7 @@ describe('workspaceSchemas', () => {
         newFiles: 2,
         removedFiles: 1,
         registeredFiles: 5,
+        autoRegisteredFiles: 2,
       });
     });
 
@@ -85,6 +87,7 @@ describe('workspaceSchemas', () => {
           newFiles: 2,
           removedFiles: 1,
           registeredFiles: 5,
+          autoRegisteredFiles: 0,
         }),
       ).toThrow('Invalid workspace scan result payload');
     });
