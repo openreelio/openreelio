@@ -352,7 +352,8 @@ export type {
 export { useAudioMixer } from './useAudioMixer';
 export type { UseAudioMixerOptions, UseAudioMixerReturn } from './useAudioMixer';
 
-export { useBinOperations } from './useBinOperations';
+export { useFileOperations } from './useFileOperations';
+export type { UseFileOperationsReturn } from './useFileOperations';
 
 export {
   KeyboardScopeProvider,

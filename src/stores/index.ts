@@ -18,8 +18,6 @@ export { useJobsStore } from './jobsStore';
 export { usePlaybackStore } from './playbackStore';
 export { useWaveformCacheStore, createWaveformCacheKey } from './waveformCacheStore';
 export { useSettingsStore } from './settingsStore';
-export { useBinStore } from './binStore';
-export type { BinState, BinActions, BinStore } from './binStore';
 export { useEditorToolStore, TOOL_CONFIGS, getToolCursor } from './editorToolStore';
 export type { EditorTool, ToolConfig, ClipboardItem, EditorToolStore } from './editorToolStore';
 
@@ -124,7 +122,6 @@ export {
   cleanupWorkspaceEventListeners,
   selectFileTree,
   selectIsScanning,
-  selectRegisteringPathCounts,
   selectScanResult,
   selectWorkspaceError,
 } from './workspaceStore';
@@ -159,7 +156,6 @@ import { usePlaybackStore } from './playbackStore';
 import { useWaveformCacheStore } from './waveformCacheStore';
 import { useAIStore } from './aiStore';
 import { useAnnotationStore } from './annotationStore';
-import { useBinStore } from './binStore';
 import { useEditorToolStore } from './editorToolStore';
 import { useAudioMixerStore } from './audioMixerStore';
 import { useModalStore } from './modalStore';
@@ -182,7 +178,6 @@ export function resetProjectStores(): void {
   useWaveformCacheStore.getState().clearCache();
   useAIStore.getState().clearChatHistory();
   useAnnotationStore.getState().reset();
-  useBinStore.getState().reset();
   useEditorToolStore.getState().reset();
   useAudioMixerStore.getState().reset();
   useModalStore.getState().closeModal();
