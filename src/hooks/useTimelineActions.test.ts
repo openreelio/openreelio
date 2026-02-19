@@ -34,13 +34,15 @@ vi.mock('@/utils/ffmpeg', () => ({
 }));
 
 const workspaceStoreMocks = vi.hoisted(() => ({
-  registerFile: vi.fn(),
+  refreshTree: vi.fn().mockResolvedValue(undefined),
+  fileTree: [] as import('@/types').FileTreeEntry[],
 }));
 
 vi.mock('@/stores/workspaceStore', () => ({
   useWorkspaceStore: {
     getState: () => ({
-      registerFile: workspaceStoreMocks.registerFile,
+      refreshTree: workspaceStoreMocks.refreshTree,
+      fileTree: workspaceStoreMocks.fileTree,
     }),
   },
 }));
@@ -146,7 +148,8 @@ describe('useTimelineActions', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     _resetCommandQueueForTesting();
-    workspaceStoreMocks.registerFile.mockReset();
+    workspaceStoreMocks.refreshTree.mockReset().mockResolvedValue(undefined);
+    workspaceStoreMocks.fileTree = [];
     mockedProbeMedia.mockResolvedValue({
       durationSec: 0,
       format: 'unknown',
@@ -333,7 +336,7 @@ describe('useTimelineActions', () => {
       });
     });
 
-    it('should register workspace file before inserting when dropped from files tab', async () => {
+    it('should look up auto-registered asset from file tree when dropped from workspace', async () => {
       const track = createMockTrack({ id: 'track_001' });
       const sequence = createMockSequence({
         id: 'seq_001',
@@ -345,11 +348,25 @@ describe('useTimelineActions', () => {
         name: 'logo.png',
       });
 
-      workspaceStoreMocks.registerFile.mockResolvedValue({
-        assetId: 'asset_workspace_001',
-        relativePath: 'images/logo.png',
-        alreadyRegistered: false,
-      });
+      // Simulate file tree with auto-registered asset
+      workspaceStoreMocks.fileTree = [
+        {
+          relativePath: 'images',
+          name: 'images',
+          isDirectory: true,
+          children: [
+            {
+              relativePath: 'images/logo.png',
+              name: 'logo.png',
+              isDirectory: false,
+              kind: 'image' as const,
+              fileSize: 4096,
+              assetId: 'asset_workspace_001',
+              children: [],
+            },
+          ],
+        },
+      ];
 
       mockedInvoke.mockImplementation((cmd: string) => {
         if (cmd === 'execute_command') {
@@ -380,7 +397,7 @@ describe('useTimelineActions', () => {
         });
       });
 
-      expect(workspaceStoreMocks.registerFile).toHaveBeenCalledWith('images/logo.png');
+      expect(workspaceStoreMocks.refreshTree).toHaveBeenCalled();
       expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
         commandType: 'InsertClip',
         payload: {
@@ -392,7 +409,7 @@ describe('useTimelineActions', () => {
       });
     });
 
-    it('should re-register workspace file when drop payload has stale assetId', async () => {
+    it('should resolve asset from file tree when drop payload has stale assetId', async () => {
       const track = createMockTrack({ id: 'track_001' });
       const sequence = createMockSequence({
         id: 'seq_001',
@@ -404,10 +421,28 @@ describe('useTimelineActions', () => {
         name: 'stale-recovered.png',
       });
 
-      workspaceStoreMocks.registerFile.mockResolvedValue({
-        assetId: 'asset_workspace_002',
-        relativePath: 'images/stale-recovered.png',
-        alreadyRegistered: false,
+      // Simulate file tree with auto-registered asset
+      workspaceStoreMocks.fileTree = [
+        {
+          relativePath: 'images',
+          name: 'images',
+          isDirectory: true,
+          children: [
+            {
+              relativePath: 'images/stale-recovered.png',
+              name: 'stale-recovered.png',
+              isDirectory: false,
+              kind: 'image' as const,
+              fileSize: 2048,
+              assetId: 'asset_workspace_002',
+              children: [],
+            },
+          ],
+        },
+      ];
+
+      useProjectStore.setState({
+        assets: new Map([[workspaceAsset.id, workspaceAsset]]),
       });
 
       mockedInvoke.mockImplementation((cmd: string) => {
@@ -440,7 +475,7 @@ describe('useTimelineActions', () => {
         });
       });
 
-      expect(workspaceStoreMocks.registerFile).toHaveBeenCalledWith('images/stale-recovered.png');
+      expect(workspaceStoreMocks.refreshTree).toHaveBeenCalled();
       expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
         commandType: 'InsertClip',
         payload: {
@@ -448,6 +483,84 @@ describe('useTimelineActions', () => {
           trackId: 'track_001',
           assetId: 'asset_workspace_002',
           timelineIn: 7,
+        },
+      });
+    });
+
+    it('should resolve workspace drop by relative path when file tree assetId is stale', async () => {
+      const track = createMockTrack({ id: 'track_001' });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [track],
+      });
+      const recoveredAsset = createMockAsset({
+        id: 'asset_workspace_recovered',
+        kind: 'image',
+        name: 'recovered.png',
+        relativePath: 'images/recovered.png',
+      });
+
+      workspaceStoreMocks.fileTree = [
+        {
+          relativePath: 'images',
+          name: 'images',
+          isDirectory: true,
+          children: [
+            {
+              relativePath: 'images/recovered.png',
+              name: 'recovered.png',
+              isDirectory: false,
+              kind: 'image' as const,
+              fileSize: 4096,
+              assetId: 'asset_stale_index',
+              children: [],
+            },
+          ],
+        },
+      ];
+
+      useProjectStore.setState({
+        assets: new Map(),
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_workspace_recovered',
+            createdIds: ['clip_workspace_recovered'],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [recoveredAsset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          assetId: 'asset_stale_index',
+          workspaceRelativePath: 'images/recovered.png',
+          assetKind: 'image',
+          trackId: 'track_001',
+          timelinePosition: 9,
+        });
+      });
+
+      expect(workspaceStoreMocks.refreshTree).toHaveBeenCalled();
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'InsertClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          assetId: 'asset_workspace_recovered',
+          timelineIn: 9,
         },
       });
     });

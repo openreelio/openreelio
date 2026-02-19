@@ -91,6 +91,38 @@ interface ResolveDroppedAssetContextOptions {
   assets: Map<string, Asset>;
 }
 
+/**
+ * Recursively searches the file tree for an entry matching the given
+ * relative path and returns its auto-registered asset ID.
+ */
+function findAssetIdInTree(
+  entries: import('@/types').FileTreeEntry[],
+  relativePath: string,
+): string | undefined {
+  for (const entry of entries) {
+    if (!entry.isDirectory && entry.relativePath === relativePath) {
+      return entry.assetId;
+    }
+    if (entry.isDirectory && entry.children.length > 0) {
+      const found = findAssetIdInTree(entry.children, relativePath);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+function findAssetIdInAssetsByRelativePath(
+  assets: Map<string, Asset>,
+  relativePath: string,
+): string | undefined {
+  for (const asset of assets.values()) {
+    if (asset.relativePath === relativePath) {
+      return asset.id;
+    }
+  }
+  return undefined;
+}
+
 async function resolveDroppedAssetContext({
   data,
   sequence,
@@ -104,14 +136,100 @@ async function resolveDroppedAssetContext({
       ? data.workspaceRelativePath
       : undefined;
 
-  const shouldRegisterWorkspaceFile =
-    !!workspaceRelativePath && (!droppedAssetId || droppedAsset == null);
+  if (
+    workspaceRelativePath &&
+    droppedAssetId &&
+    droppedAsset?.relativePath &&
+    droppedAsset.relativePath !== workspaceRelativePath
+  ) {
+    logger.warn('Drop payload assetId does not match workspace path; resolving by workspace path', {
+      sequenceId: sequence.id,
+      trackId: data.trackId,
+      payloadAssetId: droppedAssetId,
+      payloadAssetRelativePath: droppedAsset.relativePath,
+      workspaceRelativePath,
+    });
+    droppedAssetId = undefined;
+    droppedAsset = undefined;
+    droppedAssetKind = data.assetKind;
+  }
 
-  if (shouldRegisterWorkspaceFile && workspaceRelativePath) {
-    const registerResult = await useWorkspaceStore.getState().registerFile(workspaceRelativePath);
+  // In the filesystem-first model, files are auto-registered by the backend.
+  // If we have a workspace path but no asset ID, look it up from the file tree
+  // or refresh project state to pick up the auto-registered asset.
+  const needsAssetLookup = !!workspaceRelativePath && (!droppedAssetId || droppedAsset == null);
 
-    if (!registerResult) {
-      logger.warn('Cannot drop workspace file: registration failed', {
+  if (needsAssetLookup && workspaceRelativePath) {
+    const existingAssetId = findAssetIdInAssetsByRelativePath(
+      useProjectStore.getState().assets,
+      workspaceRelativePath,
+    );
+    if (existingAssetId) {
+      droppedAssetId = existingAssetId;
+      droppedAsset = useProjectStore.getState().assets.get(existingAssetId);
+      droppedAssetKind = droppedAsset?.kind ?? data.assetKind;
+    }
+
+    if (droppedAssetId && droppedAsset) {
+      return {
+        droppedAssetId,
+        droppedAsset,
+        droppedAssetKind,
+      };
+    }
+
+    // Refresh tree to ensure auto-registration is picked up
+    try {
+      await useWorkspaceStore.getState().refreshTree();
+    } catch {
+      // Non-fatal: tree refresh may fail but asset may still be available
+    }
+
+    // Look up asset ID from the file tree (auto-registered by backend)
+    const fileTree = useWorkspaceStore.getState().fileTree;
+    const foundAssetId = findAssetIdInTree(fileTree, workspaceRelativePath);
+
+    if (foundAssetId && useProjectStore.getState().assets.has(foundAssetId)) {
+      droppedAssetId = foundAssetId;
+      droppedAsset = useProjectStore.getState().assets.get(foundAssetId);
+      droppedAssetKind = droppedAsset?.kind ?? data.assetKind;
+      return {
+        droppedAssetId,
+        droppedAsset,
+        droppedAssetKind,
+      };
+    }
+
+    // Refresh project assets as a fallback (covers stale index asset IDs)
+    try {
+      const freshState = await refreshProjectState();
+      useProjectStore.setState((draft) => {
+        draft.assets = freshState.assets;
+      });
+    } catch (error) {
+      logger.warn('Failed to refresh project assets for workspace drop', {
+        sequenceId: sequence.id,
+        trackId: data.trackId,
+        workspaceRelativePath,
+        error,
+      });
+    }
+
+    const refreshedAssets = useProjectStore.getState().assets;
+    const refreshedTree = useWorkspaceStore.getState().fileTree;
+    const refreshedTreeAssetId = findAssetIdInTree(refreshedTree, workspaceRelativePath);
+    const refreshedPathAssetId = findAssetIdInAssetsByRelativePath(
+      refreshedAssets,
+      workspaceRelativePath,
+    );
+
+    droppedAssetId =
+      (refreshedTreeAssetId && refreshedAssets.has(refreshedTreeAssetId)
+        ? refreshedTreeAssetId
+        : undefined) ?? refreshedPathAssetId;
+
+    if (!droppedAssetId) {
+      logger.warn('Cannot drop workspace file: asset not found after refresh', {
         sequenceId: sequence.id,
         trackId: data.trackId,
         workspaceRelativePath,
@@ -119,27 +237,7 @@ async function resolveDroppedAssetContext({
       return null;
     }
 
-    droppedAssetId = registerResult.assetId;
-
-    droppedAsset = useProjectStore.getState().assets.get(droppedAssetId);
-    if (!droppedAsset) {
-      try {
-        const freshState = await refreshProjectState();
-        useProjectStore.setState((draft) => {
-          draft.assets = freshState.assets;
-        });
-        droppedAsset = useProjectStore.getState().assets.get(droppedAssetId);
-      } catch (error) {
-        logger.warn('Failed to refresh project assets after workspace registration', {
-          sequenceId: sequence.id,
-          trackId: data.trackId,
-          workspaceRelativePath,
-          assetId: droppedAssetId,
-          error,
-        });
-      }
-    }
-
+    droppedAsset = refreshedAssets.get(droppedAssetId);
     droppedAssetKind = droppedAsset?.kind ?? data.assetKind;
   }
 

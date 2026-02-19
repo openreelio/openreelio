@@ -6,7 +6,8 @@
  */
 
 import { useMemo, useRef, useEffect, type MouseEvent } from 'react';
-import { Type } from 'lucide-react';
+import { Type, AlertTriangle } from 'lucide-react';
+import { useProjectStore } from '@/stores/projectStore';
 import { useClipDrag, type DragPreviewPosition, type ClipDragData } from '@/hooks/useClipDrag';
 import { useWaveformPeaks } from '@/hooks/useWaveformPeaks';
 import type { Clip as ClipType, SnapPoint, Asset, TrackKind } from '@/types';
@@ -250,6 +251,10 @@ export function Clip({
   // Determine if this is a text clip
   const isText = isTextClip(clip.assetId);
 
+  // Look up the asset to check its missing status
+  const asset = useProjectStore((s) => s.getAsset(clip.assetId));
+  const isAssetMissing = asset?.missing === true;
+
   // Determine if clip has visual content (thumbnails or waveform)
   // Text clips don't have visual content like thumbnails or waveforms
   const hasVisualContent = !isText && (thumbnailConfig?.enabled || waveformConfig?.enabled);
@@ -332,6 +337,13 @@ export function Clip({
       {isText && (
         <div className="absolute inset-0 flex items-center justify-center opacity-20 pointer-events-none">
           <Type className="w-8 h-8 text-white" />
+        </div>
+      )}
+
+      {/* Missing asset overlay */}
+      {isAssetMissing && (
+        <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center pointer-events-none">
+          <AlertTriangle className="w-4 h-4 text-red-400" />
         </div>
       )}
 

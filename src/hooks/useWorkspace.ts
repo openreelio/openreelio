@@ -1,18 +1,16 @@
 /**
  * useWorkspace Hook
  *
- * Provides workspace operations for scanning, file registration,
+ * Provides workspace operations for scanning, file search,
  * and drag-to-timeline workflows.
+ *
+ * In the filesystem-first model all discovered files are auto-registered
+ * as assets by the backend, so explicit registration is no longer needed.
  */
 
 import { useCallback, useMemo } from 'react';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
-import { useProjectStore } from '@/stores';
-import { refreshProjectState } from '@/utils/stateRefreshHelper';
-import { createLogger } from '@/services/logger';
 import type { AssetKind, FileTreeEntry } from '@/types';
-
-const logger = createLogger('useWorkspace');
 
 export interface UseWorkspaceReturn {
   /** Full file tree */
@@ -21,8 +19,11 @@ export interface UseWorkspaceReturn {
   isScanning: boolean;
   /** Trigger a workspace scan */
   scanWorkspace: () => Promise<void>;
-  /** Register a workspace file and return its asset ID */
-  registerAndGetAssetId: (relativePath: string) => Promise<string | null>;
+  /**
+   * Look up the asset ID for a workspace file.
+   * Returns null if the file is not yet auto-registered.
+   */
+  getAssetIdForFile: (relativePath: string) => string | null;
   /** Check if a file is already registered as an asset */
   isFileRegistered: (relativePath: string) => boolean;
   /** Find files by name (case-insensitive substring match) */
@@ -52,34 +53,16 @@ export function useWorkspace(): UseWorkspaceReturn {
   const fileTree = useWorkspaceStore((state) => state.fileTree);
   const isScanning = useWorkspaceStore((state) => state.isScanning);
   const scanWorkspace = useWorkspaceStore((state) => state.scanWorkspace);
-  const registerFile = useWorkspaceStore((state) => state.registerFile);
 
   // Flat list of all files for search operations
   const flatFiles = useMemo(() => flattenTree(fileTree), [fileTree]);
 
-  const registerAndGetAssetId = useCallback(
-    async (relativePath: string): Promise<string | null> => {
-      const result = await registerFile(relativePath);
-      if (!result) {
-        return null;
-      }
-
-      // If newly registered, refresh project assets (lighter than full loadProject)
-      const assetMissingInStore = !useProjectStore.getState().assets.has(result.assetId);
-      if (!result.alreadyRegistered || assetMissingInStore) {
-        try {
-          const freshState = await refreshProjectState();
-          useProjectStore.setState((draft) => {
-            draft.assets = freshState.assets;
-          });
-        } catch {
-          logger.warn('Could not refresh project state after registration');
-        }
-      }
-
-      return result.assetId;
+  const getAssetIdForFile = useCallback(
+    (relativePath: string): string | null => {
+      const file = flatFiles.find((f) => f.relativePath === relativePath);
+      return file?.assetId ?? null;
     },
-    [registerFile],
+    [flatFiles],
   );
 
   const isFileRegistered = useCallback(
@@ -112,7 +95,7 @@ export function useWorkspace(): UseWorkspaceReturn {
     fileTree,
     isScanning,
     scanWorkspace,
-    registerAndGetAssetId,
+    getAssetIdForFile,
     isFileRegistered,
     findFileByName,
     findFilesByKind,
