@@ -9,7 +9,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import type { Asset, Sequence, Bin } from '@/types';
+import type { Asset, Sequence } from '@/types';
 
 /**
  * Raw project state returned from the backend.
@@ -17,7 +17,6 @@ import type { Asset, Sequence, Bin } from '@/types';
 export interface BackendProjectState {
   assets: Asset[];
   sequences: Sequence[];
-  bins: Bin[];
   activeSequenceId: string | null;
 }
 
@@ -27,7 +26,6 @@ export interface BackendProjectState {
 export interface TransformedProjectState {
   assets: Map<string, Asset>;
   sequences: Map<string, Sequence>;
-  bins: Bin[];
   activeSequenceId: string | null;
 }
 
@@ -62,7 +60,6 @@ export function transformProjectState(state: BackendProjectState): TransformedPr
   return {
     assets,
     sequences,
-    bins: state.bins ?? [],
     activeSequenceId: state.activeSequenceId,
   };
 }
