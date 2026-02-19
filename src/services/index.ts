@@ -64,9 +64,10 @@ export {
 
 export {
   fetchWorkspaceTreeFromBackend,
-  parseRelativeWorkspacePath,
-  parseRelativeWorkspacePathList,
-  registerWorkspaceFileInBackend,
-  registerWorkspaceFilesInBackend,
   scanWorkspaceFromBackend,
+  createFolderInBackend,
+  renameFileInBackend,
+  moveFileInBackend,
+  deleteFileInBackend,
+  revealInExplorerFromBackend,
 } from './workspaceGateway';

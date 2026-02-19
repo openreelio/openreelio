@@ -29,11 +29,20 @@ vi.mock('@/services/logger', () => ({
   }),
 }));
 
-import { invoke } from '@tauri-apps/api/core';
+const gatewayMocks = vi.hoisted(() => ({
+  scanWorkspaceFromBackend: vi.fn(),
+  fetchWorkspaceTreeFromBackend: vi.fn(),
+  createFolderInBackend: vi.fn(),
+  renameFileInBackend: vi.fn(),
+  moveFileInBackend: vi.fn(),
+  deleteFileInBackend: vi.fn(),
+}));
+
+vi.mock('@/services/workspaceGateway', () => gatewayMocks);
+
 import { listen } from '@tauri-apps/api/event';
 import type { FileTreeEntry, WorkspaceScanResult } from '@/types';
 
-const mockInvoke = vi.mocked(invoke);
 const mockListen = vi.mocked(listen);
 
 function createDeferred<T>(): {
@@ -63,7 +72,6 @@ describe('workspaceStore', () => {
       const state = useWorkspaceStore.getState();
       expect(state.fileTree).toEqual([]);
       expect(state.isScanning).toBe(false);
-      expect(state.registeringPathCounts).toEqual({});
       expect(state.isWatching).toBe(false);
       expect(state.scanResult).toBeNull();
       expect(state.error).toBeNull();
@@ -77,18 +85,14 @@ describe('workspaceStore', () => {
         newFiles: 3,
         removedFiles: 0,
         registeredFiles: 2,
+        autoRegisteredFiles: 3,
       };
 
-      mockInvoke.mockImplementation(async (cmd) => {
-        if (cmd === 'scan_workspace') return scanResult;
-        if (cmd === 'get_workspace_tree') return [];
-        return null;
-      });
+      gatewayMocks.scanWorkspaceFromBackend.mockResolvedValueOnce(scanResult);
+      gatewayMocks.fetchWorkspaceTreeFromBackend.mockResolvedValueOnce([]);
 
       const promise = useWorkspaceStore.getState().scanWorkspace();
 
-      // isScanning should be true immediately after calling
-      // (Note: In test environment, the promise might resolve quickly)
       await promise;
 
       const state = useWorkspaceStore.getState();
@@ -97,7 +101,7 @@ describe('workspaceStore', () => {
     });
 
     it('should handle scan errors', async () => {
-      mockInvoke.mockRejectedValueOnce('Scan failed: permission denied');
+      gatewayMocks.scanWorkspaceFromBackend.mockRejectedValueOnce('Scan failed: permission denied');
 
       await useWorkspaceStore.getState().scanWorkspace();
 
@@ -107,12 +111,9 @@ describe('workspaceStore', () => {
     });
 
     it('should reject malformed scan payloads defensively', async () => {
-      mockInvoke.mockResolvedValueOnce({
-        totalFiles: '5',
-        newFiles: 3,
-        removedFiles: 0,
-        registeredFiles: 2,
-      });
+      gatewayMocks.scanWorkspaceFromBackend.mockRejectedValueOnce(
+        new Error('Invalid workspace scan result payload: totalFiles: Expected number, received string'),
+      );
 
       await useWorkspaceStore.getState().scanWorkspace();
 
@@ -140,7 +141,7 @@ describe('workspaceStore', () => {
         },
       ];
 
-      mockInvoke.mockResolvedValueOnce(tree);
+      gatewayMocks.fetchWorkspaceTreeFromBackend.mockResolvedValueOnce(tree);
 
       await useWorkspaceStore.getState().refreshTree();
 
@@ -150,7 +151,7 @@ describe('workspaceStore', () => {
     });
 
     it('should handle refresh errors', async () => {
-      mockInvoke.mockRejectedValueOnce('No project open');
+      gatewayMocks.fetchWorkspaceTreeFromBackend.mockRejectedValueOnce('No project open');
 
       await useWorkspaceStore.getState().refreshTree();
 
@@ -179,13 +180,10 @@ describe('workspaceStore', () => {
       const first = createDeferred<FileTreeEntry[]>();
       const second = createDeferred<FileTreeEntry[]>();
 
-      let treeCallCount = 0;
-      mockInvoke.mockImplementation(async (cmd) => {
-        if (cmd !== 'get_workspace_tree') {
-          return [];
-        }
-        treeCallCount += 1;
-        return treeCallCount === 1 ? first.promise : second.promise;
+      let callCount = 0;
+      gatewayMocks.fetchWorkspaceTreeFromBackend.mockImplementation(async () => {
+        callCount += 1;
+        return callCount === 1 ? first.promise : second.promise;
       });
 
       const refreshA = useWorkspaceStore.getState().refreshTree();
@@ -200,149 +198,125 @@ describe('workspaceStore', () => {
     });
   });
 
-  describe('registerFile', () => {
-    it('should register a file and refresh tree', async () => {
-      mockInvoke
-        .mockResolvedValueOnce({
-          assetId: 'asset-123',
-          relativePath: 'video.mp4',
-          alreadyRegistered: false,
-        })
-        .mockResolvedValueOnce([]); // refreshTree call
+  describe('createFolder', () => {
+    it('should call gateway and refresh tree on success', async () => {
+      const tree: FileTreeEntry[] = [
+        {
+          relativePath: 'new-folder',
+          name: 'new-folder',
+          isDirectory: true,
+          children: [],
+        },
+      ];
 
-      const result = await useWorkspaceStore.getState().registerFile('video.mp4');
+      gatewayMocks.createFolderInBackend.mockResolvedValueOnce(undefined);
+      gatewayMocks.fetchWorkspaceTreeFromBackend.mockResolvedValueOnce(tree);
 
-      expect(result).toEqual({
-        assetId: 'asset-123',
-        relativePath: 'video.mp4',
-        alreadyRegistered: false,
-      });
-      expect(mockInvoke).toHaveBeenCalledWith('register_workspace_file', {
-        relativePath: 'video.mp4',
-      });
-      expect(useWorkspaceStore.getState().registeringPathCounts).toEqual({});
+      await useWorkspaceStore.getState().createFolder('new-folder');
+
+      expect(gatewayMocks.createFolderInBackend).toHaveBeenCalledWith('new-folder');
+      expect(useWorkspaceStore.getState().fileTree).toEqual(tree);
     });
 
-    it('should normalize Windows-style relative paths', async () => {
-      mockInvoke
-        .mockResolvedValueOnce({
-          assetId: 'asset-124',
-          relativePath: 'footage/clip.mp4',
-          alreadyRegistered: false,
-        })
-        .mockResolvedValueOnce([]);
+    it('should set error and rethrow on failure', async () => {
+      gatewayMocks.createFolderInBackend.mockRejectedValueOnce(new Error('Folder exists'));
 
-      const result = await useWorkspaceStore.getState().registerFile('footage\\clip.mp4');
-
-      expect(result?.assetId).toBe('asset-124');
-      expect(mockInvoke).toHaveBeenCalledWith('register_workspace_file', {
-        relativePath: 'footage/clip.mp4',
-      });
-    });
-
-    it('should return null on error', async () => {
-      mockInvoke.mockRejectedValueOnce('File not found');
-
-      const result = await useWorkspaceStore.getState().registerFile('missing.mp4');
-
-      expect(result).toBeNull();
-      expect(useWorkspaceStore.getState().error).toBe('File not found');
-    });
-
-    it('should reject traversal attempts before IPC call', async () => {
-      const result = await useWorkspaceStore.getState().registerFile('../outside.mp4');
-
-      expect(result).toBeNull();
-      expect(mockInvoke).not.toHaveBeenCalled();
-      expect(useWorkspaceStore.getState().error).toContain(
-        'relativePath contains invalid "." or ".."',
+      await expect(useWorkspaceStore.getState().createFolder('existing')).rejects.toThrow(
+        'Folder exists',
       );
-    });
-
-    it('should dedupe concurrent registration calls for same path', async () => {
-      const deferred = createDeferred<{
-        assetId: string;
-        relativePath: string;
-        alreadyRegistered: boolean;
-      }>();
-
-      mockInvoke.mockImplementation(async (cmd) => {
-        if (cmd === 'register_workspace_file') {
-          return deferred.promise;
-        }
-        if (cmd === 'get_workspace_tree') {
-          return [];
-        }
-        return null;
-      });
-
-      const first = useWorkspaceStore.getState().registerFile('clip.mp4');
-      const second = useWorkspaceStore.getState().registerFile(' clip.mp4 ');
-
-      expect(mockInvoke).toHaveBeenCalledTimes(1);
-      expect(mockInvoke).toHaveBeenCalledWith('register_workspace_file', {
-        relativePath: 'clip.mp4',
-      });
-
-      deferred.resolve({
-        assetId: 'asset-clip',
-        relativePath: 'clip.mp4',
-        alreadyRegistered: false,
-      });
-
-      const [firstResult, secondResult] = await Promise.all([first, second]);
-      expect(firstResult).toEqual(secondResult);
-      expect(useWorkspaceStore.getState().registeringPathCounts).toEqual({});
+      expect(useWorkspaceStore.getState().error).toBe('Folder exists');
     });
   });
 
-  describe('registerFiles', () => {
-    it('should batch register files', async () => {
-      const results = [
-        { assetId: 'a1', relativePath: 'a.mp4', alreadyRegistered: false },
-        { assetId: 'a2', relativePath: 'b.mp4', alreadyRegistered: true },
+  describe('renameFile', () => {
+    it('should call gateway and refresh tree on success', async () => {
+      const tree: FileTreeEntry[] = [
+        {
+          relativePath: 'renamed.mp4',
+          name: 'renamed.mp4',
+          isDirectory: false,
+          kind: 'video',
+          fileSize: 1024,
+          children: [],
+        },
       ];
 
-      mockInvoke.mockResolvedValueOnce(results).mockResolvedValueOnce([]); // refreshTree
+      gatewayMocks.renameFileInBackend.mockResolvedValueOnce(undefined);
+      gatewayMocks.fetchWorkspaceTreeFromBackend.mockResolvedValueOnce(tree);
 
-      const registered = await useWorkspaceStore.getState().registerFiles(['a.mp4', 'b.mp4']);
+      await useWorkspaceStore.getState().renameFile('old.mp4', 'renamed.mp4');
 
-      expect(registered).toEqual(results);
-      expect(mockInvoke).toHaveBeenCalledWith('register_workspace_files', {
-        relativePaths: ['a.mp4', 'b.mp4'],
-      });
+      expect(gatewayMocks.renameFileInBackend).toHaveBeenCalledWith('old.mp4', 'renamed.mp4');
+      expect(useWorkspaceStore.getState().fileTree).toEqual(tree);
     });
 
-    it('should dedupe and normalize batch register input paths', async () => {
-      mockInvoke
-        .mockResolvedValueOnce([
-          { assetId: 'a1', relativePath: 'a.mp4', alreadyRegistered: false },
-          { assetId: 'a2', relativePath: 'folder/clip.mp4', alreadyRegistered: false },
-        ])
-        .mockResolvedValueOnce([]);
+    it('should set error and rethrow on failure', async () => {
+      gatewayMocks.renameFileInBackend.mockRejectedValueOnce(new Error('File not found'));
 
-      await useWorkspaceStore.getState().registerFiles(['a.mp4', 'a.mp4', 'folder\\clip.mp4', '']);
+      await expect(
+        useWorkspaceStore.getState().renameFile('missing.mp4', 'new.mp4'),
+      ).rejects.toThrow('File not found');
+      expect(useWorkspaceStore.getState().error).toBe('File not found');
+    });
+  });
 
-      expect(mockInvoke).toHaveBeenCalledWith('register_workspace_files', {
-        relativePaths: ['a.mp4', 'folder/clip.mp4'],
-      });
-      expect(useWorkspaceStore.getState().registeringPathCounts).toEqual({});
+  describe('moveFile', () => {
+    it('should call gateway and refresh tree on success', async () => {
+      const tree: FileTreeEntry[] = [
+        {
+          relativePath: 'dest',
+          name: 'dest',
+          isDirectory: true,
+          children: [
+            {
+              relativePath: 'dest/clip.mp4',
+              name: 'clip.mp4',
+              isDirectory: false,
+              kind: 'video',
+              fileSize: 2048,
+              children: [],
+            },
+          ],
+        },
+      ];
+
+      gatewayMocks.moveFileInBackend.mockResolvedValueOnce(undefined);
+      gatewayMocks.fetchWorkspaceTreeFromBackend.mockResolvedValueOnce(tree);
+
+      await useWorkspaceStore.getState().moveFile('clip.mp4', 'dest');
+
+      expect(gatewayMocks.moveFileInBackend).toHaveBeenCalledWith('clip.mp4', 'dest');
+      expect(useWorkspaceStore.getState().fileTree).toEqual(tree);
     });
 
-    it('should return empty array on error', async () => {
-      mockInvoke.mockRejectedValueOnce('Batch registration failed');
+    it('should set error and rethrow on failure', async () => {
+      gatewayMocks.moveFileInBackend.mockRejectedValueOnce(new Error('Destination invalid'));
 
-      const results = await useWorkspaceStore.getState().registerFiles(['a.mp4']);
+      await expect(
+        useWorkspaceStore.getState().moveFile('clip.mp4', 'bad-dest'),
+      ).rejects.toThrow('Destination invalid');
+      expect(useWorkspaceStore.getState().error).toBe('Destination invalid');
+    });
+  });
 
-      expect(results).toEqual([]);
+  describe('deleteFile', () => {
+    it('should call gateway and refresh tree on success', async () => {
+      gatewayMocks.deleteFileInBackend.mockResolvedValueOnce(undefined);
+      gatewayMocks.fetchWorkspaceTreeFromBackend.mockResolvedValueOnce([]);
+
+      await useWorkspaceStore.getState().deleteFile('old-clip.mp4');
+
+      expect(gatewayMocks.deleteFileInBackend).toHaveBeenCalledWith('old-clip.mp4');
+      expect(useWorkspaceStore.getState().fileTree).toEqual([]);
     });
 
-    it('should reject malformed batch input before backend call', async () => {
-      const results = await useWorkspaceStore.getState().registerFiles(['a.mp4', '../escape.mp4']);
+    it('should set error and rethrow on failure', async () => {
+      gatewayMocks.deleteFileInBackend.mockRejectedValueOnce(new Error('Permission denied'));
 
-      expect(results).toEqual([]);
-      expect(mockInvoke).not.toHaveBeenCalled();
-      expect(useWorkspaceStore.getState().error).toContain('Invalid relativePaths');
+      await expect(useWorkspaceStore.getState().deleteFile('protected.mp4')).rejects.toThrow(
+        'Permission denied',
+      );
+      expect(useWorkspaceStore.getState().error).toBe('Permission denied');
     });
   });
 
@@ -350,7 +324,7 @@ describe('workspaceStore', () => {
     it('should coalesce refreshes and ignore invalid watcher payloads', async () => {
       vi.useFakeTimers();
 
-      mockInvoke.mockResolvedValue([]);
+      gatewayMocks.fetchWorkspaceTreeFromBackend.mockResolvedValue([]);
       await setupWorkspaceEventListeners();
 
       const fileAddedHandler = mockListen.mock.calls.find(
@@ -362,11 +336,10 @@ describe('workspaceStore', () => {
       fileAddedHandler?.({ payload: { relativePath: 'footage/clip.mp4', kind: 'video' } } as never);
       fileAddedHandler?.({ payload: { relativePath: 'footage/clip.mp4', kind: 'video' } } as never);
 
-      expect(mockInvoke).not.toHaveBeenCalled();
+      expect(gatewayMocks.fetchWorkspaceTreeFromBackend).not.toHaveBeenCalled();
 
       await vi.advanceTimersByTimeAsync(150);
-      expect(mockInvoke).toHaveBeenCalledTimes(1);
-      expect(mockInvoke).toHaveBeenCalledWith('get_workspace_tree', undefined);
+      expect(gatewayMocks.fetchWorkspaceTreeFromBackend).toHaveBeenCalledTimes(1);
 
       await cleanupWorkspaceEventListeners();
       expect(useWorkspaceStore.getState().isWatching).toBe(false);
@@ -375,15 +348,16 @@ describe('workspaceStore', () => {
 
   describe('reset', () => {
     it('should reset to initial state', async () => {
-      // Set some state first
-      mockInvoke
-        .mockResolvedValueOnce({
-          totalFiles: 5,
-          newFiles: 3,
-          removedFiles: 0,
-          registeredFiles: 2,
-        })
-        .mockResolvedValueOnce([]);
+      const scanResult: WorkspaceScanResult = {
+        totalFiles: 5,
+        newFiles: 3,
+        removedFiles: 0,
+        registeredFiles: 2,
+        autoRegisteredFiles: 3,
+      };
+
+      gatewayMocks.scanWorkspaceFromBackend.mockResolvedValueOnce(scanResult);
+      gatewayMocks.fetchWorkspaceTreeFromBackend.mockResolvedValueOnce([]);
 
       await useWorkspaceStore.getState().scanWorkspace();
 
@@ -393,7 +367,6 @@ describe('workspaceStore', () => {
       const state = useWorkspaceStore.getState();
       expect(state.fileTree).toEqual([]);
       expect(state.isScanning).toBe(false);
-      expect(state.registeringPathCounts).toEqual({});
       expect(state.scanResult).toBeNull();
       expect(state.error).toBeNull();
     });
