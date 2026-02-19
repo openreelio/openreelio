@@ -3,6 +3,7 @@
  *
  * Individual file or folder item in the workspace file tree.
  * Supports expand/collapse for directories and drag for files.
+ * All media files are draggable (auto-registered as assets by the backend).
  */
 
 import { useState, useCallback, type DragEvent, type MouseEvent } from 'react';
@@ -15,8 +16,7 @@ import {
   Image as ImageIcon,
   FileText,
   File,
-  Circle,
-  CheckCircle2,
+  AlertTriangle,
 } from 'lucide-react';
 import type { FileTreeEntry, AssetKind } from '@/types';
 
@@ -29,8 +29,6 @@ export interface FileTreeItemProps {
   entry: FileTreeEntry;
   /** Nesting depth for indentation */
   depth?: number;
-  /** Registration in-flight counters keyed by relative path */
-  registeringPathCounts?: Record<string, number>;
   /** Handler for clicking a file */
   onFileClick?: (entry: FileTreeEntry) => void;
   /** Handler for double-clicking a file (e.g., add to timeline) */
@@ -75,14 +73,12 @@ function formatFileSize(bytes?: number): string {
 export function FileTreeItem({
   entry,
   depth = 0,
-  registeringPathCounts,
   onFileClick,
   onFileDoubleClick,
   onContextMenu,
   onDragStart,
 }: FileTreeItemProps) {
   const [isExpanded, setIsExpanded] = useState(depth < 1);
-  const isRegistering = (registeringPathCounts?.[entry.relativePath] ?? 0) > 0;
 
   const handleToggle = useCallback(() => {
     if (entry.isDirectory) {
@@ -139,7 +135,9 @@ export function FileTreeItem({
   return (
     <>
       <div
-        className="flex items-center gap-1.5 py-0.5 text-sm cursor-pointer hover:bg-surface-active transition-colors group"
+        className={`flex items-center gap-1.5 py-0.5 text-sm cursor-pointer hover:bg-surface-active transition-colors group ${
+          entry.missing ? 'opacity-50' : ''
+        }`}
         style={{ paddingLeft }}
         onClick={handleClick}
         onDoubleClick={handleDoubleClick}
@@ -177,32 +175,17 @@ export function FileTreeItem({
         {/* Name */}
         <span className="truncate flex-1 text-editor-text">{entry.name}</span>
 
-        {/* File size badge */}
-        {!entry.isDirectory && entry.fileSize != null && (
-          <span className="text-[10px] text-text-muted flex-shrink-0 mr-1">
-            {formatFileSize(entry.fileSize)}
+        {/* Missing file indicator */}
+        {!entry.isDirectory && entry.missing && (
+          <span title="File not found — may have been moved or deleted">
+            <AlertTriangle className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />
           </span>
         )}
 
-        {/* Registration indicator */}
-        {!entry.isDirectory && (
-          <span
-            className="flex-shrink-0 mr-2"
-            title={
-              isRegistering
-                ? 'Registering...'
-                : entry.assetId != null
-                  ? 'Registered'
-                  : 'Not registered'
-            }
-          >
-            {isRegistering ? (
-              <div className="w-3 h-3 border border-blue-400 border-t-transparent rounded-full animate-spin" />
-            ) : entry.assetId != null ? (
-              <CheckCircle2 className="w-3 h-3 text-green-500" />
-            ) : (
-              <Circle className="w-3 h-3 text-text-muted opacity-50" />
-            )}
+        {/* File size badge */}
+        {!entry.isDirectory && entry.fileSize != null && (
+          <span className="text-[10px] text-text-muted flex-shrink-0 mr-2">
+            {formatFileSize(entry.fileSize)}
           </span>
         )}
       </div>
@@ -215,7 +198,6 @@ export function FileTreeItem({
               key={child.relativePath}
               entry={child}
               depth={depth + 1}
-              registeringPathCounts={registeringPathCounts}
               onFileClick={onFileClick}
               onFileDoubleClick={onFileDoubleClick}
               onContextMenu={onContextMenu}

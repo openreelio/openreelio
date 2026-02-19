@@ -2,7 +2,7 @@
  * FileTree Component
  *
  * VS Code-like file tree for the workspace explorer.
- * Shows all media files in the project folder with registration status.
+ * Shows all media files in the project folder.
  */
 
 import { useCallback, type MouseEvent } from 'react';
@@ -19,13 +19,11 @@ export interface FileTreeProps {
   entries: FileTreeEntry[];
   /** Whether a scan is in progress */
   isScanning?: boolean;
-  /** Registration in-flight counters keyed by relative path */
-  registeringPathCounts?: Record<string, number>;
   /** Handler for scanning the workspace */
   onScan?: () => void;
   /** Handler for clicking a file */
   onFileClick?: (entry: FileTreeEntry) => void;
-  /** Handler for double-clicking a file (e.g., register + add to timeline) */
+  /** Handler for double-clicking a file (e.g., add to timeline) */
   onFileDoubleClick?: (entry: FileTreeEntry) => void;
   /** Handler for right-clicking a file */
   onContextMenu?: (event: MouseEvent, entry: FileTreeEntry) => void;
@@ -40,7 +38,6 @@ export interface FileTreeProps {
 export function FileTree({
   entries,
   isScanning = false,
-  registeringPathCounts,
   onScan,
   onFileClick,
   onFileDoubleClick,
@@ -79,7 +76,6 @@ export function FileTree({
         <FileTreeItem
           key={entry.relativePath}
           entry={entry}
-          registeringPathCounts={registeringPathCounts}
           onFileClick={onFileClick}
           onFileDoubleClick={onFileDoubleClick}
           onContextMenu={onContextMenu}
