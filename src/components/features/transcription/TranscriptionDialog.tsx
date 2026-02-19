@@ -7,7 +7,7 @@
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { X, MessageSquare, AlertTriangle, Loader2 } from 'lucide-react';
-import type { AssetData } from '@/components/explorer/AssetItem';
+import type { AssetData } from '.';
 
 // =============================================================================
 // Types

@@ -7,7 +7,7 @@
 
 import React, { useEffect, useRef, useCallback } from 'react';
 import { MessageSquare, Trash2, Edit3, Loader2 } from 'lucide-react';
-import type { AssetData } from '@/components/explorer/AssetItem';
+import type { AssetData } from '.';
 
 // =============================================================================
 // Types

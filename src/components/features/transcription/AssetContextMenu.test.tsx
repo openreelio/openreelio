@@ -8,7 +8,7 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AssetContextMenu } from './AssetContextMenu';
-import type { AssetData } from '@/components/explorer/AssetItem';
+import type { AssetData } from '.';
 
 // =============================================================================
 // Test Data
