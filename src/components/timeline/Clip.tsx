@@ -251,9 +251,10 @@ export function Clip({
   // Determine if this is a text clip
   const isText = isTextClip(clip.assetId);
 
-  // Look up the asset to check its missing status
-  const asset = useProjectStore((s) => s.getAsset(clip.assetId));
-  const isAssetMissing = asset?.missing === true;
+  // Subscribe only to the missing flag to avoid re-renders on unrelated asset updates
+  const isAssetMissing = useProjectStore(
+    (s) => s.assets.get(clip.assetId)?.missing === true,
+  );
 
   // Determine if clip has visual content (thumbnails or waveform)
   // Text clips don't have visual content like thumbnails or waveforms
@@ -342,7 +343,7 @@ export function Clip({
 
       {/* Missing asset overlay */}
       {isAssetMissing && (
-        <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center pointer-events-none">
+        <div className="absolute inset-0 bg-red-500/20 flex items-center justify-center pointer-events-none z-20">
           <AlertTriangle className="w-4 h-4 text-red-400" />
         </div>
       )}

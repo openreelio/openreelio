@@ -164,6 +164,18 @@ pub async fn reveal_in_explorer(
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
     let abs_path = project.path.join(&relative_path);
+
+    // Ensure the resolved path stays within the project root
+    let canonical_root = project
+        .path
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve project root: {}", e))?;
+    if let Ok(canonical_target) = abs_path.canonicalize() {
+        if !canonical_target.starts_with(&canonical_root) {
+            return Err("Path is outside the project directory".to_string());
+        }
+    }
+
     if !abs_path.exists() {
         return Err(format!("File not found: {}", abs_path.display()));
     }

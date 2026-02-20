@@ -4,7 +4,7 @@
  * Tests for the unified filesystem-first project explorer.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { ProjectExplorer } from './ProjectExplorer';
 import type { FileTreeEntry } from '@/types';
@@ -108,8 +108,11 @@ vi.mock('@/services/logger', () => ({
 // =============================================================================
 
 describe('ProjectExplorer', () => {
+  let originalClipboard: Clipboard;
+
   beforeEach(() => {
     vi.clearAllMocks();
+    originalClipboard = navigator.clipboard;
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText: mockClipboardWriteText },
       configurable: true,
@@ -124,6 +127,13 @@ describe('ProjectExplorer', () => {
       selectedAssetId: null,
       selectAsset: vi.fn(),
       removeAsset: vi.fn(),
+    });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      value: originalClipboard,
+      configurable: true,
     });
   });
 

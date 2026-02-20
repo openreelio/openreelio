@@ -84,6 +84,25 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * Sync project store after a filesystem mutation (rename, move, delete).
+ * These operations update asset paths on the backend, so we must refresh
+ * the project store to keep frontend asset data consistent.
+ */
+async function syncProjectStoreAfterMutation(operation: string): Promise<void> {
+  try {
+    const freshState = await refreshProjectState();
+    const { useProjectStore } = await import('@/stores/projectStore');
+    useProjectStore.setState((draft) => {
+      applyProjectState(draft, freshState);
+    });
+  } catch (syncError) {
+    logger.warn(`Failed to sync project store after ${operation}`, {
+      error: toErrorMessage(syncError),
+    });
+  }
+}
+
 function scheduleWorkspaceTreeRefresh(reason: string): void {
   if (scheduledTreeRefreshTimer !== null) {
     logger.debug('Coalescing workspace tree refresh request', { reason });
@@ -213,6 +232,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       try {
         await renameFileInBackend(oldRelativePath, newName);
         await get().refreshTree();
+        await syncProjectStoreAfterMutation('renameFile');
       } catch (error) {
         const message = toErrorMessage(error);
         logger.error('Failed to rename file', { error: message });
@@ -227,6 +247,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       try {
         await moveFileInBackend(sourcePath, destFolderPath);
         await get().refreshTree();
+        await syncProjectStoreAfterMutation('moveFile');
       } catch (error) {
         const message = toErrorMessage(error);
         logger.error('Failed to move file', { error: message });
@@ -241,6 +262,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       try {
         await deleteFileInBackend(relativePath);
         await get().refreshTree();
+        await syncProjectStoreAfterMutation('deleteFile');
       } catch (error) {
         const message = toErrorMessage(error);
         logger.error('Failed to delete file', { error: message });

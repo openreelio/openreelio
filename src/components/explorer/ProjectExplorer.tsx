@@ -151,11 +151,14 @@ export function ProjectExplorer() {
     setRenameValue(entry.name);
   }, []);
 
-  const handleRenameConfirm = useCallback(() => {
+  const handleRenameConfirm = useCallback(async () => {
     if (renamingEntry && renameValue.trim() && renameValue !== renamingEntry.name) {
-      renameFile(renamingEntry.relativePath, renameValue.trim()).catch((error) => {
+      try {
+        await renameFile(renamingEntry.relativePath, renameValue.trim());
+      } catch (error) {
         logger.error('Failed to rename', { error });
-      });
+        return;
+      }
     }
     setRenamingEntry(null);
     setRenameValue('');
@@ -170,11 +173,14 @@ export function ProjectExplorer() {
     setDeleteTarget(entry);
   }, []);
 
-  const handleConfirmDelete = useCallback(() => {
+  const handleConfirmDelete = useCallback(async () => {
     if (deleteTarget) {
-      deleteFile(deleteTarget.relativePath).catch((error) => {
+      try {
+        await deleteFile(deleteTarget.relativePath);
+      } catch (error) {
         logger.error('Failed to delete', { error });
-      });
+        return;
+      }
       setDeleteTarget(null);
     }
   }, [deleteTarget, deleteFile]);
