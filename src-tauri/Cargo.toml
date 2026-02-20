@@ -46,7 +46,7 @@ thiserror = "2.0"
 # Tauri
 tauri = { version = "2", features = ["protocol-asset"] }
 tauri-plugin-dialog = "2.6"
-tauri-plugin-updater = "2.9"
+tauri-plugin-updater = "2.10"
 tauri-plugin-stronghold = "2"
 
 # Cryptography for credential storage and derivation
