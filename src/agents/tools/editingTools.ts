@@ -622,36 +622,43 @@ const EDITING_TOOLS: ToolDefinition[] = [
         const exactMatch = matches.find((m) => m.relativePath === file);
         const targetFile = exactMatch ?? matches[0];
 
-        // 2. Get or register the asset ID
+        // 2. Get the asset ID (files are auto-registered by the backend)
         let assetId = targetFile.assetId;
 
         if (!assetId) {
-          // Auto-register the file
-          const registerResult = await useWorkspaceStore
-            .getState()
-            .registerFile(targetFile.relativePath);
+          // File not yet auto-registered; refresh tree and project state
+          try {
+            await useWorkspaceStore.getState().refreshTree();
+            const freshState = await refreshProjectState();
+            useProjectStore.setState((draft) => {
+              draft.assets = freshState.assets;
+            });
+          } catch (error) {
+            logger.warn('Could not refresh state for unregistered workspace file', {
+              file: targetFile.relativePath,
+              error,
+            });
+          }
 
-          if (!registerResult) {
+          // Re-check the tree for the asset ID after refresh
+          const refreshedTree = useWorkspaceStore.getState().fileTree;
+          const findInTree = (entries: typeof refreshedTree, path: string): string | undefined => {
+            for (const e of entries) {
+              if (!e.isDirectory && e.relativePath === path) return e.assetId;
+              if (e.isDirectory) {
+                const found = findInTree(e.children, path);
+                if (found) return found;
+              }
+            }
+            return undefined;
+          };
+          assetId = findInTree(refreshedTree, targetFile.relativePath);
+
+          if (!assetId) {
             return {
               success: false,
-              error: `Failed to register workspace file "${targetFile.relativePath}"`,
+              error: `Workspace file "${targetFile.relativePath}" is not yet registered as an asset. Try scanning the workspace first.`,
             };
-          }
-          assetId = registerResult.assetId;
-
-          if (!useProjectStore.getState().assets.has(assetId)) {
-            try {
-              const freshState = await refreshProjectState();
-              useProjectStore.setState((draft) => {
-                draft.assets = freshState.assets;
-              });
-            } catch (error) {
-              logger.warn('Could not refresh project assets after workspace auto-registration', {
-                file: targetFile.relativePath,
-                assetId,
-                error,
-              });
-            }
           }
         }
 

@@ -571,19 +571,15 @@ impl CommandExecutor {
                 }))
             }
 
-            // Bin operations
-            OpKind::BinCreate => {
-                let bin_id = result.created_ids.first().ok_or_else(|| {
-                    CoreError::Internal("BinCreate missing createdId".to_string())
-                })?;
-                let bin = state.bins.get(bin_id).ok_or_else(|| {
-                    CoreError::Internal(format!("BinCreate could not find bin in state: {bin_id}"))
-                })?;
-                to_value(bin)
-            }
+            // Bin operations (deprecated - pass through command JSON for backward compatibility)
+            OpKind::BinCreate
+            | OpKind::BinRemove
+            | OpKind::BinRename
+            | OpKind::BinMove
+            | OpKind::BinUpdateColor => Ok(command_json),
 
-            OpKind::BinRemove | OpKind::BinRename | OpKind::BinMove | OpKind::BinUpdateColor => {
-                // These operations store command data which is sufficient for replay
+            // Filesystem operations - command JSON is sufficient for replay
+            OpKind::FolderCreate | OpKind::FileRename | OpKind::FileMove | OpKind::FileDelete => {
                 Ok(command_json)
             }
 
@@ -719,6 +715,11 @@ impl CommandExecutor {
             "RenameBin" => OpKind::BinRename,
             "MoveBin" => OpKind::BinMove,
             "SetBinColor" => OpKind::BinUpdateColor,
+            // Filesystem operations
+            "CreateFolder" => OpKind::FolderCreate,
+            "RenameFile" => OpKind::FileRename,
+            "MoveFile" => OpKind::FileMove,
+            "DeleteFile" => OpKind::FileDelete,
             _ => OpKind::Batch, // Default to batch for unknown types
         }
     }

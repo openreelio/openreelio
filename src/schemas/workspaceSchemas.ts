@@ -92,6 +92,7 @@ export const WorkspaceScanResultSchema = z
     newFiles: WorkspaceScanCountSchema,
     removedFiles: WorkspaceScanCountSchema,
     registeredFiles: WorkspaceScanCountSchema,
+    autoRegisteredFiles: WorkspaceScanCountSchema,
   })
   .strict() satisfies z.ZodType<WorkspaceScanResult>;
 
@@ -113,6 +114,7 @@ const FileTreeEntrySchema: z.ZodType<FileTreeEntry> = z.lazy(() =>
         (value) => (value === null ? undefined : value),
         z.string().trim().min(1).optional(),
       ),
+      missing: z.boolean().optional().default(false),
       children: z.array(FileTreeEntrySchema),
     })
     .strict()

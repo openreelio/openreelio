@@ -2,26 +2,27 @@
  * Workspace Store
  *
  * Manages workspace file tree state, scanning, and file watching.
- * Provides workspace-based asset discovery and registration.
+ * Provides workspace-based asset discovery and filesystem operations.
  */
 
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { FileTreeEntry, WorkspaceScanResult, RegisterFileResult } from '@/types';
+import type { FileTreeEntry, WorkspaceScanResult } from '@/types';
 import { createLogger } from '@/services/logger';
 import {
   fetchWorkspaceTreeFromBackend,
-  parseRelativeWorkspacePath,
-  parseRelativeWorkspacePathList,
-  registerWorkspaceFileInBackend,
-  registerWorkspaceFilesInBackend,
   scanWorkspaceFromBackend,
+  createFolderInBackend,
+  renameFileInBackend,
+  moveFileInBackend,
+  deleteFileInBackend,
 } from '@/services/workspaceGateway';
 import {
   parseWorkspaceFileEvent,
   parseWorkspaceScanCompleteEvent,
 } from '@/schemas/workspaceSchemas';
+import { refreshProjectState, applyProjectState } from '@/utils/stateRefreshHelper';
 
 const logger = createLogger('WorkspaceStore');
 
@@ -30,8 +31,6 @@ const TREE_REFRESH_COALESCE_MS = 120;
 let nextTreeRefreshRequestId = 0;
 let latestTreeRefreshRequestId = 0;
 let scheduledTreeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
-
-const inFlightSingleFileRegistrations = new Map<string, Promise<RegisterFileResult | null>>();
 
 // =============================================================================
 // Types
@@ -42,8 +41,6 @@ interface WorkspaceState {
   fileTree: FileTreeEntry[];
   /** Whether a scan is in progress */
   isScanning: boolean;
-  /** Registration in-flight counters keyed by workspace relative path */
-  registeringPathCounts: Record<string, number>;
   /** Whether the file watcher is active */
   isWatching: boolean;
   /** Result of the last scan */
@@ -57,10 +54,14 @@ interface WorkspaceActions {
   scanWorkspace: () => Promise<void>;
   /** Refresh the file tree from the backend */
   refreshTree: () => Promise<void>;
-  /** Register a single workspace file as a project asset */
-  registerFile: (relativePath: string) => Promise<RegisterFileResult | null>;
-  /** Register multiple workspace files as project assets */
-  registerFiles: (relativePaths: string[]) => Promise<RegisterFileResult[]>;
+  /** Create a new folder in the workspace */
+  createFolder: (relativePath: string) => Promise<void>;
+  /** Rename a file or folder in the workspace */
+  renameFile: (oldRelativePath: string, newName: string) => Promise<void>;
+  /** Move a file or folder to a different directory */
+  moveFile: (sourcePath: string, destFolderPath: string) => Promise<void>;
+  /** Delete a file or folder from the workspace */
+  deleteFile: (relativePath: string) => Promise<void>;
   /** Reset the workspace store to initial state */
   reset: () => void;
 }
@@ -74,37 +75,32 @@ type WorkspaceStore = WorkspaceState & WorkspaceActions;
 const initialState: WorkspaceState = {
   fileTree: [],
   isScanning: false,
-  registeringPathCounts: {},
   isWatching: false,
   scanResult: null,
   error: null,
 };
 
-function beginRegistration(
-  registeringPathCounts: Record<string, number>,
-  relativePaths: string[],
-): void {
-  for (const relativePath of relativePaths) {
-    registeringPathCounts[relativePath] = (registeringPathCounts[relativePath] ?? 0) + 1;
-  }
-}
-
-function completeRegistration(
-  registeringPathCounts: Record<string, number>,
-  relativePaths: string[],
-): void {
-  for (const relativePath of relativePaths) {
-    const nextCount = (registeringPathCounts[relativePath] ?? 0) - 1;
-    if (nextCount <= 0) {
-      delete registeringPathCounts[relativePath];
-      continue;
-    }
-    registeringPathCounts[relativePath] = nextCount;
-  }
-}
-
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Sync project store after a filesystem mutation (rename, move, delete).
+ * These operations update asset paths on the backend, so we must refresh
+ * the project store to keep frontend asset data consistent.
+ */
+async function syncProjectStoreAfterMutation(operation: string): Promise<void> {
+  try {
+    const freshState = await refreshProjectState();
+    const { useProjectStore } = await import('@/stores/projectStore');
+    useProjectStore.setState((draft) => {
+      applyProjectState(draft, freshState);
+    });
+  } catch (syncError) {
+    logger.warn(`Failed to sync project store after ${operation}`, {
+      error: toErrorMessage(syncError),
+    });
+  }
 }
 
 function scheduleWorkspaceTreeRefresh(reason: string): void {
@@ -145,6 +141,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
         logger.info('Workspace scan complete', {
           totalFiles: result.totalFiles,
           newFiles: result.newFiles,
+          autoRegisteredFiles: result.autoRegisteredFiles,
         });
 
         set((state) => {
@@ -154,6 +151,26 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
 
         // Refresh tree after scan
         await get().refreshTree();
+
+        // When auto-registration created new assets, sync project store.
+        // We import useProjectStore lazily to avoid a circular dependency
+        // (projectStore already imports workspaceStore).
+        if (result.autoRegisteredFiles > 0) {
+          try {
+            const freshState = await refreshProjectState();
+            const { useProjectStore } = await import('@/stores/projectStore');
+            useProjectStore.setState((draft) => {
+              applyProjectState(draft, freshState);
+            });
+            logger.info('Project store synced after auto-registration', {
+              autoRegisteredFiles: result.autoRegisteredFiles,
+            });
+          } catch (syncError) {
+            logger.warn('Failed to sync project store after auto-registration', {
+              error: toErrorMessage(syncError),
+            });
+          }
+        }
       } catch (error) {
         const message = toErrorMessage(error);
         logger.error('Workspace scan failed', { error: message });
@@ -197,107 +214,66 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       }
     },
 
-    registerFile: async (relativePath: string) => {
-      let normalizedPath: string;
+    createFolder: async (relativePath: string) => {
       try {
-        normalizedPath = parseRelativeWorkspacePath(relativePath);
+        await createFolderInBackend(relativePath);
+        await get().refreshTree();
       } catch (error) {
         const message = toErrorMessage(error);
+        logger.error('Failed to create folder', { error: message });
         set((state) => {
           state.error = message;
         });
-        return null;
+        throw error;
       }
-
-      const inFlight = inFlightSingleFileRegistrations.get(normalizedPath);
-      if (inFlight) {
-        logger.debug('Reusing in-flight workspace registration', { relativePath: normalizedPath });
-        return inFlight;
-      }
-
-      const registrationPromise = (async () => {
-        set((state) => {
-          beginRegistration(state.registeringPathCounts, [normalizedPath]);
-          state.error = null;
-        });
-
-        try {
-          const result = await registerWorkspaceFileInBackend(normalizedPath);
-          logger.info('Registered workspace file', {
-            relativePath: result.relativePath,
-            assetId: result.assetId,
-          });
-
-          // Refresh tree to update registration status
-          await get().refreshTree();
-          return result;
-        } catch (error) {
-          const message = toErrorMessage(error);
-          logger.error('Failed to register workspace file', { error: message });
-          set((state) => {
-            state.error = message;
-          });
-          return null;
-        } finally {
-          set((state) => {
-            completeRegistration(state.registeringPathCounts, [normalizedPath]);
-          });
-          inFlightSingleFileRegistrations.delete(normalizedPath);
-        }
-      })();
-
-      inFlightSingleFileRegistrations.set(normalizedPath, registrationPromise);
-      return registrationPromise;
     },
 
-    registerFiles: async (relativePaths: string[]) => {
-      let normalizedPaths: string[];
+    renameFile: async (oldRelativePath: string, newName: string) => {
       try {
-        normalizedPaths = parseRelativeWorkspacePathList(relativePaths);
-      } catch (error) {
-        const message = toErrorMessage(error);
-        logger.error('Invalid workspace registration batch', { error: message });
-        set((state) => {
-          state.error = message;
-        });
-        return [];
-      }
-
-      if (normalizedPaths.length === 0) {
-        return [];
-      }
-
-      set((state) => {
-        beginRegistration(state.registeringPathCounts, normalizedPaths);
-        state.error = null;
-      });
-
-      try {
-        const results = await registerWorkspaceFilesInBackend(normalizedPaths);
-        logger.info('Registered workspace files', {
-          requestedCount: normalizedPaths.length,
-          importedCount: results.length,
-        });
-
-        // Refresh tree to update registration status
+        await renameFileInBackend(oldRelativePath, newName);
         await get().refreshTree();
-        return results;
+        await syncProjectStoreAfterMutation('renameFile');
       } catch (error) {
         const message = toErrorMessage(error);
-        logger.error('Failed to register workspace files', { error: message });
+        logger.error('Failed to rename file', { error: message });
         set((state) => {
           state.error = message;
         });
-        return [];
-      } finally {
+        throw error;
+      }
+    },
+
+    moveFile: async (sourcePath: string, destFolderPath: string) => {
+      try {
+        await moveFileInBackend(sourcePath, destFolderPath);
+        await get().refreshTree();
+        await syncProjectStoreAfterMutation('moveFile');
+      } catch (error) {
+        const message = toErrorMessage(error);
+        logger.error('Failed to move file', { error: message });
         set((state) => {
-          completeRegistration(state.registeringPathCounts, normalizedPaths);
+          state.error = message;
         });
+        throw error;
+      }
+    },
+
+    deleteFile: async (relativePath: string) => {
+      try {
+        await deleteFileInBackend(relativePath);
+        await get().refreshTree();
+        await syncProjectStoreAfterMutation('deleteFile');
+      } catch (error) {
+        const message = toErrorMessage(error);
+        logger.error('Failed to delete file', { error: message });
+        set((state) => {
+          state.error = message;
+        });
+        throw error;
       }
     },
 
     reset: () => {
-      inFlightSingleFileRegistrations.clear();
       nextTreeRefreshRequestId = 0;
       latestTreeRefreshRequestId = 0;
       clearScheduledWorkspaceTreeRefresh();
@@ -368,6 +344,7 @@ export async function setupWorkspaceEventListeners(): Promise<void> {
           newFiles: event.newFiles,
           removedFiles: event.removedFiles,
           registeredFiles: event.registeredFiles,
+          autoRegisteredFiles: event.autoRegisteredFiles,
         });
 
         useWorkspaceStore.setState({
@@ -377,6 +354,22 @@ export async function setupWorkspaceEventListeners(): Promise<void> {
         });
 
         scheduleWorkspaceTreeRefresh('workspace:scan-complete');
+
+        // Sync project store when new assets were auto-registered
+        if (event.autoRegisteredFiles > 0) {
+          refreshProjectState()
+            .then(async (freshState) => {
+              const { useProjectStore } = await import('@/stores/projectStore');
+              useProjectStore.setState((draft) => {
+                applyProjectState(draft, freshState);
+              });
+            })
+            .catch((syncError) => {
+              logger.warn('Failed to sync project store after scan-complete event', {
+                error: toErrorMessage(syncError),
+              });
+            });
+        }
       } catch (error) {
         logger.warn('Ignoring invalid workspace:scan-complete payload', {
           error: toErrorMessage(error),
@@ -434,6 +427,5 @@ export async function cleanupWorkspaceEventListeners(): Promise<void> {
 
 export const selectFileTree = (state: WorkspaceStore) => state.fileTree;
 export const selectIsScanning = (state: WorkspaceStore) => state.isScanning;
-export const selectRegisteringPathCounts = (state: WorkspaceStore) => state.registeringPathCounts;
 export const selectScanResult = (state: WorkspaceStore) => state.scanResult;
 export const selectWorkspaceError = (state: WorkspaceStore) => state.error;

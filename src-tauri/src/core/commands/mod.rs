@@ -4,11 +4,11 @@
 //! All editing operations are performed through Commands in this module.
 
 mod asset;
-mod bin;
 mod caption;
 mod clip;
 mod effect;
 mod executor;
+mod filesystem;
 mod mask;
 mod project;
 mod sequence;
@@ -17,11 +17,11 @@ mod track;
 mod traits;
 
 pub use asset::*;
-pub use bin::*;
 pub use caption::*;
 pub use clip::*;
 pub use effect::*;
 pub use executor::*;
+pub use filesystem::*;
 pub use mask::*;
 pub use project::*;
 pub use sequence::*;

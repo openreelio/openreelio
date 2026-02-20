@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
+use crate::core::assets::{Asset, AssetKind, AudioInfo, VideoInfo};
+use crate::core::project::ProjectState;
 use crate::core::CoreResult;
 
 use super::ignore::IgnoreRules;
@@ -43,6 +45,8 @@ pub struct FileTreeEntry {
     pub file_size: Option<u64>,
     /// Asset ID if registered as a project asset
     pub asset_id: Option<String>,
+    /// Whether the associated asset is marked as missing
+    pub missing: bool,
     /// Child entries (for directories)
     pub children: Vec<FileTreeEntry>,
 }
@@ -208,6 +212,48 @@ impl WorkspaceService {
         &self.project_root
     }
 
+    /// Process a workspace event, updating both the index and project state.
+    /// For FileRemoved: marks matching assets as missing.
+    /// For FileAdded: auto-reconnects previously missing assets.
+    pub fn handle_event_with_state(
+        &self,
+        event: &WorkspaceEvent,
+        state: &mut ProjectState,
+    ) -> CoreResult<()> {
+        // First, update the index (existing behavior)
+        self.handle_event(event)?;
+
+        match event {
+            WorkspaceEvent::FileRemoved(rel_path) => {
+                // Find assets with this relative_path and mark them missing
+                for asset in state.assets.values_mut() {
+                    if asset.relative_path.as_deref() == Some(rel_path.as_str()) {
+                        asset.missing = true;
+                        tracing::info!(
+                            asset_id = %asset.id,
+                            path = %rel_path,
+                            "Asset marked as missing (file removed externally)"
+                        );
+                    }
+                }
+            }
+            WorkspaceEvent::FileAdded(rel_path) | WorkspaceEvent::FileModified(rel_path) => {
+                // Check if any missing asset matches this path and reconnect
+                for asset in state.assets.values_mut() {
+                    if asset.missing && asset.relative_path.as_deref() == Some(rel_path.as_str()) {
+                        asset.missing = false;
+                        tracing::info!(
+                            asset_id = %asset.id,
+                            path = %rel_path,
+                            "Asset reconnected (file re-appeared)"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Process a single workspace event (update index)
     pub fn handle_event(&self, event: &WorkspaceEvent) -> CoreResult<()> {
         match event {
@@ -237,6 +283,126 @@ impl WorkspaceService {
             }
         }
         Ok(())
+    }
+
+    /// Auto-register all discovered files that don't yet have an asset_id.
+    /// Creates Asset entries in ProjectState and links them in the index.
+    pub fn auto_register_discovered_files(
+        &self,
+        state: &mut ProjectState,
+        project_root: &std::path::Path,
+    ) -> CoreResult<usize> {
+        let unregistered = self.index.get_unregistered()?;
+        let mut registered_count = 0;
+
+        for entry in &unregistered {
+            // Check if there's already an asset with this relative_path
+            let already_exists = state
+                .assets
+                .values()
+                .any(|a| a.relative_path.as_deref() == Some(&entry.relative_path));
+            if already_exists {
+                // Link existing asset to the index entry
+                if let Some(asset) = state
+                    .assets
+                    .values()
+                    .find(|a| a.relative_path.as_deref() == Some(&entry.relative_path))
+                {
+                    let asset_id = asset.id.clone();
+                    self.index
+                        .mark_registered(&entry.relative_path, &asset_id)?;
+                }
+                continue;
+            }
+
+            let abs_path = project_root.join(&entry.relative_path);
+            let uri = abs_path.to_string_lossy().to_string();
+
+            let asset = match entry.kind {
+                AssetKind::Audio => Asset::new_audio(
+                    entry
+                        .relative_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&entry.relative_path),
+                    &uri,
+                    AudioInfo::default(),
+                ),
+                AssetKind::Image => Asset::new_image(
+                    entry
+                        .relative_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&entry.relative_path),
+                    &uri,
+                    1920,
+                    1080,
+                ),
+                _ => Asset::new_video(
+                    entry
+                        .relative_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&entry.relative_path),
+                    &uri,
+                    VideoInfo::default(),
+                ),
+            };
+
+            let asset = asset
+                .with_relative_path(&entry.relative_path)
+                .as_workspace_managed()
+                .with_file_size(entry.file_size);
+
+            let asset_id = asset.id.clone();
+            state.assets.insert(asset_id.clone(), asset);
+            self.index
+                .mark_registered(&entry.relative_path, &asset_id)?;
+            registered_count += 1;
+        }
+
+        // Also handle stale entries: asset_id in index but not in state.assets.
+        // Reuse the SAME asset_id so clips referencing it remain valid.
+        let registered_entries = self.index.get_all_registered()?;
+        for entry in &registered_entries {
+            if let Some(ref asset_id) = entry.asset_id {
+                if !state.assets.contains_key(asset_id) {
+                    let abs_path = project_root.join(&entry.relative_path);
+                    let uri = abs_path.to_string_lossy().to_string();
+                    let name = entry
+                        .relative_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&entry.relative_path);
+
+                    let mut asset = match entry.kind {
+                        AssetKind::Audio => Asset::new_audio(name, &uri, AudioInfo::default()),
+                        AssetKind::Image => Asset::new_image(name, &uri, 1920, 1080),
+                        _ => Asset::new_video(name, &uri, VideoInfo::default()),
+                    };
+
+                    // Preserve the original asset_id from the index
+                    asset.id = asset_id.clone();
+
+                    let asset = asset
+                        .with_relative_path(&entry.relative_path)
+                        .as_workspace_managed()
+                        .with_file_size(entry.file_size);
+
+                    state.assets.insert(asset_id.clone(), asset);
+                    registered_count += 1;
+                }
+            }
+        }
+
+        if registered_count > 0 {
+            tracing::info!(
+                count = registered_count,
+                "Auto-registered workspace files as assets"
+            );
+        }
+
+        Ok(registered_count)
     }
 }
 
@@ -292,6 +458,7 @@ fn build_tree_level(
             kind: None,
             file_size: None,
             asset_id: None,
+            missing: false,
             children,
         });
     }
@@ -311,6 +478,7 @@ fn build_tree_level(
                 kind: Some(entry.kind.clone()),
                 file_size: Some(entry.file_size),
                 asset_id: entry.asset_id.clone(),
+                missing: false,
                 children: vec![],
             });
         }
@@ -531,5 +699,57 @@ mod tests {
         assert!(dir_b.is_directory);
         assert_eq!(dir_b.children.len(), 1);
         assert_eq!(dir_b.children[0].name, "c.mp4");
+    }
+
+    #[test]
+    fn test_handle_event_with_state_marks_missing_on_file_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        create_test_project(dir.path());
+
+        let service = WorkspaceService::open(dir.path().to_path_buf()).unwrap();
+        service.initial_scan().unwrap();
+
+        let mut state = ProjectState::new_empty("test");
+        let asset = Asset::new_audio("bgm.wav", "audio/bgm.wav", AudioInfo::default())
+            .with_relative_path("audio/bgm.wav");
+        let asset_id = asset.id.clone();
+        state.assets.insert(asset_id.clone(), asset);
+
+        // Remove the file from disk
+        std::fs::remove_file(dir.path().join("audio/bgm.wav")).unwrap();
+
+        service
+            .handle_event_with_state(
+                &WorkspaceEvent::FileRemoved("audio/bgm.wav".to_string()),
+                &mut state,
+            )
+            .unwrap();
+
+        assert!(state.assets.get(&asset_id).unwrap().missing);
+    }
+
+    #[test]
+    fn test_handle_event_with_state_reconnects_on_file_added() {
+        let dir = tempfile::tempdir().unwrap();
+        create_test_project(dir.path());
+
+        let service = WorkspaceService::open(dir.path().to_path_buf()).unwrap();
+        service.initial_scan().unwrap();
+
+        let mut state = ProjectState::new_empty("test");
+        let mut asset = Asset::new_audio("bgm.wav", "audio/bgm.wav", AudioInfo::default())
+            .with_relative_path("audio/bgm.wav");
+        asset.missing = true;
+        let asset_id = asset.id.clone();
+        state.assets.insert(asset_id.clone(), asset);
+
+        service
+            .handle_event_with_state(
+                &WorkspaceEvent::FileAdded("audio/bgm.wav".to_string()),
+                &mut state,
+            )
+            .unwrap();
+
+        assert!(!state.assets.get(&asset_id).unwrap().missing);
     }
 }

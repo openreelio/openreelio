@@ -27,7 +27,6 @@ import {
   _resetDeduplicatorForTesting as resetDeduplicator,
 } from '@/utils/requestDeduplicator';
 import { refreshProjectState, applyProjectState } from '@/utils/stateRefreshHelper';
-import { useBinStore } from '@/stores/binStore';
 import { useWorkspaceStore, setupWorkspaceEventListeners } from '@/stores/workspaceStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 
@@ -177,15 +176,24 @@ export const useProjectStore = create<ProjectState>()(
           state.activeSequenceId = projectState.activeSequenceId;
         });
 
-        // Sync bins to bin store
-        useBinStore.getState().setBins(projectState.bins);
-
         // Initialize workspace: setup event listeners and auto-scan
         setupWorkspaceEventListeners();
         if (shouldAutoScanWorkspaceOnOpen()) {
           useWorkspaceStore
             .getState()
             .scanWorkspace()
+            .then(async () => {
+              try {
+                const freshState = await refreshProjectState();
+                set((state) => {
+                  applyProjectState(state, freshState);
+                });
+              } catch (syncError) {
+                logger.warn('Workspace auto-scan completed but project state sync failed', {
+                  error: String(syncError),
+                });
+              }
+            })
             .catch((err) => {
               logger.warn('Workspace auto-scan failed', { error: String(err) });
             });
@@ -232,9 +240,6 @@ export const useProjectStore = create<ProjectState>()(
           state.activeSequenceId = projectState.activeSequenceId;
         });
 
-        // Sync bins to bin store (empty for new project)
-        useBinStore.getState().setBins(projectState.bins);
-
         // Initialize workspace event listeners for new project
         setupWorkspaceEventListeners();
       } catch (error) {
@@ -248,8 +253,6 @@ export const useProjectStore = create<ProjectState>()(
           state.activeSequenceId = null;
           state.error = error instanceof Error ? error.message : String(error);
         });
-        // Also reset bin store
-        useBinStore.getState().reset();
         throw error;
       }
     },
@@ -284,15 +287,24 @@ export const useProjectStore = create<ProjectState>()(
           state.activeSequenceId = projectState.activeSequenceId;
         });
 
-        // Sync bins to bin store
-        useBinStore.getState().setBins(projectState.bins);
-
         // Initialize workspace: setup event listeners and auto-scan
         setupWorkspaceEventListeners();
         if (shouldAutoScanWorkspaceOnOpen()) {
           useWorkspaceStore
             .getState()
             .scanWorkspace()
+            .then(async () => {
+              try {
+                const freshState = await refreshProjectState();
+                set((state) => {
+                  applyProjectState(state, freshState);
+                });
+              } catch (syncError) {
+                logger.warn('Workspace auto-scan completed but project state sync failed', {
+                  error: String(syncError),
+                });
+              }
+            })
             .catch((err) => {
               logger.warn('Workspace auto-scan failed', { error: String(err) });
             });
@@ -569,9 +581,6 @@ export const useProjectStore = create<ProjectState>()(
               applyProjectState(state, freshState);
             });
 
-            // Sync bins to bin store (outside Immer draft)
-            useBinStore.getState().setBins(freshState.bins);
-
             if (concurrentModificationDetected) {
               throw new Error(
                 `Concurrent modification detected during command execution. ` +
@@ -618,9 +627,6 @@ export const useProjectStore = create<ProjectState>()(
             applyProjectState(state, freshState);
           });
 
-          // Sync bins to bin store
-          useBinStore.getState().setBins(freshState.bins);
-
           logger.debug('Undo completed', { newVersion: get().stateVersion });
           return result;
         } catch (error) {
@@ -654,9 +660,6 @@ export const useProjectStore = create<ProjectState>()(
             state.error = null;
             applyProjectState(state, freshState);
           });
-
-          // Sync bins to bin store
-          useBinStore.getState().setBins(freshState.bins);
 
           logger.debug('Redo completed', { newVersion: get().stateVersion });
           return result;

@@ -298,8 +298,6 @@ pub struct UpdateAssetCommand {
     pub proxy_status: Option<ProxyStatus>,
     /// New proxy URL (optional). `Some(None)` clears the proxy URL.
     pub proxy_url: Option<Option<String>>,
-    /// New bin ID (optional). `Some(None)` moves to root.
-    pub bin_id: Option<Option<String>>,
     /// Original values (for undo)
     #[serde(skip)]
     original_name: Option<String>,
@@ -313,8 +311,6 @@ pub struct UpdateAssetCommand {
     original_proxy_status: Option<ProxyStatus>,
     #[serde(skip)]
     original_proxy_url: Option<Option<String>>,
-    #[serde(skip)]
-    original_bin_id: Option<Option<String>>,
 }
 
 impl UpdateAssetCommand {
@@ -328,35 +324,12 @@ impl UpdateAssetCommand {
             thumbnail_url: None,
             proxy_status: None,
             proxy_url: None,
-            bin_id: None,
             original_name: None,
             original_tags: None,
             original_license: None,
             original_thumbnail_url: None,
             original_proxy_status: None,
             original_proxy_url: None,
-            original_bin_id: None,
-        }
-    }
-
-    /// Creates a command to move an asset to a bin
-    pub fn new_bin_update(asset_id: &str, bin_id: Option<&str>) -> Self {
-        Self {
-            asset_id: asset_id.to_string(),
-            new_name: None,
-            new_tags: None,
-            new_license: None,
-            thumbnail_url: None,
-            proxy_status: None,
-            proxy_url: None,
-            bin_id: Some(bin_id.map(|s| s.to_string())),
-            original_name: None,
-            original_tags: None,
-            original_license: None,
-            original_thumbnail_url: None,
-            original_proxy_status: None,
-            original_proxy_url: None,
-            original_bin_id: None,
         }
     }
 
@@ -411,7 +384,6 @@ impl Command for UpdateAssetCommand {
         self.original_thumbnail_url = Some(asset.thumbnail_url.clone());
         self.original_proxy_status = Some(asset.proxy_status.clone());
         self.original_proxy_url = Some(asset.proxy_url.clone());
-        self.original_bin_id = Some(asset.bin_id.clone());
 
         // Apply new values
         if let Some(name) = &self.new_name {
@@ -431,9 +403,6 @@ impl Command for UpdateAssetCommand {
         }
         if let Some(proxy_url) = &self.proxy_url {
             asset.proxy_url = proxy_url.clone();
-        }
-        if let Some(bin_id) = &self.bin_id {
-            asset.bin_id = bin_id.clone();
         }
 
         let op_id = ulid::Ulid::new().to_string();
@@ -464,9 +433,6 @@ impl Command for UpdateAssetCommand {
             }
             if let Some(proxy_url) = &self.original_proxy_url {
                 asset.proxy_url = proxy_url.clone();
-            }
-            if let Some(bin_id) = &self.original_bin_id {
-                asset.bin_id = bin_id.clone();
             }
         }
         Ok(())

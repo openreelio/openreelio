@@ -176,23 +176,6 @@ export {
 } from './bezierCurve';
 
 export {
-  buildBinTree,
-  flattenBinTree,
-  getBinPath,
-  getBinAncestors,
-  getBinDescendants,
-  getBinChildren,
-  getAssetsInBin,
-  canMoveBinTo,
-  sortBins,
-  generateUniqueBinName,
-  getDefaultBinColor,
-  BIN_COLORS,
-  BIN_COLOR_CLASSES,
-  type BinTreeNode,
-} from './binUtils';
-
-export {
   parseKeySignature,
   buildKeySignature,
   normalizeKeySignature,

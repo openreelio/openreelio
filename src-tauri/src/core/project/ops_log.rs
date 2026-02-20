@@ -68,6 +68,12 @@ pub enum OpKind {
     // Workspace operations
     WorkspaceScan,
 
+    // Filesystem operations
+    FolderCreate,
+    FileRename,
+    FileMove,
+    FileDelete,
+
     // Batch operations
     Batch,
 }

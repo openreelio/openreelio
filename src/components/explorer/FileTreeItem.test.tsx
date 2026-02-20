@@ -21,29 +21,33 @@ function createFileEntry(overrides: Partial<FileTreeEntry> = {}): FileTreeEntry 
 }
 
 describe('FileTreeItem', () => {
-  it('shows registering indicator while file registration is in progress', () => {
+  it('renders file name', () => {
     const entry = createFileEntry();
-
-    render(
-      <FileTreeItem
-        entry={entry}
-        registeringPathCounts={{
-          'footage/interview.mp4': 1,
-        }}
-      />,
-    );
-
-    const indicator = screen.getByTitle('Registering...');
-    expect(indicator).toBeInTheDocument();
-    expect(indicator.querySelector('.animate-spin')).not.toBeNull();
-  });
-
-  it('shows registered indicator when file already has an asset id', () => {
-    const entry = createFileEntry({ assetId: 'asset_001' });
 
     render(<FileTreeItem entry={entry} />);
 
-    expect(screen.getByTitle('Registered')).toBeInTheDocument();
+    expect(screen.getByText('interview.mp4')).toBeInTheDocument();
+  });
+
+  it('renders file size for non-directory entries', () => {
+    const entry = createFileEntry({ fileSize: 1024 * 1024 * 5 });
+
+    render(<FileTreeItem entry={entry} />);
+
+    expect(screen.getByText('5.0 MB')).toBeInTheDocument();
+  });
+
+  it('renders directory entries with expand/collapse', () => {
+    const entry = createFileEntry({
+      relativePath: 'footage',
+      name: 'footage',
+      isDirectory: true,
+      children: [createFileEntry({ relativePath: 'footage/clip.mp4', name: 'clip.mp4' })],
+    });
+
+    render(<FileTreeItem entry={entry} />);
+
+    expect(screen.getByText('footage')).toBeInTheDocument();
   });
 
   it('includes workspace metadata in drag payload', () => {
@@ -77,5 +81,28 @@ describe('FileTreeItem', () => {
       }),
     );
     expect(setData).toHaveBeenCalledWith('text/plain', 'asset_logo');
+  });
+
+  it('makes all non-directory entries draggable', () => {
+    const entry = createFileEntry();
+
+    render(<FileTreeItem entry={entry} />);
+
+    const row = screen.getByTitle('footage/interview.mp4');
+    expect(row).toHaveAttribute('draggable', 'true');
+  });
+
+  it('prevents drag on directory entries', () => {
+    const entry = createFileEntry({
+      relativePath: 'footage',
+      name: 'footage',
+      isDirectory: true,
+      children: [],
+    });
+
+    render(<FileTreeItem entry={entry} />);
+
+    const row = screen.getByTitle('footage');
+    expect(row).toHaveAttribute('draggable', 'false');
   });
 });
