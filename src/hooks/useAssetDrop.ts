@@ -231,18 +231,13 @@ export function useAssetDrop({
         return;
       }
 
-      const parsedData = parseDraggedAssetData(e.dataTransfer);
-      if (!parsedData) {
-        e.dataTransfer.dropEffect = 'none';
-        return;
-      }
-
-      const assetKind = resolveAssetKind(parsedData, assets);
-      if (assetKind && !isAssetCompatibleWithTrack(assetKind, resolvedTarget.track.kind)) {
-        e.dataTransfer.dropEffect = 'none';
-      }
+      // NOTE: Asset kind compatibility is validated in handleDrop instead of here.
+      // DataTransfer.getData() returns empty strings during dragover in modern
+      // Chromium-based browsers (including WebView2/Tauri) for security reasons,
+      // so parseDraggedAssetData() would always return null and incorrectly
+      // set dropEffect to 'none', preventing the drop from working.
     },
-    [sequence, scrollY, trackHeight, assets],
+    [sequence, scrollY, trackHeight],
   );
 
   const handleDragLeave = useCallback((e: DragEvent) => {

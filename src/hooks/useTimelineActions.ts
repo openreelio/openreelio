@@ -11,12 +11,14 @@
  * - Error handling is centralized in the command executor
  */
 
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useProjectStore } from '@/stores';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
+import { useToastStore } from '@/hooks/useToast';
 import { createLogger } from '@/services/logger';
 import { refreshProjectState } from '@/utils/stateRefreshHelper';
+import { probeMedia } from '@/utils/ffmpeg';
 import type {
   AssetDropData,
   ClipAudioUpdateData,
@@ -55,6 +57,9 @@ import {
 
 const logger = createLogger('TimelineActions');
 
+const WORKSPACE_DROP_QUEUE_MAX_ATTEMPTS = 3;
+const WORKSPACE_DROP_QUEUE_RETRY_DELAY_MS = 350;
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -69,6 +74,7 @@ interface TimelineActions {
   handleClipSplit: (data: ClipSplitData) => Promise<void>;
   handleClipAudioUpdate: (data: ClipAudioUpdateData) => Promise<void>;
   handleAssetDrop: (data: AssetDropData) => Promise<void>;
+  pendingWorkspaceDrops: PendingWorkspaceDropState[];
   handleDeleteClips: (clipIds: string[]) => Promise<void>;
   handleTrackCreate: (data: TrackCreateData) => Promise<void>;
   handleTrackMuteToggle: (data: TrackControlData) => Promise<void>;
@@ -89,6 +95,97 @@ interface ResolveDroppedAssetContextOptions {
   data: AssetDropData;
   sequence: Sequence;
   assets: Map<string, Asset>;
+}
+
+interface QueuedWorkspaceDrop {
+  id: string;
+  data: AssetDropData;
+  attempts: number;
+  enqueuedAt: number;
+  resolvedDurationSec?: number;
+  resolveCompletion: (inserted: boolean) => void;
+}
+
+export interface PendingWorkspaceDropState {
+  id: string;
+  trackId: string;
+  timelinePosition: number;
+  label: string;
+  workspaceRelativePath: string;
+  assetKind?: Asset['kind'];
+  durationSec?: number;
+  progressPercent: number;
+  attempts: number;
+  status: 'queued' | 'resolving' | 'inserting';
+}
+
+function createWorkspaceDropId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `workspace-drop-${crypto.randomUUID()}`;
+  }
+
+  return `workspace-drop-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function waitForDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function getWorkspaceRelativePathFromDrop(data: AssetDropData): string | undefined {
+  return 'workspaceRelativePath' in data && typeof data.workspaceRelativePath === 'string'
+    ? data.workspaceRelativePath
+    : undefined;
+}
+
+function getWorkspaceFileName(relativePath: string): string {
+  const normalized = relativePath.replace(/\\/g, '/');
+  const segments = normalized.split('/');
+  const name = segments[segments.length - 1]?.trim();
+  return name && name.length > 0 ? name : relativePath;
+}
+
+function normalizeDurationSec(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+
+  return value;
+}
+
+function normalizeProgressPercent(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function shouldProbePendingDuration(assetKind: Asset['kind'] | undefined): boolean {
+  return assetKind === 'video' || assetKind === 'audio';
+}
+
+function shouldQueueWorkspaceDropInBackground(
+  data: AssetDropData,
+  assets: Map<string, Asset>,
+): boolean {
+  const workspaceRelativePath = getWorkspaceRelativePathFromDrop(data);
+  if (!workspaceRelativePath) {
+    return false;
+  }
+
+  const payloadAssetId = data.assetId;
+  if (!payloadAssetId) {
+    return true;
+  }
+
+  const payloadAsset = assets.get(payloadAssetId);
+  if (!payloadAsset) {
+    return true;
+  }
+
+  return Boolean(payloadAsset.relativePath && payloadAsset.relativePath !== workspaceRelativePath);
 }
 
 /**
@@ -215,21 +312,67 @@ async function resolveDroppedAssetContext({
       });
     }
 
-    const refreshedAssets = useProjectStore.getState().assets;
-    const refreshedTree = useWorkspaceStore.getState().fileTree;
-    const refreshedTreeAssetId = findAssetIdInTree(refreshedTree, workspaceRelativePath);
-    const refreshedPathAssetId = findAssetIdInAssetsByRelativePath(
-      refreshedAssets,
+    let resolvedAssets = useProjectStore.getState().assets;
+    let resolvedTree = useWorkspaceStore.getState().fileTree;
+    let resolvedTreeAssetId = findAssetIdInTree(resolvedTree, workspaceRelativePath);
+    let resolvedPathAssetId = findAssetIdInAssetsByRelativePath(
+      resolvedAssets,
       workspaceRelativePath,
     );
 
     droppedAssetId =
-      (refreshedTreeAssetId && refreshedAssets.has(refreshedTreeAssetId)
-        ? refreshedTreeAssetId
-        : undefined) ?? refreshedPathAssetId;
+      (resolvedTreeAssetId && resolvedAssets.has(resolvedTreeAssetId)
+        ? resolvedTreeAssetId
+        : undefined) ?? resolvedPathAssetId;
 
     if (!droppedAssetId) {
-      logger.warn('Cannot drop workspace file: asset not found after refresh', {
+      logger.info('Workspace drop unresolved after refresh; triggering workspace scan', {
+        sequenceId: sequence.id,
+        trackId: data.trackId,
+        workspaceRelativePath,
+      });
+
+      try {
+        await useWorkspaceStore.getState().scanWorkspace();
+      } catch (error) {
+        logger.warn('Failed to scan workspace while resolving dropped file', {
+          sequenceId: sequence.id,
+          trackId: data.trackId,
+          workspaceRelativePath,
+          error,
+        });
+      }
+
+      try {
+        const freshState = await refreshProjectState();
+        useProjectStore.setState((draft) => {
+          draft.assets = freshState.assets;
+        });
+      } catch (error) {
+        logger.warn('Failed to refresh project assets after workspace scan', {
+          sequenceId: sequence.id,
+          trackId: data.trackId,
+          workspaceRelativePath,
+          error,
+        });
+      }
+
+      resolvedAssets = useProjectStore.getState().assets;
+      resolvedTree = useWorkspaceStore.getState().fileTree;
+      resolvedTreeAssetId = findAssetIdInTree(resolvedTree, workspaceRelativePath);
+      resolvedPathAssetId = findAssetIdInAssetsByRelativePath(
+        resolvedAssets,
+        workspaceRelativePath,
+      );
+
+      droppedAssetId =
+        (resolvedTreeAssetId && resolvedAssets.has(resolvedTreeAssetId)
+          ? resolvedTreeAssetId
+          : undefined) ?? resolvedPathAssetId;
+    }
+
+    if (!droppedAssetId) {
+      logger.warn('Cannot drop workspace file: asset not found after scan', {
         sequenceId: sequence.id,
         trackId: data.trackId,
         workspaceRelativePath,
@@ -237,7 +380,7 @@ async function resolveDroppedAssetContext({
       return null;
     }
 
-    droppedAsset = refreshedAssets.get(droppedAssetId);
+    droppedAsset = resolvedAssets.get(droppedAssetId);
     droppedAssetKind = droppedAsset?.kind ?? data.assetKind;
   }
 
@@ -348,7 +491,6 @@ async function resolveOrCreateTrack({
  */
 export function useTimelineActions({ sequence }: UseTimelineActionsOptions): TimelineActions {
   const executeCommand = useProjectStore((state) => state.executeCommand);
-  const assets = useProjectStore((state) => state.assets);
   const linkedSelectionEnabled = useTimelineStore((state) => state.linkedSelectionEnabled);
 
   const getCurrentSequence = useCallback((): Sequence | null => {
@@ -358,6 +500,98 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
 
     return useProjectStore.getState().sequences.get(sequence.id) ?? sequence;
   }, [sequence]);
+
+  const workspaceDropQueueRef = useRef<QueuedWorkspaceDrop[]>([]);
+  const isProcessingWorkspaceDropQueueRef = useRef(false);
+  const sequenceIdRef = useRef<string | null>(sequence?.id ?? null);
+  const [pendingWorkspaceDrops, setPendingWorkspaceDrops] = useState<PendingWorkspaceDropState[]>(
+    [],
+  );
+
+  const upsertPendingWorkspaceDrop = useCallback(
+    (dropId: string, patch: Partial<Omit<PendingWorkspaceDropState, 'id'>>): void => {
+      const normalizedPatch = {
+        ...patch,
+        ...(patch.progressPercent !== undefined
+          ? { progressPercent: normalizeProgressPercent(patch.progressPercent) }
+          : {}),
+      };
+
+      setPendingWorkspaceDrops((current) =>
+        current.map((entry) => {
+          if (entry.id !== dropId) {
+            return entry;
+          }
+
+          return {
+            ...entry,
+            ...normalizedPatch,
+          };
+        }),
+      );
+    },
+    [],
+  );
+
+  const removePendingWorkspaceDrop = useCallback((dropId: string): void => {
+    setPendingWorkspaceDrops((current) => current.filter((entry) => entry.id !== dropId));
+  }, []);
+
+  const resolvePendingWorkspaceDropDurationSec = useCallback(
+    async (
+      queuedDrop: QueuedWorkspaceDrop,
+      droppedAssetContext: ResolvedDroppedAssetContext,
+    ): Promise<number | undefined> => {
+      if (queuedDrop.resolvedDurationSec !== undefined) {
+        return queuedDrop.resolvedDurationSec;
+      }
+
+      const { droppedAsset, droppedAssetKind } = droppedAssetContext;
+      const assetDurationSec = normalizeDurationSec(droppedAsset?.durationSec);
+      if (assetDurationSec !== undefined) {
+        queuedDrop.resolvedDurationSec = assetDurationSec;
+        return assetDurationSec;
+      }
+
+      if (!droppedAsset || !shouldProbePendingDuration(droppedAssetKind)) {
+        return undefined;
+      }
+
+      try {
+        const mediaInfo = await probeMedia(droppedAsset.uri);
+        const probedDurationSec = normalizeDurationSec(mediaInfo.durationSec);
+        if (probedDurationSec === undefined) {
+          return undefined;
+        }
+
+        queuedDrop.resolvedDurationSec = probedDurationSec;
+        return probedDurationSec;
+      } catch (error) {
+        logger.debug('Unable to probe queued workspace drop duration', {
+          assetId: droppedAsset.id,
+          uri: droppedAsset.uri,
+          error,
+        });
+        return undefined;
+      }
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const nextSequenceId = sequence?.id ?? null;
+    if (sequenceIdRef.current === nextSequenceId) {
+      return;
+    }
+
+    const abandonedDrops = workspaceDropQueueRef.current.splice(0);
+    for (const abandonedDrop of abandonedDrops) {
+      abandonedDrop.resolveCompletion(false);
+    }
+
+    setPendingWorkspaceDrops([]);
+    sequenceIdRef.current = nextSequenceId;
+  }, [sequence?.id]);
 
   const executeTrackToggle = useCallback(
     async (
@@ -675,12 +909,12 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     [sequence, executeCommand],
   );
 
-  /**
-   * Handle asset drop onto timeline.
-   * State refresh is automatic via executeCommand.
-   */
-  const handleAssetDrop = useCallback(
-    async (data: AssetDropData): Promise<void> => {
+  const insertResolvedDroppedAsset = useCallback(
+    async (
+      data: AssetDropData,
+      droppedAssetContext: ResolvedDroppedAssetContext,
+      durationSecHint?: number,
+    ): Promise<boolean> => {
       const sequenceSnapshot = getSequenceSnapshotOrWarn({
         sequence,
         getCurrentSequence,
@@ -691,31 +925,23 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           sequenceId: sequence?.id,
           trackId: data.trackId,
           assetId: data.assetId,
-          workspaceRelativePath:
-            'workspaceRelativePath' in data ? data.workspaceRelativePath : undefined,
+          workspaceRelativePath: getWorkspaceRelativePathFromDrop(data),
         },
       });
 
       if (!sequence || !sequenceSnapshot) {
-        return;
-      }
-
-      const droppedAssetContext = await resolveDroppedAssetContext({
-        data,
-        sequence,
-        assets,
-      });
-      if (!droppedAssetContext) {
-        return;
+        return false;
       }
 
       const { droppedAssetId, droppedAsset, droppedAssetKind } = droppedAssetContext;
-
       const targetTrack = sequenceSnapshot.tracks.find((track) => track.id === data.trackId);
+      const normalizedDurationSecHint = normalizeDurationSec(durationSecHint);
+
+      let insertedPrimaryClip = false;
 
       try {
         if (!droppedAsset || droppedAssetKind !== 'video') {
-          await executeCommand({
+          const insertResult = await executeCommand({
             type: 'InsertClip',
             payload: {
               sequenceId: sequence.id,
@@ -724,10 +950,50 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
               timelineIn: data.timelinePosition,
             },
           });
-          return;
+
+          if (normalizedDurationSecHint !== undefined) {
+            let insertedClipId: string | undefined = insertResult.createdIds[0];
+            if (!insertedClipId) {
+              const postInsertSequence = getCurrentSequence();
+              const postInsertTrack = postInsertSequence?.tracks.find(
+                (track) => track.id === data.trackId,
+              );
+              insertedClipId = findClipByAssetAtTimeline(
+                postInsertTrack,
+                droppedAssetId,
+                data.timelinePosition,
+              )?.id;
+            }
+
+            if (insertedClipId) {
+              try {
+                await executeCommand({
+                  type: 'TrimClip',
+                  payload: {
+                    sequenceId: sequence.id,
+                    trackId: data.trackId,
+                    clipId: insertedClipId,
+                    newSourceOut: normalizedDurationSecHint,
+                  },
+                });
+              } catch (trimError) {
+                logger.warn('Inserted clip but failed to apply probed duration', {
+                  sequenceId: sequence.id,
+                  assetId: droppedAssetId,
+                  clipId: insertedClipId,
+                  trackId: data.trackId,
+                  durationSec: normalizedDurationSecHint,
+                  error: trimError,
+                });
+              }
+            }
+          }
+
+          return true;
         }
 
-        const clipDurationSec = getAssetInsertDurationSec(droppedAsset);
+        const clipDurationSec =
+          normalizedDurationSecHint ?? getAssetInsertDurationSec(droppedAsset);
         const visualTrack = await resolveOrCreateTrack({
           kind: 'video',
           sequence,
@@ -744,7 +1010,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           missingTrackMessage: 'Created visual track not found after state refresh',
         });
         if (!visualTrack) {
-          return;
+          return false;
         }
 
         const primaryVideoInsertResult = await executeCommand({
@@ -756,6 +1022,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             timelineIn: data.timelinePosition,
           },
         });
+        insertedPrimaryClip = true;
 
         let primaryVideoClipId: string | undefined = primaryVideoInsertResult.createdIds[0];
         if (!primaryVideoClipId) {
@@ -770,11 +1037,34 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           )?.id;
         }
 
+        if (normalizedDurationSecHint !== undefined && primaryVideoClipId) {
+          try {
+            await executeCommand({
+              type: 'TrimClip',
+              payload: {
+                sequenceId: sequence.id,
+                trackId: visualTrack.id,
+                clipId: primaryVideoClipId,
+                newSourceOut: normalizedDurationSecHint,
+              },
+            });
+          } catch (trimPrimaryError) {
+            logger.warn('Inserted video clip but failed to apply probed duration', {
+              sequenceId: sequence.id,
+              trackId: visualTrack.id,
+              clipId: primaryVideoClipId,
+              assetId: droppedAssetId,
+              durationSec: normalizedDurationSecHint,
+              error: trimPrimaryError,
+            });
+          }
+        }
+
         const latestDroppedAsset =
           useProjectStore.getState().assets.get(droppedAssetId) ?? droppedAsset;
         const hasLinkedAudio = await resolveAssetHasLinkedAudio(latestDroppedAsset, logger);
         if (!hasLinkedAudio) {
-          return;
+          return true;
         }
 
         try {
@@ -787,7 +1077,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
                 assetId: droppedAssetId,
               },
             );
-            return;
+            return true;
           }
 
           const latestTargetTrack = postVideoInsertSequence.tracks.find(
@@ -811,10 +1101,10 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             missingTrackMessage: 'Created audio track not found after state refresh',
           });
           if (!audioTrack) {
-            return;
+            return true;
           }
 
-          await executeCommand({
+          const audioInsertResult = await executeCommand({
             type: 'InsertClip',
             payload: {
               sequenceId: sequence.id,
@@ -824,6 +1114,44 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             },
           });
 
+          if (normalizedDurationSecHint !== undefined) {
+            let insertedAudioClipId: string | undefined = audioInsertResult.createdIds[0];
+            if (!insertedAudioClipId) {
+              const latestSequence = getCurrentSequence();
+              const latestAudioTrack = latestSequence?.tracks.find(
+                (track) => track.id === audioTrack.id,
+              );
+              insertedAudioClipId = findClipByAssetAtTimeline(
+                latestAudioTrack,
+                droppedAssetId,
+                data.timelinePosition,
+              )?.id;
+            }
+
+            if (insertedAudioClipId) {
+              try {
+                await executeCommand({
+                  type: 'TrimClip',
+                  payload: {
+                    sequenceId: sequence.id,
+                    trackId: audioTrack.id,
+                    clipId: insertedAudioClipId,
+                    newSourceOut: normalizedDurationSecHint,
+                  },
+                });
+              } catch (trimAudioError) {
+                logger.warn('Inserted audio clip but failed to apply probed duration', {
+                  sequenceId: sequence.id,
+                  trackId: audioTrack.id,
+                  clipId: insertedAudioClipId,
+                  assetId: droppedAssetId,
+                  durationSec: normalizedDurationSecHint,
+                  error: trimAudioError,
+                });
+              }
+            }
+          }
+
           if (!primaryVideoClipId) {
             logger.warn('Linked audio inserted, but source video clip ID could not be resolved', {
               sequenceId: sequence.id,
@@ -831,7 +1159,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
               videoTrackId: visualTrack.id,
               timelinePosition: data.timelinePosition,
             });
-            return;
+            return true;
           }
 
           try {
@@ -862,11 +1190,274 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             error: audioInsertError,
           });
         }
+
+        return true;
       } catch (error) {
         logger.error('Failed to insert clip', { error, assetId: droppedAssetId });
+        return insertedPrimaryClip;
       }
     },
-    [sequence, executeCommand, assets, getCurrentSequence],
+    [sequence, executeCommand, getCurrentSequence],
+  );
+
+  const processWorkspaceDropQueue = useCallback(async (): Promise<void> => {
+    if (isProcessingWorkspaceDropQueueRef.current) {
+      return;
+    }
+
+    isProcessingWorkspaceDropQueueRef.current = true;
+
+    try {
+      while (workspaceDropQueueRef.current.length > 0) {
+        // Read the latest sequence from the store on each iteration to avoid
+        // stale closure references during the long-running async loop.
+        const currentSequence = getCurrentSequence();
+        if (!currentSequence) {
+          logger.warn('Dropping queued workspace inserts: no active sequence', {
+            queuedItems: workspaceDropQueueRef.current.length,
+          });
+          const pendingDrops = workspaceDropQueueRef.current.splice(0);
+          for (const pendingDrop of pendingDrops) {
+            removePendingWorkspaceDrop(pendingDrop.id);
+            pendingDrop.resolveCompletion(false);
+          }
+          return;
+        }
+
+        const queuedDrop = workspaceDropQueueRef.current[0];
+        const resolveAttempt = queuedDrop.attempts + 1;
+        upsertPendingWorkspaceDrop(queuedDrop.id, {
+          status: 'resolving',
+          attempts: resolveAttempt,
+          progressPercent: Math.min(68, 20 + resolveAttempt * 18),
+        });
+        const workspaceRelativePath = getWorkspaceRelativePathFromDrop(queuedDrop.data);
+
+        if (!workspaceRelativePath) {
+          const [invalidDrop] = workspaceDropQueueRef.current.splice(0, 1);
+          if (invalidDrop) {
+            removePendingWorkspaceDrop(invalidDrop.id);
+          }
+          invalidDrop?.resolveCompletion(false);
+          continue;
+        }
+
+        const droppedAssetContext = await resolveDroppedAssetContext({
+          data: queuedDrop.data,
+          sequence: currentSequence,
+          assets: useProjectStore.getState().assets,
+        });
+
+        if (!droppedAssetContext) {
+          queuedDrop.attempts += 1;
+
+          if (queuedDrop.attempts >= WORKSPACE_DROP_QUEUE_MAX_ATTEMPTS) {
+            logger.warn('Queued workspace drop failed after retries', {
+              sequenceId: currentSequence.id,
+              trackId: queuedDrop.data.trackId,
+              workspaceRelativePath,
+              attempts: queuedDrop.attempts,
+            });
+            useToastStore.getState().addToast({
+              message: `Failed to load ${getWorkspaceFileName(workspaceRelativePath)}. Run Scan Workspace and retry.`,
+              variant: 'warning',
+              duration: 5500,
+            });
+            const [failedDrop] = workspaceDropQueueRef.current.splice(0, 1);
+            if (failedDrop) {
+              removePendingWorkspaceDrop(failedDrop.id);
+            }
+            failedDrop?.resolveCompletion(false);
+            continue;
+          }
+
+          upsertPendingWorkspaceDrop(queuedDrop.id, {
+            status: 'resolving',
+            attempts: queuedDrop.attempts,
+            progressPercent: Math.min(74, 26 + queuedDrop.attempts * 16),
+          });
+
+          await waitForDelay(WORKSPACE_DROP_QUEUE_RETRY_DELAY_MS * queuedDrop.attempts);
+          continue;
+        }
+
+        const resolvedDurationSec = await resolvePendingWorkspaceDropDurationSec(
+          queuedDrop,
+          droppedAssetContext,
+        );
+        upsertPendingWorkspaceDrop(queuedDrop.id, {
+          assetKind: droppedAssetContext.droppedAssetKind ?? queuedDrop.data.assetKind,
+          progressPercent: 82,
+          ...(resolvedDurationSec !== undefined ? { durationSec: resolvedDurationSec } : {}),
+        });
+
+        upsertPendingWorkspaceDrop(queuedDrop.id, {
+          status: 'inserting',
+          progressPercent: 92,
+        });
+
+        const inserted = await insertResolvedDroppedAsset(
+          queuedDrop.data,
+          droppedAssetContext,
+          resolvedDurationSec,
+        );
+        if (!inserted) {
+          queuedDrop.attempts += 1;
+          upsertPendingWorkspaceDrop(queuedDrop.id, {
+            status: 'resolving',
+            attempts: queuedDrop.attempts,
+            progressPercent: Math.min(78, 32 + queuedDrop.attempts * 14),
+          });
+
+          if (queuedDrop.attempts >= WORKSPACE_DROP_QUEUE_MAX_ATTEMPTS) {
+            logger.warn('Queued workspace drop insertion failed after retries', {
+              sequenceId: currentSequence.id,
+              trackId: queuedDrop.data.trackId,
+              workspaceRelativePath,
+              attempts: queuedDrop.attempts,
+            });
+            useToastStore.getState().addToast({
+              message: `Could not insert ${getWorkspaceFileName(workspaceRelativePath)} after loading.`,
+              variant: 'warning',
+              duration: 4500,
+            });
+            const [failedInsertDrop] = workspaceDropQueueRef.current.splice(0, 1);
+            if (failedInsertDrop) {
+              removePendingWorkspaceDrop(failedInsertDrop.id);
+            }
+            failedInsertDrop?.resolveCompletion(false);
+            continue;
+          }
+
+          await waitForDelay(WORKSPACE_DROP_QUEUE_RETRY_DELAY_MS * queuedDrop.attempts);
+          continue;
+        }
+
+        const elapsedMs = Date.now() - queuedDrop.enqueuedAt;
+        logger.info('Queued workspace drop inserted', {
+          sequenceId: currentSequence.id,
+          trackId: queuedDrop.data.trackId,
+          workspaceRelativePath,
+          attempts: queuedDrop.attempts + 1,
+          elapsedMs,
+        });
+
+        const [completedDrop] = workspaceDropQueueRef.current.splice(0, 1);
+        if (completedDrop) {
+          removePendingWorkspaceDrop(completedDrop.id);
+        }
+        completedDrop?.resolveCompletion(true);
+      }
+    } finally {
+      isProcessingWorkspaceDropQueueRef.current = false;
+      if (workspaceDropQueueRef.current.length > 0) {
+        void processWorkspaceDropQueue();
+      }
+    }
+  }, [
+    getCurrentSequence,
+    insertResolvedDroppedAsset,
+    resolvePendingWorkspaceDropDurationSec,
+    removePendingWorkspaceDrop,
+    upsertPendingWorkspaceDrop,
+  ]);
+
+  const enqueueWorkspaceDrop = useCallback(
+    (data: AssetDropData): Promise<boolean> => {
+      const workspaceRelativePath = getWorkspaceRelativePathFromDrop(data);
+      if (!workspaceRelativePath) {
+        return Promise.resolve(false);
+      }
+
+      const dropId = createWorkspaceDropId();
+      const fileName = getWorkspaceFileName(workspaceRelativePath);
+      const latestAssets = useProjectStore.getState().assets;
+      const payloadAsset = data.assetId ? latestAssets.get(data.assetId) : undefined;
+      const payloadMatchesPath = payloadAsset?.relativePath === workspaceRelativePath;
+      const initialAssetKind =
+        data.assetKind ?? (payloadMatchesPath ? payloadAsset?.kind : undefined);
+      const initialDurationSec =
+        payloadMatchesPath && payloadAsset
+          ? normalizeDurationSec(payloadAsset.durationSec)
+          : undefined;
+
+      let resolveCompletion: (inserted: boolean) => void = () => {};
+      const completion = new Promise<boolean>((resolve) => {
+        resolveCompletion = resolve;
+      });
+
+      setPendingWorkspaceDrops((current) => [
+        ...current,
+        {
+          id: dropId,
+          trackId: data.trackId,
+          timelinePosition: data.timelinePosition,
+          label: fileName,
+          workspaceRelativePath,
+          assetKind: initialAssetKind,
+          durationSec: initialDurationSec,
+          progressPercent: 8,
+          attempts: 0,
+          status: 'queued',
+        },
+      ]);
+
+      workspaceDropQueueRef.current.push({
+        id: dropId,
+        data,
+        attempts: 0,
+        enqueuedAt: Date.now(),
+        resolvedDurationSec: initialDurationSec,
+        resolveCompletion,
+      });
+
+      logger.info('Queued workspace drop for background loading', {
+        sequenceId: sequence?.id,
+        trackId: data.trackId,
+        workspaceRelativePath,
+        queueLength: workspaceDropQueueRef.current.length,
+      });
+
+      void processWorkspaceDropQueue();
+      return completion;
+    },
+    [sequence, processWorkspaceDropQueue],
+  );
+
+  /**
+   * Handle asset drop onto timeline.
+   * State refresh is automatic via executeCommand.
+   */
+  const handleAssetDrop = useCallback(
+    async (data: AssetDropData): Promise<void> => {
+      if (!sequence) {
+        logger.warn('Cannot drop asset: no sequence');
+        return;
+      }
+
+      const latestAssets = useProjectStore.getState().assets;
+      const queueInBackground = shouldQueueWorkspaceDropInBackground(data, latestAssets);
+      if (queueInBackground) {
+        await enqueueWorkspaceDrop(data);
+        return;
+      }
+
+      const droppedAssetContext = await resolveDroppedAssetContext({
+        data,
+        sequence,
+        assets: latestAssets,
+      });
+
+      if (!droppedAssetContext) {
+        if (getWorkspaceRelativePathFromDrop(data)) {
+          await enqueueWorkspaceDrop(data);
+        }
+        return;
+      }
+
+      await insertResolvedDroppedAsset(data, droppedAssetContext);
+    },
+    [sequence, enqueueWorkspaceDrop, insertResolvedDroppedAsset],
   );
 
   /**
@@ -1048,6 +1639,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleClipSplit,
     handleClipAudioUpdate,
     handleAssetDrop,
+    pendingWorkspaceDrops,
     handleDeleteClips,
     handleTrackCreate,
     handleTrackMuteToggle,

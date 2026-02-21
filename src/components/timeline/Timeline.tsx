@@ -63,6 +63,7 @@ import {
 } from './constants';
 import { resolveTrackDropTarget } from '@/utils/trackDropTarget';
 import { expandClipIdsWithLinkedCompanions } from '@/utils/clipLinking';
+import type { PendingAssetDrop } from './types';
 
 // Re-export types for backward compatibility
 export type {
@@ -82,6 +83,8 @@ import type { Track as TrackType } from '@/types';
 const logger = createLogger('Timeline');
 
 const EMPTY_AREA_DRAG_THRESHOLD_PX = 4;
+const MIN_PENDING_DROP_WIDTH_PX = 88;
+const DEFAULT_PENDING_DROP_DURATION_SEC = 10;
 
 interface EmptyAreaPanGesture {
   startX: number;
@@ -186,6 +189,7 @@ export function Timeline({
   sequence,
   onDeleteClips,
   onAssetDrop,
+  pendingAssetDrops = [],
   onClipMove,
   onClipTrim,
   onClipSplit,
@@ -1032,6 +1036,82 @@ export function Timeline({
 
   const handleSeek = useCallback((time: number) => seekFromTimeRuler(time), [seekFromTimeRuler]);
 
+  const pendingDropOverlays = useMemo(() => {
+    if (!sequence || pendingAssetDrops.length === 0) {
+      return [] as Array<{
+        id: string;
+        left: number;
+        top: number;
+        width: number;
+        label: string;
+        statusLabel: string;
+        statusClassName: string;
+        progressPercent: number;
+      }>;
+    }
+
+    const trackIndexById = new Map(sequence.tracks.map((track, index) => [track.id, index]));
+
+    const getPendingDurationSec = (drop: PendingAssetDrop): number => {
+      if (
+        typeof drop.durationSec === 'number' &&
+        Number.isFinite(drop.durationSec) &&
+        drop.durationSec > 0
+      ) {
+        return drop.durationSec;
+      }
+
+      return DEFAULT_PENDING_DROP_DURATION_SEC;
+    };
+
+    const getStatusPresentation = (
+      status: PendingAssetDrop['status'],
+    ): { label: string; className: string } => {
+      if (status === 'queued') {
+        return {
+          label: 'Queued',
+          className: 'border-amber-400/70 bg-amber-500/20 text-amber-100',
+        };
+      }
+
+      if (status === 'resolving') {
+        return {
+          label: 'Loading',
+          className: 'border-sky-400/80 bg-sky-500/20 text-sky-100 animate-pulse',
+        };
+      }
+
+      return {
+        label: 'Inserting',
+        className: 'border-emerald-400/80 bg-emerald-500/20 text-emerald-100',
+      };
+    };
+
+    return pendingAssetDrops
+      .map((drop) => {
+        const trackIndex = trackIndexById.get(drop.trackId);
+        if (trackIndex === undefined) {
+          return null;
+        }
+
+        const durationSec = getPendingDurationSec(drop);
+        const width = Math.max(MIN_PENDING_DROP_WIDTH_PX, durationSec * zoom);
+        const statusPresentation = getStatusPresentation(drop.status);
+
+        return {
+          id: drop.id,
+          left: TRACK_HEADER_WIDTH + drop.timelinePosition * zoom - scrollX,
+          top: trackIndex * TRACK_HEIGHT - scrollY,
+          width,
+          label: drop.label,
+          statusLabel: statusPresentation.label,
+          statusClassName: statusPresentation.className,
+          progressPercent: Math.max(0, Math.min(100, Math.round(drop.progressPercent))),
+        };
+      })
+      .filter((overlay): overlay is NonNullable<typeof overlay> => overlay !== null);
+  }, [sequence, pendingAssetDrops, zoom, scrollX, scrollY]);
+
   const handleClipAudioSettingsChange = useCallback(
     (trackId: string, clipId: string, patch: ClipAudioSettingsPatch) => {
       if (!sequence || !onClipAudioUpdate) {
@@ -1708,6 +1788,32 @@ export function Timeline({
               trackHeight={TRACK_HEIGHT}
               scrollX={scrollX}
             />
+            {pendingDropOverlays.map((overlay) => (
+              <div
+                key={overlay.id}
+                data-testid="pending-workspace-drop"
+                className={`absolute h-14 border border-dashed rounded-md pointer-events-none z-10 px-2 py-1 shadow-sm ${overlay.statusClassName}`}
+                style={{
+                  left: `${overlay.left}px`,
+                  top: `${overlay.top + 5}px`,
+                  width: `${overlay.width}px`,
+                }}
+              >
+                <div className="text-[11px] leading-tight truncate font-medium">
+                  {overlay.label}
+                </div>
+                <div className="text-[10px] mt-1 opacity-90 flex items-center justify-between gap-2">
+                  <span>{overlay.statusLabel}</span>
+                  <span>{overlay.progressPercent}%</span>
+                </div>
+                <div className="mt-1 h-1 rounded-full bg-black/25 overflow-hidden">
+                  <div
+                    className="h-full bg-current/90"
+                    style={{ width: `${overlay.progressPercent}%` }}
+                  />
+                </div>
+              </div>
+            ))}
             <SnapIndicator
               snapPoint={activeSnapPoint}
               isActive={isScrubbing || isDraggingPlayhead || isClipDragging}
