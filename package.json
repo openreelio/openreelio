@@ -30,7 +30,7 @@
   "dependencies": {
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-dialog": "^2.6.0",
-    "immer": "^10.1.1",
+    "immer": "^11.1.4",
     "lucide-react": "^0.562.0",
     "nanoid": "^3.3.11",
     "react": "^18.3.1",
