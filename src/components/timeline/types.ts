@@ -37,6 +37,19 @@ export type AssetDropData = AssetDropSource & {
   assetKind?: AssetKind;
 };
 
+export interface PendingAssetDrop {
+  id: string;
+  trackId: string;
+  timelinePosition: number;
+  label: string;
+  workspaceRelativePath: string;
+  assetKind?: AssetKind;
+  durationSec?: number;
+  progressPercent: number;
+  attempts: number;
+  status: 'queued' | 'resolving' | 'inserting';
+}
+
 // =============================================================================
 // Clip Operation Types
 // =============================================================================
@@ -226,6 +239,8 @@ export interface TimelineProps {
   onDeleteClips?: (clipIds: string[]) => void | Promise<void>;
   /** Callback when asset is dropped on timeline */
   onAssetDrop?: (data: AssetDropData) => void;
+  /** Workspace file drops currently loading in background */
+  pendingAssetDrops?: PendingAssetDrop[];
   /** Callback when clip is moved */
   onClipMove?: (data: ClipMoveData) => void | Promise<void>;
   /** Callback when clip is trimmed */

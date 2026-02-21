@@ -253,6 +253,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     handleClipSplit,
     handleClipAudioUpdate,
     handleAssetDrop,
+    pendingWorkspaceDrops,
     handleDeleteClips,
     handleTrackCreate,
     handleTrackMuteToggle,
@@ -592,6 +593,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                   onClipSplit={handleClipSplit}
                   onClipAudioUpdate={handleClipAudioUpdate}
                   onAssetDrop={handleAssetDrop}
+                  pendingAssetDrops={pendingWorkspaceDrops}
                   onDeleteClips={handleDeleteClips}
                   onTrackCreate={handleTrackCreate}
                   onTrackMuteToggle={handleTrackMuteToggle}

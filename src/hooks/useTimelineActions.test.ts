@@ -35,6 +35,7 @@ vi.mock('@/utils/ffmpeg', () => ({
 
 const workspaceStoreMocks = vi.hoisted(() => ({
   refreshTree: vi.fn().mockResolvedValue(undefined),
+  scanWorkspace: vi.fn().mockResolvedValue(undefined),
   fileTree: [] as import('@/types').FileTreeEntry[],
 }));
 
@@ -42,6 +43,7 @@ vi.mock('@/stores/workspaceStore', () => ({
   useWorkspaceStore: {
     getState: () => ({
       refreshTree: workspaceStoreMocks.refreshTree,
+      scanWorkspace: workspaceStoreMocks.scanWorkspace,
       fileTree: workspaceStoreMocks.fileTree,
     }),
   },
@@ -149,6 +151,7 @@ describe('useTimelineActions', () => {
     vi.clearAllMocks();
     _resetCommandQueueForTesting();
     workspaceStoreMocks.refreshTree.mockReset().mockResolvedValue(undefined);
+    workspaceStoreMocks.scanWorkspace.mockReset().mockResolvedValue(undefined);
     workspaceStoreMocks.fileTree = [];
     mockedProbeMedia.mockResolvedValue({
       durationSec: 0,
@@ -561,6 +564,89 @@ describe('useTimelineActions', () => {
           trackId: 'track_001',
           assetId: 'asset_workspace_recovered',
           timelineIn: 9,
+        },
+      });
+    });
+
+    it('should scan workspace and resolve drop when workspace file is not registered yet', async () => {
+      const track = createMockTrack({ id: 'track_001' });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [track],
+      });
+      const discoveredAsset = createMockAsset({
+        id: 'asset_workspace_scanned',
+        kind: 'image',
+        name: 'fresh.png',
+        relativePath: 'images/fresh.png',
+      });
+
+      let scanTriggered = false;
+      workspaceStoreMocks.fileTree = [];
+      workspaceStoreMocks.scanWorkspace.mockImplementation(async () => {
+        scanTriggered = true;
+        workspaceStoreMocks.fileTree = [
+          {
+            relativePath: 'images',
+            name: 'images',
+            isDirectory: true,
+            children: [
+              {
+                relativePath: 'images/fresh.png',
+                name: 'fresh.png',
+                isDirectory: false,
+                kind: 'image' as const,
+                fileSize: 1024,
+                assetId: 'asset_workspace_scanned',
+                children: [],
+              },
+            ],
+          },
+        ];
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_workspace_scanned',
+            createdIds: ['clip_workspace_scanned'],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: scanTriggered ? [discoveredAsset] : [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      useProjectStore.setState({
+        assets: new Map(),
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          workspaceRelativePath: 'images/fresh.png',
+          assetKind: 'image',
+          trackId: 'track_001',
+          timelinePosition: 4,
+        });
+      });
+
+      expect(workspaceStoreMocks.refreshTree).toHaveBeenCalled();
+      expect(workspaceStoreMocks.scanWorkspace).toHaveBeenCalledTimes(1);
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'InsertClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          assetId: 'asset_workspace_scanned',
+          timelineIn: 4,
         },
       });
     });
