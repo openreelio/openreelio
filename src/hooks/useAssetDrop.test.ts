@@ -209,7 +209,11 @@ describe('useAssetDrop', () => {
       expect(event.preventDefault).toHaveBeenCalled();
     });
 
-    it('should set dropEffect to none for image on audio track', () => {
+    it('should allow drop during dragover since getData is unavailable in modern browsers', () => {
+      // DataTransfer.getData() returns empty strings during dragover in modern
+      // Chromium-based browsers (including WebView2/Tauri). Asset kind compatibility
+      // is validated in handleDrop instead. During dragover, dropEffect should stay
+      // as 'copy' for any non-locked track with supported data types.
       const sequence: Sequence = {
         ...createMockSequence(2),
         tracks: [
@@ -236,7 +240,7 @@ describe('useAssetDrop', () => {
         result.current.handleDragOver(event);
       });
 
-      expect(event.dataTransfer.dropEffect).toBe('none');
+      expect(event.dataTransfer.dropEffect).toBe('copy');
     });
   });
 
@@ -473,14 +477,22 @@ describe('useAssetDrop', () => {
         useAssetDrop({ ...defaultOptions, onAssetDrop: undefined }),
       );
 
+      // Simulate a drag enter first to set isDraggingOver=true
+      const enterEvent = createMockDragEvent('dragenter');
+      act(() => {
+        result.current.handleDragEnter(enterEvent);
+      });
+      expect(result.current.isDraggingOver).toBe(true);
+
       const event = createMockDragEvent('drop');
 
       act(() => {
         result.current.handleDrop(event);
       });
 
-      // Should not throw
-      expect(true).toBe(true);
+      // Verify drop was handled (preventDefault called) and drag state was reset
+      expect(event.preventDefault).toHaveBeenCalled();
+      expect(result.current.isDraggingOver).toBe(false);
     });
 
     it('should handle invalid JSON data gracefully', () => {
