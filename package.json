@@ -10,6 +10,7 @@
     "tauri": "tauri",
     "test": "vitest",
     "test:run": "vitest run",
+    "test:ci-local": "CI=true vitest run --reporter=dot --no-coverage --bail=5",
     "test:ui": "vitest --ui",
     "test:bench": "vitest run src/benchmarks/**/*.bench.test.ts",
     "test:stress": "tsx scripts/run-stress-tests.ts",

@@ -36,7 +36,11 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
-  // Ensure real timers are restored to prevent timer-related hangs
+  // Clear all pending timers (intervals, timeouts) to prevent memory leaks
+  // across long test suite runs. clearAllTimers must be called BEFORE
+  // useRealTimers, because useRealTimers only switches the timer mode
+  // without cancelling pending callbacks.
+  vi.clearAllTimers();
   vi.useRealTimers();
 });
 

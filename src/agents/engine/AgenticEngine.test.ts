@@ -587,21 +587,24 @@ describe('AgenticEngine', () => {
   describe('abort', () => {
     it('should abort running process', async () => {
       let aborted = false;
+      // Track timers for deterministic cleanup
+      const pendingTimers: ReturnType<typeof setInterval>[] = [];
 
       vi.spyOn(mockLLM, 'generateStructured').mockImplementation(async () => {
         return new Promise<Thought>((resolve, reject) => {
-          // Check for abort periodically
           const checkAbort = setInterval(() => {
             if (aborted) {
               clearInterval(checkAbort);
               reject(new Error('Aborted'));
             }
           }, 10);
-          // Timeout safety
-          setTimeout(() => {
+          pendingTimers.push(checkAbort);
+
+          const safetyTimer = setTimeout(() => {
             clearInterval(checkAbort);
             resolve(mockThought);
           }, 5000);
+          pendingTimers.push(safetyTimer);
         });
       });
 
@@ -615,9 +618,16 @@ describe('AgenticEngine', () => {
       const promise = engine.run('Split the clip', agentContext, executionContext);
 
       // Abort after short delay
-      setTimeout(() => engine.abort(), 50);
+      const abortTimer = setTimeout(() => engine.abort(), 50);
+      pendingTimers.push(abortTimer);
 
       const result = await promise;
+
+      // Clean up any remaining timers to prevent leaks
+      for (const timer of pendingTimers) {
+        clearTimeout(timer);
+        clearInterval(timer);
+      }
 
       expect(result.success).toBe(false);
       // May be aborted or error depending on timing

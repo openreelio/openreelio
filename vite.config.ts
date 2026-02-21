@@ -49,6 +49,9 @@ export default defineConfig(({ mode }) => {
       isolate: true,
       // Disable file parallelism in CI to reduce memory pressure
       fileParallelism: !isCI,
+      // Use minimal reporter in CI to reduce stdout volume (prevents OOM in
+      // monitoring processes like Claude Code's Bun runtime).
+      reporter: isCI ? 'dot' : 'default',
       // Timeout settings to prevent CI hangs
       testTimeout: 30000, // 30 seconds per test
       hookTimeout: 30000, // 30 seconds for hooks
