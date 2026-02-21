@@ -155,4 +155,18 @@ describe('AgenticSidebarContent', () => {
       expect(screen.getByTestId('agentic-sidebar-content')).toHaveClass('custom-class');
     });
   });
+
+  describe('new chat registration', () => {
+    it('should not re-register handler on parent rerender when state is unchanged', () => {
+      const onRegisterNewChat = vi.fn();
+
+      const { rerender } = render(<AgenticSidebarContent onRegisterNewChat={onRegisterNewChat} />);
+
+      expect(onRegisterNewChat).toHaveBeenCalledTimes(1);
+
+      rerender(<AgenticSidebarContent onRegisterNewChat={onRegisterNewChat} />);
+
+      expect(onRegisterNewChat).toHaveBeenCalledTimes(1);
+    });
+  });
 });

@@ -14,6 +14,8 @@ import { initializeAgentSystem } from '@/stores/aiStore';
 import { useNewChat } from '@/hooks/useNewChat';
 import { createLogger } from '@/services/logger';
 
+const agentInitializedRef = { current: false };
+
 const logger = createLogger('AgenticSidebarContent');
 
 // =============================================================================
@@ -45,6 +47,15 @@ export function AgenticSidebarContent({
   // Adapters
   // ===========================================================================
 
+  // Initialize agent system once (module-level guard to survive strict mode double-renders)
+  useEffect(() => {
+    if (!agentInitializedRef.current) {
+      logger.info('Initializing agent system');
+      initializeAgentSystem();
+      agentInitializedRef.current = true;
+    }
+  }, []);
+
   const llmClient = useMemo(() => {
     logger.info('Creating TauriLLMAdapter');
     return createTauriLLMAdapter();
@@ -52,7 +63,6 @@ export function AgenticSidebarContent({
 
   const toolExecutor = useMemo(() => {
     logger.info('Creating ToolRegistryAdapter');
-    initializeAgentSystem();
     return createToolRegistryAdapter(globalToolRegistry);
   }, []);
 
@@ -62,12 +72,16 @@ export function AgenticSidebarContent({
 
   const chatHandleRef = useRef<AgenticChatHandle>(null);
 
+  const abortCurrentSession = useCallback(() => {
+    chatHandleRef.current?.abort();
+  }, []);
+
   // ===========================================================================
   // New Chat Hook
   // ===========================================================================
 
   const { newChat, canCreateNew } = useNewChat({
-    abort: () => chatHandleRef.current?.abort(),
+    abort: abortCurrentSession,
   });
 
   // Register new chat handler with parent (AISidebar)
