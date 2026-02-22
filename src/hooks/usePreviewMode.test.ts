@@ -211,7 +211,7 @@ describe('usePreviewMode', () => {
   });
 
   describe('canvas mode fallback', () => {
-    it('should return canvas mode when any clip has pending proxy', () => {
+    it('should keep video mode when clip has pending proxy but source media is playable', () => {
       const clip = createMockClip({
         assetId: 'asset-1',
         place: { timelineInSec: 0, durationSec: 10 },
@@ -230,11 +230,11 @@ describe('usePreviewMode', () => {
         currentTime: 5,
       });
 
-      expect(result.current.mode).toBe('canvas');
+      expect(result.current.mode).toBe('video');
       expect(result.current.clipsNeedingProxy).toBe(1);
     });
 
-    it('should return canvas mode when any clip has generating proxy', () => {
+    it('should keep video mode when clip has generating proxy but source media is playable', () => {
       const clip = createMockClip({
         assetId: 'asset-1',
         place: { timelineInSec: 0, durationSec: 10 },
@@ -253,12 +253,12 @@ describe('usePreviewMode', () => {
         currentTime: 5,
       });
 
-      expect(result.current.mode).toBe('canvas');
+      expect(result.current.mode).toBe('video');
       expect(result.current.hasGeneratingProxy).toBe(true);
-      expect(result.current.reason).toContain('Proxies generating');
+      expect(result.current.reason).toContain('source media while proxies generate');
     });
 
-    it('should return canvas mode when any clip has failed proxy', () => {
+    it('should keep video mode when clip has failed proxy but source media is playable', () => {
       const clip = createMockClip({
         assetId: 'asset-1',
         place: { timelineInSec: 0, durationSec: 10 },
@@ -277,10 +277,10 @@ describe('usePreviewMode', () => {
         currentTime: 5,
       });
 
-      expect(result.current.mode).toBe('canvas');
+      expect(result.current.mode).toBe('video');
     });
 
-    it('should return canvas mode when clip has notNeeded proxy status', () => {
+    it('should keep video mode when clip has notNeeded proxy status', () => {
       const clip = createMockClip({
         assetId: 'asset-1',
         place: { timelineInSec: 0, durationSec: 10 },
@@ -299,11 +299,11 @@ describe('usePreviewMode', () => {
         currentTime: 5,
       });
 
-      // notNeeded means no proxy available, so canvas mode
-      expect(result.current.mode).toBe('canvas');
+      expect(result.current.mode).toBe('video');
+      expect(result.current.reason).toContain('source media');
     });
 
-    it('should fall back to canvas if one of multiple clips lacks proxy', () => {
+    it('should keep video mode if one of multiple clips lacks proxy but has source media', () => {
       const clip1 = createMockClip({
         assetId: 'asset-1',
         place: { timelineInSec: 0, durationSec: 10 },
@@ -336,8 +336,32 @@ describe('usePreviewMode', () => {
         currentTime: 7, // Both clips active
       });
 
-      expect(result.current.mode).toBe('canvas');
+      expect(result.current.mode).toBe('video');
       expect(result.current.clipsNeedingProxy).toBe(1);
+    });
+
+    it('should return canvas mode when a clip has neither proxy nor playable source', () => {
+      const clip = createMockClip({
+        assetId: 'asset-1',
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
+      const track = createMockTrack({ clips: [clip] });
+      const sequence = createMockSequence([track]);
+      const asset = createMockAsset({
+        id: 'asset-1',
+        proxyStatus: 'pending',
+        uri: 'custom-scheme://video.mp4',
+      });
+      const assets = new Map([['asset-1', asset]]);
+
+      const { result } = renderUsePreviewMode({
+        sequence,
+        assets,
+        currentTime: 5,
+      });
+
+      expect(result.current.mode).toBe('canvas');
+      expect(result.current.reason).toContain('no playable source');
     });
   });
 
@@ -380,7 +404,14 @@ describe('usePreviewMode', () => {
       const track = createMockTrack({ clips: [clip] });
       const sequence = createMockSequence([track]);
       const assets = new Map([
-        ['asset-1', createMockAsset({ id: 'asset-1', proxyStatus: 'ready', proxyUrl: 'asset://localhost/proxy.mp4' })],
+        [
+          'asset-1',
+          createMockAsset({
+            id: 'asset-1',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy.mp4',
+          }),
+        ],
       ]);
 
       const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
@@ -394,7 +425,14 @@ describe('usePreviewMode', () => {
       const track = createMockTrack({ blendMode: 'overlay', clips: [clip] });
       const sequence = createMockSequence([track]);
       const assets = new Map([
-        ['asset-1', createMockAsset({ id: 'asset-1', proxyStatus: 'ready', proxyUrl: 'asset://localhost/proxy.mp4' })],
+        [
+          'asset-1',
+          createMockAsset({
+            id: 'asset-1',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy.mp4',
+          }),
+        ],
       ]);
 
       const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
@@ -408,7 +446,14 @@ describe('usePreviewMode', () => {
       const track = createMockTrack({ clips: [clip] });
       const sequence = createMockSequence([track]);
       const assets = new Map([
-        ['asset-1', createMockAsset({ id: 'asset-1', proxyStatus: 'ready', proxyUrl: 'asset://localhost/proxy.mp4' })],
+        [
+          'asset-1',
+          createMockAsset({
+            id: 'asset-1',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy.mp4',
+          }),
+        ],
       ]);
 
       const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
@@ -430,8 +475,18 @@ describe('usePreviewMode', () => {
       });
       const sequence = createMockSequence([videoTrack, audioTrack]);
       const assets = new Map([
-        ['asset-video', createMockAsset({ id: 'asset-video', proxyStatus: 'ready', proxyUrl: 'asset://localhost/proxy.mp4' })],
-        ['asset-audio', createMockAsset({ id: 'asset-audio', kind: 'audio', proxyStatus: 'notNeeded' })],
+        [
+          'asset-video',
+          createMockAsset({
+            id: 'asset-video',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy.mp4',
+          }),
+        ],
+        [
+          'asset-audio',
+          createMockAsset({ id: 'asset-audio', kind: 'audio', proxyStatus: 'notNeeded' }),
+        ],
       ]);
 
       const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });

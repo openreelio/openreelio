@@ -45,6 +45,7 @@ interface ActiveClipInfo {
 }
 
 const FLOAT_EPSILON = 0.0001;
+const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:/;
 
 function nearlyEqual(a: number, b: number): boolean {
   return Math.abs(a - b) <= FLOAT_EPSILON;
@@ -56,7 +57,7 @@ function nearlyEqual(a: number, b: number): boolean {
 function findActiveClips(
   sequence: Sequence,
   currentTime: number,
-  assets: Map<string, Asset>
+  assets: Map<string, Asset>,
 ): ActiveClipInfo[] {
   const activeClips: ActiveClipInfo[] = [];
 
@@ -88,6 +89,27 @@ function findActiveClips(
  */
 function hasReadyProxy(asset: Asset): boolean {
   return asset.proxyStatus === 'ready' && !!asset.proxyUrl;
+}
+
+function isWindowsAbsolutePath(path: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(path);
+}
+
+function hasPlayableVideoSource(asset: Asset): boolean {
+  const source = asset.uri?.trim();
+  if (!source) {
+    return false;
+  }
+
+  const hasUnsupportedUriScheme =
+    URI_SCHEME_PATTERN.test(source) &&
+    !isWindowsAbsolutePath(source) &&
+    !source.startsWith('http://') &&
+    !source.startsWith('https://') &&
+    !source.startsWith('file://') &&
+    !source.startsWith('asset://');
+
+  return !hasUnsupportedUriScheme;
 }
 
 /**
@@ -205,7 +227,9 @@ export function usePreviewMode({
     // Analyze proxy readiness for active video clips on visual tracks.
     const videoClips = activeClips.filter(
       (activeClip): activeClip is ActiveClipInfo & { asset: Asset } =>
-        activeClip.track.kind === 'video' && activeClip.asset !== null && isVideoAsset(activeClip.asset)
+        activeClip.track.kind === 'video' &&
+        activeClip.asset !== null &&
+        isVideoAsset(activeClip.asset),
     );
 
     if (videoClips.length === 0) {
@@ -219,13 +243,19 @@ export function usePreviewMode({
 
     const clipStatuses = videoClips.map(({ asset }) => ({
       hasProxy: hasReadyProxy(asset),
+      hasPlayableSource: hasPlayableVideoSource(asset),
       isGenerating: asset.proxyStatus === 'generating',
       needsProxy: asset.proxyStatus !== 'notNeeded',
     }));
 
     const allHaveProxy = clipStatuses.every((status) => status.hasProxy);
+    const allPlayableInVideoMode = clipStatuses.every(
+      (status) => status.hasProxy || status.hasPlayableSource,
+    );
     const anyGenerating = clipStatuses.some((status) => status.isGenerating);
-    const clipsNeedingProxy = clipStatuses.filter((status) => status.needsProxy && !status.hasProxy).length;
+    const clipsNeedingProxy = clipStatuses.filter(
+      (status) => status.needsProxy && !status.hasProxy,
+    ).length;
 
     if (allHaveProxy) {
       return {
@@ -236,19 +266,23 @@ export function usePreviewMode({
       };
     }
 
-    if (anyGenerating) {
+    if (allPlayableInVideoMode) {
       return {
-        mode: 'canvas',
-        reason: 'Proxies generating - using frame extraction',
-        hasGeneratingProxy: true,
+        mode: 'video',
+        reason: anyGenerating
+          ? 'Using source media while proxies generate'
+          : 'Using source media for clips without ready proxies',
+        hasGeneratingProxy: anyGenerating,
         clipsNeedingProxy,
       };
     }
 
     return {
       mode: 'canvas',
-      reason: 'Some clips missing proxy - using frame extraction',
-      hasGeneratingProxy: false,
+      reason: anyGenerating
+        ? 'Proxies generating and some clips have no playable source - using frame extraction'
+        : 'Some clips have no playable source and missing proxy - using frame extraction',
+      hasGeneratingProxy: anyGenerating,
       clipsNeedingProxy,
     };
   }, [sequence, assets, currentTime]);
