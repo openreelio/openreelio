@@ -19,6 +19,7 @@ import type { Sequence, Asset, Clip } from '@/types';
 import { createLogger } from '@/services/logger';
 import { collectPlaybackAudioClips } from '@/utils/audioPlayback';
 import { clampClipPan, clampClipVolumeDb, getClipFadeFactor } from '@/utils/clipAudio';
+import { normalizeFileUriToPath } from '@/utils/uri';
 
 const logger = createLogger('AudioPlayback');
 
@@ -145,6 +146,12 @@ export function useAudioPlayback({
     return usePlaybackStore.getState().isPlaying;
   }, []);
 
+  const getAudioSourceUri = useCallback((asset: Asset): string => {
+    // Audio preview should always read from original media source.
+    // Video proxies may be generated without embedded audio tracks.
+    return asset.uri;
+  }, []);
+
   useEffect(() => {
     isPlayingRef.current = isPlaying;
   }, [isPlaying]);
@@ -214,10 +221,8 @@ export function useAudioPlayback({
 
       try {
         // Convert to Tauri asset URL
-        let url = assetUri;
-        if (url.startsWith('file://')) {
-          url = convertFileSrc(url.replace('file://', ''));
-        } else if (url.startsWith('/') || url.match(/^[A-Za-z]:\\/)) {
+        let url = normalizeFileUriToPath(assetUri.trim());
+        if (!url.startsWith('asset://') && (url.startsWith('/') || url.match(/^[A-Za-z]:[\\/]/))) {
           url = convertFileSrc(url);
         }
 
@@ -310,12 +315,12 @@ export function useAudioPlayback({
         retryTimeoutsRef.current.delete(assetId);
       }
 
-      const audioUrl = asset.proxyUrl || asset.uri;
+      const audioUrl = getAudioSourceUri(asset);
       const buffer = await loadAudioBuffer(assetId, audioUrl, true);
 
       return buffer !== null;
     },
-    [assets, loadAudioBuffer],
+    [assets, loadAudioBuffer, getAudioSourceUri],
   );
 
   /**
@@ -446,7 +451,7 @@ export function useAudioPlayback({
           if (scheduledSourcesRef.current.has(clip.id)) continue;
 
           // Load audio buffer
-          const audioUrl = asset.proxyUrl || asset.uri;
+          const audioUrl = getAudioSourceUri(asset);
           const audioBuffer = await loadAudioBuffer(asset.id, audioUrl);
           if (!audioBuffer) continue;
 
@@ -574,6 +579,7 @@ export function useAudioPlayback({
     getAudioClips,
     loadAudioBuffer,
     calculateClipVolume,
+    getAudioSourceUri,
     getScheduleAheadTime,
     getLiveIsPlaying,
   ]);

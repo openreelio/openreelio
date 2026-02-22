@@ -19,6 +19,7 @@ import type { Sequence, Asset, Clip, Effect } from '@/types';
 import { createLogger } from '@/services/logger';
 import { collectPlaybackAudioClips } from '@/utils/audioPlayback';
 import { clampClipPan, clampClipVolumeDb, getClipFadeFactor } from '@/utils/clipAudio';
+import { normalizeFileUriToPath } from '@/utils/uri';
 import {
   createAudioEffectNode,
   updateAudioEffectNode,
@@ -150,6 +151,12 @@ export function useAudioPlaybackWithEffects({
     return isPlayingRef.current;
   }, []);
 
+  const getAudioSourceUri = useCallback((asset: Asset): string => {
+    // Audio preview should always read from original media source.
+    // Video proxies may be generated without embedded audio tracks.
+    return asset.uri;
+  }, []);
+
   useEffect(() => {
     isPlayingRef.current = isPlaying;
   }, [isPlaying]);
@@ -208,10 +215,8 @@ export function useAudioPlaybackWithEffects({
       }
 
       try {
-        let url = assetUri;
-        if (url.startsWith('file://')) {
-          url = convertFileSrc(url.replace('file://', ''));
-        } else if (url.startsWith('/') || url.match(/^[A-Za-z]:\\/)) {
+        let url = normalizeFileUriToPath(assetUri.trim());
+        if (!url.startsWith('asset://') && (url.startsWith('/') || url.match(/^[A-Za-z]:[\\/]/))) {
           url = convertFileSrc(url);
         }
 
@@ -295,12 +300,12 @@ export function useAudioPlaybackWithEffects({
         retryTimeoutsRef.current.delete(assetId);
       }
 
-      const audioUrl = asset.proxyUrl || asset.uri;
+      const audioUrl = getAudioSourceUri(asset);
       const buffer = await loadAudioBuffer(assetId, audioUrl, true);
 
       return buffer !== null;
     },
-    [assets, loadAudioBuffer],
+    [assets, loadAudioBuffer, getAudioSourceUri],
   );
 
   // -------------------------------------------------------------------------
@@ -450,7 +455,7 @@ export function useAudioPlaybackWithEffects({
           if (clip.place.timelineInSec > currentTime + SCHEDULE_AHEAD_TIME) continue;
           if (scheduledSourcesRef.current.has(clip.id)) continue;
 
-          const audioUrl = asset.proxyUrl || asset.uri;
+          const audioUrl = getAudioSourceUri(asset);
           const audioBuffer = await loadAudioBuffer(asset.id, audioUrl);
           if (!audioBuffer) continue;
 
@@ -562,6 +567,7 @@ export function useAudioPlaybackWithEffects({
     loadAudioBuffer,
     calculateClipVolume,
     createEffectChainForClip,
+    getAudioSourceUri,
     getLiveIsPlaying,
   ]);
 
