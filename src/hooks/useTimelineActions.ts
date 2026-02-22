@@ -537,19 +537,19 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     setPendingWorkspaceDrops((current) => current.filter((entry) => entry.id !== dropId));
   }, []);
 
-  const resolvePendingWorkspaceDropDurationSec = useCallback(
+  const resolveDroppedAssetDurationSec = useCallback(
     async (
-      queuedDrop: QueuedWorkspaceDrop,
       droppedAssetContext: ResolvedDroppedAssetContext,
+      durationSecHint?: number,
     ): Promise<number | undefined> => {
-      if (queuedDrop.resolvedDurationSec !== undefined) {
-        return queuedDrop.resolvedDurationSec;
+      const normalizedDurationHint = normalizeDurationSec(durationSecHint);
+      if (normalizedDurationHint !== undefined) {
+        return normalizedDurationHint;
       }
 
       const { droppedAsset, droppedAssetKind } = droppedAssetContext;
       const assetDurationSec = normalizeDurationSec(droppedAsset?.durationSec);
       if (assetDurationSec !== undefined) {
-        queuedDrop.resolvedDurationSec = assetDurationSec;
         return assetDurationSec;
       }
 
@@ -559,15 +559,9 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
 
       try {
         const mediaInfo = await probeMedia(droppedAsset.uri);
-        const probedDurationSec = normalizeDurationSec(mediaInfo.durationSec);
-        if (probedDurationSec === undefined) {
-          return undefined;
-        }
-
-        queuedDrop.resolvedDurationSec = probedDurationSec;
-        return probedDurationSec;
+        return normalizeDurationSec(mediaInfo.durationSec);
       } catch (error) {
-        logger.debug('Unable to probe queued workspace drop duration', {
+        logger.debug('Unable to probe dropped asset duration', {
           assetId: droppedAsset.id,
           uri: droppedAsset.uri,
           error,
@@ -576,6 +570,25 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
       }
     },
     [],
+  );
+
+  const resolvePendingWorkspaceDropDurationSec = useCallback(
+    async (
+      queuedDrop: QueuedWorkspaceDrop,
+      droppedAssetContext: ResolvedDroppedAssetContext,
+    ): Promise<number | undefined> => {
+      const resolvedDurationSec = await resolveDroppedAssetDurationSec(
+        droppedAssetContext,
+        queuedDrop.resolvedDurationSec,
+      );
+      if (resolvedDurationSec === undefined) {
+        return undefined;
+      }
+
+      queuedDrop.resolvedDurationSec = resolvedDurationSec;
+      return resolvedDurationSec;
+    },
+    [resolveDroppedAssetDurationSec],
   );
 
   useEffect(() => {
@@ -936,6 +949,11 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
       const { droppedAssetId, droppedAsset, droppedAssetKind } = droppedAssetContext;
       const targetTrack = sequenceSnapshot.tracks.find((track) => track.id === data.trackId);
       const normalizedDurationSecHint = normalizeDurationSec(durationSecHint);
+      const normalizedAssetDurationSec = normalizeDurationSec(droppedAsset?.durationSec);
+      const shouldApplyDurationHint =
+        normalizedDurationSecHint !== undefined &&
+        (normalizedAssetDurationSec === undefined ||
+          Math.abs(normalizedAssetDurationSec - normalizedDurationSecHint) > 0.001);
 
       let insertedPrimaryClip = false;
 
@@ -951,7 +969,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             },
           });
 
-          if (normalizedDurationSecHint !== undefined) {
+          if (shouldApplyDurationHint) {
             let insertedClipId: string | undefined = insertResult.createdIds[0];
             if (!insertedClipId) {
               const postInsertSequence = getCurrentSequence();
@@ -1037,7 +1055,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           )?.id;
         }
 
-        if (normalizedDurationSecHint !== undefined && primaryVideoClipId) {
+        if (shouldApplyDurationHint && primaryVideoClipId) {
           try {
             await executeCommand({
               type: 'TrimClip',
@@ -1114,7 +1132,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             },
           });
 
-          if (normalizedDurationSecHint !== undefined) {
+          if (shouldApplyDurationHint) {
             let insertedAudioClipId: string | undefined = audioInsertResult.createdIds[0];
             if (!insertedAudioClipId) {
               const latestSequence = getCurrentSequence();
@@ -1455,9 +1473,10 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         return;
       }
 
-      await insertResolvedDroppedAsset(data, droppedAssetContext);
+      const resolvedDurationSec = await resolveDroppedAssetDurationSec(droppedAssetContext);
+      await insertResolvedDroppedAsset(data, droppedAssetContext, resolvedDurationSec);
     },
-    [sequence, enqueueWorkspaceDrop, insertResolvedDroppedAsset],
+    [sequence, enqueueWorkspaceDrop, insertResolvedDroppedAsset, resolveDroppedAssetDurationSec],
   );
 
   /**
