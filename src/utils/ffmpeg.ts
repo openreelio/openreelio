@@ -6,6 +6,7 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import type { FFmpegStatus, MediaInfo } from '@/types';
+import { normalizeFileUriToPath } from '@/utils/uri';
 
 // =============================================================================
 // Types
@@ -31,6 +32,10 @@ export interface GenerateWaveformOptions {
   height: number;
 }
 
+function normalizeLocalMediaInputPath(inputPath: string): string {
+  return normalizeFileUriToPath(inputPath);
+}
+
 // =============================================================================
 // API Functions
 // =============================================================================
@@ -51,7 +56,7 @@ export async function checkFFmpeg(): Promise<FFmpegStatus> {
  */
 export async function extractFrame(options: ExtractFrameOptions): Promise<void> {
   return invoke<void>('extract_frame', {
-    inputPath: options.inputPath,
+    inputPath: normalizeLocalMediaInputPath(options.inputPath),
     timeSec: options.timeSec,
     outputPath: options.outputPath,
   });
@@ -64,7 +69,9 @@ export async function extractFrame(options: ExtractFrameOptions): Promise<void> 
  * @returns Media information including duration, format, streams
  */
 export async function probeMedia(inputPath: string): Promise<MediaInfo> {
-  return invoke<MediaInfo>('probe_media', { inputPath });
+  return invoke<MediaInfo>('probe_media', {
+    inputPath: normalizeLocalMediaInputPath(inputPath),
+  });
 }
 
 /**
@@ -77,7 +84,7 @@ export async function probeMedia(inputPath: string): Promise<MediaInfo> {
  */
 export async function generateThumbnail(options: GenerateThumbnailOptions): Promise<void> {
   return invoke<void>('generate_thumbnail', {
-    inputPath: options.inputPath,
+    inputPath: normalizeLocalMediaInputPath(options.inputPath),
     outputPath: options.outputPath,
     width: options.width ?? null,
     height: options.height ?? null,
@@ -94,7 +101,7 @@ export async function generateThumbnail(options: GenerateThumbnailOptions): Prom
  */
 export async function generateWaveform(options: GenerateWaveformOptions): Promise<void> {
   return invoke<void>('generate_waveform', {
-    inputPath: options.inputPath,
+    inputPath: normalizeLocalMediaInputPath(options.inputPath),
     outputPath: options.outputPath,
     width: options.width,
     height: options.height,
