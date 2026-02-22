@@ -339,6 +339,104 @@ describe('useTimelineActions', () => {
       });
     });
 
+    it('should probe and apply full duration when dropped video asset lacks duration metadata', async () => {
+      const track = createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [track],
+      });
+      const asset = createMockAsset({
+        id: 'asset_001',
+        kind: 'video',
+        durationSec: undefined,
+        audio: undefined,
+      });
+
+      mockedProbeMedia.mockResolvedValue({
+        durationSec: 24,
+        format: 'mov,mp4,m4a,3gp,3g2,mj2',
+        sizeBytes: 1024,
+        video: {
+          width: 1920,
+          height: 1080,
+          fps: 30,
+          codec: 'h264',
+          pixelFormat: 'yuv420p',
+        },
+        audio: undefined,
+      });
+
+      useProjectStore.setState({
+        assets: new Map([[asset.id, asset]]),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          const call = args as { commandType: string; payload: Record<string, unknown> };
+          executeCalls.push(call);
+
+          if (call.commandType === 'InsertClip') {
+            return Promise.resolve({
+              opId: 'op_insert',
+              createdIds: ['clip_1'],
+              deletedIds: [],
+            });
+          }
+
+          return Promise.resolve({
+            opId: 'op_trim',
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [asset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          assetId: 'asset_001',
+          trackId: 'track_v1',
+          timelinePosition: 2,
+        });
+      });
+
+      expect(mockedProbeMedia).toHaveBeenCalledWith('/path/to/video.mp4');
+      expect(executeCalls).toEqual(
+        expect.arrayContaining([
+          {
+            commandType: 'InsertClip',
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_v1',
+              assetId: 'asset_001',
+              timelineIn: 2,
+            },
+          },
+          {
+            commandType: 'TrimClip',
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_v1',
+              clipId: 'clip_1',
+              newSourceOut: 24,
+            },
+          },
+        ]),
+      );
+    });
+
     it('should look up auto-registered asset from file tree when dropped from workspace', async () => {
       const track = createMockTrack({ id: 'track_001' });
       const sequence = createMockSequence({

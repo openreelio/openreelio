@@ -109,6 +109,13 @@ describe('assetHasPlayableAudio', () => {
     expect(assetHasPlayableAudio(silentVideo)).toBe(false);
     expect(assetHasPlayableAudio(image)).toBe(false);
   });
+
+  it('treats video clips on audio tracks as playable even without metadata', () => {
+    const silentVideo = createAsset({ id: 'v3', kind: 'video', audio: undefined });
+
+    expect(assetHasPlayableAudio(silentVideo, 'audio')).toBe(true);
+    expect(assetHasPlayableAudio(silentVideo, 'video')).toBe(false);
+  });
 });
 
 describe('collectPlaybackAudioClips', () => {
@@ -239,5 +246,33 @@ describe('collectPlaybackAudioClips', () => {
     const result = collectPlaybackAudioClips(sequence, new Map([[videoAsset.id, videoAsset]]));
 
     expect(result).toEqual([]);
+  });
+
+  it('collects audio-track companion clips for video assets without audio metadata', () => {
+    const videoAssetMissingMetadata = createAsset({
+      id: 'video-asset-missing-audio',
+      kind: 'video',
+      audio: undefined,
+    });
+
+    const sequence = createSequence([
+      createTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [createClip({ id: 'video-clip', assetId: 'video-asset-missing-audio' })],
+      }),
+      createTrack({
+        id: 'audio-track',
+        kind: 'audio',
+        clips: [createClip({ id: 'audio-clip', assetId: 'video-asset-missing-audio' })],
+      }),
+    ]);
+
+    const result = collectPlaybackAudioClips(
+      sequence,
+      new Map([[videoAssetMissingMetadata.id, videoAssetMissingMetadata]]),
+    );
+
+    expect(result.map((entry) => entry.clip.id)).toEqual(['audio-clip']);
   });
 });

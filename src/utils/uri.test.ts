@@ -9,7 +9,12 @@ describe('normalizeFileUriToPath', () => {
   it('returns the input for non-file URIs', () => {
     expect(normalizeFileUriToPath('/path/to/file.mp4')).toBe('/path/to/file.mp4');
     expect(normalizeFileUriToPath('C:/path/to/file.mp4')).toBe('C:/path/to/file.mp4');
-    expect(normalizeFileUriToPath('https://example.com/video.mp4')).toBe('https://example.com/video.mp4');
+    expect(normalizeFileUriToPath('https://example.com/video.mp4')).toBe(
+      'https://example.com/video.mp4',
+    );
+    expect(normalizeFileUriToPath('asset://cdn.example.com/video.mp4')).toBe(
+      'asset://cdn.example.com/video.mp4',
+    );
   });
 
   it('strips file:// prefix for POSIX file URLs', () => {
@@ -25,6 +30,18 @@ describe('normalizeFileUriToPath', () => {
     expect(normalizeFileUriToPath('file:///c:/path/to/video.mp4')).toBe('c:/path/to/video.mp4');
     expect(normalizeFileUriToPath('file:///C:/Program%20Files/App/video.mp4')).toBe(
       'C:/Program Files/App/video.mp4',
+    );
+  });
+
+  it('normalizes Tauri asset URLs to local paths', () => {
+    expect(normalizeFileUriToPath('asset://localhost/home/user/video.mp4')).toBe(
+      '/home/user/video.mp4',
+    );
+    expect(normalizeFileUriToPath('asset://localhost/C:/videos/clip.mp4')).toBe(
+      'C:/videos/clip.mp4',
+    );
+    expect(normalizeFileUriToPath('asset://localhost/C:/Program%20Files/App/clip.mp4')).toBe(
+      'C:/Program Files/App/clip.mp4',
     );
   });
 

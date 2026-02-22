@@ -3,7 +3,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { invoke } from '@tauri-apps/api/core';
 import {
+  extractFrame,
+  probeMedia,
   getTempFramePath,
   isVideoFile,
   isAudioFile,
@@ -15,9 +18,45 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
 
+const mockedInvoke = vi.mocked(invoke);
+
 describe('FFmpeg Utilities', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  describe('IPC path normalization', () => {
+    it('normalizes file URLs before probeMedia IPC', async () => {
+      mockedInvoke.mockResolvedValue({
+        durationSec: 1,
+        format: 'mp4',
+        sizeBytes: 1,
+        video: undefined,
+        audio: undefined,
+      });
+
+      await probeMedia('file:///C:/videos/sample.mp4');
+
+      expect(mockedInvoke).toHaveBeenCalledWith('probe_media', {
+        inputPath: 'C:/videos/sample.mp4',
+      });
+    });
+
+    it('normalizes asset protocol URLs before extractFrame IPC', async () => {
+      mockedInvoke.mockResolvedValue(undefined);
+
+      await extractFrame({
+        inputPath: 'asset://localhost/C:/videos/sample.mp4',
+        timeSec: 1.25,
+        outputPath: '/tmp/frame.png',
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('extract_frame', {
+        inputPath: 'C:/videos/sample.mp4',
+        timeSec: 1.25,
+        outputPath: '/tmp/frame.png',
+      });
+    });
   });
 
   describe('getTempFramePath', () => {

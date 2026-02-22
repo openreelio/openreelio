@@ -1,4 +1,4 @@
-import type { Asset, Clip, Sequence } from '@/types';
+import type { Asset, Clip, Sequence, Track } from '@/types';
 
 export interface PlaybackAudioClipEntry {
   clip: Clip;
@@ -31,8 +31,23 @@ function createCompanionKey(clip: Clip): string {
   ].join('|');
 }
 
-export function assetHasPlayableAudio(asset: Asset): boolean {
-  return asset.kind === 'audio' || (asset.kind === 'video' && Boolean(asset.audio));
+export function assetHasPlayableAudio(asset: Asset, trackKind?: Track['kind']): boolean {
+  if (asset.kind === 'audio') {
+    return true;
+  }
+
+  if (asset.kind !== 'video') {
+    return false;
+  }
+
+  // Audio-track companions for video clips may be inserted before asset metadata
+  // is fully populated (e.g., workspace auto-registration). Those clips are still
+  // valid audio playback targets and should not be filtered out.
+  if (trackKind === 'audio') {
+    return true;
+  }
+
+  return Boolean(asset.audio);
 }
 
 export function collectPlaybackAudioClips(
@@ -52,7 +67,7 @@ export function collectPlaybackAudioClips(
 
     for (const clip of track.clips) {
       const asset = assets.get(clip.assetId);
-      if (!asset || !assetHasPlayableAudio(asset)) {
+      if (!asset || !assetHasPlayableAudio(asset, track.kind)) {
         continue;
       }
 
@@ -69,7 +84,7 @@ export function collectPlaybackAudioClips(
 
     for (const clip of track.clips) {
       const asset = assets.get(clip.assetId);
-      if (!asset || !assetHasPlayableAudio(asset)) {
+      if (!asset || !assetHasPlayableAudio(asset, track.kind)) {
         continue;
       }
 
