@@ -24,11 +24,14 @@ import type {
   RiskLevel,
 } from '../core/types';
 import { PlanningTimeoutError, PlanValidationError } from '../core/errors';
+import { createLogger } from '@/services/logger';
 import {
   collectStepValueReferences,
   normalizeReferencesForValidation,
 } from '../core/stepReferences';
 import { buildOrchestrationPlaybook } from '../core/orchestrationPlaybooks';
+
+const logger = createLogger('Planner');
 
 // =============================================================================
 // Types
@@ -46,6 +49,12 @@ export interface PlannerConfig {
   approvalRequiredRisks?: RiskLevel[];
   /** Custom system prompt override */
   systemPromptOverride?: string;
+  /** Number of retries after initial planning attempt */
+  maxRetries?: number;
+  /** Backoff in milliseconds between retries */
+  retryBackoffMs?: number;
+  /** Maximum tools included in compact retry prompt */
+  compactPromptToolLimit?: number;
 }
 
 /**
@@ -56,6 +65,9 @@ const DEFAULT_CONFIG: Required<PlannerConfig> = {
   maxSteps: 20,
   approvalRequiredRisks: ['high', 'critical'],
   systemPromptOverride: '',
+  maxRetries: 1,
+  retryBackoffMs: 400,
+  compactPromptToolLimit: 24,
 };
 
 const ID_PLACEHOLDER_PATTERNS: RegExp[] = [
@@ -66,6 +78,14 @@ const ID_PLACEHOLDER_PATTERNS: RegExp[] = [
 
 const TRACK_ALIAS_PATTERNS: RegExp[] = [/^(video|audio)_[0-9]+$/i];
 const CONTEXT_LIST_LIMIT = 40;
+const COMPACT_CONTEXT_LIST_LIMIT = 12;
+const TOOL_PROMPT_LIMIT = 80;
+const HISTORY_MESSAGE_LIMIT = 16;
+const COMPACT_HISTORY_MESSAGE_LIMIT = 8;
+const HISTORY_MESSAGE_CHAR_LIMIT = 1800;
+const COMPACT_HISTORY_MESSAGE_CHAR_LIMIT = 900;
+
+type PromptDetailLevel = 'full' | 'compact';
 
 const ORCHESTRATION_PLAYBOOK_LINES: string[] = [
   'Orchestration Playbooks (use when request matches):',
@@ -126,41 +146,77 @@ export class Planner {
    * @throws PlanValidationError if plan is invalid
    */
   async plan(thought: Thought, context: AgentContext, history?: LLMMessage[]): Promise<Plan> {
-    this.abortController = new AbortController();
-
     const playbookMatch = buildOrchestrationPlaybook(thought, context, this.toolExecutor);
     if (playbookMatch) {
       this.validatePlan(playbookMatch.plan, context);
       return playbookMatch.plan;
     }
 
-    const messages = this.buildMessages(thought, context, history);
     const schema = this.buildPlanSchema();
+    const maxAttempts = this.config.maxRetries + 1;
 
-    try {
-      const plan = await this.executeWithTimeout(
-        () => this.llm.generateStructured<Plan>(messages, schema),
-        this.config.timeout,
-      );
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const promptMode: PromptDetailLevel = attempt === 0 ? 'full' : 'compact';
+      const timeoutMs = this.resolveTimeoutForAttempt(attempt);
+      const messages = this.buildMessages(thought, context, history, promptMode);
 
-      // Validate the plan
-      this.validatePlan(plan, context);
+      this.abortController = new AbortController();
 
-      return plan;
-    } catch (error) {
-      if (error instanceof PlanningTimeoutError) {
-        throw error;
+      try {
+        logger.debug('Planning attempt started', {
+          attempt: attempt + 1,
+          maxAttempts,
+          promptMode,
+          timeoutMs,
+          messageCount: messages.length,
+          promptChars: messages.reduce((sum, message) => sum + message.content.length, 0),
+        });
+
+        const plan = await this.executeWithTimeout(
+          () =>
+            this.llm.generateStructured<Plan>(messages, schema, {
+              maxTokens: promptMode === 'compact' ? 1200 : 1800,
+              temperature: 0.2,
+            }),
+          timeoutMs,
+        );
+
+        this.validatePlan(plan, context);
+        return plan;
+      } catch (error) {
+        const aborted = this.abortController?.signal.aborted ?? false;
+
+        if (error instanceof PlanValidationError) {
+          throw error;
+        }
+
+        const shouldRetry = this.shouldRetryPlanning(error, aborted, attempt, maxAttempts);
+        if (shouldRetry) {
+          const backoffMs = this.config.retryBackoffMs * (attempt + 1);
+          logger.warn('Planning attempt failed; retrying with compact prompt', {
+            attempt: attempt + 1,
+            maxAttempts,
+            backoffMs,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          await this.delay(backoffMs);
+          continue;
+        }
+
+        if (error instanceof PlanningTimeoutError) {
+          throw error;
+        }
+
+        throw new PlanValidationError(
+          `Failed to generate plan: ${error instanceof Error ? error.message : String(error)}`,
+          [],
+        );
+      } finally {
+        this.abortController = null;
       }
-      if (error instanceof PlanValidationError) {
-        throw error;
-      }
-      throw new PlanValidationError(
-        `Failed to generate plan: ${error instanceof Error ? error.message : String(error)}`,
-        [],
-      );
-    } finally {
-      this.abortController = null;
     }
+
+    throw new PlanValidationError('Failed to generate plan after retries', []);
   }
 
   /**
@@ -186,29 +242,44 @@ export class Planner {
       return playbookMatch.plan;
     }
 
+    const schema = this.buildPlanSchema();
+    // Append structured output instructions to messages so the streamed
+    // response already contains the JSON we need — avoiding a second LLM call.
+    const schemaInstruction = [
+      'Return ONLY a JSON object that strictly matches this JSON Schema.',
+      'Do not include markdown code fences, comments, or additional text.',
+      '',
+      'JSON Schema:',
+      JSON.stringify(schema),
+    ].join('\n');
     const messages = this.buildMessages(thought, context, history);
+    messages.push({ role: 'system', content: schemaInstruction });
 
     try {
-      // Stream the planning process for UI feedback
+      // Stream the planning process for UI feedback while accumulating text
+      let accumulated = '';
       for await (const chunk of this.llm.generateStream(messages)) {
         if (this.abortController?.signal.aborted) {
           break;
         }
+        accumulated += chunk;
         onProgress(chunk);
       }
 
-      // Check abort before making additional LLM call
       if (this.abortController?.signal.aborted) {
         throw new PlanValidationError('Planning aborted', []);
       }
 
-      // Get the structured result
-      const schema = this.buildPlanSchema();
-      const plan = await this.llm.generateStructured<Plan>(messages, schema);
+      // Parse the accumulated streaming output as structured JSON
+      // instead of making a second LLM call
+      const plan = this.parseAccumulatedPlan<Plan>(accumulated);
 
       this.validatePlan(plan, context);
       return plan;
     } catch (error) {
+      if (error instanceof PlanValidationError) {
+        throw error;
+      }
       throw new PlanValidationError(
         `Failed to generate plan with streaming: ${error instanceof Error ? error.message : String(error)}`,
         [],
@@ -239,14 +310,16 @@ export class Planner {
     thought: Thought,
     context: AgentContext,
     history?: LLMMessage[],
+    promptDetailLevel: PromptDetailLevel = 'full',
   ): LLMMessage[] {
-    const systemPrompt = this.buildSystemPrompt(context);
+    const systemPrompt = this.buildSystemPrompt(context, promptDetailLevel);
     const userPrompt = this.buildUserPrompt(thought);
     const messages: LLMMessage[] = [{ role: 'system', content: systemPrompt }];
 
     // Insert conversation history between system prompt and current input
-    if (history && history.length > 0) {
-      messages.push(...history);
+    const preparedHistory = this.prepareHistory(history, promptDetailLevel);
+    if (preparedHistory.length > 0) {
+      messages.push(...preparedHistory);
     }
 
     messages.push({ role: 'user', content: userPrompt });
@@ -256,10 +329,16 @@ export class Planner {
   /**
    * Build system prompt with available tools and context
    */
-  private buildSystemPrompt(context: AgentContext): string {
+  private buildSystemPrompt(
+    context: AgentContext,
+    promptDetailLevel: PromptDetailLevel = 'full',
+  ): string {
     if (this.config.systemPromptOverride) {
       return this.config.systemPromptOverride;
     }
+
+    const contextListLimit =
+      promptDetailLevel === 'compact' ? COMPACT_CONTEXT_LIST_LIMIT : CONTEXT_LIST_LIMIT;
 
     const parts: string[] = [
       'You are a planning assistant for a video editing application.',
@@ -285,11 +364,11 @@ export class Planner {
       parts.push('- Available assets: (none)');
     } else {
       parts.push(`- Available assets (${context.availableAssets.length}):`);
-      for (const asset of context.availableAssets.slice(0, CONTEXT_LIST_LIMIT)) {
+      for (const asset of context.availableAssets.slice(0, contextListLimit)) {
         parts.push(`  - ${asset.id} (${asset.type}) ${asset.name}`);
       }
-      if (context.availableAssets.length > CONTEXT_LIST_LIMIT) {
-        const omittedCount = context.availableAssets.length - CONTEXT_LIST_LIMIT;
+      if (context.availableAssets.length > contextListLimit) {
+        const omittedCount = context.availableAssets.length - contextListLimit;
         parts.push(`  - ... ${omittedCount} more asset IDs omitted for brevity`);
       }
     }
@@ -298,25 +377,44 @@ export class Planner {
       parts.push('- Available tracks: (none)');
     } else {
       parts.push(`- Available tracks (${context.availableTracks.length}):`);
-      for (const track of context.availableTracks.slice(0, CONTEXT_LIST_LIMIT)) {
+      for (const track of context.availableTracks.slice(0, contextListLimit)) {
         parts.push(`  - ${track.id} (${track.type}, clips=${track.clipCount}) ${track.name}`);
       }
-      if (context.availableTracks.length > CONTEXT_LIST_LIMIT) {
-        const omittedCount = context.availableTracks.length - CONTEXT_LIST_LIMIT;
+      if (context.availableTracks.length > contextListLimit) {
+        const omittedCount = context.availableTracks.length - contextListLimit;
         parts.push(`  - ... ${omittedCount} more track IDs omitted for brevity`);
       }
     }
 
     // Add available tools with descriptions
     const tools = this.toolExecutor.getAvailableTools();
-    for (const tool of tools) {
+    const toolListLimit =
+      promptDetailLevel === 'compact' ? this.config.compactPromptToolLimit : TOOL_PROMPT_LIMIT;
+    const visibleTools = tools.slice(0, toolListLimit);
+
+    for (const tool of visibleTools) {
       const definition = this.toolExecutor.getToolDefinition(tool.name);
       parts.push(`- ${tool.name}: ${tool.description}`);
-      parts.push(`  Risk Level: ${tool.riskLevel}`);
-      parts.push(`  Parallelizable: ${tool.parallelizable ? 'yes' : 'no'}`);
-      if (definition?.required && definition.required.length > 0) {
-        parts.push(`  Required args: ${definition.required.join(', ')}`);
+      if (promptDetailLevel === 'full') {
+        parts.push(`  Risk Level: ${tool.riskLevel}`);
+        parts.push(`  Parallelizable: ${tool.parallelizable ? 'yes' : 'no'}`);
       }
+      if (definition?.required && definition.required.length > 0) {
+        const requiredPreview = definition.required.slice(0, 12);
+        parts.push(`  Required args: ${requiredPreview.join(', ')}`);
+      }
+    }
+
+    if (tools.length > visibleTools.length) {
+      parts.push(
+        `- ... ${tools.length - visibleTools.length} more tools omitted in ${promptDetailLevel} prompt mode`,
+      );
+    }
+
+    if (promptDetailLevel === 'compact') {
+      parts.push(
+        '- Prompt mode: compact retry. Keep steps concise and prioritize essential actions.',
+      );
     }
 
     this.appendLanguagePolicyInstructions(parts, context.languagePolicy);
@@ -390,6 +488,147 @@ export class Planner {
     }
 
     return parts.join('\n');
+  }
+
+  private prepareHistory(
+    history: LLMMessage[] | undefined,
+    promptDetailLevel: PromptDetailLevel,
+  ): LLMMessage[] {
+    if (!history || history.length === 0) {
+      return [];
+    }
+
+    const messageLimit =
+      promptDetailLevel === 'compact' ? COMPACT_HISTORY_MESSAGE_LIMIT : HISTORY_MESSAGE_LIMIT;
+    const charLimit =
+      promptDetailLevel === 'compact'
+        ? COMPACT_HISTORY_MESSAGE_CHAR_LIMIT
+        : HISTORY_MESSAGE_CHAR_LIMIT;
+
+    return history.slice(-messageLimit).map((message) => ({
+      ...message,
+      content: this.truncateMessageContent(message.content, charLimit),
+    }));
+  }
+
+  private truncateMessageContent(content: string, maxChars: number): string {
+    if (content.length <= maxChars) {
+      return content;
+    }
+
+    const head = content.slice(0, Math.floor(maxChars * 0.75));
+    const tail = content.slice(-Math.floor(maxChars * 0.15));
+    return `${head}\n...[truncated ${content.length - maxChars} chars]...\n${tail}`;
+  }
+
+  private resolveTimeoutForAttempt(attempt: number): number {
+    if (attempt === 0) {
+      return this.config.timeout;
+    }
+
+    const expanded = Math.max(this.config.timeout + 30000, Math.round(this.config.timeout * 1.5));
+    return Math.min(expanded, 180000);
+  }
+
+  private shouldRetryPlanning(
+    error: unknown,
+    aborted: boolean,
+    attempt: number,
+    maxAttempts: number,
+  ): boolean {
+    if (aborted || attempt >= maxAttempts - 1) {
+      return false;
+    }
+
+    if (error instanceof PlanningTimeoutError) {
+      return true;
+    }
+
+    const message = error instanceof Error ? error.message : String(error);
+    return /timeout|timed out|rate limit|429|503|network|temporar|service unavailable|failed to parse structured response|invalid json|unterminated string/i.test(
+      message,
+    );
+  }
+
+  /**
+   * Parse accumulated streaming text into a structured plan.
+   * Handles raw JSON, code-fenced JSON, and embedded JSON objects.
+   */
+  private parseAccumulatedPlan<T>(text: string): T {
+    const trimmed = text.replace(/^\uFEFF/, '').trim();
+    if (trimmed.length === 0) {
+      throw new PlanValidationError('Empty response from LLM during streaming', []);
+    }
+
+    // Try raw parse first
+    try {
+      return JSON.parse(trimmed) as T;
+    } catch {
+      // continue to fallback strategies
+    }
+
+    // Try extracting from code fences
+    const fenceRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
+    for (const match of trimmed.matchAll(fenceRegex)) {
+      const candidate = match[1]?.trim();
+      if (candidate) {
+        try {
+          return JSON.parse(candidate) as T;
+        } catch {
+          // continue
+        }
+      }
+    }
+
+    // Try extracting balanced JSON object
+    const objStart = trimmed.indexOf('{');
+    if (objStart >= 0) {
+      const balanced = this.extractBalancedBraces(trimmed, objStart);
+      if (balanced) {
+        try {
+          return JSON.parse(balanced) as T;
+        } catch {
+          // fall through
+        }
+      }
+    }
+
+    const preview = trimmed.slice(0, 160).replace(/\s+/g, ' ');
+    throw new PlanValidationError(
+      `Failed to parse streaming plan output as JSON: ${preview}...`,
+      [],
+    );
+  }
+
+  /**
+   * Extract a balanced JSON substring starting at the given index.
+   */
+  private extractBalancedBraces(text: string, start: number): string | null {
+    const stack: string[] = ['}'];
+    let inString = false;
+    let escaped = false;
+
+    for (let i = start + 1; i < text.length; i++) {
+      const char = text[i];
+      if (inString) {
+        if (escaped) { escaped = false; continue; }
+        if (char === '\\') { escaped = true; continue; }
+        if (char === '"') { inString = false; }
+        continue;
+      }
+      if (char === '"') { inString = true; continue; }
+      if (char === '{') { stack.push('}'); continue; }
+      if (char === '[') { stack.push(']'); continue; }
+      if (char === '}' || char === ']') {
+        if (stack.pop() !== char) return null;
+        if (stack.length === 0) return text.slice(start, i + 1);
+      }
+    }
+    return null;
+  }
+
+  private delay(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   /**
@@ -794,39 +1033,50 @@ export class Planner {
     return new Promise<T>((resolve, reject) => {
       let settled = false;
 
-      const timeoutId = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          this.abort();
-          reject(new PlanningTimeoutError(timeout));
-        }
-      }, timeout);
-
-      const abortHandler = () => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timeoutId);
-          reject(new PlanningTimeoutError(timeout));
-        }
-      };
-
-      if (this.abortController?.signal.aborted) {
-        settled = true;
-        clearTimeout(timeoutId);
-        reject(new PlanningTimeoutError(timeout));
-        return;
-      }
-
       const signal = this.abortController?.signal;
-      if (signal) {
-        signal.addEventListener('abort', abortHandler);
-      }
-
       const cleanup = () => {
         if (signal) {
           signal.removeEventListener('abort', abortHandler);
         }
       };
+
+      const failAsAborted = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutId);
+        cleanup();
+        reject(new PlanValidationError('Planning aborted', []));
+      };
+
+      const failAsTimeout = () => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeoutId);
+        cleanup();
+        this.llm.abort();
+        reject(new PlanningTimeoutError(timeout));
+      };
+
+      const abortHandler = () => {
+        failAsAborted();
+      };
+
+      const timeoutId = setTimeout(() => {
+        failAsTimeout();
+      }, timeout);
+
+      if (this.abortController?.signal.aborted) {
+        failAsAborted();
+        return;
+      }
+
+      if (signal) {
+        signal.addEventListener('abort', abortHandler);
+      }
 
       operation()
         .then((result) => {

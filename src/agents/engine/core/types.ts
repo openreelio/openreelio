@@ -594,7 +594,7 @@ export interface AgenticEngineConfig {
   maxIterations: number;
   /** Timeout for thinking phase in ms (default: 60000) */
   thinkingTimeout: number;
-  /** Timeout for planning phase in ms (default: 60000) */
+  /** Timeout for planning phase in ms (default: 90000) */
   planningTimeout: number;
   /** Timeout for execution phase in ms (default: 60000) */
   executionTimeout: number;
@@ -698,7 +698,7 @@ export interface AgenticEngineConfig {
 export const DEFAULT_ENGINE_CONFIG: AgenticEngineConfig = {
   maxIterations: 20,
   thinkingTimeout: 60000,
-  planningTimeout: 60000,
+  planningTimeout: 90000,
   executionTimeout: 60000,
   observationTimeout: 15000,
   enableStreaming: true,
