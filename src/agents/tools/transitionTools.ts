@@ -1,27 +1,56 @@
 /**
  * Transition Tools
  *
- * Transition-related tools for the AI agent system.
- * Handles adding, removing, and adjusting transitions between clips.
+ * Transition operations are modeled as effect operations in the core engine.
  */
 
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
 import { executeAgentCommand } from './commandExecutor';
+import { useProjectStore } from '@/stores/projectStore';
+import type { Clip, Sequence } from '@/types';
 
 const logger = createLogger('TransitionTools');
 
-// =============================================================================
-// Tool Definitions
-// =============================================================================
+type TransitionEffectType = 'cross_dissolve' | 'wipe' | 'slide' | 'zoom' | 'fade';
+
+function mapTransitionType(value: string): TransitionEffectType {
+  return value === 'dissolve' ? 'cross_dissolve' : (value as TransitionEffectType);
+}
+
+function getSequence(sequenceId: string): Sequence | undefined {
+  return useProjectStore.getState().sequences.get(sequenceId);
+}
+
+function clipHasEffectId(clip: Clip, effectId: string): boolean {
+  const rawEffects = clip.effects as unknown[];
+  return rawEffects.some((effect) => {
+    if (typeof effect === 'string') {
+      return effect === effectId;
+    }
+
+    if (typeof effect === 'object' && effect !== null && 'id' in effect) {
+      return (effect as { id?: unknown }).id === effectId;
+    }
+
+    return false;
+  });
+}
+
+function findClipIdForEffect(sequence: Sequence, trackId: string, effectId: string): string | null {
+  const track = sequence.tracks.find((candidate) => candidate.id === trackId);
+  if (!track) {
+    return null;
+  }
+
+  const clip = track.clips.find((candidate) => clipHasEffectId(candidate, effectId));
+  return clip?.id ?? null;
+}
 
 const TRANSITION_TOOLS: ToolDefinition[] = [
-  // ---------------------------------------------------------------------------
-  // Add Transition
-  // ---------------------------------------------------------------------------
   {
     name: 'add_transition',
-    description: 'Add a transition between two adjacent clips',
+    description: 'Add a transition effect to a clip',
     category: 'transition',
     parameters: {
       type: 'object',
@@ -36,7 +65,7 @@ const TRANSITION_TOOLS: ToolDefinition[] = [
         },
         clipId: {
           type: 'string',
-          description: 'The ID of the clip to add transition after',
+          description: 'The ID of the clip to add transition on',
         },
         transitionType: {
           type: 'string',
@@ -52,16 +81,24 @@ const TRANSITION_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await executeAgentCommand('AddTransition', {
+        const result = await executeAgentCommand('AddEffect', {
           sequenceId: args.sequenceId as string,
           trackId: args.trackId as string,
           clipId: args.clipId as string,
-          transitionType: args.transitionType as string,
-          duration: args.duration as number,
+          effectType: mapTransitionType(args.transitionType as string),
+          params: {
+            duration: args.duration as number,
+          },
         });
 
         logger.debug('add_transition executed', { opId: result.opId });
-        return { success: true, result };
+        return {
+          success: true,
+          result: {
+            ...result,
+            transitionId: result.createdIds[0],
+          },
+        };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('add_transition failed', { error: message });
@@ -69,13 +106,9 @@ const TRANSITION_TOOLS: ToolDefinition[] = [
       }
     },
   },
-
-  // ---------------------------------------------------------------------------
-  // Remove Transition
-  // ---------------------------------------------------------------------------
   {
     name: 'remove_transition',
-    description: 'Remove a transition between clips',
+    description: 'Remove a transition effect by transitionId(effectId)',
     category: 'transition',
     parameters: {
       type: 'object',
@@ -90,17 +123,41 @@ const TRANSITION_TOOLS: ToolDefinition[] = [
         },
         transitionId: {
           type: 'string',
-          description: 'The ID of the transition to remove',
+          description: 'Transition ID (same as effect ID)',
+        },
+        clipId: {
+          type: 'string',
+          description: 'Optional clip ID; auto-resolved when omitted',
         },
       },
       required: ['sequenceId', 'trackId', 'transitionId'],
     },
     handler: async (args) => {
       try {
-        const result = await executeAgentCommand('RemoveTransition', {
-          sequenceId: args.sequenceId as string,
-          trackId: args.trackId as string,
-          transitionId: args.transitionId as string,
+        const sequenceId = args.sequenceId as string;
+        const trackId = args.trackId as string;
+        const transitionId = args.transitionId as string;
+
+        const sequence = getSequence(sequenceId);
+        if (!sequence) {
+          return { success: false, error: `Sequence '${sequenceId}' not found` };
+        }
+
+        const clipId =
+          (args.clipId as string | undefined) ??
+          findClipIdForEffect(sequence, trackId, transitionId);
+        if (!clipId) {
+          return {
+            success: false,
+            error: `Could not resolve clip for transition '${transitionId}' on track '${trackId}'`,
+          };
+        }
+
+        const result = await executeAgentCommand('RemoveEffect', {
+          sequenceId,
+          trackId,
+          clipId,
+          effectId: transitionId,
         });
 
         logger.debug('remove_transition executed', { opId: result.opId });
@@ -112,13 +169,9 @@ const TRANSITION_TOOLS: ToolDefinition[] = [
       }
     },
   },
-
-  // ---------------------------------------------------------------------------
-  // Set Transition Duration
-  // ---------------------------------------------------------------------------
   {
     name: 'set_transition_duration',
-    description: 'Change the duration of an existing transition',
+    description: 'Change transition duration using transitionId(effectId)',
     category: 'transition',
     parameters: {
       type: 'object',
@@ -133,7 +186,7 @@ const TRANSITION_TOOLS: ToolDefinition[] = [
         },
         transitionId: {
           type: 'string',
-          description: 'The ID of the transition',
+          description: 'Transition ID (same as effect ID)',
         },
         duration: {
           type: 'number',
@@ -144,11 +197,11 @@ const TRANSITION_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await executeAgentCommand('SetTransitionDuration', {
-          sequenceId: args.sequenceId as string,
-          trackId: args.trackId as string,
-          transitionId: args.transitionId as string,
-          duration: args.duration as number,
+        const result = await executeAgentCommand('UpdateEffect', {
+          effectId: args.transitionId as string,
+          params: {
+            duration: args.duration as number,
+          },
         });
 
         logger.debug('set_transition_duration executed', { opId: result.opId });
@@ -162,21 +215,11 @@ const TRANSITION_TOOLS: ToolDefinition[] = [
   },
 ];
 
-// =============================================================================
-// Registration Functions
-// =============================================================================
-
-/**
- * Register all transition tools with the global registry.
- */
 export function registerTransitionTools(): void {
   globalToolRegistry.registerMany(TRANSITION_TOOLS);
   logger.info('Transition tools registered', { count: TRANSITION_TOOLS.length });
 }
 
-/**
- * Unregister all transition tools from the global registry.
- */
 export function unregisterTransitionTools(): void {
   for (const tool of TRANSITION_TOOLS) {
     globalToolRegistry.unregister(tool.name);
@@ -184,9 +227,6 @@ export function unregisterTransitionTools(): void {
   logger.info('Transition tools unregistered', { count: TRANSITION_TOOLS.length });
 }
 
-/**
- * Get the list of transition tool names.
- */
 export function getTransitionToolNames(): string[] {
-  return TRANSITION_TOOLS.map((t) => t.name);
+  return TRANSITION_TOOLS.map((tool) => tool.name);
 }

@@ -1,33 +1,78 @@
 /**
  * Caption Tools
  *
- * Caption-related tools for the AI agent system.
- * Handles adding, editing, and styling captions/subtitles.
+ * Caption-related tools for creating, updating, and deleting caption clips.
  */
 
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
 import { executeAgentCommand } from './commandExecutor';
-import type { CommandResult } from '@/types';
+import { useProjectStore } from '@/stores/projectStore';
+import type { Sequence } from '@/types';
 
 const logger = createLogger('CaptionTools');
 
-// =============================================================================
-// Types
-// =============================================================================
-
-interface CaptionCommandResult extends CommandResult {
-  captionId?: string;
+function getSequence(sequenceId: string): Sequence | undefined {
+  return useProjectStore.getState().sequences.get(sequenceId);
 }
 
-// =============================================================================
-// Tool Definitions
-// =============================================================================
+function resolveCaptionTrackId(
+  sequence: Sequence,
+  captionId: string,
+  explicitTrackId?: string,
+): string | null {
+  if (explicitTrackId) {
+    return explicitTrackId;
+  }
+
+  for (const track of sequence.tracks) {
+    if (track.kind !== 'caption') {
+      continue;
+    }
+
+    if (track.clips.some((clip) => clip.id === captionId)) {
+      return track.id;
+    }
+  }
+
+  const firstCaptionTrack = sequence.tracks.find((track) => track.kind === 'caption');
+  return firstCaptionTrack?.id ?? null;
+}
+
+async function ensureCaptionTrack(sequenceId: string, explicitTrackId?: string): Promise<string> {
+  const sequence = getSequence(sequenceId);
+  if (!sequence) {
+    throw new Error(`Sequence '${sequenceId}' not found`);
+  }
+
+  if (explicitTrackId) {
+    const hasTrack = sequence.tracks.some((track) => track.id === explicitTrackId);
+    if (!hasTrack) {
+      throw new Error(`Track '${explicitTrackId}' not found in sequence '${sequenceId}'`);
+    }
+    return explicitTrackId;
+  }
+
+  const existingCaptionTrack = sequence.tracks.find((track) => track.kind === 'caption');
+  if (existingCaptionTrack) {
+    return existingCaptionTrack.id;
+  }
+
+  const createTrackResult = await executeAgentCommand('CreateTrack', {
+    sequenceId,
+    kind: 'caption',
+    name: 'Captions',
+  });
+
+  const createdTrackId = createTrackResult.createdIds[0];
+  if (!createdTrackId) {
+    throw new Error('Failed to create caption track');
+  }
+
+  return createdTrackId;
+}
 
 const CAPTION_TOOLS: ToolDefinition[] = [
-  // ---------------------------------------------------------------------------
-  // Add Caption
-  // ---------------------------------------------------------------------------
   {
     name: 'add_caption',
     description: 'Add a caption/subtitle at a specific time position',
@@ -38,6 +83,10 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         sequenceId: {
           type: 'string',
           description: 'The ID of the sequence',
+        },
+        trackId: {
+          type: 'string',
+          description: 'Optional caption track ID (auto-created when omitted)',
         },
         text: {
           type: 'string',
@@ -53,27 +102,39 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         },
         style: {
           type: 'object',
-          description:
-            'Optional caption style (fontSize, fontFamily, color, backgroundColor, position)',
+          description: 'Optional caption style payload',
         },
       },
       required: ['sequenceId', 'text', 'startTime', 'endTime'],
     },
     handler: async (args) => {
       try {
-        const result = (await executeAgentCommand('AddCaption', {
-          sequenceId: args.sequenceId as string,
+        const sequenceId = args.sequenceId as string;
+        const trackId = await ensureCaptionTrack(sequenceId, args.trackId as string | undefined);
+
+        const result = await executeAgentCommand('CreateCaption', {
+          sequenceId,
+          trackId,
           text: args.text as string,
-          startTime: args.startTime as number,
-          endTime: args.endTime as number,
+          startSec: args.startTime as number,
+          endSec: args.endTime as number,
           style: args.style as Record<string, unknown> | undefined,
-        })) as CaptionCommandResult;
+        });
 
         logger.debug('add_caption executed', {
           opId: result.opId,
-          captionId: result.captionId,
+          trackId,
+          captionId: result.createdIds[0],
         });
-        return { success: true, result };
+
+        return {
+          success: true,
+          result: {
+            ...result,
+            captionId: result.createdIds[0],
+            trackId,
+          },
+        };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('add_caption failed', { error: message });
@@ -81,13 +142,9 @@ const CAPTION_TOOLS: ToolDefinition[] = [
       }
     },
   },
-
-  // ---------------------------------------------------------------------------
-  // Update Caption
-  // ---------------------------------------------------------------------------
   {
     name: 'update_caption',
-    description: 'Update the text content of an existing caption',
+    description: 'Update an existing caption text and/or timing',
     category: 'utility',
     parameters: {
       type: 'object',
@@ -96,36 +153,58 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           type: 'string',
           description: 'The ID of the sequence',
         },
+        trackId: {
+          type: 'string',
+          description: 'Optional caption track ID (auto-resolved by captionId when omitted)',
+        },
         captionId: {
           type: 'string',
           description: 'The ID of the caption to update',
         },
         text: {
           type: 'string',
-          description: 'The new caption text',
+          description: 'New caption text',
         },
         startTime: {
           type: 'number',
-          description: 'New start time in seconds (optional)',
+          description: 'Optional new start time in seconds',
         },
         endTime: {
           type: 'number',
-          description: 'New end time in seconds (optional)',
+          description: 'Optional new end time in seconds',
         },
       },
-      required: ['sequenceId', 'captionId', 'text'],
+      required: ['sequenceId', 'captionId'],
     },
     handler: async (args) => {
       try {
+        const sequenceId = args.sequenceId as string;
+        const captionId = args.captionId as string;
+
+        const sequence = getSequence(sequenceId);
+        if (!sequence) {
+          return { success: false, error: `Sequence '${sequenceId}' not found` };
+        }
+
+        const trackId = resolveCaptionTrackId(
+          sequence,
+          captionId,
+          args.trackId as string | undefined,
+        );
+        if (!trackId) {
+          return { success: false, error: `Could not resolve caption track for '${captionId}'` };
+        }
+
         const result = await executeAgentCommand('UpdateCaption', {
-          sequenceId: args.sequenceId as string,
-          captionId: args.captionId as string,
-          text: args.text as string,
-          startTime: args.startTime as number | undefined,
-          endTime: args.endTime as number | undefined,
+          sequenceId,
+          trackId,
+          captionId,
+          text: args.text as string | undefined,
+          startSec: args.startTime as number | undefined,
+          endSec: args.endTime as number | undefined,
         });
 
-        logger.debug('update_caption executed', { opId: result.opId });
+        logger.debug('update_caption executed', { opId: result.opId, captionId, trackId });
         return { success: true, result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -134,10 +213,6 @@ const CAPTION_TOOLS: ToolDefinition[] = [
       }
     },
   },
-
-  // ---------------------------------------------------------------------------
-  // Delete Caption
-  // ---------------------------------------------------------------------------
   {
     name: 'delete_caption',
     description: 'Remove a caption from the timeline',
@@ -149,6 +224,10 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           type: 'string',
           description: 'The ID of the sequence',
         },
+        trackId: {
+          type: 'string',
+          description: 'Optional caption track ID (auto-resolved by captionId when omitted)',
+        },
         captionId: {
           type: 'string',
           description: 'The ID of the caption to delete',
@@ -158,12 +237,30 @@ const CAPTION_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
+        const sequenceId = args.sequenceId as string;
+        const captionId = args.captionId as string;
+
+        const sequence = getSequence(sequenceId);
+        if (!sequence) {
+          return { success: false, error: `Sequence '${sequenceId}' not found` };
+        }
+
+        const trackId = resolveCaptionTrackId(
+          sequence,
+          captionId,
+          args.trackId as string | undefined,
+        );
+        if (!trackId) {
+          return { success: false, error: `Could not resolve caption track for '${captionId}'` };
+        }
+
         const result = await executeAgentCommand('DeleteCaption', {
-          sequenceId: args.sequenceId as string,
-          captionId: args.captionId as string,
+          sequenceId,
+          trackId,
+          captionId,
         });
 
-        logger.debug('delete_caption executed', { opId: result.opId });
+        logger.debug('delete_caption executed', { opId: result.opId, captionId, trackId });
         return { success: true, result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -172,13 +269,9 @@ const CAPTION_TOOLS: ToolDefinition[] = [
       }
     },
   },
-
-  // ---------------------------------------------------------------------------
-  // Style Caption
-  // ---------------------------------------------------------------------------
   {
     name: 'style_caption',
-    description: 'Change the visual style of a caption',
+    description: 'Change caption visual style metadata',
     category: 'utility',
     parameters: {
       type: 'object',
@@ -186,6 +279,10 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         sequenceId: {
           type: 'string',
           description: 'The ID of the sequence',
+        },
+        trackId: {
+          type: 'string',
+          description: 'Optional caption track ID (auto-resolved by captionId when omitted)',
         },
         captionId: {
           type: 'string',
@@ -201,11 +298,11 @@ const CAPTION_TOOLS: ToolDefinition[] = [
         },
         color: {
           type: 'string',
-          description: 'Text color in hex format (e.g., #FFFFFF)',
+          description: 'Text color in hex format',
         },
         backgroundColor: {
           type: 'string',
-          description: 'Background color in hex format with optional alpha (e.g., #00000080)',
+          description: 'Background color in hex format with optional alpha',
         },
         position: {
           type: 'string',
@@ -217,20 +314,43 @@ const CAPTION_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const styleProps: Record<string, unknown> = {};
-        if (args.fontSize !== undefined) styleProps.fontSize = args.fontSize;
-        if (args.fontFamily !== undefined) styleProps.fontFamily = args.fontFamily;
-        if (args.color !== undefined) styleProps.color = args.color;
-        if (args.backgroundColor !== undefined) styleProps.backgroundColor = args.backgroundColor;
-        if (args.position !== undefined) styleProps.position = args.position;
+        const sequenceId = args.sequenceId as string;
+        const captionId = args.captionId as string;
 
-        const result = await executeAgentCommand('StyleCaption', {
-          sequenceId: args.sequenceId as string,
-          captionId: args.captionId as string,
-          style: styleProps,
+        const sequence = getSequence(sequenceId);
+        if (!sequence) {
+          return { success: false, error: `Sequence '${sequenceId}' not found` };
+        }
+
+        const trackId = resolveCaptionTrackId(
+          sequence,
+          captionId,
+          args.trackId as string | undefined,
+        );
+        if (!trackId) {
+          return { success: false, error: `Could not resolve caption track for '${captionId}'` };
+        }
+
+        const style: Record<string, unknown> = {};
+        if (args.fontSize !== undefined) style.fontSize = args.fontSize;
+        if (args.fontFamily !== undefined) style.fontFamily = args.fontFamily;
+        if (args.color !== undefined) style.color = args.color;
+        if (args.backgroundColor !== undefined) style.backgroundColor = args.backgroundColor;
+        if (args.position !== undefined) style.position = args.position;
+
+        const result = await executeAgentCommand('UpdateCaption', {
+          sequenceId,
+          trackId,
+          captionId,
+          style,
         });
 
-        logger.debug('style_caption executed', { opId: result.opId });
+        logger.debug('style_caption executed', {
+          opId: result.opId,
+          captionId,
+          trackId,
+          styleKeys: Object.keys(style),
+        });
         return { success: true, result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -241,21 +361,11 @@ const CAPTION_TOOLS: ToolDefinition[] = [
   },
 ];
 
-// =============================================================================
-// Registration Functions
-// =============================================================================
-
-/**
- * Register all caption tools with the global registry.
- */
 export function registerCaptionTools(): void {
   globalToolRegistry.registerMany(CAPTION_TOOLS);
   logger.info('Caption tools registered', { count: CAPTION_TOOLS.length });
 }
 
-/**
- * Unregister all caption tools from the global registry.
- */
 export function unregisterCaptionTools(): void {
   for (const tool of CAPTION_TOOLS) {
     globalToolRegistry.unregister(tool.name);
@@ -263,9 +373,6 @@ export function unregisterCaptionTools(): void {
   logger.info('Caption tools unregistered', { count: CAPTION_TOOLS.length });
 }
 
-/**
- * Get the list of caption tool names.
- */
 export function getCaptionToolNames(): string[] {
-  return CAPTION_TOOLS.map((t) => t.name);
+  return CAPTION_TOOLS.map((tool) => tool.name);
 }
