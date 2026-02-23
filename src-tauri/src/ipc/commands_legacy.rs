@@ -12,13 +12,13 @@ use tauri::{Emitter, Manager, State};
 use crate::core::{
     assets::{Asset, AudioInfo, ProxyStatus, VideoInfo},
     commands::{
-        AddEffectCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand, CreateFolderCommand,
-        CreateSequenceCommand, CreateCaptionCommand, DeleteCaptionCommand, DeleteFileCommand,
-        ImportAssetCommand, InsertClipCommand, MoveClipCommand, MoveFileCommand, RemoveAssetCommand,
-        RemoveClipCommand, RemoveEffectCommand, RemoveMaskCommand, RemoveTextClipCommand,
-        RenameFileCommand, SetClipAudioCommand, SetClipMuteCommand, SetClipTransformCommand,
-        SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand, UpdateAssetCommand,
-        UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
+        AddEffectCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand,
+        CreateCaptionCommand, CreateFolderCommand, CreateSequenceCommand, DeleteCaptionCommand,
+        DeleteFileCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand, MoveFileCommand,
+        RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMaskCommand,
+        RemoveTextClipCommand, RenameFileCommand, SetClipAudioCommand, SetClipMuteCommand,
+        SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand,
+        UpdateAssetCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
     },
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
     fs::{
@@ -2545,6 +2545,8 @@ pub async fn apply_edit_script(
                 | "AddTrack"
                 | "addTrack"
                 | "UpdateCaption"
+                | "CreateCaption"
+                | "DeleteCaption"
         );
         if needs_sequence_id && !obj.contains_key("sequenceId") {
             obj.insert(
@@ -2571,6 +2573,8 @@ pub async fn apply_edit_script(
                 | "TrimClip"
                 | "MoveClip"
                 | "UpdateCaption"
+                | "CreateCaption"
+                | "DeleteCaption"
         );
         if needs_track_id && !obj.contains_key("trackId") {
             if let Some(clip_id) = obj.get("clipId").and_then(|v| v.as_str()) {

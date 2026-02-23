@@ -380,8 +380,8 @@ pub async fn read_workspace_document(
         return Err("Binary file content is not supported".to_string());
     }
 
-    let content = String::from_utf8(bytes)
-        .map_err(|_| "File is not valid UTF-8 text".to_string())?;
+    let content =
+        String::from_utf8(bytes).map_err(|_| "File is not valid UTF-8 text".to_string())?;
 
     let modified_at_unix_sec = metadata
         .modified()
@@ -501,7 +501,6 @@ fn is_text_document_path(path: &Path) -> bool {
             | "readme.md"
             | "agents.md"
             | "claude.md"
-            | ".env"
             | ".gitignore"
             | ".openreelignore"
     ) {
@@ -514,8 +513,7 @@ fn is_text_document_path(path: &Path) -> bool {
 
     matches!(
         ext.to_lowercase().as_str(),
-        "md"
-            | "markdown"
+        "md" | "markdown"
             | "txt"
             | "json"
             | "jsonc"

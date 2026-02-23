@@ -59,7 +59,7 @@ function toEffectSnapshot(raw: unknown): EffectSnapshot | null {
 }
 
 function getClipEffects(clip: Clip): EffectSnapshot[] {
-  const rawEffects = clip.effects as unknown[];
+  const rawEffects = Array.isArray(clip.effects) ? clip.effects : [];
   return rawEffects
     .map(toEffectSnapshot)
     .filter((effect): effect is EffectSnapshot => effect !== null);
@@ -299,17 +299,18 @@ const EFFECT_TOOLS: ToolDefinition[] = [
           };
         }
 
+        const missingEffectType = effects.find((effect) => !effect.effectType);
+        if (missingEffectType) {
+          return {
+            success: false,
+            error:
+              'Source effect details are not available in current state snapshot; cannot copy effect definitions.',
+          };
+        }
+
         const createdEffectIds: string[] = [];
 
         for (const effect of effects) {
-          if (!effect.effectType) {
-            return {
-              success: false,
-              error:
-                'Source effect details are not available in current state snapshot; cannot copy effect definitions.',
-            };
-          }
-
           const addResult = await executeAgentCommand('AddEffect', {
             sequenceId,
             trackId: targetTrackId,

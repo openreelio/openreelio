@@ -84,14 +84,17 @@ const AUDIO_TOOLS: ToolDefinition[] = [
         }
 
         const clampedVolume = Math.max(MIN_VOLUME_PERCENT, Math.min(MAX_VOLUME_PERCENT, rawVolume));
-        const sequence = getSequence(sequenceId);
-        if (!sequence) {
-          return { success: false, error: `Sequence '${sequenceId}' not found` };
-        }
 
-        const targetClipIds = requestedClipId
-          ? [requestedClipId]
-          : getTrackClipIds(sequence, trackId);
+        let targetClipIds: string[];
+        if (requestedClipId) {
+          targetClipIds = [requestedClipId];
+        } else {
+          const sequence = getSequence(sequenceId);
+          if (!sequence) {
+            return { success: false, error: `Sequence '${sequenceId}' not found` };
+          }
+          targetClipIds = getTrackClipIds(sequence, trackId);
+        }
 
         if (targetClipIds.length === 0) {
           return {

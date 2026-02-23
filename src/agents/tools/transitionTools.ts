@@ -23,7 +23,7 @@ function getSequence(sequenceId: string): Sequence | undefined {
 }
 
 function clipHasEffectId(clip: Clip, effectId: string): boolean {
-  const rawEffects = clip.effects as unknown[];
+  const rawEffects = Array.isArray(clip.effects) ? clip.effects : [];
   return rawEffects.some((effect) => {
     if (typeof effect === 'string') {
       return effect === effectId;
@@ -138,14 +138,15 @@ const TRANSITION_TOOLS: ToolDefinition[] = [
         const trackId = args.trackId as string;
         const transitionId = args.transitionId as string;
 
-        const sequence = getSequence(sequenceId);
-        if (!sequence) {
-          return { success: false, error: `Sequence '${sequenceId}' not found` };
+        const requestedClipId = args.clipId as string | undefined;
+        let clipId: string | null | undefined = requestedClipId;
+        if (!clipId) {
+          const sequence = getSequence(sequenceId);
+          if (!sequence) {
+            return { success: false, error: `Sequence '${sequenceId}' not found` };
+          }
+          clipId = findClipIdForEffect(sequence, trackId, transitionId);
         }
-
-        const clipId =
-          (args.clipId as string | undefined) ??
-          findClipIdForEffect(sequence, trackId, transitionId);
         if (!clipId) {
           return {
             success: false,

@@ -305,6 +305,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         setIsRunning(false);
         optionsRef.current.onError?.(configError);
         logger.error('Pre-flight check failed: AI provider not configured');
+        runGuardRef.current = false;
         return null;
       }
 

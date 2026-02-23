@@ -971,15 +971,18 @@ describe('TauriLLMAdapter', () => {
       await expect(promise).rejects.toThrow('Generation aborted');
     });
 
-    it('should set isGenerating to false immediately after abort', () => {
+    it('should set isGenerating to false immediately after abort', async () => {
+      const deferred = createDeferred<{ message: string }>();
+      invokeMock.mockReturnValueOnce(deferred.promise);
+
       const adapter = createTauriLLMAdapter();
-      // Start a request to enter generating state
-      invokeMock.mockReturnValueOnce(new Promise(() => {})); // never resolves
-      adapter.complete(USER_MSG);
+      const promise = adapter.complete(USER_MSG);
 
       expect(adapter.isGenerating()).toBe(true);
 
       adapter.abort();
+      deferred.resolve(chatResponse('late'));
+      await expect(promise).rejects.toThrow('Generation aborted');
       expect(adapter.isGenerating()).toBe(false);
     });
 
