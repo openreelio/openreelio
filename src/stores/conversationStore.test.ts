@@ -13,6 +13,12 @@ import {
 } from '@/agents/engine/core/conversation';
 import type { Thought, Plan } from '@/agents/engine/core/types';
 
+// Mock Tauri IPC (external boundary - allowed by Testing Trophy policy)
+const mockInvoke = vi.fn().mockResolvedValue(undefined);
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...args: unknown[]) => mockInvoke(...args),
+}));
+
 // =============================================================================
 // Test Fixtures
 // =============================================================================
@@ -50,8 +56,6 @@ function createTestPlan(): Plan {
 // Setup
 // =============================================================================
 
-let mockStorage: Map<string, string>;
-
 beforeEach(() => {
   // Reset store state
   useConversationStore.setState({
@@ -59,18 +63,12 @@ beforeEach(() => {
     isGenerating: false,
     streamingMessageId: null,
     activeProjectId: null,
+    activeSessionId: null,
+    sessions: [],
   });
 
-  // Mock localStorage
-  mockStorage = new Map();
-  vi.stubGlobal('localStorage', {
-    getItem: vi.fn((key: string) => mockStorage.get(key) ?? null),
-    setItem: vi.fn((key: string, value: string) => mockStorage.set(key, value)),
-    removeItem: vi.fn((key: string) => mockStorage.delete(key)),
-    length: 0,
-    key: vi.fn(() => null),
-    clear: vi.fn(() => mockStorage.clear()),
-  });
+  // Reset IPC mock
+  mockInvoke.mockReset().mockResolvedValue(undefined);
 
   // Mock crypto.randomUUID
   let uuidCounter = 0;
@@ -103,33 +101,19 @@ describe('ConversationStore', () => {
       expect(state.streamingMessageId).toBeNull();
     });
 
-    it('should load existing conversation from localStorage', () => {
-      const existing = {
-        id: 'conv-1',
-        projectId: 'project-1',
-        messages: [
-          {
-            id: 'msg-1',
-            role: 'user',
-            parts: [{ type: 'text', content: 'Hello' }],
-            timestamp: Date.now(),
-          },
-        ],
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-      };
-      mockStorage.set('openreelio_conversation_project-1', JSON.stringify(existing));
+    it('should trigger session loading from SQLite on loadForProject', () => {
+      mockInvoke.mockResolvedValueOnce([
+        { id: 'session-1', agent: 'editor', messageCount: 1, createdAt: Date.now(), updatedAt: Date.now() },
+      ]);
 
       const store = useConversationStore.getState();
       store.loadForProject('project-1');
 
       const state = useConversationStore.getState();
-      expect(state.activeConversation!.id).toBe('conv-1');
-      expect(state.activeConversation!.messages).toHaveLength(1);
-      expect(state.activeConversation!.messages[0].parts[0]).toEqual({
-        type: 'text',
-        content: 'Hello',
-      });
+      expect(state.activeConversation).not.toBeNull();
+      expect(state.activeProjectId).toBe('project-1');
+      // Sessions are loaded asynchronously via invoke
+      expect(mockInvoke).toHaveBeenCalledWith('list_ai_sessions', { projectId: 'project-1' });
     });
 
     it('should switch between projects', () => {
@@ -407,9 +391,11 @@ describe('ConversationStore', () => {
   });
 
   describe('clearConversation', () => {
-    it('should clear the conversation and remove from storage', () => {
+    it('should clear the conversation and delete session from SQLite', () => {
       const store = useConversationStore.getState();
       store.loadForProject('project-1');
+      // Simulate having an active session
+      useConversationStore.setState({ activeSessionId: 'session-1' });
       store.addUserMessage('Hello');
       store.startAssistantMessage();
 
@@ -419,7 +405,8 @@ describe('ConversationStore', () => {
       expect(state.activeConversation!.messages).toEqual([]);
       expect(state.isGenerating).toBe(false);
       expect(state.streamingMessageId).toBeNull();
-      expect(localStorage.removeItem).toHaveBeenCalledWith('openreelio_conversation_project-1');
+      // Verify session deletion IPC call
+      expect(mockInvoke).toHaveBeenCalledWith('delete_ai_session', { sessionId: 'session-1' });
     });
 
     it('should handle clear when no project is active', () => {
@@ -443,58 +430,64 @@ describe('ConversationStore', () => {
   });
 
   describe('persistence', () => {
-    it('should persist user messages via debounced save', () => {
+    it('should persist user messages via debounced IPC save', () => {
       vi.useFakeTimers();
       const store = useConversationStore.getState();
       store.loadForProject('project-1');
+      mockInvoke.mockReset().mockResolvedValue(undefined);
+
+      // Set active session so persistence triggers
+      useConversationStore.setState({ activeSessionId: 'session-1' });
 
       store.addUserMessage('Hello');
 
-      // Not saved immediately
-      expect(localStorage.setItem).not.toHaveBeenCalled();
+      // Not saved immediately (debounced)
+      expect(mockInvoke).not.toHaveBeenCalledWith('save_ai_message', expect.anything());
 
       // After debounce
       vi.advanceTimersByTime(1100);
-      expect(localStorage.setItem).toHaveBeenCalled();
-
-      const savedData = JSON.parse(mockStorage.get('openreelio_conversation_project-1')!);
-      expect(savedData.messages).toHaveLength(1);
-      expect(savedData.messages[0].parts[0].content).toBe('Hello');
+      expect(mockInvoke).toHaveBeenCalledWith('save_ai_message', expect.objectContaining({
+        input: expect.objectContaining({
+          sessionId: 'session-1',
+          role: 'user',
+        }),
+      }));
     });
 
-    it('should persist on finalize', () => {
+    it('should persist on finalize via IPC', () => {
       vi.useFakeTimers();
       const store = useConversationStore.getState();
       store.loadForProject('project-1');
+      mockInvoke.mockReset().mockResolvedValue(undefined);
+
+      // Set active session so persistence triggers
+      useConversationStore.setState({ activeSessionId: 'session-1' });
 
       const msgId = store.startAssistantMessage();
       store.appendPart(msgId, createTextPart('response'));
       store.finalizeMessage(msgId);
 
       vi.advanceTimersByTime(1100);
-      expect(localStorage.setItem).toHaveBeenCalled();
+      expect(mockInvoke).toHaveBeenCalledWith('save_ai_message', expect.objectContaining({
+        input: expect.objectContaining({
+          sessionId: 'session-1',
+          role: 'assistant',
+        }),
+      }));
     });
 
-    it('should load persisted conversation on next loadForProject', () => {
+    it('should not persist when no active session', () => {
       vi.useFakeTimers();
       const store = useConversationStore.getState();
       store.loadForProject('project-1');
-      store.addUserMessage('Persisted message');
-      vi.advanceTimersByTime(1100); // Trigger save
+      mockInvoke.mockReset().mockResolvedValue(undefined);
 
-      // Simulate reload
-      useConversationStore.setState({
-        activeConversation: null,
-        activeProjectId: null,
-      });
+      // No activeSessionId set
+      store.addUserMessage('Hello');
+      vi.advanceTimersByTime(1100);
 
-      store.loadForProject('project-1');
-      const state = useConversationStore.getState();
-      expect(state.activeConversation!.messages).toHaveLength(1);
-      expect(state.activeConversation!.messages[0].parts[0]).toEqual({
-        type: 'text',
-        content: 'Persisted message',
-      });
+      // Should not have called save since no session
+      expect(mockInvoke).not.toHaveBeenCalledWith('save_ai_message', expect.anything());
     });
   });
 
