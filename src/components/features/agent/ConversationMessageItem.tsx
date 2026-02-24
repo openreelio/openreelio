@@ -18,6 +18,9 @@ import { ToolResultPartRenderer } from './parts/ToolResultPartRenderer';
 import { ErrorPartRenderer } from './parts/ErrorPartRenderer';
 import { ApprovalPartRenderer } from './parts/ApprovalPartRenderer';
 import { ToolApprovalPartRenderer } from './parts/ToolApprovalPartRenderer';
+import { ReasoningPartRenderer } from './parts/ReasoningPartRenderer';
+import { CompactionPartRenderer } from './parts/CompactionPartRenderer';
+import { PatchPartRenderer } from './parts/PatchPartRenderer';
 
 // =============================================================================
 // Types
@@ -93,6 +96,12 @@ function renderPart(
           onDeny={callbacks.onToolDeny}
         />
       );
+    case 'reasoning':
+      return <ReasoningPartRenderer key={key} part={part} />;
+    case 'compaction':
+      return <CompactionPartRenderer key={key} part={part} />;
+    case 'patch':
+      return <PatchPartRenderer key={key} part={part} />;
     default:
       return null;
   }
