@@ -103,6 +103,40 @@ export interface ToolApprovalPart {
 }
 
 /**
+ * Context compaction notice part.
+ * Inserted when the conversation was summarized to save context window space.
+ */
+export interface CompactionPart {
+  type: 'compaction';
+  /** The AI-generated summary of the compacted messages */
+  summary: string;
+  /** Whether this was triggered automatically or by the user */
+  auto: boolean;
+}
+
+/**
+ * Extended thinking / reasoning part from the LLM.
+ * Rendered as a collapsible "thinking" block with dim styling.
+ */
+export interface ReasoningPart {
+  type: 'reasoning';
+  /** Raw reasoning content from the LLM */
+  content: string;
+}
+
+/**
+ * Code / file patch part representing edit diffs.
+ * Rendered as an inline diff viewer with syntax highlighting.
+ */
+export interface PatchPart {
+  type: 'patch';
+  /** Unified diff content */
+  diff: string;
+  /** Files affected by this patch */
+  files: string[];
+}
+
+/**
  * Union of all message part types
  */
 export type MessagePart =
@@ -113,7 +147,10 @@ export type MessagePart =
   | ToolResultPart
   | ErrorPart
   | ApprovalPart
-  | ToolApprovalPart;
+  | ToolApprovalPart
+  | CompactionPart
+  | ReasoningPart
+  | PatchPart;
 
 // =============================================================================
 // Conversation Message
@@ -308,6 +345,30 @@ export function createApprovalPart(
   return { type: 'approval', plan, status };
 }
 
+/**
+ * Create a compaction notice part
+ */
+export function createCompactionPart(
+  summary: string,
+  auto: boolean = true
+): CompactionPart {
+  return { type: 'compaction', summary, auto };
+}
+
+/**
+ * Create a reasoning part (extended thinking)
+ */
+export function createReasoningPart(content: string): ReasoningPart {
+  return { type: 'reasoning', content };
+}
+
+/**
+ * Create a patch part (file diffs)
+ */
+export function createPatchPart(diff: string, files: string[]): PatchPart {
+  return { type: 'patch', diff, files };
+}
+
 // =============================================================================
 // Conversion Helpers
 // =============================================================================
@@ -350,6 +411,15 @@ export function toSimpleLLMMessage(msg: ConversationMessage): LLMMessage {
         textParts.push(
           `[Tool Approval] ${part.tool} ${part.status}: ${part.description}`
         );
+        break;
+      case 'compaction':
+        textParts.push(`[Context Summary] ${part.summary}`);
+        break;
+      case 'reasoning':
+        textParts.push(`[Reasoning] ${part.content}`);
+        break;
+      case 'patch':
+        textParts.push(`[Patch] Files: ${part.files.join(', ')}\n${part.diff}`);
         break;
     }
   }
@@ -427,6 +497,12 @@ export function isValidMessagePart(part: unknown): part is MessagePart {
         typeof p.tool === 'string' &&
         ['pending', 'approved', 'denied'].includes(p.status as string)
       );
+    case 'compaction':
+      return typeof p.summary === 'string' && typeof p.auto === 'boolean';
+    case 'reasoning':
+      return typeof p.content === 'string';
+    case 'patch':
+      return typeof p.diff === 'string' && Array.isArray(p.files);
     default:
       return false;
   }
