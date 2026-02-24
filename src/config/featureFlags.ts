@@ -48,6 +48,13 @@ export interface FeatureFlags {
    * @default false
    */
   USE_VIDEO_GENERATION: boolean;
+
+  /**
+   * Enable the simplified Agent Loop (opencode-style stream → tool → loop)
+   * When true, uses the new AgentLoop instead of the 4-phase TPAO engine
+   * @default false
+   */
+  USE_AGENT_LOOP: boolean;
 }
 
 /**
@@ -73,6 +80,7 @@ const STORAGE_KEY = 'openreelio-feature-flags';
 const DEFAULT_FLAGS: FeatureFlags = {
   USE_AGENTIC_ENGINE: true,
   USE_VIDEO_GENERATION: false,
+  USE_AGENT_LOOP: false,
 };
 
 /**
@@ -81,6 +89,7 @@ const DEFAULT_FLAGS: FeatureFlags = {
 export const FEATURE_FLAG_KEYS: readonly FeatureFlagKey[] = [
   'USE_AGENTIC_ENGINE',
   'USE_VIDEO_GENERATION',
+  'USE_AGENT_LOOP',
 ] as const;
 
 // =============================================================================
@@ -310,6 +319,18 @@ export function isAgenticEngineEnabled(): boolean {
  */
 export function isVideoGenerationEnabled(): boolean {
   return getFeatureFlag('USE_VIDEO_GENERATION');
+}
+
+/**
+ * Check if the simplified Agent Loop is enabled
+ *
+ * When true, uses the new AgentLoop (opencode-style stream → tool → loop)
+ * instead of the 4-phase Think-Plan-Act-Observe engine.
+ *
+ * @returns true if the simplified agent loop should be used
+ */
+export function isAgentLoopEnabled(): boolean {
+  return getFeatureFlag('USE_AGENT_LOOP');
 }
 
 // =============================================================================
