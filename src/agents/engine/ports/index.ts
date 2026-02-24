@@ -14,6 +14,7 @@ export {
   type LLMToolDefinition,
   type LLMStreamEvent,
   type LLMTextEvent,
+  type LLMReasoningEvent,
   type LLMToolCallEvent,
   type LLMToolResultEvent,
   type LLMDoneEvent,

@@ -59,6 +59,7 @@ export interface LLMToolDefinition {
  */
 export type LLMStreamEvent =
   | LLMTextEvent
+  | LLMReasoningEvent
   | LLMToolCallEvent
   | LLMToolResultEvent
   | LLMDoneEvent
@@ -69,6 +70,14 @@ export type LLMStreamEvent =
  */
 export interface LLMTextEvent {
   type: 'text';
+  content: string;
+}
+
+/**
+ * Reasoning/thinking chunk from stream
+ */
+export interface LLMReasoningEvent {
+  type: 'reasoning';
   content: string;
 }
 
