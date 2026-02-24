@@ -751,6 +751,23 @@ mod tauri_app {
                 $crate::ipc::complete_with_ai_raw,
                 $crate::ipc::chat_with_ai,
                 $crate::ipc::get_available_ai_models,
+                // AI Conversation persistence commands
+                $crate::core::ai::conversation_commands::create_ai_session,
+                $crate::core::ai::conversation_commands::list_ai_sessions,
+                $crate::core::ai::conversation_commands::get_ai_session,
+                $crate::core::ai::conversation_commands::save_ai_message,
+                $crate::core::ai::conversation_commands::update_ai_part,
+                $crate::core::ai::conversation_commands::mark_parts_compacted,
+                $crate::core::ai::conversation_commands::delete_ai_session,
+                $crate::core::ai::conversation_commands::archive_ai_session,
+                $crate::core::ai::conversation_commands::update_ai_session_title,
+                // AI Knowledge persistence commands
+                $crate::core::ai::knowledge_commands::save_ai_knowledge,
+                $crate::core::ai::knowledge_commands::query_ai_knowledge,
+                $crate::core::ai::knowledge_commands::delete_ai_knowledge,
+                // AI Streaming commands
+                $crate::core::ai::streaming::stream_ai_completion,
+                $crate::core::ai::streaming::abort_ai_stream,
                 // FFmpeg commands
                 $crate::core::ffmpeg::check_ffmpeg,
                 $crate::core::ffmpeg::extract_frame,
@@ -1059,6 +1076,23 @@ mod tauri_app {
             ipc::complete_with_ai_raw,
             ipc::chat_with_ai,
             ipc::get_available_ai_models,
+            // AI Conversation persistence commands
+            crate::core::ai::conversation_commands::create_ai_session,
+            crate::core::ai::conversation_commands::list_ai_sessions,
+            crate::core::ai::conversation_commands::get_ai_session,
+            crate::core::ai::conversation_commands::save_ai_message,
+            crate::core::ai::conversation_commands::update_ai_part,
+            crate::core::ai::conversation_commands::mark_parts_compacted,
+            crate::core::ai::conversation_commands::delete_ai_session,
+            crate::core::ai::conversation_commands::archive_ai_session,
+            crate::core::ai::conversation_commands::update_ai_session_title,
+            // AI Knowledge persistence commands
+            crate::core::ai::knowledge_commands::save_ai_knowledge,
+            crate::core::ai::knowledge_commands::query_ai_knowledge,
+            crate::core::ai::knowledge_commands::delete_ai_knowledge,
+            // AI Streaming commands
+            crate::core::ai::streaming::stream_ai_completion,
+            crate::core::ai::streaming::abort_ai_stream,
             // FFmpeg commands
             crate::core::ffmpeg::check_ffmpeg,
             crate::core::ffmpeg::extract_frame,
