@@ -727,11 +727,6 @@ describe('Planner', () => {
 
   describe('planWithStreaming', () => {
     it('should emit progress events', async () => {
-      mockLLM.setStreamResponse({
-        content: 'Planning step by step...',
-        chunkSize: 10,
-      });
-
       const mockPlan: Plan = {
         goal: 'Test plan',
         steps: [
@@ -749,7 +744,12 @@ describe('Planner', () => {
         rollbackStrategy: 'Undo',
       };
 
-      mockLLM.setStructuredResponse({ structured: mockPlan });
+      // planWithStreaming now parses the accumulated stream output directly
+      // (no second LLM call), so the stream must contain valid JSON.
+      mockLLM.setStreamResponse({
+        content: JSON.stringify(mockPlan),
+        chunkSize: 40,
+      });
 
       const progressChunks: string[] = [];
 
@@ -759,6 +759,7 @@ describe('Planner', () => {
 
       expect(progressChunks.length).toBeGreaterThan(0);
       expect(result).toBeDefined();
+      expect(result.goal).toBe('Test plan');
     });
   });
 
@@ -826,6 +827,7 @@ describe('Planner', () => {
     it('should throw PlanningTimeoutError on timeout', async () => {
       const shortTimeoutPlanner = createPlanner(mockLLM, mockToolExecutor, {
         timeout: 10,
+        maxRetries: 0,
       });
 
       mockLLM.setStructuredResponse({
@@ -842,6 +844,82 @@ describe('Planner', () => {
       await expect(shortTimeoutPlanner.plan(sampleThought, context)).rejects.toThrow(
         PlanningTimeoutError,
       );
+    });
+
+    it('should retry once with compact prompt after timeout and succeed', async () => {
+      let callCount = 0;
+
+      const retryingLLM = createMockLLMAdapter();
+      retryingLLM.generateStructured = async <T>(messages: unknown[]): Promise<T> => {
+        callCount += 1;
+
+        if (callCount === 1) {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+        }
+
+        const systemMessage = (messages as Array<{ role: string; content: string }>).find(
+          (message) => message.role === 'system',
+        );
+
+        const compact = systemMessage?.content.includes('Prompt mode: compact retry');
+
+        return {
+          goal: compact ? 'Compact retry plan' : 'Initial plan',
+          steps: [],
+          estimatedTotalDuration: 0,
+          requiresApproval: false,
+          rollbackStrategy: 'N/A',
+        } as T;
+      };
+
+      const retryPlanner = createPlanner(retryingLLM, mockToolExecutor, {
+        timeout: 10,
+        maxRetries: 1,
+        retryBackoffMs: 0,
+      });
+
+      const result = await retryPlanner.plan(sampleThought, context);
+      expect(result.goal).toBe('Compact retry plan');
+      expect(callCount).toBe(2);
+    });
+
+    it('should retry after structured parse failure and succeed', async () => {
+      let callCount = 0;
+
+      const retryingLLM = createMockLLMAdapter();
+      retryingLLM.generateStructured = async <T>(messages: unknown[]): Promise<T> => {
+        callCount += 1;
+
+        if (callCount === 1) {
+          throw new Error(
+            'Failed to parse structured response: { "goal": "broken" ...: Unterminated string in JSON',
+          );
+        }
+
+        const systemMessage = (messages as Array<{ role: string; content: string }>).find(
+          (message) => message.role === 'system',
+        );
+
+        const compact = systemMessage?.content.includes('Prompt mode: compact retry');
+
+        return {
+          goal: compact ? 'Recovered after parse retry' : 'Initial parse failure',
+          steps: [],
+          estimatedTotalDuration: 0,
+          requiresApproval: false,
+          rollbackStrategy: 'N/A',
+        } as T;
+      };
+
+      const retryPlanner = createPlanner(retryingLLM, mockToolExecutor, {
+        timeout: 2000,
+        maxRetries: 1,
+        retryBackoffMs: 0,
+      });
+
+      const result = await retryPlanner.plan(sampleThought, context);
+      expect(result.goal).toBe('Recovered after parse retry');
+      expect(callCount).toBe(2);
     });
 
     it('should throw PlanValidationError on malformed response', async () => {

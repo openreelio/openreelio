@@ -12,13 +12,13 @@ use tauri::{Emitter, Manager, State};
 use crate::core::{
     assets::{Asset, AudioInfo, ProxyStatus, VideoInfo},
     commands::{
-        AddEffectCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand, CreateFolderCommand,
-        CreateSequenceCommand, DeleteFileCommand, ImportAssetCommand, InsertClipCommand,
-        MoveClipCommand, MoveFileCommand, RemoveAssetCommand, RemoveClipCommand,
-        RemoveEffectCommand, RemoveMaskCommand, RemoveTextClipCommand, RenameFileCommand,
-        SetClipAudioCommand, SetClipMuteCommand, SetClipTransformCommand, SetTrackBlendModeCommand,
-        SplitClipCommand, TrimClipCommand, UpdateAssetCommand, UpdateEffectCommand,
-        UpdateMaskCommand, UpdateTextCommand,
+        AddEffectCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand,
+        CreateCaptionCommand, CreateFolderCommand, CreateSequenceCommand, DeleteCaptionCommand,
+        DeleteFileCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand, MoveFileCommand,
+        RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMaskCommand,
+        RemoveTextClipCommand, RenameFileCommand, SetClipAudioCommand, SetClipMuteCommand,
+        SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand,
+        UpdateAssetCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
     },
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
     fs::{
@@ -1715,6 +1715,15 @@ pub async fn execute_command(
             &p.track_id,
             p.blend_mode,
         )),
+        CommandPayload::CreateCaption(p) => Box::new(
+            CreateCaptionCommand::new(&p.sequence_id, &p.track_id, p.start_sec, p.end_sec)
+                .with_text(p.text),
+        ),
+        CommandPayload::DeleteCaption(p) => Box::new(DeleteCaptionCommand::new(
+            &p.sequence_id,
+            &p.track_id,
+            &p.caption_id,
+        )),
         CommandPayload::UpdateCaption(p) => Box::new(
             crate::core::commands::UpdateCaptionCommand::new(
                 &p.sequence_id,
@@ -2536,6 +2545,8 @@ pub async fn apply_edit_script(
                 | "AddTrack"
                 | "addTrack"
                 | "UpdateCaption"
+                | "CreateCaption"
+                | "DeleteCaption"
         );
         if needs_sequence_id && !obj.contains_key("sequenceId") {
             obj.insert(
@@ -2562,6 +2573,8 @@ pub async fn apply_edit_script(
                 | "TrimClip"
                 | "MoveClip"
                 | "UpdateCaption"
+                | "CreateCaption"
+                | "DeleteCaption"
         );
         if needs_track_id && !obj.contains_key("trackId") {
             if let Some(clip_id) = obj.get("clipId").and_then(|v| v.as_str()) {
@@ -2698,6 +2711,15 @@ pub async fn apply_edit_script(
                 }
                 Box::new(track_cmd)
             }
+            CommandPayload::CreateCaption(p) => Box::new(
+                CreateCaptionCommand::new(&p.sequence_id, &p.track_id, p.start_sec, p.end_sec)
+                    .with_text(p.text),
+            ),
+            CommandPayload::DeleteCaption(p) => Box::new(DeleteCaptionCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.caption_id,
+            )),
             CommandPayload::UpdateCaption(p) => Box::new(
                 crate::core::commands::UpdateCaptionCommand::new(
                     &p.sequence_id,

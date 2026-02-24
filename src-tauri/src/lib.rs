@@ -807,6 +807,9 @@ mod tauri_app {
                 $crate::ipc::scan_workspace,
                 $crate::ipc::get_workspace_tree,
                 $crate::ipc::reveal_in_explorer,
+                $crate::ipc::list_workspace_documents,
+                $crate::ipc::read_workspace_document,
+                $crate::ipc::write_workspace_document,
             ]
         };
     }
@@ -1117,6 +1120,9 @@ mod tauri_app {
             ipc::scan_workspace,
             ipc::get_workspace_tree,
             ipc::reveal_in_explorer,
+            ipc::list_workspace_documents,
+            ipc::read_workspace_document,
+            ipc::write_workspace_document,
         ])
         .run(tauri::generate_context!());
 

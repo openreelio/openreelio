@@ -148,14 +148,39 @@ pub struct UpdateCaptionPayload {
     #[serde(alias = "clipId")]
     pub caption_id: ClipId,
     pub text: Option<String>,
-    #[serde(alias = "startSec")]
+    #[serde(alias = "startSec", alias = "startTime")]
     pub start_sec: Option<TimeSec>,
-    #[serde(alias = "endSec")]
+    #[serde(alias = "endSec", alias = "endTime")]
     pub end_sec: Option<TimeSec>,
     // Forward-compatible fields currently used by UI/QC but not applied by core yet.
     // Keep them to avoid rejecting payloads during strict parsing.
     pub style: Option<serde_json::Value>,
     pub position: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateCaptionPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub text: String,
+    #[serde(alias = "startTime")]
+    pub start_sec: TimeSec,
+    #[serde(alias = "endTime")]
+    pub end_sec: TimeSec,
+    // Forward-compatible fields currently used by UI/agent prompts but not
+    // applied by core command logic yet.
+    pub style: Option<serde_json::Value>,
+    pub position: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteCaptionPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    #[serde(alias = "clipId")]
+    pub caption_id: ClipId,
 }
 
 // =============================================================================
@@ -170,7 +195,7 @@ pub struct AddEffectPayload {
     pub track_id: TrackId,
     pub clip_id: ClipId,
     pub effect_type: EffectType,
-    #[serde(default)]
+    #[serde(default, alias = "parameters")]
     pub params: HashMap<String, ParamValue>,
     /// Optional position in the effect list (None = append at end)
     pub position: Option<usize>,
@@ -496,7 +521,23 @@ pub enum CommandPayload {
     )]
     CreateTrack(CreateTrackPayload),
 
-    #[serde(alias = "updateCaption", alias = "UpdateCaption")]
+    #[serde(
+        alias = "createCaption",
+        alias = "CreateCaption",
+        alias = "addCaption",
+        alias = "AddCaption"
+    )]
+    CreateCaption(CreateCaptionPayload),
+
+    #[serde(alias = "deleteCaption", alias = "DeleteCaption")]
+    DeleteCaption(DeleteCaptionPayload),
+
+    #[serde(
+        alias = "updateCaption",
+        alias = "UpdateCaption",
+        alias = "styleCaption",
+        alias = "StyleCaption"
+    )]
     UpdateCaption(UpdateCaptionPayload),
 
     #[serde(alias = "addEffect", alias = "AddEffect")]
@@ -606,6 +647,59 @@ mod tests {
         assert!(
             parsed.is_ok(),
             "expected UpdateCaption to parse, got: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_create_caption_payload_supports_aliases() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "text": "Caption text",
+            "startTime": 1.25,
+            "endTime": 3.5,
+        });
+
+        for command_type in ["CreateCaption", "createCaption", "AddCaption", "addCaption"] {
+            let parsed = CommandPayload::parse(command_type.to_string(), payload.clone());
+            assert!(
+                matches!(parsed, Ok(CommandPayload::CreateCaption(_))),
+                "expected {command_type} alias to parse, got: {parsed:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_delete_caption_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "captionId": "cap_001",
+        });
+
+        let parsed = CommandPayload::parse("DeleteCaption".to_string(), payload);
+        assert!(
+            matches!(parsed, Ok(CommandPayload::DeleteCaption(_))),
+            "expected DeleteCaption to parse, got: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_add_effect_payload_supports_parameters_alias() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "clipId": "clip_001",
+            "effectType": "brightness",
+            "parameters": {
+                "value": 0.25
+            }
+        });
+
+        let parsed = CommandPayload::parse("AddEffect".to_string(), payload);
+        assert!(
+            matches!(parsed, Ok(CommandPayload::AddEffect(_))),
+            "expected AddEffect with parameters alias to parse, got: {parsed:?}"
         );
     }
 

@@ -144,6 +144,8 @@ export class TauriLLMAdapter implements ILLMClient {
   private _isConfigured = false;
   private _aborted = false;
   private abortController: AbortController | null = null;
+  private requestSequence = 0;
+  private activeRequestId: number | null = null;
 
   constructor(config: TauriLLMAdapterConfig = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
@@ -163,9 +165,7 @@ export class TauriLLMAdapter implements ILLMClient {
     messages: LLMMessage[],
     options?: GenerateOptions,
   ): AsyncGenerator<string, void, unknown> {
-    this._isGenerating = true;
-    this._aborted = false;
-    this.abortController = new AbortController();
+    const requestId = this.beginRequest();
 
     try {
       const response = await this.callBackend(messages, options);
@@ -189,8 +189,7 @@ export class TauriLLMAdapter implements ILLMClient {
         await this.delay(this.config.streamChunkDelay);
       }
     } finally {
-      this._isGenerating = false;
-      this.abortController = null;
+      this.finishRequest(requestId);
     }
   }
 
@@ -202,9 +201,7 @@ export class TauriLLMAdapter implements ILLMClient {
     _tools: LLMToolDefinition[],
     options?: GenerateOptions,
   ): AsyncGenerator<LLMStreamEvent, void, unknown> {
-    this._isGenerating = true;
-    this._aborted = false;
-    this.abortController = new AbortController();
+    const requestId = this.beginRequest();
 
     try {
       const response = await this.callBackend(messages, options);
@@ -241,8 +238,7 @@ export class TauriLLMAdapter implements ILLMClient {
         error: error instanceof Error ? error : new Error(String(error)),
       };
     } finally {
-      this._isGenerating = false;
-      this.abortController = null;
+      this.finishRequest(requestId);
     }
   }
 
@@ -256,6 +252,7 @@ export class TauriLLMAdapter implements ILLMClient {
     schema: Record<string, unknown>,
     options?: GenerateOptions,
   ): Promise<T> {
+    const requestId = this.beginRequest();
     const schemaInstructions = [
       'Return ONLY a JSON object that strictly matches the JSON Schema.',
       'Do not include markdown code fences, comments, or additional text.',
@@ -264,18 +261,18 @@ export class TauriLLMAdapter implements ILLMClient {
       JSON.stringify(schema),
     ].join('\n');
 
-    const response = await this.callRawCompletion(
-      [...messages, { role: 'system', content: schemaInstructions }],
-      {
-        ...options,
-        jsonMode: true,
-      },
-    );
-
     try {
-      return JSON.parse(response.text) as T;
-    } catch {
-      throw new Error(`Failed to parse structured response: ${response.text.slice(0, 100)}...`);
+      const response = await this.callRawCompletion(
+        [...messages, { role: 'system', content: schemaInstructions }],
+        {
+          ...options,
+          jsonMode: true,
+        },
+      );
+
+      return this.parseStructuredResponse<T>(response.text);
+    } finally {
+      this.finishRequest(requestId);
     }
   }
 
@@ -283,8 +280,7 @@ export class TauriLLMAdapter implements ILLMClient {
    * Complete without streaming
    */
   async complete(messages: LLMMessage[], options?: GenerateOptions): Promise<LLMCompletionResult> {
-    this._isGenerating = true;
-    this._aborted = false;
+    const requestId = this.beginRequest();
 
     try {
       const response = await this.callBackend(messages, options);
@@ -303,7 +299,7 @@ export class TauriLLMAdapter implements ILLMClient {
           : undefined,
       };
     } finally {
-      this._isGenerating = false;
+      this.finishRequest(requestId);
     }
   }
 
@@ -378,6 +374,10 @@ export class TauriLLMAdapter implements ILLMClient {
     messages: LLMMessage[],
     options?: GenerateOptions,
   ): Promise<TauriAIResponse> {
+    if (this._aborted) {
+      throw new Error('Generation aborted');
+    }
+
     // Convert messages to backend format
     const backendMessages: TauriConversationMessage[] = messages.map((m) => ({
       role: m.role,
@@ -407,18 +407,26 @@ export class TauriLLMAdapter implements ILLMClient {
     };
 
     // Call backend
-    const response = await invoke<TauriAIResponse>('chat_with_ai', {
+    const response = await invoke<unknown>('chat_with_ai', {
       messages: backendMessages,
       context,
     });
 
-    return response;
+    if (this._aborted) {
+      throw new Error('Generation aborted');
+    }
+
+    return this.validateChatResponse(response);
   }
 
   private async callRawCompletion(
     messages: LLMMessage[],
     options?: GenerateOptions & { jsonMode?: boolean },
   ): Promise<TauriRawCompletionResponse> {
+    if (this._aborted) {
+      throw new Error('Generation aborted');
+    }
+
     // Convert messages to backend DTO format
     const backendMessages: TauriConversationMessage[] = messages.map((m) => ({
       role: m.role,
@@ -439,12 +447,211 @@ export class TauriLLMAdapter implements ILLMClient {
       rawOptions.temperature = options.temperature;
     }
 
-    const response = await invoke<TauriRawCompletionResponse>('complete_with_ai_raw', {
+    const response = await invoke<unknown>('complete_with_ai_raw', {
       messages: backendMessages,
       options: rawOptions,
     });
 
-    return response;
+    if (this._aborted) {
+      throw new Error('Generation aborted');
+    }
+
+    return this.validateRawCompletionResponse(response);
+  }
+
+  /**
+   * Validate chat_with_ai response shape at runtime.
+   * The generic `invoke<T>` only provides compile-time types; the backend
+   * could return an unexpected shape after a version mismatch or bug.
+   */
+  private validateChatResponse(response: unknown): TauriAIResponse {
+    if (typeof response !== 'object' || response === null) {
+      throw new Error('Backend returned invalid chat response: expected object');
+    }
+
+    const record = response as Record<string, unknown>;
+
+    if (typeof record.message !== 'string') {
+      throw new Error(
+        `Backend returned invalid chat response: "message" must be a string, got ${typeof record.message}`,
+      );
+    }
+
+    return {
+      message: record.message,
+      actions: Array.isArray(record.actions) ? record.actions : undefined,
+      needsConfirmation: typeof record.needsConfirmation === 'boolean' ? record.needsConfirmation : undefined,
+      intent: typeof record.intent === 'object' && record.intent !== null ? record.intent as TauriAIResponse['intent'] : undefined,
+    };
+  }
+
+  /**
+   * Validate complete_with_ai_raw response shape at runtime.
+   */
+  private validateRawCompletionResponse(response: unknown): TauriRawCompletionResponse {
+    if (typeof response !== 'object' || response === null) {
+      throw new Error('Backend returned invalid raw completion response: expected object');
+    }
+
+    const record = response as Record<string, unknown>;
+
+    if (typeof record.text !== 'string') {
+      throw new Error(
+        `Backend returned invalid raw completion response: "text" must be a string, got ${typeof record.text}`,
+      );
+    }
+
+    return {
+      text: record.text,
+      model: typeof record.model === 'string' ? record.model : 'unknown',
+      usage: typeof record.usage === 'object' && record.usage !== null
+        ? (record.usage as TauriRawCompletionResponse['usage'])
+        : { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+      finishReason: typeof record.finishReason === 'string' ? record.finishReason : 'unknown',
+    };
+  }
+
+  private parseStructuredResponse<T>(rawText: string): T {
+    const text = rawText.replace(/^\uFEFF/, '').trim();
+    const candidates = new Set<string>();
+
+    if (text.length > 0) {
+      candidates.add(text);
+    }
+
+    for (const fencedCandidate of this.extractCodeFenceJsonCandidates(text)) {
+      if (fencedCandidate.trim().length > 0) {
+        candidates.add(fencedCandidate.trim());
+      }
+    }
+
+    for (const embeddedCandidate of this.extractEmbeddedJsonCandidates(text)) {
+      if (embeddedCandidate.trim().length > 0) {
+        candidates.add(embeddedCandidate.trim());
+      }
+    }
+
+    let lastErrorMessage = 'no details';
+    for (const candidate of candidates) {
+      try {
+        return JSON.parse(candidate) as T;
+      } catch (error) {
+        lastErrorMessage = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const preview = text.slice(0, 160).replace(/\s+/g, ' ');
+    throw new Error(`Failed to parse structured response: ${preview}...: ${lastErrorMessage}`);
+  }
+
+  private extractCodeFenceJsonCandidates(text: string): string[] {
+    const candidates: string[] = [];
+    const fenceRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
+
+    for (const match of text.matchAll(fenceRegex)) {
+      const candidate = match[1]?.trim();
+      if (candidate) {
+        candidates.push(candidate);
+      }
+    }
+
+    return candidates;
+  }
+
+  private extractEmbeddedJsonCandidates(text: string): string[] {
+    const candidates: string[] = [];
+    const startIndexes = [text.indexOf('{'), text.indexOf('[')]
+      .filter((index) => index >= 0)
+      .sort((a, b) => a - b);
+
+    for (const startIndex of startIndexes) {
+      const candidate = this.extractBalancedJson(text, startIndex);
+      if (candidate) {
+        candidates.push(candidate);
+      }
+    }
+
+    return candidates;
+  }
+
+  private extractBalancedJson(text: string, startIndex: number): string | null {
+    const firstChar = text[startIndex];
+    if (firstChar !== '{' && firstChar !== '[') {
+      return null;
+    }
+
+    const closingStack: string[] = [firstChar === '{' ? '}' : ']'];
+    let inString = false;
+    let escaped = false;
+
+    for (let index = startIndex + 1; index < text.length; index += 1) {
+      const char = text[index];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+
+        if (char === '\\') {
+          escaped = true;
+          continue;
+        }
+
+        if (char === '"') {
+          inString = false;
+        }
+
+        continue;
+      }
+
+      if (char === '"') {
+        inString = true;
+        continue;
+      }
+
+      if (char === '{') {
+        closingStack.push('}');
+        continue;
+      }
+
+      if (char === '[') {
+        closingStack.push(']');
+        continue;
+      }
+
+      if (char === '}' || char === ']') {
+        const expectedClosing = closingStack.pop();
+        if (expectedClosing !== char) {
+          return null;
+        }
+
+        if (closingStack.length === 0) {
+          return text.slice(startIndex, index + 1);
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private beginRequest(): number {
+    this._isGenerating = true;
+    this._aborted = false;
+    this.abortController = new AbortController();
+    const requestId = ++this.requestSequence;
+    this.activeRequestId = requestId;
+    return requestId;
+  }
+
+  private finishRequest(requestId: number): void {
+    if (this.activeRequestId !== requestId) {
+      return;
+    }
+
+    this._isGenerating = false;
+    this.abortController = null;
+    this.activeRequestId = null;
   }
 
   /**

@@ -8,8 +8,62 @@
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
 import { executeAgentCommand } from './commandExecutor';
+import { useProjectStore } from '@/stores/projectStore';
+import type { Clip, Sequence } from '@/types';
 
 const logger = createLogger('EffectTools');
+
+interface EffectSnapshot {
+  id: string;
+  effectType?: string;
+  params: Record<string, unknown>;
+  enabled: boolean;
+}
+
+function getSequence(sequenceId: string): Sequence | undefined {
+  return useProjectStore.getState().sequences.get(sequenceId);
+}
+
+function findClip(sequence: Sequence, trackId: string, clipId: string): Clip | undefined {
+  const track = sequence.tracks.find((candidate) => candidate.id === trackId);
+  return track?.clips.find((candidate) => candidate.id === clipId);
+}
+
+function toEffectSnapshot(raw: unknown): EffectSnapshot | null {
+  if (typeof raw === 'string') {
+    return {
+      id: raw,
+      params: {},
+      enabled: true,
+    };
+  }
+
+  if (typeof raw !== 'object' || raw === null) {
+    return null;
+  }
+
+  const candidate = raw as Record<string, unknown>;
+  if (typeof candidate.id !== 'string') {
+    return null;
+  }
+
+  return {
+    id: candidate.id,
+    effectType: typeof candidate.effectType === 'string' ? candidate.effectType : undefined,
+    params:
+      typeof candidate.params === 'object' && candidate.params !== null
+        ? (candidate.params as Record<string, unknown>)
+        : {},
+    enabled: candidate.enabled === undefined ? true : Boolean(candidate.enabled),
+  };
+}
+
+function getClipEffects(clip: Clip): EffectSnapshot[] {
+  const rawEffects = Array.isArray(clip.effects) ? clip.effects : [];
+  return rawEffects
+    .map(toEffectSnapshot)
+    .filter((effect): effect is EffectSnapshot => effect !== null);
+}
 
 // =============================================================================
 // Tool Definitions
@@ -56,7 +110,7 @@ const EFFECT_TOOLS: ToolDefinition[] = [
           trackId: args.trackId as string,
           clipId: args.clipId as string,
           effectType: args.effectType as string,
-          parameters: (args.parameters as Record<string, unknown>) ?? {},
+          params: (args.parameters as Record<string, unknown>) ?? {},
         });
 
         logger.debug('add_effect executed', { opId: result.opId });
@@ -156,13 +210,11 @@ const EFFECT_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await executeAgentCommand('AdjustEffectParam', {
-          sequenceId: args.sequenceId as string,
-          trackId: args.trackId as string,
-          clipId: args.clipId as string,
+        const result = await executeAgentCommand('UpdateEffect', {
           effectId: args.effectId as string,
-          paramName: args.paramName as string,
-          paramValue: args.paramValue as number,
+          params: {
+            [args.paramName as string]: args.paramValue as number,
+          },
         });
 
         logger.debug('adjust_effect_param executed', { opId: result.opId });
@@ -210,15 +262,82 @@ const EFFECT_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await executeAgentCommand('CopyEffects', {
-          sequenceId: args.sequenceId as string,
-          sourceTrackId: args.sourceTrackId as string,
-          sourceClipId: args.sourceClipId as string,
-          targetTrackId: args.targetTrackId as string,
-          targetClipId: args.targetClipId as string,
-        });
+        const sequenceId = args.sequenceId as string;
+        const sourceTrackId = args.sourceTrackId as string;
+        const sourceClipId = args.sourceClipId as string;
+        const targetTrackId = args.targetTrackId as string;
+        const targetClipId = args.targetClipId as string;
 
-        logger.debug('copy_effects executed', { opId: result.opId });
+        const sequence = getSequence(sequenceId);
+        if (!sequence) {
+          return { success: false, error: `Sequence '${sequenceId}' not found` };
+        }
+
+        const sourceClip = findClip(sequence, sourceTrackId, sourceClipId);
+        if (!sourceClip) {
+          return {
+            success: false,
+            error: `Source clip '${sourceClipId}' was not found on track '${sourceTrackId}'`,
+          };
+        }
+
+        if (!findClip(sequence, targetTrackId, targetClipId)) {
+          return {
+            success: false,
+            error: `Target clip '${targetClipId}' was not found on track '${targetTrackId}'`,
+          };
+        }
+
+        const effects = getClipEffects(sourceClip);
+        if (effects.length === 0) {
+          return {
+            success: true,
+            result: {
+              copiedCount: 0,
+              copiedEffectIds: [],
+            },
+          };
+        }
+
+        const missingEffectType = effects.find((effect) => !effect.effectType);
+        if (missingEffectType) {
+          return {
+            success: false,
+            error:
+              'Source effect details are not available in current state snapshot; cannot copy effect definitions.',
+          };
+        }
+
+        const createdEffectIds: string[] = [];
+
+        for (const effect of effects) {
+          const addResult = await executeAgentCommand('AddEffect', {
+            sequenceId,
+            trackId: targetTrackId,
+            clipId: targetClipId,
+            effectType: effect.effectType,
+            params: effect.params,
+          });
+
+          const createdEffectId = addResult.createdIds[0];
+          if (createdEffectId) {
+            createdEffectIds.push(createdEffectId);
+
+            if (!effect.enabled) {
+              await executeAgentCommand('UpdateEffect', {
+                effectId: createdEffectId,
+                enabled: false,
+              });
+            }
+          }
+        }
+
+        const result = {
+          copiedCount: createdEffectIds.length,
+          copiedEffectIds: createdEffectIds,
+        };
+
+        logger.debug('copy_effects executed', { copiedCount: result.copiedCount });
         return { success: true, result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -255,13 +374,51 @@ const EFFECT_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await executeAgentCommand('ResetEffects', {
-          sequenceId: args.sequenceId as string,
-          trackId: args.trackId as string,
-          clipId: args.clipId as string,
-        });
+        const sequenceId = args.sequenceId as string;
+        const trackId = args.trackId as string;
+        const clipId = args.clipId as string;
 
-        logger.debug('reset_effects executed', { opId: result.opId });
+        const sequence = getSequence(sequenceId);
+        if (!sequence) {
+          return { success: false, error: `Sequence '${sequenceId}' not found` };
+        }
+
+        const clip = findClip(sequence, trackId, clipId);
+        if (!clip) {
+          return {
+            success: false,
+            error: `Clip '${clipId}' was not found on track '${trackId}'`,
+          };
+        }
+
+        const effects = getClipEffects(clip);
+        if (effects.length === 0) {
+          return {
+            success: true,
+            result: {
+              removedCount: 0,
+              removedEffectIds: [],
+            },
+          };
+        }
+
+        const removedEffectIds: string[] = [];
+        for (const effect of effects) {
+          await executeAgentCommand('RemoveEffect', {
+            sequenceId,
+            trackId,
+            clipId,
+            effectId: effect.id,
+          });
+          removedEffectIds.push(effect.id);
+        }
+
+        const result = {
+          removedCount: removedEffectIds.length,
+          removedEffectIds,
+        };
+
+        logger.debug('reset_effects executed', { removedCount: result.removedCount });
         return { success: true, result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

@@ -149,6 +149,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   // Refs
   const engineRef = useRef<ReturnType<typeof createAgenticEngine> | null>(null);
   const abortedRef = useRef(false);
+  const runGuardRef = useRef(false);
   const approvalResolverRef = useRef<{
     resolve: (result: { approved: boolean; feedback?: string }) => void;
   } | null>(null);
@@ -251,14 +252,21 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   const run = useCallback(
     async (input: string): Promise<AgentRunResult | null> => {
       if (!isEnabled) {
+        const disabledError = new Error(
+          'Agentic engine is disabled via feature flag. Enable USE_AGENTIC_ENGINE to run agent workflows.',
+        );
+        setError(disabledError);
+        setPhase('failed');
+        optionsRef.current.onError?.(disabledError);
         logger.warn('Agentic engine is disabled via feature flag');
         return null;
       }
 
-      if (isRunning) {
+      if (runGuardRef.current) {
         logger.warn('Engine is already running');
         return null;
       }
+      runGuardRef.current = true;
 
       // Reset state
       setIsRunning(true);
@@ -297,6 +305,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         setIsRunning(false);
         optionsRef.current.onError?.(configError);
         logger.error('Pre-flight check failed: AI provider not configured');
+        runGuardRef.current = false;
         return null;
       }
 
@@ -319,28 +328,23 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
           approvalHandler:
             config?.approvalHandler ??
             (async () => {
-              return await new Promise<{ approved: boolean; feedback?: string }>(
-                (resolve) => {
-                  approvalResolverRef.current = { resolve };
-                },
-              );
+              return await new Promise<{ approved: boolean; feedback?: string }>((resolve) => {
+                approvalResolverRef.current = { resolve };
+              });
             }),
           toolPermissionHandler:
             config?.toolPermissionHandler ??
             (async (toolName, _args, step) => {
-              const permission =
-                usePermissionStore.getState().resolvePermission(toolName);
+              const permission = usePermissionStore.getState().resolvePermission(toolName);
               if (permission === 'allow') return 'allow';
               if (permission === 'deny') return 'deny';
               // 'ask' — show inline approval UI, wait for user response
-              return await new Promise<'allow' | 'deny' | 'allow_always'>(
-                (resolve) => {
-                  toolPermissionResolverRef.current = {
-                    resolve,
-                    step,
-                  };
-                },
-              );
+              return await new Promise<'allow' | 'deny' | 'allow_always'>((resolve) => {
+                toolPermissionResolverRef.current = {
+                  resolve,
+                  step,
+                };
+              });
             }),
         });
         engineRef.current = engine;
@@ -374,21 +378,24 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         logger.error('Engine run failed', { error: error.message });
         throw error;
       } finally {
+        runGuardRef.current = false;
         setIsRunning(false);
         engineRef.current = null;
       }
     },
-    [isEnabled, isRunning, llmClient, toolExecutor, config, buildContext, handleEvent],
+    [isEnabled, llmClient, toolExecutor, config, buildContext, handleEvent],
   );
 
   // Abort
   const abort = useCallback(() => {
     abortedRef.current = true;
     engineRef.current?.abort();
-    // Unblock pending promises so the engine can finish aborting
-    approvalResolverRef.current?.resolve({ approved: true });
+    // Unblock pending promises so the engine can finish aborting.
+    // Reject approval and deny tool permissions to prevent execution of
+    // any pending plan steps after the abort signal.
+    approvalResolverRef.current?.resolve({ approved: false, feedback: 'Aborted by user' });
     approvalResolverRef.current = null;
-    toolPermissionResolverRef.current?.resolve('allow');
+    toolPermissionResolverRef.current?.resolve('deny');
     toolPermissionResolverRef.current = null;
     setPhase('aborted');
     setIsRunning(false);
@@ -399,6 +406,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   // Reset
   const reset = useCallback(() => {
     abortedRef.current = false;
+    runGuardRef.current = false;
     engineRef.current = null;
     approvalResolverRef.current = null;
     setPhase('idle');
@@ -425,19 +433,16 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   }, []);
 
   // Tool permission actions
-  const approveToolPermission = useCallback(
-    (decision: 'allow' | 'deny' | 'allow_always') => {
-      if (decision === 'allow_always' && toolPermissionResolverRef.current?.step) {
-        const step = toolPermissionResolverRef.current.step as { tool?: string };
-        if (step.tool) {
-          usePermissionStore.getState().allowAlways(step.tool);
-        }
+  const approveToolPermission = useCallback((decision: 'allow' | 'deny' | 'allow_always') => {
+    if (decision === 'allow_always' && toolPermissionResolverRef.current?.step) {
+      const step = toolPermissionResolverRef.current.step as { tool?: string };
+      if (step.tool) {
+        usePermissionStore.getState().allowAlways(step.tool);
       }
-      toolPermissionResolverRef.current?.resolve(decision);
-      toolPermissionResolverRef.current = null;
-    },
-    [],
-  );
+    }
+    toolPermissionResolverRef.current?.resolve(decision);
+    toolPermissionResolverRef.current = null;
+  }, []);
 
   // Retry with last user input
   const retry = useCallback(async (): Promise<AgentRunResult | null> => {

@@ -8,8 +8,35 @@
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
 import { executeAgentCommand } from './commandExecutor';
+import { useProjectStore } from '@/stores/projectStore';
+import type { Sequence } from '@/types';
 
 const logger = createLogger('AudioTools');
+
+const MIN_VOLUME_PERCENT = 0;
+const MAX_VOLUME_PERCENT = 200;
+const SILENT_DB = -80;
+
+function getSequence(sequenceId: string): Sequence | undefined {
+  return useProjectStore.getState().sequences.get(sequenceId);
+}
+
+function getTrackClipIds(sequence: Sequence, trackId: string): string[] {
+  const track = sequence.tracks.find((candidate) => candidate.id === trackId);
+  if (!track) {
+    return [];
+  }
+
+  return track.clips.map((clip) => clip.id);
+}
+
+function toVolumeDb(volumePercent: number): number {
+  if (volumePercent <= 0) {
+    return SILENT_DB;
+  }
+
+  return 20 * Math.log10(volumePercent / 100);
+}
 
 // =============================================================================
 // Tool Definitions
@@ -47,14 +74,60 @@ const AUDIO_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await executeAgentCommand('AdjustVolume', {
-          sequenceId: args.sequenceId as string,
-          trackId: args.trackId as string,
-          clipId: args.clipId as string | undefined,
-          volume: args.volume as number,
-        });
+        const sequenceId = args.sequenceId as string;
+        const trackId = args.trackId as string;
+        const requestedClipId = args.clipId as string | undefined;
+        const rawVolume = args.volume as number;
 
-        logger.debug('adjust_volume executed', { opId: result.opId });
+        if (!Number.isFinite(rawVolume)) {
+          return { success: false, error: 'volume must be a finite number' };
+        }
+
+        const clampedVolume = Math.max(MIN_VOLUME_PERCENT, Math.min(MAX_VOLUME_PERCENT, rawVolume));
+
+        let targetClipIds: string[];
+        if (requestedClipId) {
+          targetClipIds = [requestedClipId];
+        } else {
+          const sequence = getSequence(sequenceId);
+          if (!sequence) {
+            return { success: false, error: `Sequence '${sequenceId}' not found` };
+          }
+          targetClipIds = getTrackClipIds(sequence, trackId);
+        }
+
+        if (targetClipIds.length === 0) {
+          return {
+            success: false,
+            error: requestedClipId
+              ? `Clip '${requestedClipId}' not found on track '${trackId}'`
+              : `Track '${trackId}' has no clips to adjust`,
+          };
+        }
+
+        const volumeDb = toVolumeDb(clampedVolume);
+        for (const clipId of targetClipIds) {
+          await executeAgentCommand('SetClipAudio', {
+            sequenceId,
+            trackId,
+            clipId,
+            volumeDb,
+            muted: clampedVolume <= 0,
+          });
+        }
+
+        const result = {
+          appliedCount: targetClipIds.length,
+          clipIds: targetClipIds,
+          volumePercent: clampedVolume,
+          volumeDb,
+        };
+
+        logger.debug('adjust_volume executed', {
+          trackId,
+          appliedCount: result.appliedCount,
+          volumeDb,
+        });
         return { success: true, result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -95,12 +168,11 @@ const AUDIO_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await executeAgentCommand('AddAudioFade', {
+        const result = await executeAgentCommand('SetClipAudio', {
           sequenceId: args.sequenceId as string,
           trackId: args.trackId as string,
           clipId: args.clipId as string,
-          fadeType: 'in',
-          duration: args.duration as number,
+          fadeInSec: args.duration as number,
         });
 
         logger.debug('add_fade_in executed', { opId: result.opId });
@@ -144,12 +216,11 @@ const AUDIO_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await executeAgentCommand('AddAudioFade', {
+        const result = await executeAgentCommand('SetClipAudio', {
           sequenceId: args.sequenceId as string,
           trackId: args.trackId as string,
           clipId: args.clipId as string,
-          fadeType: 'out',
-          duration: args.duration as number,
+          fadeOutSec: args.duration as number,
         });
 
         logger.debug('add_fade_out executed', { opId: result.opId });
@@ -237,13 +308,47 @@ const AUDIO_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await executeAgentCommand('SetTrackMute', {
-          sequenceId: args.sequenceId as string,
-          trackId: args.trackId as string,
-          muted: args.muted as boolean,
-        });
+        const sequenceId = args.sequenceId as string;
+        const trackId = args.trackId as string;
+        const muted = args.muted as boolean;
 
-        logger.debug('mute_track executed', { opId: result.opId });
+        const sequence = getSequence(sequenceId);
+        if (!sequence) {
+          return { success: false, error: `Sequence '${sequenceId}' not found` };
+        }
+
+        const clipIds = getTrackClipIds(sequence, trackId);
+        if (clipIds.length === 0) {
+          return {
+            success: true,
+            result: {
+              muted,
+              affectedClipCount: 0,
+              clipIds: [],
+            },
+          };
+        }
+
+        for (const clipId of clipIds) {
+          await executeAgentCommand('SetClipMute', {
+            sequenceId,
+            trackId,
+            clipId,
+            muted,
+          });
+        }
+
+        const result = {
+          muted,
+          affectedClipCount: clipIds.length,
+          clipIds,
+        };
+
+        logger.debug('mute_track executed', {
+          trackId,
+          muted,
+          affectedClipCount: clipIds.length,
+        });
         return { success: true, result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -284,14 +389,19 @@ const AUDIO_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const result = await executeAgentCommand('NormalizeAudio', {
+        const targetLevel = (args.targetLevel as number | undefined) ?? -3;
+
+        const result = await executeAgentCommand('AddEffect', {
           sequenceId: args.sequenceId as string,
           trackId: args.trackId as string,
           clipId: args.clipId as string,
-          targetLevel: (args.targetLevel as number | undefined) ?? -3,
+          effectType: 'loudness_normalize',
+          params: {
+            target_lufs: targetLevel,
+          },
         });
 
-        logger.debug('normalize_audio executed', { opId: result.opId });
+        logger.debug('normalize_audio executed', { opId: result.opId, targetLevel });
         return { success: true, result };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
