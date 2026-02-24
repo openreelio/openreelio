@@ -280,7 +280,7 @@ pub async fn list_workspace_documents(
         .max_depth(16)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|e| should_walk_workspace_entry(e))
+        .filter_entry(should_walk_workspace_entry)
     {
         let entry = match entry {
             Ok(e) => e,
