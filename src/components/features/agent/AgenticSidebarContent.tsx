@@ -5,8 +5,10 @@
  * Uses useAgenticLoopWithStores for real store integration.
  */
 
-import { useMemo, useCallback, useEffect, useRef } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { AgenticChat, type AgenticChatHandle } from './AgenticChat';
+import { SessionList } from './SessionList';
 import { createTauriLLMAdapter } from '@/agents/engine/adapters/llm/TauriLLMAdapter';
 import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRegistryAdapter';
 import { globalToolRegistry } from '@/agents';
@@ -43,6 +45,7 @@ export function AgenticSidebarContent({
   onRegisterNewChat,
   className = '',
 }: AgenticSidebarContentProps) {
+  const [showSessionList, setShowSessionList] = useState(false);
   // ===========================================================================
   // Adapters
   // ===========================================================================
@@ -120,18 +123,46 @@ export function AgenticSidebarContent({
   return (
     <div
       data-testid="agentic-sidebar-content"
-      className={`flex flex-col flex-1 overflow-hidden ${className}`}
+      className={`flex flex-row flex-1 overflow-hidden ${className}`}
     >
-      <AgenticChat
-        ref={chatHandleRef}
-        llmClient={llmClient}
-        toolExecutor={toolExecutor}
-        onSubmit={handleSubmit}
-        onComplete={handleComplete}
-        onError={handleError}
-        placeholder="Describe what you want to edit..."
-        className="flex-1"
-      />
+      {/* Session List Panel */}
+      {showSessionList && (
+        <div className="w-48 flex-shrink-0 border-r border-border-subtle bg-surface-base">
+          <SessionList onNewSession={newChat} />
+        </div>
+      )}
+
+      {/* Main Chat Area */}
+      <div className="flex flex-col flex-1 overflow-hidden">
+        {/* Session toggle bar */}
+        <div className="flex items-center px-2 py-1 border-b border-border-subtle bg-surface-base">
+          <button
+            onClick={() => setShowSessionList((prev) => !prev)}
+            className="p-1 rounded hover:bg-surface-active transition-colors"
+            aria-label={showSessionList ? 'Hide sessions' : 'Show sessions'}
+            title={showSessionList ? 'Hide sessions' : 'Show sessions'}
+            data-testid="toggle-sessions-btn"
+          >
+            {showSessionList ? (
+              <PanelLeftClose className="w-3.5 h-3.5 text-text-tertiary" />
+            ) : (
+              <PanelLeftOpen className="w-3.5 h-3.5 text-text-tertiary" />
+            )}
+          </button>
+          <span className="text-xs text-text-tertiary ml-2">AI Chat</span>
+        </div>
+
+        <AgenticChat
+          ref={chatHandleRef}
+          llmClient={llmClient}
+          toolExecutor={toolExecutor}
+          onSubmit={handleSubmit}
+          onComplete={handleComplete}
+          onError={handleError}
+          placeholder="Describe what you want to edit..."
+          className="flex-1"
+        />
+      </div>
     </div>
   );
 }

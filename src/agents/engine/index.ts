@@ -283,3 +283,107 @@ export {
   MemoryManagerAdapter,
   createMemoryManagerAdapter,
 } from './adapters/memory/MemoryManagerAdapter';
+
+// =============================================================================
+// Simplified Agent Loop (opencode-style)
+// =============================================================================
+export {
+  AgentLoop,
+  createAgentLoop,
+  AgentLoopAbortedError,
+  type AgentLoopConfig,
+  DEFAULT_AGENT_LOOP_CONFIG,
+  type AgentLoopEvent,
+  type TextDeltaEvent,
+  type ReasoningDeltaEvent,
+  type ToolCallStartEvent,
+  type ToolCallCompleteEvent,
+  type ToolsExecutedEvent,
+  type CompactedEvent,
+  type DoneEvent,
+  type ToolCallResult,
+} from './AgentLoop';
+
+// =============================================================================
+// Context Compaction
+// =============================================================================
+export {
+  Compaction,
+  type PruneResult,
+  type CompactResult,
+  PRUNE_PROTECT_TOKENS,
+  PRUNE_MINIMUM_TOKENS,
+  COMPACT_THRESHOLD,
+  CHARS_PER_TOKEN,
+} from './core/compaction';
+
+// =============================================================================
+// Doom Loop Detector
+// =============================================================================
+export { DoomLoopDetector } from './core/DoomLoopDetector';
+
+// =============================================================================
+// Fast Path Parser
+// =============================================================================
+export { parseFastPathPlan, type FastPathMatch } from './core/fastPathParser';
+
+// =============================================================================
+// New Conversation Part Types (Phase 1)
+// =============================================================================
+export {
+  type CompactionPart,
+  type ReasoningPart,
+  type PatchPart,
+  createCompactionPart,
+  createReasoningPart,
+  createPatchPart,
+} from './core/conversation';
+
+// =============================================================================
+// Knowledge Base (Phase 6)
+// =============================================================================
+export {
+  KnowledgeBase,
+  type KnowledgeEntry,
+  type KnowledgeCategory,
+  type KnowledgeQuery,
+} from './core/knowledgeBase';
+
+// =============================================================================
+// System Prompt Assembly (Phase 6)
+// =============================================================================
+export {
+  assembleSystemPrompt,
+  buildCompactionPrompt,
+  type AgentRole,
+  type SystemPromptOptions,
+} from './prompts/system';
+
+export {
+  buildEnvironmentContext,
+  buildAssetContext,
+  buildTrackContext,
+  buildSelectionContext,
+  buildToolsContext,
+  buildFullEnvironmentPrompt,
+} from './prompts/environment';
+
+export {
+  EDITOR_PROMPT,
+  ANALYST_PROMPT,
+  COLORIST_PROMPT,
+  AUDIO_PROMPT,
+} from './prompts/agentPrompts';
+
+// =============================================================================
+// Agent Definitions (Phase 5)
+// =============================================================================
+export {
+  AGENT_DEFINITIONS,
+  getAgentDefinition,
+  getAllAgentDefinitions,
+  getPrimaryAgents,
+  getSubAgents,
+  type AgentDefinition,
+  type AgentMode,
+} from './core/agentDefinitions';

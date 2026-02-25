@@ -4835,6 +4835,9 @@ pub async fn configure_ai_provider(
     }
 
     let provider_type: ProviderType = config.provider_type.parse().map_err(|e: String| e)?;
+    let requested_api_key = config.api_key.clone();
+    let requested_base_url = config.base_url.clone();
+    let requested_model = config.model.clone();
 
     let provider_config = match provider_type {
         ProviderType::OpenAI => {
@@ -4919,12 +4922,40 @@ pub async fn configure_ai_provider(
                 provider_type: Some(provider_type.to_string()),
                 is_configured,
                 is_available,
-                current_model: config.model.clone(),
+                current_model: requested_model.clone(),
                 available_models: available_models.clone(),
                 error_message: error_message.clone(),
             },
         )
         .await;
+
+    let streaming_base_url = requested_base_url.unwrap_or_else(|| match provider_type {
+        ProviderType::OpenAI => crate::core::ai::OpenAIProvider::DEFAULT_BASE_URL.to_string(),
+        ProviderType::Anthropic => crate::core::ai::AnthropicProvider::DEFAULT_BASE_URL.to_string(),
+        ProviderType::Gemini => crate::core::ai::GeminiProvider::DEFAULT_BASE_URL.to_string(),
+        ProviderType::Local => crate::core::ai::LocalProvider::DEFAULT_BASE_URL.to_string(),
+    });
+
+    let streaming_model = requested_model
+        .clone()
+        .unwrap_or_else(|| match provider_type {
+            ProviderType::OpenAI => "gpt-5.2".to_string(),
+            ProviderType::Anthropic => "claude-sonnet-4-5-20251015".to_string(),
+            ProviderType::Gemini => "gemini-3-flash-preview".to_string(),
+            ProviderType::Local => "llama3.2".to_string(),
+        });
+
+    crate::core::ai::set_streaming_provider_config(crate::core::ai::StreamingProviderConfig {
+        provider_type,
+        api_key: if provider_type == ProviderType::Local {
+            String::new()
+        } else {
+            requested_api_key.unwrap_or_default()
+        },
+        base_url: streaming_base_url,
+        model: streaming_model,
+    })
+    .await;
 
     tracing::info!(
         "Configured AI provider: {} (configured: {}, available: {})",
@@ -4937,7 +4968,7 @@ pub async fn configure_ai_provider(
         provider_type: Some(provider_type.to_string()),
         is_configured,
         is_available,
-        current_model: config.model,
+        current_model: requested_model,
         available_models,
         error_message,
     })
@@ -4968,6 +4999,7 @@ pub async fn get_ai_provider_status(
 pub async fn clear_ai_provider(state: State<'_, AppState>) -> Result<(), String> {
     let gateway = state.ai_gateway.lock().await;
     gateway.clear_provider().await;
+    crate::core::ai::clear_streaming_provider_config().await;
 
     tracing::info!("Cleared AI provider");
     Ok(())
@@ -4994,6 +5026,7 @@ pub async fn sync_ai_from_vault(
     let app_data_dir = get_app_data_dir(&app)?;
     let settings_manager = SettingsManager::new(app_data_dir.clone());
     let settings = settings_manager.load();
+    crate::core::ai::clear_streaming_provider_config().await;
 
     let provider_type = settings.ai.primary_provider;
     let model = settings.ai.primary_model.clone();
@@ -5075,6 +5108,18 @@ pub async fn sync_ai_from_vault(
         None
     };
 
+    let streaming_api_key = api_key.clone().unwrap_or_default();
+    let streaming_base_url = match ai_provider_type {
+        ProviderType::OpenAI => crate::core::ai::OpenAIProvider::DEFAULT_BASE_URL.to_string(),
+        ProviderType::Anthropic => crate::core::ai::AnthropicProvider::DEFAULT_BASE_URL.to_string(),
+        ProviderType::Gemini => crate::core::ai::GeminiProvider::DEFAULT_BASE_URL.to_string(),
+        ProviderType::Local => settings
+            .ai
+            .ollama_url
+            .clone()
+            .unwrap_or_else(|| crate::core::ai::LocalProvider::DEFAULT_BASE_URL.to_string()),
+    };
+
     // Build provider config
     let provider_config = match ai_provider_type {
         ProviderType::OpenAI => {
@@ -5133,6 +5178,18 @@ pub async fn sync_ai_from_vault(
             },
         )
         .await;
+
+    crate::core::ai::set_streaming_provider_config(crate::core::ai::StreamingProviderConfig {
+        provider_type: ai_provider_type,
+        api_key: if ai_provider_type == ProviderType::Local {
+            String::new()
+        } else {
+            streaming_api_key
+        },
+        base_url: streaming_base_url,
+        model: model.clone(),
+    })
+    .await;
 
     tracing::info!(
         "Synced AI provider from vault: {} (configured: {}, available: {})",

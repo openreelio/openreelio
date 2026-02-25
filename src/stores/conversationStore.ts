@@ -2,26 +2,28 @@
  * Conversation Store
  *
  * Zustand store for managing conversation state.
- * Replaces the fragmented chat state across aiStore and AgenticChat.
  * Provides unified message management with typed parts.
  *
  * Features:
- * - Per-project conversations with persistence
+ * - Per-project conversations with SQLite persistence via Tauri IPC
+ * - Multi-session support (create, list, switch, delete, archive)
  * - Multi-part message model (text, thinking, plan, tool calls, etc.)
  * - Streaming support via appendPart/updatePart
  * - Conversion to LLMMessage[] for multi-turn context
+ * - Debounced persistence to avoid excessive IPC calls
  */
 
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
+import { invoke } from '@tauri-apps/api/core';
 import {
   createConversation,
   createUserMessage,
   createAssistantMessage,
   createSystemMessage,
   toSimpleLLMMessages,
-  isValidConversationMessage,
   type Conversation,
+  type ConversationMessage,
   type MessagePart,
   type TokenUsage,
 } from '@/agents/engine/core/conversation';
@@ -34,17 +36,32 @@ const logger = createLogger('ConversationStore');
 // Constants
 // =============================================================================
 
-const STORAGE_KEY_PREFIX = 'openreelio_conversation_';
-const MAX_MESSAGES_PER_CONVERSATION = 200;
-const MAX_STORAGE_SIZE_BYTES = 2 * 1024 * 1024; // 2MB
 const SAVE_DEBOUNCE_MS = 1000;
+
+// =============================================================================
+// Session Types (mirror backend DTOs)
+// =============================================================================
+
+export interface SessionSummary {
+  id: string;
+  projectId: string;
+  title: string;
+  agent: string;
+  modelProvider: string | null;
+  modelId: string | null;
+  createdAt: number;
+  updatedAt: number;
+  archived: boolean;
+  messageCount: number;
+  lastMessagePreview: string | null;
+}
 
 // =============================================================================
 // Types
 // =============================================================================
 
 export interface ConversationState {
-  /** The active conversation (loaded per project) */
+  /** The active conversation (loaded per project or session) */
   activeConversation: Conversation | null;
   /** Whether the AI is currently generating a response */
   isGenerating: boolean;
@@ -52,11 +69,25 @@ export interface ConversationState {
   streamingMessageId: string | null;
   /** The project ID for the active conversation */
   activeProjectId: string | null;
+  /** The active session ID (SQLite-backed) */
+  activeSessionId: string | null;
+  /** Available sessions for the active project */
+  sessions: SessionSummary[];
 }
 
 export interface ConversationActions {
   /** Load or create a conversation for a project */
   loadForProject: (projectId: string) => void;
+  /** Load sessions list for the active project from SQLite */
+  loadSessions: (projectId: string) => Promise<void>;
+  /** Create a new session and switch to it */
+  createSession: (agent?: string) => Promise<string | null>;
+  /** Switch to an existing session */
+  switchSession: (sessionId: string) => Promise<void>;
+  /** Delete a session */
+  deleteSession: (sessionId: string) => Promise<void>;
+  /** Archive a session */
+  archiveSession: (sessionId: string) => Promise<void>;
   /** Add a user message and return its ID */
   addUserMessage: (content: string) => string;
   /** Start a new assistant message (for streaming) and return its ID */
@@ -82,93 +113,67 @@ export interface ConversationActions {
 export type ConversationStore = ConversationState & ConversationActions;
 
 // =============================================================================
-// Persistence Helpers
+// Debounced Persistence (SQLite via IPC)
 // =============================================================================
 
-function getStorageKey(projectId: string): string {
-  const sanitized = projectId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return `${STORAGE_KEY_PREFIX}${sanitized}`;
-}
+const saveTimeoutBySession = new Map<string, ReturnType<typeof setTimeout>>();
 
-function loadFromStorage(projectId: string): Conversation | null {
-  try {
-    const key = getStorageKey(projectId);
-    const stored = localStorage.getItem(key);
-    if (!stored) return null;
-
-    const data = JSON.parse(stored) as Conversation;
-    if (!data || !data.id || !data.projectId || !Array.isArray(data.messages)) {
-      return null;
-    }
-
-    // Validate and filter messages
-    data.messages = data.messages.filter(isValidConversationMessage);
-    return data;
-  } catch (error) {
-    logger.error('Failed to load conversation from storage', { projectId, error });
-    return null;
+/** Clear all pending debounced saves (e.g., on project switch or conversation clear). */
+function clearAllPendingSaves(): void {
+  for (const timeout of saveTimeoutBySession.values()) {
+    clearTimeout(timeout);
   }
+  saveTimeoutBySession.clear();
 }
-
-function saveToStorage(conversation: Conversation): void {
-  try {
-    const key = getStorageKey(conversation.projectId);
-
-    // Limit messages
-    const limitedConv: Conversation = {
-      ...conversation,
-      messages: conversation.messages.slice(-MAX_MESSAGES_PER_CONVERSATION),
-      updatedAt: Date.now(),
-    };
-
-    const serialized = JSON.stringify(limitedConv);
-
-    if (serialized.length > MAX_STORAGE_SIZE_BYTES) {
-      logger.warn('Conversation exceeds size limit, truncating', {
-        projectId: conversation.projectId,
-        size: serialized.length,
-      });
-      // Keep most recent messages
-      limitedConv.messages = limitedConv.messages.slice(
-        -Math.floor(MAX_MESSAGES_PER_CONVERSATION / 2)
-      );
-      const truncated = JSON.stringify(limitedConv);
-      localStorage.setItem(key, truncated);
-    } else {
-      localStorage.setItem(key, serialized);
-    }
-  } catch (error) {
-    logger.error('Failed to save conversation to storage', {
-      projectId: conversation.projectId,
-      error,
-    });
-  }
-}
-
-// =============================================================================
-// Debounced Save
-// =============================================================================
-
-const saveTimeoutByProject = new Map<string, ReturnType<typeof setTimeout>>();
 
 /**
- * Schedule a debounced save scoped to a specific project.
- * Each project has its own timeout, preventing fast project switches
- * from dropping pending saves for the previous project.
+ * Schedule a debounced save of a finalized message to SQLite.
+ * During streaming, parts are appended in-memory only; the full message
+ * is persisted once finalizeMessage is called.
  */
-function debouncedSave(projectId: string, getLatest: () => Conversation | null): void {
-  const existing = saveTimeoutByProject.get(projectId);
-  if (existing) {
-    clearTimeout(existing);
-  }
+function debouncedPersistMessage(
+  sessionId: string,
+  message: ConversationMessage,
+): void {
+  const key = `${sessionId}:${message.id}`;
+  const existing = saveTimeoutBySession.get(key);
+  if (existing) clearTimeout(existing);
+
   const timeoutId = setTimeout(() => {
-    const conversation = getLatest();
-    if (conversation && conversation.projectId === projectId) {
-      saveToStorage(conversation);
-    }
-    saveTimeoutByProject.delete(projectId);
+    saveTimeoutBySession.delete(key);
+    persistMessage(sessionId, message).catch((err) => {
+      logger.error('Failed to persist message to SQLite', { sessionId, messageId: message.id, err });
+    });
   }, SAVE_DEBOUNCE_MS);
-  saveTimeoutByProject.set(projectId, timeoutId);
+  saveTimeoutBySession.set(key, timeoutId);
+}
+
+async function persistMessage(
+  sessionId: string,
+  message: ConversationMessage,
+): Promise<void> {
+  try {
+    const parts = message.parts.map((part, idx) => ({
+      id: `${message.id}_p${idx}`,
+      sortOrder: idx,
+      partType: part.type,
+      dataJson: JSON.stringify(part),
+    }));
+
+    await invoke('save_ai_message', {
+      input: {
+        id: message.id,
+        sessionId,
+        role: message.role,
+        timestamp: message.timestamp,
+        parts,
+        usageJson: message.usage ? JSON.stringify(message.usage) : null,
+        finishReason: null,
+      },
+    });
+  } catch (err) {
+    logger.error('Failed to save message via IPC', { sessionId, err });
+  }
 }
 
 // =============================================================================
@@ -184,23 +189,158 @@ export const useConversationStore = create<ConversationStore>()(
     isGenerating: false,
     streamingMessageId: null,
     activeProjectId: null,
+    activeSessionId: null,
+    sessions: [],
 
     // =========================================================================
     // Actions
     // =========================================================================
 
     loadForProject: (projectId: string) => {
-      const existing = loadFromStorage(projectId);
+      clearAllPendingSaves();
       set((state) => {
         state.activeProjectId = projectId;
-        state.activeConversation = existing ?? createConversation(projectId);
+        state.activeConversation = createConversation(projectId);
         state.isGenerating = false;
         state.streamingMessageId = null;
+        state.activeSessionId = null;
+        state.sessions = [];
       });
-      logger.info('Loaded conversation for project', {
-        projectId,
-        messageCount: existing?.messages.length ?? 0,
-      });
+
+      // Fire-and-forget: load sessions from SQLite
+      get().loadSessions(projectId);
+
+      logger.info('Loaded conversation for project', { projectId });
+    },
+
+    loadSessions: async (projectId: string) => {
+      try {
+        const sessions = await invoke<SessionSummary[]>('list_ai_sessions', { projectId });
+        // Only update if the active project hasn't changed while we were loading
+        if (get().activeProjectId === projectId) {
+          set((state) => {
+            state.sessions = sessions;
+          });
+        }
+      } catch (err) {
+        logger.error('Failed to load sessions from SQLite', { projectId, err });
+      }
+    },
+
+    createSession: async (agent?: string) => {
+      const projectId = get().activeProjectId;
+      if (!projectId) return null;
+
+      try {
+        const session = await invoke<SessionSummary>('create_ai_session', {
+          projectId,
+          agent: agent ?? 'editor',
+          modelProvider: null,
+          modelId: null,
+        });
+
+        set((state) => {
+          state.sessions.unshift(session);
+          state.activeSessionId = session.id;
+          state.activeConversation = createConversation(projectId);
+          state.activeConversation.id = session.id;
+          state.isGenerating = false;
+          state.streamingMessageId = null;
+        });
+
+        logger.info('Created new AI session', { sessionId: session.id, projectId });
+        return session.id;
+      } catch (err) {
+        logger.error('Failed to create AI session', { projectId, err });
+        return null;
+      }
+    },
+
+    switchSession: async (sessionId: string) => {
+      try {
+        const data = await invoke<{
+          session: SessionSummary;
+          messages: Array<{
+            id: string;
+            sessionId: string;
+            role: string;
+            timestamp: number;
+            parts: Array<{ partType: string; dataJson: string }>;
+            usageJson: string | null;
+          }>;
+        }>('get_ai_session', { sessionId });
+
+        const projectId = get().activeProjectId ?? data.session.projectId;
+
+        // Reconstruct ConversationMessage[] from backend data
+        const messages: ConversationMessage[] = data.messages.map((msg) => ({
+          id: msg.id,
+          role: msg.role as ConversationMessage['role'],
+          parts: msg.parts.map((p) => {
+            try {
+              return JSON.parse(p.dataJson) as MessagePart;
+            } catch {
+              return { type: 'text' as const, content: p.dataJson };
+            }
+          }),
+          timestamp: msg.timestamp,
+          sessionId: msg.sessionId,
+          usage: msg.usageJson
+            ? (() => { try { return JSON.parse(msg.usageJson) as TokenUsage; } catch { return undefined; } })()
+            : undefined,
+        }));
+
+        set((state) => {
+          state.activeSessionId = sessionId;
+          state.activeConversation = {
+            id: sessionId,
+            projectId,
+            messages,
+            createdAt: data.session.createdAt,
+            updatedAt: data.session.updatedAt,
+          };
+          state.isGenerating = false;
+          state.streamingMessageId = null;
+        });
+
+        logger.info('Switched to session', { sessionId, messageCount: messages.length });
+      } catch (err) {
+        logger.error('Failed to switch session', { sessionId, err });
+      }
+    },
+
+    deleteSession: async (sessionId: string) => {
+      try {
+        await invoke('delete_ai_session', { sessionId });
+        set((state) => {
+          state.sessions = state.sessions.filter((s) => s.id !== sessionId);
+          if (state.activeSessionId === sessionId) {
+            state.activeSessionId = null;
+            const pid = state.activeProjectId;
+            state.activeConversation = pid ? createConversation(pid) : null;
+          }
+        });
+        logger.info('Deleted AI session', { sessionId });
+      } catch (err) {
+        logger.error('Failed to delete session', { sessionId, err });
+      }
+    },
+
+    archiveSession: async (sessionId: string) => {
+      try {
+        await invoke('archive_ai_session', { sessionId });
+        set((state) => {
+          state.sessions = state.sessions.filter((s) => s.id !== sessionId);
+          if (state.activeSessionId === sessionId) {
+            state.activeSessionId = null;
+            const pid = state.activeProjectId;
+            state.activeConversation = pid ? createConversation(pid) : null;
+          }
+        });
+        logger.info('Archived AI session', { sessionId });
+      } catch (err) {
+        logger.error('Failed to archive session', { sessionId, err });
+      }
     },
 
     addUserMessage: (content: string) => {
@@ -210,8 +350,9 @@ export const useConversationStore = create<ConversationStore>()(
         state.activeConversation.messages.push(msg);
         state.activeConversation.updatedAt = Date.now();
       });
-      const pid = get().activeProjectId;
-      if (pid) debouncedSave(pid, () => get().activeConversation);
+      // Persist to SQLite if we have an active session
+      const sid = get().activeSessionId;
+      if (sid) debouncedPersistMessage(sid, msg);
       return msg.id;
     },
 
@@ -266,8 +407,14 @@ export const useConversationStore = create<ConversationStore>()(
         state.streamingMessageId = null;
         state.activeConversation.updatedAt = Date.now();
       });
-      const pid = get().activeProjectId;
-      if (pid) debouncedSave(pid, () => get().activeConversation);
+
+      // Persist finalized message to SQLite
+      const sid = get().activeSessionId;
+      const conv = get().activeConversation;
+      if (sid && conv) {
+        const message = conv.messages.find((m) => m.id === messageId);
+        if (message) debouncedPersistMessage(sid, message);
+      }
     },
 
     addSystemMessage: (content: string) => {
@@ -277,8 +424,8 @@ export const useConversationStore = create<ConversationStore>()(
         state.activeConversation.messages.push(msg);
         state.activeConversation.updatedAt = Date.now();
       });
-      const pid = get().activeProjectId;
-      if (pid) debouncedSave(pid, () => get().activeConversation);
+      const sid = get().activeSessionId;
+      if (sid) debouncedPersistMessage(sid, msg);
       return msg.id;
     },
 
@@ -304,7 +451,10 @@ export const useConversationStore = create<ConversationStore>()(
     },
 
     clearConversation: () => {
+      clearAllPendingSaves();
       const projectId = get().activeProjectId;
+      const sessionId = get().activeSessionId;
+
       set((state) => {
         if (projectId) {
           state.activeConversation = createConversation(projectId);
@@ -313,13 +463,14 @@ export const useConversationStore = create<ConversationStore>()(
         }
         state.isGenerating = false;
         state.streamingMessageId = null;
+        state.activeSessionId = null;
       });
-      if (projectId) {
-        try {
-          localStorage.removeItem(getStorageKey(projectId));
-        } catch {
-          // Ignore storage errors during clear
-        }
+
+      // Delete the session from SQLite if it exists
+      if (sessionId) {
+        invoke('delete_ai_session', { sessionId }).catch((err) => {
+          logger.error('Failed to delete session during clear', { sessionId, err });
+        });
       }
     },
 
