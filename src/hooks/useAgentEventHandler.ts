@@ -22,15 +22,37 @@ import { isAgentError } from '@/agents/engine';
 /**
  * Hook that returns an event handler translating AgentEvents
  * into conversationStore actions.
+ *
+ * Tracks the target sessionId so that events arriving after a
+ * session switch are silently dropped instead of mutating the
+ * wrong conversation.
  */
 export function useAgentEventHandler() {
   const messageIdRef = useRef<string | null>(null);
+  /** The session this handler is bound to. Set on session_start. */
+  const boundSessionIdRef = useRef<string | null>(null);
 
   const handleEvent = useCallback((event: AgentEvent) => {
     const store = useConversationStore.getState();
 
+    // Guard: once bound, only accept events for the same active session.
+    // This blocks late events after explicit session switch or clear.
+    if (
+      boundSessionIdRef.current &&
+      event.type !== 'session_start' &&
+      store.activeSessionId !== boundSessionIdRef.current
+    ) {
+      // Active session was explicitly switched to a different session — discard stale events
+      return;
+    }
+
     switch (event.type) {
       case 'session_start': {
+        // Bind this handler to the engine's session
+        boundSessionIdRef.current = event.sessionId;
+        if (store.activeSessionId !== event.sessionId) {
+          useConversationStore.setState({ activeSessionId: event.sessionId });
+        }
         // Start a new assistant message for this session
         const msgId = store.startAssistantMessage(event.sessionId);
         messageIdRef.current = msgId;
@@ -158,6 +180,7 @@ export function useAgentEventHandler() {
           store.finalizeMessage(messageIdRef.current);
           messageIdRef.current = null;
         }
+        boundSessionIdRef.current = null;
         break;
       }
 
@@ -176,6 +199,7 @@ export function useAgentEventHandler() {
           store.finalizeMessage(messageIdRef.current);
           messageIdRef.current = null;
         }
+        boundSessionIdRef.current = null;
         break;
       }
 
@@ -188,6 +212,7 @@ export function useAgentEventHandler() {
           store.finalizeMessage(messageIdRef.current);
           messageIdRef.current = null;
         }
+        boundSessionIdRef.current = null;
         break;
       }
 

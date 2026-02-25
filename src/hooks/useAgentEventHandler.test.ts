@@ -426,6 +426,36 @@ describe('useAgentEventHandler', () => {
     expect(useConversationStore.getState().isGenerating).toBe(false);
   });
 
+  it('should drop stale events after session is cleared', () => {
+    const { result } = renderHook(() => useAgentEventHandler());
+
+    act(() => {
+      result.current.handleEvent({
+        type: 'session_start',
+        sessionId: 'session-1',
+        input: 'test',
+        timestamp: Date.now(),
+      });
+    });
+
+    const started = useConversationStore.getState();
+    expect(started.activeSessionId).toBe('session-1');
+
+    // Simulate explicit clear/new-chat while old run still emitting events.
+    useConversationStore.setState({ activeSessionId: null });
+
+    act(() => {
+      result.current.handleEvent({
+        type: 'thinking_complete',
+        thought: createTestThought(),
+        timestamp: Date.now(),
+      });
+    });
+
+    const msg = useConversationStore.getState().activeConversation!.messages[0];
+    expect(msg.parts).toHaveLength(0);
+  });
+
   it('should handle full session lifecycle', () => {
     const { result } = renderHook(() => useAgentEventHandler());
 
