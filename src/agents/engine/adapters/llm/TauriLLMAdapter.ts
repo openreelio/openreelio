@@ -225,7 +225,10 @@ export class TauriLLMAdapter implements ILLMClient {
     this.activeStreamId = streamId;
 
     try {
-      const backendMessages = this.convertMessages(messages, options);
+      // For streaming, the system prompt is passed as a separate IPC
+      // parameter to stream_ai_completion. Do NOT inject it into messages
+      // to avoid the backend receiving it twice.
+      const backendMessages = this.convertMessages(messages);
 
       // Subscribe first to avoid dropping early error/done events.
       const { events, cleanup } = await this.createStreamChannel(streamId);

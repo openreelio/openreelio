@@ -147,6 +147,10 @@ impl KnowledgeDb {
         // The LIMIT is passed as a bind parameter to avoid SQL interpolation.
         let (sql, bound_categories);
         if let Some(cats) = categories {
+            // Empty category filter: no rows can match → return early
+            if cats.is_empty() {
+                return Ok(Vec::new());
+            }
             // Category placeholders start at ?4 (after project_id, min_relevance, limit)
             let placeholders: Vec<String> = cats
                 .iter()

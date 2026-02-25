@@ -442,18 +442,11 @@ fn parse_openai_event(data: &str) -> Option<StreamEvent> {
             };
             let function = tc.get("function")?;
 
-            // If name is present, this is start/metadata for a tool call.
+            // If name is present, this is the start of a tool call.
+            // Always emit ToolCallStart first; any arguments in the same
+            // delta are treated as the first ToolCallDelta (OpenAI may
+            // send partial arguments alongside the name).
             if let Some(name) = function.get("name").and_then(|v| v.as_str()) {
-                if let Some(args) = function.get("arguments").and_then(|v| v.as_str()) {
-                    if !args.is_empty() {
-                        return Some(StreamEvent::ToolCallComplete {
-                            id,
-                            name: name.to_string(),
-                            args_json: args.to_string(),
-                        });
-                    }
-                }
-
                 return Some(StreamEvent::ToolCallStart {
                     id,
                     name: name.to_string(),

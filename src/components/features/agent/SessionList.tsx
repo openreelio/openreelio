@@ -100,10 +100,18 @@ export function SessionList({ onNewSession, className = '' }: SessionListProps) 
           sessions.map((session) => {
             const isActive = session.id === activeSessionId;
             return (
-              <button
+              <div
                 key={session.id}
+                role="button"
+                tabIndex={0}
                 onClick={() => handleSwitch(session.id)}
-                className={`w-full text-left px-3 py-2 border-b border-border-subtle/50 transition-colors group ${
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    handleSwitch(session.id);
+                  }
+                }}
+                className={`w-full text-left px-3 py-2 border-b border-border-subtle/50 transition-colors group cursor-pointer ${
                   isActive
                     ? 'bg-primary-500/10 border-l-2 border-l-primary-500'
                     : 'hover:bg-surface-active border-l-2 border-l-transparent'
@@ -154,7 +162,7 @@ export function SessionList({ onNewSession, className = '' }: SessionListProps) 
                     </button>
                   </div>
                 </div>
-              </button>
+              </div>
             );
           })
         )}

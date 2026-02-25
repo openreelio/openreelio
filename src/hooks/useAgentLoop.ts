@@ -220,18 +220,25 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
 
             case 'error':
               setError(event.error);
+              setPhase('failed');
+              optionsRef.current.onError?.(event.error);
               break;
 
             case 'done':
-              setPhase('completed');
+              // Only mark completed if no prior error/doom-loop occurred
+              setPhase((prev) => (prev === 'failed' ? 'failed' : 'completed'));
               optionsRef.current.onComplete?.(event.usage);
               break;
 
-            case 'doom_loop_detected':
-              setError(
-                new Error(`Doom loop detected: ${event.tool} called ${event.count} times`),
+            case 'doom_loop_detected': {
+              const doomErr = new Error(
+                `Doom loop detected: ${event.tool} called ${event.count} times`,
               );
+              setError(doomErr);
+              setPhase('failed');
+              optionsRef.current.onError?.(doomErr);
               break;
+            }
           }
 
           // Forward to external handler
@@ -301,10 +308,13 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
     return run(lastInput);
   }, [run]);
 
-  // Cleanup on unmount
+  // Cleanup on unmount: abort loop AND resolve pending permission prompts
   useEffect(() => {
     return () => {
       loopRef.current?.abort();
+      // Unblock any pending tool-permission promise so the loop doesn't hang
+      toolPermissionResolverRef.current?.resolve('deny');
+      toolPermissionResolverRef.current = null;
     };
   }, []);
 

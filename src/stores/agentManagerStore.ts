@@ -7,7 +7,11 @@
 
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
+import { enableMapSet } from 'immer';
 import type { AgentDefinition } from '@/agents/engine/core/agentDefinitions';
+
+// Required for Immer to track Map/Set mutations
+enableMapSet();
 
 // =============================================================================
 // Types
