@@ -1948,5 +1948,227 @@ describe('TauriLLMAdapter', () => {
 
       expect(result.template).toBe('value with {braces} inside');
     });
+
+    // =======================================================================
+    // JSON Repair — truncated responses
+    // =======================================================================
+
+    describe('truncated response repair', () => {
+      const schema = { type: 'object', properties: { goal: { type: 'string' } } };
+
+      it('should repair a response truncated mid-string value', async () => {
+        // Simulates LLM running out of tokens mid-string
+        invokeMock.mockImplementation((command: string) => {
+          if (command === 'complete_with_ai_raw') {
+            return Promise.resolve({
+              text: '{"goal":"Keep only the odd-numbered 1-second seg',
+              model: 'test-model',
+              usage: { promptTokens: 100, completionTokens: 1800, totalTokens: 1900 },
+              finishReason: 'max_tokens',
+            });
+          }
+          return Promise.resolve();
+        });
+
+        const adapter = createTauriLLMAdapter();
+        const result = await adapter.generateStructured<{ goal: string }>(USER_MSG, schema);
+
+        expect(result.goal).toBe('Keep only the odd-numbered 1-second seg');
+      });
+
+      it('should repair a response truncated mid-array', async () => {
+        invokeMock.mockImplementation((command: string) => {
+          if (command === 'complete_with_ai_raw') {
+            return Promise.resolve({
+              text: '{"goal":"test","steps":[{"id":"s1"},{"id":"s2"}',
+              model: 'test-model',
+              usage: { promptTokens: 100, completionTokens: 1200, totalTokens: 1300 },
+              finishReason: 'length',
+            });
+          }
+          return Promise.resolve();
+        });
+
+        const adapter = createTauriLLMAdapter();
+        const result = await adapter.generateStructured<{
+          goal: string;
+          steps: Array<{ id: string }>;
+        }>(USER_MSG, schema);
+
+        expect(result.goal).toBe('test');
+        expect(result.steps).toHaveLength(2);
+      });
+
+      it('should repair a response truncated mid-nested-object', async () => {
+        invokeMock.mockImplementation((command: string) => {
+          if (command === 'complete_with_ai_raw') {
+            return Promise.resolve({
+              text: '{"goal":"cut","steps":[{"id":"s1","args":{"clipId":"abc"',
+              model: 'test-model',
+              usage: { promptTokens: 50, completionTokens: 500, totalTokens: 550 },
+              finishReason: 'max_tokens',
+            });
+          }
+          return Promise.resolve();
+        });
+
+        const adapter = createTauriLLMAdapter();
+        const result = await adapter.generateStructured<{
+          goal: string;
+          steps: Array<{ id: string; args: { clipId: string } }>;
+        }>(USER_MSG, schema);
+
+        expect(result.goal).toBe('cut');
+        expect(result.steps[0].args.clipId).toBe('abc');
+      });
+
+      it('should repair a response with trailing comma before truncation', async () => {
+        invokeMock.mockImplementation((command: string) => {
+          if (command === 'complete_with_ai_raw') {
+            return Promise.resolve({
+              text: '{"goal":"trim","items":["a","b",',
+              model: 'test-model',
+              usage: { promptTokens: 50, completionTokens: 100, totalTokens: 150 },
+              finishReason: 'max_tokens',
+            });
+          }
+          return Promise.resolve();
+        });
+
+        const adapter = createTauriLLMAdapter();
+        const result = await adapter.generateStructured<{ goal: string; items: string[] }>(
+          USER_MSG,
+          schema,
+        );
+
+        expect(result.goal).toBe('trim');
+        expect(result.items).toEqual(['a', 'b']);
+      });
+
+      it('should include truncation hint in error when repair also fails', async () => {
+        // Completely garbled truncation that can't be repaired to valid JSON
+        invokeMock.mockImplementation((command: string) => {
+          if (command === 'complete_with_ai_raw') {
+            return Promise.resolve({
+              text: 'This is not JSON at all and was truncated',
+              model: 'test-model',
+              usage: { promptTokens: 50, completionTokens: 100, totalTokens: 150 },
+              finishReason: 'max_tokens',
+            });
+          }
+          return Promise.resolve();
+        });
+
+        const adapter = createTauriLLMAdapter();
+        await expect(adapter.generateStructured(USER_MSG, schema)).rejects.toThrow(
+          'response was truncated by token limit',
+        );
+      });
+
+      it('should log warning to console when finishReason is max_tokens', async () => {
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        invokeMock.mockImplementation((command: string) => {
+          if (command === 'complete_with_ai_raw') {
+            return Promise.resolve({
+              text: '{"goal":"ok"}',
+              model: 'test-model',
+              usage: { promptTokens: 100, completionTokens: 1800, totalTokens: 1900 },
+              finishReason: 'max_tokens',
+            });
+          }
+          return Promise.resolve();
+        });
+
+        const adapter = createTauriLLMAdapter();
+        await adapter.generateStructured<{ goal: string }>(USER_MSG, schema);
+
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.stringContaining('Structured response truncated'),
+        );
+
+        warnSpy.mockRestore();
+      });
+    });
+  });
+
+  // =========================================================================
+  // repairTruncatedJson() — unit tests
+  // =========================================================================
+  describe('repairTruncatedJson()', () => {
+    let adapter: TauriLLMAdapter;
+
+    beforeEach(() => {
+      adapter = createTauriLLMAdapter();
+    });
+
+    it('should return null for already-balanced JSON', () => {
+      expect(adapter.repairTruncatedJson('{"a":1}')).toBeNull();
+    });
+
+    it('should return null when no JSON object is present', () => {
+      expect(adapter.repairTruncatedJson('just plain text')).toBeNull();
+    });
+
+    it('should close an unterminated string', () => {
+      const repaired = adapter.repairTruncatedJson('{"goal":"hello world');
+      expect(repaired).not.toBeNull();
+      expect(JSON.parse(repaired!)).toEqual({ goal: 'hello world' });
+    });
+
+    it('should close unterminated string and open object', () => {
+      const repaired = adapter.repairTruncatedJson('{"a":"val","b":"oth');
+      expect(repaired).not.toBeNull();
+      const parsed = JSON.parse(repaired!);
+      expect(parsed.a).toBe('val');
+      expect(parsed.b).toBe('oth');
+    });
+
+    it('should close nested objects and arrays', () => {
+      const repaired = adapter.repairTruncatedJson('{"a":[{"b":1},{"c":2}');
+      expect(repaired).not.toBeNull();
+      const parsed = JSON.parse(repaired!);
+      expect(parsed.a).toEqual([{ b: 1 }, { c: 2 }]);
+    });
+
+    it('should handle escaped quotes inside strings', () => {
+      const repaired = adapter.repairTruncatedJson('{"a":"say \\"hi\\"","b":"tru');
+      expect(repaired).not.toBeNull();
+      const parsed = JSON.parse(repaired!);
+      expect(parsed.a).toBe('say "hi"');
+      expect(parsed.b).toBe('tru');
+    });
+
+    it('should strip trailing comma before closing', () => {
+      const repaired = adapter.repairTruncatedJson('{"items":[1,2,');
+      expect(repaired).not.toBeNull();
+      const parsed = JSON.parse(repaired!);
+      expect(parsed.items).toEqual([1, 2]);
+    });
+
+    it('should handle deeply nested truncation', () => {
+      const repaired = adapter.repairTruncatedJson('{"a":{"b":{"c":{"d":"deep');
+      expect(repaired).not.toBeNull();
+      const parsed = JSON.parse(repaired!);
+      expect(parsed.a.b.c.d).toBe('deep');
+    });
+
+    it('should handle Korean text in truncated string', () => {
+      const repaired = adapter.repairTruncatedJson(
+        '{"goal":"홀수 초수의 영상만 남기고 짝수 초수를 제거',
+      );
+      expect(repaired).not.toBeNull();
+      const parsed = JSON.parse(repaired!);
+      expect(parsed.goal).toBe('홀수 초수의 영상만 남기고 짝수 초수를 제거');
+    });
+
+    it('should handle the exact error case from the bug report', () => {
+      const truncated =
+        '{ "goal": "Keep only the odd-numbered 1-second segments (0-1s, 2-3s, 4-5s, etc.) and remove the even-numbered segments (1-2s, 3-4s,';
+      const repaired = adapter.repairTruncatedJson(truncated);
+      expect(repaired).not.toBeNull();
+      const parsed = JSON.parse(repaired!);
+      expect(parsed.goal).toContain('odd-numbered 1-second segments');
+    });
   });
 });

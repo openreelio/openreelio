@@ -410,6 +410,9 @@ export class TauriLLMAdapter implements ILLMClient {
    * Expects the backend to return JSON in the message field.
    * Uses the non-streaming `complete_with_ai_raw` command.
    *
+   * When the response is truncated (finishReason is 'max_tokens' or
+   * 'length'), the adapter attempts to repair the JSON before failing.
+   *
    * @param messages - Conversation messages
    * @param schema - JSON Schema for the expected output
    * @param options - Generation options
@@ -438,7 +441,19 @@ export class TauriLLMAdapter implements ILLMClient {
         },
       );
 
-      return this.parseStructuredResponse<T>(response.text);
+      const truncated =
+        response.finishReason === 'max_tokens' || response.finishReason === 'length';
+
+      if (truncated) {
+        console.warn(
+          `[TauriLLMAdapter] Structured response truncated ` +
+            `(finishReason=${response.finishReason}, ` +
+            `completionTokens=${response.usage.completionTokens}). ` +
+            `Attempting JSON repair.`,
+        );
+      }
+
+      return this.parseStructuredResponse<T>(response.text, truncated);
     } finally {
       this.finishRequest(requestId);
     }
@@ -879,10 +894,17 @@ export class TauriLLMAdapter implements ILLMClient {
   /**
    * Parse a raw text response as structured JSON.
    *
-   * Attempts multiple extraction strategies: raw text, code-fenced
-   * JSON blocks, and embedded balanced JSON objects/arrays.
+   * Attempts multiple extraction strategies in order:
+   * 1. Raw text
+   * 2. Code-fenced JSON blocks
+   * 3. Embedded balanced JSON objects/arrays
+   * 4. (If truncated) Repaired JSON — closes unterminated strings,
+   *    arrays, and objects so partial results can still be used.
+   *
+   * @param rawText - The raw LLM output text
+   * @param truncated - Whether the response was truncated by the provider
    */
-  private parseStructuredResponse<T>(rawText: string): T {
+  private parseStructuredResponse<T>(rawText: string, truncated = false): T {
     const text = rawText.replace(/^\uFEFF/, '').trim();
     const candidates = new Set<string>();
 
@@ -902,6 +924,13 @@ export class TauriLLMAdapter implements ILLMClient {
       }
     }
 
+    // Strategy 4: Attempt JSON repair on the raw text (useful when
+    // the response was truncated mid-string or mid-object).
+    const repaired = this.repairTruncatedJson(text);
+    if (repaired !== null) {
+      candidates.add(repaired);
+    }
+
     let lastErrorMessage = 'no details';
     for (const candidate of candidates) {
       try {
@@ -912,7 +941,10 @@ export class TauriLLMAdapter implements ILLMClient {
     }
 
     const preview = text.slice(0, 160).replace(/\s+/g, ' ');
-    throw new Error(`Failed to parse structured response: ${preview}...: ${lastErrorMessage}`);
+    const truncatedHint = truncated ? ' (response was truncated by token limit)' : '';
+    throw new Error(
+      `Failed to parse structured response${truncatedHint}: ${preview}...: ${lastErrorMessage}`,
+    );
   }
 
   /** Extract JSON candidates from markdown code fences. */
@@ -1007,6 +1039,98 @@ export class TauriLLMAdapter implements ILLMClient {
     }
 
     return null;
+  }
+
+  // ===========================================================================
+  // JSON Repair
+  // ===========================================================================
+
+  /**
+   * Attempt to repair a truncated JSON string.
+   *
+   * When an LLM response is cut off mid-output (due to token limits),
+   * the JSON is syntactically invalid. This method walks the text,
+   * tracking string/object/array nesting, then appends the minimal
+   * closing tokens needed to make the JSON parseable.
+   *
+   * Limitations:
+   * - Repaired JSON may be missing fields that the schema requires
+   *   (the caller's validation layer handles that).
+   * - Truncation inside a numeric literal or keyword (true/false/null)
+   *   cannot be repaired reliably and will return null.
+   *
+   * @returns A repaired JSON string, or null if repair is not feasible.
+   */
+  repairTruncatedJson(text: string): string | null {
+    const jsonStart = text.indexOf('{');
+    if (jsonStart < 0) {
+      return null;
+    }
+
+    const source = text.slice(jsonStart);
+    const closingStack: string[] = [];
+    let inString = false;
+    let escaped = false;
+
+    for (let i = 0; i < source.length; i += 1) {
+      const char = source[i];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === '\\') {
+          escaped = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (char === '"') {
+        inString = true;
+        continue;
+      }
+      if (char === '{') {
+        closingStack.push('}');
+        continue;
+      }
+      if (char === '[') {
+        closingStack.push(']');
+        continue;
+      }
+      if (char === '}' || char === ']') {
+        if (closingStack.length > 0 && closingStack[closingStack.length - 1] === char) {
+          closingStack.pop();
+        }
+      }
+    }
+
+    // Already balanced — nothing to repair
+    if (!inString && closingStack.length === 0) {
+      return null;
+    }
+
+    let repaired = source;
+
+    // Close an unterminated string
+    if (inString) {
+      repaired += '"';
+    }
+
+    // Strip a trailing comma that would make the JSON invalid
+    // (common when truncated after a list element)
+    repaired = repaired.replace(/,\s*$/, '');
+
+    // Close all open containers in reverse order
+    while (closingStack.length > 0) {
+      repaired += closingStack.pop();
+    }
+
+    return repaired;
   }
 
   // ===========================================================================
