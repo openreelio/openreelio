@@ -104,10 +104,12 @@ export interface ConversationActions {
   getMessagesForContext: (maxMessages?: number) => LLMMessage[];
   /** Get the last user input text */
   getLastUserInput: () => string | null;
-  /** Clear the current conversation */
+  /** Clear the current conversation (creates new session, preserves old one) */
   clearConversation: () => void;
   /** Set generating state */
   setGenerating: (isGenerating: boolean) => void;
+  /** Ensure an active session exists, creating one if needed. Returns the session ID. */
+  ensureSession: (agent?: string) => Promise<string | null>;
 }
 
 export type ConversationStore = ConversationState & ConversationActions;
@@ -117,6 +119,7 @@ export type ConversationStore = ConversationState & ConversationActions;
 // =============================================================================
 
 const saveTimeoutBySession = new Map<string, ReturnType<typeof setTimeout>>();
+const pendingSessionCreationByProject = new Map<string, Promise<string | null>>();
 
 /** Clear all pending debounced saves (e.g., on project switch or conversation clear). */
 function clearAllPendingSaves(): void {
@@ -131,10 +134,7 @@ function clearAllPendingSaves(): void {
  * During streaming, parts are appended in-memory only; the full message
  * is persisted once finalizeMessage is called.
  */
-function debouncedPersistMessage(
-  sessionId: string,
-  message: ConversationMessage,
-): void {
+function debouncedPersistMessage(sessionId: string, message: ConversationMessage): void {
   const key = `${sessionId}:${message.id}`;
   const existing = saveTimeoutBySession.get(key);
   if (existing) clearTimeout(existing);
@@ -142,16 +142,17 @@ function debouncedPersistMessage(
   const timeoutId = setTimeout(() => {
     saveTimeoutBySession.delete(key);
     persistMessage(sessionId, message).catch((err) => {
-      logger.error('Failed to persist message to SQLite', { sessionId, messageId: message.id, err });
+      logger.error('Failed to persist message to SQLite', {
+        sessionId,
+        messageId: message.id,
+        err,
+      });
     });
   }, SAVE_DEBOUNCE_MS);
   saveTimeoutBySession.set(key, timeoutId);
 }
 
-async function persistMessage(
-  sessionId: string,
-  message: ConversationMessage,
-): Promise<void> {
+async function persistMessage(sessionId: string, message: ConversationMessage): Promise<void> {
   try {
     const parts = message.parts.map((part, idx) => ({
       id: `${message.id}_p${idx}`,
@@ -221,6 +222,12 @@ export const useConversationStore = create<ConversationStore>()(
           set((state) => {
             state.sessions = sessions;
           });
+
+          // Auto-select the most recent session if none is active
+          if (!get().activeSessionId && sessions.length > 0) {
+            const mostRecent = sessions[0]; // Backend returns ordered by updated_at DESC
+            await get().switchSession(mostRecent.id);
+          }
         }
       } catch (err) {
         logger.error('Failed to load sessions from SQLite', { projectId, err });
@@ -239,11 +246,28 @@ export const useConversationStore = create<ConversationStore>()(
           modelId: null,
         });
 
+        // Project may have changed while the async IPC call was in-flight.
+        if (get().activeProjectId !== projectId) {
+          logger.warn('Discarding stale session creation result after project switch', {
+            sessionId: session.id,
+            createdForProjectId: projectId,
+            activeProjectId: get().activeProjectId,
+          });
+          return session.id;
+        }
+
         set((state) => {
-          state.sessions.unshift(session);
+          state.sessions = [session, ...state.sessions.filter((s) => s.id !== session.id)];
           state.activeSessionId = session.id;
-          state.activeConversation = createConversation(projectId);
-          state.activeConversation.id = session.id;
+
+          if (state.activeConversation && state.activeConversation.projectId === projectId) {
+            state.activeConversation.id = session.id;
+            state.activeConversation.updatedAt = Date.now();
+          } else {
+            state.activeConversation = createConversation(projectId);
+            state.activeConversation.id = session.id;
+          }
+
           state.isGenerating = false;
           state.streamingMessageId = null;
         });
@@ -270,7 +294,17 @@ export const useConversationStore = create<ConversationStore>()(
           }>;
         }>('get_ai_session', { sessionId });
 
-        const projectId = get().activeProjectId ?? data.session.projectId;
+        const activeProjectId = get().activeProjectId;
+        if (activeProjectId && activeProjectId !== data.session.projectId) {
+          logger.warn('Ignoring switchSession from a different project context', {
+            sessionId,
+            sessionProjectId: data.session.projectId,
+            activeProjectId,
+          });
+          return;
+        }
+
+        const projectId = data.session.projectId;
 
         // Reconstruct ConversationMessage[] from backend data
         const messages: ConversationMessage[] = data.messages.map((msg) => ({
@@ -286,7 +320,13 @@ export const useConversationStore = create<ConversationStore>()(
           timestamp: msg.timestamp,
           sessionId: msg.sessionId,
           usage: msg.usageJson
-            ? (() => { try { return JSON.parse(msg.usageJson) as TokenUsage; } catch { return undefined; } })()
+            ? (() => {
+                try {
+                  return JSON.parse(msg.usageJson) as TokenUsage;
+                } catch {
+                  return undefined;
+                }
+              })()
             : undefined,
         }));
 
@@ -345,19 +385,54 @@ export const useConversationStore = create<ConversationStore>()(
 
     addUserMessage: (content: string) => {
       const msg = createUserMessage(content);
+      const sid = get().activeSessionId;
+      if (sid) {
+        msg.sessionId = sid;
+      }
+
       set((state) => {
         if (!state.activeConversation) return;
         state.activeConversation.messages.push(msg);
         state.activeConversation.updatedAt = Date.now();
       });
+
       // Persist to SQLite if we have an active session
-      const sid = get().activeSessionId;
-      if (sid) debouncedPersistMessage(sid, msg);
+      if (sid) {
+        debouncedPersistMessage(sid, msg);
+      } else {
+        // Auto-create a session on first message if none exists
+        get()
+          .ensureSession()
+          .then((newSid) => {
+            if (!newSid) return;
+
+            // Bind the message to the newly created session for deterministic persistence.
+            set((state) => {
+              if (!state.activeConversation) return;
+              const target = state.activeConversation.messages.find((m) => m.id === msg.id);
+              if (target) {
+                target.sessionId = newSid;
+              }
+            });
+
+            const boundMessage = get().activeConversation?.messages.find(
+              (m) => m.id === msg.id,
+            ) ?? {
+              ...msg,
+              sessionId: newSid,
+            };
+            debouncedPersistMessage(newSid, boundMessage);
+          })
+          .catch((err) => {
+            logger.error('Failed to auto-create session for user message', { err });
+          });
+      }
       return msg.id;
     },
 
     startAssistantMessage: (sessionId?: string) => {
-      const msg = createAssistantMessage(sessionId);
+      const resolvedSessionId = sessionId ?? get().activeSessionId ?? undefined;
+      const msg = createAssistantMessage(resolvedSessionId);
       set((state) => {
         if (!state.activeConversation) return;
         state.activeConversation.messages.push(msg);
@@ -371,9 +446,7 @@ export const useConversationStore = create<ConversationStore>()(
     appendPart: (messageId: string, part: MessagePart) => {
       set((state) => {
         if (!state.activeConversation) return;
-        const message = state.activeConversation.messages.find(
-          (m) => m.id === messageId
-        );
+        const message = state.activeConversation.messages.find((m) => m.id === messageId);
         if (message) {
           message.parts.push(part);
           state.activeConversation.updatedAt = Date.now();
@@ -384,9 +457,7 @@ export const useConversationStore = create<ConversationStore>()(
     updatePart: (messageId: string, partIndex: number, update: Partial<MessagePart>) => {
       set((state) => {
         if (!state.activeConversation) return;
-        const message = state.activeConversation.messages.find(
-          (m) => m.id === messageId
-        );
+        const message = state.activeConversation.messages.find((m) => m.id === messageId);
         if (message && message.parts[partIndex]) {
           Object.assign(message.parts[partIndex], update);
           state.activeConversation.updatedAt = Date.now();
@@ -397,9 +468,7 @@ export const useConversationStore = create<ConversationStore>()(
     finalizeMessage: (messageId: string, usage?: TokenUsage) => {
       set((state) => {
         if (!state.activeConversation) return;
-        const message = state.activeConversation.messages.find(
-          (m) => m.id === messageId
-        );
+        const message = state.activeConversation.messages.find((m) => m.id === messageId);
         if (message && usage) {
           message.usage = usage;
         }
@@ -409,11 +478,13 @@ export const useConversationStore = create<ConversationStore>()(
       });
 
       // Persist finalized message to SQLite
-      const sid = get().activeSessionId;
       const conv = get().activeConversation;
-      if (sid && conv) {
+      if (conv) {
         const message = conv.messages.find((m) => m.id === messageId);
-        if (message) debouncedPersistMessage(sid, message);
+        const sid = message?.sessionId ?? get().activeSessionId;
+        if (sid && message) {
+          debouncedPersistMessage(sid, message);
+        }
       }
     },
 
@@ -453,7 +524,6 @@ export const useConversationStore = create<ConversationStore>()(
     clearConversation: () => {
       clearAllPendingSaves();
       const projectId = get().activeProjectId;
-      const sessionId = get().activeSessionId;
 
       set((state) => {
         if (projectId) {
@@ -464,14 +534,8 @@ export const useConversationStore = create<ConversationStore>()(
         state.isGenerating = false;
         state.streamingMessageId = null;
         state.activeSessionId = null;
+        // Preserve sessions list — do NOT delete old session from SQLite
       });
-
-      // Delete the session from SQLite if it exists
-      if (sessionId) {
-        invoke('delete_ai_session', { sessionId }).catch((err) => {
-          logger.error('Failed to delete session during clear', { sessionId, err });
-        });
-      }
     },
 
     setGenerating: (isGenerating: boolean) => {
@@ -482,5 +546,28 @@ export const useConversationStore = create<ConversationStore>()(
         }
       });
     },
-  }))
+
+    ensureSession: async (agent?: string) => {
+      const existing = get().activeSessionId;
+      if (existing) return existing;
+
+      const projectId = get().activeProjectId;
+      if (!projectId) return null;
+
+      const inFlight = pendingSessionCreationByProject.get(projectId);
+      if (inFlight) return inFlight;
+
+      const creationPromise = get()
+        .createSession(agent)
+        .finally(() => {
+          const current = pendingSessionCreationByProject.get(projectId);
+          if (current === creationPromise) {
+            pendingSessionCreationByProject.delete(projectId);
+          }
+        });
+
+      pendingSessionCreationByProject.set(projectId, creationPromise);
+      return creationPromise;
+    },
+  })),
 );

@@ -103,7 +103,13 @@ describe('ConversationStore', () => {
 
     it('should trigger session loading from SQLite on loadForProject', () => {
       mockInvoke.mockResolvedValueOnce([
-        { id: 'session-1', agent: 'editor', messageCount: 1, createdAt: Date.now(), updatedAt: Date.now() },
+        {
+          id: 'session-1',
+          agent: 'editor',
+          messageCount: 1,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
       ]);
 
       const store = useConversationStore.getState();
@@ -160,6 +166,80 @@ describe('ConversationStore', () => {
       const store = useConversationStore.getState();
       const msgId = store.addUserMessage('Hello');
       expect(msgId).toBeTruthy(); // Returns ID even if no conversation
+    });
+
+    it('should keep the first message when session is auto-created', async () => {
+      const now = Date.now();
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === 'list_ai_sessions') return [];
+        if (command === 'create_ai_session') {
+          return {
+            id: 'session-1',
+            projectId: 'project-1',
+            title: 'New conversation',
+            agent: 'editor',
+            modelProvider: null,
+            modelId: null,
+            createdAt: now,
+            updatedAt: now,
+            archived: false,
+            messageCount: 0,
+            lastMessagePreview: null,
+          };
+        }
+        return undefined;
+      });
+
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+
+      const msgId = store.addUserMessage('Hello first turn');
+
+      await store.ensureSession();
+
+      const state = useConversationStore.getState();
+      expect(state.activeSessionId).toBe('session-1');
+      expect(state.activeConversation!.messages).toHaveLength(1);
+      expect(state.activeConversation!.messages[0].id).toBe(msgId);
+      expect(state.activeConversation!.messages[0].parts[0]).toEqual({
+        type: 'text',
+        content: 'Hello first turn',
+      });
+    });
+  });
+
+  describe('ensureSession', () => {
+    it('should dedupe concurrent session creation requests', async () => {
+      const now = Date.now();
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === 'create_ai_session') {
+          return {
+            id: 'session-concurrent',
+            projectId: 'project-1',
+            title: 'New conversation',
+            agent: 'editor',
+            modelProvider: null,
+            modelId: null,
+            createdAt: now,
+            updatedAt: now,
+            archived: false,
+            messageCount: 0,
+            lastMessagePreview: null,
+          };
+        }
+        return [];
+      });
+
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+
+      const [sid1, sid2] = await Promise.all([store.ensureSession(), store.ensureSession()]);
+
+      expect(sid1).toBe('session-concurrent');
+      expect(sid2).toBe('session-concurrent');
+
+      const createCalls = mockInvoke.mock.calls.filter(([cmd]) => cmd === 'create_ai_session');
+      expect(createCalls).toHaveLength(1);
     });
   });
 
@@ -391,7 +471,7 @@ describe('ConversationStore', () => {
   });
 
   describe('clearConversation', () => {
-    it('should clear the conversation and delete session from SQLite', () => {
+    it('should clear the conversation and preserve old session in session list', () => {
       const store = useConversationStore.getState();
       store.loadForProject('project-1');
       // Simulate having an active session
@@ -405,8 +485,9 @@ describe('ConversationStore', () => {
       expect(state.activeConversation!.messages).toEqual([]);
       expect(state.isGenerating).toBe(false);
       expect(state.streamingMessageId).toBeNull();
-      // Verify session deletion IPC call
-      expect(mockInvoke).toHaveBeenCalledWith('delete_ai_session', { sessionId: 'session-1' });
+      expect(state.activeSessionId).toBeNull();
+      // Old session should NOT be deleted from SQLite — it stays in the session list
+      expect(mockInvoke).not.toHaveBeenCalledWith('delete_ai_session', { sessionId: 'session-1' });
     });
 
     it('should handle clear when no project is active', () => {
@@ -446,12 +527,15 @@ describe('ConversationStore', () => {
 
       // After debounce
       vi.advanceTimersByTime(1100);
-      expect(mockInvoke).toHaveBeenCalledWith('save_ai_message', expect.objectContaining({
-        input: expect.objectContaining({
-          sessionId: 'session-1',
-          role: 'user',
+      expect(mockInvoke).toHaveBeenCalledWith(
+        'save_ai_message',
+        expect.objectContaining({
+          input: expect.objectContaining({
+            sessionId: 'session-1',
+            role: 'user',
+          }),
         }),
-      }));
+      );
     });
 
     it('should persist on finalize via IPC', () => {
@@ -468,12 +552,39 @@ describe('ConversationStore', () => {
       store.finalizeMessage(msgId);
 
       vi.advanceTimersByTime(1100);
-      expect(mockInvoke).toHaveBeenCalledWith('save_ai_message', expect.objectContaining({
-        input: expect.objectContaining({
-          sessionId: 'session-1',
-          role: 'assistant',
+      expect(mockInvoke).toHaveBeenCalledWith(
+        'save_ai_message',
+        expect.objectContaining({
+          input: expect.objectContaining({
+            sessionId: 'session-1',
+            role: 'assistant',
+          }),
         }),
-      }));
+      );
+    });
+
+    it('should persist finalized assistant message using message-bound sessionId', () => {
+      vi.useFakeTimers();
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+      mockInvoke.mockReset().mockResolvedValue(undefined);
+
+      useConversationStore.setState({ activeSessionId: 'session-active' });
+
+      const msgId = store.startAssistantMessage('session-bound');
+      store.appendPart(msgId, createTextPart('response'));
+
+      // Simulate user switching sessions before finalize
+      useConversationStore.setState({ activeSessionId: 'session-other' });
+      store.finalizeMessage(msgId);
+
+      vi.advanceTimersByTime(1100);
+
+      const saveCalls = mockInvoke.mock.calls.filter(([cmd]) => cmd === 'save_ai_message');
+      expect(saveCalls).toHaveLength(1);
+      expect((saveCalls[0][1] as { input: { sessionId: string } }).input.sessionId).toBe(
+        'session-bound',
+      );
     });
 
     it('should not persist when no active session', () => {
@@ -525,7 +636,7 @@ describe('ConversationStore', () => {
       // Tool result
       store.appendPart(
         assistantId,
-        createToolResultPart(step.id, step.tool, true, 150, { success: true })
+        createToolResultPart(step.id, step.tool, true, 150, { success: true }),
       );
 
       // Final text summary
