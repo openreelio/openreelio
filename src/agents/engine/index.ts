@@ -318,6 +318,16 @@ export {
 } from './core/compaction';
 
 // =============================================================================
+// Model Registry
+// =============================================================================
+export {
+  getModelLimits,
+  resolveMaxOutputTokens,
+  resolveContextLimit,
+  type ModelTokenLimits,
+} from './core/modelRegistry';
+
+// =============================================================================
 // Doom Loop Detector
 // =============================================================================
 export { DoomLoopDetector } from './core/DoomLoopDetector';
