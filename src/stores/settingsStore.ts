@@ -295,7 +295,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     googleApiKey: null,
     ollamaUrl: null,
     temperature: 0.3,
-    maxTokens: 4096,
+    maxTokens: 16384,
     frameExtractionRate: 1.0,
     monthlyBudgetCents: null,
     perRequestLimitCents: 50,

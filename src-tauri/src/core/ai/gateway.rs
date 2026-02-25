@@ -55,7 +55,7 @@ impl Default for AIGatewayConfig {
             max_retries: 3,
             creative_temperature: 0.8,
             analytical_temperature: 0.2,
-            max_script_tokens: 4096,
+            max_script_tokens: 16384,
         }
     }
 }
