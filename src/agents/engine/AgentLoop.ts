@@ -30,6 +30,7 @@ import { toSimpleLLMMessages } from './core/conversation';
 import { parseFastPathPlan, type FastPathMatch } from './core/fastPathParser';
 import { DoomLoopDetector } from './core/DoomLoopDetector';
 import { Compaction } from './core/compaction';
+import { resolveMaxOutputTokens, resolveContextLimit } from './core/modelRegistry';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('AgentLoop');
@@ -144,6 +145,10 @@ export interface AgentLoopConfig {
   doomLoopThreshold: number;
   /** Minimum risk level requiring permission. Default: 'high' */
   approvalThreshold: RiskLevel;
+  /** Active model identifier for token budget resolution */
+  activeModel?: string;
+  /** Active provider identifier for token budget resolution */
+  activeProvider?: string;
   /** LLM generation options */
   generateOptions?: GenerateOptions;
   /**
@@ -188,7 +193,26 @@ export class AgentLoop {
   ) {
     this.llm = llm;
     this.tools = tools;
-    this.config = { ...DEFAULT_AGENT_LOOP_CONFIG, ...config };
+
+    // Resolve context limit and maxTokens from model metadata if not explicitly set
+    const merged = { ...DEFAULT_AGENT_LOOP_CONFIG, ...config };
+
+    if (!config.contextLimit) {
+      merged.contextLimit = resolveContextLimit(merged.activeModel, merged.activeProvider);
+    }
+
+    if (!merged.generateOptions?.maxTokens) {
+      const resolved = resolveMaxOutputTokens(
+        merged.generateOptions?.maxTokens,
+        merged.activeModel,
+        merged.activeProvider,
+      );
+      if (resolved) {
+        merged.generateOptions = { ...merged.generateOptions, maxTokens: resolved };
+      }
+    }
+
+    this.config = merged;
   }
 
   /**

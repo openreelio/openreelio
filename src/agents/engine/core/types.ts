@@ -639,6 +639,15 @@ export interface AgenticEngineConfig {
   /** Maximum rollback operations to attempt per failed run (default: 20) */
   maxRollbackSteps: number;
 
+  /** User-configured max output tokens (from settings.ai.maxTokens) */
+  maxOutputTokens?: number;
+  /** Context window limit (derived from model metadata) */
+  contextLimit?: number;
+  /** Active model identifier (e.g. "claude-sonnet-4-5-20251015") */
+  activeModel?: string;
+  /** Active provider identifier (e.g. "anthropic") */
+  activeProvider?: string;
+
   /** Memory store adapter for operation/correction/preference retrieval */
   memoryStore?: IMemoryStore;
 

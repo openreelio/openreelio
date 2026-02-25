@@ -469,12 +469,23 @@ export function useAgentLoopWithStores(
     );
   }, [externalContext]);
 
+  // Read AI settings for model-aware token budget resolution
+  const aiMaxTokens = useSettingsStore((s) => s.settings.ai.maxTokens);
+  const aiPrimaryModel = useSettingsStore((s) => s.settings.ai.primaryModel);
+  const aiPrimaryProvider = useSettingsStore((s) => s.settings.ai.primaryProvider);
+
   return useAgentLoop({
     ...options,
     context,
     config: {
       ...options.config,
       contextRefresher,
+      activeModel: options.config?.activeModel ?? aiPrimaryModel,
+      activeProvider: options.config?.activeProvider ?? aiPrimaryProvider,
+      generateOptions: {
+        ...options.config?.generateOptions,
+        maxTokens: options.config?.generateOptions?.maxTokens ?? aiMaxTokens,
+      },
     },
   });
 }
