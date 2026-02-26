@@ -312,11 +312,16 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       // Build context
       const context = buildContext();
 
-      // Create execution context
+      // Ensure a conversation session exists before running
+      const convStore = useConversationStore.getState();
+      const storeSessionId = convStore.activeSessionId
+        ?? await convStore.ensureSession();
+
+      // Create execution context bound to the store session
       const executionContext = {
         projectId: context.projectId,
         sequenceId: context.sequenceId,
-        sessionId: crypto.randomUUID(),
+        sessionId: storeSessionId ?? crypto.randomUUID(),
         expectedStateVersion: context.projectStateVersion,
       };
 
@@ -599,12 +604,20 @@ export function useAgenticLoopWithStores(
     };
   }, [externalContext?.projectId]);
 
+  // Read AI settings for model-aware token budget resolution
+  const aiMaxTokens = useSettingsStore((s) => s.settings.ai.maxTokens);
+  const aiPrimaryModel = useSettingsStore((s) => s.settings.ai.primaryModel);
+  const aiPrimaryProvider = useSettingsStore((s) => s.settings.ai.primaryProvider);
+
   return useAgenticLoop({
     ...options,
     context,
     config: {
       ...options.config,
       contextRefresher,
+      maxOutputTokens: options.config?.maxOutputTokens ?? aiMaxTokens,
+      activeModel: options.config?.activeModel ?? aiPrimaryModel,
+      activeProvider: options.config?.activeProvider ?? aiPrimaryProvider,
     },
   });
 }

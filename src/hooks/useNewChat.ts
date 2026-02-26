@@ -2,7 +2,8 @@
  * useNewChat Hook
  *
  * Handles new chat lifecycle: aborts running engine,
- * clears conversationStore, and resets agent state.
+ * detaches from current session (preserves it in session list),
+ * and starts a fresh conversation.
  */
 
 import { useCallback } from 'react';
@@ -40,7 +41,8 @@ export function useNewChat(options: UseNewChatOptions = {}): UseNewChatReturn {
     // and is a no-op when the engine is not running.
     abort?.();
 
-    // Clear the conversation store
+    // Detach from current session and start fresh
+    // (clearConversation preserves the old session in the session list)
     clearConversation();
   }, [abort, clearConversation]);
 

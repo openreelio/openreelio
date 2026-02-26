@@ -55,6 +55,8 @@ export interface PlannerConfig {
   retryBackoffMs?: number;
   /** Maximum tools included in compact retry prompt */
   compactPromptToolLimit?: number;
+  /** Max output tokens for LLM generation (resolved from model metadata + user settings) */
+  maxOutputTokens?: number;
 }
 
 /**
@@ -68,6 +70,7 @@ const DEFAULT_CONFIG: Required<PlannerConfig> = {
   maxRetries: 1,
   retryBackoffMs: 400,
   compactPromptToolLimit: 24,
+  maxOutputTokens: undefined as unknown as number,
 };
 
 const ID_PLACEHOLDER_PATTERNS: RegExp[] = [
@@ -172,10 +175,15 @@ export class Planner {
           promptChars: messages.reduce((sum, message) => sum + message.content.length, 0),
         });
 
+        // Use a generous output budget so structured Plan JSON is never
+        // truncated — especially important for complex multi-step plans
+        // and non-ASCII prompts (Korean, Japanese, etc.) that consume
+        // 2-3× more tokens per character.  Compact retry keeps the same
+        // output budget since it already saves tokens on the input side.
         const plan = await this.executeWithTimeout(
           () =>
             this.llm.generateStructured<Plan>(messages, schema, {
-              maxTokens: promptMode === 'compact' ? 1200 : 1800,
+              maxTokens: this.config.maxOutputTokens ?? 16384,
               temperature: 0.2,
             }),
           timeoutMs,

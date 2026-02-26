@@ -645,7 +645,8 @@ fn build_anthropic_request(
         .and_then(|o| o.model.clone())
         .unwrap_or_else(|| config.model.clone());
 
-    let max_tokens = options.as_ref().and_then(|o| o.max_tokens).unwrap_or(4096);
+    // Default to 16384 to avoid truncating complex structured responses.
+    let max_tokens = options.as_ref().and_then(|o| o.max_tokens).unwrap_or(16384);
 
     let mut api_messages: Vec<serde_json::Value> = Vec::new();
     for msg in messages {

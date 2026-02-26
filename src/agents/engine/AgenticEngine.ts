@@ -38,6 +38,7 @@ import {
   ToolBudgetExceededError,
 } from './core/errors';
 import { parseFastPathPlan } from './core/fastPathParser';
+import { getModelLimits } from './core/modelRegistry';
 import { Thinker, createThinker } from './phases/Thinker';
 import { Planner, createPlanner } from './phases/Planner';
 import {
@@ -131,10 +132,20 @@ export class AgenticEngine {
 
     const approvalRequiredRisks = risksAtOrAbove(this.config.approvalThreshold);
 
+    // For the Planner, use the model's native max output tokens — NOT the
+    // user's chat maxTokens setting. Planning generates structured JSON
+    // that can be large; capping it by the user's chat preference causes
+    // truncation on complex requests (Korean text, multi-step plans).
+    const plannerMaxOutputTokens = getModelLimits(
+      this.config.activeModel,
+      this.config.activeProvider,
+    ).maxOutputTokens;
+
     this.thinker = createThinker(llm, { timeout: this.config.thinkingTimeout });
     this.planner = createPlanner(llm, toolExecutor, {
       timeout: this.config.planningTimeout,
       approvalRequiredRisks,
+      maxOutputTokens: plannerMaxOutputTokens,
     });
     this.executor = createExecutor(toolExecutor, {
       stopOnError: this.config.stopOnError ?? true,

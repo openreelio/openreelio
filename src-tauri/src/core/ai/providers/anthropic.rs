@@ -191,8 +191,11 @@ impl AIProvider for AnthropicProvider {
             }]
         };
 
-        // Set max_tokens (required for Anthropic)
-        let max_tokens = request.max_tokens.unwrap_or(4096);
+        // Set max_tokens (required by Anthropic API).
+        // Default to 16384 to avoid truncating complex structured responses
+        // (e.g. multi-step plan JSON). Callers should pass an explicit value
+        // when a lower budget is appropriate.
+        let max_tokens = request.max_tokens.unwrap_or(16384);
 
         // Build request
         let api_request = MessagesRequest {
