@@ -2784,10 +2784,7 @@ pub async fn validate_edit_script(
                             ));
                         }
                         None => {
-                            issues.push(format!(
-                                "AddMarker command {} has non-numeric timeSec",
-                                i
-                            ));
+                            issues.push(format!("AddMarker command {} has non-numeric timeSec", i));
                         }
                         _ => {} // valid
                     }

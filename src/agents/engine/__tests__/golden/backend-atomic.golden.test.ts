@@ -227,18 +227,18 @@ describe('Golden: backend-atomic', () => {
       executionContext,
     );
 
-    // Overall failure
+    // Overall failure — atomic batch was rolled back, so ALL tools report failure
     expect(result.success).toBe(false);
-    expect(result.successCount).toBe(1);
-    expect(result.failureCount).toBe(2);
+    expect(result.successCount).toBe(0);
+    expect(result.failureCount).toBe(3);
 
-    // Step 1 succeeded
-    expect(result.results[0].result.success).toBe(true);
-    // Step 2 failed
+    // All tools report failure because the batch was rolled back atomically
+    expect(result.results[0].result.success).toBe(false);
+    expect(result.results[0].result.error).toContain('Batch rolled back');
     expect(result.results[1].result.success).toBe(false);
-    expect(result.results[1].result.error).toContain('Clip not found');
-    // Step 3 was not executed
+    expect(result.results[1].result.error).toContain('Batch rolled back');
     expect(result.results[2].result.success).toBe(false);
+    expect(result.results[2].result.error).toContain('Batch rolled back');
   });
 
   it('should route mixed batch (editing + analysis) correctly', async () => {
