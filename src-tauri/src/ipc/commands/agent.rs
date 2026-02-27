@@ -55,6 +55,11 @@ pub async fn write_agent_trace(
     // Rotate old traces if needed
     rotate_traces(&traces_dir, max_files).await;
 
+    // Sanitize trace_id to prevent path traversal
+    if trace_id.contains('/') || trace_id.contains('\\') || trace_id.contains("..") {
+        return Err("Invalid trace_id: contains path separators or '..'".to_string());
+    }
+
     // Write the trace file
     let file_path = traces_dir.join(format!("{}.json", trace_id));
     tokio::fs::write(&file_path, trace_json.as_bytes())
@@ -67,6 +72,10 @@ pub async fn write_agent_trace(
 
 /// Delete the oldest trace files when count exceeds the limit.
 async fn rotate_traces(traces_dir: &PathBuf, max_files: usize) {
+    if max_files == 0 {
+        return;
+    }
+
     let entries = match tokio::fs::read_dir(traces_dir).await {
         Ok(entries) => entries,
         Err(_) => return,
@@ -177,9 +186,9 @@ pub async fn execute_agent_plan(
 
     // Validate plan structure and compute execution order
     let executor = PlanExecutor::new(plan.clone());
-    let execution_order = executor.validate_and_prepare().map_err(|e| {
-        format!("Plan validation failed: {e}")
-    })?;
+    let execution_order = executor
+        .validate_and_prepare()
+        .map_err(|e| format!("Plan validation failed: {e}"))?;
 
     // Lock the project for the duration of plan execution
     let mut guard = state.project.lock().await;
@@ -204,12 +213,15 @@ pub async fn execute_agent_plan(
         let step_start = std::time::Instant::now();
 
         // Emit step start event
-        let _ = app.emit("agent:plan_step_start", PlanStepEvent {
-            plan_id: plan_id.clone(),
-            step_id: step.id.clone(),
-            step_index: step_idx,
-            total_steps,
-        });
+        let _ = app.emit(
+            "agent:plan_step_start",
+            PlanStepEvent {
+                plan_id: plan_id.clone(),
+                step_id: step.id.clone(),
+                step_index: step_idx,
+                total_steps,
+            },
+        );
 
         // Resolve $fromStep/$path references in step params
         let resolved_params = match resolve_step_references(&step.params, &results_by_id) {
@@ -218,13 +230,16 @@ pub async fn execute_agent_plan(
                 let duration_ms = step_start.elapsed().as_millis() as u64;
                 let error_msg = format!("Reference resolution failed: {e}");
 
-                let _ = app.emit("agent:plan_step_failed", PlanStepFailedEvent {
-                    plan_id: plan_id.clone(),
-                    step_id: step.id.clone(),
-                    step_index: step_idx,
-                    total_steps,
-                    error: error_msg.clone(),
-                });
+                let _ = app.emit(
+                    "agent:plan_step_failed",
+                    PlanStepFailedEvent {
+                        plan_id: plan_id.clone(),
+                        step_id: step.id.clone(),
+                        step_index: step_idx,
+                        total_steps,
+                        error: error_msg.clone(),
+                    },
+                );
 
                 let result = StepResult {
                     step_id: step.id.clone(),
@@ -237,9 +252,7 @@ pub async fn execute_agent_plan(
                 step_results.push(result);
 
                 // Rollback completed steps
-                let rollback_report = rollback_steps(
-                    project, &executor, step_idx, &step_results,
-                );
+                let rollback_report = rollback_steps(project, &executor, step_idx, &step_results);
 
                 return Ok(AgentPlanResult {
                     plan_id,
@@ -265,13 +278,16 @@ pub async fn execute_agent_plan(
                 let duration_ms = step_start.elapsed().as_millis() as u64;
                 let error_msg = format!("Invalid command '{}': {e}", step.tool_name);
 
-                let _ = app.emit("agent:plan_step_failed", PlanStepFailedEvent {
-                    plan_id: plan_id.clone(),
-                    step_id: step.id.clone(),
-                    step_index: step_idx,
-                    total_steps,
-                    error: error_msg.clone(),
-                });
+                let _ = app.emit(
+                    "agent:plan_step_failed",
+                    PlanStepFailedEvent {
+                        plan_id: plan_id.clone(),
+                        step_id: step.id.clone(),
+                        step_index: step_idx,
+                        total_steps,
+                        error: error_msg.clone(),
+                    },
+                );
 
                 let result = StepResult {
                     step_id: step.id.clone(),
@@ -283,9 +299,7 @@ pub async fn execute_agent_plan(
                 };
                 step_results.push(result);
 
-                let rollback_report = rollback_steps(
-                    project, &executor, step_idx, &step_results,
-                );
+                let rollback_report = rollback_steps(project, &executor, step_idx, &step_results);
 
                 return Ok(AgentPlanResult {
                     plan_id,
@@ -295,10 +309,7 @@ pub async fn execute_agent_plan(
                     step_results,
                     operation_ids,
                     rollback_report: Some(rollback_report),
-                    error_message: Some(format!(
-                        "Step '{}' failed: invalid command",
-                        step.id
-                    )),
+                    error_message: Some(format!("Step '{}' failed: invalid command", step.id)),
                     execution_time_ms: start.elapsed().as_millis() as u64,
                 });
             }
@@ -326,14 +337,17 @@ pub async fn execute_agent_plan(
                     operation_id: Some(op_id.clone()),
                 };
 
-                let _ = app.emit("agent:plan_step_complete", PlanStepCompleteEvent {
-                    plan_id: plan_id.clone(),
-                    step_id: step.id.clone(),
-                    step_index: step_idx,
-                    total_steps,
-                    operation_id: Some(op_id.clone()),
-                    duration_ms,
-                });
+                let _ = app.emit(
+                    "agent:plan_step_complete",
+                    PlanStepCompleteEvent {
+                        plan_id: plan_id.clone(),
+                        step_id: step.id.clone(),
+                        step_index: step_idx,
+                        total_steps,
+                        operation_id: Some(op_id.clone()),
+                        duration_ms,
+                    },
+                );
 
                 operation_ids.push(op_id);
                 results_by_id.insert(step.id.clone(), result.clone());
@@ -351,13 +365,16 @@ pub async fn execute_agent_plan(
                 let duration_ms = step_start.elapsed().as_millis() as u64;
                 let error_msg = format!("Command execution failed: {e}");
 
-                let _ = app.emit("agent:plan_step_failed", PlanStepFailedEvent {
-                    plan_id: plan_id.clone(),
-                    step_id: step.id.clone(),
-                    step_index: step_idx,
-                    total_steps,
-                    error: error_msg.clone(),
-                });
+                let _ = app.emit(
+                    "agent:plan_step_failed",
+                    PlanStepFailedEvent {
+                        plan_id: plan_id.clone(),
+                        step_id: step.id.clone(),
+                        step_index: step_idx,
+                        total_steps,
+                        error: error_msg.clone(),
+                    },
+                );
 
                 let result = StepResult {
                     step_id: step.id.clone(),
@@ -377,9 +394,7 @@ pub async fn execute_agent_plan(
                 );
 
                 // Rollback completed steps
-                let rollback_report = rollback_steps(
-                    project, &executor, step_idx, &step_results,
-                );
+                let rollback_report = rollback_steps(project, &executor, step_idx, &step_results);
 
                 return Ok(AgentPlanResult {
                     plan_id,
@@ -389,10 +404,7 @@ pub async fn execute_agent_plan(
                     step_results,
                     operation_ids,
                     rollback_report: Some(rollback_report),
-                    error_message: Some(format!(
-                        "Step '{}' failed during execution",
-                        step.id
-                    )),
+                    error_message: Some(format!("Step '{}' failed during execution", step.id)),
                     execution_time_ms: start.elapsed().as_millis() as u64,
                 });
             }
