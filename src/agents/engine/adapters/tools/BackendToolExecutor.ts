@@ -47,6 +47,43 @@ const BACKEND_CATEGORIES = new Set([
   'asset',
 ]);
 
+/**
+ * Compound tool expander function signature.
+ * Takes tool args and returns an array of primitive plan steps
+ * that the backend can execute atomically.
+ */
+export type CompoundExpander = (
+  args: Record<string, unknown>,
+) => Array<{ toolName: string; params: Record<string, unknown>; dependsOn?: string[] }>;
+
+/**
+ * Registry of compound tools that need expansion into primitive steps.
+ * Compound tools like ripple_edit, roll_edit, slip_edit, slide_edit
+ * generate multiple sub-steps sent as a single atomic plan.
+ */
+const compoundExpanders = new Map<string, CompoundExpander>();
+
+/**
+ * Register a compound tool expander.
+ */
+export function registerCompoundExpander(toolName: string, expander: CompoundExpander): void {
+  compoundExpanders.set(toolName, expander);
+}
+
+/**
+ * Unregister a compound tool expander.
+ */
+export function unregisterCompoundExpander(toolName: string): void {
+  compoundExpanders.delete(toolName);
+}
+
+/**
+ * Check if a tool has a compound expander registered.
+ */
+export function hasCompoundExpander(toolName: string): boolean {
+  return compoundExpanders.has(toolName);
+}
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -98,21 +135,34 @@ export class BackendToolExecutor implements IToolExecutor {
 
     const start = performance.now();
 
-    // Build a single-step plan for backend execution
+    // Check if this is a compound tool that needs expansion
+    const expander = compoundExpanders.get(toolName);
+    const steps = expander
+      ? expander(args).map((sub, i) => ({
+          id: `step-${i + 1}`,
+          toolName: sub.toolName,
+          params: sub.params as Record<string, never>,
+          description: `Execute ${sub.toolName}`,
+          riskLevel: 'low' as const,
+          dependsOn: sub.dependsOn ?? (i > 0 ? [`step-${i}`] : []),
+          optional: false,
+        }))
+      : [
+          {
+            id: 'step-1',
+            toolName,
+            params: args as Record<string, never>,
+            description: `Execute ${toolName}`,
+            riskLevel: 'low' as const,
+            dependsOn: [] as string[],
+            optional: false,
+          },
+        ];
+
     const plan: AgentPlan = {
       id: `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      goal: `Execute ${toolName}`,
-      steps: [
-        {
-          id: 'step-1',
-          toolName,
-          params: args as Record<string, never>,
-          description: `Execute ${toolName}`,
-          riskLevel: 'low' as const,
-          dependsOn: [],
-          optional: false,
-        },
-      ],
+      goal: expander ? `Execute compound ${toolName} (${steps.length} steps)` : `Execute ${toolName}`,
+      steps,
       approvalGranted: true,
       sessionId: context.sessionId,
     };
@@ -142,10 +192,20 @@ export class BackendToolExecutor implements IToolExecutor {
         const duration = performance.now() - start;
 
         if (result.success && result.stepResults.length > 0) {
-          const stepResult = result.stepResults[0];
+          // For compound tools, aggregate all step results into the data field
+          const data = expander
+            ? {
+                steps: result.stepResults.map((sr) => ({
+                  success: sr.success,
+                  data: sr.data,
+                })),
+                stepsCompleted: result.stepsCompleted,
+              }
+            : result.stepResults[0].data;
+
           return {
             success: true,
-            data: stepResult.data,
+            data,
             duration,
             undoable: true,
             undoOperation: {
@@ -188,19 +248,64 @@ export class BackendToolExecutor implements IToolExecutor {
     const frontendTools = request.tools.filter((t) => !this.isBackendTool(t.name));
 
     // Execute backend tools as a single plan (atomic with rollback)
+    // Compound tools are expanded into primitive sub-steps.
     if (backendTools.length > 0) {
+      // Track which original tool index maps to which step ranges
+      const toolStepMapping: Array<{ toolIndex: number; stepStart: number; stepCount: number }> =
+        [];
+      const allSteps: AgentPlan['steps'] = [];
+      let stepCounter = 0;
+
+      for (let i = 0; i < backendTools.length; i++) {
+        const t = backendTools[i];
+        const exp = compoundExpanders.get(t.name);
+
+        if (exp) {
+          const subSteps = exp(t.args);
+          const startIdx = stepCounter;
+          for (let j = 0; j < subSteps.length; j++) {
+            allSteps.push({
+              id: `step-${stepCounter + 1}`,
+              toolName: subSteps[j].toolName,
+              params: subSteps[j].params as Record<string, never>,
+              description: `Execute ${subSteps[j].toolName}`,
+              riskLevel: 'low' as const,
+              dependsOn:
+                subSteps[j].dependsOn ??
+                (stepCounter > 0 && request.mode === 'sequential'
+                  ? [`step-${stepCounter}`]
+                  : []),
+              optional: false,
+            });
+            stepCounter++;
+          }
+          toolStepMapping.push({
+            toolIndex: i,
+            stepStart: startIdx,
+            stepCount: subSteps.length,
+          });
+        } else {
+          allSteps.push({
+            id: `step-${stepCounter + 1}`,
+            toolName: t.name,
+            params: t.args as Record<string, never>,
+            description: `Execute ${t.name}`,
+            riskLevel: 'low' as const,
+            dependsOn:
+              request.mode === 'sequential' && stepCounter > 0
+                ? [`step-${stepCounter}`]
+                : [],
+            optional: false,
+          });
+          toolStepMapping.push({ toolIndex: i, stepStart: stepCounter, stepCount: 1 });
+          stepCounter++;
+        }
+      }
+
       const plan: AgentPlan = {
         id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        goal: `Batch execute ${backendTools.length} tools`,
-        steps: backendTools.map((t, i) => ({
-          id: `step-${i + 1}`,
-          toolName: t.name,
-          params: t.args as Record<string, never>,
-          description: `Execute ${t.name}`,
-          riskLevel: 'low' as const,
-          dependsOn: request.mode === 'sequential' && i > 0 ? [`step-${i}`] : [],
-          optional: false,
-        })),
+        goal: `Batch execute ${backendTools.length} tools (${allSteps.length} steps)`,
+        steps: allSteps,
         approvalGranted: true,
         sessionId: context.sessionId,
       };
@@ -208,25 +313,36 @@ export class BackendToolExecutor implements IToolExecutor {
       try {
         const planResult = await invoke<AgentPlanResult>('execute_agent_plan', { plan });
 
-        for (let i = 0; i < backendTools.length; i++) {
-          const stepResult = planResult.stepResults[i];
-          if (stepResult?.success) {
+        // Map step results back to original tools using the step mapping
+        for (const mapping of toolStepMapping) {
+          const stepSlice = planResult.stepResults.slice(
+            mapping.stepStart,
+            mapping.stepStart + mapping.stepCount,
+          );
+          const allSucceeded = stepSlice.every((sr) => sr?.success);
+
+          if (allSucceeded && stepSlice.length > 0) {
+            const totalDuration = stepSlice.reduce((sum, sr) => sum + (sr?.durationMs ?? 0), 0);
             results.push({
-              tool: backendTools[i].name,
+              tool: backendTools[mapping.toolIndex].name,
               result: {
                 success: true,
-                data: stepResult.data,
-                duration: stepResult.durationMs,
+                data:
+                  mapping.stepCount > 1
+                    ? { steps: stepSlice.map((sr) => ({ success: sr.success, data: sr.data })) }
+                    : stepSlice[0].data,
+                duration: totalDuration,
                 undoable: true,
               },
             });
             successCount++;
           } else {
+            const failedStep = stepSlice.find((sr) => !sr?.success);
             results.push({
-              tool: backendTools[i].name,
+              tool: backendTools[mapping.toolIndex].name,
               result: createFailureResult(
-                stepResult?.error ?? 'Step not executed',
-                stepResult?.durationMs ?? 0,
+                failedStep?.error ?? 'Step not executed',
+                failedStep?.durationMs ?? 0,
               ),
             });
             failureCount++;

@@ -9,7 +9,12 @@
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
-import { BackendToolExecutor, createBackendToolExecutor } from './BackendToolExecutor';
+import {
+  BackendToolExecutor,
+  createBackendToolExecutor,
+  registerCompoundExpander,
+  unregisterCompoundExpander,
+} from './BackendToolExecutor';
 import type {
   IToolExecutor,
   ExecutionContext,
@@ -502,6 +507,151 @@ describe('BackendToolExecutor', () => {
       await backend.execute('analyze_video', { assetId: 'a1' }, CONTEXT);
       expect(frontend.execute).toHaveBeenCalledTimes(1);
       expect(mockInvoke).toHaveBeenCalledTimes(1); // Still just the 1 call from editing
+    });
+  });
+
+  // ===========================================================================
+  // Compound tool expansion
+  // ===========================================================================
+
+  describe('compound tool expansion', () => {
+    afterEach(() => {
+      unregisterCompoundExpander('ripple_edit');
+    });
+
+    it('should expand compound tool into multiple sub-steps for single execute', async () => {
+      // Register compound expander for ripple_edit
+      registerCompoundExpander('ripple_edit', (args) => [
+        { toolName: 'trim_clip', params: { clipId: args.clipId, newSourceOut: args.trimEnd } },
+        { toolName: 'move_clip', params: { clipId: 'clip-2', newTimelineIn: 8 } },
+        { toolName: 'move_clip', params: { clipId: 'clip-3', newTimelineIn: 13 } },
+      ]);
+
+      // Add ripple_edit tool definition to frontend executor
+      const extendedTools = [
+        ...TOOL_DEFS,
+        { name: 'ripple_edit', description: 'Ripple edit', category: 'clip', parameters: {} },
+        { name: 'trim_clip', description: 'Trim a clip', category: 'clip', parameters: {} },
+        { name: 'move_clip', description: 'Move a clip', category: 'clip', parameters: {} },
+      ];
+      const extendedFrontend = createMockFrontendExecutor(extendedTools);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'plan-compound',
+        success: true,
+        totalSteps: 3,
+        stepsCompleted: 3,
+        stepResults: [
+          { stepId: 'step-1', success: true, data: { trimmed: true }, durationMs: 10 },
+          { stepId: 'step-2', success: true, data: { moved: true }, durationMs: 5 },
+          { stepId: 'step-3', success: true, data: { moved: true }, durationMs: 5 },
+        ],
+        operationIds: ['op-1', 'op-2', 'op-3'],
+        executionTimeMs: 20,
+      });
+
+      const result = await extendedBackend.execute(
+        'ripple_edit',
+        { clipId: 'clip-1', trimEnd: 8 },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      // Data should contain aggregated step results
+      expect(result.data).toEqual({
+        steps: [
+          { success: true, data: { trimmed: true } },
+          { success: true, data: { moved: true } },
+          { success: true, data: { moved: true } },
+        ],
+        stepsCompleted: 3,
+      });
+
+      // Plan sent to backend should have 3 primitive steps, not 1 compound step
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          goal: expect.stringContaining('compound'),
+          steps: [
+            expect.objectContaining({ toolName: 'trim_clip' }),
+            expect.objectContaining({ toolName: 'move_clip', params: { clipId: 'clip-2', newTimelineIn: 8 } }),
+            expect.objectContaining({ toolName: 'move_clip', params: { clipId: 'clip-3', newTimelineIn: 13 } }),
+          ],
+        }),
+      });
+    });
+
+    it('should expand compound tool in batch and map results back', async () => {
+      registerCompoundExpander('ripple_edit', (args) => [
+        { toolName: 'trim_clip', params: { clipId: args.clipId, newSourceOut: args.trimEnd } },
+        { toolName: 'move_clip', params: { clipId: 'clip-2', newTimelineIn: 8 } },
+      ]);
+
+      const extendedTools = [
+        ...TOOL_DEFS,
+        { name: 'ripple_edit', description: 'Ripple edit', category: 'clip', parameters: {} },
+        { name: 'trim_clip', description: 'Trim', category: 'clip', parameters: {} },
+        { name: 'move_clip', description: 'Move', category: 'clip', parameters: {} },
+      ];
+      const extendedFrontend = createMockFrontendExecutor(extendedTools);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      // Batch: ripple_edit (compound→2 steps) + split_clip (atomic→1 step) = 3 total steps
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'batch-compound',
+        success: true,
+        totalSteps: 3,
+        stepsCompleted: 3,
+        stepResults: [
+          { stepId: 'step-1', success: true, data: { trimmed: true }, durationMs: 10 },
+          { stepId: 'step-2', success: true, data: { moved: true }, durationMs: 5 },
+          { stepId: 'step-3', success: true, data: { split: true }, durationMs: 8 },
+        ],
+        operationIds: ['op-1', 'op-2', 'op-3'],
+        executionTimeMs: 23,
+      });
+
+      const result = await extendedBackend.executeBatch(
+        {
+          tools: [
+            { name: 'ripple_edit', args: { clipId: 'clip-1', trimEnd: 8 } },
+            { name: 'split_clip', args: { clipId: 'clip-5', atTimelineSec: 3 } },
+          ],
+          mode: 'sequential',
+          stopOnError: true,
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.successCount).toBe(2); // 2 original tools
+      expect(result.results).toHaveLength(2);
+
+      // First result: compound ripple_edit (aggregated from 2 steps)
+      expect(result.results[0].tool).toBe('ripple_edit');
+      expect(result.results[0].result.success).toBe(true);
+      expect(result.results[0].result.data).toEqual({
+        steps: [
+          { success: true, data: { trimmed: true } },
+          { success: true, data: { moved: true } },
+        ],
+      });
+
+      // Second result: atomic split_clip (single step)
+      expect(result.results[1].tool).toBe('split_clip');
+      expect(result.results[1].result.success).toBe(true);
+      expect(result.results[1].result.data).toEqual({ split: true });
+
+      // Backend plan should have 3 steps total
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          steps: expect.arrayContaining([
+            expect.objectContaining({ toolName: 'trim_clip' }),
+            expect.objectContaining({ toolName: 'move_clip' }),
+            expect.objectContaining({ toolName: 'split_clip' }),
+          ]),
+        }),
+      });
     });
   });
 
