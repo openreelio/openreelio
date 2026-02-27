@@ -93,11 +93,21 @@ impl Command for AddMarkerCommand {
     }
 
     fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
-        if let Some(marker_id) = &self.created_marker_id {
-            if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
-                sequence.remove_marker(marker_id);
-            }
-        }
+        let marker_id = self.created_marker_id.as_ref().ok_or_else(|| {
+            CoreError::Internal(
+                "AddMarkerCommand::undo called before execute (no created_marker_id)".to_string(),
+            )
+        })?;
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        sequence
+            .remove_marker(marker_id)
+            .ok_or_else(|| CoreError::MarkerNotFound(marker_id.clone()))?;
+
         Ok(())
     }
 
@@ -162,11 +172,18 @@ impl Command for RemoveMarkerCommand {
     }
 
     fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
-        if let Some(marker) = &self.removed_marker {
-            if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
-                sequence.add_marker(marker.clone());
-            }
-        }
+        let marker = self.removed_marker.as_ref().ok_or_else(|| {
+            CoreError::Internal(
+                "RemoveMarkerCommand::undo called before execute (no removed_marker)".to_string(),
+            )
+        })?;
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        sequence.add_marker(marker.clone());
         Ok(())
     }
 

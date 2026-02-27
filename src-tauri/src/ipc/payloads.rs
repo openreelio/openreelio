@@ -787,9 +787,11 @@ impl CommandPayload {
             CommandPayload::RemoveTrack(p) => {
                 Box::new(RemoveTrackCommand::new(&p.sequence_id, &p.track_id))
             }
-            CommandPayload::RenameTrack(p) => {
-                Box::new(RenameTrackCommand::new(&p.sequence_id, &p.track_id, &p.new_name))
-            }
+            CommandPayload::RenameTrack(p) => Box::new(RenameTrackCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.new_name,
+            )),
             CommandPayload::AddMarker(p) => {
                 let mut cmd = AddMarkerCommand::new(&p.sequence_id, p.time_sec, &p.label);
                 if let Some(color) = p.color {

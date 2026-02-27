@@ -17,8 +17,7 @@ use crate::core::{
         DeleteFileCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand, MoveFileCommand,
         RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand,
         RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
-        RenameTrackCommand,
-        SetClipAudioCommand, SetClipMuteCommand, SetClipTransformCommand,
+        RenameTrackCommand, SetClipAudioCommand, SetClipMuteCommand, SetClipTransformCommand,
         SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand, UpdateAssetCommand,
         UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
     },
@@ -2520,9 +2519,11 @@ pub async fn apply_edit_script(
             CommandPayload::RemoveTrack(p) => {
                 Box::new(RemoveTrackCommand::new(&p.sequence_id, &p.track_id))
             }
-            CommandPayload::RenameTrack(p) => {
-                Box::new(RenameTrackCommand::new(&p.sequence_id, &p.track_id, &p.new_name))
-            }
+            CommandPayload::RenameTrack(p) => Box::new(RenameTrackCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.new_name,
+            )),
             CommandPayload::CreateCaption(p) => Box::new(
                 CreateCaptionCommand::new(&p.sequence_id, &p.track_id, p.start_sec, p.end_sec)
                     .with_text(p.text),
@@ -2769,6 +2770,26 @@ pub async fn validate_edit_script(
                 }
                 if cmd.params.get("newName").is_none() {
                     issues.push(format!("RenameTrack command {} missing newName", i));
+                }
+            }
+            "AddMarker" | "addMarker" => {
+                if cmd.params.get("timeSec").is_none() {
+                    issues.push(format!("AddMarker command {} missing timeSec", i));
+                } else if let Some(v) = cmd.params.get("timeSec").and_then(|v| v.as_f64()) {
+                    if !v.is_finite() || v < 0.0 {
+                        issues.push(format!(
+                            "AddMarker command {} has invalid timeSec: must be finite and non-negative",
+                            i
+                        ));
+                    }
+                }
+                if cmd.params.get("label").is_none() {
+                    issues.push(format!("AddMarker command {} missing label", i));
+                }
+            }
+            "RemoveMarker" | "removeMarker" | "DeleteMarker" | "deleteMarker" => {
+                if cmd.params.get("markerId").is_none() {
+                    issues.push(format!("RemoveMarker command {} missing markerId", i));
                 }
             }
             _ => {
