@@ -39,7 +39,6 @@ import { getTimelineSnapshot } from './storeAccessor';
 const CTX: AgentContext = { projectId: 'project-1', sequenceId: 'seq-1' };
 
 function getMockExecuteCommand() {
-   
   return (useProjectStore.getState as any)().executeCommand as ReturnType<typeof vi.fn>;
 }
 
@@ -57,7 +56,9 @@ describe('editingTools — extended tools', () => {
     vi.mocked(useProjectStore.getState).mockReturnValue({
       isLoaded: true,
       meta: { id: 'project-1', name: 'Test' },
-      executeCommand: vi.fn().mockResolvedValue({ opId: 'op-1', success: true, createdIds: ['track-new'] }),
+      executeCommand: vi
+        .fn()
+        .mockResolvedValue({ opId: 'op-1', success: true, createdIds: ['track-new'] }),
     } as unknown as ReturnType<typeof useProjectStore.getState>);
   });
 
@@ -74,10 +75,7 @@ describe('editingTools — extended tools', () => {
 
     it('should call CreateTrack command', async () => {
       const tool = globalToolRegistry.get('add_track');
-      const result = await tool!.handler(
-        { sequenceId: 'seq-1', kind: 'video', name: 'V3' },
-        CTX,
-      );
+      const result = await tool!.handler({ sequenceId: 'seq-1', kind: 'video', name: 'V3' }, CTX);
 
       expect(result.success).toBe(true);
       const mockExec = getMockExecuteCommand();
@@ -97,10 +95,7 @@ describe('editingTools — extended tools', () => {
 
     it('should call RemoveTrack command', async () => {
       const tool = globalToolRegistry.get('remove_track');
-      const result = await tool!.handler(
-        { sequenceId: 'seq-1', trackId: 'track-1' },
-        CTX,
-      );
+      const result = await tool!.handler({ sequenceId: 'seq-1', trackId: 'track-1' }, CTX);
 
       expect(result.success).toBe(true);
       const mockExec = getMockExecuteCommand();
@@ -114,14 +109,13 @@ describe('editingTools — extended tools', () => {
       vi.mocked(useProjectStore.getState).mockReturnValue({
         isLoaded: true,
         meta: { id: 'project-1', name: 'Test' },
-        executeCommand: vi.fn().mockRejectedValue(new Error('Cannot remove track: track contains clips')),
+        executeCommand: vi
+          .fn()
+          .mockRejectedValue(new Error('Cannot remove track: track contains clips')),
       } as unknown as ReturnType<typeof useProjectStore.getState>);
 
       const tool = globalToolRegistry.get('remove_track');
-      const result = await tool!.handler(
-        { sequenceId: 'seq-1', trackId: 'track-1' },
-        CTX,
-      );
+      const result = await tool!.handler({ sequenceId: 'seq-1', trackId: 'track-1' }, CTX);
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('track contains clips');
@@ -195,7 +189,13 @@ describe('editingTools — extended tools', () => {
     it('should call SplitClip as first step of freeze', async () => {
       const tool = globalToolRegistry.get('freeze_frame');
       const result = await tool!.handler(
-        { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', frameTime: 3.5, duration: 2.0 },
+        {
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          clipId: 'clip-1',
+          frameTime: 3.5,
+          duration: 2.0,
+        },
         CTX,
       );
 
@@ -227,11 +227,58 @@ describe('editingTools — extended tools', () => {
         duration: 30,
         trackCount: 1,
         clipCount: 3,
-        tracks: [{ id: 'track-1', name: 'V1', kind: 'video', clipCount: 3, muted: false, locked: false, visible: true, volume: 1 }],
+        tracks: [
+          {
+            id: 'track-1',
+            name: 'V1',
+            kind: 'video',
+            clipCount: 3,
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1,
+          },
+        ],
         clips: [
-          { id: 'clip-1', assetId: 'a1', trackId: 'track-1', timelineIn: 0, duration: 10, sourceIn: 0, sourceOut: 10, speed: 1, opacity: 1, hasEffects: false, effectCount: 0 },
-          { id: 'clip-2', assetId: 'a2', trackId: 'track-1', timelineIn: 10, duration: 5, sourceIn: 0, sourceOut: 5, speed: 1, opacity: 1, hasEffects: false, effectCount: 0 },
-          { id: 'clip-3', assetId: 'a3', trackId: 'track-1', timelineIn: 15, duration: 5, sourceIn: 0, sourceOut: 5, speed: 1, opacity: 1, hasEffects: false, effectCount: 0 },
+          {
+            id: 'clip-1',
+            assetId: 'a1',
+            trackId: 'track-1',
+            timelineIn: 0,
+            duration: 10,
+            sourceIn: 0,
+            sourceOut: 10,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
+          {
+            id: 'clip-2',
+            assetId: 'a2',
+            trackId: 'track-1',
+            timelineIn: 10,
+            duration: 5,
+            sourceIn: 0,
+            sourceOut: 5,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
+          {
+            id: 'clip-3',
+            assetId: 'a3',
+            trackId: 'track-1',
+            timelineIn: 15,
+            duration: 5,
+            sourceIn: 0,
+            sourceOut: 5,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
         ],
         selectedClipIds: [],
         selectedTrackIds: [],
@@ -277,7 +324,18 @@ describe('editingTools — extended tools', () => {
         duration: 10,
         trackCount: 1,
         clipCount: 0,
-        tracks: [{ id: 'track-1', name: 'V1', kind: 'video', clipCount: 0, muted: false, locked: false, visible: true, volume: 1 }],
+        tracks: [
+          {
+            id: 'track-1',
+            name: 'V1',
+            kind: 'video',
+            clipCount: 0,
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1,
+          },
+        ],
         clips: [],
         selectedClipIds: [],
         selectedTrackIds: [],
@@ -310,10 +368,45 @@ describe('editingTools — extended tools', () => {
         duration: 20,
         trackCount: 1,
         clipCount: 2,
-        tracks: [{ id: 'track-1', name: 'V1', kind: 'video', clipCount: 2, muted: false, locked: false, visible: true, volume: 1 }],
+        tracks: [
+          {
+            id: 'track-1',
+            name: 'V1',
+            kind: 'video',
+            clipCount: 2,
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1,
+          },
+        ],
         clips: [
-          { id: 'clip-A', assetId: 'a1', trackId: 'track-1', timelineIn: 0, duration: 10, sourceIn: 0, sourceOut: 10, speed: 1, opacity: 1, hasEffects: false, effectCount: 0 },
-          { id: 'clip-B', assetId: 'a2', trackId: 'track-1', timelineIn: 10, duration: 10, sourceIn: 0, sourceOut: 10, speed: 1, opacity: 1, hasEffects: false, effectCount: 0 },
+          {
+            id: 'clip-A',
+            assetId: 'a1',
+            trackId: 'track-1',
+            timelineIn: 0,
+            duration: 10,
+            sourceIn: 0,
+            sourceOut: 10,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
+          {
+            id: 'clip-B',
+            assetId: 'a2',
+            trackId: 'track-1',
+            timelineIn: 10,
+            duration: 10,
+            sourceIn: 0,
+            sourceOut: 10,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
         ],
         selectedClipIds: [],
         selectedTrackIds: [],
@@ -322,7 +415,13 @@ describe('editingTools — extended tools', () => {
 
       const tool = globalToolRegistry.get('roll_edit');
       const result = await tool!.handler(
-        { sequenceId: 'seq-1', trackId: 'track-1', leftClipId: 'clip-A', rightClipId: 'clip-B', rollAmount: 2 },
+        {
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          leftClipId: 'clip-A',
+          rightClipId: 'clip-B',
+          rollAmount: 2,
+        },
         CTX,
       );
 
@@ -358,9 +457,32 @@ describe('editingTools — extended tools', () => {
         duration: 10,
         trackCount: 1,
         clipCount: 1,
-        tracks: [{ id: 'track-1', name: 'V1', kind: 'video', clipCount: 1, muted: false, locked: false, visible: true, volume: 1 }],
+        tracks: [
+          {
+            id: 'track-1',
+            name: 'V1',
+            kind: 'video',
+            clipCount: 1,
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1,
+          },
+        ],
         clips: [
-          { id: 'clip-1', assetId: 'a1', trackId: 'track-1', timelineIn: 5, duration: 10, sourceIn: 2, sourceOut: 12, speed: 1, opacity: 1, hasEffects: false, effectCount: 0 },
+          {
+            id: 'clip-1',
+            assetId: 'a1',
+            trackId: 'track-1',
+            timelineIn: 5,
+            duration: 10,
+            sourceIn: 2,
+            sourceOut: 12,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
         ],
         selectedClipIds: [],
         selectedTrackIds: [],
@@ -395,9 +517,32 @@ describe('editingTools — extended tools', () => {
         duration: 10,
         trackCount: 1,
         clipCount: 1,
-        tracks: [{ id: 'track-1', name: 'V1', kind: 'video', clipCount: 1, muted: false, locked: false, visible: true, volume: 1 }],
+        tracks: [
+          {
+            id: 'track-1',
+            name: 'V1',
+            kind: 'video',
+            clipCount: 1,
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1,
+          },
+        ],
         clips: [
-          { id: 'clip-1', assetId: 'a1', trackId: 'track-1', timelineIn: 0, duration: 5, sourceIn: 1, sourceOut: 6, speed: 1, opacity: 1, hasEffects: false, effectCount: 0 },
+          {
+            id: 'clip-1',
+            assetId: 'a1',
+            trackId: 'track-1',
+            timelineIn: 0,
+            duration: 5,
+            sourceIn: 1,
+            sourceOut: 6,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
         ],
         selectedClipIds: [],
         selectedTrackIds: [],
@@ -430,11 +575,58 @@ describe('editingTools — extended tools', () => {
         duration: 30,
         trackCount: 1,
         clipCount: 3,
-        tracks: [{ id: 'track-1', name: 'V1', kind: 'video', clipCount: 3, muted: false, locked: false, visible: true, volume: 1 }],
+        tracks: [
+          {
+            id: 'track-1',
+            name: 'V1',
+            kind: 'video',
+            clipCount: 3,
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1,
+          },
+        ],
         clips: [
-          { id: 'clip-prev', assetId: 'a1', trackId: 'track-1', timelineIn: 0, duration: 10, sourceIn: 0, sourceOut: 10, speed: 1, opacity: 1, hasEffects: false, effectCount: 0 },
-          { id: 'clip-target', assetId: 'a2', trackId: 'track-1', timelineIn: 10, duration: 5, sourceIn: 0, sourceOut: 5, speed: 1, opacity: 1, hasEffects: false, effectCount: 0 },
-          { id: 'clip-next', assetId: 'a3', trackId: 'track-1', timelineIn: 15, duration: 10, sourceIn: 0, sourceOut: 10, speed: 1, opacity: 1, hasEffects: false, effectCount: 0 },
+          {
+            id: 'clip-prev',
+            assetId: 'a1',
+            trackId: 'track-1',
+            timelineIn: 0,
+            duration: 10,
+            sourceIn: 0,
+            sourceOut: 10,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
+          {
+            id: 'clip-target',
+            assetId: 'a2',
+            trackId: 'track-1',
+            timelineIn: 10,
+            duration: 5,
+            sourceIn: 0,
+            sourceOut: 5,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
+          {
+            id: 'clip-next',
+            assetId: 'a3',
+            trackId: 'track-1',
+            timelineIn: 15,
+            duration: 10,
+            sourceIn: 0,
+            sourceOut: 10,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
         ],
         selectedClipIds: [],
         selectedTrackIds: [],
@@ -465,7 +657,11 @@ describe('editingTools — extended tools', () => {
       // 3. Trim next clip (sourceIn 0 → 2, timelineIn 15 → 17)
       expect(mockExec).toHaveBeenCalledWith({
         type: 'TrimClip',
-        payload: expect.objectContaining({ clipId: 'clip-next', newSourceIn: 2, newTimelineIn: 17 }),
+        payload: expect.objectContaining({
+          clipId: 'clip-next',
+          newSourceIn: 2,
+          newTimelineIn: 17,
+        }),
       });
 
       // 3 total calls: move + 2 trims
@@ -480,9 +676,32 @@ describe('editingTools — extended tools', () => {
         duration: 10,
         trackCount: 1,
         clipCount: 1,
-        tracks: [{ id: 'track-1', name: 'V1', kind: 'video', clipCount: 1, muted: false, locked: false, visible: true, volume: 1 }],
+        tracks: [
+          {
+            id: 'track-1',
+            name: 'V1',
+            kind: 'video',
+            clipCount: 1,
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1,
+          },
+        ],
         clips: [
-          { id: 'clip-only', assetId: 'a1', trackId: 'track-1', timelineIn: 0, duration: 10, sourceIn: 0, sourceOut: 10, speed: 1, opacity: 1, hasEffects: false, effectCount: 0 },
+          {
+            id: 'clip-only',
+            assetId: 'a1',
+            trackId: 'track-1',
+            timelineIn: 0,
+            duration: 10,
+            sourceIn: 0,
+            sourceOut: 10,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
         ],
         selectedClipIds: [],
         selectedTrackIds: [],
@@ -529,8 +748,45 @@ describe('editingTools — extended tools', () => {
       const mockExec = getMockExecuteCommand();
       expect(mockExec).toHaveBeenCalledWith({
         type: 'AddMarker',
-        payload: expect.objectContaining({ sequenceId: 'seq-1', timeSec: 5.0, label: 'Intro Start' }),
+        payload: expect.objectContaining({
+          sequenceId: 'seq-1',
+          timeSec: 5.0,
+          label: 'Intro Start',
+        }),
       });
+    });
+
+    it('should convert named color to RGBA object', async () => {
+      const tool = globalToolRegistry.get('add_marker');
+      const result = await tool!.handler(
+        { sequenceId: 'seq-1', time: 5.0, label: 'Intro Start', color: 'red' },
+        CTX,
+      );
+
+      expect(result.success).toBe(true);
+      const mockExec = getMockExecuteCommand();
+      expect(mockExec).toHaveBeenCalledWith({
+        type: 'AddMarker',
+        payload: expect.objectContaining({
+          sequenceId: 'seq-1',
+          timeSec: 5.0,
+          label: 'Intro Start',
+          color: { r: 1, g: 0, b: 0 },
+        }),
+      });
+    });
+
+    it('should reject invalid color input', async () => {
+      const tool = globalToolRegistry.get('add_marker');
+      const result = await tool!.handler(
+        { sequenceId: 'seq-1', time: 5.0, label: 'Intro Start', color: 'unknown-color' },
+        CTX,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Invalid marker color');
+      const mockExec = getMockExecuteCommand();
+      expect(mockExec).not.toHaveBeenCalled();
     });
   });
 
@@ -543,10 +799,7 @@ describe('editingTools — extended tools', () => {
 
     it('should call RemoveMarker command', async () => {
       const tool = globalToolRegistry.get('remove_marker');
-      const result = await tool!.handler(
-        { sequenceId: 'seq-1', markerId: 'marker-1' },
-        CTX,
-      );
+      const result = await tool!.handler({ sequenceId: 'seq-1', markerId: 'marker-1' }, CTX);
 
       expect(result.success).toBe(true);
       const mockExec = getMockExecuteCommand();
