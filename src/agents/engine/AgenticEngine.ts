@@ -53,6 +53,8 @@ import {
   detectRepeatedTerminalFailure,
   type TerminalFailureGuidance,
 } from './phases/executionFailureUtils';
+import { TraceRecorder, type AgentTrace } from './core/traceRecorder';
+import { writeTrace } from './core/traceWriter';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('AgenticEngine');
@@ -97,6 +99,8 @@ export interface AgentRunResult {
   summary?: SessionSummary;
   /** Rollback report when recovery was attempted */
   rollbackReport?: RollbackReport;
+  /** Structured trace of the agent run (when tracing is enabled) */
+  trace?: AgentTrace;
 }
 
 // =============================================================================
@@ -189,6 +193,15 @@ export class AgenticEngine {
     this.activeSessionId = executionContext.sessionId;
     this.isAborted = false;
 
+    // Initialize trace recorder if tracing is enabled
+    const tracer = this.config.enableTracing ? new TraceRecorder() : null;
+    tracer?.startRun({
+      sessionId: executionContext.sessionId,
+      input,
+      model: this.config.activeModel,
+      provider: this.config.activeProvider,
+    });
+
     const startTime = Date.now();
     const executionResults: ExecutionResult[] = [];
     let plannedStepCount = 0;
@@ -239,6 +252,7 @@ export class AgenticEngine {
           return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
             aborted: true,
             finalState: state,
+            trace: tracer?.finalize(false, 'Aborted by user'),
           });
         }
 
@@ -276,11 +290,13 @@ export class AgenticEngine {
         // =====================================================================
         this.currentPhase = 'thinking';
         state.phase = 'thinking';
+        tracer?.startPhase('thinking');
         this.emitEvent(onEvent, { type: 'thinking_start', timestamp: Date.now() });
 
         let thought: Thought;
         if (fastPathMatch) {
           thought = fastPathMatch.thought;
+          tracer?.setFastPath(true);
           logger.info('Fast path selected', {
             sessionId: executionContext.sessionId,
             strategy: fastPathMatch.strategy,
@@ -293,6 +309,7 @@ export class AgenticEngine {
             const err = asError(error);
             state.error = err;
             state = this.finalizeState(state, 'failed');
+            tracer?.endPhase(err.message);
             this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
             logger.error('Thinking phase failed', {
               sessionId: executionContext.sessionId,
@@ -302,11 +319,13 @@ export class AgenticEngine {
             return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
               error: err,
               finalState: state,
+              trace: tracer?.finalize(false, err.message),
             });
           }
         }
 
         state.thought = thought;
+        tracer?.endPhase();
         this.emitEvent(onEvent, { type: 'thinking_complete', thought, timestamp: Date.now() });
 
         if (thought.needsMoreInfo) {
@@ -338,6 +357,7 @@ export class AgenticEngine {
         // =====================================================================
         this.currentPhase = 'planning';
         state.phase = 'planning';
+        tracer?.startPhase('planning');
         this.emitEvent(onEvent, { type: 'planning_start', timestamp: Date.now() });
 
         let plan: Plan;
@@ -350,6 +370,7 @@ export class AgenticEngine {
             const err = asError(error);
             state.error = err;
             state = this.finalizeState(state, 'failed');
+            tracer?.endPhase(err.message);
             this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
             logger.error('Planning phase failed', {
               sessionId: executionContext.sessionId,
@@ -359,6 +380,7 @@ export class AgenticEngine {
             return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
               error: err,
               finalState: state,
+              trace: tracer?.finalize(false, err.message),
             });
           }
         }
@@ -385,6 +407,7 @@ export class AgenticEngine {
         plannedStepCount = attemptedStepCount;
 
         state.plan = plan;
+        tracer?.endPhase();
         this.emitEvent(onEvent, { type: 'planning_complete', plan, timestamp: Date.now() });
 
         // =====================================================================
@@ -477,6 +500,7 @@ export class AgenticEngine {
           return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
             aborted: true,
             finalState: state,
+            trace: tracer?.finalize(false, 'Aborted by user'),
           });
         }
 
@@ -485,6 +509,7 @@ export class AgenticEngine {
         // =====================================================================
         this.currentPhase = 'executing';
         state.phase = 'executing';
+        tracer?.startPhase('executing');
 
         const stepById = new Map<string, PlanStep>(plan.steps.map((s) => [s.id, s]));
         const executionContextForIteration: ExecutionContext = {
@@ -575,6 +600,12 @@ export class AgenticEngine {
 
               if (progress.phase === 'step_completed' || progress.phase === 'step_failed') {
                 if (progress.result) {
+                  tracer?.recordToolCall({
+                    name: step.tool,
+                    success: progress.result.success,
+                    durationMs: progress.result.duration,
+                    error: progress.result.error,
+                  });
                   this.emitEvent(onEvent, {
                     type: 'execution_complete',
                     step,
@@ -627,6 +658,7 @@ export class AgenticEngine {
 
           state.error = err;
           state = this.finalizeState(state, 'failed');
+          tracer?.endPhase(err.message);
           this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
           logger.error('Execution phase failed', {
             sessionId: executionContext.sessionId,
@@ -647,6 +679,7 @@ export class AgenticEngine {
             finalState: state,
             summary,
             rollbackReport,
+            trace: tracer?.finalize(false, err.message),
           });
         }
 
@@ -654,6 +687,7 @@ export class AgenticEngine {
         toolCallsUsed += executionResult.toolCallsUsed;
         state.executionHistory.push(...this.toExecutionRecords(executionResult));
         await this.recordExecutionOperations(executionResult, contextWithTools.projectId);
+        tracer?.endPhase();
 
         if (this.isAborted || executionResult.aborted) {
           state = this.finalizeState(state, 'aborted');
@@ -666,6 +700,7 @@ export class AgenticEngine {
           return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
             aborted: true,
             finalState: state,
+            trace: tracer?.finalize(false, 'Aborted by user'),
           });
         }
 
@@ -674,6 +709,7 @@ export class AgenticEngine {
         // =====================================================================
         this.currentPhase = 'observing';
         state.phase = 'observing';
+        tracer?.startPhase('observing');
 
         let observation: Observation;
         try {
@@ -682,6 +718,7 @@ export class AgenticEngine {
           const err = asError(error);
           state.error = err;
           state = this.finalizeState(state, 'failed');
+          tracer?.endPhase(err.message);
           this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
           logger.error('Observation phase failed', {
             sessionId: executionContext.sessionId,
@@ -691,6 +728,7 @@ export class AgenticEngine {
           return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
             error: err,
             finalState: state,
+            trace: tracer?.finalize(false, err.message),
           });
         }
 
@@ -717,6 +755,7 @@ export class AgenticEngine {
         }
 
         lastObservation = observation;
+        tracer?.endPhase();
         this.emitEvent(onEvent, {
           type: 'observation_complete',
           observation,
@@ -736,12 +775,18 @@ export class AgenticEngine {
             success: observation.goalAchieved,
           });
 
+          tracer?.setIterations(iteration);
           return this.createResult(
             observation.goalAchieved,
             executionResults,
             iteration,
             Date.now() - startTime,
-            { observation, finalState: state, summary },
+            {
+              observation,
+              finalState: state,
+              summary,
+              trace: tracer?.finalize(observation.goalAchieved),
+            },
           );
         }
 
@@ -753,10 +798,12 @@ export class AgenticEngine {
       state = this.finalizeState(state, 'failed');
       this.emitEvent(onEvent, { type: 'session_failed', error: err, timestamp: Date.now() });
 
+      tracer?.setIterations(iteration);
       return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
         observation: lastObservation,
         error: err,
         finalState: state,
+        trace: tracer?.finalize(false, err.message),
       });
     } finally {
       this.currentPhase = 'idle';
@@ -1120,7 +1167,7 @@ export class AgenticEngine {
       finalState: AgentState;
     },
   ): AgentRunResult {
-    return {
+    const result: AgentRunResult = {
       success,
       executionResults,
       iterations,
@@ -1136,7 +1183,17 @@ export class AgenticEngine {
       finalState: options.finalState,
       summary: options.summary,
       rollbackReport: options.rollbackReport,
+      trace: options.trace,
     };
+
+    // Fire-and-forget trace writing — errors are logged but not propagated
+    if (result.trace) {
+      writeTrace(result.trace).catch(() => {
+        // Intentionally swallowed — writeTrace already logs on failure
+      });
+    }
+
+    return result;
   }
 }
 

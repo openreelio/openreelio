@@ -138,9 +138,20 @@ export function ConversationMessageItem({
       >
         <div className="max-w-[80%] px-4 py-2 rounded-lg bg-primary-600 text-white">
           <p className="text-sm whitespace-pre-wrap">{textContent}</p>
-          <span className="text-xs opacity-60 mt-1 block">
-            {new Date(message.timestamp).toLocaleTimeString()}
-          </span>
+          <div className="flex items-center gap-2 mt-1">
+            <span className="text-xs opacity-60 block">
+              {new Date(message.timestamp).toLocaleTimeString()}
+            </span>
+            {message.persistenceStatus === 'failed' && (
+              <span
+                className="text-xs text-red-300 opacity-70"
+                title="Message could not be saved"
+                data-testid="persistence-failed-indicator"
+              >
+                (not saved)
+              </span>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -182,9 +193,20 @@ export function ConversationMessageItem({
             onToolDeny,
           })
         )}
-        <span className="text-xs text-text-tertiary block">
-          {new Date(message.timestamp).toLocaleTimeString()}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-text-tertiary block">
+            {new Date(message.timestamp).toLocaleTimeString()}
+          </span>
+          {message.persistenceStatus === 'failed' && (
+            <span
+              className="text-xs text-red-400 opacity-70"
+              title="Message could not be saved"
+              data-testid="persistence-failed-indicator"
+            >
+              (not saved)
+            </span>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -139,6 +139,18 @@ export {
   createTimeoutError,
 } from './core/errors';
 
+export {
+  SessionGuard,
+  SessionMismatchError,
+  InvalidPhaseTransitionError,
+} from './core/sessionGuard';
+
+export {
+  registerAgentAbort,
+  unregisterAgentAbort,
+  abortRunningAgent,
+} from './core/agentCleanup';
+
 // =============================================================================
 // Port Interfaces
 // =============================================================================
@@ -201,6 +213,7 @@ export {
   type ToolApprovalPart,
   type ConversationRole,
   type TokenUsage,
+  type PersistenceStatus,
   type ConversationMessage,
   type Conversation,
 
@@ -278,6 +291,11 @@ export {
   ToolRegistryAdapter,
   createToolRegistryAdapter,
 } from './adapters/tools/ToolRegistryAdapter';
+
+export {
+  BackendToolExecutor,
+  createBackendToolExecutor,
+} from './adapters/tools/BackendToolExecutor';
 
 export {
   MemoryManagerAdapter,

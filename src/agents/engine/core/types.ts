@@ -608,6 +608,9 @@ export interface AgenticEngineConfig {
   /** Enable checkpoints (default: true) */
   enableCheckpoints: boolean;
 
+  /** Enable structured JSON tracing for agent runs (default: true) */
+  enableTracing: boolean;
+
   /** Minimum risk level requiring approval (default: 'high') */
   approvalThreshold: RiskLevel;
   /** Auto retry on failure (default: true) */
@@ -713,6 +716,7 @@ export const DEFAULT_ENGINE_CONFIG: AgenticEngineConfig = {
   enableStreaming: true,
   enableMemory: true,
   enableCheckpoints: true,
+  enableTracing: true,
   approvalThreshold: 'high',
   autoRetryOnFailure: true,
   maxRetries: 2,

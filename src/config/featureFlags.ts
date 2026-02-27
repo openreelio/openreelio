@@ -55,6 +55,14 @@ export interface FeatureFlags {
    * @default false
    */
   USE_AGENT_LOOP: boolean;
+
+  /**
+   * Enable backend tool execution for editing tools
+   * When true, editing tools route through backend IPC (execute_agent_plan)
+   * and analysis tools stay on frontend. When false, all tools use frontend.
+   * @default false
+   */
+  USE_BACKEND_TOOLS: boolean;
 }
 
 /**
@@ -81,6 +89,7 @@ const DEFAULT_FLAGS: FeatureFlags = {
   USE_AGENTIC_ENGINE: true,
   USE_VIDEO_GENERATION: false,
   USE_AGENT_LOOP: false,
+  USE_BACKEND_TOOLS: false,
 };
 
 /**
@@ -90,6 +99,7 @@ export const FEATURE_FLAG_KEYS: readonly FeatureFlagKey[] = [
   'USE_AGENTIC_ENGINE',
   'USE_VIDEO_GENERATION',
   'USE_AGENT_LOOP',
+  'USE_BACKEND_TOOLS',
 ] as const;
 
 // =============================================================================
@@ -331,6 +341,19 @@ export function isVideoGenerationEnabled(): boolean {
  */
 export function isAgentLoopEnabled(): boolean {
   return getFeatureFlag('USE_AGENT_LOOP');
+}
+
+/**
+ * Check if backend tool execution is enabled
+ *
+ * When true, editing tools are routed through the backend
+ * execute_agent_plan IPC endpoint for atomic execution with rollback.
+ * Analysis tools remain on the frontend.
+ *
+ * @returns true if backend tool execution should be used
+ */
+export function isBackendToolsEnabled(): boolean {
+  return getFeatureFlag('USE_BACKEND_TOOLS');
 }
 
 // =============================================================================

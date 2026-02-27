@@ -1,16 +1,15 @@
 /**
  * MemoryManagerAdapter
  *
- * Bridges the legacy MemoryManager to the IMemoryStore port used by
- * the AgenticEngine.
+ * Implements the IMemoryStore port with SQLite-backed persistence via Tauri IPC.
+ * Operations, preferences, and corrections are stored in the backend
+ * `agent_memory` table. When IPC is unavailable (e.g., in tests or offline),
+ * a simple in-memory Map fallback is used.
+ *
+ * Conversations and project memory remain in-memory (not persisted via IPC).
  */
 
-import {
-  createMemoryManager,
-  type MemoryManager,
-  type UserCorrection,
-  type OperationFrequency,
-} from '@/agents/core/AgentMemory';
+import { commands, type MemoryEntry } from '@/bindings';
 import type {
   ConversationMemory,
   IMemoryStore,
@@ -20,14 +19,32 @@ import type {
 } from '../../ports/IMemoryStore';
 import type { CorrectionRecord, OperationRecord } from '../../core/types';
 
+// Sentinel project ID for global (non-project-specific) memory entries
+const GLOBAL_PROJECT_ID = '__global__';
+
+// =============================================================================
+// Adapter
+// =============================================================================
+
 export class MemoryManagerAdapter implements IMemoryStore {
-  private readonly memory: MemoryManager;
+  // Conversations and project memory remain in-memory
   private readonly conversations = new Map<string, ConversationMemory>();
   private readonly projectMemory = new Map<string, ProjectMemory>();
 
-  constructor(memoryManager?: MemoryManager) {
-    this.memory = memoryManager ?? createMemoryManager();
-  }
+  // In-memory fallback stores (activated on IPC failure)
+  private readonly fallbackOperations = new Map<string, OperationRecord>();
+  private readonly fallbackPreferences = new Map<string, unknown>();
+  private readonly fallbackCorrections: CorrectionRecord[] = [];
+  private ipcFailed = false;
+
+  // Auto-incrementing ID counter for new entries
+  private idCounter = 0;
+
+  constructor() {}
+
+  // ===========================================================================
+  // Conversation Memory (in-memory only)
+  // ===========================================================================
 
   async storeConversation(conversation: ConversationMemory): Promise<void> {
     this.conversations.set(conversation.conversationId, {
@@ -65,47 +82,133 @@ export class MemoryManagerAdapter implements IMemoryStore {
     this.conversations.delete(conversationId);
   }
 
-  async recordOperation(operation: string, projectId?: string): Promise<void> {
-    this.memory.recordOperation(operation);
+  // ===========================================================================
+  // Operation Tracking (IPC-backed with fallback)
+  // ===========================================================================
 
-    if (!projectId) {
-      return;
+  async recordOperation(operation: string, projectId?: string): Promise<void> {
+    if (!this.ipcFailed) {
+      try {
+        // Operations are stored globally (not per-project) to match
+        // the getFrequentOperations / getRecentOperations interface.
+        const existing = await this.getOperationEntry(GLOBAL_PROJECT_ID, operation);
+        const count = existing ? existing.count + 1 : 1;
+        const value = JSON.stringify({ count, lastUsed: Date.now() });
+
+        const id = existing
+          ? this.parseEntryId(existing)
+          : this.generateId('op');
+
+        const result = await commands.saveAgentMemory(
+          id, GLOBAL_PROJECT_ID, 'operation', operation, value, null,
+        );
+        if (result.status === 'error') throw new Error(result.error);
+
+        // Update project memory tracking
+        if (projectId) {
+          this.updateProjectOperations(projectId, operation);
+        }
+        return;
+      } catch (e) {
+        this.activateFallback('recordOperation', e);
+      }
     }
 
-    const existing = this.projectMemory.get(projectId) ?? this.createProjectMemory(projectId);
-    const nextOperations = [
-      operation,
-      ...existing.commonOperations.filter((name) => name !== operation),
-    ];
-    this.projectMemory.set(projectId, {
-      ...existing,
-      commonOperations: nextOperations.slice(0, 30),
-      lastAccessed: Date.now(),
-    });
+    // Fallback: in-memory (keyed by operation name only — global scope)
+    const existing = this.fallbackOperations.get(operation);
+    const count = existing ? existing.count + 1 : 1;
+    this.fallbackOperations.set(operation, { operation, count, lastUsed: Date.now() });
+
+    if (projectId) {
+      this.updateProjectOperations(projectId, operation);
+    }
   }
 
   async getFrequentOperations(limit: number = 10): Promise<OperationRecord[]> {
-    return this.memory.getFrequentOperations(limit).map(mapOperationFrequencyToRecord);
+    if (!this.ipcFailed) {
+      try {
+        const entries = await this.fetchCategory(GLOBAL_PROJECT_ID, 'operation');
+        return entries
+          .map(parseOperationEntry)
+          .sort((a, b) => b.count - a.count)
+          .slice(0, limit);
+      } catch (e) {
+        this.activateFallback('getFrequentOperations', e);
+      }
+    }
+
+    return Array.from(this.fallbackOperations.values())
+      .sort((a, b) => b.count - a.count)
+      .slice(0, limit);
   }
 
   async getRecentOperations(limit: number = 10): Promise<OperationRecord[]> {
-    return this.memory.getRecentOperations(limit).map(mapOperationFrequencyToRecord);
+    if (!this.ipcFailed) {
+      try {
+        // Backend sorts by updatedAt DESC already
+        const entries = await this.fetchCategory(GLOBAL_PROJECT_ID, 'operation');
+        return entries.map(parseOperationEntry).slice(0, limit);
+      } catch (e) {
+        this.activateFallback('getRecentOperations', e);
+      }
+    }
+
+    return Array.from(this.fallbackOperations.values())
+      .sort((a, b) => b.lastUsed - a.lastUsed)
+      .slice(0, limit);
   }
 
+  // ===========================================================================
+  // Corrections (IPC-backed with fallback)
+  // ===========================================================================
+
   async recordCorrection(original: string, corrected: string, context?: string): Promise<void> {
-    this.memory.recordCorrection(original, corrected, context);
+    if (!this.ipcFailed) {
+      try {
+        const id = this.generateId('corr');
+        const value = JSON.stringify({ original, corrected, context });
+        const result = await commands.saveAgentMemory(
+          id, GLOBAL_PROJECT_ID, 'correction', original, value, null,
+        );
+        if (result.status === 'error') throw new Error(result.error);
+        return;
+      } catch (e) {
+        this.activateFallback('recordCorrection', e);
+      }
+    }
+
+    this.fallbackCorrections.push({ original, corrected, context });
   }
 
   async getCorrections(limit: number = 20): Promise<CorrectionRecord[]> {
-    return this.memory.getCorrections().slice(-limit).reverse().map(mapUserCorrectionToRecord);
+    if (!this.ipcFailed) {
+      try {
+        const entries = await this.fetchCategory(GLOBAL_PROJECT_ID, 'correction');
+        return entries.map(parseCorrectionEntry).slice(0, limit);
+      } catch (e) {
+        this.activateFallback('getCorrections', e);
+      }
+    }
+
+    return [...this.fallbackCorrections].reverse().slice(0, limit);
   }
 
   async searchCorrections(query: string, limit: number = 20): Promise<CorrectionRecord[]> {
-    return this.memory
-      .findRelevantCorrections(query)
-      .slice(0, limit)
-      .map(mapUserCorrectionToRecord);
+    const all = await this.getCorrections(100);
+    const lowerQuery = query.toLowerCase();
+    return all
+      .filter(
+        (c) =>
+          c.original.toLowerCase().includes(lowerQuery) ||
+          c.corrected.toLowerCase().includes(lowerQuery) ||
+          (c.context ?? '').toLowerCase().includes(lowerQuery),
+      )
+      .slice(0, limit);
   }
+
+  // ===========================================================================
+  // User Preferences (IPC-backed with fallback)
+  // ===========================================================================
 
   async setPreferences(preferences: Partial<UserPreferences>): Promise<void> {
     const current = await this.getPreferences();
@@ -117,30 +220,30 @@ export class MemoryManagerAdapter implements IMemoryStore {
       custom: mergedCustom,
     };
 
-    if (merged.defaultTransitionType !== undefined) {
-      this.memory.setPreference('defaultTransitionType', merged.defaultTransitionType);
-    }
-    if (merged.defaultTransitionDuration !== undefined) {
-      this.memory.setPreference('defaultTransitionDuration', merged.defaultTransitionDuration);
-    }
-    if (merged.defaultVolume !== undefined) {
-      this.memory.setPreference('defaultVolume', merged.defaultVolume);
-    }
-    if (merged.language !== undefined) {
-      this.memory.setPreference('language', merged.language);
-    }
+    const keys: (keyof Omit<UserPreferences, 'custom'>)[] = [
+      'defaultTransitionType',
+      'defaultTransitionDuration',
+      'defaultVolume',
+      'language',
+    ];
 
-    this.memory.setPreference('custom', merged.custom);
+    for (const key of keys) {
+      if (merged[key] !== undefined) {
+        await this.setPreference(key, merged[key]);
+      }
+    }
+    await this.setPreference('custom', merged.custom);
   }
 
   async getPreferences(): Promise<UserPreferences> {
-    const defaultTransitionType = this.memory.getPreference<string>('defaultTransitionType');
-    const defaultTransitionDuration = this.memory.getPreference<number>(
+    const defaultTransitionType = await this.getPreference<string>('defaultTransitionType');
+    const defaultTransitionDuration = await this.getPreference<number>(
       'defaultTransitionDuration',
     );
-    const defaultVolume = this.memory.getPreference<number>('defaultVolume');
-    const language = this.memory.getPreference<string>('language');
-    const custom = this.memory.getPreference<Record<string, unknown>>('custom', {}) ?? {};
+    const defaultVolume = await this.getPreference<number>('defaultVolume');
+    const language = await this.getPreference<string>('language');
+    const custom =
+      (await this.getPreference<Record<string, unknown>>('custom')) ?? {};
 
     return {
       defaultTransitionType,
@@ -152,12 +255,44 @@ export class MemoryManagerAdapter implements IMemoryStore {
   }
 
   async setPreference(key: string, value: unknown): Promise<void> {
-    this.memory.setPreference(key, value);
+    if (!this.ipcFailed) {
+      try {
+        const id = `pref-${key}`;
+        const serialized = JSON.stringify(value);
+        const result = await commands.saveAgentMemory(
+          id, GLOBAL_PROJECT_ID, 'preference', key, serialized, null,
+        );
+        if (result.status === 'error') throw new Error(result.error);
+        return;
+      } catch (e) {
+        this.activateFallback('setPreference', e);
+      }
+    }
+
+    this.fallbackPreferences.set(key, value);
   }
 
   async getPreference<T>(key: string, defaultValue?: T): Promise<T | undefined> {
-    return this.memory.getPreference<T>(key, defaultValue);
+    if (!this.ipcFailed) {
+      try {
+        const entries = await this.fetchCategory(GLOBAL_PROJECT_ID, 'preference');
+        const entry = entries.find((e) => e.key === key);
+        if (entry) {
+          return JSON.parse(entry.value) as T;
+        }
+        return defaultValue;
+      } catch (e) {
+        this.activateFallback('getPreference', e);
+      }
+    }
+
+    const value = this.fallbackPreferences.get(key);
+    return (value as T | undefined) ?? defaultValue;
   }
+
+  // ===========================================================================
+  // Project Memory (in-memory only)
+  // ===========================================================================
 
   async getProjectMemory(projectId: string): Promise<ProjectMemory | null> {
     return this.projectMemory.get(projectId) ?? null;
@@ -176,10 +311,25 @@ export class MemoryManagerAdapter implements IMemoryStore {
     });
   }
 
+  // ===========================================================================
+  // Lifecycle
+  // ===========================================================================
+
   async clearAll(): Promise<void> {
     this.conversations.clear();
     this.projectMemory.clear();
-    this.memory.clearAll();
+    this.fallbackOperations.clear();
+    this.fallbackPreferences.clear();
+    this.fallbackCorrections.length = 0;
+
+    if (!this.ipcFailed) {
+      try {
+        const result = await commands.clearAgentMemory(GLOBAL_PROJECT_ID, null);
+        if (result.status === 'error') throw new Error(result.error);
+      } catch {
+        // Best effort — local state already cleared
+      }
+    }
   }
 
   async clearProject(projectId: string): Promise<void> {
@@ -188,6 +338,15 @@ export class MemoryManagerAdapter implements IMemoryStore {
     for (const [conversationId, conversation] of this.conversations.entries()) {
       if (conversation.projectId === projectId) {
         this.conversations.delete(conversationId);
+      }
+    }
+
+    if (!this.ipcFailed) {
+      try {
+        const result = await commands.clearAgentMemory(projectId, null);
+        if (result.status === 'error') throw new Error(result.error);
+      } catch {
+        // Best effort
       }
     }
   }
@@ -252,10 +411,14 @@ export class MemoryManagerAdapter implements IMemoryStore {
     const rawProjectMemory = Array.isArray(data.projectMemory)
       ? (data.projectMemory as ProjectMemory[])
       : [];
-    for (const projectMemory of rawProjectMemory) {
-      await this.updateProjectMemory(projectMemory.projectId, projectMemory);
+    for (const pm of rawProjectMemory) {
+      await this.updateProjectMemory(pm.projectId, pm);
     }
   }
+
+  // ===========================================================================
+  // Private Helpers
+  // ===========================================================================
 
   private createProjectMemory(projectId: string): ProjectMemory {
     return {
@@ -266,26 +429,102 @@ export class MemoryManagerAdapter implements IMemoryStore {
       lastAccessed: Date.now(),
     };
   }
+
+  private updateProjectOperations(projectId: string, operation: string): void {
+    const existing = this.projectMemory.get(projectId) ?? this.createProjectMemory(projectId);
+    const nextOperations = [
+      operation,
+      ...existing.commonOperations.filter((name) => name !== operation),
+    ];
+    this.projectMemory.set(projectId, {
+      ...existing,
+      commonOperations: nextOperations.slice(0, 30),
+      lastAccessed: Date.now(),
+    });
+  }
+
+  private generateId(prefix: string): string {
+    this.idCounter += 1;
+    return `${prefix}-${Date.now()}-${this.idCounter}`;
+  }
+
+  private async fetchCategory(
+    projectId: string,
+    category: string,
+  ): Promise<MemoryEntry[]> {
+    const result = await commands.getAgentMemory(projectId, category);
+    if (result.status === 'error') throw new Error(result.error);
+    return result.data;
+  }
+
+  /** Look up an existing operation entry by project + operation name. */
+  private async getOperationEntry(
+    projectId: string,
+    operation: string,
+  ): Promise<(OperationRecord & { _id: string }) | null> {
+    const entries = await this.fetchCategory(projectId, 'operation');
+    const entry = entries.find((e) => e.key === operation);
+    if (!entry) return null;
+    const parsed = parseOperationEntry(entry);
+    return { ...parsed, _id: entry.id };
+  }
+
+  /** Extract the stored ID from an entry for upsert. */
+  private parseEntryId(record: { _id: string }): string {
+    return record._id;
+  }
+
+  private activateFallback(method: string, error: unknown): void {
+    if (!this.ipcFailed) {
+      console.warn(
+        `[MemoryManagerAdapter] IPC failed in ${method}, switching to in-memory fallback:`,
+        error instanceof Error ? error.message : error,
+      );
+      this.ipcFailed = true;
+    }
+  }
 }
 
-export function createMemoryManagerAdapter(memoryManager?: MemoryManager): MemoryManagerAdapter {
-  return new MemoryManagerAdapter(memoryManager);
+// =============================================================================
+// Factory
+// =============================================================================
+
+export function createMemoryManagerAdapter(): MemoryManagerAdapter {
+  return new MemoryManagerAdapter();
 }
 
-function mapOperationFrequencyToRecord(operation: OperationFrequency): OperationRecord {
-  return {
-    operation: operation.operation,
-    count: operation.count,
-    lastUsed: operation.lastUsed,
-  };
+// =============================================================================
+// Entry Parsers
+// =============================================================================
+
+function parseOperationEntry(entry: MemoryEntry): OperationRecord {
+  try {
+    const parsed = JSON.parse(entry.value) as { count?: number; lastUsed?: number };
+    return {
+      operation: entry.key,
+      count: parsed.count ?? 1,
+      lastUsed: parsed.lastUsed ?? entry.updatedAt,
+    };
+  } catch {
+    return { operation: entry.key, count: 1, lastUsed: entry.updatedAt };
+  }
 }
 
-function mapUserCorrectionToRecord(correction: UserCorrection): CorrectionRecord {
-  return {
-    original: correction.original,
-    corrected: correction.corrected,
-    context: correction.context,
-  };
+function parseCorrectionEntry(entry: MemoryEntry): CorrectionRecord {
+  try {
+    const parsed = JSON.parse(entry.value) as {
+      original?: string;
+      corrected?: string;
+      context?: string;
+    };
+    return {
+      original: parsed.original ?? entry.key,
+      corrected: parsed.corrected ?? '',
+      context: parsed.context,
+    };
+  } catch {
+    return { original: entry.key, corrected: '', context: undefined };
+  }
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

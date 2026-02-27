@@ -5,8 +5,16 @@
  * Enables context persistence and learning from interactions.
  */
 
-import type { AgentMessage, AgentContext } from '../Agent';
+import type { AgentContext } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
+
+/** A message in the agent conversation (legacy type, kept for ShortTermMemory compat) */
+export interface AgentMessage {
+  role: 'system' | 'user' | 'assistant' | 'tool';
+  content: string;
+  toolCalls?: Array<{ name: string; arguments: Record<string, unknown>; id?: string }>;
+  toolCallId?: string;
+}
 
 const logger = createLogger('AgentMemory');
 

@@ -11,8 +11,10 @@ import { AgenticChat, type AgenticChatHandle } from './AgenticChat';
 import { SessionList } from './SessionList';
 import { createTauriLLMAdapter } from '@/agents/engine/adapters/llm/TauriLLMAdapter';
 import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRegistryAdapter';
+import { createBackendToolExecutor } from '@/agents/engine/adapters/tools/BackendToolExecutor';
 import { globalToolRegistry } from '@/agents';
 import { initializeAgentSystem } from '@/stores/aiStore';
+import { isBackendToolsEnabled } from '@/config/featureFlags';
 import { useNewChat } from '@/hooks/useNewChat';
 import { createLogger } from '@/services/logger';
 
@@ -65,8 +67,13 @@ export function AgenticSidebarContent({
   }, []);
 
   const toolExecutor = useMemo(() => {
-    logger.info('Creating ToolRegistryAdapter');
-    return createToolRegistryAdapter(globalToolRegistry);
+    const frontend = createToolRegistryAdapter(globalToolRegistry);
+    if (isBackendToolsEnabled()) {
+      logger.info('Creating BackendToolExecutor (editing tools → backend IPC)');
+      return createBackendToolExecutor(frontend);
+    }
+    logger.info('Creating ToolRegistryAdapter (all tools → frontend)');
+    return frontend;
   }, []);
 
   // ===========================================================================

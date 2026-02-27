@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import { useAgentApproval, useAgentApprovalStore } from './useAgentApproval';
+import { useAgentApproval, useAgentApprovalStore, clearPendingApprovals } from './useAgentApproval';
 
 describe('useAgentApproval', () => {
   beforeEach(() => {
@@ -391,6 +391,216 @@ describe('useAgentApproval', () => {
       });
 
       expect(result.current.history).toHaveLength(0);
+    });
+  });
+
+  describe('timeout auto-reject', () => {
+    it('should auto-reject after 30 seconds', async () => {
+      const onReject = vi.fn();
+      const { result } = renderHook(() => useAgentApproval());
+
+      let approvalResult: boolean | undefined;
+
+      act(() => {
+        result.current
+          .waitForApproval({
+            toolName: 'delete_clip',
+            description: 'Delete clip',
+            riskLevel: 'high',
+            onReject,
+          })
+          .then((approved) => {
+            approvalResult = approved;
+          });
+      });
+
+      expect(result.current.hasPendingRequest).toBe(true);
+
+      // Advance past timeout and flush microtasks
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+      });
+
+      // Should be auto-rejected
+      expect(approvalResult).toBe(false);
+      expect(result.current.hasPendingRequest).toBe(false);
+      expect(onReject).toHaveBeenCalledWith(
+        'Approval timed out — operation was not permitted',
+      );
+    });
+
+    it('should add timed-out request to history as rejected', async () => {
+      const { result } = renderHook(() => useAgentApproval());
+
+      act(() => {
+        result.current.waitForApproval({
+          toolName: 'delete_clip',
+          description: 'Delete clip',
+          riskLevel: 'high',
+        });
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+      });
+
+      expect(result.current.history).toHaveLength(1);
+      expect(result.current.history[0].response).toBe('rejected');
+      expect(result.current.history[0].reason).toBe(
+        'Approval timed out — operation was not permitted',
+      );
+    });
+
+    it('should not auto-reject if approved before timeout', async () => {
+      const onReject = vi.fn();
+      const { result } = renderHook(() => useAgentApproval());
+
+      let approvalResult: boolean | undefined;
+
+      act(() => {
+        result.current
+          .waitForApproval({
+            toolName: 'delete_clip',
+            description: 'Delete clip',
+            riskLevel: 'high',
+            onReject,
+          })
+          .then((approved) => {
+            approvalResult = approved;
+          });
+      });
+
+      const requestId = result.current.currentRequest!.id;
+
+      // Approve before timeout
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+        result.current.approve(requestId);
+      });
+
+      expect(approvalResult).toBe(true);
+      expect(onReject).not.toHaveBeenCalled();
+
+      // Advancing past timeout should have no effect
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+      });
+
+      expect(result.current.history).toHaveLength(1);
+      expect(result.current.history[0].response).toBe('approved');
+    });
+
+    it('should not auto-reject if manually rejected before timeout', async () => {
+      const onReject = vi.fn();
+      const { result } = renderHook(() => useAgentApproval());
+
+      act(() => {
+        result.current.waitForApproval({
+          toolName: 'delete_clip',
+          description: 'Delete clip',
+          riskLevel: 'high',
+          onReject,
+        });
+      });
+
+      const requestId = result.current.currentRequest!.id;
+
+      await act(async () => {
+        result.current.reject(requestId, 'User rejected');
+      });
+
+      expect(onReject).toHaveBeenCalledWith('User rejected');
+      onReject.mockClear();
+
+      // Advancing past timeout should have no additional effect
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+      });
+
+      expect(onReject).not.toHaveBeenCalled();
+      expect(result.current.history).toHaveLength(1);
+    });
+  });
+
+  describe('clearPendingApprovals', () => {
+    it('should reject all pending resolvers', async () => {
+      const { result } = renderHook(() => useAgentApproval());
+
+      let approvalResult: boolean | undefined;
+
+      act(() => {
+        result.current
+          .waitForApproval({
+            toolName: 'delete_clip',
+            description: 'Delete clip',
+            riskLevel: 'high',
+          })
+          .then((approved) => {
+            approvalResult = approved;
+          });
+      });
+
+      expect(result.current.hasPendingRequest).toBe(true);
+
+      await act(async () => {
+        clearPendingApprovals();
+      });
+
+      expect(approvalResult).toBe(false);
+      expect(result.current.hasPendingRequest).toBe(false);
+    });
+
+    it('should clear timeout timers on cleanup', () => {
+      const { result } = renderHook(() => useAgentApproval());
+      const onReject = vi.fn();
+
+      act(() => {
+        result.current.waitForApproval({
+          toolName: 'delete_clip',
+          description: 'Delete clip',
+          riskLevel: 'high',
+          onReject,
+        });
+      });
+
+      act(() => {
+        clearPendingApprovals();
+      });
+
+      // Timer should be cleared — advancing time should not trigger onReject
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+
+      expect(onReject).not.toHaveBeenCalled();
+    });
+
+    it('should allow new requests after cleanup', () => {
+      const { result } = renderHook(() => useAgentApproval());
+
+      act(() => {
+        result.current.requestApproval({
+          toolName: 'first',
+          description: 'First',
+          riskLevel: 'low',
+        });
+      });
+
+      act(() => {
+        clearPendingApprovals();
+      });
+
+      // Should be able to create a new request
+      act(() => {
+        result.current.requestApproval({
+          toolName: 'second',
+          description: 'Second',
+          riskLevel: 'low',
+        });
+      });
+
+      expect(result.current.hasPendingRequest).toBe(true);
+      expect(result.current.currentRequest?.toolName).toBe('second');
     });
   });
 });

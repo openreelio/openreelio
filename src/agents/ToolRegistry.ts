@@ -5,8 +5,39 @@
  * Provides tool schemas for AI function calling.
  */
 
-import type { AgentContext, AgentTool, JsonSchema } from './Agent';
 import { createLogger } from '@/services/logger';
+
+// =============================================================================
+// Shared Types (formerly from Agent.ts)
+// =============================================================================
+
+/** JSON Schema for tool parameters */
+export interface JsonSchema {
+  type: string;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  items?: JsonSchema;
+  description?: string;
+  enum?: unknown[];
+}
+
+/** A tool that an agent can use (LLM function calling shape) */
+export interface AgentTool {
+  name: string;
+  description: string;
+  parameters: JsonSchema;
+}
+
+/** Context provided to the agent for tool execution */
+export interface AgentContext {
+  projectId?: string;
+  sequenceId?: string;
+  selectedClipIds?: string[];
+  selectedTrackIds?: string[];
+  playheadPosition?: number;
+  timelineDuration?: number;
+  metadata?: Record<string, unknown>;
+}
 
 const logger = createLogger('ToolRegistry');
 

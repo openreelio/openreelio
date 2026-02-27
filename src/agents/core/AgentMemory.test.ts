@@ -9,7 +9,8 @@ import {
   MemoryManager,
   createMemoryManager,
 } from './AgentMemory';
-import type { AgentMessage, AgentContext } from '../Agent';
+import type { AgentMessage } from './AgentMemory';
+import type { AgentContext } from '../ToolRegistry';
 
 describe('MemoryManager', () => {
   let memory: MemoryManager;

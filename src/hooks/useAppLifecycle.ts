@@ -13,6 +13,9 @@ import { isTauri as isTauriApi, invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { confirm } from '@tauri-apps/plugin-dialog';
 import { useProjectStore, useSettingsStore } from '@/stores';
+import { useMessageQueueStore } from '@/stores/messageQueueStore';
+import { abortRunningAgent } from '@/agents/engine/core/agentCleanup';
+import { clearPendingApprovals } from '@/hooks/useAgentApproval';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('useAppLifecycle');
@@ -148,6 +151,14 @@ export function useAppLifecycle(): void {
                 }
               }
             }
+
+            // Abort running agent, clear pending approvals, and flush message queue
+            const wasRunning = abortRunningAgent();
+            if (wasRunning) {
+              logger.info('Aborted running agent engine before close');
+            }
+            clearPendingApprovals();
+            useMessageQueueStore.getState().clear();
 
             // Perform backend cleanup with timeout
             logger.debug('Starting backend cleanup...');
