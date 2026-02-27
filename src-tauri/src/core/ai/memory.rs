@@ -75,10 +75,10 @@ impl AgentMemoryDb {
                     ttl_seconds INTEGER
                 );
 
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_memory_project_category_key
+                    ON agent_memory(project_id, category, key);
                 CREATE INDEX IF NOT EXISTS idx_agent_memory_project_category
                     ON agent_memory(project_id, category);
-                CREATE INDEX IF NOT EXISTS idx_agent_memory_key
-                    ON agent_memory(project_id, key);
                 "#,
             )
             .map_err(|e| CoreError::Internal(format!("Failed to initialize schema: {}", e)))?;
@@ -106,7 +106,8 @@ impl AgentMemoryDb {
                 r#"INSERT INTO agent_memory
                     (id, project_id, category, key, value, created_at, updated_at, ttl_seconds)
                    VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-                   ON CONFLICT(id) DO UPDATE SET
+                   ON CONFLICT(project_id, category, key) DO UPDATE SET
+                    id = excluded.id,
                     value = excluded.value,
                     updated_at = excluded.updated_at,
                     ttl_seconds = excluded.ttl_seconds"#,
@@ -244,6 +245,22 @@ mod tests {
         let entries = db.get_by_category("proj-1", "operation").unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].value, "v2");
+    }
+
+    #[test]
+    fn upsert_with_different_id_same_composite_key() {
+        let db = AgentMemoryDb::in_memory().unwrap();
+        db.save("m1", "proj-1", "operation", "key", "v1", None)
+            .unwrap();
+        // Different ID but same (project_id, category, key) — should replace, not duplicate
+        db.save("m2", "proj-1", "operation", "key", "v2", None)
+            .unwrap();
+
+        let entries = db.get_by_category("proj-1", "operation").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].value, "v2");
+        // ID should be updated to the new one
+        assert_eq!(entries[0].id, "m2");
     }
 
     #[test]
