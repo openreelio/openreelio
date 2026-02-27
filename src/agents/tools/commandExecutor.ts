@@ -8,6 +8,9 @@
 
 import type { CommandResult, CommandType } from '@/types';
 import { useProjectStore } from '@/stores/projectStore';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('AgentCommandExecutor');
 
 export async function executeAgentCommand(
   commandType: string,
@@ -16,17 +19,15 @@ export async function executeAgentCommand(
   const project = useProjectStore.getState();
 
   if (!project.isLoaded || !project.meta) {
-    console.warn(
-      `[executeAgentCommand] Rejected "${commandType}": no project is loaded`,
+    logger.warn(
+      `Rejected "${commandType}": no project is loaded`,
     );
     throw new Error(
       `Cannot execute agent command "${commandType}": no project is loaded. Open or create a project first.`,
     );
   }
 
-  console.warn(
-    `[executeAgentCommand] Executing "${commandType}" via projectStore`,
-  );
+  logger.debug(`Executing "${commandType}" via projectStore`);
   return project.executeCommand({
     type: commandType as CommandType,
     payload,

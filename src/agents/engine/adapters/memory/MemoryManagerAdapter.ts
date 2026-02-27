@@ -10,6 +10,7 @@
  */
 
 import { commands, type MemoryEntry } from '@/bindings';
+import { createLogger } from '@/services/logger';
 import type {
   ConversationMemory,
   IMemoryStore,
@@ -18,6 +19,8 @@ import type {
   UserPreferences,
 } from '../../ports/IMemoryStore';
 import type { CorrectionRecord, OperationRecord } from '../../core/types';
+
+const logger = createLogger('MemoryManagerAdapter');
 
 // Sentinel project ID for global (non-project-specific) memory entries
 const GLOBAL_PROJECT_ID = '__global__';
@@ -476,9 +479,9 @@ export class MemoryManagerAdapter implements IMemoryStore {
 
   private activateFallback(method: string, error: unknown): void {
     if (!this.ipcFailed) {
-      console.warn(
-        `[MemoryManagerAdapter] IPC failed in ${method}, switching to in-memory fallback:`,
-        error instanceof Error ? error.message : error,
+      logger.warn(
+        `IPC failed in ${method}, switching to in-memory fallback:`,
+        { error: error instanceof Error ? error.message : error },
       );
       this.ipcFailed = true;
     }
