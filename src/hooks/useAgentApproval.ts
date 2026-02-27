@@ -7,7 +7,7 @@
 
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
-import type { RiskLevel } from '@/agents/registry/ToolMetadata';
+import type { RiskLevel } from '@/agents/engine/core/types';
 
 // =============================================================================
 // Types
@@ -66,6 +66,9 @@ type ApprovalStore = ApprovalState & ApprovalActions;
 
 const MAX_HISTORY_SIZE = 50;
 
+/** Auto-reject timeout in milliseconds (Design Decision D6) */
+const APPROVAL_TIMEOUT_MS = 30_000;
+
 // =============================================================================
 // External Storage for Non-Serializable Data
 // =============================================================================
@@ -78,6 +81,9 @@ const callbackRegistry = new Map<string, {
 
 // Store promise resolvers outside of Zustand/Immer (Map doesn't work with Immer)
 const pendingResolvers = new Map<string, { resolve: (approved: boolean) => void }>();
+
+// Store timeout timers for auto-reject (keyed by request ID)
+const timeoutTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 // =============================================================================
 // Initial State
@@ -118,6 +124,11 @@ export const useAgentApprovalStore = create<ApprovalStore>()(
     },
 
     reset: () => {
+      // Clear all timeout timers to prevent stale callbacks
+      for (const [, timer] of timeoutTimers) {
+        clearTimeout(timer);
+      }
+      timeoutTimers.clear();
       // Clear external registries
       callbackRegistry.clear();
       pendingResolvers.clear();
@@ -125,6 +136,35 @@ export const useAgentApprovalStore = create<ApprovalStore>()(
     },
   }))
 );
+
+// =============================================================================
+// Standalone Utilities
+// =============================================================================
+
+/**
+ * Clear all pending approval requests, auto-rejecting them.
+ * Call this during session teardown or project close to prevent
+ * stale approval dialogs from blocking future sessions.
+ */
+export function clearPendingApprovals(): void {
+  // Auto-reject all pending resolvers
+  for (const [id, resolver] of pendingResolvers) {
+    resolver.resolve(false);
+    pendingResolvers.delete(id);
+  }
+
+  // Clear all timeout timers
+  for (const [id, timer] of timeoutTimers) {
+    clearTimeout(timer);
+    timeoutTimers.delete(id);
+  }
+
+  // Clear callback registry
+  callbackRegistry.clear();
+
+  // Clear store state
+  useAgentApprovalStore.getState().setCurrentRequest(null);
+}
 
 // =============================================================================
 // Hook
@@ -186,6 +226,13 @@ export function useAgentApproval(): UseAgentApprovalReturn {
       return;
     }
 
+    // Cancel timeout timer
+    const timer = timeoutTimers.get(requestId);
+    if (timer) {
+      clearTimeout(timer);
+      timeoutTimers.delete(requestId);
+    }
+
     // Call onApprove callback from external registry
     const callbacks = callbackRegistry.get(requestId);
     callbacks?.onApprove?.();
@@ -221,6 +268,13 @@ export function useAgentApproval(): UseAgentApprovalReturn {
       return;
     }
 
+    // Cancel timeout timer
+    const timer = timeoutTimers.get(requestId);
+    if (timer) {
+      clearTimeout(timer);
+      timeoutTimers.delete(requestId);
+    }
+
     // Call onReject callback from external registry
     const callbacks = callbackRegistry.get(requestId);
     callbacks?.onReject?.(reason);
@@ -254,6 +308,12 @@ export function useAgentApproval(): UseAgentApprovalReturn {
     const { currentRequest } = useAgentApprovalStore.getState();
 
     if (currentRequest) {
+      // Clear timeout timer to prevent stale callback firing
+      const timer = timeoutTimers.get(currentRequest.id);
+      if (timer) {
+        clearTimeout(timer);
+        timeoutTimers.delete(currentRequest.id);
+      }
       const resolver = pendingResolvers.get(currentRequest.id);
       if (resolver) {
         resolver.resolve(false);
@@ -276,6 +336,37 @@ export function useAgentApproval(): UseAgentApprovalReturn {
 
       // Store the resolver externally
       pendingResolvers.set(requestId, { resolve });
+
+      // Start auto-reject timeout (Design Decision D6: 30 seconds)
+      const timer = setTimeout(() => {
+        timeoutTimers.delete(requestId);
+        const pending = pendingResolvers.get(requestId);
+        if (pending) {
+          // Auto-reject with timeout reason
+          const callbacks = callbackRegistry.get(requestId);
+          callbacks?.onReject?.('Approval timed out — operation was not permitted');
+          pending.resolve(false);
+          pendingResolvers.delete(requestId);
+          callbackRegistry.delete(requestId);
+
+          // Add to history as rejected
+          const { currentRequest } = useAgentApprovalStore.getState();
+          if (currentRequest && currentRequest.id === requestId) {
+            store.addToHistory({
+              id: currentRequest.id,
+              toolName: currentRequest.toolName,
+              description: currentRequest.description,
+              riskLevel: currentRequest.riskLevel,
+              response: 'rejected',
+              reason: 'Approval timed out — operation was not permitted',
+              respondedAt: Date.now(),
+            });
+            store.setCurrentRequest(null);
+          }
+        }
+      }, APPROVAL_TIMEOUT_MS);
+
+      timeoutTimers.set(requestId, timer);
     });
   };
 

@@ -1,13 +1,7 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { invoke } from '@tauri-apps/api/core';
 import { useProjectStore } from '@/stores/projectStore';
 import { executeAgentCommand } from './commandExecutor';
 
-vi.mock('@tauri-apps/api/core', () => ({
-  invoke: vi.fn(),
-}));
-
-const mockInvoke = vi.mocked(invoke);
 type ExecuteCommandFn = ReturnType<typeof useProjectStore.getState>['executeCommand'];
 
 describe('executeAgentCommand', () => {
@@ -28,29 +22,17 @@ describe('executeAgentCommand', () => {
     });
   });
 
-  it('falls back to direct invoke when project is not loaded', async () => {
-    mockInvoke.mockResolvedValueOnce({ opId: 'op_ipc', success: true });
-
-    const result = await executeAgentCommand('MoveClip', {
-      sequenceId: 'seq_001',
-      trackId: 'track_001',
-      clipId: 'clip_001',
-      newTimelineIn: 10,
-    });
-
-    expect(result).toEqual({ opId: 'op_ipc', success: true });
-    expect(mockInvoke).toHaveBeenCalledWith('execute_command', {
-      commandType: 'MoveClip',
-      payload: {
+  it('should throw descriptive error when no project is loaded', async () => {
+    await expect(
+      executeAgentCommand('MoveClip', {
         sequenceId: 'seq_001',
-        trackId: 'track_001',
         clipId: 'clip_001',
         newTimelineIn: 10,
-      },
-    });
+      }),
+    ).rejects.toThrow('no project is loaded');
   });
 
-  it('uses project store executor when project is loaded even without active sequence', async () => {
+  it('should use project store executor when project is loaded', async () => {
     const mockExecuteCommand = vi.fn().mockResolvedValue({ opId: 'op_store', success: true });
     useProjectStore.setState({
       isLoaded: true,
@@ -76,6 +58,11 @@ describe('executeAgentCommand', () => {
         newTimelineIn: 12,
       },
     });
-    expect(mockInvoke).not.toHaveBeenCalled();
+  });
+
+  it('should include command type in error message', async () => {
+    await expect(
+      executeAgentCommand('SplitClip', { clipId: 'c1', splitTime: 5 }),
+    ).rejects.toThrow('SplitClip');
   });
 });

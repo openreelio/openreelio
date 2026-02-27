@@ -26,6 +26,7 @@ import {
   type ConversationMessage,
   type MessagePart,
   type TokenUsage,
+  type PersistenceStatus,
 } from '@/agents/engine/core/conversation';
 import type { LLMMessage } from '@/agents/engine/ports/ILLMClient';
 import { createLogger } from '@/services/logger';
@@ -37,6 +38,8 @@ const logger = createLogger('ConversationStore');
 // =============================================================================
 
 const SAVE_DEBOUNCE_MS = 1000;
+const PERSIST_MAX_RETRIES = 3;
+const PERSIST_BACKOFF_BASE_MS = 1000;
 
 // =============================================================================
 // Session Types (mirror backend DTOs)
@@ -152,29 +155,58 @@ function debouncedPersistMessage(sessionId: string, message: ConversationMessage
   saveTimeoutBySession.set(key, timeoutId);
 }
 
-async function persistMessage(sessionId: string, message: ConversationMessage): Promise<void> {
-  try {
-    const parts = message.parts.map((part, idx) => ({
-      id: `${message.id}_p${idx}`,
-      sortOrder: idx,
-      partType: part.type,
-      dataJson: JSON.stringify(part),
-    }));
+/** Update the persistenceStatus of a message in the store. */
+function updatePersistenceStatus(messageId: string, status: PersistenceStatus): void {
+  useConversationStore.setState((state) => {
+    if (!state.activeConversation) return;
+    const message = state.activeConversation.messages.find((m) => m.id === messageId);
+    if (message) {
+      message.persistenceStatus = status;
+    }
+  });
+}
 
-    await invoke('save_ai_message', {
-      input: {
-        id: message.id,
+async function persistMessage(sessionId: string, message: ConversationMessage): Promise<void> {
+  const parts = message.parts.map((part, idx) => ({
+    id: `${message.id}_p${idx}`,
+    sortOrder: idx,
+    partType: part.type,
+    dataJson: JSON.stringify(part),
+  }));
+
+  const input = {
+    id: message.id,
+    sessionId,
+    role: message.role,
+    timestamp: message.timestamp,
+    parts,
+    usageJson: message.usage ? JSON.stringify(message.usage) : null,
+    finishReason: null,
+  };
+
+  for (let attempt = 1; attempt <= PERSIST_MAX_RETRIES; attempt++) {
+    try {
+      await invoke('save_ai_message', { input });
+      updatePersistenceStatus(message.id, 'saved');
+      return;
+    } catch (err) {
+      logger.error('Failed to save message via IPC', {
         sessionId,
-        role: message.role,
-        timestamp: message.timestamp,
-        parts,
-        usageJson: message.usage ? JSON.stringify(message.usage) : null,
-        finishReason: null,
-      },
-    });
-  } catch (err) {
-    logger.error('Failed to save message via IPC', { sessionId, err });
+        messageId: message.id,
+        attempt,
+        maxRetries: PERSIST_MAX_RETRIES,
+        err,
+      });
+
+      if (attempt < PERSIST_MAX_RETRIES) {
+        const delay = PERSIST_BACKOFF_BASE_MS * Math.pow(2, attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
   }
+
+  // All retries exhausted
+  updatePersistenceStatus(message.id, 'failed');
 }
 
 // =============================================================================
@@ -477,13 +509,20 @@ export const useConversationStore = create<ConversationStore>()(
         state.activeConversation.updatedAt = Date.now();
       });
 
-      // Persist finalized message to SQLite
+      // Persist finalized message to SQLite immediately (no debounce)
       const conv = get().activeConversation;
       if (conv) {
         const message = conv.messages.find((m) => m.id === messageId);
         const sid = message?.sessionId ?? get().activeSessionId;
         if (sid && message) {
-          debouncedPersistMessage(sid, message);
+          updatePersistenceStatus(messageId, 'pending');
+          persistMessage(sid, message).catch((err) => {
+            logger.error('Failed to persist finalized message', {
+              sessionId: sid,
+              messageId,
+              err,
+            });
+          });
         }
       }
     },

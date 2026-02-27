@@ -9,7 +9,6 @@ import { lazy, Suspense, useCallback, useState, useEffect, useMemo } from 'react
 import { ErrorBoundary } from './components/shared';
 import { FFmpegWarning, ToastContainer, type ToastVariant } from './components/ui';
 import { useProjectStore, setupProxyEventListeners, cleanupProxyEventListeners } from './stores';
-import { initializeAgentSystem } from './stores/aiStore';
 import {
   useFFmpegStatus,
   useAutoSave,
@@ -141,11 +140,6 @@ function App(): JSX.Element {
         logger.error('Failed to cleanup proxy event listeners', { error });
       });
     };
-  }, []);
-
-  // Initialize AI agent system on app mount
-  useEffect(() => {
-    initializeAgentSystem();
   }, []);
 
   // ===========================================================================

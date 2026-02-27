@@ -173,6 +173,9 @@ export interface TokenUsage {
 /**
  * A single message in the conversation with typed parts
  */
+/** Persistence status of a message in SQLite storage */
+export type PersistenceStatus = 'pending' | 'saved' | 'failed';
+
 export interface ConversationMessage {
   /** Unique message identifier */
   id: string;
@@ -186,6 +189,8 @@ export interface ConversationMessage {
   sessionId?: string;
   /** Token usage for assistant messages */
   usage?: TokenUsage;
+  /** Whether this message has been persisted to SQLite */
+  persistenceStatus?: PersistenceStatus;
 }
 
 /**

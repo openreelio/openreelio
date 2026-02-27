@@ -6,7 +6,7 @@
  */
 
 import { useCallback, useId, useRef, useEffect, type KeyboardEvent } from 'react';
-import type { RiskLevel } from '@/agents/registry/ToolMetadata';
+import type { RiskLevel } from '@/agents/engine/core/types';
 
 // =============================================================================
 // Types
@@ -53,18 +53,25 @@ const RISK_COLORS: Record<RiskLevel, { bg: string; text: string; border: string 
     text: 'text-red-400',
     border: 'border-red-500/30',
   },
+  critical: {
+    bg: 'bg-red-700/10',
+    text: 'text-red-300',
+    border: 'border-red-700/30',
+  },
 };
 
 const RISK_LABELS: Record<RiskLevel, string> = {
   low: 'Low Risk',
   medium: 'Medium Risk',
   high: 'High Risk',
+  critical: 'Critical Risk',
 };
 
 const RISK_DESCRIPTIONS: Record<RiskLevel, string> = {
   low: 'This operation is safe and can be easily undone.',
   medium: 'This operation may have moderate effects. Review before proceeding.',
   high: 'This operation may cause significant changes. Proceed with caution.',
+  critical: 'This operation is irreversible and may cause data loss. Confirm carefully.',
 };
 
 // =============================================================================

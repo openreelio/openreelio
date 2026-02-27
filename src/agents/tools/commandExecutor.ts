@@ -1,14 +1,16 @@
 /**
  * Agent Tool Command Executor
  *
- * Executes backend edit commands with store synchronization when a project
- * is actively loaded. In non-project contexts (unit tests, early bootstrap),
- * it falls back to direct IPC execution.
+ * Executes backend edit commands through the project store when a project
+ * is actively loaded. Throws an explicit error when no project is loaded,
+ * as editing tools require project context to function correctly.
  */
 
-import { invoke } from '@tauri-apps/api/core';
 import type { CommandResult, CommandType } from '@/types';
 import { useProjectStore } from '@/stores/projectStore';
+import { createLogger } from '@/services/logger';
+
+const logger = createLogger('AgentCommandExecutor');
 
 export async function executeAgentCommand(
   commandType: string,
@@ -16,15 +18,18 @@ export async function executeAgentCommand(
 ): Promise<CommandResult> {
   const project = useProjectStore.getState();
 
-  if (project.isLoaded && project.meta) {
-    return project.executeCommand({
-      type: commandType as CommandType,
-      payload,
-    });
+  if (!project.isLoaded || !project.meta) {
+    logger.warn(
+      `Rejected "${commandType}": no project is loaded`,
+    );
+    throw new Error(
+      `Cannot execute agent command "${commandType}": no project is loaded. Open or create a project first.`,
+    );
   }
 
-  return invoke<CommandResult>('execute_command', {
-    commandType,
+  logger.debug(`Executing "${commandType}" via projectStore`);
+  return project.executeCommand({
+    type: commandType as CommandType,
     payload,
   });
 }

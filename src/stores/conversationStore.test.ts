@@ -538,8 +538,7 @@ describe('ConversationStore', () => {
       );
     });
 
-    it('should persist on finalize via IPC', () => {
-      vi.useFakeTimers();
+    it('should persist on finalize immediately (no debounce)', async () => {
       const store = useConversationStore.getState();
       store.loadForProject('project-1');
       mockInvoke.mockReset().mockResolvedValue(undefined);
@@ -551,20 +550,21 @@ describe('ConversationStore', () => {
       store.appendPart(msgId, createTextPart('response'));
       store.finalizeMessage(msgId);
 
-      vi.advanceTimersByTime(1100);
-      expect(mockInvoke).toHaveBeenCalledWith(
-        'save_ai_message',
-        expect.objectContaining({
-          input: expect.objectContaining({
-            sessionId: 'session-1',
-            role: 'assistant',
+      // Should be called immediately (no timer needed)
+      await vi.waitFor(() => {
+        expect(mockInvoke).toHaveBeenCalledWith(
+          'save_ai_message',
+          expect.objectContaining({
+            input: expect.objectContaining({
+              sessionId: 'session-1',
+              role: 'assistant',
+            }),
           }),
-        }),
-      );
+        );
+      });
     });
 
-    it('should persist finalized assistant message using message-bound sessionId', () => {
-      vi.useFakeTimers();
+    it('should persist finalized assistant message using message-bound sessionId', async () => {
       const store = useConversationStore.getState();
       store.loadForProject('project-1');
       mockInvoke.mockReset().mockResolvedValue(undefined);
@@ -578,13 +578,13 @@ describe('ConversationStore', () => {
       useConversationStore.setState({ activeSessionId: 'session-other' });
       store.finalizeMessage(msgId);
 
-      vi.advanceTimersByTime(1100);
-
-      const saveCalls = mockInvoke.mock.calls.filter(([cmd]) => cmd === 'save_ai_message');
-      expect(saveCalls).toHaveLength(1);
-      expect((saveCalls[0][1] as { input: { sessionId: string } }).input.sessionId).toBe(
-        'session-bound',
-      );
+      await vi.waitFor(() => {
+        const saveCalls = mockInvoke.mock.calls.filter(([cmd]) => cmd === 'save_ai_message');
+        expect(saveCalls).toHaveLength(1);
+        expect((saveCalls[0][1] as { input: { sessionId: string } }).input.sessionId).toBe(
+          'session-bound',
+        );
+      });
     });
 
     it('should not persist when no active session', () => {
@@ -599,6 +599,116 @@ describe('ConversationStore', () => {
 
       // Should not have called save since no session
       expect(mockInvoke).not.toHaveBeenCalledWith('save_ai_message', expect.anything());
+    });
+  });
+
+  describe('persistence retry logic', () => {
+    it('should set persistenceStatus to saved on success', async () => {
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+      mockInvoke.mockReset().mockResolvedValue(undefined);
+      useConversationStore.setState({ activeSessionId: 'session-1' });
+
+      const msgId = store.startAssistantMessage();
+      store.appendPart(msgId, createTextPart('response'));
+      store.finalizeMessage(msgId);
+
+      await vi.waitFor(() => {
+        const msg = useConversationStore.getState().activeConversation!.messages.find(
+          (m) => m.id === msgId,
+        );
+        expect(msg?.persistenceStatus).toBe('saved');
+      });
+    });
+
+    it('should retry on IPC failure and succeed on second attempt', async () => {
+      vi.useFakeTimers();
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+      useConversationStore.setState({ activeSessionId: 'session-1' });
+
+      // First call: fail, second call: succeed
+      mockInvoke.mockReset();
+      mockInvoke
+        .mockRejectedValueOnce(new Error('IPC failure'))
+        .mockResolvedValueOnce(undefined);
+
+      const msgId = store.startAssistantMessage();
+      store.appendPart(msgId, createTextPart('response'));
+      store.finalizeMessage(msgId);
+
+      // First attempt fails immediately
+      await vi.advanceTimersByTimeAsync(100);
+
+      // Advance past first backoff (1s)
+      await vi.advanceTimersByTimeAsync(1100);
+
+      // Second attempt should succeed
+      await vi.advanceTimersByTimeAsync(100);
+
+      const msg = useConversationStore.getState().activeConversation!.messages.find(
+        (m) => m.id === msgId,
+      );
+      expect(msg?.persistenceStatus).toBe('saved');
+
+      const saveCalls = mockInvoke.mock.calls.filter(([cmd]) => cmd === 'save_ai_message');
+      expect(saveCalls).toHaveLength(2);
+    });
+
+    it('should set persistenceStatus to failed after all retries exhausted', async () => {
+      vi.useFakeTimers();
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+      useConversationStore.setState({ activeSessionId: 'session-1' });
+
+      // All 3 attempts fail
+      mockInvoke.mockReset();
+      mockInvoke
+        .mockRejectedValueOnce(new Error('IPC failure 1'))
+        .mockRejectedValueOnce(new Error('IPC failure 2'))
+        .mockRejectedValueOnce(new Error('IPC failure 3'));
+
+      const msgId = store.startAssistantMessage();
+      store.appendPart(msgId, createTextPart('response'));
+      store.finalizeMessage(msgId);
+
+      // Attempt 1 fails immediately
+      await vi.advanceTimersByTimeAsync(100);
+
+      // Backoff 1: 1s
+      await vi.advanceTimersByTimeAsync(1100);
+      // Attempt 2 fails
+      await vi.advanceTimersByTimeAsync(100);
+
+      // Backoff 2: 2s
+      await vi.advanceTimersByTimeAsync(2100);
+      // Attempt 3 fails
+      await vi.advanceTimersByTimeAsync(100);
+
+      const msg = useConversationStore.getState().activeConversation!.messages.find(
+        (m) => m.id === msgId,
+      );
+      expect(msg?.persistenceStatus).toBe('failed');
+
+      const saveCalls = mockInvoke.mock.calls.filter(([cmd]) => cmd === 'save_ai_message');
+      expect(saveCalls).toHaveLength(3);
+    });
+
+    it('should set persistenceStatus to pending on finalize before persist completes', () => {
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+      // Use a never-resolving promise to keep it pending
+      mockInvoke.mockReset().mockReturnValue(new Promise(() => {}));
+      useConversationStore.setState({ activeSessionId: 'session-1' });
+
+      const msgId = store.startAssistantMessage();
+      store.appendPart(msgId, createTextPart('response'));
+      store.finalizeMessage(msgId);
+
+      const msg = useConversationStore.getState().activeConversation!.messages.find(
+        (m) => m.id === msgId,
+      );
+      expect(msg?.persistenceStatus).toBe('pending');
     });
   });
 

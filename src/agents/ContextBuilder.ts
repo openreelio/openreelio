@@ -5,7 +5,7 @@
  * Uses builder pattern for flexible context construction.
  */
 
-import type { AgentContext } from './Agent';
+import type { AgentContext } from './ToolRegistry';
 
 // =============================================================================
 // Types

@@ -2,6 +2,7 @@
 //!
 //! Provides AI integration for video editing assistance.
 
+pub mod agent_plan;
 pub mod conversation;
 #[cfg(not(test))]
 pub mod conversation_commands;
@@ -12,6 +13,8 @@ pub mod gateway;
 pub mod knowledge;
 #[cfg(not(test))]
 pub mod knowledge_commands;
+pub mod memory;
+pub mod plan_executor;
 pub mod proposal;
 pub mod provider;
 pub mod providers;
@@ -33,6 +36,9 @@ pub(crate) fn get_app_data_dir(app: &tauri::AppHandle) -> Result<std::path::Path
         .map_err(|e| format!("Failed to get app data directory: {e}"))
 }
 
+pub use agent_plan::{
+    AgentPlan, AgentPlanResult, PlanRiskLevel, PlanStep, RollbackReport, StepResult,
+};
 pub use conversation::{ConversationDb, MessageRow, MessageWithParts, PartRow, SessionRow};
 pub use cost_tracker::{CostError, CostTracker, ModelPricing, UsageSummary};
 pub use edit_script::{EditCommand, EditScript, Requirement, RiskAssessment};
@@ -44,6 +50,8 @@ pub use gateway::{
     AIGateway, AIGatewayConfig, EditContext, KeyMoment, ProviderRuntimeStatus, ValidationResult,
 };
 pub use knowledge::{KnowledgeDb, KnowledgeRow};
+pub use memory::{AgentMemoryDb, MemoryEntry};
+pub use plan_executor::{resolve_step_references, PlanExecutor};
 pub use proposal::{Proposal, ProposalManager, ProposalStatus};
 pub use provider::{
     AIIntent, AIIntentType, AIProvider, AIResponse, CompletionRequest, CompletionResponse,

@@ -57,6 +57,9 @@ pub enum CoreError {
     #[error("Sequence not found: {0}")]
     SequenceNotFound(SequenceId),
 
+    #[error("Marker not found: {0}")]
+    MarkerNotFound(String),
+
     #[error("Invalid split point: {0} seconds")]
     InvalidSplitPoint(TimeSec),
 

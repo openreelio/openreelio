@@ -94,6 +94,10 @@ pub enum StateChange {
     SequenceCreated { sequence_id: String },
     /// An existing sequence was modified
     SequenceModified { sequence_id: String },
+    /// A new marker was created
+    MarkerCreated { marker_id: String },
+    /// A marker was deleted
+    MarkerDeleted { marker_id: String },
 }
 
 /// Trait that all edit commands must implement

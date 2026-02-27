@@ -51,6 +51,8 @@ import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { globalToolRegistry } from '@/agents';
+import { clearPendingApprovals } from '@/hooks/useAgentApproval';
+import { registerAgentAbort, unregisterAgentAbort } from '@/agents/engine/core/agentCleanup';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('useAgenticLoop');
@@ -402,6 +404,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     approvalResolverRef.current = null;
     toolPermissionResolverRef.current?.resolve('deny');
     toolPermissionResolverRef.current = null;
+    clearPendingApprovals();
     setPhase('aborted');
     setIsRunning(false);
     optionsRef.current.onAbort?.();
@@ -414,6 +417,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     runGuardRef.current = false;
     engineRef.current = null;
     approvalResolverRef.current = null;
+    clearPendingApprovals();
     setPhase('idle');
     setIsRunning(false);
     setEvents([]);
@@ -459,14 +463,15 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     return run(lastInput);
   }, [run]);
 
-  // Cleanup on unmount
+  // Register abort for project-close cleanup; clean up on unmount
   useEffect(() => {
+    registerAgentAbort(abort);
     return () => {
-      if (engineRef.current) {
-        engineRef.current.abort();
-      }
+      unregisterAgentAbort();
+      // Use the shared abort() to ensure resolver and approval cleanup
+      abort();
     };
-  }, []);
+  }, [abort]);
 
   return {
     // State

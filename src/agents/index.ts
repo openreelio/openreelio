@@ -1,25 +1,10 @@
 /**
  * Agent Framework
  *
- * Exports the agent system for AI-driven video editing operations.
+ * Exports the tool registry and tool registration functions.
+ * Legacy agent classes (Agent, VideoEditingAgent, MockAgent) have been removed.
+ * Use the Agentic Engine (src/agents/engine/) for all agent operations.
  */
-
-// Base agent
-export {
-  Agent,
-  type AgentConfig,
-  type AgentContext,
-  type AgentMessage,
-  type AgentResponse,
-  type AgentStatus,
-  type AgentTool,
-  type AgentToolCall,
-  type AgentToolResult,
-  type AgentEventType,
-  type AgentEventListener,
-  type MessageRole,
-  type JsonSchema,
-} from './Agent';
 
 // Tool registry
 export {
@@ -30,6 +15,9 @@ export {
   type ToolCategory,
   type ToolExecutionResult,
   type AIFunctionSchema,
+  type JsonSchema,
+  type AgentContext,
+  type AgentTool,
 } from './ToolRegistry';
 
 // Context builder
@@ -40,12 +28,6 @@ export {
   type ProjectStateShape,
   type TimelineStateShape,
 } from './ContextBuilder';
-
-// Mock agent for testing
-export { MockAgent, type MockLLMResponse } from './MockAgent';
-
-// Video editing agent
-export { VideoEditingAgent, createVideoEditingAgent } from './VideoEditingAgent';
 
 // Tools
 export {
