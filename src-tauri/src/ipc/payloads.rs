@@ -142,6 +142,21 @@ pub struct CreateTrackPayload {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveTrackPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RenameTrackPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub new_name: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateCaptionPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
@@ -522,6 +537,17 @@ pub enum CommandPayload {
     CreateTrack(CreateTrackPayload),
 
     #[serde(
+        alias = "removeTrack",
+        alias = "RemoveTrack",
+        alias = "deleteTrack",
+        alias = "DeleteTrack"
+    )]
+    RemoveTrack(RemoveTrackPayload),
+
+    #[serde(alias = "renameTrack", alias = "RenameTrack")]
+    RenameTrack(RenameTrackPayload),
+
+    #[serde(
         alias = "createCaption",
         alias = "CreateCaption",
         alias = "addCaption",
@@ -643,10 +669,10 @@ impl CommandPayload {
             CreateCaptionCommand, CreateFolderCommand, CreateSequenceCommand, DeleteCaptionCommand,
             DeleteFileCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand,
             MoveFileCommand, RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand,
-            RemoveMaskCommand, RemoveTextClipCommand, RenameFileCommand, SetClipAudioCommand,
-            SetClipMuteCommand, SetClipTransformCommand, SetTrackBlendModeCommand,
-            SplitClipCommand, TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand,
-            UpdateTextCommand,
+            RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
+            RenameTrackCommand, SetClipAudioCommand, SetClipMuteCommand,
+            SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand,
+            UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
         };
 
         match self {
@@ -721,6 +747,12 @@ impl CommandPayload {
                     cmd = cmd.at_position(position);
                 }
                 Box::new(cmd)
+            }
+            CommandPayload::RemoveTrack(p) => {
+                Box::new(RemoveTrackCommand::new(&p.sequence_id, &p.track_id))
+            }
+            CommandPayload::RenameTrack(p) => {
+                Box::new(RenameTrackCommand::new(&p.sequence_id, &p.track_id, &p.new_name))
             }
             CommandPayload::CreateCaption(p) => Box::new(
                 CreateCaptionCommand::new(&p.sequence_id, &p.track_id, p.start_sec, p.end_sec)

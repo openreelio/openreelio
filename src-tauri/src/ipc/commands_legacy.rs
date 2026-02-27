@@ -16,9 +16,10 @@ use crate::core::{
         CreateCaptionCommand, CreateFolderCommand, CreateSequenceCommand, DeleteCaptionCommand,
         DeleteFileCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand, MoveFileCommand,
         RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMaskCommand,
-        RemoveTextClipCommand, RenameFileCommand, SetClipAudioCommand, SetClipMuteCommand,
-        SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand,
-        UpdateAssetCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
+        RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand, RenameTrackCommand,
+        SetClipAudioCommand, SetClipMuteCommand, SetClipTransformCommand,
+        SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand, UpdateAssetCommand,
+        UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
     },
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
     fs::{
@@ -2336,6 +2337,12 @@ pub async fn apply_edit_script(
                 | "createTrack"
                 | "AddTrack"
                 | "addTrack"
+                | "RemoveTrack"
+                | "removeTrack"
+                | "deleteTrack"
+                | "DeleteTrack"
+                | "RenameTrack"
+                | "renameTrack"
                 | "UpdateCaption"
                 | "CreateCaption"
                 | "DeleteCaption"
@@ -2502,6 +2509,12 @@ pub async fn apply_edit_script(
                     track_cmd = track_cmd.at_position(position);
                 }
                 Box::new(track_cmd)
+            }
+            CommandPayload::RemoveTrack(p) => {
+                Box::new(RemoveTrackCommand::new(&p.sequence_id, &p.track_id))
+            }
+            CommandPayload::RenameTrack(p) => {
+                Box::new(RenameTrackCommand::new(&p.sequence_id, &p.track_id, &p.new_name))
             }
             CommandPayload::CreateCaption(p) => Box::new(
                 CreateCaptionCommand::new(&p.sequence_id, &p.track_id, p.start_sec, p.end_sec)
@@ -2722,6 +2735,19 @@ pub async fn validate_edit_script(
                 }
                 if cmd.params.get("name").is_none() {
                     issues.push(format!("CreateTrack command {} missing name", i));
+                }
+            }
+            "RemoveTrack" | "removeTrack" | "deleteTrack" | "DeleteTrack" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("RemoveTrack command {} missing trackId", i));
+                }
+            }
+            "RenameTrack" | "renameTrack" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("RenameTrack command {} missing trackId", i));
+                }
+                if cmd.params.get("newName").is_none() {
+                    issues.push(format!("RenameTrack command {} missing newName", i));
                 }
             }
             _ => {
