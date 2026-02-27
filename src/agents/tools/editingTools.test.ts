@@ -39,7 +39,7 @@ import { getTimelineSnapshot } from './storeAccessor';
 const CTX: AgentContext = { projectId: 'project-1', sequenceId: 'seq-1' };
 
 function getMockExecuteCommand() {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+   
   return (useProjectStore.getState as any)().executeCommand as ReturnType<typeof vi.fn>;
 }
 
@@ -504,6 +504,79 @@ describe('editingTools — extended tools', () => {
         type: 'MoveClip',
         payload: expect.objectContaining({ clipId: 'clip-only', newTimelineIn: 3 }),
       });
+    });
+  });
+
+  // ===========================================================================
+  // Marker Tools
+  // ===========================================================================
+
+  describe('add_marker', () => {
+    it('should be registered with category timeline', () => {
+      const tool = globalToolRegistry.get('add_marker');
+      expect(tool).toBeDefined();
+      expect(tool!.category).toBe('timeline');
+    });
+
+    it('should call AddMarker command', async () => {
+      const tool = globalToolRegistry.get('add_marker');
+      const result = await tool!.handler(
+        { sequenceId: 'seq-1', time: 5.0, label: 'Intro Start' },
+        CTX,
+      );
+
+      expect(result.success).toBe(true);
+      const mockExec = getMockExecuteCommand();
+      expect(mockExec).toHaveBeenCalledWith({
+        type: 'AddMarker',
+        payload: expect.objectContaining({ sequenceId: 'seq-1', timeSec: 5.0, label: 'Intro Start' }),
+      });
+    });
+  });
+
+  describe('remove_marker', () => {
+    it('should be registered with category timeline', () => {
+      const tool = globalToolRegistry.get('remove_marker');
+      expect(tool).toBeDefined();
+      expect(tool!.category).toBe('timeline');
+    });
+
+    it('should call RemoveMarker command', async () => {
+      const tool = globalToolRegistry.get('remove_marker');
+      const result = await tool!.handler(
+        { sequenceId: 'seq-1', markerId: 'marker-1' },
+        CTX,
+      );
+
+      expect(result.success).toBe(true);
+      const mockExec = getMockExecuteCommand();
+      expect(mockExec).toHaveBeenCalledWith({
+        type: 'RemoveMarker',
+        payload: { sequenceId: 'seq-1', markerId: 'marker-1' },
+      });
+    });
+  });
+
+  describe('list_markers', () => {
+    it('should be registered with category analysis', () => {
+      const tool = globalToolRegistry.get('list_markers');
+      expect(tool).toBeDefined();
+      expect(tool!.category).toBe('analysis');
+    });
+  });
+
+  describe('navigate_to_marker', () => {
+    it('should be registered with category analysis', () => {
+      const tool = globalToolRegistry.get('navigate_to_marker');
+      expect(tool).toBeDefined();
+      expect(tool!.category).toBe('analysis');
+    });
+
+    it('should reject negative time', async () => {
+      const tool = globalToolRegistry.get('navigate_to_marker');
+      const result = await tool!.handler({ time: -1 }, CTX);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('non-negative');
     });
   });
 });

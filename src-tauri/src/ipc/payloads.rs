@@ -1,8 +1,8 @@
 use crate::core::effects::{EffectType, ParamValue};
 use crate::core::masks::{MaskBlendMode, MaskShape};
 use crate::core::text::TextClipData;
-use crate::core::timeline::{BlendMode, TrackKind, Transform};
-use crate::core::{AssetId, ClipId, EffectId, MaskId, SequenceId, TimeSec, TrackId};
+use crate::core::timeline::{BlendMode, MarkerType, TrackKind, Transform};
+use crate::core::{AssetId, ClipId, Color, EffectId, MaskId, SequenceId, TimeSec, TrackId};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -153,6 +153,29 @@ pub struct RenameTrackPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
     pub new_name: String,
+}
+
+// =============================================================================
+// Marker Payloads
+// =============================================================================
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AddMarkerPayload {
+    pub sequence_id: SequenceId,
+    pub time_sec: TimeSec,
+    pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<Color>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_type: Option<MarkerType>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveMarkerPayload {
+    pub sequence_id: SequenceId,
+    pub marker_id: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -547,6 +570,18 @@ pub enum CommandPayload {
     #[serde(alias = "renameTrack", alias = "RenameTrack")]
     RenameTrack(RenameTrackPayload),
 
+    // Marker commands
+    #[serde(alias = "addMarker", alias = "AddMarker")]
+    AddMarker(AddMarkerPayload),
+
+    #[serde(
+        alias = "removeMarker",
+        alias = "RemoveMarker",
+        alias = "deleteMarker",
+        alias = "DeleteMarker"
+    )]
+    RemoveMarker(RemoveMarkerPayload),
+
     #[serde(
         alias = "createCaption",
         alias = "CreateCaption",
@@ -665,14 +700,15 @@ impl CommandPayload {
         project_path: &std::path::Path,
     ) -> Box<dyn crate::core::commands::Command> {
         use crate::core::commands::{
-            AddEffectCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand,
-            CreateCaptionCommand, CreateFolderCommand, CreateSequenceCommand, DeleteCaptionCommand,
-            DeleteFileCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand,
-            MoveFileCommand, RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand,
-            RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
-            RenameTrackCommand, SetClipAudioCommand, SetClipMuteCommand,
-            SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand,
-            UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
+            AddEffectCommand, AddMarkerCommand, AddMaskCommand, AddTextClipCommand,
+            AddTrackCommand, CreateCaptionCommand, CreateFolderCommand, CreateSequenceCommand,
+            DeleteCaptionCommand, DeleteFileCommand, ImportAssetCommand, InsertClipCommand,
+            MoveClipCommand, MoveFileCommand, RemoveAssetCommand, RemoveClipCommand,
+            RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
+            RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, SetClipAudioCommand,
+            SetClipMuteCommand, SetClipTransformCommand, SetTrackBlendModeCommand,
+            SplitClipCommand, TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand,
+            UpdateTextCommand,
         };
 
         match self {
@@ -753,6 +789,19 @@ impl CommandPayload {
             }
             CommandPayload::RenameTrack(p) => {
                 Box::new(RenameTrackCommand::new(&p.sequence_id, &p.track_id, &p.new_name))
+            }
+            CommandPayload::AddMarker(p) => {
+                let mut cmd = AddMarkerCommand::new(&p.sequence_id, p.time_sec, &p.label);
+                if let Some(color) = p.color {
+                    cmd = cmd.with_color(color);
+                }
+                if let Some(marker_type) = p.marker_type {
+                    cmd = cmd.with_marker_type(marker_type);
+                }
+                Box::new(cmd)
+            }
+            CommandPayload::RemoveMarker(p) => {
+                Box::new(RemoveMarkerCommand::new(&p.sequence_id, &p.marker_id))
             }
             CommandPayload::CreateCaption(p) => Box::new(
                 CreateCaptionCommand::new(&p.sequence_id, &p.track_id, p.start_sec, p.end_sec)

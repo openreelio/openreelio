@@ -12,11 +12,12 @@ use tauri::{Emitter, Manager, State};
 use crate::core::{
     assets::{Asset, AudioInfo, ProxyStatus, VideoInfo},
     commands::{
-        AddEffectCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand,
+        AddEffectCommand, AddMarkerCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand,
         CreateCaptionCommand, CreateFolderCommand, CreateSequenceCommand, DeleteCaptionCommand,
         DeleteFileCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand, MoveFileCommand,
-        RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMaskCommand,
-        RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand, RenameTrackCommand,
+        RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand,
+        RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
+        RenameTrackCommand,
         SetClipAudioCommand, SetClipMuteCommand, SetClipTransformCommand,
         SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand, UpdateAssetCommand,
         UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
@@ -2346,6 +2347,12 @@ pub async fn apply_edit_script(
                 | "UpdateCaption"
                 | "CreateCaption"
                 | "DeleteCaption"
+                | "AddMarker"
+                | "addMarker"
+                | "RemoveMarker"
+                | "removeMarker"
+                | "DeleteMarker"
+                | "deleteMarker"
         );
         if needs_sequence_id && !obj.contains_key("sequenceId") {
             obj.insert(
@@ -2614,6 +2621,20 @@ pub async fn apply_edit_script(
             }
             CommandPayload::RemoveMask(p) => {
                 Box::new(RemoveMaskCommand::new(&p.effect_id, &p.mask_id))
+            }
+            // Marker commands
+            CommandPayload::AddMarker(p) => {
+                let mut cmd = AddMarkerCommand::new(&p.sequence_id, p.time_sec, &p.label);
+                if let Some(color) = p.color {
+                    cmd = cmd.with_color(color);
+                }
+                if let Some(marker_type) = p.marker_type {
+                    cmd = cmd.with_marker_type(marker_type);
+                }
+                Box::new(cmd)
+            }
+            CommandPayload::RemoveMarker(p) => {
+                Box::new(RemoveMarkerCommand::new(&p.sequence_id, &p.marker_id))
             }
             // Text clip commands
             CommandPayload::AddTextClip(p) => Box::new(AddTextClipCommand::new(

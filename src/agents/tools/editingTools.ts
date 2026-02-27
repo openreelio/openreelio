@@ -1233,6 +1233,175 @@ const EDITING_TOOLS: ToolDefinition[] = [
       }
     },
   },
+  // -------------------------------------------------------------------------
+  // Add Marker
+  // -------------------------------------------------------------------------
+  {
+    name: 'add_marker',
+    description: 'Add a timeline marker at a specific time with a label and optional color.',
+    category: 'timeline',
+    parameters: {
+      type: 'object',
+      properties: {
+        sequenceId: { type: 'string', description: 'Target sequence ID' },
+        time: { type: 'number', description: 'Time position in seconds for the marker' },
+        label: { type: 'string', description: 'Label text for the marker' },
+        color: {
+          type: 'string',
+          description: 'Optional color for the marker (e.g., "red", "blue", "green", "yellow")',
+        },
+      },
+      required: ['sequenceId', 'time', 'label'],
+    },
+    handler: async (args) => {
+      try {
+        const result = await executeAgentCommand('AddMarker', {
+          sequenceId: args.sequenceId as string,
+          timeSec: args.time as number,
+          label: args.label as string,
+          color: args.color as string | undefined,
+        });
+        logger.debug('add_marker executed', { opId: result.opId });
+        return { success: true, result };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('add_marker failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // Remove Marker
+  // -------------------------------------------------------------------------
+  {
+    name: 'remove_marker',
+    description: 'Remove a timeline marker by its ID.',
+    category: 'timeline',
+    parameters: {
+      type: 'object',
+      properties: {
+        sequenceId: { type: 'string', description: 'Target sequence ID' },
+        markerId: { type: 'string', description: 'ID of the marker to remove' },
+      },
+      required: ['sequenceId', 'markerId'],
+    },
+    handler: async (args) => {
+      try {
+        const result = await executeAgentCommand('RemoveMarker', {
+          sequenceId: args.sequenceId as string,
+          markerId: args.markerId as string,
+        });
+        logger.debug('remove_marker executed', { opId: result.opId });
+        return { success: true, result };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('remove_marker failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // List Markers (Analysis — stays on frontend)
+  // -------------------------------------------------------------------------
+  {
+    name: 'list_markers',
+    description: 'List all markers on the current timeline, optionally filtered by time range.',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {
+        fromTime: { type: 'number', description: 'Start of time range in seconds (inclusive)' },
+        toTime: { type: 'number', description: 'End of time range in seconds (inclusive)' },
+      },
+    },
+    handler: async (args) => {
+      try {
+        // Access the active sequence via project store
+        const project = useProjectStore.getState();
+        if (!project.activeSequenceId) {
+          return { success: false, error: 'No active sequence' };
+        }
+        const activeSequence = project.sequences.get(project.activeSequenceId);
+        if (!activeSequence) {
+          return { success: false, error: 'Active sequence not found' };
+        }
+
+        let markers = activeSequence.markers ?? [];
+
+        // Optional time range filter
+        const fromTime = args.fromTime as number | undefined;
+        const toTime = args.toTime as number | undefined;
+        if (fromTime !== undefined || toTime !== undefined) {
+          markers = markers.filter((m: { timeSec: number }) => {
+            if (fromTime !== undefined && m.timeSec < fromTime) return false;
+            if (toTime !== undefined && m.timeSec > toTime) return false;
+            return true;
+          });
+        }
+
+        return {
+          success: true,
+          result: {
+            markers: markers.map((m: { id: string; timeSec: number; label: string; color?: unknown; markerType?: string }) => ({
+              id: m.id,
+              time: m.timeSec,
+              label: m.label,
+              color: m.color,
+              type: m.markerType,
+            })),
+            count: markers.length,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('list_markers failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // -------------------------------------------------------------------------
+  // Navigate to Marker (Frontend — sets playhead position)
+  // -------------------------------------------------------------------------
+  {
+    name: 'navigate_to_marker',
+    description: 'Set the playhead position to a marker\'s time. Use list_markers first to find available markers.',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {
+        time: { type: 'number', description: 'Time position in seconds to navigate to' },
+      },
+      required: ['time'],
+    },
+    handler: async (args) => {
+      try {
+        const time = args.time as number;
+        if (time < 0) {
+          return { success: false, error: 'Time must be non-negative' };
+        }
+
+        // Use playback store to set playhead position
+        const { usePlaybackStore } = await import('@/stores/playbackStore');
+        usePlaybackStore.getState().seek(time, 'agent');
+
+        logger.debug('navigate_to_marker executed', { time });
+        return {
+          success: true,
+          result: {
+            navigatedTo: time,
+            description: `Playhead moved to ${time}s`,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('navigate_to_marker failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
 ];
 
 // =============================================================================

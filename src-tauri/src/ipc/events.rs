@@ -498,6 +498,20 @@ impl EventEmitter {
                     )
                     .map_err(|e| format!("Failed to emit effect updated event: {}", e))?;
                 }
+                StateChange::MarkerCreated { marker_id } => {
+                    app.emit(
+                        "marker:created",
+                        &serde_json::json!({ "markerId": marker_id }),
+                    )
+                    .map_err(|e| format!("Failed to emit marker created event: {}", e))?;
+                }
+                StateChange::MarkerDeleted { marker_id } => {
+                    app.emit(
+                        "marker:deleted",
+                        &serde_json::json!({ "markerId": marker_id }),
+                    )
+                    .map_err(|e| format!("Failed to emit marker deleted event: {}", e))?;
+                }
             }
         }
         Ok(())

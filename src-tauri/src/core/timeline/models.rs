@@ -236,6 +236,21 @@ impl Sequence {
         self.modified_at = chrono::Utc::now().to_rfc3339();
     }
 
+    /// Removes a marker by ID and returns it if found
+    pub fn remove_marker(&mut self, marker_id: &str) -> Option<Marker> {
+        if let Some(pos) = self.markers.iter().position(|m| m.id == marker_id) {
+            self.modified_at = chrono::Utc::now().to_rfc3339();
+            Some(self.markers.remove(pos))
+        } else {
+            None
+        }
+    }
+
+    /// Gets a marker by ID
+    pub fn get_marker(&self, marker_id: &str) -> Option<&Marker> {
+        self.markers.iter().find(|m| m.id == marker_id)
+    }
+
     /// Calculates the total duration of the sequence
     pub fn duration(&self) -> TimeSec {
         self.tracks
