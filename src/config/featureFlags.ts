@@ -89,7 +89,7 @@ const DEFAULT_FLAGS: FeatureFlags = {
   USE_AGENTIC_ENGINE: true,
   USE_VIDEO_GENERATION: false,
   USE_AGENT_LOOP: false,
-  USE_BACKEND_TOOLS: false,
+  USE_BACKEND_TOOLS: true,
 };
 
 /**
