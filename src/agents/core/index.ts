@@ -1,41 +1,15 @@
 /**
  * Agent Core Module
  *
- * Exports core agent functionality including hooks and hookable agents.
+ * Exports the memory system (still used by MemoryManagerAdapter).
+ * Hook system and HookableAgent have been removed with the legacy agent.
  */
-
-// Hook system
-export {
-  HookManager,
-  createHookManager,
-  type PreToolUseHook,
-  type PostToolUseHook,
-  type PreMessageHook,
-  type PostMessageHook,
-  type PreToolUseHookResult,
-  type PostToolUseHookResult,
-  type PreMessageHookResult,
-  type PostMessageHookResult,
-  type PreToolUseContext,
-  type PostToolUseContext,
-  type PreMessageContext,
-  type PostMessageContext,
-  type HookPriority,
-  type HookRegistrationOptions,
-  type UnsubscribeHook,
-} from './AgentHooks';
-
-// Hookable agent
-export {
-  HookableAgent,
-  type HookableAgentConfig,
-  type HookExecutionResult,
-} from './HookableAgent';
 
 // Memory system
 export {
   MemoryManager,
   createMemoryManager,
+  type AgentMessage,
   type ShortTermMemory,
   type LongTermMemory,
   type OperationFrequency,
