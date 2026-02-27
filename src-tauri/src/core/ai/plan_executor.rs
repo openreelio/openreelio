@@ -74,7 +74,7 @@ impl PlanExecutor {
             failed_at_index: failed_index,
             candidate_count,
             attempted_count,
-            succeeded_count: attempted_count,
+            succeeded_count: 0,
             failed_count: 0,
             rolled_back_steps,
             rollback_errors: vec![],
@@ -572,7 +572,8 @@ mod tests {
         assert_eq!(report.failed_at_index, 1);
         assert_eq!(report.candidate_count, 1);
         assert_eq!(report.attempted_count, 1);
-        assert_eq!(report.succeeded_count, 1);
+        // succeeded_count defaults to 0 before actual rollback execution
+        assert_eq!(report.succeeded_count, 0);
         assert_eq!(report.failed_count, 0);
         assert_eq!(report.rolled_back_steps, vec!["step-1".to_string()]);
         assert!(report.rollback_errors.is_empty());
@@ -719,8 +720,8 @@ mod tests {
         // 1. Build a real ProjectState with one sequence, one video track, one asset
         let mut state = ProjectState::new_empty("Integration Test");
 
-        let asset = Asset::new_video("video.mp4", "/video.mp4", VideoInfo::default())
-            .with_duration(10.0);
+        let asset =
+            Asset::new_video("video.mp4", "/video.mp4", VideoInfo::default()).with_duration(10.0);
         let asset_id = asset.id.clone();
         state.assets.insert(asset_id.clone(), asset);
 
