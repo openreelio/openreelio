@@ -923,8 +923,8 @@ const EDITING_TOOLS: ToolDefinition[] = [
     handler: async (args) => {
       try {
         const speed = args.speed as number;
-        if (speed < 0.1 || speed > 10.0) {
-          return { success: false, error: 'Speed must be between 0.1 and 10.0' };
+        if (!Number.isFinite(speed) || speed < 0.1 || speed > 10.0) {
+          return { success: false, error: 'Speed must be a finite number between 0.1 and 10.0' };
         }
         const result = await executeAgentCommand('SetClipTransform', {
           sequenceId: args.sequenceId as string,
@@ -966,40 +966,21 @@ const EDITING_TOOLS: ToolDefinition[] = [
       required: ['sequenceId', 'trackId', 'clipId', 'frameTime'],
     },
     handler: async (args) => {
-      try {
-        // Step 1: Split clip at the freeze point
-        const splitResult = await executeAgentCommand('SplitClip', {
-          sequenceId: args.sequenceId as string,
-          trackId: args.trackId as string,
-          clipId: args.clipId as string,
-          splitTime: args.frameTime as number,
-        });
-
-        // Step 2: Get the new clip IDs from split result
-        const freezeDuration = (args.duration as number) ?? 2.0;
-
-        // TODO: Full freeze frame requires setting speed to 0 on the segment or
-        // using a still frame mechanism. Currently only the split step is performed.
-        logger.debug('freeze_frame: split performed (full freeze pending)', {
-          opId: splitResult.opId,
-          freezeDuration,
-        });
-        return {
-          success: true,
-          result: {
-            ...splitResult,
-            freezeDuration,
-            partial: true,
-            description:
-              `Split performed at ${args.frameTime}s. ` +
-              `Full freeze frame (speed=0 for ${freezeDuration}s) is not yet implemented.`,
-          },
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        logger.error('freeze_frame failed', { error: message });
-        return { success: false, error: message };
-      }
+      // Freeze frame requires speed=0 support which is not yet implemented.
+      // Return failure to prevent the agent from treating this as a completed operation.
+      const freezeDuration = (args.duration as number) ?? 2.0;
+      logger.warn('freeze_frame not yet implemented', {
+        clipId: args.clipId,
+        frameTime: args.frameTime,
+        freezeDuration,
+      });
+      return {
+        success: false,
+        error:
+          `Freeze frame is not yet fully implemented. ` +
+          `The operation requires speed=0 support on clip segments. ` +
+          `As a workaround, use split_clip at ${args.frameTime}s and manually adjust the segment.`,
+      };
     },
   },
   // -------------------------------------------------------------------------
@@ -1045,7 +1026,11 @@ const EDITING_TOOLS: ToolDefinition[] = [
         }
 
         const currentEnd = targetClip.timelineIn + targetClip.duration;
-        const delta = trimEnd - targetClip.sourceOut;
+        // Compute delta in timeline-time, accounting for clip speed
+        const speed = (targetClip as unknown as Record<string, unknown>).speed as number;
+        const effectiveSpeed = speed && speed > 0 ? speed : 1;
+        const sourceDelta = trimEnd - targetClip.sourceOut;
+        const delta = sourceDelta / effectiveSpeed;
 
         // 2. Trim the target clip
         const trimResult = await executeAgentCommand('TrimClip', {

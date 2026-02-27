@@ -101,12 +101,13 @@ fn topological_sort(steps: &[PlanStep]) -> Result<Vec<usize>, String> {
         return Ok(vec![]);
     }
 
-    // Build id -> index mapping
-    let id_to_index: HashMap<&str, usize> = steps
-        .iter()
-        .enumerate()
-        .map(|(i, s)| (s.id.as_str(), i))
-        .collect();
+    // Build id -> index mapping, rejecting duplicate step IDs
+    let mut id_to_index: HashMap<&str, usize> = HashMap::with_capacity(steps.len());
+    for (i, s) in steps.iter().enumerate() {
+        if id_to_index.insert(s.id.as_str(), i).is_some() {
+            return Err(format!("Duplicate step ID '{}' at index {}", s.id, i));
+        }
+    }
 
     let n = steps.len();
 
@@ -687,6 +688,23 @@ mod tests {
             .validate_and_prepare()
             .expect_err("Should detect cycle");
         assert!(err.contains("Circular dependency"));
+    }
+
+    #[test]
+    fn validate_and_prepare_rejects_duplicate_step_ids() {
+        let plan = AgentPlan {
+            id: "plan-012".to_string(),
+            goal: "Plan with duplicate IDs".to_string(),
+            steps: vec![make_step("step-1", vec![]), make_step("step-1", vec![])],
+            approval_granted: true,
+            session_id: None,
+        };
+
+        let executor = PlanExecutor::new(plan);
+        let err = executor
+            .validate_and_prepare()
+            .expect_err("Should detect duplicate");
+        assert!(err.contains("Duplicate step ID"));
     }
 
     #[test]

@@ -94,9 +94,13 @@ async function createNewProject(page: Page, _projectName: string): Promise<boole
 
   // In browser-based E2E runs, native folder dialogs are unavailable.
   // If opening a folder cannot transition to the editor, skip workflow assertions.
-  await expect(page.locator(APP_READY_SELECTOR).first()).toBeVisible({
-    timeout: PROJECT_OPEN_TIMEOUT,
-  });
+  try {
+    await expect(page.locator(APP_READY_SELECTOR).first()).toBeVisible({
+      timeout: PROJECT_OPEN_TIMEOUT,
+    });
+  } catch {
+    return false;
+  }
 
   const timeline = page.locator('[data-testid="timeline"]');
   if (!(await timeline.isVisible().catch(() => false))) {

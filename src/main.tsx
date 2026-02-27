@@ -9,8 +9,13 @@ import './styles/main.css';
 const logger = createLogger('Root');
 
 // Initialize agent system before React renders (ADR-045)
-// Ensures all 56+ tools are registered before any component mounts
-initializeAgentSystem();
+// Ensures all 56+ tools are registered before any component mounts.
+// Wrapped in try/catch so a failure here does not prevent the app from rendering.
+try {
+  initializeAgentSystem();
+} catch (err) {
+  logger.error('Agent system initialization failed — AI features may be unavailable', { err });
+}
 
 /**
  * Root error fallback for catastrophic failures.

@@ -175,7 +175,7 @@ describe('editingTools — extended tools', () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('Speed must be between 0.1 and 10.0');
+      expect(result.error).toContain('between 0.1 and 10.0');
     });
   });
 
@@ -186,7 +186,7 @@ describe('editingTools — extended tools', () => {
       expect(tool!.category).toBe('clip');
     });
 
-    it('should call SplitClip as first step of freeze', async () => {
+    it('should return failure since freeze frame is not yet implemented', async () => {
       const tool = globalToolRegistry.get('freeze_frame');
       const result = await tool!.handler(
         {
@@ -199,12 +199,8 @@ describe('editingTools — extended tools', () => {
         CTX,
       );
 
-      expect(result.success).toBe(true);
-      const mockExec = getMockExecuteCommand();
-      expect(mockExec).toHaveBeenCalledWith({
-        type: 'SplitClip',
-        payload: expect.objectContaining({ clipId: 'clip-1', splitTime: 3.5 }),
-      });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not yet fully implemented');
     });
   });
 

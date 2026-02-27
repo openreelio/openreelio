@@ -468,9 +468,8 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     registerAgentAbort(abort);
     return () => {
       unregisterAgentAbort();
-      if (engineRef.current) {
-        engineRef.current.abort();
-      }
+      // Use the shared abort() to ensure resolver and approval cleanup
+      abort();
     };
   }, [abort]);
 

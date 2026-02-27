@@ -2775,12 +2775,21 @@ pub async fn validate_edit_script(
             "AddMarker" | "addMarker" => {
                 if cmd.params.get("timeSec").is_none() {
                     issues.push(format!("AddMarker command {} missing timeSec", i));
-                } else if let Some(v) = cmd.params.get("timeSec").and_then(|v| v.as_f64()) {
-                    if !v.is_finite() || v < 0.0 {
-                        issues.push(format!(
-                            "AddMarker command {} has invalid timeSec: must be finite and non-negative",
-                            i
-                        ));
+                } else if let Some(v) = cmd.params.get("timeSec") {
+                    match v.as_f64() {
+                        Some(n) if !n.is_finite() || n < 0.0 => {
+                            issues.push(format!(
+                                "AddMarker command {} has invalid timeSec: must be finite and non-negative",
+                                i
+                            ));
+                        }
+                        None => {
+                            issues.push(format!(
+                                "AddMarker command {} has non-numeric timeSec",
+                                i
+                            ));
+                        }
+                        _ => {} // valid
                     }
                 }
                 if cmd.params.get("label").is_none() {

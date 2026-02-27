@@ -119,12 +119,15 @@ export class TraceRecorder {
     model?: string;
     provider?: string;
   }): void {
+    this.traceId = generateId('trace');
     this.sessionId = options.sessionId;
     this.input = options.input;
     this.model = options.model ?? '';
     this.provider = options.provider ?? '';
     this.startTime = Date.now();
     this.finalized = false;
+    this.fastPath = false;
+    this.iterations = 0;
     this.phases = [];
     this.currentPhase = null;
     this.tokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
@@ -181,7 +184,8 @@ export class TraceRecorder {
   addTokenUsage(usage: Partial<TokenUsage>): void {
     this.tokenUsage.inputTokens += usage.inputTokens ?? 0;
     this.tokenUsage.outputTokens += usage.outputTokens ?? 0;
-    this.tokenUsage.totalTokens += usage.totalTokens ?? 0;
+    // Derive total from components to prevent drift
+    this.tokenUsage.totalTokens = this.tokenUsage.inputTokens + this.tokenUsage.outputTokens;
   }
 
   /**

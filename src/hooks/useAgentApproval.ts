@@ -124,6 +124,11 @@ export const useAgentApprovalStore = create<ApprovalStore>()(
     },
 
     reset: () => {
+      // Clear all timeout timers to prevent stale callbacks
+      for (const [, timer] of timeoutTimers) {
+        clearTimeout(timer);
+      }
+      timeoutTimers.clear();
       // Clear external registries
       callbackRegistry.clear();
       pendingResolvers.clear();
@@ -303,6 +308,12 @@ export function useAgentApproval(): UseAgentApprovalReturn {
     const { currentRequest } = useAgentApprovalStore.getState();
 
     if (currentRequest) {
+      // Clear timeout timer to prevent stale callback firing
+      const timer = timeoutTimers.get(currentRequest.id);
+      if (timer) {
+        clearTimeout(timer);
+        timeoutTimers.delete(currentRequest.id);
+      }
       const resolver = pendingResolvers.get(currentRequest.id);
       if (resolver) {
         resolver.resolve(false);

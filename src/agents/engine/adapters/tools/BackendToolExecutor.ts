@@ -264,17 +264,27 @@ export class BackendToolExecutor implements IToolExecutor {
           const subSteps = exp(t.args);
           const startIdx = stepCounter;
           for (let j = 0; j < subSteps.length; j++) {
+            // Compound sub-steps must always execute sequentially relative to
+            // each other, regardless of batch mode. The first sub-step may
+            // depend on the previous global step in sequential mode.
+            let dependsOn: string[];
+            if (subSteps[j].dependsOn) {
+              dependsOn = subSteps[j].dependsOn!;
+            } else if (j > 0) {
+              // Force sequential dependency within compound tool
+              dependsOn = [`step-${stepCounter}`];
+            } else if (stepCounter > 0 && request.mode === 'sequential') {
+              dependsOn = [`step-${stepCounter}`];
+            } else {
+              dependsOn = [];
+            }
             allSteps.push({
               id: `step-${stepCounter + 1}`,
               toolName: subSteps[j].toolName,
               params: subSteps[j].params as Record<string, never>,
               description: `Execute ${subSteps[j].toolName}`,
               riskLevel: 'low' as const,
-              dependsOn:
-                subSteps[j].dependsOn ??
-                (stepCounter > 0 && request.mode === 'sequential'
-                  ? [`step-${stepCounter}`]
-                  : []),
+              dependsOn,
               optional: false,
             });
             stepCounter++;
@@ -313,39 +323,61 @@ export class BackendToolExecutor implements IToolExecutor {
       try {
         const planResult = await invoke<AgentPlanResult>('execute_agent_plan', { plan });
 
-        // Map step results back to original tools using the step mapping
-        for (const mapping of toolStepMapping) {
-          const stepSlice = planResult.stepResults.slice(
-            mapping.stepStart,
-            mapping.stepStart + mapping.stepCount,
-          );
-          const allSucceeded = stepSlice.every((sr) => sr?.success);
-
-          if (allSucceeded && stepSlice.length > 0) {
-            const totalDuration = stepSlice.reduce((sum, sr) => sum + (sr?.durationMs ?? 0), 0);
+        // If the plan failed atomically (with rollback), all tools must be
+        // reported as failed — individual step slices may look successful
+        // but the entire batch was rolled back.
+        if (!planResult.success) {
+          const batchError =
+            planResult.errorMessage ??
+            planResult.rollbackReport?.rollbackErrors?.join('; ') ??
+            'Plan execution failed';
+          for (const t of backendTools) {
             results.push({
-              tool: backendTools[mapping.toolIndex].name,
-              result: {
-                success: true,
-                data:
-                  mapping.stepCount > 1
-                    ? { steps: stepSlice.map((sr) => ({ success: sr.success, data: sr.data })) }
-                    : stepSlice[0].data,
-                duration: totalDuration,
-                undoable: true,
-              },
-            });
-            successCount++;
-          } else {
-            const failedStep = stepSlice.find((sr) => !sr?.success);
-            results.push({
-              tool: backendTools[mapping.toolIndex].name,
-              result: createFailureResult(
-                failedStep?.error ?? 'Step not executed',
-                failedStep?.durationMs ?? 0,
-              ),
+              tool: t.name,
+              result: createFailureResult(`Batch rolled back: ${batchError}`, 0),
             });
             failureCount++;
+          }
+        } else {
+          // Map step results back to original tools using the step mapping
+          for (const mapping of toolStepMapping) {
+            const stepSlice = planResult.stepResults.slice(
+              mapping.stepStart,
+              mapping.stepStart + mapping.stepCount,
+            );
+            const allSucceeded = stepSlice.every((sr) => sr?.success);
+
+            if (allSucceeded && stepSlice.length > 0) {
+              const totalDuration = stepSlice.reduce(
+                (sum, sr) => sum + (sr?.durationMs ?? 0),
+                0,
+              );
+              results.push({
+                tool: backendTools[mapping.toolIndex].name,
+                result: {
+                  success: true,
+                  data:
+                    mapping.stepCount > 1
+                      ? {
+                          steps: stepSlice.map((sr) => ({ success: sr.success, data: sr.data })),
+                        }
+                      : stepSlice[0].data,
+                  duration: totalDuration,
+                  undoable: true,
+                },
+              });
+              successCount++;
+            } else {
+              const failedStep = stepSlice.find((sr) => !sr?.success);
+              results.push({
+                tool: backendTools[mapping.toolIndex].name,
+                result: createFailureResult(
+                  failedStep?.error ?? 'Step not executed',
+                  failedStep?.durationMs ?? 0,
+                ),
+              });
+              failureCount++;
+            }
           }
         }
       } catch (err) {
