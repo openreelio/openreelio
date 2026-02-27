@@ -60,6 +60,9 @@ pub mod video_generation;
 // Workspace commands (workspace scanning, file tree, registration)
 pub mod workspace;
 
+// Agent commands (trace writing, plan execution, memory persistence)
+pub mod agent;
+
 // Placeholder for future extracted modules
 // pub mod settings;
 
@@ -78,3 +81,6 @@ pub use video_generation::*;
 
 // Re-export workspace commands
 pub use workspace::*;
+
+// Re-export agent commands
+pub use agent::*;

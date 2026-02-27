@@ -627,6 +627,237 @@ impl CommandPayload {
         });
         serde_json::from_value(raw_request).map_err(|e| format!("Invalid command payload: {}", e))
     }
+
+    /// Converts a validated `CommandPayload` into an executable `Command` trait object.
+    ///
+    /// This function extracts the command construction logic so that it can be
+    /// reused by both the `execute_command` IPC handler and the agent plan executor.
+    ///
+    /// `project_path` is needed only for filesystem commands (CreateFolder, RenameFile, etc.).
+    pub fn build_command(
+        self,
+        project_path: &std::path::Path,
+    ) -> Box<dyn crate::core::commands::Command> {
+        use crate::core::commands::{
+            AddEffectCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand,
+            CreateCaptionCommand, CreateFolderCommand, CreateSequenceCommand, DeleteCaptionCommand,
+            DeleteFileCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand,
+            MoveFileCommand, RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand,
+            RemoveMaskCommand, RemoveTextClipCommand, RenameFileCommand, SetClipAudioCommand,
+            SetClipMuteCommand, SetClipTransformCommand, SetTrackBlendModeCommand,
+            SplitClipCommand, TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand,
+            UpdateTextCommand,
+        };
+
+        match self {
+            CommandPayload::InsertClip(p) => Box::new(InsertClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.asset_id,
+                p.timeline_start,
+            )),
+            CommandPayload::RemoveClip(p) => Box::new(RemoveClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+            )),
+            CommandPayload::MoveClip(p) => Box::new(MoveClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.new_timeline_in,
+                p.new_track_id,
+            )),
+            CommandPayload::TrimClip(p) => Box::new(TrimClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.new_source_in,
+                p.new_source_out,
+                p.new_timeline_in,
+            )),
+            CommandPayload::SplitClip(p) => Box::new(SplitClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.split_time,
+            )),
+            CommandPayload::SetClipTransform(p) => Box::new(SetClipTransformCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.transform,
+            )),
+            CommandPayload::SetClipMute(p) => Box::new(SetClipMuteCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.muted,
+            )),
+            CommandPayload::SetClipAudio(p) => Box::new(SetClipAudioCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.volume_db,
+                p.pan,
+                p.muted,
+                p.fade_in_sec,
+                p.fade_out_sec,
+            )),
+            CommandPayload::SetTrackBlendMode(p) => Box::new(SetTrackBlendModeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.blend_mode,
+            )),
+            CommandPayload::ImportAsset(p) => Box::new(ImportAssetCommand::new(&p.name, &p.uri)),
+            CommandPayload::RemoveAsset(p) => Box::new(RemoveAssetCommand::new(&p.asset_id)),
+            CommandPayload::CreateSequence(p) => Box::new(CreateSequenceCommand::new(
+                &p.name,
+                &p.format.unwrap_or_else(|| "1080p".to_string()),
+            )),
+            CommandPayload::CreateTrack(p) => {
+                let mut cmd = AddTrackCommand::new(&p.sequence_id, &p.name, p.kind);
+                if let Some(position) = p.position {
+                    cmd = cmd.at_position(position);
+                }
+                Box::new(cmd)
+            }
+            CommandPayload::CreateCaption(p) => Box::new(
+                CreateCaptionCommand::new(&p.sequence_id, &p.track_id, p.start_sec, p.end_sec)
+                    .with_text(p.text),
+            ),
+            CommandPayload::DeleteCaption(p) => Box::new(DeleteCaptionCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.caption_id,
+            )),
+            CommandPayload::UpdateCaption(p) => Box::new(
+                crate::core::commands::UpdateCaptionCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.caption_id,
+                )
+                .with_text(p.text)
+                .with_time_range(p.start_sec, p.end_sec),
+            ),
+            CommandPayload::AddEffect(p) => {
+                let mut cmd =
+                    AddEffectCommand::new(&p.sequence_id, &p.track_id, &p.clip_id, p.effect_type);
+                for (key, value) in p.params {
+                    cmd = cmd.with_param(key, value);
+                }
+                if let Some(pos) = p.position {
+                    cmd = cmd.at_position(pos);
+                }
+                Box::new(cmd)
+            }
+            CommandPayload::RemoveEffect(p) => Box::new(RemoveEffectCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                &p.effect_id,
+            )),
+            CommandPayload::UpdateEffect(p) => {
+                let mut cmd = UpdateEffectCommand::new(&p.effect_id);
+                for (key, value) in p.params {
+                    cmd = cmd.with_param(key, value);
+                }
+                if let Some(enabled) = p.enabled {
+                    cmd = cmd.set_enabled(enabled);
+                }
+                Box::new(cmd)
+            }
+            CommandPayload::AddMask(p) => {
+                let mut cmd = AddMaskCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    &p.effect_id,
+                    p.shape,
+                );
+                if let Some(name) = p.name {
+                    cmd = cmd.with_name(name);
+                }
+                if p.feather > 0.0 {
+                    cmd = cmd.with_feather(p.feather);
+                }
+                if p.inverted {
+                    cmd = cmd.inverted();
+                }
+                Box::new(cmd)
+            }
+            CommandPayload::UpdateMask(p) => {
+                let mut cmd = UpdateMaskCommand::new(&p.effect_id, &p.mask_id);
+                if let Some(shape) = p.shape {
+                    cmd = cmd.with_shape(shape);
+                }
+                if let Some(name) = p.name {
+                    cmd = cmd.with_name(name);
+                }
+                if let Some(feather) = p.feather {
+                    cmd = cmd.with_feather(feather);
+                }
+                if let Some(opacity) = p.opacity {
+                    cmd = cmd.with_opacity(opacity);
+                }
+                if let Some(expansion) = p.expansion {
+                    cmd = cmd.with_expansion(expansion);
+                }
+                if let Some(inverted) = p.inverted {
+                    cmd = cmd.with_inverted(inverted);
+                }
+                if let Some(blend_mode) = p.blend_mode {
+                    cmd = cmd.with_blend_mode(blend_mode);
+                }
+                if let Some(enabled) = p.enabled {
+                    cmd = cmd.with_enabled(enabled);
+                }
+                if let Some(locked) = p.locked {
+                    cmd = cmd.with_locked(locked);
+                }
+                Box::new(cmd)
+            }
+            CommandPayload::RemoveMask(p) => {
+                Box::new(RemoveMaskCommand::new(&p.effect_id, &p.mask_id))
+            }
+            CommandPayload::AddTextClip(p) => Box::new(AddTextClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.timeline_in,
+                p.duration,
+                p.text_data,
+            )),
+            CommandPayload::UpdateTextClip(p) => Box::new(UpdateTextCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.text_data,
+            )),
+            CommandPayload::RemoveTextClip(p) => Box::new(RemoveTextClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+            )),
+            CommandPayload::CreateFolder(p) => Box::new(CreateFolderCommand::new(
+                &p.relative_path,
+                project_path.to_path_buf(),
+            )),
+            CommandPayload::RenameFile(p) => Box::new(RenameFileCommand::new(
+                &p.old_relative_path,
+                &p.new_name,
+                project_path.to_path_buf(),
+            )),
+            CommandPayload::MoveFile(p) => Box::new(MoveFileCommand::new(
+                &p.source_path,
+                &p.dest_folder_path,
+                project_path.to_path_buf(),
+            )),
+            CommandPayload::DeleteFile(p) => Box::new(DeleteFileCommand::new(
+                &p.relative_path,
+                project_path.to_path_buf(),
+            )),
+        }
+    }
 }
 
 #[cfg(test)]

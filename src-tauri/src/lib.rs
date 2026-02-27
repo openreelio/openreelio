@@ -827,6 +827,14 @@ mod tauri_app {
                 $crate::ipc::list_workspace_documents,
                 $crate::ipc::read_workspace_document,
                 $crate::ipc::write_workspace_document,
+                // Agent commands
+                $crate::ipc::write_agent_trace,
+                $crate::ipc::execute_agent_plan,
+                // Agent memory commands
+                $crate::ipc::save_agent_memory,
+                $crate::ipc::get_agent_memory,
+                $crate::ipc::delete_agent_memory,
+                $crate::ipc::clear_agent_memory,
             ]
         };
     }
@@ -1157,6 +1165,14 @@ mod tauri_app {
             ipc::list_workspace_documents,
             ipc::read_workspace_document,
             ipc::write_workspace_document,
+            // Agent commands
+            ipc::write_agent_trace,
+            ipc::execute_agent_plan,
+            // Agent memory commands
+            ipc::save_agent_memory,
+            ipc::get_agent_memory,
+            ipc::delete_agent_memory,
+            ipc::clear_agent_memory,
         ])
         .run(tauri::generate_context!());
 
