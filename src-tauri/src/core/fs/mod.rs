@@ -120,9 +120,21 @@ pub fn validate_local_input_path(path: &str, label: &str) -> Result<PathBuf, Str
         return Err(format!("{label} is not a file: {}", pb.display()));
     }
 
-    // Best-effort normalization. Canonicalization can fail on some special filesystems
-    // even when metadata succeeds; in that case we keep the validated absolute path.
-    Ok(std::fs::canonicalize(&pb).unwrap_or(pb))
+    // Best-effort normalization. Canonicalization can fail on special filesystems
+    // (network shares, some UNC paths) even when metadata succeeds. We fall back
+    // to the validated absolute path, but log the failure so it is visible in
+    // traces if it ever causes a downstream scope-check mismatch.
+    match std::fs::canonicalize(&pb) {
+        Ok(canonical) => Ok(canonical),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to canonicalize '{}' (using validated path as-is): {}",
+                pb.display(),
+                e
+            );
+            Ok(pb)
+        }
+    }
 }
 
 /// Validates and canonicalizes a project directory path.
@@ -248,13 +260,33 @@ pub async fn validate_local_input_path_async(path: &str, label: &str) -> Result<
         return Err(format!("{label} is not a file: {}", pb.display()));
     }
 
-    // Best-effort normalization.
+    // Best-effort normalization — same policy as the sync variant: fall back
+    // to the validated absolute path and log when canonicalization fails.
+    // The closure always produces a `PathBuf` (never an error), so we avoid
+    // any `From<io::Error>` conversion that the outer `Result<_, String>` can't
+    // satisfy.
     let pb_clone = pb.clone();
-    Ok(
-        tokio::task::spawn_blocking(move || std::fs::canonicalize(&pb_clone).unwrap_or(pb_clone))
-            .await
-            .unwrap_or(pb),
-    )
+    let canonical = tokio::task::spawn_blocking(move || match std::fs::canonicalize(&pb_clone) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to canonicalize '{}' (using validated path as-is): {}",
+                pb_clone.display(),
+                e
+            );
+            pb_clone
+        }
+    })
+    .await
+    // spawn_blocking panicked — fall back to original path rather than propagating
+    .unwrap_or_else(|_| {
+        tracing::warn!(
+            "spawn_blocking for canonicalize panicked; using original path '{}'",
+            pb.display()
+        );
+        pb.clone()
+    });
+    Ok(canonical)
 }
 
 /// Validates an output path for write operations.

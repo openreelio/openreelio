@@ -61,6 +61,22 @@ fn try_acquire_lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, String> {
     })
 }
 
+/// Emits a Tauri event, logging a warning if the emission fails.
+///
+/// Tauri's `emit()` returns an error when the event loop has been shut down
+/// (e.g. the window was closed during a long-running job). Rather than
+/// propagating that error up the call stack—which would mask the *actual*
+/// job result—we log a `WARN` and continue so the job status is still
+/// recorded correctly.
+fn emit_or_warn<S>(handle: &tauri::AppHandle, event: &str, payload: S)
+where
+    S: serde::Serialize + Clone,
+{
+    if let Err(e) = handle.emit(event, payload) {
+        tracing::warn!("Failed to emit Tauri event '{}': {}", event, e);
+    }
+}
+
 // =============================================================================
 // Job Handle
 // =============================================================================
@@ -392,8 +408,8 @@ impl JobProcessor {
             "message": message,
         });
 
-        let _ = self.app_handle.emit("job:progress", payload.clone());
-        let _ = self.app_handle.emit("job-progress", payload);
+        emit_or_warn(&self.app_handle, "job:progress", payload.clone());
+        emit_or_warn(&self.app_handle, "job-progress", payload);
     }
 
     /// Emit job completion event.
@@ -404,8 +420,8 @@ impl JobProcessor {
             "jobId": job_id,
             "result": result,
         });
-        let _ = self.app_handle.emit("job:completed", payload.clone());
-        let _ = self.app_handle.emit("job-complete", payload);
+        emit_or_warn(&self.app_handle, "job:completed", payload.clone());
+        emit_or_warn(&self.app_handle, "job-complete", payload);
     }
 
     /// Emit job failure event.
@@ -416,8 +432,8 @@ impl JobProcessor {
             "jobId": job_id,
             "error": error,
         });
-        let _ = self.app_handle.emit("job:failed", payload.clone());
-        let _ = self.app_handle.emit("job-failed", payload);
+        emit_or_warn(&self.app_handle, "job:failed", payload.clone());
+        emit_or_warn(&self.app_handle, "job-failed", payload);
     }
 
     /// Process thumbnail generation job
@@ -502,7 +518,8 @@ impl JobProcessor {
         let input_path = validate_local_input_path_async(input_path, "inputPath").await?;
 
         // Emit generating event
-        let _ = self.app_handle.emit(
+        emit_or_warn(
+            &self.app_handle,
             "asset:proxy-generating",
             serde_json::json!({
                 "assetId": asset_id,
@@ -538,8 +555,8 @@ impl JobProcessor {
                     "fps": progress.fps,
                     "etaSeconds": progress.eta_seconds,
                 });
-                let _ = app_handle.emit("job:progress", payload.clone());
-                let _ = app_handle.emit("job-progress", payload);
+                emit_or_warn(&app_handle, "job:progress", payload.clone());
+                emit_or_warn(&app_handle, "job-progress", payload);
             }
         });
 
@@ -559,7 +576,8 @@ impl JobProcessor {
 
                 // Emit proxy ready event for frontend to update state
                 // Note: proxyUrl is the raw file path, frontend handles conversion
-                let _ = self.app_handle.emit(
+                emit_or_warn(
+                    &self.app_handle,
                     "asset:proxy-ready",
                     serde_json::json!({
                         "assetId": asset_id,
@@ -584,7 +602,8 @@ impl JobProcessor {
                 let error_msg = format!("Proxy generation failed: {}", e);
 
                 // Emit proxy failed event
-                let _ = self.app_handle.emit(
+                emit_or_warn(
+                    &self.app_handle,
                     "asset:proxy-failed",
                     serde_json::json!({
                         "assetId": asset_id,
@@ -605,8 +624,6 @@ impl JobProcessor {
     /// - `waveform-complete` on success with { assetId, samplesPerSecond, peakCount, durationSec }
     /// - `waveform-error` on failure with { assetId, error }
     async fn process_waveform(&self, job: &Job) -> Result<serde_json::Value, String> {
-        use tauri::Emitter;
-
         let asset_id = job
             .payload
             .get("assetId")
@@ -630,7 +647,8 @@ impl JobProcessor {
             .unwrap_or(100) as u32;
 
         // Emit generating event
-        let _ = self.app_handle.emit(
+        emit_or_warn(
+            &self.app_handle,
             "waveform-generating",
             serde_json::json!({
                 "assetId": asset_id,
@@ -656,7 +674,8 @@ impl JobProcessor {
         {
             Ok(waveform) => {
                 // Emit completion event
-                let _ = self.app_handle.emit(
+                emit_or_warn(
+                    &self.app_handle,
                     "waveform-complete",
                     serde_json::json!({
                         "assetId": asset_id,
@@ -685,7 +704,8 @@ impl JobProcessor {
                 let error_msg = format!("Waveform generation failed: {}", e);
 
                 // Emit error event
-                let _ = self.app_handle.emit(
+                emit_or_warn(
+                    &self.app_handle,
                     "waveform-error",
                     serde_json::json!({
                         "assetId": asset_id,
@@ -883,7 +903,8 @@ impl JobProcessor {
         );
 
         // Emit completion event
-        let _ = self.app_handle.emit(
+        emit_or_warn(
+            &self.app_handle,
             "transcription-complete",
             serde_json::json!({
                 "jobId": job.id,
@@ -1034,7 +1055,8 @@ impl JobProcessor {
             );
 
             // Emit completion event
-            let _ = self.app_handle.emit(
+            emit_or_warn(
+                &self.app_handle,
                 "indexing-complete",
                 serde_json::json!({
                     "jobId": job.id,
@@ -1108,7 +1130,8 @@ impl JobProcessor {
         );
 
         // Emit rendering start event
-        let _ = self.app_handle.emit(
+        emit_or_warn(
+            &self.app_handle,
             "preview:rendering",
             serde_json::json!({
                 "jobId": job.id,
@@ -1149,7 +1172,8 @@ impl JobProcessor {
             let total_clips: usize = sequence.tracks.iter().map(|t| t.clips.len()).sum();
             if total_clips == 0 {
                 let error = "Sequence has no clips to render";
-                let _ = self.app_handle.emit(
+                emit_or_warn(
+                    &self.app_handle,
                     "preview:failed",
                     serde_json::json!({
                         "jobId": job.id,
@@ -1193,7 +1217,8 @@ impl JobProcessor {
             // Spawn progress reporter task
             let progress_task = tokio::spawn(async move {
                 while let Some(progress) = progress_rx.recv().await {
-                    let _ = app_handle.emit(
+                    emit_or_warn(
+                        &app_handle,
                         "preview:progress",
                         serde_json::json!({
                             "jobId": job_id,
@@ -1228,7 +1253,8 @@ impl JobProcessor {
                     let preview_path = export_result.output_path.to_string_lossy().to_string();
 
                     // Emit completion event
-                    let _ = self.app_handle.emit(
+                    emit_or_warn(
+                        &self.app_handle,
                         "preview:complete",
                         serde_json::json!({
                             "jobId": job.id,
@@ -1260,7 +1286,8 @@ impl JobProcessor {
                     let error_msg = format!("Preview render failed: {}", e);
 
                     // Emit failure event
-                    let _ = self.app_handle.emit(
+                    emit_or_warn(
+                        &self.app_handle,
                         "preview:failed",
                         serde_json::json!({
                             "jobId": job.id,
@@ -1382,7 +1409,8 @@ impl JobProcessor {
             let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
             if !validation.is_valid {
                 let error_msg = validation.errors.join("; ");
-                let _ = self.app_handle.emit(
+                emit_or_warn(
+                    &self.app_handle,
                     "render:failed",
                     serde_json::json!({
                         "jobId": job.id,
@@ -1408,7 +1436,8 @@ impl JobProcessor {
             // Spawn progress forwarder
             let progress_task = tokio::spawn(async move {
                 while let Some(progress) = progress_rx.recv().await {
-                    let _ = app_handle.emit(
+                    emit_or_warn(
+                        &app_handle,
                         "render:progress",
                         serde_json::json!({
                             "jobId": job_id,
@@ -1441,7 +1470,8 @@ impl JobProcessor {
                 Ok(export_result) => {
                     let output_str = export_result.output_path.to_string_lossy().to_string();
 
-                    let _ = self.app_handle.emit(
+                    emit_or_warn(
+                        &self.app_handle,
                         "render:complete",
                         serde_json::json!({
                             "jobId": job.id,
@@ -1468,7 +1498,8 @@ impl JobProcessor {
                 }
                 Err(e) => {
                     let error_msg = format!("Export failed: {}", e);
-                    let _ = self.app_handle.emit(
+                    emit_or_warn(
+                        &self.app_handle,
                         "render:failed",
                         serde_json::json!({
                             "jobId": job.id,
@@ -1501,7 +1532,8 @@ impl JobProcessor {
             .ok_or("Missing prompt in payload")?;
 
         // Emit generating event
-        let _ = self.app_handle.emit(
+        emit_or_warn(
+            &self.app_handle,
             "ai:generating",
             serde_json::json!({
                 "jobId": job.id,
@@ -1523,7 +1555,8 @@ impl JobProcessor {
             // Check if AI provider is configured
             if !gateway.is_configured().await {
                 let error = "No AI provider configured. Configure an AI provider in Settings.";
-                let _ = self.app_handle.emit(
+                emit_or_warn(
+                    &self.app_handle,
                     "ai:failed",
                     serde_json::json!({
                         "jobId": job.id,
@@ -1536,7 +1569,8 @@ impl JobProcessor {
             // Check if provider is available
             if !gateway.has_provider().await {
                 let error = "AI provider not reachable. Use 'Test connection' in Settings to verify connectivity.";
-                let _ = self.app_handle.emit(
+                emit_or_warn(
+                    &self.app_handle,
                     "ai:failed",
                     serde_json::json!({
                         "jobId": job.id,
@@ -1623,7 +1657,8 @@ impl JobProcessor {
                         .map_err(|e| format!("Failed to serialize EditScript: {}", e))?;
 
                     // Emit completion event
-                    let _ = self.app_handle.emit(
+                    emit_or_warn(
+                        &self.app_handle,
                         "ai:completed",
                         serde_json::json!({
                             "jobId": job.id,
@@ -1647,7 +1682,8 @@ impl JobProcessor {
                     let error_msg = format!("AI generation failed: {}", e);
 
                     // Emit failure event
-                    let _ = self.app_handle.emit(
+                    emit_or_warn(
+                        &self.app_handle,
                         "ai:failed",
                         serde_json::json!({
                             "jobId": job.id,
@@ -1733,7 +1769,7 @@ pub(crate) fn start_workers_with_arcs(
                             }
 
                             // Emit started event
-                            let _ = app_clone.emit("job:started", serde_json::json!({
+                            emit_or_warn(&app_clone, "job:started", serde_json::json!({
                                 "jobId": &job.id,
                                 "jobType": job_type_wire_value(&job.job_type),
                             }));
@@ -1868,7 +1904,7 @@ pub fn start_workers(
                             }
 
                             // Emit started event
-                            let _ = app_clone.emit("job:started", serde_json::json!({
+                            emit_or_warn(&app_clone, "job:started", serde_json::json!({
                                 "jobId": &job.id,
                                 "jobType": job_type_wire_value(&job.job_type),
                             }));
