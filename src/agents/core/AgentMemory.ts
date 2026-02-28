@@ -469,23 +469,78 @@ export class MemoryManager {
   /**
    * Import long-term memory from persistence.
    *
-   * @param data - Serialized memory data
+   * Validates size and structural integrity before applying the imported data
+   * to prevent memory corruption or denial-of-service via oversized payloads.
+   *
+   * @param data - Serialized memory data (JSON string)
+   * @throws {Error} If the data is too large, malformed, or structurally invalid
    */
   importLongTermMemory(data: string): void {
-    try {
-      const parsed = JSON.parse(data);
-      this.longTermMemory = {
-        preferences: parsed.preferences ?? {},
-        frequentOperations: parsed.frequentOperations ?? [],
-        corrections: parsed.corrections ?? [],
-        projectMemory: new Map(parsed.projectMemory ?? []),
-        lastUpdatedAt: parsed.lastUpdatedAt ?? Date.now(),
-      };
-      logger.info('Long-term memory imported');
-    } catch (error) {
-      logger.error('Failed to import long-term memory', { error });
-      throw new Error('Failed to import memory data');
+    // Guard against DoS via massive JSON payloads (10 MB hard limit).
+    const MAX_BYTES = 10 * 1024 * 1024;
+    if (data.length > MAX_BYTES) {
+      const sizeMB = (data.length / 1024 / 1024).toFixed(1);
+      const msg = `Memory data exceeds maximum size (${sizeMB} MB > 10 MB)`;
+      logger.error(msg);
+      throw new Error(msg);
     }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(data);
+    } catch (error) {
+      logger.error('Failed to parse memory JSON', { error, dataLength: data.length });
+      throw new Error('Memory data is not valid JSON');
+    }
+
+    // Structural type guard — reject anything that isn't a plain object.
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      const msg = 'Memory data must be a JSON object, not a primitive or array';
+      logger.error(msg, { type: typeof parsed });
+      throw new Error(msg);
+    }
+
+    const raw = parsed as Record<string, unknown>;
+
+    // Validate individual fields before touching live state so a bad import
+    // never leaves memory in a half-updated, inconsistent state.
+    const preferences =
+      raw.preferences !== undefined && typeof raw.preferences === 'object' && raw.preferences !== null
+        ? (raw.preferences as Record<string, unknown>)
+        : {};
+
+    const frequentOperations = Array.isArray(raw.frequentOperations)
+      ? (raw.frequentOperations as OperationFrequency[])
+      : [];
+
+    const corrections = Array.isArray(raw.corrections)
+      ? (raw.corrections as UserCorrection[])
+      : [];
+
+    const projectMemoryEntries = Array.isArray(raw.projectMemory)
+      ? (raw.projectMemory as [string, ProjectMemory][])
+      : [];
+
+    const lastUpdatedAt =
+      typeof raw.lastUpdatedAt === 'number' && Number.isFinite(raw.lastUpdatedAt)
+        ? raw.lastUpdatedAt
+        : Date.now();
+
+    // Atomic swap — only replace state after all validation passes.
+    this.longTermMemory = {
+      preferences,
+      frequentOperations,
+      corrections,
+      projectMemory: new Map(projectMemoryEntries),
+      lastUpdatedAt,
+    };
+
+    logger.info('Long-term memory imported', {
+      preferencesCount: Object.keys(preferences).length,
+      frequentOperationsCount: frequentOperations.length,
+      correctionsCount: corrections.length,
+      projectsCount: projectMemoryEntries.length,
+    });
   }
 
   // ===========================================================================

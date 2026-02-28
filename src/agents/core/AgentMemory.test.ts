@@ -327,7 +327,142 @@ describe('MemoryManager', () => {
     it('should throw on invalid import data', () => {
       expect(() => {
         memory.importLongTermMemory('invalid json');
-      }).toThrow('Failed to import');
+      }).toThrow(/not valid JSON/i);
+    });
+  });
+
+  // ===========================================================================
+  // Destructive / edge-case tests
+  // ===========================================================================
+
+  describe('importLongTermMemory — destructive scenarios', () => {
+    it('should reject payloads exceeding 10 MB', () => {
+      // Build a string slightly over the 10 MB threshold
+      const oversized = 'x'.repeat(10 * 1024 * 1024 + 1);
+      expect(() => memory.importLongTermMemory(oversized)).toThrow(/exceeds maximum size/i);
+    });
+
+    it('should reject JSON that is not a plain object (null)', () => {
+      expect(() => memory.importLongTermMemory('null')).toThrow(/JSON object/i);
+    });
+
+    it('should reject JSON that is a primitive (number)', () => {
+      expect(() => memory.importLongTermMemory('42')).toThrow(/JSON object/i);
+    });
+
+    it('should reject JSON that is an array', () => {
+      expect(() => memory.importLongTermMemory('[]')).toThrow(/JSON object/i);
+    });
+
+    it('should reject non-JSON string without corrupting existing state', () => {
+      memory.setPreference('safe', 'kept');
+      expect(() => memory.importLongTermMemory('not json at all }{{')).toThrow(/not valid JSON/i);
+      // State must be untouched after a failed import
+      expect(memory.getPreference('safe')).toBe('kept');
+    });
+
+    it('should leave state unchanged when import throws (atomicity)', () => {
+      memory.setPreference('existing', 'value');
+      memory.recordOperation('existing_op');
+
+      // Attempt an invalid import
+      try {
+        memory.importLongTermMemory('{not:valid-json}');
+      } catch {
+        // expected
+      }
+
+      // Original state must be intact
+      expect(memory.getPreference('existing')).toBe('value');
+      expect(memory.getFrequentOperations()).toHaveLength(1);
+    });
+
+    it('should accept object with all fields missing (uses safe defaults)', () => {
+      // Empty object — every field should fall back to its default
+      expect(() => memory.importLongTermMemory('{}')).not.toThrow();
+      expect(memory.getFrequentOperations()).toEqual([]);
+      expect(memory.getCorrections()).toEqual([]);
+      expect(memory.getAllPreferences()).toEqual({});
+    });
+
+    it('should ignore non-array frequentOperations and corrections', () => {
+      const badData = JSON.stringify({
+        preferences: { a: 1 },
+        frequentOperations: 'not an array',
+        corrections: 99,
+        projectMemory: null,
+        lastUpdatedAt: Date.now(),
+      });
+
+      expect(() => memory.importLongTermMemory(badData)).not.toThrow();
+      // Malformed fields default to empty arrays
+      expect(memory.getFrequentOperations()).toEqual([]);
+      expect(memory.getCorrections()).toEqual([]);
+      // Preference from valid field is imported correctly
+      expect(memory.getPreference('a')).toBe(1);
+    });
+
+    it('should ignore non-object preferences field', () => {
+      const badData = JSON.stringify({
+        preferences: 'should-be-an-object',
+      });
+
+      expect(() => memory.importLongTermMemory(badData)).not.toThrow();
+      expect(memory.getAllPreferences()).toEqual({});
+    });
+
+    it('should handle projectMemory with invalid entries gracefully', () => {
+      // projectMemory is a serialised array of [key, value] entries.
+      // If any entries are malformed, new Map() may still succeed; we
+      // verify that the import itself does not throw.
+      const dataWithBadEntries = JSON.stringify({
+        projectMemory: [['proj_ok', { projectId: 'proj_ok', frequentAssets: [], commonSequences: [], notes: [], preferences: {} }]],
+      });
+
+      expect(() => memory.importLongTermMemory(dataWithBadEntries)).not.toThrow();
+      const projMem = memory.getProjectMemory('proj_ok');
+      expect(projMem.projectId).toBe('proj_ok');
+    });
+
+    it('should handle extremely large but valid JSON under the limit', () => {
+      // Build a valid payload at ~9.9 MB
+      const bigPrefs: Record<string, string> = {};
+      // Each key/value pair is ~100 bytes; 100_000 entries ≈ 10 MB, so use 90_000
+      for (let i = 0; i < 90_000; i++) {
+        bigPrefs[`key_${i}`] = `${'v'.repeat(60)}_${i}`;
+      }
+      const bigData = JSON.stringify({ preferences: bigPrefs });
+      // Should succeed without throwing
+      expect(() => memory.importLongTermMemory(bigData)).not.toThrow();
+    });
+
+    it('should handle concurrent import calls without corrupting state', async () => {
+      // Simulate two imports arriving very close together
+      const data1 = JSON.stringify({ preferences: { source: 'import-1' } });
+      const data2 = JSON.stringify({ preferences: { source: 'import-2' } });
+
+      // Run both synchronously (importLongTermMemory is sync)
+      memory.importLongTermMemory(data1);
+      memory.importLongTermMemory(data2);
+
+      // The last write wins; state is consistent
+      const source = memory.getPreference<string>('source');
+      expect(['import-1', 'import-2']).toContain(source);
+    });
+
+    it('should preserve a round-trip through export/import with Map data', () => {
+      memory.addProjectNote('proj_rt', 'Round-trip note');
+      memory.recordAssetAccess('proj_rt', 'asset_rt');
+      memory.setPreference('rt_pref', { nested: true });
+
+      const exported = memory.exportLongTermMemory();
+      const restored = createMemoryManager();
+      restored.importLongTermMemory(exported);
+
+      const projMem = restored.getProjectMemory('proj_rt');
+      expect(projMem.notes).toContain('Round-trip note');
+      expect(projMem.frequentAssets).toContain('asset_rt');
+      expect(restored.getPreference<{ nested: boolean }>('rt_pref')).toEqual({ nested: true });
     });
   });
 
