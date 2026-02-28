@@ -17,9 +17,9 @@ use crate::core::{
         DeleteFileCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand, MoveFileCommand,
         RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand,
         RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
-        RenameTrackCommand, SetClipAudioCommand, SetClipMuteCommand, SetClipTransformCommand,
-        SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand, UpdateAssetCommand,
-        UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
+        RenameTrackCommand, SetClipAudioCommand, SetClipMuteCommand, SetClipSpeedCommand,
+        SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand,
+        UpdateAssetCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
     },
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
     fs::{
@@ -2333,6 +2333,8 @@ pub async fn apply_edit_script(
                 | "MoveClip"
                 | "SetClipMute"
                 | "SetClipAudio"
+                | "SetClipSpeed"
+                | "setClipSpeed"
                 | "CreateTrack"
                 | "createTrack"
                 | "AddTrack"
@@ -2373,6 +2375,8 @@ pub async fn apply_edit_script(
                 | "SetClipTransform"
                 | "SetClipMute"
                 | "SetClipAudio"
+                | "SetClipSpeed"
+                | "setClipSpeed"
                 | "DeleteClip"
                 | "RemoveClip"
                 | "TrimClip"
@@ -2481,6 +2485,12 @@ pub async fn apply_edit_script(
                 &p.track_id,
                 &p.clip_id,
                 p.transform,
+            )),
+            CommandPayload::SetClipSpeed(p) => Box::new(SetClipSpeedCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.speed,
             )),
             CommandPayload::SetClipMute(p) => Box::new(SetClipMuteCommand::new(
                 &p.sequence_id,
@@ -2746,9 +2756,27 @@ pub async fn validate_edit_script(
                     }
                 }
             }
-            "SplitClip" | "DeleteClip" | "TrimClip" | "MoveClip" => {
+            "SplitClip" | "DeleteClip" | "TrimClip" | "MoveClip" | "SetClipSpeed"
+            | "setClipSpeed" | "changeClipSpeed" => {
                 if cmd.params.get("clipId").is_none() {
                     issues.push(format!("{} command {} missing clipId", cmd.command_type, i));
+                }
+                if cmd.command_type == "SetClipSpeed"
+                    || cmd.command_type == "setClipSpeed"
+                    || cmd.command_type == "changeClipSpeed"
+                {
+                    match cmd.params.get("speed").and_then(|v| v.as_f64()) {
+                        Some(v) if v.is_finite() && v > 0.0 => {}
+                        Some(_) => {
+                            issues.push(format!(
+                                "SetClipSpeed command {} has invalid speed: must be finite and > 0",
+                                i
+                            ));
+                        }
+                        None => {
+                            issues.push(format!("SetClipSpeed command {} missing speed", i));
+                        }
+                    }
                 }
             }
             "CreateTrack" | "createTrack" | "AddTrack" | "addTrack" => {

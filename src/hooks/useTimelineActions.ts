@@ -40,6 +40,7 @@ import {
 import {
   buildClipAudioPayload,
   buildClipDeletionMap,
+  DEFAULT_INSERT_CLIP_DURATION_SEC,
   ensureSourceClipExistsOrWarn,
   findClipByAssetAtTimeline,
   getAssetInsertDurationSec,
@@ -160,6 +161,23 @@ function normalizeProgressPercent(value: number): number {
   }
 
   return Math.max(0, Math.min(100, Math.round(value)));
+}
+
+function extractErrorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
+function isClipOverlapError(errorMessage: string): boolean {
+  const normalized = errorMessage.toLowerCase();
+  return (
+    normalized.includes('clip overlap') ||
+    normalized.includes('clip conflict') ||
+    normalized.includes('another clip exists at this position')
+  );
 }
 
 function shouldProbePendingDuration(assetKind: Asset['kind'] | undefined): boolean {
@@ -733,7 +751,24 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           },
         );
       } catch (error) {
-        logger.error('Failed to move clip', { error, clipId: data.clipId });
+        const errorMessage = extractErrorMessage(error);
+        if (isClipOverlapError(errorMessage)) {
+          useToastStore.getState().addToast({
+            message: 'Cannot move clip: target range is occupied.',
+            variant: 'warning',
+            duration: 3200,
+          });
+          logger.warn('Clip move blocked by overlap', {
+            clipId: data.clipId,
+            sequenceId: data.sequenceId,
+            trackId: data.trackId,
+            newTimelineIn: data.newTimelineIn,
+            error: errorMessage,
+          });
+          return;
+        }
+
+        logger.error('Failed to move clip', { error, clipId: data.clipId, errorMessage });
       }
     },
     [sequence, executeCommand, linkedSelectionEnabled, getCurrentSequence],
@@ -947,23 +982,60 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
       }
 
       const { droppedAssetId, droppedAsset, droppedAssetKind } = droppedAssetContext;
+      const effectiveDroppedAsset =
+        useProjectStore.getState().assets.get(droppedAssetId) ?? droppedAsset;
+      const effectiveDroppedAssetKind = effectiveDroppedAsset?.kind ?? droppedAssetKind;
       const targetTrack = sequenceSnapshot.tracks.find((track) => track.id === data.trackId);
       const normalizedDurationSecHint = normalizeDurationSec(durationSecHint);
-      const normalizedAssetDurationSec = normalizeDurationSec(droppedAsset?.durationSec);
+      const normalizedAssetDurationSec = normalizeDurationSec(effectiveDroppedAsset?.durationSec);
       const shouldApplyDurationHint =
         normalizedDurationSecHint !== undefined &&
         (normalizedAssetDurationSec === undefined ||
           Math.abs(normalizedAssetDurationSec - normalizedDurationSecHint) > 0.001);
+      const fallbackClipDurationSec =
+        normalizedDurationSecHint ??
+        normalizedAssetDurationSec ??
+        (effectiveDroppedAsset
+          ? getAssetInsertDurationSec(effectiveDroppedAsset)
+          : DEFAULT_INSERT_CLIP_DURATION_SEC);
 
       let insertedPrimaryClip = false;
 
       try {
-        if (!droppedAsset || droppedAssetKind !== 'video') {
+        if (!effectiveDroppedAsset || effectiveDroppedAssetKind !== 'video') {
+          const nonVideoTrackKind: TrackCreateData['kind'] =
+            effectiveDroppedAssetKind === 'audio' || targetTrack?.kind === 'audio'
+              ? 'audio'
+              : 'video';
+
+          const insertTrack = await resolveOrCreateTrack({
+            kind: nonVideoTrackKind,
+            sequence,
+            sequenceSnapshot,
+            preferredTrack: targetTrack,
+            timelineIn: data.timelinePosition,
+            durationSec: fallbackClipDurationSec,
+            assetId: droppedAssetId,
+            executeCommand,
+            getCurrentSequence,
+            createTrackFailureMessage:
+              nonVideoTrackKind === 'audio'
+                ? 'Unable to auto-create audio track for dropped asset'
+                : 'Unable to auto-create visual track for dropped asset',
+            snapshotUnavailableMessage:
+              'Created track cannot be resolved: sequence snapshot unavailable',
+            missingTrackMessage: 'Created track not found after state refresh',
+          });
+
+          if (!insertTrack) {
+            return false;
+          }
+
           const insertResult = await executeCommand({
             type: 'InsertClip',
             payload: {
               sequenceId: sequence.id,
-              trackId: data.trackId,
+              trackId: insertTrack.id,
               assetId: droppedAssetId,
               timelineIn: data.timelinePosition,
             },
@@ -974,7 +1046,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             if (!insertedClipId) {
               const postInsertSequence = getCurrentSequence();
               const postInsertTrack = postInsertSequence?.tracks.find(
-                (track) => track.id === data.trackId,
+                (track) => track.id === insertTrack.id,
               );
               insertedClipId = findClipByAssetAtTimeline(
                 postInsertTrack,
@@ -989,7 +1061,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
                   type: 'TrimClip',
                   payload: {
                     sequenceId: sequence.id,
-                    trackId: data.trackId,
+                    trackId: insertTrack.id,
                     clipId: insertedClipId,
                     newSourceOut: normalizedDurationSecHint,
                   },
@@ -999,7 +1071,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
                   sequenceId: sequence.id,
                   assetId: droppedAssetId,
                   clipId: insertedClipId,
-                  trackId: data.trackId,
+                  trackId: insertTrack.id,
                   durationSec: normalizedDurationSecHint,
                   error: trimError,
                 });
@@ -1010,8 +1082,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           return true;
         }
 
-        const clipDurationSec =
-          normalizedDurationSecHint ?? getAssetInsertDurationSec(droppedAsset);
+        const clipDurationSec = fallbackClipDurationSec;
         const visualTrack = await resolveOrCreateTrack({
           kind: 'video',
           sequence,
@@ -1079,7 +1150,10 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         }
 
         const latestDroppedAsset =
-          useProjectStore.getState().assets.get(droppedAssetId) ?? droppedAsset;
+          useProjectStore.getState().assets.get(droppedAssetId) ?? effectiveDroppedAsset;
+        if (!latestDroppedAsset) {
+          return true;
+        }
         const hasLinkedAudio = await resolveAssetHasLinkedAudio(latestDroppedAsset, logger);
         if (!hasLinkedAudio) {
           return true;
@@ -1211,7 +1285,28 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
 
         return true;
       } catch (error) {
-        logger.error('Failed to insert clip', { error, assetId: droppedAssetId });
+        const errorMessage = extractErrorMessage(error);
+        if (isClipOverlapError(errorMessage)) {
+          useToastStore.getState().addToast({
+            message: 'Cannot insert clip: target range is occupied.',
+            variant: 'warning',
+            duration: 3200,
+          });
+          logger.warn('Clip insertion blocked by overlap', {
+            assetId: droppedAssetId,
+            sequenceId: sequence.id,
+            trackId: data.trackId,
+            timelinePosition: data.timelinePosition,
+            error: errorMessage,
+          });
+          return insertedPrimaryClip;
+        }
+
+        logger.error('Failed to insert clip', {
+          error,
+          assetId: droppedAssetId,
+          errorMessage,
+        });
         return insertedPrimaryClip;
       }
     },

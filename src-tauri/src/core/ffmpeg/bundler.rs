@@ -439,7 +439,7 @@ pub fn download_ffmpeg(output_dir: &Path, config: &BundlerConfig) -> BundlerResu
 
     // Download main FFmpeg archive
     let archive_path = temp_dir.join(&source.filename);
-    println!("Downloading FFmpeg from {}...", source.url);
+    tracing::info!("Downloading FFmpeg from {}...", source.url);
     download_file_blocking(&source.url, &archive_path, config.timeout_seconds)?;
 
     // Verify checksum if provided
@@ -455,7 +455,7 @@ pub fn download_ffmpeg(output_dir: &Path, config: &BundlerConfig) -> BundlerResu
     }
 
     // Extract main archive
-    println!("Extracting FFmpeg...");
+    tracing::info!("Extracting FFmpeg...");
     extract_archive(&archive_path, &extract_dir)?;
 
     // Find and copy ffmpeg binary
@@ -469,7 +469,7 @@ pub fn download_ffmpeg(output_dir: &Path, config: &BundlerConfig) -> BundlerResu
     if let Some(ffprobe_src) = ffprobe_source {
         // macOS: Download separate ffprobe
         let ffprobe_archive = temp_dir.join(&ffprobe_src.filename);
-        println!("Downloading FFprobe from {}...", ffprobe_src.url);
+        tracing::info!("Downloading FFprobe from {}...", ffprobe_src.url);
         download_file_blocking(&ffprobe_src.url, &ffprobe_archive, config.timeout_seconds)?;
 
         let ffprobe_extract_dir = extract_dir.join("ffprobe");
@@ -493,16 +493,16 @@ pub fn download_ffmpeg(output_dir: &Path, config: &BundlerConfig) -> BundlerResu
     }
 
     // Verify binaries work
-    println!("Verifying FFmpeg binary...");
+    tracing::info!("Verifying FFmpeg binary...");
     verify_binary(&final_ffmpeg)?;
-    println!("Verifying FFprobe binary...");
+    tracing::info!("Verifying FFprobe binary...");
     verify_binary(&final_ffprobe)?;
 
     // Cleanup temp files
     let _ = std::fs::remove_dir_all(&temp_dir);
     let _ = std::fs::remove_dir_all(&extract_dir);
 
-    println!("FFmpeg binaries ready at {}", binaries_dir.display());
+    tracing::info!("FFmpeg binaries ready at {}", binaries_dir.display());
 
     Ok(FFmpegPaths {
         ffmpeg: final_ffmpeg,

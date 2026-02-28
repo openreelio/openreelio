@@ -17,6 +17,7 @@ import type { Asset, Color, Sequence, Track } from '@/types';
 
 const logger = createLogger('EditingTools');
 const DEFAULT_INSERT_CLIP_DURATION_SEC = 10;
+const DEFAULT_FREEZE_FRAME_RATE = 30;
 
 const MARKER_COLOR_PRESETS: Record<string, Color> = {
   red: { r: 1, g: 0, b: 0 },
@@ -926,12 +927,21 @@ const EDITING_TOOLS: ToolDefinition[] = [
         if (!Number.isFinite(speed) || speed < 0.1 || speed > 10.0) {
           return { success: false, error: 'Speed must be a finite number between 0.1 and 10.0' };
         }
-        const result = await executeAgentCommand('SetClipTransform', {
+        const reverse = (args.reverse as boolean) ?? false;
+        if (reverse) {
+          return {
+            success: false,
+            error:
+              'Reverse playback is not yet supported by the backend clip model. ' +
+              'Set reverse=false and retry.',
+          };
+        }
+
+        const result = await executeAgentCommand('SetClipSpeed', {
           sequenceId: args.sequenceId as string,
           trackId: args.trackId as string,
           clipId: args.clipId as string,
           speed,
-          reverse: (args.reverse as boolean) ?? false,
         });
         logger.debug('change_clip_speed executed', { opId: result.opId });
         return { success: true, result };
@@ -962,25 +972,211 @@ const EDITING_TOOLS: ToolDefinition[] = [
           type: 'number',
           description: 'Duration of the freeze frame in seconds (default: 2.0)',
         },
+        frameRate: {
+          type: 'number',
+          description: 'Source frame rate used to derive one-frame freeze segment (default: 30)',
+        },
       },
       required: ['sequenceId', 'trackId', 'clipId', 'frameTime'],
     },
     handler: async (args) => {
-      // Freeze frame requires speed=0 support which is not yet implemented.
-      // Return failure to prevent the agent from treating this as a completed operation.
-      const freezeDuration = (args.duration as number) ?? 2.0;
-      logger.warn('freeze_frame not yet implemented', {
-        clipId: args.clipId,
-        frameTime: args.frameTime,
-        freezeDuration,
-      });
-      return {
-        success: false,
-        error:
-          `Freeze frame is not yet fully implemented. ` +
-          `The operation requires speed=0 support on clip segments. ` +
-          `As a workaround, use split_clip at ${args.frameTime}s and manually adjust the segment.`,
+      let appliedCommandCount = 0;
+
+      const rollbackAppliedCommands = async (): Promise<boolean> => {
+        if (appliedCommandCount === 0) {
+          return true;
+        }
+
+        const project = useProjectStore.getState() as {
+          undo?: () => Promise<{ success: boolean }>;
+        };
+        if (typeof project.undo !== 'function') {
+          logger.warn('freeze_frame rollback skipped: undo API unavailable');
+          appliedCommandCount = 0;
+          return true;
+        }
+
+        for (let i = 0; i < appliedCommandCount; i += 1) {
+          try {
+            const undoResult = await project.undo();
+            if (!undoResult.success) {
+              logger.error('freeze_frame rollback failed: undo returned unsuccessful result', {
+                step: i + 1,
+                total: appliedCommandCount,
+              });
+              appliedCommandCount = 0;
+              return false;
+            }
+          } catch (undoError) {
+            logger.error('freeze_frame rollback failed: undo threw error', {
+              step: i + 1,
+              total: appliedCommandCount,
+              error: undoError instanceof Error ? undoError.message : String(undoError),
+            });
+            appliedCommandCount = 0;
+            return false;
+          }
+        }
+
+        appliedCommandCount = 0;
+        return true;
       };
+
+      const executeFreezeCommand = async (
+        commandType: string,
+        payload: Record<string, unknown>,
+      ) => {
+        const result = await executeAgentCommand(commandType, payload);
+        appliedCommandCount += 1;
+        return result;
+      };
+
+      try {
+        const sequenceId = args.sequenceId as string;
+        const trackId = args.trackId as string;
+        const clipId = args.clipId as string;
+        const frameTime = args.frameTime as number;
+        const freezeDuration = (args.duration as number) ?? 2.0;
+        const frameRate = (args.frameRate as number) ?? DEFAULT_FREEZE_FRAME_RATE;
+
+        if (!Number.isFinite(frameTime) || frameTime < 0) {
+          return { success: false, error: 'frameTime must be a finite, non-negative number' };
+        }
+        if (!Number.isFinite(freezeDuration) || freezeDuration <= 0) {
+          return { success: false, error: 'duration must be a finite number greater than 0' };
+        }
+        if (!Number.isFinite(frameRate) || frameRate <= 0) {
+          return { success: false, error: 'frameRate must be a finite number greater than 0' };
+        }
+
+        const snapshot = getTimelineSnapshot();
+        const clip = snapshot.clips.find((candidate) => {
+          return candidate.id === clipId && candidate.trackId === trackId;
+        });
+
+        if (!clip) {
+          return { success: false, error: `Clip ${clipId} not found on track ${trackId}` };
+        }
+
+        const clipStart = clip.timelineIn;
+        const clipEnd = clip.timelineIn + clip.duration;
+        const absoluteFrameTime = frameTime;
+        const relativeFrameTime = clipStart + frameTime;
+        const absoluteInBounds = absoluteFrameTime > clipStart && absoluteFrameTime < clipEnd;
+        const relativeInBounds = relativeFrameTime > clipStart && relativeFrameTime < clipEnd;
+
+        if (!absoluteInBounds && !relativeInBounds) {
+          return {
+            success: false,
+            error:
+              `frameTime must be either (a) timeline time inside clip bounds ` +
+              `(${clipStart.toFixed(3)} - ${clipEnd.toFixed(3)}s) or ` +
+              `(b) clip-relative time inside (0 - ${clip.duration.toFixed(3)}s)`,
+          };
+        }
+
+        const resolvedFrameTime = absoluteInBounds ? absoluteFrameTime : relativeFrameTime;
+        const frameTimeMode = absoluteInBounds ? 'timeline' : 'clip-relative';
+
+        const sourceFrameDuration = 1 / frameRate;
+        const effectiveSpeed = clip.speed > 0 ? clip.speed : 1;
+        const timelineFrameDuration = sourceFrameDuration / effectiveSpeed;
+
+        if (freezeDuration <= timelineFrameDuration) {
+          return {
+            success: false,
+            error:
+              `duration (${freezeDuration}s) must be greater than one frame on timeline ` +
+              `(${timelineFrameDuration.toFixed(6)}s at ${frameRate}fps).`,
+          };
+        }
+
+        const secondSplitTime = resolvedFrameTime + timelineFrameDuration;
+        if (secondSplitTime >= clipEnd) {
+          return {
+            success: false,
+            error: 'Not enough clip media after frameTime to create a freeze frame segment',
+          };
+        }
+
+        const firstSplit = await executeFreezeCommand('SplitClip', {
+          sequenceId,
+          trackId,
+          clipId,
+          splitTime: resolvedFrameTime,
+        });
+
+        const freezeClipId = firstSplit.createdIds[0];
+        if (!freezeClipId) {
+          const rollbackSucceeded = await rollbackAppliedCommands();
+          return {
+            success: false,
+            error:
+              'Freeze frame failed: first split did not return a created clip ID' +
+              (rollbackSucceeded ? '' : ' (automatic rollback did not complete)'),
+          };
+        }
+
+        const secondSplit = await executeFreezeCommand('SplitClip', {
+          sequenceId,
+          trackId,
+          clipId: freezeClipId,
+          splitTime: secondSplitTime,
+        });
+
+        const tailClipId = secondSplit.createdIds[0];
+        if (!tailClipId) {
+          const rollbackSucceeded = await rollbackAppliedCommands();
+          return {
+            success: false,
+            error:
+              'Freeze frame failed: second split did not return a tail clip ID' +
+              (rollbackSucceeded ? '' : ' (automatic rollback did not complete)'),
+          };
+        }
+
+        const freezeSpeed = sourceFrameDuration / freezeDuration;
+        await executeFreezeCommand('SetClipSpeed', {
+          sequenceId,
+          trackId,
+          clipId: freezeClipId,
+          speed: freezeSpeed,
+        });
+
+        const delta = freezeDuration - timelineFrameDuration;
+        await executeFreezeCommand('MoveClip', {
+          sequenceId,
+          trackId,
+          clipId: tailClipId,
+          newTimelineIn: secondSplitTime + delta,
+        });
+
+        return {
+          success: true,
+          result: {
+            freezeClipId,
+            tailClipId,
+            frameTime,
+            resolvedFrameTime,
+            frameTimeMode,
+            freezeDuration,
+            frameRate,
+            freezeSpeed,
+            timelineFrameDuration,
+            description:
+              `Freeze frame inserted at ${resolvedFrameTime.toFixed(3)}s (${frameTimeMode}) for ` +
+              `${freezeDuration.toFixed(3)}s using ${frameRate}fps source frame size.`,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const rollbackSucceeded = await rollbackAppliedCommands();
+        logger.error('freeze_frame failed', { error: message });
+        return {
+          success: false,
+          error: rollbackSucceeded ? message : `${message} (automatic rollback did not complete)`,
+        };
+      }
     },
   },
   // -------------------------------------------------------------------------

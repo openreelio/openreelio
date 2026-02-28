@@ -3,7 +3,7 @@
  *
  * Integration tests verifying:
  * - Editing tools route to backend IPC (execute_agent_plan)
- * - Analysis tools stay on frontend ToolRegistryAdapter
+ * - High-level/non-command tools stay on frontend ToolRegistryAdapter
  * - Feature flag off routes ALL tools through frontend
  */
 
@@ -51,25 +51,23 @@ function createMockFrontendExecutor(tools: TestToolDef[]): IToolExecutor {
       return { success: true, data: { frontend: true, tool: toolName, args }, duration: 1 };
     }),
 
-    executeBatch: vi.fn(
-      async (request: BatchExecutionRequest) => {
-        const results = request.tools.map((t) => ({
-          tool: t.name,
-          result: {
-            success: true,
-            data: { frontend: true, tool: t.name },
-            duration: 1,
-          } as ToolExecutionResult,
-        }));
-        return {
+    executeBatch: vi.fn(async (request: BatchExecutionRequest) => {
+      const results = request.tools.map((t) => ({
+        tool: t.name,
+        result: {
           success: true,
-          results,
-          totalDuration: 1,
-          successCount: results.length,
-          failureCount: 0,
-        } as BatchExecutionResult;
-      },
-    ),
+          data: { frontend: true, tool: t.name },
+          duration: 1,
+        } as ToolExecutionResult,
+      }));
+      return {
+        success: true,
+        results,
+        totalDuration: 1,
+        successCount: results.length,
+        failureCount: 0,
+      } as BatchExecutionResult;
+    }),
 
     getAvailableTools: vi.fn((category?: string) => {
       const infos: ToolInfo[] = tools.map((t) => ({
@@ -100,7 +98,7 @@ function createMockFrontendExecutor(tools: TestToolDef[]): IToolExecutor {
       };
     }),
 
-    validateArgs: vi.fn(() => ({ valid: true, errors: [] } as ValidationResult)),
+    validateArgs: vi.fn(() => ({ valid: true, errors: [] }) as ValidationResult),
 
     hasTool: vi.fn((name: string) => toolMap.has(name)),
 
@@ -148,9 +146,27 @@ const TOOL_DEFS: TestToolDef[] = [
     parameters: { type: 'object', properties: {} },
   },
   {
+    name: 'move_clip',
+    description: 'Move a clip',
+    category: 'clip',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'freeze_frame',
+    description: 'Create a freeze frame',
+    category: 'clip',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
     name: 'add_transition',
     description: 'Add a transition',
     category: 'transition',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
+    name: 'rename_track',
+    description: 'Rename a track',
+    category: 'track',
     parameters: { type: 'object', properties: {} },
   },
   {
@@ -221,7 +237,7 @@ describe('BackendToolExecutor', () => {
           goal: 'Execute split_clip',
           steps: [
             expect.objectContaining({
-              toolName: 'split_clip',
+              toolName: 'splitClip',
               params: { clipId: 'clip-1', atTimelineSec: 5 },
             }),
           ],
@@ -234,36 +250,36 @@ describe('BackendToolExecutor', () => {
       expect(frontend.execute).not.toHaveBeenCalled();
     });
 
-    it('should route transition tool to backend IPC', async () => {
-      mockInvoke.mockResolvedValueOnce({
-        planId: 'plan-1',
-        success: true,
-        totalSteps: 1,
-        stepsCompleted: 1,
-        stepResults: [
-          { stepId: 'step-1', success: true, data: { transitionId: 'tr-1' }, durationMs: 5 },
-        ],
-        operationIds: ['op-2'],
-        executionTimeMs: 5,
-      });
+    it('should route transition orchestration tool to frontend executor', async () => {
+      const result = await backend.execute('add_transition', { type: 'dissolve' }, CONTEXT);
 
-      const result = await backend.execute(
+      expect(result.success).toBe(true);
+      expect(frontend.execute).toHaveBeenCalledWith(
         'add_transition',
         { type: 'dissolve' },
         CONTEXT,
       );
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should route track tools with frontend-only arg shaping to frontend', async () => {
+      const result = await backend.execute(
+        'rename_track',
+        { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+        CONTEXT,
+      );
 
       expect(result.success).toBe(true);
-      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', expect.any(Object));
-      expect(frontend.execute).not.toHaveBeenCalled();
+      expect(frontend.execute).toHaveBeenCalledWith(
+        'rename_track',
+        { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+        CONTEXT,
+      );
+      expect(mockInvoke).not.toHaveBeenCalled();
     });
 
     it('should route analysis tool to frontend executor', async () => {
-      const result = await backend.execute(
-        'analyze_video',
-        { assetId: 'asset-1' },
-        CONTEXT,
-      );
+      const result = await backend.execute('analyze_video', { assetId: 'asset-1' }, CONTEXT);
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual({
@@ -273,19 +289,35 @@ describe('BackendToolExecutor', () => {
       });
 
       // Frontend was called, backend was NOT
-      expect(frontend.execute).toHaveBeenCalledWith('analyze_video', { assetId: 'asset-1' }, CONTEXT);
+      expect(frontend.execute).toHaveBeenCalledWith(
+        'analyze_video',
+        { assetId: 'asset-1' },
+        CONTEXT,
+      );
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
     it('should route utility tool to frontend executor', async () => {
+      const result = await backend.execute('get_timeline_state', {}, CONTEXT);
+
+      expect(result.success).toBe(true);
+      expect(frontend.execute).toHaveBeenCalledWith('get_timeline_state', {}, CONTEXT);
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should keep frontend-only compound clip tools on frontend', async () => {
       const result = await backend.execute(
-        'get_timeline_state',
-        {},
+        'freeze_frame',
+        { clipId: 'clip-1', frameTime: 4, freezeDuration: 2 },
         CONTEXT,
       );
 
       expect(result.success).toBe(true);
-      expect(frontend.execute).toHaveBeenCalledWith('get_timeline_state', {}, CONTEXT);
+      expect(frontend.execute).toHaveBeenCalledWith(
+        'freeze_frame',
+        { clipId: 'clip-1', frameTime: 4, freezeDuration: 2 },
+        CONTEXT,
+      );
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
@@ -295,19 +327,13 @@ describe('BackendToolExecutor', () => {
         success: false,
         totalSteps: 1,
         stepsCompleted: 0,
-        stepResults: [
-          { stepId: 'step-1', success: false, error: 'Clip not found', durationMs: 2 },
-        ],
+        stepResults: [{ stepId: 'step-1', success: false, error: 'Clip not found', durationMs: 2 }],
         operationIds: [],
         errorMessage: 'Step 1 failed: Clip not found',
         executionTimeMs: 2,
       });
 
-      const result = await backend.execute(
-        'split_clip',
-        { clipId: 'nonexistent' },
-        CONTEXT,
-      );
+      const result = await backend.execute('split_clip', { clipId: 'nonexistent' }, CONTEXT);
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('Clip not found');
@@ -358,7 +384,7 @@ describe('BackendToolExecutor', () => {
         {
           tools: [
             { name: 'split_clip', args: { clipId: 'c1', atTimelineSec: 5 } },
-            { name: 'insert_clip', args: { trackId: 't1', assetId: 'a1' } },
+            { name: 'move_clip', args: { clipId: 'c2', newTimelineIn: 8 } },
             { name: 'analyze_video', args: { assetId: 'a1' } },
           ],
           mode: 'sequential',
@@ -372,12 +398,12 @@ describe('BackendToolExecutor', () => {
       expect(result.successCount).toBe(3);
       expect(result.failureCount).toBe(0);
 
-      // Backend received a 2-step plan (split_clip + insert_clip)
+      // Backend received a 2-step plan (split_clip + move_clip)
       expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
         plan: expect.objectContaining({
           steps: expect.arrayContaining([
-            expect.objectContaining({ toolName: 'split_clip' }),
-            expect.objectContaining({ toolName: 'insert_clip' }),
+            expect.objectContaining({ toolName: 'splitClip' }),
+            expect.objectContaining({ toolName: 'moveClip' }),
           ]),
         }),
       });
@@ -398,7 +424,7 @@ describe('BackendToolExecutor', () => {
         {
           tools: [
             { name: 'split_clip', args: { clipId: 'c1', atTimelineSec: 5 } },
-            { name: 'insert_clip', args: { trackId: 't1', assetId: 'a1' } },
+            { name: 'move_clip', args: { clipId: 'c2', newTimelineIn: 8 } },
           ],
           mode: 'sequential',
           stopOnError: true,
@@ -420,7 +446,7 @@ describe('BackendToolExecutor', () => {
     it('should delegate getAvailableTools to frontend', () => {
       const tools = backend.getAvailableTools();
       expect(frontend.getAvailableTools).toHaveBeenCalled();
-      expect(tools.length).toBe(5);
+      expect(tools.length).toBe(8);
     });
 
     it('should delegate getToolDefinition to frontend', () => {
@@ -444,7 +470,7 @@ describe('BackendToolExecutor', () => {
     it('should delegate getToolsByCategory to frontend', () => {
       const byCategory = backend.getToolsByCategory();
       expect(frontend.getToolsByCategory).toHaveBeenCalled();
-      expect(byCategory.get('clip')).toHaveLength(2);
+      expect(byCategory.get('clip')).toHaveLength(4);
     });
   });
 
@@ -491,9 +517,7 @@ describe('BackendToolExecutor', () => {
         success: true,
         totalSteps: 1,
         stepsCompleted: 1,
-        stepResults: [
-          { stepId: 'step-1', success: true, data: { ok: true }, durationMs: 5 },
-        ],
+        stepResults: [{ stepId: 'step-1', success: true, data: { ok: true }, durationMs: 5 }],
         operationIds: ['op-1'],
         executionTimeMs: 5,
       });
@@ -522,9 +546,9 @@ describe('BackendToolExecutor', () => {
     it('should expand compound tool into multiple sub-steps for single execute', async () => {
       // Register compound expander for ripple_edit
       registerCompoundExpander('ripple_edit', (args) => [
-        { toolName: 'trim_clip', params: { clipId: args.clipId, newSourceOut: args.trimEnd } },
-        { toolName: 'move_clip', params: { clipId: 'clip-2', newTimelineIn: 8 } },
-        { toolName: 'move_clip', params: { clipId: 'clip-3', newTimelineIn: 13 } },
+        { toolName: 'trimClip', params: { clipId: args.clipId, newSourceOut: args.trimEnd } },
+        { toolName: 'moveClip', params: { clipId: 'clip-2', newTimelineIn: 8 } },
+        { toolName: 'moveClip', params: { clipId: 'clip-3', newTimelineIn: 13 } },
       ]);
 
       // Add ripple_edit tool definition to frontend executor
@@ -573,9 +597,15 @@ describe('BackendToolExecutor', () => {
         plan: expect.objectContaining({
           goal: expect.stringContaining('compound'),
           steps: [
-            expect.objectContaining({ toolName: 'trim_clip' }),
-            expect.objectContaining({ toolName: 'move_clip', params: { clipId: 'clip-2', newTimelineIn: 8 } }),
-            expect.objectContaining({ toolName: 'move_clip', params: { clipId: 'clip-3', newTimelineIn: 13 } }),
+            expect.objectContaining({ toolName: 'trimClip' }),
+            expect.objectContaining({
+              toolName: 'moveClip',
+              params: { clipId: 'clip-2', newTimelineIn: 8 },
+            }),
+            expect.objectContaining({
+              toolName: 'moveClip',
+              params: { clipId: 'clip-3', newTimelineIn: 13 },
+            }),
           ],
         }),
       });
@@ -583,8 +613,8 @@ describe('BackendToolExecutor', () => {
 
     it('should expand compound tool in batch and map results back', async () => {
       registerCompoundExpander('ripple_edit', (args) => [
-        { toolName: 'trim_clip', params: { clipId: args.clipId, newSourceOut: args.trimEnd } },
-        { toolName: 'move_clip', params: { clipId: 'clip-2', newTimelineIn: 8 } },
+        { toolName: 'trimClip', params: { clipId: args.clipId, newSourceOut: args.trimEnd } },
+        { toolName: 'moveClip', params: { clipId: 'clip-2', newTimelineIn: 8 } },
       ]);
 
       const extendedTools = [
@@ -646,9 +676,9 @@ describe('BackendToolExecutor', () => {
       expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
         plan: expect.objectContaining({
           steps: expect.arrayContaining([
-            expect.objectContaining({ toolName: 'trim_clip' }),
-            expect.objectContaining({ toolName: 'move_clip' }),
-            expect.objectContaining({ toolName: 'split_clip' }),
+            expect.objectContaining({ toolName: 'trimClip' }),
+            expect.objectContaining({ toolName: 'moveClip' }),
+            expect.objectContaining({ toolName: 'splitClip' }),
           ]),
         }),
       });

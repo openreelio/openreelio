@@ -182,16 +182,31 @@ impl Command for AddTextClipCommand {
             ));
         }
 
-        // 6. Create the virtual text asset ID
+        // 6. Reject overlapping placement on the same track
+        let candidate_place = ClipPlace::new(self.timeline_in, self.duration);
+        if let Some(conflict) = track
+            .clips
+            .iter()
+            .find(|existing| existing.place.overlaps(&candidate_place))
+        {
+            return Err(CoreError::ClipOverlap {
+                track_id: track.id.clone(),
+                existing_clip_id: conflict.id.clone(),
+                new_start: candidate_place.timeline_in_sec,
+                new_end: candidate_place.timeline_out_sec(),
+            });
+        }
+
+        // 7. Create the virtual text asset ID
         let clip_id = ulid::Ulid::new().to_string();
         let asset_id = format!("{}{}", TEXT_ASSET_PREFIX, clip_id);
 
-        // 7. Create the clip
+        // 8. Create the clip
         let clip = Clip {
             id: clip_id.clone(),
             asset_id,
             range: ClipRange::new(0.0, self.duration),
-            place: ClipPlace::new(self.timeline_in, self.duration),
+            place: candidate_place,
             transform: crate::core::timeline::Transform::default(),
             opacity: self.text_data.opacity as f32,
             speed: 1.0,
@@ -204,19 +219,19 @@ impl Command for AddTextClipCommand {
             color: None,
         };
 
-        // 8. Create the TextOverlay effect
+        // 9. Create the TextOverlay effect
         let mut effect = Effect::new(EffectType::TextOverlay);
         self.set_text_params(&mut effect);
         let effect_id = effect.id.clone();
 
-        // 9. Add effect ID to clip's effect list
+        // 10. Add effect ID to clip's effect list
         let mut clip = clip;
         clip.effects.push(effect_id.clone());
 
-        // 10. Store the clip in the track
+        // 11. Store the clip in the track
         track.clips.push(clip);
 
-        // 11. Sort clips by timeline position
+        // 12. Sort clips by timeline position
         track.clips.sort_by(|a, b| {
             a.place
                 .timeline_in_sec
@@ -224,10 +239,10 @@ impl Command for AddTextClipCommand {
                 .then_with(|| a.id.cmp(&b.id))
         });
 
-        // 12. Store the effect in state
+        // 13. Store the effect in state
         state.effects.insert(effect_id.clone(), effect);
 
-        // 13. Store created IDs for undo
+        // 14. Store created IDs for undo
         self.created_clip_id = Some(clip_id.clone());
         self.created_effect_id = Some(effect_id.clone());
 
@@ -1028,6 +1043,31 @@ mod tests {
 
         let result = cmd.execute(&mut state);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_text_clip_fails_on_overlap() {
+        let mut state = create_test_state();
+        let sequence = state.sequences.get_mut("seq-1").unwrap();
+        let track = sequence.get_track_mut("video-track").unwrap();
+
+        let mut existing_clip = Clip::new("asset-existing");
+        existing_clip.id = "clip-existing".to_string();
+        existing_clip.range = ClipRange::new(0.0, 6.0);
+        existing_clip.place = ClipPlace::new(2.0, 6.0);
+        track.clips.push(existing_clip);
+
+        let mut cmd = AddTextClipCommand::new(
+            "seq-1",
+            "video-track",
+            5.0,
+            3.0,
+            TextClipData::new("Overlap"),
+        );
+
+        let result = cmd.execute(&mut state);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CoreError::ClipOverlap { .. }));
     }
 
     #[test]

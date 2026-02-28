@@ -744,6 +744,7 @@ export type CommandType =
   | 'DeleteFile'
   | 'InsertClip'
   | 'SetClipTransform'
+  | 'SetClipSpeed'
   | 'SetClipMute'
   | 'SetClipAudio'
   | 'SplitClip'

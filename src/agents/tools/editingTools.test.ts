@@ -152,7 +152,7 @@ describe('editingTools — extended tools', () => {
       expect(tool!.category).toBe('clip');
     });
 
-    it('should call SetClipTransform with speed and reverse', async () => {
+    it('should call SetClipSpeed with speed', async () => {
       const tool = globalToolRegistry.get('change_clip_speed');
       const result = await tool!.handler(
         { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', speed: 2.0, reverse: false },
@@ -162,9 +162,20 @@ describe('editingTools — extended tools', () => {
       expect(result.success).toBe(true);
       const mockExec = getMockExecuteCommand();
       expect(mockExec).toHaveBeenCalledWith({
-        type: 'SetClipTransform',
-        payload: expect.objectContaining({ clipId: 'clip-1', speed: 2.0, reverse: false }),
+        type: 'SetClipSpeed',
+        payload: expect.objectContaining({ clipId: 'clip-1', speed: 2.0 }),
       });
+    });
+
+    it('should reject reverse playback until backend support is available', async () => {
+      const tool = globalToolRegistry.get('change_clip_speed');
+      const result = await tool!.handler(
+        { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', speed: 2.0, reverse: true },
+        CTX,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Reverse playback is not yet supported');
     });
 
     it('should reject speed outside 0.1-10.0 range', async () => {
@@ -186,7 +197,222 @@ describe('editingTools — extended tools', () => {
       expect(tool!.category).toBe('clip');
     });
 
-    it('should return failure since freeze frame is not yet implemented', async () => {
+    it('should build a freeze segment and shift tail clip forward', async () => {
+      vi.mocked(getTimelineSnapshot).mockReturnValue({
+        stateVersion: 1,
+        sequenceId: 'seq-1',
+        sequenceName: 'Main',
+        duration: 20,
+        trackCount: 1,
+        clipCount: 1,
+        tracks: [
+          {
+            id: 'track-1',
+            name: 'V1',
+            kind: 'video',
+            clipCount: 1,
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1,
+          },
+        ],
+        clips: [
+          {
+            id: 'clip-1',
+            assetId: 'a1',
+            trackId: 'track-1',
+            timelineIn: 0,
+            duration: 10,
+            sourceIn: 0,
+            sourceOut: 10,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
+        ],
+        selectedClipIds: [],
+        selectedTrackIds: [],
+        playheadPosition: 0,
+      });
+
+      vi.mocked(useProjectStore.getState).mockReturnValue({
+        isLoaded: true,
+        meta: { id: 'project-1', name: 'Test' },
+        executeCommand: vi
+          .fn()
+          .mockResolvedValueOnce({ opId: 'op-s1', createdIds: ['clip-freeze'] })
+          .mockResolvedValueOnce({ opId: 'op-s2', createdIds: ['clip-tail'] })
+          .mockResolvedValueOnce({ opId: 'op-s3', createdIds: [] })
+          .mockResolvedValueOnce({ opId: 'op-s4', createdIds: [] }),
+      } as unknown as ReturnType<typeof useProjectStore.getState>);
+
+      const tool = globalToolRegistry.get('freeze_frame');
+      const result = await tool!.handler(
+        {
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          clipId: 'clip-1',
+          frameTime: 3.5,
+          duration: 2.0,
+        },
+        CTX,
+      );
+
+      expect(result.success).toBe(true);
+
+      const mockExec = getMockExecuteCommand();
+      expect(mockExec).toHaveBeenCalledTimes(4);
+      expect(mockExec).toHaveBeenNthCalledWith(1, {
+        type: 'SplitClip',
+        payload: expect.objectContaining({ clipId: 'clip-1', splitTime: 3.5 }),
+      });
+      expect(mockExec).toHaveBeenNthCalledWith(2, {
+        type: 'SplitClip',
+        payload: expect.objectContaining({ clipId: 'clip-freeze', splitTime: 3.5 + 1 / 30 }),
+      });
+
+      const speedCall = mockExec.mock.calls[2][0] as { type: string; payload: { speed: number } };
+      expect(speedCall.type).toBe('SetClipSpeed');
+      expect(speedCall.payload.speed).toBeCloseTo(1 / 60, 6);
+
+      const moveCall = mockExec.mock.calls[3][0] as {
+        type: string;
+        payload: { clipId: string; newTimelineIn: number };
+      };
+      expect(moveCall.type).toBe('MoveClip');
+      expect(moveCall.payload.clipId).toBe('clip-tail');
+      expect(moveCall.payload.newTimelineIn).toBeCloseTo(5.5, 6);
+    });
+
+    it('should accept clip-relative frameTime when clip starts later on timeline', async () => {
+      vi.mocked(getTimelineSnapshot).mockReturnValue({
+        stateVersion: 1,
+        sequenceId: 'seq-1',
+        sequenceName: 'Main',
+        duration: 30,
+        trackCount: 1,
+        clipCount: 1,
+        tracks: [
+          {
+            id: 'track-1',
+            name: 'V1',
+            kind: 'video',
+            clipCount: 1,
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1,
+          },
+        ],
+        clips: [
+          {
+            id: 'clip-1',
+            assetId: 'a1',
+            trackId: 'track-1',
+            timelineIn: 10,
+            duration: 10,
+            sourceIn: 0,
+            sourceOut: 10,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
+        ],
+        selectedClipIds: [],
+        selectedTrackIds: [],
+        playheadPosition: 0,
+      });
+
+      vi.mocked(useProjectStore.getState).mockReturnValue({
+        isLoaded: true,
+        meta: { id: 'project-1', name: 'Test' },
+        executeCommand: vi
+          .fn()
+          .mockResolvedValueOnce({ opId: 'op-s1', createdIds: ['clip-freeze'] })
+          .mockResolvedValueOnce({ opId: 'op-s2', createdIds: ['clip-tail'] })
+          .mockResolvedValueOnce({ opId: 'op-s3', createdIds: [] })
+          .mockResolvedValueOnce({ opId: 'op-s4', createdIds: [] }),
+      } as unknown as ReturnType<typeof useProjectStore.getState>);
+
+      const tool = globalToolRegistry.get('freeze_frame');
+      const result = await tool!.handler(
+        {
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          clipId: 'clip-1',
+          frameTime: 1,
+          duration: 2.0,
+        },
+        CTX,
+      );
+
+      expect(result.success).toBe(true);
+
+      const mockExec = getMockExecuteCommand();
+      expect(mockExec).toHaveBeenNthCalledWith(1, {
+        type: 'SplitClip',
+        payload: expect.objectContaining({ clipId: 'clip-1', splitTime: 11 }),
+      });
+    });
+
+    it('should rollback previously applied commands when a later freeze step fails', async () => {
+      vi.mocked(getTimelineSnapshot).mockReturnValue({
+        stateVersion: 1,
+        sequenceId: 'seq-1',
+        sequenceName: 'Main',
+        duration: 20,
+        trackCount: 1,
+        clipCount: 1,
+        tracks: [
+          {
+            id: 'track-1',
+            name: 'V1',
+            kind: 'video',
+            clipCount: 1,
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1,
+          },
+        ],
+        clips: [
+          {
+            id: 'clip-1',
+            assetId: 'a1',
+            trackId: 'track-1',
+            timelineIn: 0,
+            duration: 10,
+            sourceIn: 0,
+            sourceOut: 10,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
+        ],
+        selectedClipIds: [],
+        selectedTrackIds: [],
+        playheadPosition: 0,
+      });
+
+      const executeCommand = vi
+        .fn()
+        .mockResolvedValueOnce({ opId: 'op-s1', createdIds: ['clip-freeze'] })
+        .mockResolvedValueOnce({ opId: 'op-s2', createdIds: ['clip-tail'] })
+        .mockResolvedValueOnce({ opId: 'op-s3', createdIds: [] })
+        .mockRejectedValueOnce(new Error('Move failed due to overlap'));
+      const undo = vi.fn().mockResolvedValue({ success: true, canUndo: true, canRedo: true });
+
+      vi.mocked(useProjectStore.getState).mockReturnValue({
+        isLoaded: true,
+        meta: { id: 'project-1', name: 'Test' },
+        executeCommand,
+        undo,
+      } as unknown as ReturnType<typeof useProjectStore.getState>);
+
       const tool = globalToolRegistry.get('freeze_frame');
       const result = await tool!.handler(
         {
@@ -200,7 +426,70 @@ describe('editingTools — extended tools', () => {
       );
 
       expect(result.success).toBe(false);
-      expect(result.error).toContain('not yet fully implemented');
+      expect(result.error).toContain('Move failed due to overlap');
+      expect(undo).toHaveBeenCalledTimes(3);
+    });
+
+    it('should fail when split command does not return created IDs', async () => {
+      vi.mocked(getTimelineSnapshot).mockReturnValue({
+        stateVersion: 1,
+        sequenceId: 'seq-1',
+        sequenceName: 'Main',
+        duration: 20,
+        trackCount: 1,
+        clipCount: 1,
+        tracks: [
+          {
+            id: 'track-1',
+            name: 'V1',
+            kind: 'video',
+            clipCount: 1,
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1,
+          },
+        ],
+        clips: [
+          {
+            id: 'clip-1',
+            assetId: 'a1',
+            trackId: 'track-1',
+            timelineIn: 0,
+            duration: 10,
+            sourceIn: 0,
+            sourceOut: 10,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
+        ],
+        selectedClipIds: [],
+        selectedTrackIds: [],
+        playheadPosition: 0,
+      });
+
+      vi.mocked(useProjectStore.getState).mockReturnValue({
+        isLoaded: true,
+        meta: { id: 'project-1', name: 'Test' },
+        executeCommand: vi.fn().mockResolvedValue({ opId: 'op-s1', createdIds: [] }),
+      } as unknown as ReturnType<typeof useProjectStore.getState>);
+
+      const tool = globalToolRegistry.get('freeze_frame');
+      const result = await tool!.handler(
+        {
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          clipId: 'clip-1',
+          frameTime: 3.5,
+          duration: 2.0,
+        },
+        CTX,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('did not return a created clip ID');
     });
   });
 

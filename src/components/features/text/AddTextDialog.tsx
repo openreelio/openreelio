@@ -26,7 +26,7 @@ export interface AddTextDialogProps {
   /** Callback when dialog is closed */
   onClose: () => void;
   /** Callback when text is added */
-  onAdd: (payload: AddTextPayload) => void;
+  onAdd: (payload: AddTextPayload) => Promise<void>;
   /** Available tracks (only video and overlay will be shown) */
   tracks: Track[];
   /** Current playhead time (insertion point) */
@@ -59,6 +59,29 @@ const DEFAULT_TEXT_STYLE: TextClipData['style'] = {
 /** Track kinds that support text clips */
 const TEXT_SUPPORTED_TRACK_KINDS: TrackKind[] = ['video', 'overlay'];
 
+function getClipTimelineDurationSec(clip: Track['clips'][number]): number {
+  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+  const sourceDuration = clip.range.sourceOutSec - clip.range.sourceInSec;
+
+  if (Number.isFinite(sourceDuration) && sourceDuration > 0) {
+    return sourceDuration / safeSpeed;
+  }
+
+  return Number.isFinite(clip.place.durationSec) && clip.place.durationSec > 0
+    ? clip.place.durationSec
+    : 0;
+}
+
+function trackHasOverlap(track: Track, timelineIn: number, durationSec: number): boolean {
+  const candidateEnd = timelineIn + durationSec;
+
+  return track.clips.some((clip) => {
+    const clipStart = clip.place.timelineInSec;
+    const clipEnd = clipStart + getClipTimelineDurationSec(clip);
+    return timelineIn < clipEnd && candidateEnd > clipStart;
+  });
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -78,8 +101,10 @@ export function AddTextDialog({
   const [duration, setDuration] = useState(DEFAULT_DURATION);
   const [selectedTrackId, setSelectedTrackId] = useState<string>('');
   const [selectedPreset, setSelectedPreset] = useState<TextPreset | null>(
-    () => getPresetById('centered-title') ?? null
+    () => getPresetById('centered-title') ?? null,
   );
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const textInputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -90,12 +115,28 @@ export function AddTextDialog({
   // Filter tracks to only show video and overlay tracks that are not locked
   const availableTracks = useMemo(() => {
     return tracks.filter(
-      (track) => TEXT_SUPPORTED_TRACK_KINDS.includes(track.kind) && !track.locked
+      (track) => TEXT_SUPPORTED_TRACK_KINDS.includes(track.kind) && !track.locked,
     );
   }, [tracks]);
 
   // Validate content
   const isContentValid = content.trim().length > 0;
+  const clampedDuration = Math.max(MIN_DURATION, Math.min(MAX_DURATION, duration));
+
+  const selectedTrack = useMemo(
+    () => availableTracks.find((track) => track.id === selectedTrackId),
+    [availableTracks, selectedTrackId],
+  );
+
+  const hasTrackConflict = useMemo(() => {
+    if (!selectedTrack) {
+      return false;
+    }
+
+    return trackHasOverlap(selectedTrack, currentTime, clampedDuration);
+  }, [selectedTrack, currentTime, clampedDuration]);
+
+  const canSubmit = isContentValid && !!selectedTrack && !hasTrackConflict && !isSubmitting;
 
   // ===========================================================================
   // Effects
@@ -122,8 +163,9 @@ export function AddTextDialog({
       setContent(DEFAULT_TEXT);
       setDuration(DEFAULT_DURATION);
       setSelectedPreset(getPresetById('centered-title') ?? null);
+      setSubmitError(null);
+      setIsSubmitting(false);
     }
-   
   }, [isOpen]);
 
   // ===========================================================================
@@ -131,8 +173,12 @@ export function AddTextDialog({
   // ===========================================================================
 
   const handleClose = useCallback(() => {
+    if (isSubmitting) {
+      return;
+    }
+
     onClose();
-  }, [onClose]);
+  }, [isSubmitting, onClose]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
@@ -140,57 +186,99 @@ export function AddTextDialog({
         handleClose();
       }
     },
-    [handleClose]
+    [handleClose],
   );
 
   const handleContentChange = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      if (submitError) {
+        setSubmitError(null);
+      }
+
       setContent(e.target.value);
     },
-    []
+    [submitError],
   );
 
   const handleDurationChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
+      if (submitError) {
+        setSubmitError(null);
+      }
+
       const value = parseFloat(e.target.value);
       if (!isNaN(value)) {
         setDuration(value);
       }
     },
-    []
+    [submitError],
   );
 
   const handleTrackChange = useCallback(
     (e: React.ChangeEvent<HTMLSelectElement>) => {
+      if (submitError) {
+        setSubmitError(null);
+      }
+
       setSelectedTrackId(e.target.value);
     },
-    []
+    [submitError],
   );
 
-  const handlePresetSelect = useCallback((preset: TextPreset) => {
-    setSelectedPreset(preset);
-  }, []);
+  const handlePresetSelect = useCallback(
+    (preset: TextPreset) => {
+      if (submitError) {
+        setSubmitError(null);
+      }
 
-  const handleAdd = useCallback(() => {
-    if (!isContentValid || !selectedTrackId) return;
+      setSelectedPreset(preset);
+    },
+    [submitError],
+  );
 
-    // Clamp duration to valid range
-    const clampedDuration = Math.max(MIN_DURATION, Math.min(MAX_DURATION, duration));
+  const handleAdd = useCallback(async () => {
+    if (!canSubmit || !selectedTrack) {
+      return;
+    }
 
-    // Create text data from selected preset
     const textData: TextClipData = selectedPreset
       ? presetToTextClipData(selectedPreset, content)
-      : { content, style: DEFAULT_TEXT_STYLE, position: { x: 0.5, y: 0.5 }, rotation: 0, opacity: 1.0 };
+      : {
+          content,
+          style: DEFAULT_TEXT_STYLE,
+          position: { x: 0.5, y: 0.5 },
+          rotation: 0,
+          opacity: 1.0,
+        };
 
-    onAdd({
-      trackId: selectedTrackId,
-      timelineIn: currentTime,
-      duration: clampedDuration,
-      textData,
-    });
+    try {
+      setIsSubmitting(true);
+      setSubmitError(null);
 
-    onClose();
-  }, [content, duration, selectedTrackId, selectedPreset, currentTime, isContentValid, onAdd, onClose]);
+      await onAdd({
+        trackId: selectedTrack.id,
+        timelineIn: currentTime,
+        duration: clampedDuration,
+        textData,
+      });
+
+      onClose();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setSubmitError(message || 'Failed to add text clip');
+    } finally {
+      setIsSubmitting(false);
+    }
+  }, [
+    canSubmit,
+    clampedDuration,
+    content,
+    currentTime,
+    onAdd,
+    onClose,
+    selectedPreset,
+    selectedTrack,
+  ]);
 
   // ===========================================================================
   // Render
@@ -232,10 +320,7 @@ export function AddTextDialog({
         <div className="p-4 space-y-4">
           {/* Text Content */}
           <div className="space-y-2">
-            <label
-              htmlFor="text-content"
-              className="block text-sm font-medium text-editor-text"
-            >
+            <label htmlFor="text-content" className="block text-sm font-medium text-editor-text">
               Text Content
             </label>
             <textarea
@@ -250,9 +335,7 @@ export function AddTextDialog({
 
           {/* Presets */}
           <div className="space-y-2">
-            <label className="block text-sm font-medium text-editor-text">
-              Style Preset
-            </label>
+            <label className="block text-sm font-medium text-editor-text">Style Preset</label>
             <TextPresetPicker
               onSelect={handlePresetSelect}
               selectedPresetId={selectedPreset?.id}
@@ -263,10 +346,7 @@ export function AddTextDialog({
 
           {/* Track Selection */}
           <div className="space-y-2">
-            <label
-              htmlFor="track-select"
-              className="block text-sm font-medium text-editor-text"
-            >
+            <label htmlFor="track-select" className="block text-sm font-medium text-editor-text">
               Track
             </label>
             <select
@@ -274,6 +354,7 @@ export function AddTextDialog({
               className="w-full px-3 py-2 bg-editor-input border border-editor-border rounded text-sm text-editor-text focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
               value={selectedTrackId}
               onChange={handleTrackChange}
+              disabled={isSubmitting}
             >
               {availableTracks.map((track) => (
                 <option key={track.id} value={track.id}>
@@ -281,14 +362,17 @@ export function AddTextDialog({
                 </option>
               ))}
             </select>
+            {hasTrackConflict && (
+              <p className="text-xs text-red-400">
+                Selected track already has a clip at this time. Choose another track or move the
+                playhead.
+              </p>
+            )}
           </div>
 
           {/* Duration */}
           <div className="space-y-2">
-            <label
-              htmlFor="duration-input"
-              className="block text-sm font-medium text-editor-text"
-            >
+            <label htmlFor="duration-input" className="block text-sm font-medium text-editor-text">
               Duration (seconds)
             </label>
             <input
@@ -300,6 +384,7 @@ export function AddTextDialog({
               className="w-full px-3 py-2 bg-editor-input border border-editor-border rounded text-sm text-editor-text focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
               value={duration}
               onChange={handleDurationChange}
+              disabled={isSubmitting}
             />
             <p className="text-xs text-editor-text-muted">
               Text will be added at {currentTime.toFixed(2)}s on the timeline
@@ -309,10 +394,12 @@ export function AddTextDialog({
 
         {/* Footer */}
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-editor-border">
+          {submitError && <p className="mr-auto text-xs text-red-400">{submitError}</p>}
           <button
             type="button"
             className="px-4 py-2 text-sm text-editor-text-muted hover:text-editor-text rounded border border-editor-border hover:bg-editor-border transition-colors"
             onClick={handleClose}
+            disabled={isSubmitting}
           >
             Cancel
           </button>
@@ -320,9 +407,9 @@ export function AddTextDialog({
             type="button"
             className="px-4 py-2 text-sm bg-teal-600 text-white rounded hover:bg-teal-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             onClick={handleAdd}
-            disabled={!isContentValid}
+            disabled={!canSubmit}
           >
-            Add
+            {isSubmitting ? 'Adding...' : 'Add'}
           </button>
         </div>
       </div>
