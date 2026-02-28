@@ -81,6 +81,15 @@ pub struct SetClipTransformPayload {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetClipSpeedPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub speed: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipMutePayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
@@ -533,6 +542,13 @@ pub enum CommandPayload {
     #[serde(alias = "setClipTransform", alias = "SetClipTransform")]
     SetClipTransform(SetClipTransformPayload),
 
+    #[serde(
+        alias = "setClipSpeed",
+        alias = "SetClipSpeed",
+        alias = "changeClipSpeed"
+    )]
+    SetClipSpeed(SetClipSpeedPayload),
+
     #[serde(alias = "setClipMute", alias = "SetClipMute")]
     SetClipMute(SetClipMutePayload),
 
@@ -706,9 +722,9 @@ impl CommandPayload {
             MoveClipCommand, MoveFileCommand, RemoveAssetCommand, RemoveClipCommand,
             RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
             RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, SetClipAudioCommand,
-            SetClipMuteCommand, SetClipTransformCommand, SetTrackBlendModeCommand,
-            SplitClipCommand, TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand,
-            UpdateTextCommand,
+            SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
+            SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand, UpdateEffectCommand,
+            UpdateMaskCommand, UpdateTextCommand,
         };
 
         match self {
@@ -749,6 +765,12 @@ impl CommandPayload {
                 &p.track_id,
                 &p.clip_id,
                 p.transform,
+            )),
+            CommandPayload::SetClipSpeed(p) => Box::new(SetClipSpeedCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.speed,
             )),
             CommandPayload::SetClipMute(p) => Box::new(SetClipMuteCommand::new(
                 &p.sequence_id,
@@ -1035,6 +1057,22 @@ mod tests {
         assert!(
             parsed.is_ok(),
             "expected SetClipTransform to parse, got: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_set_clip_speed_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "clipId": "clip_001",
+            "speed": 1.5,
+        });
+
+        let parsed = CommandPayload::parse("SetClipSpeed".to_string(), payload);
+        assert!(
+            matches!(parsed, Ok(CommandPayload::SetClipSpeed(_))),
+            "expected SetClipSpeed to parse, got: {parsed:?}"
         );
     }
 

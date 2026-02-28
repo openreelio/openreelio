@@ -655,12 +655,12 @@ impl Command for TrimClipCommand {
             .tracks
             .iter()
             .enumerate()
-            .find_map(|(t_idx, track)| {
+            .find_map(|(track_idx, track)| {
                 track
                     .clips
                     .iter()
                     .position(|c| c.id == self.clip_id)
-                    .map(|c_idx| (t_idx, c_idx))
+                    .map(|clip_idx| (track_idx, clip_idx))
             })
             .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
 
@@ -1104,6 +1104,133 @@ impl Command for SetClipAudioCommand {
             "muted": self.muted,
             "fadeInSec": self.fade_in_sec,
             "fadeOutSec": self.fade_out_sec,
+        })
+    }
+}
+
+// =============================================================================
+// SetClipSpeedCommand
+// =============================================================================
+
+/// Command to update a clip's playback speed.
+///
+/// Timeline duration is automatically recalculated from source range and speed:
+/// `duration = (sourceOut - sourceIn) / speed`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetClipSpeedCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub speed: f32,
+    #[serde(skip)]
+    previous_speed: Option<f32>,
+    #[serde(skip)]
+    previous_duration_sec: Option<TimeSec>,
+}
+
+impl SetClipSpeedCommand {
+    pub fn new(sequence_id: &str, track_id: &str, clip_id: &str, speed: f32) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            speed,
+            previous_speed: None,
+            previous_duration_sec: None,
+        }
+    }
+}
+
+impl Command for SetClipSpeedCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !self.speed.is_finite() || self.speed <= 0.0 {
+            return Err(CoreError::InvalidCommand(
+                "speed must be a finite number > 0".to_string(),
+            ));
+        }
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track_idx = sequence
+            .tracks
+            .iter()
+            .position(|track| track.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        let clip_idx = sequence.tracks[track_idx]
+            .clips
+            .iter()
+            .position(|c| c.id == self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        let original = sequence.tracks[track_idx].clips[clip_idx].clone();
+        self.previous_speed = Some(original.speed);
+        self.previous_duration_sec = Some(original.place.duration_sec);
+
+        let mut candidate = original;
+        candidate.speed = self.speed;
+        candidate.place.duration_sec = candidate.range.duration() / self.speed as f64;
+
+        if !candidate.place.duration_sec.is_finite() || candidate.place.duration_sec <= 0.0 {
+            return Err(CoreError::ValidationError(
+                "Clip duration must be finite and > 0 after speed change".to_string(),
+            ));
+        }
+
+        {
+            let track = &sequence.tracks[track_idx];
+            validate_no_overlap(track, &candidate.place, Some(&candidate.id))?;
+        }
+
+        sequence.tracks[track_idx].clips[clip_idx] = candidate;
+        sort_track_clips(&mut sequence.tracks[track_idx]);
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let (Some(previous_speed), Some(previous_duration_sec)) =
+            (self.previous_speed, self.previous_duration_sec)
+        else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) else {
+            return Ok(());
+        };
+
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.speed = previous_speed;
+            clip.place.duration_sec = previous_duration_sec;
+            sort_track_clips(track);
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetClipSpeed"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "speed": self.speed,
         })
     }
 }
@@ -1905,6 +2032,71 @@ mod tests {
         cmd.undo(&mut state).unwrap();
         let restored = &state.sequences[&seq_id].tracks[0].clips[0].transform;
         assert_eq!(restored, &original);
+    }
+
+    #[test]
+    fn test_set_clip_speed_command_updates_duration_and_undoes() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let original_speed = state.sequences[&seq_id].tracks[0].clips[0].speed;
+        let original_duration = state.sequences[&seq_id].tracks[0].clips[0]
+            .place
+            .duration_sec;
+
+        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, &track_id, &clip_id, 2.0);
+        speed_cmd.execute(&mut state).unwrap();
+
+        let updated = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert_eq!(updated.speed, 2.0);
+        assert_eq!(updated.place.duration_sec, 5.0);
+
+        speed_cmd.undo(&mut state).unwrap();
+
+        let restored = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert_eq!(restored.speed, original_speed);
+        assert_eq!(restored.place.duration_sec, original_duration);
+    }
+
+    #[test]
+    fn test_set_clip_speed_rejects_non_positive_speed() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, &track_id, &clip_id, 0.0);
+
+        let err = speed_cmd.execute(&mut state).unwrap_err();
+        assert!(matches!(err, CoreError::InvalidCommand(_)));
+    }
+
+    #[test]
+    fn test_set_clip_speed_validates_track_membership() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, "wrong-track", &clip_id, 2.0);
+
+        let err = speed_cmd.execute(&mut state).unwrap_err();
+        assert!(matches!(err, CoreError::TrackNotFound(_)));
     }
 
     #[test]
