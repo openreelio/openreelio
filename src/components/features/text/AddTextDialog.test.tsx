@@ -74,7 +74,7 @@ describe('AddTextDialog', () => {
   const defaultProps = {
     isOpen: true,
     onClose: vi.fn(),
-    onAdd: vi.fn(),
+    onAdd: vi.fn().mockResolvedValue(undefined),
     tracks: mockTracks,
     currentTime: 5.0,
   };
@@ -152,7 +152,7 @@ describe('AddTextDialog', () => {
 
     it('should call onAdd with correct data when Add button is clicked', async () => {
       const user = userEvent.setup();
-      const onAdd = vi.fn();
+      const onAdd = vi.fn().mockResolvedValue(undefined);
 
       render(<AddTextDialog {...defaultProps} onAdd={onAdd} />);
 
@@ -164,21 +164,23 @@ describe('AddTextDialog', () => {
       // Click Add button
       await user.click(screen.getByRole('button', { name: /^add$/i }));
 
-      expect(onAdd).toHaveBeenCalledWith(
-        expect.objectContaining({
-          trackId: expect.any(String),
-          timelineIn: 5.0,
-          duration: 3,
-          textData: expect.objectContaining({
-            content: 'Hello World',
+      await waitFor(() => {
+        expect(onAdd).toHaveBeenCalledWith(
+          expect.objectContaining({
+            trackId: expect.any(String),
+            timelineIn: 5.0,
+            duration: 3,
+            textData: expect.objectContaining({
+              content: 'Hello World',
+            }),
           }),
-        })
-      );
+        );
+      });
     });
 
     it('should update duration when input changes', async () => {
       const user = userEvent.setup();
-      const onAdd = vi.fn();
+      const onAdd = vi.fn().mockResolvedValue(undefined);
 
       render(<AddTextDialog {...defaultProps} onAdd={onAdd} />);
 
@@ -190,16 +192,18 @@ describe('AddTextDialog', () => {
 
       await user.click(screen.getByRole('button', { name: /^add$/i }));
 
-      expect(onAdd).toHaveBeenCalledWith(
-        expect.objectContaining({
-          duration: 5,
-        })
-      );
+      await waitFor(() => {
+        expect(onAdd).toHaveBeenCalledWith(
+          expect.objectContaining({
+            duration: 5,
+          }),
+        );
+      });
     });
 
     it('should apply preset when preset is selected from picker', async () => {
       const user = userEvent.setup();
-      const onAdd = vi.fn();
+      const onAdd = vi.fn().mockResolvedValue(undefined);
 
       render(<AddTextDialog {...defaultProps} onAdd={onAdd} />);
 
@@ -213,17 +217,19 @@ describe('AddTextDialog', () => {
 
       await user.click(screen.getByRole('button', { name: /^add$/i }));
 
-      expect(onAdd).toHaveBeenCalledWith(
-        expect.objectContaining({
-          textData: expect.objectContaining({
-            content: 'My Title',
-            style: expect.objectContaining({
-              fontSize: 96, // Epic Title preset uses 96pt
-              bold: true,
+      await waitFor(() => {
+        expect(onAdd).toHaveBeenCalledWith(
+          expect.objectContaining({
+            textData: expect.objectContaining({
+              content: 'My Title',
+              style: expect.objectContaining({
+                fontSize: 96, // Epic Title preset uses 96pt
+                bold: true,
+              }),
             }),
           }),
-        })
-      );
+        );
+      });
     });
 
     it('should disable Add button when text content is empty', async () => {
@@ -240,7 +246,7 @@ describe('AddTextDialog', () => {
     it('should close dialog after successful add', async () => {
       const user = userEvent.setup();
       const onClose = vi.fn();
-      const onAdd = vi.fn();
+      const onAdd = vi.fn().mockResolvedValue(undefined);
 
       render(<AddTextDialog {...defaultProps} onClose={onClose} onAdd={onAdd} />);
 
@@ -249,6 +255,23 @@ describe('AddTextDialog', () => {
       await waitFor(() => {
         expect(onClose).toHaveBeenCalled();
       });
+    });
+
+    it('should show error and keep dialog open when add fails', async () => {
+      const user = userEvent.setup();
+      const onClose = vi.fn();
+      const onAdd = vi.fn().mockRejectedValue(new Error('Validation error'));
+
+      render(<AddTextDialog {...defaultProps} onClose={onClose} onAdd={onAdd} />);
+
+      await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+      await waitFor(() => {
+        expect(onAdd).toHaveBeenCalled();
+      });
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByText('Validation error')).toBeInTheDocument();
     });
   });
 
@@ -266,7 +289,7 @@ describe('AddTextDialog', () => {
 
     it('should allow changing track selection', async () => {
       const user = userEvent.setup();
-      const onAdd = vi.fn();
+      const onAdd = vi.fn().mockResolvedValue(undefined);
 
       render(<AddTextDialog {...defaultProps} onAdd={onAdd} />);
 
@@ -275,11 +298,13 @@ describe('AddTextDialog', () => {
 
       await user.click(screen.getByRole('button', { name: /^add$/i }));
 
-      expect(onAdd).toHaveBeenCalledWith(
-        expect.objectContaining({
-          trackId: 'track-overlay',
-        })
-      );
+      await waitFor(() => {
+        expect(onAdd).toHaveBeenCalledWith(
+          expect.objectContaining({
+            trackId: 'track-overlay',
+          }),
+        );
+      });
     });
 
     it('should not show locked tracks', () => {
@@ -306,7 +331,7 @@ describe('AddTextDialog', () => {
   describe('validation', () => {
     it('should enforce minimum duration of 0.5 seconds', async () => {
       const user = userEvent.setup();
-      const onAdd = vi.fn();
+      const onAdd = vi.fn().mockResolvedValue(undefined);
 
       render(<AddTextDialog {...defaultProps} onAdd={onAdd} />);
 
@@ -317,16 +342,18 @@ describe('AddTextDialog', () => {
       await user.click(screen.getByRole('button', { name: /^add$/i }));
 
       // Should use minimum duration of 0.5
-      expect(onAdd).toHaveBeenCalledWith(
-        expect.objectContaining({
-          duration: 0.5,
-        })
-      );
+      await waitFor(() => {
+        expect(onAdd).toHaveBeenCalledWith(
+          expect.objectContaining({
+            duration: 0.5,
+          }),
+        );
+      });
     });
 
     it('should enforce maximum duration of 300 seconds', async () => {
       const user = userEvent.setup();
-      const onAdd = vi.fn();
+      const onAdd = vi.fn().mockResolvedValue(undefined);
 
       render(<AddTextDialog {...defaultProps} onAdd={onAdd} />);
 
@@ -337,11 +364,53 @@ describe('AddTextDialog', () => {
       await user.click(screen.getByRole('button', { name: /^add$/i }));
 
       // Should use maximum duration of 300
-      expect(onAdd).toHaveBeenCalledWith(
-        expect.objectContaining({
-          duration: 300,
-        })
-      );
+      await waitFor(() => {
+        expect(onAdd).toHaveBeenCalledWith(
+          expect.objectContaining({
+            duration: 300,
+          }),
+        );
+      });
+    });
+
+    it('should block add when selected track has overlapping clip', async () => {
+      const user = userEvent.setup();
+      const onAdd = vi.fn().mockResolvedValue(undefined);
+      const tracksWithConflict: Track[] = [
+        {
+          ...mockTracks[0],
+          clips: [
+            {
+              id: 'clip-existing',
+              assetId: 'asset-existing',
+              range: { sourceInSec: 0, sourceOutSec: 8 },
+              place: { timelineInSec: 4, durationSec: 8 },
+              transform: {
+                position: { x: 0.5, y: 0.5 },
+                scale: { x: 1, y: 1 },
+                rotationDeg: 0,
+                anchor: { x: 0.5, y: 0.5 },
+              },
+              opacity: 1,
+              speed: 1,
+              effects: [],
+              audio: {
+                volumeDb: 0,
+                pan: 0,
+                muted: false,
+              },
+            },
+          ],
+        },
+        ...mockTracks.slice(1),
+      ];
+
+      render(<AddTextDialog {...defaultProps} onAdd={onAdd} tracks={tracksWithConflict} />);
+
+      await user.click(screen.getByRole('button', { name: /^add$/i }));
+
+      expect(onAdd).not.toHaveBeenCalled();
+      expect(screen.getByText(/already has a clip at this time/i)).toBeInTheDocument();
     });
   });
 
