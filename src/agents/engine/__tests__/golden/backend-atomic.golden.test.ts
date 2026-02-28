@@ -157,9 +157,9 @@ describe('Golden: backend-atomic', () => {
     expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
       plan: expect.objectContaining({
         steps: [
-          expect.objectContaining({ toolName: 'split_clip' }),
-          expect.objectContaining({ toolName: 'move_clip' }),
-          expect.objectContaining({ toolName: 'trim_clip' }),
+          expect.objectContaining({ toolName: 'splitClip' }),
+          expect.objectContaining({ toolName: 'moveClip' }),
+          expect.objectContaining({ toolName: 'trimClip' }),
         ],
       }),
     });
@@ -277,8 +277,8 @@ describe('Golden: backend-atomic', () => {
     expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
       plan: expect.objectContaining({
         steps: expect.arrayContaining([
-          expect.objectContaining({ toolName: 'split_clip' }),
-          expect.objectContaining({ toolName: 'move_clip' }),
+          expect.objectContaining({ toolName: 'splitClip' }),
+          expect.objectContaining({ toolName: 'moveClip' }),
         ]),
       }),
     });

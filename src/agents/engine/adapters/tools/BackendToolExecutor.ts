@@ -1,13 +1,13 @@
 /**
  * BackendToolExecutor
  *
- * Routes tool execution between backend IPC (for editing tools) and
- * frontend ToolRegistryAdapter (for analysis/utility tools).
+ * Routes tool execution between backend IPC (for backend-safe edit commands)
+ * and frontend ToolRegistryAdapter (for orchestration/high-level tools).
  *
- * When the USE_BACKEND_TOOLS feature flag is enabled, editing tools
- * (clip, track, effect, transition, audio, caption) are dispatched to
- * the backend `execute_agent_plan` IPC endpoint for atomic execution
- * with rollback support. Analysis and utility tools remain on the frontend.
+ * When the USE_BACKEND_TOOLS feature flag is enabled, tools that map 1:1 to
+ * backend CommandPayload variants are dispatched to `execute_agent_plan` for
+ * atomic execution with rollback. High-level tools that require frontend state
+ * orchestration remain on the frontend.
  *
  * Implements the IToolExecutor interface.
  */
@@ -35,17 +35,28 @@ const logger = createLogger('BackendToolExecutor');
 // Constants
 // =============================================================================
 
-/** Tool categories that route to the backend for atomic execution */
-const BACKEND_CATEGORIES = new Set([
-  'clip',
-  'track',
-  'timeline',
-  'effect',
-  'transition',
-  'audio',
-  'caption',
-  'asset',
+/**
+ * Tools that can be sent directly to backend `CommandPayload::parse` after
+ * snake_case -> camelCase normalization.
+ *
+ * Keep this list conservative: only include tools whose public args are already
+ * command-shaped and do not rely on extra frontend orchestration.
+ */
+const BACKEND_DIRECT_TOOLS = new Set([
+  'move_clip',
+  'trim_clip',
+  'split_clip',
+  'delete_clip',
+  'add_track',
+  'remove_track',
+  'remove_marker',
 ]);
+
+function normalizeToolNameForBackend(toolName: string): string {
+  // Backend CommandPayload parsing uses camelCase aliases. Agent tool names are
+  // snake_case, so normalize before sending to execute_agent_plan.
+  return toolName.replace(/_([a-z])/g, (_, char: string) => char.toUpperCase());
+}
 
 /**
  * Compound tool expander function signature.
@@ -119,9 +130,18 @@ export class BackendToolExecutor implements IToolExecutor {
    * Determines whether a tool should be executed on the backend.
    */
   private isBackendTool(toolName: string): boolean {
-    const toolDef = this.frontendExecutor.getToolDefinition(toolName);
-    if (!toolDef) return false;
-    return BACKEND_CATEGORIES.has(toolDef.category);
+    // Only known tools can route either way.
+    if (!this.frontendExecutor.getToolDefinition(toolName)) {
+      return false;
+    }
+
+    // Explicit compound expanders are backend-safe by definition because they
+    // emit primitive command steps.
+    if (compoundExpanders.has(toolName)) {
+      return true;
+    }
+
+    return BACKEND_DIRECT_TOOLS.has(toolName);
   }
 
   async execute(
@@ -140,7 +160,7 @@ export class BackendToolExecutor implements IToolExecutor {
     const steps = expander
       ? expander(args).map((sub, i) => ({
           id: `step-${i + 1}`,
-          toolName: sub.toolName,
+          toolName: normalizeToolNameForBackend(sub.toolName),
           params: sub.params as Record<string, never>,
           description: `Execute ${sub.toolName}`,
           riskLevel: 'low' as const,
@@ -150,7 +170,7 @@ export class BackendToolExecutor implements IToolExecutor {
       : [
           {
             id: 'step-1',
-            toolName,
+            toolName: normalizeToolNameForBackend(toolName),
             params: args as Record<string, never>,
             description: `Execute ${toolName}`,
             riskLevel: 'low' as const,
@@ -161,7 +181,9 @@ export class BackendToolExecutor implements IToolExecutor {
 
     const plan: AgentPlan = {
       id: `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      goal: expander ? `Execute compound ${toolName} (${steps.length} steps)` : `Execute ${toolName}`,
+      goal: expander
+        ? `Execute compound ${toolName} (${steps.length} steps)`
+        : `Execute ${toolName}`,
       steps,
       approvalGranted: true,
       sessionId: context.sessionId,
@@ -217,9 +239,7 @@ export class BackendToolExecutor implements IToolExecutor {
         }
 
         const errorMsg =
-          result.errorMessage ??
-          result.stepResults[0]?.error ??
-          'Unknown backend execution error';
+          result.errorMessage ?? result.stepResults[0]?.error ?? 'Unknown backend execution error';
         return createFailureResult(errorMsg, duration);
       } finally {
         unlistenStart();
@@ -280,7 +300,7 @@ export class BackendToolExecutor implements IToolExecutor {
             }
             allSteps.push({
               id: `step-${stepCounter + 1}`,
-              toolName: subSteps[j].toolName,
+              toolName: normalizeToolNameForBackend(subSteps[j].toolName),
               params: subSteps[j].params as Record<string, never>,
               description: `Execute ${subSteps[j].toolName}`,
               riskLevel: 'low' as const,
@@ -297,14 +317,12 @@ export class BackendToolExecutor implements IToolExecutor {
         } else {
           allSteps.push({
             id: `step-${stepCounter + 1}`,
-            toolName: t.name,
+            toolName: normalizeToolNameForBackend(t.name),
             params: t.args as Record<string, never>,
             description: `Execute ${t.name}`,
             riskLevel: 'low' as const,
             dependsOn:
-              request.mode === 'sequential' && stepCounter > 0
-                ? [`step-${stepCounter}`]
-                : [],
+              request.mode === 'sequential' && stepCounter > 0 ? [`step-${stepCounter}`] : [],
             optional: false,
           });
           toolStepMapping.push({ toolIndex: i, stepStart: stepCounter, stepCount: 1 });
@@ -348,10 +366,7 @@ export class BackendToolExecutor implements IToolExecutor {
             const allSucceeded = stepSlice.every((sr) => sr?.success);
 
             if (allSucceeded && stepSlice.length > 0) {
-              const totalDuration = stepSlice.reduce(
-                (sum, sr) => sum + (sr?.durationMs ?? 0),
-                0,
-              );
+              const totalDuration = stepSlice.reduce((sum, sr) => sum + (sr?.durationMs ?? 0), 0);
               results.push({
                 tool: backendTools[mapping.toolIndex].name,
                 result: {
@@ -446,8 +461,6 @@ export class BackendToolExecutor implements IToolExecutor {
  * Editing tools are routed to the backend; analysis/utility tools
  * are delegated to the frontend executor.
  */
-export function createBackendToolExecutor(
-  frontendExecutor: IToolExecutor,
-): BackendToolExecutor {
+export function createBackendToolExecutor(frontendExecutor: IToolExecutor): BackendToolExecutor {
   return new BackendToolExecutor(frontendExecutor);
 }
