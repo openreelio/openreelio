@@ -3330,7 +3330,15 @@ export type StateChange =
 /**
  * An existing sequence was modified
  */
-{ type: "sequenceModified"; sequence_id: string }
+{ type: "sequenceModified"; sequence_id: string } | 
+/**
+ * A new marker was created
+ */
+{ type: "markerCreated"; marker_id: string } | 
+/**
+ * A marker was deleted
+ */
+{ type: "markerDeleted"; marker_id: string }
 /**
  * Generic state change event payload.
  */
