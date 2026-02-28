@@ -9,18 +9,115 @@
  */
 
 import { useState, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { useProjectStore } from '@/stores/projectStore';
-import type {
-  TextClipData,
-  CommandResult,
-  ClipId,
-  TrackId,
-  TimeSec,
-} from '@/types';
+import type { TextClipData, ClipId, TrackId, TimeSec } from '@/types';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('useTextClip');
+
+const HEX_COLOR_PATTERN = /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i;
+const RGB_FUNCTION_PATTERN = /^rgba?\(([^)]+)\)$/i;
+
+function toHexByte(value: number): string {
+  return Math.round(value).toString(16).padStart(2, '0').toUpperCase();
+}
+
+function parseRgbChannel(raw: string): number | undefined {
+  const value = raw.trim();
+  if (value.endsWith('%')) {
+    const percentage = Number.parseFloat(value.slice(0, -1));
+    if (!Number.isFinite(percentage)) {
+      return undefined;
+    }
+    return Math.min(255, Math.max(0, (percentage / 100) * 255));
+  }
+
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    return undefined;
+  }
+
+  return Math.min(255, Math.max(0, parsed));
+}
+
+function parseAlphaChannel(raw: string): number | undefined {
+  const value = raw.trim();
+  if (value.endsWith('%')) {
+    const percentage = Number.parseFloat(value.slice(0, -1));
+    if (!Number.isFinite(percentage)) {
+      return undefined;
+    }
+    return Math.min(1, Math.max(0, percentage / 100));
+  }
+
+  const parsed = Number.parseFloat(value);
+  if (!Number.isFinite(parsed)) {
+    return undefined;
+  }
+
+  return Math.min(1, Math.max(0, parsed));
+}
+
+function normalizeColorToHex(color: string): string {
+  const trimmed = color.trim();
+  if (trimmed.length === 0) {
+    return color;
+  }
+
+  if (HEX_COLOR_PATTERN.test(trimmed)) {
+    return trimmed.toUpperCase();
+  }
+
+  const match = RGB_FUNCTION_PATTERN.exec(trimmed);
+  if (!match) {
+    return color;
+  }
+
+  const isRgba = /^rgba/i.test(trimmed);
+  const parts = match[1].split(',').map((part) => part.trim());
+  if ((!isRgba && parts.length !== 3) || (isRgba && parts.length !== 4)) {
+    return color;
+  }
+
+  const red = parseRgbChannel(parts[0]);
+  const green = parseRgbChannel(parts[1]);
+  const blue = parseRgbChannel(parts[2]);
+  const alpha = isRgba ? parseAlphaChannel(parts[3]) : 1;
+
+  if (red === undefined || green === undefined || blue === undefined || alpha === undefined) {
+    return color;
+  }
+
+  const hex = `${toHexByte(red)}${toHexByte(green)}${toHexByte(blue)}`;
+  const alphaHex = alpha < 1 ? toHexByte(alpha * 255) : '';
+  return `#${hex}${alphaHex}`;
+}
+
+function normalizeTextClipDataColors(textData: TextClipData): TextClipData {
+  return {
+    ...textData,
+    style: {
+      ...textData.style,
+      color: normalizeColorToHex(textData.style.color),
+      backgroundColor:
+        typeof textData.style.backgroundColor === 'string'
+          ? normalizeColorToHex(textData.style.backgroundColor)
+          : textData.style.backgroundColor,
+    },
+    shadow: textData.shadow
+      ? {
+          ...textData.shadow,
+          color: normalizeColorToHex(textData.shadow.color),
+        }
+      : textData.shadow,
+    outline: textData.outline
+      ? {
+          ...textData.outline,
+          color: normalizeColorToHex(textData.outline.color),
+        }
+      : textData.outline,
+  };
+}
 
 // =============================================================================
 // Types
@@ -127,6 +224,7 @@ export function useTextClip(): UseTextClipResult {
 
   // Get active sequence ID from store
   const activeSequenceId = useProjectStore((state) => state.activeSequenceId);
+  const executeCommand = useProjectStore((state) => state.executeCommand);
 
   /**
    * Add a new text clip to a track.
@@ -163,6 +261,8 @@ export function useTextClip(): UseTextClipResult {
       setError(null);
 
       try {
+        const normalizedTextData = normalizeTextClipDataColors(params.textData);
+
         logger.debug('Adding text clip', {
           trackId: params.trackId,
           timelineIn: params.timelineIn,
@@ -170,14 +270,14 @@ export function useTextClip(): UseTextClipResult {
           content: params.textData.content.substring(0, 50),
         });
 
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'AddTextClip',
+        const result = await executeCommand({
+          type: 'AddTextClip',
           payload: {
             sequenceId: activeSequenceId,
             trackId: params.trackId,
             timelineIn: params.timelineIn,
             duration: params.duration,
-            textData: params.textData,
+            textData: normalizedTextData,
           },
         });
 
@@ -194,7 +294,7 @@ export function useTextClip(): UseTextClipResult {
         setIsAdding(false);
       }
     },
-    [activeSequenceId]
+    [activeSequenceId, executeCommand],
   );
 
   /**
@@ -219,19 +319,21 @@ export function useTextClip(): UseTextClipResult {
       setError(null);
 
       try {
+        const normalizedTextData = normalizeTextClipDataColors(params.textData);
+
         logger.debug('Updating text clip', {
           trackId: params.trackId,
           clipId: params.clipId,
           content: params.textData.content.substring(0, 50),
         });
 
-        await invoke<CommandResult>('execute_command', {
-          commandType: 'UpdateTextClip',
+        await executeCommand({
+          type: 'UpdateTextClip',
           payload: {
             sequenceId: activeSequenceId,
             trackId: params.trackId,
             clipId: params.clipId,
-            textData: params.textData,
+            textData: normalizedTextData,
           },
         });
 
@@ -245,7 +347,7 @@ export function useTextClip(): UseTextClipResult {
         setIsUpdating(false);
       }
     },
-    [activeSequenceId]
+    [activeSequenceId, executeCommand],
   );
 
   /**
@@ -269,8 +371,8 @@ export function useTextClip(): UseTextClipResult {
           clipId: params.clipId,
         });
 
-        await invoke<CommandResult>('execute_command', {
-          commandType: 'RemoveTextClip',
+        await executeCommand({
+          type: 'RemoveTextClip',
           payload: {
             sequenceId: activeSequenceId,
             trackId: params.trackId,
@@ -288,7 +390,7 @@ export function useTextClip(): UseTextClipResult {
         setIsRemoving(false);
       }
     },
-    [activeSequenceId]
+    [activeSequenceId, executeCommand],
   );
 
   /**
