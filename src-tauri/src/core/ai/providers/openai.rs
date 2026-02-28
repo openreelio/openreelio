@@ -94,6 +94,17 @@ impl OpenAIProvider {
     }
 }
 
+impl std::fmt::Debug for OpenAIProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OpenAIProvider")
+            .field("api_key", &"***REDACTED***")
+            .field("base_url", &self.base_url)
+            .field("default_model", &self.default_model)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
 // =============================================================================
 // OpenAI API Types
 // =============================================================================

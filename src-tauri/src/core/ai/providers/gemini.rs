@@ -91,7 +91,20 @@ impl GeminiProvider {
             .map(|s| s.to_string())
             .collect()
     }
+}
 
+impl std::fmt::Debug for GeminiProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GeminiProvider")
+            .field("api_key", &"***REDACTED***")
+            .field("base_url", &self.base_url)
+            .field("default_model", &self.default_model)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
+impl GeminiProvider {
     fn build_generate_content_request(
         &self,
         request: &CompletionRequest,

@@ -97,6 +97,17 @@ impl AnthropicProvider {
     }
 }
 
+impl std::fmt::Debug for AnthropicProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnthropicProvider")
+            .field("api_key", &"***REDACTED***")
+            .field("base_url", &self.base_url)
+            .field("default_model", &self.default_model)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
+}
+
 // =============================================================================
 // Anthropic API Types
 // =============================================================================
