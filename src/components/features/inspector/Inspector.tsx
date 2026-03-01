@@ -22,7 +22,14 @@ import { formatDuration } from '@/utils/formatters';
 import { EffectsList } from '../effects';
 import { TextInspector } from './TextInspector';
 import type { SelectedTextClip } from './TextInspector';
-import type { Effect, EffectId, CaptionStyle, TextClipData, ClipId } from '@/types';
+import type {
+  Effect,
+  EffectId,
+  CaptionStyle,
+  CaptionPosition,
+  TextClipData,
+  ClipId,
+} from '@/types';
 
 // =============================================================================
 // Types
@@ -65,6 +72,7 @@ export interface SelectedCaption {
   startSec: number;
   endSec: number;
   style?: CaptionStyle;
+  position?: CaptionPosition;
 }
 
 /** Inspector component props */
@@ -113,6 +121,33 @@ function getAssetIcon(kind: SelectedAsset['kind']): JSX.Element {
     default:
       return <FileText className="w-4 h-4" />;
   }
+}
+
+function normalizeCaptionPosition(position: CaptionPosition | undefined): CaptionPosition {
+  if (!position) {
+    return {
+      type: 'preset',
+      vertical: 'bottom',
+      marginPercent: 5,
+    };
+  }
+
+  if (position.type === 'custom') {
+    const xPercent = Number.isFinite(position.xPercent) ? position.xPercent : 50;
+    const yPercent = Number.isFinite(position.yPercent) ? position.yPercent : 90;
+    return {
+      type: 'custom',
+      xPercent: Math.max(0, Math.min(100, xPercent)),
+      yPercent: Math.max(0, Math.min(100, yPercent)),
+    };
+  }
+
+  const marginPercent = Number.isFinite(position.marginPercent) ? position.marginPercent : 5;
+  return {
+    type: 'preset',
+    vertical: position.vertical,
+    marginPercent: Math.max(0, Math.min(50, marginPercent)),
+  };
 }
 
 // =============================================================================
@@ -352,6 +387,38 @@ export function Inspector({
   // ===========================================================================
 
   if (selectedCaption) {
+    const captionPosition = normalizeCaptionPosition(selectedCaption.position);
+
+    const commitCaptionPosition = (position: CaptionPosition): void => {
+      onCaptionChange?.(selectedCaption.id, 'position', position);
+    };
+
+    const handlePositionModeChange = (nextMode: string): void => {
+      if (nextMode === 'custom') {
+        const fromPresetY =
+          captionPosition.type === 'preset'
+            ? captionPosition.vertical === 'top'
+              ? captionPosition.marginPercent
+              : captionPosition.vertical === 'center'
+                ? 50
+                : 100 - captionPosition.marginPercent
+            : captionPosition.yPercent;
+        commitCaptionPosition({
+          type: 'custom',
+          xPercent: 50,
+          yPercent: Math.max(0, Math.min(100, fromPresetY)),
+        });
+        return;
+      }
+
+      const vertical = nextMode === 'top' || nextMode === 'center' ? nextMode : 'bottom';
+      commitCaptionPosition({
+        type: 'preset',
+        vertical,
+        marginPercent: captionPosition.type === 'preset' ? captionPosition.marginPercent : 5,
+      });
+    };
+
     return (
       <div
         data-testid="inspector"
@@ -393,6 +460,81 @@ export function Inspector({
               value={`${(selectedCaption.endSec - selectedCaption.startSec).toFixed(2)}s`}
               testId="caption-duration"
             />
+          </div>
+
+          <div className="space-y-2">
+            <label className="text-xs font-medium text-editor-text-muted">Position</label>
+            <select
+              data-testid="caption-position-mode"
+              value={captionPosition.type === 'custom' ? 'custom' : captionPosition.vertical}
+              className="w-full bg-editor-input bg-opacity-50 border border-editor-border rounded p-2 text-sm text-editor-text focus:border-primary-500 focus:ring-1 focus:ring-primary-500 focus:outline-none"
+              onChange={(event) => handlePositionModeChange(event.target.value)}
+            >
+              <option value="top">Top</option>
+              <option value="center">Center</option>
+              <option value="bottom">Bottom</option>
+              <option value="custom">Custom</option>
+            </select>
+
+            {captionPosition.type === 'preset' ? (
+              <div className="space-y-1">
+                <label className="text-[11px] text-editor-text-muted">Margin (%)</label>
+                <input
+                  data-testid="caption-position-margin"
+                  type="range"
+                  min={0}
+                  max={50}
+                  step={1}
+                  value={captionPosition.marginPercent}
+                  onChange={(event) => {
+                    commitCaptionPosition({
+                      type: 'preset',
+                      vertical: captionPosition.vertical,
+                      marginPercent: Number(event.target.value),
+                    });
+                  }}
+                />
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 gap-2">
+                <div className="space-y-1">
+                  <label className="text-[11px] text-editor-text-muted">X (%)</label>
+                  <input
+                    data-testid="caption-position-x"
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={captionPosition.xPercent}
+                    onChange={(event) => {
+                      commitCaptionPosition({
+                        type: 'custom',
+                        xPercent: Number(event.target.value),
+                        yPercent: captionPosition.yPercent,
+                      });
+                    }}
+                  />
+                </div>
+                <div className="space-y-1">
+                  <label className="text-[11px] text-editor-text-muted">Y (%)</label>
+                  <input
+                    data-testid="caption-position-y"
+                    type="range"
+                    min={0}
+                    max={100}
+                    step={1}
+                    value={captionPosition.yPercent}
+                    onChange={(event) => {
+                      commitCaptionPosition({
+                        type: 'custom',
+                        xPercent: captionPosition.xPercent,
+                        yPercent: Number(event.target.value),
+                      });
+                    }}
+                  />
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
