@@ -5,8 +5,10 @@
  * whether the active frame can be represented by the proxy video renderer.
  */
 
-import { useMemo } from 'react';
+import { useMemo, useRef } from 'react';
 import type { Sequence, Asset, Clip, Track } from '@/types';
+import { isClipActiveAtTime } from '@/utils/clipTiming';
+import { isCaptionLikeClip } from '@/utils/captionClip';
 
 // =============================================================================
 // Types
@@ -45,6 +47,8 @@ interface ActiveClipInfo {
 }
 
 const FLOAT_EPSILON = 0.0001;
+const ACTIVE_CLIP_EPSILON_SEC = 1 / 240;
+const NO_CLIP_HYSTERESIS_SEC = 1 / 30;
 const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:/;
 
 function nearlyEqual(a: number, b: number): boolean {
@@ -66,12 +70,7 @@ function findActiveClips(
     if (track.muted || !track.visible) continue;
 
     for (const clip of track.clips) {
-      const clipStart = clip.place.timelineInSec;
-      const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-      const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-      const clipEnd = clipStart + clipDuration;
-
-      if (currentTime >= clipStart && currentTime < clipEnd) {
+      if (isClipActiveAtTime(clip, currentTime, ACTIVE_CLIP_EPSILON_SEC)) {
         activeClips.push({
           clip,
           track,
@@ -146,6 +145,11 @@ function getCanvasFallbackReason({ clip, track, asset }: ActiveClipInfo): string
     return null;
   }
 
+  // Caption-style overlays are supported in video mode via HTML overlay rendering.
+  if (isCaptionLikeClip(track, clip, asset)) {
+    return null;
+  }
+
   if (track.kind !== 'video') {
     return 'Overlay/caption compositing requires canvas mode';
   }
@@ -186,15 +190,21 @@ export function usePreviewMode({
   assets,
   currentTime,
 }: UsePreviewModeOptions): PreviewModeResult {
+  const previousResultRef = useRef<PreviewModeResult | null>(null);
+  const previousTimeRef = useRef<number | null>(null);
+
   return useMemo(() => {
     // No sequence = canvas mode (show empty state)
     if (!sequence) {
-      return {
+      const result: PreviewModeResult = {
         mode: 'canvas',
         reason: 'No sequence loaded',
         hasGeneratingProxy: false,
         clipsNeedingProxy: 0,
       };
+      previousResultRef.current = result;
+      previousTimeRef.current = currentTime;
+      return result;
     }
 
     // Find all active clips at current time
@@ -202,12 +212,33 @@ export function usePreviewMode({
 
     // No clips at playhead = canvas mode (show black frame)
     if (activeClips.length === 0) {
-      return {
+      const previousResult = previousResultRef.current;
+      const previousTime = previousTimeRef.current;
+
+      if (
+        previousResult &&
+        previousTime !== null &&
+        previousResult.mode === 'video' &&
+        Math.abs(currentTime - previousTime) <= NO_CLIP_HYSTERESIS_SEC
+      ) {
+        const stabilizedResult: PreviewModeResult = {
+          ...previousResult,
+          reason: 'Stabilizing mode at clip boundary',
+        };
+        previousResultRef.current = stabilizedResult;
+        previousTimeRef.current = currentTime;
+        return stabilizedResult;
+      }
+
+      const result: PreviewModeResult = {
         mode: 'canvas',
         reason: 'No clips at playhead',
         hasGeneratingProxy: false,
         clipsNeedingProxy: 0,
       };
+      previousResultRef.current = result;
+      previousTimeRef.current = currentTime;
+      return result;
     }
 
     // If any active visual clip needs compositing, force canvas mode.
@@ -216,29 +247,36 @@ export function usePreviewMode({
       .find((reason): reason is string => reason !== null);
 
     if (canvasFallbackReason) {
-      return {
+      const result: PreviewModeResult = {
         mode: 'canvas',
         reason: canvasFallbackReason,
         hasGeneratingProxy: false,
         clipsNeedingProxy: 0,
       };
+      previousResultRef.current = result;
+      previousTimeRef.current = currentTime;
+      return result;
     }
 
     // Analyze proxy readiness for active video clips on visual tracks.
     const videoClips = activeClips.filter(
       (activeClip): activeClip is ActiveClipInfo & { asset: Asset } =>
         activeClip.track.kind === 'video' &&
+        !isCaptionLikeClip(activeClip.track, activeClip.clip, activeClip.asset) &&
         activeClip.asset !== null &&
         isVideoAsset(activeClip.asset),
     );
 
     if (videoClips.length === 0) {
-      return {
+      const result: PreviewModeResult = {
         mode: 'canvas',
         reason: 'No video clips (images use canvas)',
         hasGeneratingProxy: false,
         clipsNeedingProxy: 0,
       };
+      previousResultRef.current = result;
+      previousTimeRef.current = currentTime;
+      return result;
     }
 
     const clipStatuses = videoClips.map(({ asset }) => ({
@@ -258,16 +296,19 @@ export function usePreviewMode({
     ).length;
 
     if (allHaveProxy) {
-      return {
+      const result: PreviewModeResult = {
         mode: 'video',
         reason: 'All video clips have ready proxies',
         hasGeneratingProxy: false,
         clipsNeedingProxy: 0,
       };
+      previousResultRef.current = result;
+      previousTimeRef.current = currentTime;
+      return result;
     }
 
     if (allPlayableInVideoMode) {
-      return {
+      const result: PreviewModeResult = {
         mode: 'video',
         reason: anyGenerating
           ? 'Using source media while proxies generate'
@@ -275,9 +316,12 @@ export function usePreviewMode({
         hasGeneratingProxy: anyGenerating,
         clipsNeedingProxy,
       };
+      previousResultRef.current = result;
+      previousTimeRef.current = currentTime;
+      return result;
     }
 
-    return {
+    const result: PreviewModeResult = {
       mode: 'canvas',
       reason: anyGenerating
         ? 'Proxies generating and some clips have no playable source - using frame extraction'
@@ -285,5 +329,8 @@ export function usePreviewMode({
       hasGeneratingProxy: anyGenerating,
       clipsNeedingProxy,
     };
+    previousResultRef.current = result;
+    previousTimeRef.current = currentTime;
+    return result;
   }, [sequence, assets, currentTime]);
 }
