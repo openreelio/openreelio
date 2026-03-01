@@ -31,7 +31,12 @@ const mockClips: ClipType[] = [
     assetId: 'asset_001',
     range: { sourceInSec: 0, sourceOutSec: 10 },
     place: { timelineInSec: 0, durationSec: 10 },
-    transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+    transform: {
+      position: { x: 0.5, y: 0.5 },
+      scale: { x: 1, y: 1 },
+      rotationDeg: 0,
+      anchor: { x: 0.5, y: 0.5 },
+    },
     opacity: 1,
     speed: 1,
     effects: [],
@@ -42,7 +47,12 @@ const mockClips: ClipType[] = [
     assetId: 'asset_002',
     range: { sourceInSec: 0, sourceOutSec: 5 },
     place: { timelineInSec: 15, durationSec: 5 },
-    transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+    transform: {
+      position: { x: 0.5, y: 0.5 },
+      scale: { x: 1, y: 1 },
+      rotationDeg: 0,
+      anchor: { x: 0.5, y: 0.5 },
+    },
     opacity: 1,
     speed: 1,
     effects: [],
@@ -57,7 +67,12 @@ const adjacentClips: ClipType[] = [
     assetId: 'asset_001',
     range: { sourceInSec: 0, sourceOutSec: 5 },
     place: { timelineInSec: 0, durationSec: 5 },
-    transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+    transform: {
+      position: { x: 0.5, y: 0.5 },
+      scale: { x: 1, y: 1 },
+      rotationDeg: 0,
+      anchor: { x: 0.5, y: 0.5 },
+    },
     opacity: 1,
     speed: 1,
     effects: [],
@@ -68,7 +83,12 @@ const adjacentClips: ClipType[] = [
     assetId: 'asset_002',
     range: { sourceInSec: 0, sourceOutSec: 5 },
     place: { timelineInSec: 5, durationSec: 5 }, // Starts exactly where clip_001 ends
-    transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+    transform: {
+      position: { x: 0.5, y: 0.5 },
+      scale: { x: 1, y: 1 },
+      rotationDeg: 0,
+      anchor: { x: 0.5, y: 0.5 },
+    },
     opacity: 1,
     speed: 1,
     effects: [],
@@ -79,7 +99,12 @@ const adjacentClips: ClipType[] = [
     assetId: 'asset_003',
     range: { sourceInSec: 0, sourceOutSec: 5 },
     place: { timelineInSec: 10, durationSec: 5 }, // Starts exactly where clip_002 ends
-    transform: { position: { x: 0.5, y: 0.5 }, scale: { x: 1, y: 1 }, rotationDeg: 0, anchor: { x: 0.5, y: 0.5 } },
+    transform: {
+      position: { x: 0.5, y: 0.5 },
+      scale: { x: 1, y: 1 },
+      rotationDeg: 0,
+      anchor: { x: 0.5, y: 0.5 },
+    },
     opacity: 1,
     speed: 1,
     effects: [],
@@ -132,6 +157,45 @@ describe('Track', () => {
   // ===========================================================================
 
   describe('interactions', () => {
+    it('should call onMoveUp when move-up button is clicked', () => {
+      const onMoveUp = vi.fn();
+      render(
+        <Track track={mockTrack} clips={[]} zoom={100} onMoveUp={onMoveUp} canMoveUp canMoveDown />,
+      );
+
+      fireEvent.click(screen.getByTestId('move-track-up-button'));
+      expect(onMoveUp).toHaveBeenCalledWith('track_001');
+    });
+
+    it('should disable move buttons when moving is not allowed', () => {
+      const onMoveUp = vi.fn();
+      const onMoveDown = vi.fn();
+
+      render(
+        <Track
+          track={mockTrack}
+          clips={[]}
+          zoom={100}
+          onMoveUp={onMoveUp}
+          onMoveDown={onMoveDown}
+          canMoveUp={false}
+          canMoveDown={false}
+        />,
+      );
+
+      const moveUpButton = screen.getByTestId('move-track-up-button');
+      const moveDownButton = screen.getByTestId('move-track-down-button');
+
+      expect(moveUpButton).toBeDisabled();
+      expect(moveDownButton).toBeDisabled();
+
+      fireEvent.click(moveUpButton);
+      fireEvent.click(moveDownButton);
+
+      expect(onMoveUp).not.toHaveBeenCalled();
+      expect(onMoveDown).not.toHaveBeenCalled();
+    });
+
     it('should call onMuteToggle when mute button is clicked', () => {
       const onMuteToggle = vi.fn();
       render(<Track track={mockTrack} clips={[]} zoom={100} onMuteToggle={onMuteToggle} />);
@@ -150,7 +214,9 @@ describe('Track', () => {
 
     it('should call onVisibilityToggle when visibility button is clicked', () => {
       const onVisibilityToggle = vi.fn();
-      render(<Track track={mockTrack} clips={[]} zoom={100} onVisibilityToggle={onVisibilityToggle} />);
+      render(
+        <Track track={mockTrack} clips={[]} zoom={100} onVisibilityToggle={onVisibilityToggle} />,
+      );
 
       fireEvent.click(screen.getByTestId('visibility-button'));
       expect(onVisibilityToggle).toHaveBeenCalledWith('track_001');
@@ -171,7 +237,12 @@ describe('Track', () => {
     });
 
     it('should apply different colors for different track types', () => {
-      const audioTrack: TrackType = { ...mockTrack, id: 'track_002', kind: 'audio', name: 'Audio 1' };
+      const audioTrack: TrackType = {
+        ...mockTrack,
+        id: 'track_002',
+        kind: 'audio',
+        name: 'Audio 1',
+      };
       const { rerender } = render(<Track track={mockTrack} clips={[]} zoom={100} />);
 
       // Video track
@@ -195,7 +266,7 @@ describe('Track', () => {
           zoom={100}
           viewportWidth={2000}
           showTransitionZones
-        />
+        />,
       );
 
       // 3 adjacent clips = 2 transition zones
@@ -211,7 +282,7 @@ describe('Track', () => {
           zoom={100}
           viewportWidth={2000}
           showTransitionZones={false}
-        />
+        />,
       );
 
       expect(screen.queryAllByTestId('transition-zone')).toHaveLength(0);
@@ -225,7 +296,7 @@ describe('Track', () => {
           zoom={100}
           viewportWidth={3000}
           showTransitionZones
-        />
+        />,
       );
 
       expect(screen.queryAllByTestId('transition-zone')).toHaveLength(0);
@@ -241,7 +312,7 @@ describe('Track', () => {
           viewportWidth={2000}
           showTransitionZones
           onTransitionZoneClick={onTransitionZoneClick}
-        />
+        />,
       );
 
       const zones = screen.getAllByTestId('transition-zone');
@@ -262,7 +333,7 @@ describe('Track', () => {
           viewportWidth={2000}
           showTransitionZones
           onTransitionZoneClick={onTransitionZoneClick}
-        />
+        />,
       );
 
       const zones = screen.getAllByTestId('transition-zone');

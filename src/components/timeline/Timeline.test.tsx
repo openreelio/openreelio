@@ -809,7 +809,7 @@ describe('Timeline', () => {
       });
     });
 
-    it('should seek when clicking on track header body (non-button area)', async () => {
+    it('should not seek when clicking on track header body (non-button area)', async () => {
       render(<Timeline sequence={mockSequence} />);
 
       const header = screen.getAllByTestId('track-header')[0];
@@ -829,7 +829,7 @@ describe('Timeline', () => {
         });
       });
 
-      expect(usePlaybackStore.getState().currentTime).toBeGreaterThan(0);
+      expect(usePlaybackStore.getState().currentTime).toBe(0);
     });
 
     it('should not seek when clicking track header control buttons', async () => {
