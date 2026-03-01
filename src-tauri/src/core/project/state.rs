@@ -1116,6 +1116,16 @@ impl ProjectState {
         } else {
             Some(text)
         };
+        clip.caption_style = op
+            .payload
+            .get("style")
+            .filter(|value| !value.is_null())
+            .cloned();
+        clip.caption_position = op
+            .payload
+            .get("position")
+            .filter(|value| !value.is_null())
+            .cloned();
 
         track.add_clip(clip);
         Ok(())
@@ -1219,6 +1229,14 @@ impl ProjectState {
             let duration = new_end - new_start;
             clip.place = ClipPlace::new(new_start, duration);
             clip.range = ClipRange::new(0.0, duration);
+        }
+
+        if let Some(style) = op.payload.get("style").filter(|value| !value.is_null()) {
+            clip.caption_style = Some(style.clone());
+        }
+
+        if let Some(position) = op.payload.get("position").filter(|value| !value.is_null()) {
+            clip.caption_position = Some(position.clone());
         }
 
         Ok(())

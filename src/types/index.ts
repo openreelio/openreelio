@@ -409,6 +409,10 @@ export interface Clip {
   audio: AudioSettings;
   label?: string;
   color?: Color;
+  /** Optional caption style override (used for caption-track clips) */
+  captionStyle?: CaptionStyle;
+  /** Optional caption position override (used for caption-track clips) */
+  captionPosition?: CaptionPosition;
 }
 
 export interface Marker {
@@ -760,6 +764,7 @@ export type CommandType =
   | 'DeleteCaption'
   | 'SetSequenceFormat'
   | 'CreateTrack'
+  | 'ReorderTracks'
   | 'DeleteTrack'
   | 'SetTrackBlendMode'
   | 'ToggleTrackMute'
