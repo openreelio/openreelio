@@ -6,9 +6,8 @@
  */
 
 import { useState, useCallback } from 'react';
-import { invoke } from '@tauri-apps/api/core';
 import { useProjectStore } from '@/stores/projectStore';
-import type { Caption, CommandResult } from '@/types';
+import type { Caption } from '@/types';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('useCaption');
@@ -59,6 +58,7 @@ export function useCaption(): UseCaptionResult {
 
   // Get active sequence ID from store
   const activeSequenceId = useProjectStore((state) => state.activeSequenceId);
+  const executeCommand = useProjectStore((state) => state.executeCommand);
 
   /**
    * Update an existing caption
@@ -81,8 +81,8 @@ export function useCaption(): UseCaptionResult {
           text: caption.text.substring(0, 50),
         });
 
-        await invoke<CommandResult>('execute_command', {
-          commandType: 'UpdateCaption',
+        await executeCommand({
+          type: 'UpdateCaption',
           payload: {
             sequenceId: activeSequenceId,
             trackId,
@@ -90,7 +90,6 @@ export function useCaption(): UseCaptionResult {
             text: caption.text,
             startSec: caption.startSec,
             endSec: caption.endSec,
-            // Include speaker in metadata if available
           },
         });
 
@@ -104,7 +103,7 @@ export function useCaption(): UseCaptionResult {
         setIsUpdating(false);
       }
     },
-    [activeSequenceId]
+    [activeSequenceId, executeCommand],
   );
 
   /**
@@ -128,8 +127,8 @@ export function useCaption(): UseCaptionResult {
           endSec: params.endSec,
         });
 
-        const result = await invoke<CommandResult>('execute_command', {
-          commandType: 'CreateCaption',
+        const result = await executeCommand({
+          type: 'CreateCaption',
           payload: {
             sequenceId: activeSequenceId,
             trackId,
@@ -152,7 +151,7 @@ export function useCaption(): UseCaptionResult {
         setIsCreating(false);
       }
     },
-    [activeSequenceId]
+    [activeSequenceId, executeCommand],
   );
 
   /**
@@ -172,8 +171,8 @@ export function useCaption(): UseCaptionResult {
       try {
         logger.debug('Deleting caption', { trackId, captionId });
 
-        await invoke<CommandResult>('execute_command', {
-          commandType: 'DeleteCaption',
+        await executeCommand({
+          type: 'DeleteCaption',
           payload: {
             sequenceId: activeSequenceId,
             trackId,
@@ -191,7 +190,7 @@ export function useCaption(): UseCaptionResult {
         setIsDeleting(false);
       }
     },
-    [activeSequenceId]
+    [activeSequenceId, executeCommand],
   );
 
   /**
