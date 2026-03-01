@@ -15,6 +15,7 @@ use crate::core::{
         AddEffectCommand, AddMarkerCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand,
         CreateCaptionCommand, CreateFolderCommand, CreateSequenceCommand, DeleteCaptionCommand,
         DeleteFileCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand, MoveFileCommand,
+        ReorderTracksCommand,
         RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand,
         RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
         RenameTrackCommand, SetClipAudioCommand, SetClipMuteCommand, SetClipSpeedCommand,
@@ -2536,7 +2537,9 @@ pub async fn apply_edit_script(
             )),
             CommandPayload::CreateCaption(p) => Box::new(
                 CreateCaptionCommand::new(&p.sequence_id, &p.track_id, p.start_sec, p.end_sec)
-                    .with_text(p.text),
+                    .with_text(p.text)
+                    .with_style(p.style)
+                    .with_position(p.position),
             ),
             CommandPayload::DeleteCaption(p) => Box::new(DeleteCaptionCommand::new(
                 &p.sequence_id,
@@ -2550,8 +2553,14 @@ pub async fn apply_edit_script(
                     &p.caption_id,
                 )
                 .with_text(p.text)
-                .with_time_range(p.start_sec, p.end_sec),
+                .with_time_range(p.start_sec, p.end_sec)
+                .with_style(p.style)
+                .with_position(p.position),
             ),
+            CommandPayload::ReorderTracks(p) => Box::new(ReorderTracksCommand::new(
+                &p.sequence_id,
+                p.new_order,
+            )),
             CommandPayload::AddEffect(p) => {
                 let mut cmd =
                     AddEffectCommand::new(&p.sequence_id, &p.track_id, &p.clip_id, p.effect_type);

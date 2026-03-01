@@ -164,6 +164,13 @@ pub struct RenameTrackPayload {
     pub new_name: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReorderTracksPayload {
+    pub sequence_id: SequenceId,
+    pub new_order: Vec<TrackId>,
+}
+
 // =============================================================================
 // Marker Payloads
 // =============================================================================
@@ -586,6 +593,9 @@ pub enum CommandPayload {
     #[serde(alias = "renameTrack", alias = "RenameTrack")]
     RenameTrack(RenameTrackPayload),
 
+    #[serde(alias = "reorderTracks", alias = "ReorderTracks")]
+    ReorderTracks(ReorderTracksPayload),
+
     // Marker commands
     #[serde(alias = "addMarker", alias = "AddMarker")]
     AddMarker(AddMarkerPayload),
@@ -721,8 +731,8 @@ impl CommandPayload {
             DeleteCaptionCommand, DeleteFileCommand, ImportAssetCommand, InsertClipCommand,
             MoveClipCommand, MoveFileCommand, RemoveAssetCommand, RemoveClipCommand,
             RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
-            RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, SetClipAudioCommand,
-            SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
+            RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, ReorderTracksCommand,
+            SetClipAudioCommand, SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
             SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand, UpdateEffectCommand,
             UpdateMaskCommand, UpdateTextCommand,
         };
@@ -814,6 +824,9 @@ impl CommandPayload {
                 &p.track_id,
                 &p.new_name,
             )),
+            CommandPayload::ReorderTracks(p) => {
+                Box::new(ReorderTracksCommand::new(&p.sequence_id, p.new_order))
+            }
             CommandPayload::AddMarker(p) => {
                 let mut cmd = AddMarkerCommand::new(&p.sequence_id, p.time_sec, &p.label);
                 if let Some(color) = p.color {
@@ -829,7 +842,9 @@ impl CommandPayload {
             }
             CommandPayload::CreateCaption(p) => Box::new(
                 CreateCaptionCommand::new(&p.sequence_id, &p.track_id, p.start_sec, p.end_sec)
-                    .with_text(p.text),
+                    .with_text(p.text)
+                    .with_style(p.style)
+                    .with_position(p.position),
             ),
             CommandPayload::DeleteCaption(p) => Box::new(DeleteCaptionCommand::new(
                 &p.sequence_id,
@@ -843,7 +858,9 @@ impl CommandPayload {
                     &p.caption_id,
                 )
                 .with_text(p.text)
-                .with_time_range(p.start_sec, p.end_sec),
+                .with_time_range(p.start_sec, p.end_sec)
+                .with_style(p.style)
+                .with_position(p.position),
             ),
             CommandPayload::AddEffect(p) => {
                 let mut cmd =

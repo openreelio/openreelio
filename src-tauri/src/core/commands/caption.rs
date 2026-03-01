@@ -43,6 +43,10 @@ pub struct CreateCaptionCommand {
     pub start_sec: TimeSec,
     pub end_sec: TimeSec,
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<serde_json::Value>,
     #[serde(skip)]
     created_caption_id: Option<ClipId>,
 }
@@ -55,12 +59,24 @@ impl CreateCaptionCommand {
             start_sec,
             end_sec,
             text: String::new(),
+            style: None,
+            position: None,
             created_caption_id: None,
         }
     }
 
     pub fn with_text(mut self, text: impl Into<String>) -> Self {
         self.text = text.into();
+        self
+    }
+
+    pub fn with_style(mut self, style: Option<serde_json::Value>) -> Self {
+        self.style = style;
+        self
+    }
+
+    pub fn with_position(mut self, position: Option<serde_json::Value>) -> Self {
+        self.position = position;
         self
     }
 }
@@ -96,6 +112,8 @@ impl Command for CreateCaptionCommand {
         clip.place = ClipPlace::new(self.start_sec, duration);
         clip.range = ClipRange::new(0.0, duration);
         clip.label = normalize_caption_text(std::mem::take(&mut self.text));
+        clip.caption_style = self.style.clone();
+        clip.caption_position = self.position.clone();
 
         let caption_id = clip.id.clone();
         self.created_caption_id = Some(caption_id.clone());
@@ -246,6 +264,10 @@ pub struct UpdateCaptionCommand {
     old_place: Option<ClipPlace>,
     #[serde(skip)]
     old_range: Option<ClipRange>,
+    #[serde(skip)]
+    old_style: Option<Option<serde_json::Value>>,
+    #[serde(skip)]
+    old_position: Option<Option<serde_json::Value>>,
 }
 
 impl UpdateCaptionCommand {
@@ -262,6 +284,8 @@ impl UpdateCaptionCommand {
             old_label: None,
             old_place: None,
             old_range: None,
+            old_style: None,
+            old_position: None,
         }
     }
 
@@ -275,6 +299,16 @@ impl UpdateCaptionCommand {
         self.end_sec = end_sec;
         self
     }
+
+    pub fn with_style(mut self, style: Option<serde_json::Value>) -> Self {
+        self.style = style;
+        self
+    }
+
+    pub fn with_position(mut self, position: Option<serde_json::Value>) -> Self {
+        self.position = position;
+        self
+    }
 }
 
 impl Command for UpdateCaptionCommand {
@@ -285,6 +319,8 @@ impl Command for UpdateCaptionCommand {
             caption_id = %self.caption_id,
             has_text = self.text.is_some(),
             has_time_range = self.start_sec.is_some() || self.end_sec.is_some(),
+            has_style = self.style.is_some(),
+            has_position = self.position.is_some(),
             "Updating caption"
         );
 
@@ -309,6 +345,8 @@ impl Command for UpdateCaptionCommand {
         self.old_label = Some(clip.label.clone());
         self.old_place = Some(clip.place.clone());
         self.old_range = Some(clip.range.clone());
+        self.old_style = Some(clip.caption_style.clone());
+        self.old_position = Some(clip.caption_position.clone());
 
         clip.speed = 1.0;
 
@@ -335,6 +373,14 @@ impl Command for UpdateCaptionCommand {
             let duration = new_end - new_start;
             clip.place = ClipPlace::new(new_start, duration);
             clip.range = ClipRange::new(0.0, duration);
+        }
+
+        if let Some(style) = self.style.clone() {
+            clip.caption_style = Some(style);
+        }
+
+        if let Some(position) = self.position.clone() {
+            clip.caption_position = Some(position);
         }
 
         let op_id = ulid::Ulid::new().to_string();
@@ -364,6 +410,12 @@ impl Command for UpdateCaptionCommand {
         }
         if let Some(old_range) = &self.old_range {
             clip.range = old_range.clone();
+        }
+        if let Some(old_style) = &self.old_style {
+            clip.caption_style = old_style.clone();
+        }
+        if let Some(old_position) = &self.old_position {
+            clip.caption_position = old_position.clone();
         }
 
         Ok(())
