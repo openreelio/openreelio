@@ -32,6 +32,39 @@ import {
 
 const logger = createLogger('ProjectExplorer');
 
+interface CaptionSegmentPayload {
+  startSec: number;
+  endSec: number;
+  text: string;
+}
+
+function buildCaptionSegmentPayloads(
+  segments: Array<{ startTime: number; endTime: number; text: string }>,
+): CaptionSegmentPayload[] {
+  const payloads: CaptionSegmentPayload[] = [];
+
+  for (const segment of segments) {
+    const text = segment.text.trim();
+    if (!text) {
+      continue;
+    }
+
+    const startSec = Math.max(0, segment.startTime);
+    const endSec = Math.max(startSec + 0.01, segment.endTime);
+    if (!Number.isFinite(startSec) || !Number.isFinite(endSec) || endSec <= startSec) {
+      continue;
+    }
+
+    payloads.push({
+      startSec,
+      endSec,
+      text,
+    });
+  }
+
+  return payloads;
+}
+
 export function ProjectExplorer() {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -42,7 +75,7 @@ export function ProjectExplorer() {
   const scanWorkspace = useWorkspaceStore((state) => state.scanWorkspace);
 
   // Project store
-  const { assets, selectAsset } = useProjectStore();
+  const { assets, selectAsset, executeCommand, activeSequenceId, sequences } = useProjectStore();
 
   // File operations
   const { createFolder, renameFile, deleteFile, revealInExplorer } = useFileOperations();
@@ -278,9 +311,62 @@ export function ProjectExplorer() {
       setTranscriptionAsset(null);
       setTranscribingAssets((prev) => new Set(prev).add(assetId));
       try {
-        await transcribeAndIndex(assetId, {
+        const result = await transcribeAndIndex(assetId, {
           language: options.language === 'auto' ? undefined : options.language,
+          model: options.model,
+          skipIndexing: !options.indexForSearch,
         });
+
+        if (!options.addToTimeline || !result || result.segments.length === 0) {
+          return;
+        }
+
+        const activeSequence = activeSequenceId ? sequences.get(activeSequenceId) : undefined;
+        if (!activeSequence) {
+          logger.warn('Transcription complete, but no active sequence is available for captions', {
+            assetId,
+          });
+          return;
+        }
+
+        const captionSegments = buildCaptionSegmentPayloads(result.segments);
+        if (captionSegments.length === 0) {
+          return;
+        }
+
+        let captionTrackId = activeSequence.tracks.find((track) => track.kind === 'caption')?.id;
+        if (!captionTrackId) {
+          const trackCreationResult = await executeCommand({
+            type: 'CreateTrack',
+            payload: {
+              sequenceId: activeSequence.id,
+              kind: 'caption',
+              name: 'Captions',
+            },
+          });
+          captionTrackId = trackCreationResult.createdIds[0];
+        }
+
+        if (!captionTrackId) {
+          logger.warn('Unable to resolve caption track for transcription insertion', {
+            assetId,
+            sequenceId: activeSequence.id,
+          });
+          return;
+        }
+
+        for (const segment of captionSegments) {
+          await executeCommand({
+            type: 'CreateCaption',
+            payload: {
+              sequenceId: activeSequence.id,
+              trackId: captionTrackId,
+              startSec: segment.startSec,
+              endSec: segment.endSec,
+              text: segment.text,
+            },
+          });
+        }
       } finally {
         setTranscribingAssets((prev) => {
           const next = new Set(prev);
@@ -289,7 +375,7 @@ export function ProjectExplorer() {
         });
       }
     },
-    [transcriptionAsset, transcribeAndIndex],
+    [transcriptionAsset, transcribeAndIndex, activeSequenceId, sequences, executeCommand],
   );
 
   const handleTranscriptionCancel = useCallback(() => {
