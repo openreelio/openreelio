@@ -2,15 +2,19 @@
 //!
 //! Handles final video export using FFmpeg.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use tokio::sync::mpsc::Sender;
 
 use crate::core::{
     assets::Asset,
     commands::TEXT_ASSET_PREFIX,
-    effects::{Effect, EffectCategory, EffectType, FilterGraph, IntoFFmpegFilter},
+    effects::{Effect, EffectCategory, EffectType, FilterGraph, IntoFFmpegFilter, ParamValue},
     ffmpeg::FFmpegRunner,
     fs::validate_local_input_path,
     process::configure_tokio_command,
@@ -564,7 +568,7 @@ pub fn is_text_clip(clip: &Clip) -> bool {
 /// FFmpeg input arguments and filter string for the text clip
 fn build_text_clip_filter(
     clip: &Clip,
-    effects: &std::collections::HashMap<String, Effect>,
+    effects: &HashMap<String, Effect>,
     width: u32,
     height: u32,
 ) -> Option<(Vec<String>, String)> {
@@ -591,6 +595,351 @@ fn build_text_clip_filter(
     let drawtext_filter = text_effect.to_filter_body();
 
     Some((input_args, drawtext_filter))
+}
+
+fn get_json_field<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a Value> {
+    keys.iter().find_map(|key| object.get(*key))
+}
+
+fn parse_json_number(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(raw) => raw.trim().parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+fn parse_json_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(value) => Some(*value),
+        Value::String(raw) => {
+            let normalized = raw.trim().to_ascii_lowercase();
+            match normalized.as_str() {
+                "true" | "1" | "yes" | "on" => Some(true),
+                "false" | "0" | "no" | "off" => Some(false),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn normalize_caption_axis(raw: f64) -> f64 {
+    if !raw.is_finite() {
+        return 0.0;
+    }
+
+    let normalized = if raw.abs() > 1.0 { raw / 100.0 } else { raw };
+    normalized.clamp(0.0, 1.0)
+}
+
+fn parse_hex_color(raw: &str) -> Option<(String, Option<f64>)> {
+    let mut hex = raw.trim().trim_start_matches('#').to_string();
+    if hex.is_empty() || !hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return None;
+    }
+
+    if hex.len() == 3 || hex.len() == 4 {
+        hex = hex.chars().flat_map(|ch| [ch, ch]).collect::<String>();
+    }
+
+    match hex.len() {
+        6 => Some((format!("#{}", hex.to_ascii_uppercase()), None)),
+        8 => {
+            let rgb = &hex[0..6];
+            let alpha_hex = &hex[6..8];
+            let alpha_byte = u8::from_str_radix(alpha_hex, 16).ok()?;
+            Some((
+                format!("#{}", rgb.to_ascii_uppercase()),
+                Some((alpha_byte as f64 / 255.0).clamp(0.0, 1.0)),
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn parse_caption_color(value: &Value) -> Option<(String, Option<f64>)> {
+    if let Some(text) = value.as_str() {
+        return parse_hex_color(text);
+    }
+
+    let object = value.as_object()?;
+    let red =
+        parse_json_number(get_json_field(object, &["r", "red"])?).map(|v| v.clamp(0.0, 255.0));
+    let green =
+        parse_json_number(get_json_field(object, &["g", "green"])?).map(|v| v.clamp(0.0, 255.0));
+    let blue =
+        parse_json_number(get_json_field(object, &["b", "blue"])?).map(|v| v.clamp(0.0, 255.0));
+
+    let (red, green, blue) = (red?, green?, blue?);
+    let alpha = get_json_field(object, &["a", "alpha"])
+        .and_then(parse_json_number)
+        .map(|value| value.clamp(0.0, 255.0) / 255.0);
+
+    Some((
+        format!(
+            "#{:02X}{:02X}{:02X}",
+            red.round() as u8,
+            green.round() as u8,
+            blue.round() as u8
+        ),
+        alpha,
+    ))
+}
+
+fn vertical_position_to_y(vertical: &str, margin_percent: f64) -> f64 {
+    let margin = (if margin_percent.is_finite() {
+        margin_percent
+    } else {
+        5.0
+    })
+    .clamp(0.0, 45.0)
+        / 100.0;
+
+    match vertical {
+        "top" => margin,
+        "center" | "middle" => 0.5,
+        _ => 1.0 - margin,
+    }
+}
+
+fn resolve_caption_anchor(position: Option<&Value>, style: Option<&Value>) -> (f64, f64) {
+    let mut x = 0.5;
+    let mut y = 0.9;
+
+    if let Some(position_value) = position {
+        if let Some(preset) = position_value.as_str() {
+            y = vertical_position_to_y(preset, 5.0);
+            return (x, y);
+        }
+
+        if let Some(position_object) = position_value.as_object() {
+            let position_type = get_json_field(position_object, &["type"])
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+
+            if position_type.eq_ignore_ascii_case("preset") {
+                let vertical = get_json_field(position_object, &["vertical"])
+                    .and_then(Value::as_str)
+                    .unwrap_or("bottom");
+                let margin_percent =
+                    get_json_field(position_object, &["marginPercent", "margin_percent"])
+                        .and_then(parse_json_number)
+                        .unwrap_or(5.0);
+                return (x, vertical_position_to_y(vertical, margin_percent));
+            }
+
+            if let Some(custom_x) = get_json_field(position_object, &["xPercent", "x_percent", "x"])
+                .and_then(parse_json_number)
+            {
+                x = normalize_caption_axis(custom_x);
+            }
+            if let Some(custom_y) = get_json_field(position_object, &["yPercent", "y_percent", "y"])
+                .and_then(parse_json_number)
+            {
+                y = normalize_caption_axis(custom_y);
+            }
+        }
+    }
+
+    if let Some(style_object) = style.and_then(Value::as_object) {
+        if let Some(vertical_align) =
+            get_json_field(style_object, &["verticalAlign", "vertical_align"])
+                .and_then(Value::as_str)
+        {
+            let mapped = match vertical_align {
+                "top" => Some("top"),
+                "middle" | "center" => Some("center"),
+                "bottom" => Some("bottom"),
+                _ => None,
+            };
+
+            if let Some(vertical) = mapped {
+                y = vertical_position_to_y(vertical, 10.0);
+            }
+        }
+    }
+
+    (x, y)
+}
+
+fn find_transition_effect<'a>(
+    clip: &Clip,
+    effects: &'a HashMap<String, Effect>,
+) -> Option<&'a Effect> {
+    clip.effects
+        .iter()
+        .filter_map(|effect_id| effects.get(effect_id))
+        .find(|effect| effect.effect_type.category() == EffectCategory::Transition)
+}
+
+fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
+    let text = clip.label.as_deref()?.trim();
+    if text.is_empty() {
+        return None;
+    }
+
+    let mut effect = Effect::new(EffectType::TextOverlay);
+    effect.set_param("text", ParamValue::String(text.to_string()));
+
+    let style_object = clip.caption_style.as_ref().and_then(Value::as_object);
+
+    if let Some(style) = style_object {
+        if let Some(font_family) = get_json_field(style, &["fontFamily", "font_family"])
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            effect.set_param("font_family", ParamValue::String(font_family.to_string()));
+        }
+
+        if let Some(font_size) =
+            get_json_field(style, &["fontSize", "font_size"]).and_then(parse_json_number)
+        {
+            effect.set_param("font_size", ParamValue::Float(font_size.clamp(1.0, 500.0)));
+        }
+
+        let mut opacity_from_color: Option<f64> = None;
+        if let Some(color_value) = get_json_field(style, &["color"]) {
+            if let Some((hex, alpha)) = parse_caption_color(color_value) {
+                effect.set_param("color", ParamValue::String(hex));
+                opacity_from_color = alpha;
+            }
+        }
+
+        if let Some(background_value) =
+            get_json_field(style, &["backgroundColor", "background_color"])
+        {
+            if let Some((hex, _)) = parse_caption_color(background_value) {
+                effect.set_param("background_color", ParamValue::String(hex));
+            }
+        }
+
+        if let Some(shadow_value) = get_json_field(style, &["shadowColor", "shadow_color"]) {
+            if let Some((hex, _)) = parse_caption_color(shadow_value) {
+                effect.set_param("shadow_color", ParamValue::String(hex));
+            }
+        }
+
+        if let Some(outline_value) = get_json_field(style, &["outlineColor", "outline_color"]) {
+            if let Some((hex, _)) = parse_caption_color(outline_value) {
+                effect.set_param("outline_color", ParamValue::String(hex));
+            }
+        }
+
+        if let Some(shadow_offset) =
+            get_json_field(style, &["shadowOffset", "shadow_offset"]).and_then(parse_json_number)
+        {
+            let clamped = shadow_offset.clamp(-500.0, 500.0).round() as i64;
+            effect.set_param("shadow_x", ParamValue::Int(clamped));
+            effect.set_param("shadow_y", ParamValue::Int(clamped));
+        }
+
+        if let Some(outline_width) =
+            get_json_field(style, &["outlineWidth", "outline_width"]).and_then(parse_json_number)
+        {
+            effect.set_param(
+                "outline_width",
+                ParamValue::Int(outline_width.clamp(0.0, 100.0).round() as i64),
+            );
+        }
+
+        if let Some(alignment) =
+            get_json_field(style, &["alignment", "textAlign", "text_align"]).and_then(Value::as_str)
+        {
+            let normalized = alignment.to_ascii_lowercase();
+            if matches!(normalized.as_str(), "left" | "center" | "right") {
+                effect.set_param("alignment", ParamValue::String(normalized));
+            }
+        }
+
+        if let Some(italic) = get_json_field(style, &["italic"]).and_then(parse_json_bool) {
+            effect.set_param("italic", ParamValue::Bool(italic));
+        }
+
+        let bold = get_json_field(style, &["bold"])
+            .and_then(parse_json_bool)
+            .or_else(|| {
+                get_json_field(style, &["fontWeight", "font_weight"]).and_then(|value| {
+                    if let Some(raw) = value.as_str() {
+                        let normalized = raw.to_ascii_lowercase();
+                        Some(normalized == "bold" || normalized == "700" || normalized == "800")
+                    } else {
+                        parse_json_number(value).map(|weight| weight >= 600.0)
+                    }
+                })
+            });
+        if let Some(bold) = bold {
+            effect.set_param("bold", ParamValue::Bool(bold));
+        }
+
+        if let Some(line_height) =
+            get_json_field(style, &["lineHeight", "line_height"]).and_then(parse_json_number)
+        {
+            effect.set_param(
+                "line_height",
+                ParamValue::Float(line_height.clamp(0.5, 5.0)),
+            );
+        }
+
+        if let Some(opacity) = get_json_field(style, &["opacity"]).and_then(parse_json_number) {
+            effect.set_param("opacity", ParamValue::Float(opacity.clamp(0.0, 1.0)));
+        } else if let Some(opacity) = opacity_from_color {
+            effect.set_param("opacity", ParamValue::Float(opacity.clamp(0.0, 1.0)));
+        }
+    }
+
+    let (x, y) =
+        resolve_caption_anchor(clip.caption_position.as_ref(), clip.caption_style.as_ref());
+    effect.set_param("x", ParamValue::Float(x));
+    effect.set_param("y", ParamValue::Float(y));
+
+    let start = clip.place.timeline_in_sec;
+    let end = clip.place.timeline_out_sec();
+    if !start.is_finite() || !end.is_finite() || end <= start {
+        return None;
+    }
+
+    let filter_body = effect.to_filter_body();
+    Some(format!(
+        "{}:enable='between(t,{:.6},{:.6})'",
+        filter_body,
+        start.max(0.0),
+        end.max(0.0)
+    ))
+}
+
+fn collect_caption_drawtext_filters(all_clips: &[(&Clip, &Track)]) -> Vec<String> {
+    all_clips
+        .iter()
+        .filter_map(|(clip, track)| {
+            if track.kind == TrackKind::Caption {
+                build_caption_drawtext_with_enable(clip)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn append_caption_overlays(
+    filter_complex: &mut String,
+    base_video_label: &str,
+    caption_filters: &[String],
+) -> String {
+    let mut current_video_label = base_video_label.to_string();
+
+    for (index, filter) in caption_filters.iter().enumerate() {
+        let next_video_label = format!("[capv{}]", index);
+        filter_complex.push(';');
+        filter_complex.push_str(&format!(
+            "{}{}{}",
+            current_video_label, filter, next_video_label
+        ));
+        current_video_label = next_video_label;
+    }
+
+    current_video_label
 }
 
 // =============================================================================
@@ -631,7 +980,15 @@ impl ExportEngine {
         // Collect unique asset IDs from all clips
         let mut unique_asset_ids = std::collections::HashSet::new();
         for track in &sequence.tracks {
+            if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
+                continue;
+            }
+
             for clip in &track.clips {
+                if is_text_clip(clip) {
+                    continue;
+                }
+
                 unique_asset_ids.insert(clip.asset_id.clone());
             }
         }
@@ -815,6 +1172,7 @@ impl ExportEngine {
         let mut filter_complex = String::new();
         let mut video_streams = Vec::new();
         let mut audio_streams = Vec::new();
+        let mut video_transitions: Vec<Option<&Effect>> = Vec::new();
 
         // Collect all clips sorted by timeline position
         let mut all_clips: Vec<(&Clip, &Track)> = Vec::new();
@@ -834,12 +1192,20 @@ impl ExportEngine {
             return Err(ExportError::NoClips);
         }
 
+        let caption_filters = collect_caption_drawtext_filters(&all_clips);
+
         // Get output dimensions from settings or use defaults
         let output_width = settings.width.unwrap_or(1920);
         let output_height = settings.height.unwrap_or(1080);
 
         // Add inputs and build filter graph
         for (clip, track) in &all_clips {
+            if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
+                // Caption/overlay tracks are not rendered by the current export pipeline.
+                // Skip them so virtual caption clips are not treated as file inputs.
+                continue;
+            }
+
             // Check if this is a text clip (virtual asset with __text__ prefix)
             if is_text_clip(clip) {
                 // Text clips use a color source input with drawtext filter
@@ -860,6 +1226,7 @@ impl ExportEngine {
                     filter_complex.push(';');
 
                     video_streams.push(format!("[{}]", video_out_label));
+                    video_transitions.push(find_transition_effect(clip, effects));
 
                     // Text clips have no audio
                     input_index += 1;
@@ -928,6 +1295,7 @@ impl ExportEngine {
                     }
 
                     video_streams.push(format!("[{}]", video_out_label));
+                    video_transitions.push(find_transition_effect(clip, effects));
 
                     // Audio processing: ONLY if this asset has audio
                     if clip_has_audio {
@@ -1004,22 +1372,17 @@ impl ExportEngine {
             input_index += 1;
         }
 
+        if video_streams.is_empty() {
+            return Err(ExportError::InvalidSettings(
+                "Sequence has no visual clips to export".to_string(),
+            ));
+        }
+
         // Remove trailing semicolon if present
         if filter_complex.ends_with(';') {
             filter_complex.pop();
         }
         filter_complex.push(';');
-
-        // Collect transition effects for each clip (if any)
-        let mut clip_transitions: Vec<Option<&Effect>> = Vec::new();
-        for (clip, _track) in &all_clips {
-            let transition = clip
-                .effects
-                .iter()
-                .filter_map(|eid| effects.get(eid))
-                .find(|e| e.effect_type.category() == EffectCategory::Transition);
-            clip_transitions.push(transition);
-        }
 
         // Concat video streams with optional xfade transitions
         if video_streams.len() == 1 {
@@ -1038,7 +1401,7 @@ impl ExportEngine {
                 };
 
                 // Check if current clip has a transition effect (applies to transition INTO next clip)
-                if let Some(transition_effect) = clip_transitions.get(i).and_then(|t| *t) {
+                if let Some(transition_effect) = video_transitions.get(i).and_then(|t| *t) {
                     // Build xfade filter using the transition effect parameters
                     let xfade_filter = transition_effect.to_filter_body();
 
@@ -1062,6 +1425,9 @@ impl ExportEngine {
             }
         }
 
+        let final_video_label =
+            append_caption_overlays(&mut filter_complex, "[outv]", &caption_filters);
+
         // Concat audio streams ONLY if we have any
         if !audio_streams.is_empty() {
             filter_complex.push(';');
@@ -1079,7 +1445,7 @@ impl ExportEngine {
 
         // Map outputs
         args.push("-map".to_string());
-        args.push("[outv]".to_string());
+        args.push(final_video_label);
 
         // Map audio output ONLY if we have audio streams
         if !audio_streams.is_empty() {
@@ -1642,8 +2008,25 @@ pub fn validate_export_settings(
         return validation;
     }
 
+    let visual_clip_count: usize = sequence
+        .tracks
+        .iter()
+        .filter(|track| track.kind == TrackKind::Video)
+        .map(|track| track.clips.len())
+        .sum();
+    if visual_clip_count == 0 {
+        validation.add_error("Sequence has no visual clips to export");
+        return validation;
+    }
+
     // Check all clip assets exist (except virtual text clips) and are safe to read.
     for track in &sequence.tracks {
+        if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
+            // Caption/overlay tracks are currently excluded from final render composition.
+            // Skip file-based asset validation for these tracks.
+            continue;
+        }
+
         for clip in &track.clips {
             if is_text_clip(clip) {
                 // Ensure the clip has an enabled TextOverlay effect so rendering is deterministic.
@@ -1756,6 +2139,8 @@ pub fn build_complex_filter_args_with_audio_info(
         return Err(ExportError::NoClips);
     }
 
+    let caption_filters = collect_caption_drawtext_filters(&all_clips);
+
     // Build FilterGraph helper (inline version without engine)
     // If effects have keyframes, they are resolved at the midpoint of the clip
     fn build_clip_filter_graph_standalone(
@@ -1789,6 +2174,12 @@ pub fn build_complex_filter_args_with_audio_info(
 
     // Add inputs and build filter graph
     for (clip, track) in &all_clips {
+        if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
+            // Caption/overlay tracks are not rendered by the current export pipeline.
+            // Skip them so virtual caption clips are not treated as file inputs.
+            continue;
+        }
+
         // Check if this is a text clip (virtual asset with __text__ prefix)
         if is_text_clip(clip) {
             // Text clips use a color source input with drawtext filter
@@ -1934,6 +2325,12 @@ pub fn build_complex_filter_args_with_audio_info(
         input_index += 1;
     }
 
+    if video_streams.is_empty() {
+        return Err(ExportError::InvalidSettings(
+            "Sequence has no visual clips to export".to_string(),
+        ));
+    }
+
     // Remove trailing semicolon if present
     if filter_complex.ends_with(';') {
         filter_complex.pop();
@@ -1947,6 +2344,9 @@ pub fn build_complex_filter_args_with_audio_info(
         filter_complex.push_str(&video_streams.join(""));
         filter_complex.push_str(&format!("concat=n={}:v=1:a=0[outv]", video_streams.len()));
     }
+
+    let final_video_label =
+        append_caption_overlays(&mut filter_complex, "[outv]", &caption_filters);
 
     // Concat audio streams ONLY if we have any
     if !audio_streams.is_empty() {
@@ -1964,7 +2364,7 @@ pub fn build_complex_filter_args_with_audio_info(
     args.push(filter_complex);
 
     args.push("-map".to_string());
-    args.push("[outv]".to_string());
+    args.push(final_video_label);
 
     if !audio_streams.is_empty() {
         args.push("-map".to_string());
@@ -2255,6 +2655,84 @@ mod tests {
 
         assert!(!validation.is_valid);
         assert!(validation.errors.iter().any(|e| e.contains("not found")));
+    }
+
+    #[test]
+    fn test_validation_requires_visual_clips() {
+        use crate::core::assets::AudioInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut audio_track = Track::new_audio("Audio 1");
+        audio_track.add_clip(
+            Clip::new("audio_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(audio_track);
+
+        let audio_path = create_temp_media_file("validation_audio.mp3");
+        let mut assets = std::collections::HashMap::new();
+        let mut audio_asset =
+            Asset::new_audio("validation_audio.mp3", &audio_path, AudioInfo::default())
+                .with_duration(3.0)
+                .with_file_size(1_000_000);
+        audio_asset.id = "audio_asset".to_string();
+        assets.insert("audio_asset".to_string(), audio_asset);
+
+        let effects = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
+
+        assert!(!validation.is_valid);
+        assert!(validation
+            .errors
+            .iter()
+            .any(|e| e.contains("no visual clips")));
+    }
+
+    #[test]
+    fn test_validation_ignores_caption_track_virtual_assets() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut caption_track = Track::new_caption("Captions");
+        caption_track.add_clip(
+            Clip::new("caption")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(caption_track);
+
+        let video_path = create_temp_media_file("validation_video.mp4");
+        let mut assets = std::collections::HashMap::new();
+        let mut video_asset =
+            Asset::new_video("validation_video.mp4", &video_path, VideoInfo::default())
+                .with_duration(3.0)
+                .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let effects = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
+
+        assert!(
+            validation.is_valid,
+            "Expected caption track assets to be ignored. Got: {validation:?}"
+        );
     }
 
     #[test]
@@ -2755,6 +3233,294 @@ mod tests {
         assert!(
             !args_str.contains("-c:a"),
             "Args should not include audio codec for silent video. Got: {}",
+            args_str
+        );
+    }
+
+    #[test]
+    fn test_build_filter_rejects_sequences_without_visual_streams() {
+        use crate::core::assets::AudioInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut audio_track = Track::new_audio("Audio 1");
+        audio_track.add_clip(
+            Clip::new("audio_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(audio_track);
+
+        let audio_path = create_temp_media_file("audio_only_filter.mp3");
+        let mut audio_asset =
+            Asset::new_audio("audio_only_filter.mp3", &audio_path, AudioInfo::default())
+                .with_duration(3.0)
+                .with_file_size(1_000_000);
+        audio_asset.id = "audio_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("audio_asset".to_string(), audio_asset);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "audio_asset".to_string(),
+            AssetAudioInfo { has_audio: true },
+        );
+
+        let effects = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        let err = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &settings,
+        )
+        .unwrap_err();
+
+        match err {
+            ExportError::InvalidSettings(message) => {
+                assert!(message.contains("no visual clips"), "Got: {message}");
+            }
+            other => panic!("Expected InvalidSettings, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_build_filter_ignores_caption_tracks_without_assets() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut caption_track = Track::new_caption("Captions");
+        caption_track.add_clip(
+            Clip::new("caption")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(caption_track);
+
+        let video_path = create_temp_media_file("video_with_caption_track.mp4");
+        let mut video_asset = Asset::new_video(
+            "video_with_caption_track.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "video_asset".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+
+        let effects = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        let result = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &settings,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Expected caption track to be ignored. Error: {:?}",
+            result.err()
+        );
+
+        let args = result.unwrap();
+        let input_count = args.iter().filter(|arg| arg.as_str() == "-i").count();
+        assert_eq!(
+            input_count, 1,
+            "Expected only one file input for visual clip"
+        );
+    }
+
+    #[test]
+    fn test_build_filter_burns_in_caption_track() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut caption_track = Track::new_caption("Captions");
+        let mut caption_clip = Clip::new("caption")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.5);
+        caption_clip.label = Some("Hello from caption track".to_string());
+        caption_track.add_clip(caption_clip);
+        sequence.add_track(caption_track);
+
+        let video_path = create_temp_media_file("video_caption_burnin.mp4");
+        let mut video_asset = Asset::new_video(
+            "video_caption_burnin.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "video_asset".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+
+        let effects = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        let result = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &settings,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Caption burn-in filter generation should succeed. Error: {:?}",
+            result.err()
+        );
+
+        let args = result.unwrap();
+        let args_str = args.join(" ");
+
+        assert!(
+            args_str.contains("drawtext="),
+            "Expected drawtext overlay in filter graph. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("between(t,0.500000,2.500000)"),
+            "Expected caption time window in drawtext enable expression. Got: {}",
+            args_str
+        );
+
+        let input_count = args.iter().filter(|arg| arg.as_str() == "-i").count();
+        assert_eq!(
+            input_count, 1,
+            "Caption burn-in should not add extra file inputs"
+        );
+
+        let first_map_index = args
+            .iter()
+            .position(|arg| arg.as_str() == "-map")
+            .expect("Expected at least one -map argument");
+        assert_eq!(
+            args.get(first_map_index + 1).map(String::as_str),
+            Some("[capv0]"),
+            "Expected video map label to use caption-composited stream"
+        );
+    }
+
+    #[test]
+    fn test_build_filter_caption_style_maps_rgba_and_position() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let mut caption_track = Track::new_caption("Captions");
+        let mut caption_clip = Clip::new("caption")
+            .with_source_range(0.0, 2.0)
+            .place_at(0.25);
+        caption_clip.label = Some("Styled caption".to_string());
+        caption_clip.caption_style = Some(serde_json::json!({
+            "fontSize": 64,
+            "alignment": "left",
+            "color": { "r": 255, "g": 0, "b": 0, "a": 128 },
+            "outlineColor": "#000000",
+            "outlineWidth": 3
+        }));
+        caption_clip.caption_position = Some(serde_json::json!({
+            "type": "preset",
+            "vertical": "bottom",
+            "marginPercent": 5
+        }));
+        caption_track.add_clip(caption_clip);
+        sequence.add_track(caption_track);
+
+        let video_path = create_temp_media_file("video_caption_style.mp4");
+        let mut video_asset =
+            Asset::new_video("video_caption_style.mp4", &video_path, VideoInfo::default())
+                .with_duration(3.0)
+                .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "video_asset".to_string(),
+            AssetAudioInfo { has_audio: false },
+        );
+
+        let effects = std::collections::HashMap::new();
+        let settings = ExportSettings::default();
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &effects,
+            &audio_info_map,
+            &settings,
+        )
+        .expect("Caption style burn-in filter generation should succeed");
+        let args_str = args.join(" ");
+
+        assert!(
+            args_str.contains("fontcolor=0xFF0000@0.50"),
+            "Expected RGBA color to map to FFmpeg fontcolor with opacity. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("y=(h*0.9500)-(text_h/2)"),
+            "Expected preset bottom position to map to y=0.95. Got: {}",
+            args_str
+        );
+        assert!(
+            args_str.contains("x=(w*0.5000)"),
+            "Expected left alignment x expression. Got: {}",
             args_str
         );
     }
