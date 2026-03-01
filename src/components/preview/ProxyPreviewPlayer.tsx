@@ -12,10 +12,18 @@ import {
   type PlaybackSeekEventDetail,
   usePlaybackStore,
 } from '@/stores/playbackStore';
+import { useProjectStore } from '@/stores/projectStore';
+import { useTimelineStore } from '@/stores/timelineStore';
 import { createLogger } from '@/services/logger';
 import { PlayerControls } from './PlayerControls';
 import { normalizeFileUriToPath } from '@/utils/uri';
-import type { Sequence, Asset, Clip } from '@/types';
+import {
+  getClipSourceTimeAtTimelineTime,
+  getSafeClipSpeed,
+  isClipActiveAtTime,
+} from '@/utils/clipTiming';
+import { isCaptionLikeClip } from '@/utils/captionClip';
+import type { Sequence, Asset, Clip, CaptionStyle, CaptionPosition, CaptionColor } from '@/types';
 
 // =============================================================================
 // Types
@@ -43,6 +51,22 @@ interface RenderableClip extends ActiveClip {
   src: string;
 }
 
+interface ActiveCaption {
+  clip: Clip;
+  trackId: string;
+  trackKind: Sequence['tracks'][number]['kind'];
+  trackIndex: number;
+  text: string;
+}
+
+interface CaptionDragState {
+  captionId: string;
+  trackId: string;
+  pointerId: number;
+  offsetX: number;
+  offsetY: number;
+}
+
 // =============================================================================
 // Constants
 // =============================================================================
@@ -56,10 +80,6 @@ const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:/;
 
 const logger = createLogger('ProxyPreviewPlayer');
 
-function getSafeClipSpeed(clip: Clip): number {
-  return clip.speed > 0 ? clip.speed : 1;
-}
-
 function isWindowsAbsolutePath(path: string): boolean {
   return /^[a-zA-Z]:[\\/]/.test(path);
 }
@@ -72,6 +92,182 @@ function clampTimelineTime(time: number, duration: number): number {
     return Math.max(0, time);
   }
   return Math.max(0, Math.min(duration, time));
+}
+
+const DEFAULT_CAPTION_STYLE: CaptionStyle = {
+  fontFamily: 'Arial',
+  fontSize: 48,
+  fontWeight: 'normal',
+  color: { r: 255, g: 255, b: 255, a: 255 },
+  outlineColor: { r: 0, g: 0, b: 0, a: 255 },
+  outlineWidth: 2,
+  shadowColor: { r: 0, g: 0, b: 0, a: 160 },
+  shadowOffset: 2,
+  alignment: 'center',
+  italic: false,
+  underline: false,
+};
+
+const DEFAULT_CAPTION_POSITION: CaptionPosition = {
+  type: 'preset',
+  vertical: 'bottom',
+  marginPercent: 5,
+};
+
+function clampPercent(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(0, Math.min(100, value));
+}
+
+function normalizeCaptionStyle(style: CaptionStyle | undefined): CaptionStyle {
+  if (!style) {
+    return DEFAULT_CAPTION_STYLE;
+  }
+
+  return {
+    ...DEFAULT_CAPTION_STYLE,
+    ...style,
+    color: {
+      ...DEFAULT_CAPTION_STYLE.color,
+      ...style.color,
+    },
+    backgroundColor: style.backgroundColor
+      ? {
+          r: style.backgroundColor.r,
+          g: style.backgroundColor.g,
+          b: style.backgroundColor.b,
+          a: style.backgroundColor.a,
+        }
+      : undefined,
+    outlineColor: style.outlineColor
+      ? {
+          r: style.outlineColor.r,
+          g: style.outlineColor.g,
+          b: style.outlineColor.b,
+          a: style.outlineColor.a,
+        }
+      : undefined,
+    shadowColor: style.shadowColor
+      ? {
+          r: style.shadowColor.r,
+          g: style.shadowColor.g,
+          b: style.shadowColor.b,
+          a: style.shadowColor.a,
+        }
+      : undefined,
+  };
+}
+
+function normalizeCaptionPosition(position: CaptionPosition | undefined): CaptionPosition {
+  if (!position) {
+    return DEFAULT_CAPTION_POSITION;
+  }
+
+  if (position.type === 'custom') {
+    return {
+      type: 'custom',
+      xPercent: clampPercent(position.xPercent, 50),
+      yPercent: clampPercent(position.yPercent, 90),
+    };
+  }
+
+  return {
+    type: 'preset',
+    vertical: position.vertical,
+    marginPercent: clampPercent(position.marginPercent, 5),
+  };
+}
+
+function resolveCaptionAnchor(
+  style: CaptionStyle,
+  position: CaptionPosition,
+): {
+  xPercent: number;
+  yPercent: number;
+} {
+  let xPercent = 50;
+  if (style.alignment === 'left') {
+    xPercent = 10;
+  } else if (style.alignment === 'right') {
+    xPercent = 90;
+  }
+
+  let yPercent = 90;
+  if (position.type === 'custom') {
+    xPercent = position.xPercent;
+    yPercent = position.yPercent;
+  } else if (position.vertical === 'top') {
+    yPercent = position.marginPercent;
+  } else if (position.vertical === 'center') {
+    yPercent = 50;
+  } else {
+    yPercent = 100 - position.marginPercent;
+  }
+
+  return {
+    xPercent: clampPercent(xPercent, 50),
+    yPercent: clampPercent(yPercent, 90),
+  };
+}
+
+function toRgba(color: CaptionColor): string {
+  return `rgba(${color.r}, ${color.g}, ${color.b}, ${color.a / 255})`;
+}
+
+function buildCaptionTextShadow(style: CaptionStyle): string | undefined {
+  const parts: string[] = [];
+
+  if (style.outlineColor && style.outlineWidth > 0) {
+    const width = Math.max(1, Math.round(style.outlineWidth));
+    const outline = toRgba(style.outlineColor);
+    parts.push(
+      `${-width}px 0 ${outline}`,
+      `${width}px 0 ${outline}`,
+      `0 ${-width}px ${outline}`,
+      `0 ${width}px ${outline}`,
+      `${-width}px ${-width}px ${outline}`,
+      `${width}px ${-width}px ${outline}`,
+      `${-width}px ${width}px ${outline}`,
+      `${width}px ${width}px ${outline}`,
+    );
+  }
+
+  if (style.shadowColor && style.shadowOffset > 0) {
+    const offset = style.shadowOffset;
+    parts.push(`${offset}px ${offset}px ${offset}px ${toRgba(style.shadowColor)}`);
+  }
+
+  return parts.length > 0 ? parts.join(', ') : undefined;
+}
+
+function resolveCaptionPositionForClip(
+  clip: Clip,
+  trackKind: Sequence['tracks'][number]['kind'],
+): CaptionPosition {
+  if (clip.captionPosition) {
+    return normalizeCaptionPosition(clip.captionPosition);
+  }
+
+  // Legacy/non-caption clips can still be repositioned through transform.position.
+  if (trackKind !== 'caption') {
+    const xPercent = clampPercent(clip.transform.position.x * 100, 50);
+    const yPercent = clampPercent(clip.transform.position.y * 100, 90);
+    const hasCustomTransformPosition =
+      Math.abs(xPercent - 50) > 0.01 || Math.abs(yPercent - 50) > 0.01;
+
+    if (hasCustomTransformPosition) {
+      return {
+        type: 'custom',
+        xPercent,
+        yPercent,
+      };
+    }
+  }
+
+  return DEFAULT_CAPTION_POSITION;
 }
 
 // =============================================================================
@@ -109,10 +305,15 @@ export function ProxyPreviewPlayer({
     setPlaybackRate,
   } = usePlaybackStore();
 
+  const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
+  const executeCommand = useProjectStore((state) => state.executeCommand);
+
   // Local state
   const [buffered, setBuffered] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [videoErrors, setVideoErrors] = useState<Map<string, string>>(new Map());
+  const [captionDragState, setCaptionDragState] = useState<CaptionDragState | null>(null);
+  const [captionDraftPosition, setCaptionDraftPosition] = useState<CaptionPosition | null>(null);
 
   // NOTE: Playback duration is managed by useTimelineEngine (Timeline component).
   // Do NOT compute or set it here - competing setDuration calls cause the SeekBar
@@ -147,12 +348,8 @@ export function ProxyPreviewPlayer({
       if (track.kind !== 'video') return;
 
       for (const clip of track.clips) {
-        const clipSpeed = clip.speed > 0 ? clip.speed : 1;
-        const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / clipSpeed;
-        const clipEnd = clip.place.timelineInSec + clipDuration;
-
         // Check if clip is active at current time
-        if (currentTime >= clip.place.timelineInSec && currentTime < clipEnd) {
+        if (isClipActiveAtTime(clip, currentTime)) {
           const asset = assets.get(clip.assetId);
           if (!asset || asset.kind !== 'video') {
             continue;
@@ -263,11 +460,272 @@ export function ProxyPreviewPlayer({
     return clips;
   }, [activeClips, getVideoSrc]);
 
+  const activeCaptions = useMemo((): ActiveCaption[] => {
+    if (!sequence) {
+      return [];
+    }
+
+    const captions: ActiveCaption[] = [];
+
+    sequence.tracks.forEach((track, trackIndex) => {
+      if (track.muted || !track.visible) {
+        return;
+      }
+
+      for (const clip of track.clips) {
+        if (!isClipActiveAtTime(clip, currentTime)) {
+          continue;
+        }
+
+        const asset = assets.get(clip.assetId);
+        if (!isCaptionLikeClip(track, clip, asset)) {
+          continue;
+        }
+
+        const text = clip.label?.trim();
+        if (!text) {
+          continue;
+        }
+
+        captions.push({
+          clip,
+          trackId: track.id,
+          trackKind: track.kind,
+          trackIndex,
+          text,
+        });
+      }
+    });
+
+    captions.sort((a, b) => a.trackIndex - b.trackIndex);
+    return captions;
+  }, [sequence, assets, currentTime]);
+
+  const selectedCaptionId = selectedClipIds.length === 1 ? selectedClipIds[0] : null;
+  const selectedActiveCaption = useMemo(() => {
+    if (!selectedCaptionId) {
+      return null;
+    }
+
+    return activeCaptions.find((caption) => caption.clip.id === selectedCaptionId) ?? null;
+  }, [activeCaptions, selectedCaptionId]);
+
+  useEffect(() => {
+    if (!selectedActiveCaption || captionDragState?.captionId !== selectedActiveCaption.clip.id) {
+      setCaptionDragState(null);
+      setCaptionDraftPosition(null);
+    }
+  }, [selectedActiveCaption, captionDragState]);
+
+  const resolvePointerCaptionPosition = useCallback(
+    (
+      clientX: number,
+      clientY: number,
+      offsetX: number,
+      offsetY: number,
+    ): CaptionPosition | null => {
+      const container = containerRef.current;
+      if (!container) {
+        return null;
+      }
+
+      const rect = container.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return null;
+      }
+
+      const anchorX = clientX - rect.left - offsetX;
+      const anchorY = clientY - rect.top - offsetY;
+
+      return {
+        type: 'custom',
+        xPercent: clampPercent((anchorX / rect.width) * 100, 50),
+        yPercent: clampPercent((anchorY / rect.height) * 100, 90),
+      };
+    },
+    [],
+  );
+
+  const handleCaptionPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>, caption: ActiveCaption) => {
+      if (!sequence) {
+        return;
+      }
+
+      if (selectedCaptionId !== caption.clip.id) {
+        return;
+      }
+
+      const style = normalizeCaptionStyle(caption.clip.captionStyle);
+      const currentPosition =
+        captionDraftPosition ?? resolveCaptionPositionForClip(caption.clip, caption.trackKind);
+
+      const container = containerRef.current;
+      if (!container) {
+        return;
+      }
+
+      const rect = container.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) {
+        return;
+      }
+
+      const anchor = resolveCaptionAnchor(style, currentPosition);
+      const anchorX = rect.left + (anchor.xPercent / 100) * rect.width;
+      const anchorY = rect.top + (anchor.yPercent / 100) * rect.height;
+      const offsetX = event.clientX - anchorX;
+      const offsetY = event.clientY - anchorY;
+
+      const nextPosition = resolvePointerCaptionPosition(
+        event.clientX,
+        event.clientY,
+        offsetX,
+        offsetY,
+      );
+      if (!nextPosition) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      event.currentTarget.setPointerCapture(event.pointerId);
+
+      setCaptionDragState({
+        captionId: caption.clip.id,
+        trackId: caption.trackId,
+        pointerId: event.pointerId,
+        offsetX,
+        offsetY,
+      });
+      setCaptionDraftPosition(nextPosition);
+    },
+    [sequence, selectedCaptionId, captionDraftPosition, resolvePointerCaptionPosition],
+  );
+
+  const handleCaptionPointerMove = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>, caption: ActiveCaption) => {
+      if (!captionDragState || captionDragState.captionId !== caption.clip.id) {
+        return;
+      }
+
+      if (captionDragState.pointerId !== event.pointerId) {
+        return;
+      }
+
+      const nextPosition = resolvePointerCaptionPosition(
+        event.clientX,
+        event.clientY,
+        captionDragState.offsetX,
+        captionDragState.offsetY,
+      );
+      if (!nextPosition) {
+        return;
+      }
+
+      event.preventDefault();
+      setCaptionDraftPosition(nextPosition);
+    },
+    [captionDragState, resolvePointerCaptionPosition],
+  );
+
+  const commitCaptionPosition = useCallback(
+    async (caption: ActiveCaption, position: CaptionPosition) => {
+      if (!sequence) {
+        return;
+      }
+
+      try {
+        if (caption.trackKind === 'caption') {
+          await executeCommand({
+            type: 'UpdateCaption',
+            payload: {
+              sequenceId: sequence.id,
+              trackId: caption.trackId,
+              captionId: caption.clip.id,
+              position,
+            },
+          });
+          return;
+        }
+
+        // Legacy subtitle-like clips on non-caption tracks are moved via transform.
+        await executeCommand({
+          type: 'SetClipTransform',
+          payload: {
+            sequenceId: sequence.id,
+            trackId: caption.trackId,
+            clipId: caption.clip.id,
+            transform: {
+              ...caption.clip.transform,
+              position: {
+                x: position.type === 'custom' ? position.xPercent / 100 : 0.5,
+                y: position.type === 'custom' ? position.yPercent / 100 : 0.9,
+              },
+            },
+          },
+        });
+      } catch (error) {
+        logger.error('Failed to commit caption position from preview drag', {
+          error,
+          sequenceId: sequence.id,
+          trackId: caption.trackId,
+          captionId: caption.clip.id,
+        });
+      }
+    },
+    [executeCommand, sequence],
+  );
+
+  const handleCaptionPointerUp = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>, caption: ActiveCaption) => {
+      if (!captionDragState || captionDragState.captionId !== caption.clip.id) {
+        return;
+      }
+
+      if (captionDragState.pointerId !== event.pointerId) {
+        return;
+      }
+
+      event.preventDefault();
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+
+      const finalPosition = captionDraftPosition;
+      const activeCaption = activeCaptions.find(
+        (item) => item.clip.id === captionDragState.captionId,
+      );
+      setCaptionDragState(null);
+      setCaptionDraftPosition(null);
+
+      if (finalPosition && activeCaption) {
+        void commitCaptionPosition(activeCaption, finalPosition);
+      }
+    },
+    [activeCaptions, captionDragState, captionDraftPosition, commitCaptionPosition],
+  );
+
+  const handleCaptionPointerCancel = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>, caption: ActiveCaption) => {
+      if (!captionDragState || captionDragState.captionId !== caption.clip.id) {
+        return;
+      }
+
+      if (captionDragState.pointerId !== event.pointerId) {
+        return;
+      }
+
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      setCaptionDragState(null);
+      setCaptionDraftPosition(null);
+    },
+    [captionDragState],
+  );
+
   const getClampedSourceTime = useCallback((clip: Clip, timelineTime: number) => {
-    const offsetInClip = timelineTime - clip.place.timelineInSec;
-    const safeSpeed = getSafeClipSpeed(clip);
-    const sourceTime = clip.range.sourceInSec + offsetInClip * safeSpeed;
-    return Math.max(clip.range.sourceInSec, Math.min(clip.range.sourceOutSec, sourceTime));
+    return getClipSourceTimeAtTimelineTime(clip, timelineTime);
   }, []);
 
   // Sync video elements to timeline position.
@@ -324,48 +782,61 @@ export function ProxyPreviewPlayer({
   // Animation frame loop for playback
   const updatePlayback = useCallback(
     (timestamp: number) => {
-      if (!isPlaying) return;
-
-      // Limit updates to avoid excessive re-renders
-      if (timestamp - lastUpdateTimeRef.current >= FRAME_INTERVAL) {
-        const prevTimestamp = lastUpdateTimeRef.current;
-        lastUpdateTimeRef.current = timestamp;
-
-        // Find the first playing video to sync time from (not just first clip)
-        // This handles cases where some clips may have load errors or be paused
-        let foundVideoSource = false;
-        for (const { clip } of renderableClips) {
-          const video = videoRefs.current.get(clip.id);
-          if (video && !video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
-            // Calculate timeline time from video time
-            const offsetInSource = video.currentTime - clip.range.sourceInSec;
-            const safeSpeed = getSafeClipSpeed(clip);
-            const timelineTime = clip.place.timelineInSec + offsetInSource / safeSpeed;
-            const clampedTimelineTime = clampTimelineTime(timelineTime, duration);
-            setCurrentTime(clampedTimelineTime, 'proxy-video-clock');
-            // Update synthetic time reference
-            playbackStartRef.current = { timestamp, timelineTime: clampedTimelineTime };
-            foundVideoSource = true;
-            break; // Use first valid video as time source
-          }
-        }
-
-        // Fallback: If no video is available, advance time synthetically
-        // This ensures playback continues even when all videos fail to load
-        if (!foundVideoSource && prevTimestamp > 0) {
-          const elapsed = (timestamp - prevTimestamp) / 1000; // Convert to seconds
-          const timeAdvance = elapsed * playbackRate;
-          const newTime = clampTimelineTime(currentTime + timeAdvance, duration);
-          setCurrentTime(newTime, 'proxy-synthetic-clock');
-
-          // Stop at end of duration
-          if (newTime >= duration) {
-            setIsPlaying(false);
-          }
-        }
+      if (!isPlaying) {
+        animationFrameRef.current = null;
+        return;
       }
 
-      animationFrameRef.current = requestAnimationFrame(updatePlayback);
+      try {
+        // Limit updates to avoid excessive re-renders
+        if (timestamp - lastUpdateTimeRef.current >= FRAME_INTERVAL) {
+          const prevTimestamp = lastUpdateTimeRef.current;
+          lastUpdateTimeRef.current = timestamp;
+
+          // Find the first playing video to sync time from (not just first clip)
+          // This handles cases where some clips may have load errors or be paused
+          let foundVideoSource = false;
+          for (const { clip } of renderableClips) {
+            const video = videoRefs.current.get(clip.id);
+            if (video && !video.paused && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+              // Calculate timeline time from video time
+              const offsetInSource = video.currentTime - clip.range.sourceInSec;
+              const safeSpeed = getSafeClipSpeed(clip);
+              const timelineTime = clip.place.timelineInSec + offsetInSource / safeSpeed;
+              const clampedTimelineTime = clampTimelineTime(timelineTime, duration);
+              setCurrentTime(clampedTimelineTime, 'proxy-video-clock');
+              // Update synthetic time reference
+              playbackStartRef.current = { timestamp, timelineTime: clampedTimelineTime };
+              foundVideoSource = true;
+              break; // Use first valid video as time source
+            }
+          }
+
+          // Fallback: If no video is available, advance time synthetically
+          // This ensures playback continues even when all videos fail to load
+          if (!foundVideoSource && prevTimestamp > 0) {
+            const elapsed = (timestamp - prevTimestamp) / 1000; // Convert to seconds
+            const timeAdvance = elapsed * playbackRate;
+            const newTime = clampTimelineTime(currentTime + timeAdvance, duration);
+            setCurrentTime(newTime, 'proxy-synthetic-clock');
+
+            // Stop at end of duration
+            if (newTime >= duration) {
+              setIsPlaying(false);
+            }
+          }
+        }
+      } catch (error) {
+        logger.error('Proxy playback frame update failed', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        if (isPlaying) {
+          animationFrameRef.current = requestAnimationFrame(updatePlayback);
+        } else {
+          animationFrameRef.current = null;
+        }
+      }
     },
     [isPlaying, renderableClips, setCurrentTime, playbackRate, currentTime, duration, setIsPlaying],
   );
@@ -741,6 +1212,75 @@ export function ProxyPreviewPlayer({
           })
         )}
       </div>
+
+      {/* Caption overlays (rendered in proxy mode to avoid canvas fallback for captions) */}
+      {activeCaptions.length > 0 && (
+        <div className="absolute inset-0 pointer-events-none" data-testid="proxy-caption-layer">
+          {activeCaptions.map((caption) => {
+            const style = normalizeCaptionStyle(caption.clip.captionStyle);
+            const resolvedPosition =
+              selectedCaptionId === caption.clip.id && captionDraftPosition
+                ? captionDraftPosition
+                : resolveCaptionPositionForClip(caption.clip, caption.trackKind);
+            const anchor = resolveCaptionAnchor(style, resolvedPosition);
+
+            const translateX =
+              style.alignment === 'left' ? '0%' : style.alignment === 'right' ? '-100%' : '-50%';
+
+            const isSelected = selectedCaptionId === caption.clip.id;
+            const isEditableSelected = isSelected;
+            const isDraggingSelected =
+              captionDragState?.captionId === caption.clip.id && captionDragState.pointerId != null;
+
+            const fontWeight =
+              style.fontWeight === 'bold' ? 700 : style.fontWeight === 'light' ? 300 : 400;
+            const textShadow = buildCaptionTextShadow(style);
+            const textDecoration = style.underline ? 'underline' : 'none';
+
+            return (
+              <div
+                key={caption.clip.id}
+                data-testid={`proxy-caption-${caption.clip.id}`}
+                className={`absolute select-none ${isEditableSelected ? 'pointer-events-auto' : 'pointer-events-none'}`}
+                style={{
+                  left: `${anchor.xPercent}%`,
+                  top: `${anchor.yPercent}%`,
+                  transform: `translate(${translateX}, -50%)`,
+                  color: toRgba(style.color),
+                  fontFamily: style.fontFamily,
+                  fontSize: `${Math.max(12, style.fontSize * 0.75)}px`,
+                  fontWeight,
+                  fontStyle: style.italic ? 'italic' : 'normal',
+                  textAlign: style.alignment,
+                  textDecoration,
+                  whiteSpace: 'pre-line',
+                  lineHeight: 1.2,
+                  backgroundColor: style.backgroundColor
+                    ? toRgba(style.backgroundColor)
+                    : 'transparent',
+                  textShadow,
+                  border: isEditableSelected ? '1px dashed rgba(59, 130, 246, 0.9)' : 'none',
+                  borderRadius: isEditableSelected ? '4px' : '0',
+                  padding: isEditableSelected || style.backgroundColor ? '2px 6px' : '0',
+                  cursor: isEditableSelected
+                    ? isDraggingSelected
+                      ? 'grabbing'
+                      : 'grab'
+                    : 'default',
+                  zIndex: caption.trackIndex * 10 + 5,
+                }}
+                title={isEditableSelected ? 'Drag to reposition caption' : undefined}
+                onPointerDown={(event) => handleCaptionPointerDown(event, caption)}
+                onPointerMove={(event) => handleCaptionPointerMove(event, caption)}
+                onPointerUp={(event) => handleCaptionPointerUp(event, caption)}
+                onPointerCancel={(event) => handleCaptionPointerCancel(event, caption)}
+              >
+                {caption.text}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Controls Overlay */}
       {showControls && (

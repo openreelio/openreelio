@@ -60,7 +60,7 @@ export const UnifiedPreviewPlayer = memo(function UnifiedPreviewPlayer({
     if (sequenceProp !== undefined) {
       return sequenceProp;
     }
-    return activeSequenceId ? sequences.get(activeSequenceId) ?? null : null;
+    return activeSequenceId ? (sequences.get(activeSequenceId) ?? null) : null;
   }, [sequenceProp, activeSequenceId, sequences]);
 
   // Determine optimal preview mode
@@ -70,10 +70,20 @@ export const UnifiedPreviewPlayer = memo(function UnifiedPreviewPlayer({
     currentTime,
   });
 
+  const sequenceCanvas = sequence?.format?.canvas;
+  const sequenceAspectRatio =
+    sequenceCanvas && sequenceCanvas.width > 0 && sequenceCanvas.height > 0
+      ? sequenceCanvas.width / sequenceCanvas.height
+      : undefined;
+
   // Render proxy-based player for video mode
   if (mode === 'video' && sequence) {
     return (
-      <div className={`relative ${className}`} data-testid="unified-preview-player" data-mode="video">
+      <div
+        className={`relative ${className}`}
+        data-testid="unified-preview-player"
+        data-mode="video"
+      >
         <ProxyPreviewPlayer
           sequence={sequence}
           assets={assets}
@@ -93,12 +103,19 @@ export const UnifiedPreviewPlayer = memo(function UnifiedPreviewPlayer({
 
   // Render canvas-based player for canvas mode
   return (
-    <div className={`relative ${className}`} data-testid="unified-preview-player" data-mode="canvas">
+    <div
+      className={`relative ${className}`}
+      data-testid="unified-preview-player"
+      data-mode="canvas"
+    >
       <TimelinePreviewPlayer
         className="w-full h-full"
         showControls={showControls}
         showTimecode={showTimecode}
         showStats={showStats}
+        aspectRatio={sequenceAspectRatio}
+        width={sequenceCanvas?.width}
+        height={sequenceCanvas?.height}
         onEnded={onEnded}
         onFrameRender={onFrameRender}
       />
