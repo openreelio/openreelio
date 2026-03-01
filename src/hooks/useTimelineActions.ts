@@ -27,6 +27,7 @@ import type {
   ClipSplitData,
   TrackControlData,
   TrackCreateData,
+  TrackReorderData,
   CaptionUpdateData,
 } from '@/components/timeline/Timeline';
 import type { Asset, Command, CommandResult, Sequence, Track } from '@/types';
@@ -81,6 +82,7 @@ interface TimelineActions {
   handleTrackMuteToggle: (data: TrackControlData) => Promise<void>;
   handleTrackLockToggle: (data: TrackControlData) => Promise<void>;
   handleTrackVisibilityToggle: (data: TrackControlData) => Promise<void>;
+  handleTrackReorder: (data: TrackReorderData) => Promise<void>;
   handleUpdateCaption: (data: CaptionUpdateData) => Promise<void>;
 }
 
@@ -1669,6 +1671,71 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
   );
 
   /**
+   * Handle track reorder.
+   */
+  const handleTrackReorder = useCallback(
+    async (data: TrackReorderData): Promise<void> => {
+      if (!sequence) {
+        logger.warn('Cannot reorder track: no sequence');
+        return;
+      }
+
+      const sequenceSnapshot = getCurrentSequence();
+      if (!sequenceSnapshot) {
+        logger.warn('Cannot reorder track: sequence snapshot unavailable', {
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+          newIndex: data.newIndex,
+        });
+        return;
+      }
+
+      const currentIndex = sequenceSnapshot.tracks.findIndex((track) => track.id === data.trackId);
+      if (currentIndex < 0) {
+        logger.warn('Cannot reorder track: track not found', {
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+        });
+        return;
+      }
+
+      const clampedTargetIndex = Math.max(
+        0,
+        Math.min(data.newIndex, sequenceSnapshot.tracks.length - 1),
+      );
+      if (clampedTargetIndex === currentIndex) {
+        return;
+      }
+
+      const reorderedTrackIds = sequenceSnapshot.tracks.map((track) => track.id);
+      const [movedTrackId] = reorderedTrackIds.splice(currentIndex, 1);
+      if (!movedTrackId) {
+        return;
+      }
+      reorderedTrackIds.splice(clampedTargetIndex, 0, movedTrackId);
+
+      try {
+        await executeCommand({
+          type: 'ReorderTracks',
+          payload: {
+            sequenceId: data.sequenceId,
+            newOrder: reorderedTrackIds,
+          },
+        });
+      } catch (error) {
+        logger.error('Failed to reorder track', {
+          error,
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+          currentIndex,
+          newIndex: clampedTargetIndex,
+        });
+      }
+    },
+    [sequence, executeCommand, getCurrentSequence],
+  );
+
+  /**
    * Handle track mute toggle.
    * State refresh is automatic via executeCommand.
    */
@@ -1738,6 +1805,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             startSec: data.startSec,
             endSec: data.endSec,
             style: data.style,
+            position: data.position,
           },
         });
       } catch (error) {
@@ -1759,6 +1827,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleTrackMuteToggle,
     handleTrackLockToggle,
     handleTrackVisibilityToggle,
+    handleTrackReorder,
     handleUpdateCaption,
   };
 }
