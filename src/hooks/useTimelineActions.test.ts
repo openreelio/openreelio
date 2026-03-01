@@ -227,6 +227,56 @@ describe('useTimelineActions', () => {
         },
       });
     });
+
+    it('should forward caption position updates', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [createMockTrack({ id: 'track_001' })],
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_001',
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleUpdateCaption({
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          captionId: 'cap_001',
+          position: { x: 0.42, y: 0.84 },
+        });
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'UpdateCaption',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          captionId: 'cap_001',
+          text: undefined,
+          startSec: undefined,
+          endSec: undefined,
+          style: undefined,
+          position: { x: 0.42, y: 0.84 },
+        },
+      });
+    });
   });
 
   // ===========================================================================
@@ -1411,6 +1461,106 @@ describe('useTimelineActions', () => {
           kind: 'video',
           name: 'B-Roll Stack',
           position: 1,
+        },
+      });
+    });
+  });
+
+  // ===========================================================================
+  // Track Reorder Tests
+  // ===========================================================================
+
+  describe('handleTrackReorder', () => {
+    it('should execute ReorderTracks command with reordered track IDs', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' }),
+          createMockTrack({ id: 'track_v2', kind: 'video', name: 'Video 2' }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', name: 'Audio 1' }),
+        ],
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_reorder_001',
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleTrackReorder({
+          sequenceId: 'seq_001',
+          trackId: 'track_v2',
+          newIndex: 0,
+        });
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'ReorderTracks',
+        payload: {
+          sequenceId: 'seq_001',
+          newOrder: ['track_v2', 'track_v1', 'track_a1'],
+        },
+      });
+    });
+
+    it('should clamp out-of-range target index before reordering', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' }),
+          createMockTrack({ id: 'track_v2', kind: 'video', name: 'Video 2' }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', name: 'Audio 1' }),
+        ],
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_reorder_002',
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleTrackReorder({
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          newIndex: 99,
+        });
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'ReorderTracks',
+        payload: {
+          sequenceId: 'seq_001',
+          newOrder: ['track_v2', 'track_a1', 'track_v1'],
         },
       });
     });
