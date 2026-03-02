@@ -127,6 +127,10 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   const { isPlaying, currentTime, duration, syncWithTimeline, play, pause, seek } =
     usePlaybackStore();
 
+  // Ref mirror for syncWithTimeline to safely read the latest value in cleanup
+  // without adding syncWithTimeline to the cleanup effect's dependency array.
+  const syncWithTimelineRef = useRef(syncWithTimeline);
+
   const activeSequenceId = useProjectStore((state) => state.activeSequenceId);
   const sequences = useProjectStore((state) => state.sequences);
   const assets = useProjectStore((state) => state.assets);
@@ -572,6 +576,11 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   // Cleanup
   // ===========================================================================
 
+  // Keep the ref mirror in sync with the latest syncWithTimeline value.
+  useEffect(() => {
+    syncWithTimelineRef.current = syncWithTimeline;
+  }, [syncWithTimeline]);
+
   useEffect(() => {
     // Mark as mounted
     isMountedRef.current = true;
@@ -584,14 +593,16 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       isMountedRef.current = false;
       // Stop playback on unmount only when this component owns the playback loop.
       // In timeline-synced mode, playback ownership belongs to TimelineEngine.
-      if (!syncWithTimeline) {
+      // Use the ref so this cleanup only runs on actual unmount (not when
+      // syncWithTimeline changes), preventing unexpected playback interruption.
+      if (!syncWithTimelineRef.current) {
         pause();
       }
       // Clear pending extractions to prevent memory leaks
       // and stale updates after unmount
       extractionsMap.clear();
     };
-  }, [pause, syncWithTimeline]);
+  }, [pause]);
 
   // ===========================================================================
   // Render Empty State

@@ -254,8 +254,9 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       let callbackErrored = false;
       try {
         onFrameRef.current(newTime);
-      } catch {
+      } catch (error) {
         callbackErrored = true;
+        console.error('[usePlaybackLoop] Frame callback error:', error);
       }
       const frameEndTime = performance.now();
       const renderTimeMs = frameEndTime - frameStartTime;
