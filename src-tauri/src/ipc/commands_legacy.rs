@@ -2355,6 +2355,8 @@ pub async fn apply_edit_script(
                 | "removeMarker"
                 | "DeleteMarker"
                 | "deleteMarker"
+                | "ReorderTracks"
+                | "reorderTracks"
         );
         if needs_sequence_id && !obj.contains_key("sequenceId") {
             obj.insert(

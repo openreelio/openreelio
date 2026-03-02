@@ -1231,12 +1231,20 @@ impl ProjectState {
             clip.range = ClipRange::new(0.0, duration);
         }
 
-        if let Some(style) = op.payload.get("style").filter(|value| !value.is_null()) {
-            clip.caption_style = Some(style.clone());
+        if let Some(style) = op.payload.get("style") {
+            clip.caption_style = if style.is_null() {
+                None
+            } else {
+                Some(style.clone())
+            };
         }
 
-        if let Some(position) = op.payload.get("position").filter(|value| !value.is_null()) {
-            clip.caption_position = Some(position.clone());
+        if let Some(position) = op.payload.get("position") {
+            clip.caption_position = if position.is_null() {
+                None
+            } else {
+                Some(position.clone())
+            };
         }
 
         Ok(())

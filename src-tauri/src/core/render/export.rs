@@ -693,7 +693,7 @@ fn vertical_position_to_y(vertical: &str, margin_percent: f64) -> f64 {
     } else {
         5.0
     })
-    .clamp(0.0, 45.0)
+    .clamp(0.0, 50.0)
         / 100.0;
 
     match vertical {
@@ -770,7 +770,7 @@ fn find_transition_effect<'a>(
     clip.effects
         .iter()
         .filter_map(|effect_id| effects.get(effect_id))
-        .find(|effect| effect.effect_type.category() == EffectCategory::Transition)
+        .find(|effect| effect.enabled && effect.effect_type.category() == EffectCategory::Transition)
 }
 
 fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
