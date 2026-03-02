@@ -15,12 +15,12 @@ use crate::core::{
         AddEffectCommand, AddMarkerCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand,
         CreateCaptionCommand, CreateFolderCommand, CreateSequenceCommand, DeleteCaptionCommand,
         DeleteFileCommand, ImportAssetCommand, InsertClipCommand, MoveClipCommand, MoveFileCommand,
-        ReorderTracksCommand,
         RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand,
         RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
-        RenameTrackCommand, SetClipAudioCommand, SetClipMuteCommand, SetClipSpeedCommand,
-        SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand,
-        UpdateAssetCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
+        RenameTrackCommand, ReorderTracksCommand, SetClipAudioCommand, SetClipMuteCommand,
+        SetClipSpeedCommand, SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand,
+        TrimClipCommand, UpdateAssetCommand, UpdateEffectCommand, UpdateMaskCommand,
+        UpdateTextCommand,
     },
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
     fs::{
@@ -2559,10 +2559,9 @@ pub async fn apply_edit_script(
                 .with_style(p.style)
                 .with_position(p.position),
             ),
-            CommandPayload::ReorderTracks(p) => Box::new(ReorderTracksCommand::new(
-                &p.sequence_id,
-                p.new_order,
-            )),
+            CommandPayload::ReorderTracks(p) => {
+                Box::new(ReorderTracksCommand::new(&p.sequence_id, p.new_order))
+            }
             CommandPayload::AddEffect(p) => {
                 let mut cmd =
                     AddEffectCommand::new(&p.sequence_id, &p.track_id, &p.clip_id, p.effect_type);

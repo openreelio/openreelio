@@ -770,7 +770,9 @@ fn find_transition_effect<'a>(
     clip.effects
         .iter()
         .filter_map(|effect_id| effects.get(effect_id))
-        .find(|effect| effect.enabled && effect.effect_type.category() == EffectCategory::Transition)
+        .find(|effect| {
+            effect.enabled && effect.effect_type.category() == EffectCategory::Transition
+        })
 }
 
 fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
