@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isCaptionLikeClip } from './captionClip';
+import { CAPTION_CLIP_ASSET_ID, isCaptionLikeClip } from './captionClip';
 import type { Clip, Track, Asset } from '@/types';
 
 function createClip(overrides: Partial<Clip> = {}): Clip {
@@ -80,5 +80,12 @@ describe('isCaptionLikeClip', () => {
     const asset = createAsset({ id: 'asset-video', kind: 'video' });
 
     expect(isCaptionLikeClip(track, clip, asset)).toBe(false);
+  });
+
+  it('returns true for clips using the reserved caption asset id', () => {
+    const track = createTrack({ kind: 'video' });
+    const clip = createClip({ assetId: CAPTION_CLIP_ASSET_ID });
+
+    expect(isCaptionLikeClip(track, clip, undefined)).toBe(true);
   });
 });

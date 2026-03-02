@@ -167,6 +167,23 @@ describe('Track', () => {
       expect(onMoveUp).toHaveBeenCalledWith('track_001');
     });
 
+    it('should call onMoveDown when move-down button is clicked', () => {
+      const onMoveDown = vi.fn();
+      render(
+        <Track
+          track={mockTrack}
+          clips={[]}
+          zoom={100}
+          onMoveDown={onMoveDown}
+          canMoveUp
+          canMoveDown
+        />,
+      );
+
+      fireEvent.click(screen.getByTestId('move-track-down-button'));
+      expect(onMoveDown).toHaveBeenCalledWith('track_001');
+    });
+
     it('should disable move buttons when moving is not allowed', () => {
       const onMoveUp = vi.fn();
       const onMoveDown = vi.fn();
