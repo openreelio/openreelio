@@ -16,6 +16,8 @@ import {
   Unlock,
   Volume2,
   VolumeX,
+  ArrowUp,
+  ArrowDown,
   type LucideIcon,
 } from 'lucide-react';
 import type { Track as TrackType, Clip as ClipType, TrackKind, SnapPoint } from '@/types';
@@ -74,6 +76,14 @@ interface TrackProps {
   onLockToggle?: (trackId: string) => void;
   /** Visibility toggle handler */
   onVisibilityToggle?: (trackId: string) => void;
+  /** Move track one row up */
+  onMoveUp?: (trackId: string) => void;
+  /** Move track one row down */
+  onMoveDown?: (trackId: string) => void;
+  /** Whether moving up is possible */
+  canMoveUp?: boolean;
+  /** Whether moving down is possible */
+  canMoveDown?: boolean;
   /** Clip click handler with modifier keys */
   onClipClick?: (clipId: string, modifiers: ClickModifiers) => void;
   /** Clip double-click handler */
@@ -144,6 +154,10 @@ export function Track({
   onMuteToggle,
   onLockToggle,
   onVisibilityToggle,
+  onMoveUp,
+  onMoveDown,
+  canMoveUp = false,
+  canMoveDown = false,
   onClipClick,
   onClipDoubleClick,
   onClipAudioSettingsChange,
@@ -213,11 +227,42 @@ export function Track({
 
         {/* Track controls */}
         <div className="flex items-center gap-1">
+          {/* Move up button */}
+          <button
+            data-testid="move-track-up-button"
+            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={(event) => {
+              event.stopPropagation();
+              onMoveUp?.(track.id);
+            }}
+            title="Move track up"
+            disabled={!canMoveUp}
+          >
+            <ArrowUp className="w-3.5 h-3.5" />
+          </button>
+
+          {/* Move down button */}
+          <button
+            data-testid="move-track-down-button"
+            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={(event) => {
+              event.stopPropagation();
+              onMoveDown?.(track.id);
+            }}
+            title="Move track down"
+            disabled={!canMoveDown}
+          >
+            <ArrowDown className="w-3.5 h-3.5" />
+          </button>
+
           {/* Mute button */}
           <button
             data-testid="mute-button"
             className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
-            onClick={() => onMuteToggle?.(track.id)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onMuteToggle?.(track.id);
+            }}
             title={track.muted ? 'Unmute' : 'Mute'}
           >
             {track.muted ? (
@@ -236,7 +281,10 @@ export function Track({
           <button
             data-testid="lock-button"
             className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
-            onClick={() => onLockToggle?.(track.id)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onLockToggle?.(track.id);
+            }}
             title={track.locked ? 'Unlock' : 'Lock'}
           >
             {track.locked ? (
@@ -255,7 +303,10 @@ export function Track({
           <button
             data-testid="visibility-button"
             className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
-            onClick={() => onVisibilityToggle?.(track.id)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onVisibilityToggle?.(track.id);
+            }}
             title={track.visible ? 'Hide' : 'Show'}
           >
             {track.visible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}

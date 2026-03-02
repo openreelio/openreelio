@@ -217,6 +217,8 @@ impl Command for AddTextClipCommand {
                 truncate_text(&self.text_data.content, 20)
             )),
             color: None,
+            caption_style: None,
+            caption_position: None,
         };
 
         // 9. Create the TextOverlay effect

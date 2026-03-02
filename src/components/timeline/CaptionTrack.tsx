@@ -6,7 +6,7 @@
  */
 
 import { useRef, useMemo } from 'react';
-import { Type, Eye, EyeOff, Lock, Unlock, Globe, Download } from 'lucide-react';
+import { Type, Eye, EyeOff, Lock, Unlock, Globe, Download, ArrowUp, ArrowDown } from 'lucide-react';
 import type { Caption, CaptionTrack as CaptionTrackType, CaptionColor } from '@/types';
 import { CaptionClip, type ClickModifiers } from './CaptionClip';
 
@@ -39,6 +39,14 @@ interface CaptionTrackProps {
   onCaptionDoubleClick?: (captionId: string) => void;
   /** Track header click handler */
   onTrackClick?: (trackId: string) => void;
+  /** Move track one row up */
+  onMoveUp?: (trackId: string) => void;
+  /** Move track one row down */
+  onMoveDown?: (trackId: string) => void;
+  /** Whether moving up is possible */
+  canMoveUp?: boolean;
+  /** Whether moving down is possible */
+  canMoveDown?: boolean;
   /** Export click handler - receives track ID and all captions */
   onExportClick?: (trackId: string, captions: Caption[]) => void;
 }
@@ -120,6 +128,10 @@ export function CaptionTrack({
   onCaptionClick,
   onCaptionDoubleClick,
   onTrackClick,
+  onMoveUp,
+  onMoveDown,
+  canMoveUp = false,
+  canMoveDown = false,
   onExportClick,
 }: CaptionTrackProps) {
   // Ref for measuring viewport width if not provided
@@ -175,6 +187,34 @@ export function CaptionTrack({
 
         {/* Track controls */}
         <div className="flex items-center gap-1">
+          {/* Move up button */}
+          <button
+            data-testid="caption-move-up-button"
+            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={(e) => {
+              e.stopPropagation();
+              onMoveUp?.(track.id);
+            }}
+            disabled={!canMoveUp}
+            title="Move track up"
+          >
+            <ArrowUp className="w-3.5 h-3.5" />
+          </button>
+
+          {/* Move down button */}
+          <button
+            data-testid="caption-move-down-button"
+            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
+            onClick={(e) => {
+              e.stopPropagation();
+              onMoveDown?.(track.id);
+            }}
+            disabled={!canMoveDown}
+            title="Move track down"
+          >
+            <ArrowDown className="w-3.5 h-3.5" />
+          </button>
+
           {/* Export button */}
           <button
             data-testid="caption-export-button"

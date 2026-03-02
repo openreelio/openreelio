@@ -558,6 +558,12 @@ pub struct Clip {
     /// Optional color for UI
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color: Option<Color>,
+    /// Optional caption style override for caption track clips.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caption_style: Option<serde_json::Value>,
+    /// Optional caption position override for caption track clips.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caption_position: Option<serde_json::Value>,
 }
 
 impl Clip {
@@ -575,6 +581,8 @@ impl Clip {
             audio: AudioSettings::default(),
             label: None,
             color: None,
+            caption_style: None,
+            caption_position: None,
         }
     }
 
@@ -613,6 +621,8 @@ impl Clip {
             audio: AudioSettings::default(),
             label: None,
             color: None,
+            caption_style: None,
+            caption_position: None,
         }
     }
 

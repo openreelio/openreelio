@@ -112,14 +112,8 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
   } = options;
 
   // Playback store state
-  const {
-    isPlaying,
-    currentTime,
-    playbackRate,
-    loop,
-    setCurrentTime,
-    setIsPlaying,
-  } = usePlaybackStore();
+  const { isPlaying, currentTime, playbackRate, loop, setCurrentTime, setIsPlaying } =
+    usePlaybackStore();
 
   // State
   const [isActive, setIsActive] = useState(false);
@@ -212,7 +206,7 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       // Use framesElapsed * frameIntervalMs for smoother timing
       const cappedDeltaMs = Math.min(
         framesElapsed * frameIntervalMs,
-        PLAYBACK.FRAME_DROP_THRESHOLD_MS * 2
+        PLAYBACK.FRAME_DROP_THRESHOLD_MS * 2,
       );
       const deltaSec = (cappedDeltaMs / 1000) * playbackRate;
 
@@ -257,12 +251,18 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       // Call frame callback (using ref for stability)
       // Track render time for performance monitoring
       const frameStartTime = performance.now();
-      onFrameRef.current(newTime);
+      let callbackErrored = false;
+      try {
+        onFrameRef.current(newTime);
+      } catch (error) {
+        callbackErrored = true;
+        console.error('[usePlaybackLoop] Frame callback error:', error);
+      }
       const frameEndTime = performance.now();
       const renderTimeMs = frameEndTime - frameStartTime;
 
       // Report frame render to performance monitor
-      playbackMonitor.recordFrame(renderTimeMs, false);
+      playbackMonitor.recordFrame(renderTimeMs, callbackErrored);
 
       // Schedule next frame
       rafIdRef.current = requestAnimationFrame(playbackLoop);
@@ -278,7 +278,7 @@ export function usePlaybackLoop(options: UsePlaybackLoopOptions): UsePlaybackLoo
       setIsPlaying,
       onEnded,
       updateFps,
-    ]
+    ],
   );
 
   /**

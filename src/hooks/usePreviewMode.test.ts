@@ -129,7 +129,12 @@ describe('usePreviewMode', () => {
 
     it('should return canvas mode when playhead is past all clips', () => {
       const track = createMockTrack({
-        clips: [createMockClip({ place: { timelineInSec: 0, durationSec: 5 } })],
+        clips: [
+          createMockClip({
+            place: { timelineInSec: 0, durationSec: 5 },
+            range: { sourceInSec: 0, sourceOutSec: 5 },
+          }),
+        ],
       });
       const sequence = createMockSequence([track]);
       const assets = new Map([['asset-1', createMockAsset()]]);
@@ -486,6 +491,87 @@ describe('usePreviewMode', () => {
         [
           'asset-audio',
           createMockAsset({ id: 'asset-audio', kind: 'audio', proxyStatus: 'notNeeded' }),
+        ],
+      ]);
+
+      const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
+
+      expect(result.current.mode).toBe('video');
+    });
+
+    it('should keep video mode when a caption track overlaps a ready video clip', () => {
+      const videoTrack = createMockTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [createMockClip({ id: 'video-clip', assetId: 'asset-video' })],
+      });
+      const captionTrack = createMockTrack({
+        id: 'caption-track',
+        kind: 'caption',
+        clips: [
+          createMockClip({
+            id: 'caption-clip',
+            assetId: 'caption',
+            label: 'Hello caption',
+            place: { timelineInSec: 0, durationSec: 10 },
+            range: { sourceInSec: 0, sourceOutSec: 10 },
+          }),
+        ],
+      });
+      const sequence = createMockSequence([videoTrack, captionTrack]);
+      const assets = new Map([
+        [
+          'asset-video',
+          createMockAsset({
+            id: 'asset-video',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy.mp4',
+          }),
+        ],
+      ]);
+
+      const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
+
+      expect(result.current.mode).toBe('video');
+    });
+
+    it('should keep video mode when a subtitle asset clip overlaps a ready video clip', () => {
+      const videoTrack = createMockTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [createMockClip({ id: 'video-clip', assetId: 'asset-video' })],
+      });
+      const subtitleOverlayTrack = createMockTrack({
+        id: 'subtitle-track',
+        kind: 'video',
+        clips: [
+          createMockClip({
+            id: 'subtitle-clip',
+            assetId: 'asset-subtitle',
+            label: 'Subtitle line',
+            place: { timelineInSec: 0, durationSec: 10 },
+            range: { sourceInSec: 0, sourceOutSec: 10 },
+          }),
+        ],
+      });
+      const sequence = createMockSequence([videoTrack, subtitleOverlayTrack]);
+      const assets = new Map([
+        [
+          'asset-video',
+          createMockAsset({
+            id: 'asset-video',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy.mp4',
+          }),
+        ],
+        [
+          'asset-subtitle',
+          createMockAsset({
+            id: 'asset-subtitle',
+            kind: 'subtitle',
+            name: 'captions.srt',
+            proxyStatus: 'notNeeded',
+          }),
         ],
       ]);
 

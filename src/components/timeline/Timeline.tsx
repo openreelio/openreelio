@@ -76,6 +76,7 @@ export type {
   ClipAudioUpdateData,
   TrackControlData,
   TrackCreateData,
+  TrackReorderData,
   CaptionUpdateData,
 } from './types';
 import type { Track as TrackType } from '@/types';
@@ -152,8 +153,8 @@ function adaptTrackToCaptionTrack(track: TrackType): CaptionTrackType {
       (clip.range.sourceOutSec - clip.range.sourceInSec) / (clip.speed > 0 ? clip.speed : 1),
     text: clip.label || '',
     speaker: undefined,
-    styleOverride: undefined,
-    positionOverride: undefined,
+    styleOverride: clip.captionStyle,
+    positionOverride: clip.captionPosition,
     metadata: {},
   }));
 
@@ -201,6 +202,7 @@ export function Timeline({
   onTrackVisibilityToggle,
   onTrackCreate,
   onAddText,
+  onTrackReorder,
 }: TimelineProps) {
   // ===========================================================================
   // Store State - Using targeted selectors to minimize re-renders
@@ -1161,6 +1163,8 @@ export function Timeline({
 
   const isInteractiveTracksAreaTarget = useCallback((target: HTMLElement): boolean => {
     return Boolean(
+      target.closest('[data-testid="track-header"]') ||
+      target.closest('[data-testid="caption-track-header"]') ||
       target.closest('[data-testid^="clip-"]') ||
       target.closest('[data-testid^="caption-clip-"]') ||
       target.closest('button') ||
@@ -1404,6 +1408,58 @@ export function Timeline({
       if (sequence && callback) callback({ sequenceId: sequence.id, trackId });
     },
     [sequence],
+  );
+
+  const moveTrackToIndex = useCallback(
+    (trackId: string, newIndex: number) => {
+      if (!sequence || !onTrackReorder) {
+        return;
+      }
+
+      const trackIndex = sequence.tracks.findIndex((track) => track.id === trackId);
+      if (trackIndex < 0) {
+        return;
+      }
+
+      if (newIndex < 0 || newIndex >= sequence.tracks.length || newIndex === trackIndex) {
+        return;
+      }
+
+      void onTrackReorder({
+        sequenceId: sequence.id,
+        trackId,
+        newIndex,
+      });
+    },
+    [sequence, onTrackReorder],
+  );
+
+  const handleTrackMoveUp = useCallback(
+    (trackId: string) => {
+      if (!sequence) {
+        return;
+      }
+
+      const trackIndex = sequence.tracks.findIndex((track) => track.id === trackId);
+      if (trackIndex > 0) {
+        moveTrackToIndex(trackId, trackIndex - 1);
+      }
+    },
+    [sequence, moveTrackToIndex],
+  );
+
+  const handleTrackMoveDown = useCallback(
+    (trackId: string) => {
+      if (!sequence) {
+        return;
+      }
+
+      const trackIndex = sequence.tracks.findIndex((track) => track.id === trackId);
+      if (trackIndex >= 0 && trackIndex < sequence.tracks.length - 1) {
+        moveTrackToIndex(trackId, trackIndex + 1);
+      }
+    },
+    [sequence, moveTrackToIndex],
   );
 
   // ===========================================================================
@@ -1734,7 +1790,10 @@ export function Timeline({
               data-testid="timeline-tracks-scroll-layer"
               style={{ transform: `translateY(-${scrollY}px)` }}
             >
-              {sequence.tracks.map((track) => {
+              {sequence.tracks.map((track, trackIndex) => {
+                const canMoveUp = trackIndex > 0;
+                const canMoveDown = trackIndex < sequence.tracks.length - 1;
+
                 if (track.kind === 'caption') {
                   const captionTrack = adaptTrackToCaptionTrack(track);
                   return (
@@ -1748,6 +1807,10 @@ export function Timeline({
                       selectedCaptionIds={selectedClipIds}
                       onLockToggle={createTrackHandler(onTrackLockToggle)}
                       onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
+                      onMoveUp={handleTrackMoveUp}
+                      onMoveDown={handleTrackMoveDown}
+                      canMoveUp={canMoveUp}
+                      canMoveDown={canMoveDown}
                       onCaptionClick={handleClipClick}
                       onCaptionDoubleClick={createCaptionDoubleClickHandler(track.id)}
                       onExportClick={handleCaptionExportClick}
@@ -1778,6 +1841,10 @@ export function Timeline({
                     onMuteToggle={createTrackHandler(onTrackMuteToggle)}
                     onLockToggle={createTrackHandler(onTrackLockToggle)}
                     onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
+                    onMoveUp={handleTrackMoveUp}
+                    onMoveDown={handleTrackMoveDown}
+                    canMoveUp={canMoveUp}
+                    canMoveDown={canMoveDown}
                   />
                 );
               })}

@@ -191,6 +191,8 @@ export interface CaptionUpdateData {
   endSec?: number;
   /** Style updates (JSON string or object) */
   style?: unknown;
+  /** Position updates */
+  position?: unknown;
 }
 
 // =============================================================================
@@ -220,6 +222,18 @@ export interface TrackCreateData {
   name?: string;
   /** Optional insertion position (0-based) */
   position?: number;
+}
+
+/**
+ * Data for reordering an existing track.
+ */
+export interface TrackReorderData {
+  /** ID of the sequence where the track exists */
+  sequenceId: string;
+  /** ID of the track to move */
+  trackId: string;
+  /** New 0-based index in visual order */
+  newIndex: number;
 }
 
 // =============================================================================
@@ -263,6 +277,8 @@ export interface TimelineProps {
   onTrackCreate?: (data: TrackCreateData) => void | Promise<void>;
   /** Callback when Add Text button is clicked */
   onAddText?: () => void;
+  /** Callback when a track should be moved to a new index */
+  onTrackReorder?: (data: TrackReorderData) => void | Promise<void>;
 }
 
 // =============================================================================

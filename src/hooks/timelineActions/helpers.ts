@@ -1,5 +1,6 @@
 import { probeMedia } from '@/utils/ffmpeg';
 import { findClipReference } from '@/utils/clipLinking';
+import { getClipTimelineDurationSec } from '@/utils/clipTiming';
 import type { ClipAudioUpdateData, TrackCreateData } from '@/components/timeline/Timeline';
 import type { Asset, Clip, Sequence, Track } from '@/types';
 
@@ -17,8 +18,7 @@ interface WarnLogger {
 }
 
 export function getClipTimelineDuration(clip: Clip): number {
-  const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-  return (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+  return getClipTimelineDurationSec(clip);
 }
 
 function rangesOverlap(startA: number, endA: number, startB: number, endB: number): boolean {

@@ -69,6 +69,47 @@ describe('CaptionTrack', () => {
   });
 
   describe('Track Controls', () => {
+    it('calls onMoveUp when move-up button clicked', () => {
+      const onMoveUp = vi.fn();
+      const track = createTestTrack({ id: 'track_move_up_test' });
+
+      render(<CaptionTrack track={track} zoom={100} onMoveUp={onMoveUp} canMoveUp canMoveDown />);
+
+      const moveUpButton = screen.getByTestId('caption-move-up-button');
+      fireEvent.click(moveUpButton);
+
+      expect(onMoveUp).toHaveBeenCalledWith('track_move_up_test');
+    });
+
+    it('disables move buttons when moving is not allowed', () => {
+      const onMoveUp = vi.fn();
+      const onMoveDown = vi.fn();
+      const track = createTestTrack();
+
+      render(
+        <CaptionTrack
+          track={track}
+          zoom={100}
+          onMoveUp={onMoveUp}
+          onMoveDown={onMoveDown}
+          canMoveUp={false}
+          canMoveDown={false}
+        />,
+      );
+
+      const moveUpButton = screen.getByTestId('caption-move-up-button');
+      const moveDownButton = screen.getByTestId('caption-move-down-button');
+
+      expect(moveUpButton).toBeDisabled();
+      expect(moveDownButton).toBeDisabled();
+
+      fireEvent.click(moveUpButton);
+      fireEvent.click(moveDownButton);
+
+      expect(onMoveUp).not.toHaveBeenCalled();
+      expect(onMoveDown).not.toHaveBeenCalled();
+    });
+
     it('calls onLockToggle when lock button clicked', () => {
       const onLockToggle = vi.fn();
       const track = createTestTrack({ id: 'track_lock_test' });
@@ -116,7 +157,7 @@ describe('CaptionTrack', () => {
           zoom={100}
           onTrackClick={onTrackClick}
           onLockToggle={onLockToggle}
-        />
+        />,
       );
 
       const lockButton = screen.getByTestId('caption-lock-button');
@@ -184,9 +225,7 @@ describe('CaptionTrack', () => {
       const captions = [createTestCaption({ id: 'dbl_caption' })];
       const track = createTestTrack({ captions });
 
-      render(
-        <CaptionTrack track={track} zoom={100} onCaptionDoubleClick={onCaptionDoubleClick} />
-      );
+      render(<CaptionTrack track={track} zoom={100} onCaptionDoubleClick={onCaptionDoubleClick} />);
 
       const caption = screen.getByTestId('caption-clip-dbl_caption');
       fireEvent.doubleClick(caption);
@@ -216,9 +255,7 @@ describe('CaptionTrack', () => {
       ];
       const track = createTestTrack({ captions });
 
-      render(
-        <CaptionTrack track={track} zoom={100} selectedCaptionIds={['selected_caption']} />
-      );
+      render(<CaptionTrack track={track} zoom={100} selectedCaptionIds={['selected_caption']} />);
 
       const selected = screen.getByTestId('caption-clip-selected_caption');
       const unselected = screen.getByTestId('caption-clip-unselected_caption');
@@ -237,18 +274,12 @@ describe('CaptionTrack', () => {
           startSec: i * 10,
           endSec: i * 10 + 5,
           text: `Caption ${i}`,
-        })
+        }),
       );
       const track = createTestTrack({ captions });
 
       render(
-        <CaptionTrack
-          track={track}
-          zoom={100}
-          scrollX={0}
-          viewportWidth={500}
-          duration={1000}
-        />
+        <CaptionTrack track={track} zoom={100} scrollX={0} viewportWidth={500} duration={1000} />,
       );
 
       // Should render only captions visible in viewport + buffer
@@ -324,7 +355,7 @@ describe('CaptionTrack', () => {
           zoom={100}
           onTrackClick={onTrackClick}
           onExportClick={onExportClick}
-        />
+        />,
       );
 
       const exportButton = screen.getByTestId('caption-export-button');

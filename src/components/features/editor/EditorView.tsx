@@ -41,7 +41,7 @@ import { createLogger } from '@/services/logger';
 import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { Terminal, Sliders, Sparkles } from 'lucide-react';
-import type { Sequence } from '@/types';
+import type { Sequence, CaptionPosition } from '@/types';
 import type { AddTextPayload } from '@/components/features/text';
 import type { ChannelLevels } from '@/components/features/mixer';
 import type { MulticamGroup } from '@/utils/multicam';
@@ -83,6 +83,46 @@ export interface EditorViewProps {
   sequence: Sequence | null;
   /** App version string displayed in header */
   appVersion?: string;
+}
+
+function normalizeCaptionPositionValue(value: unknown): CaptionPosition | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const candidate = value as Partial<CaptionPosition> & Record<string, unknown>;
+  if (candidate.type === 'custom') {
+    const xPercent = Number(candidate.xPercent);
+    const yPercent = Number(candidate.yPercent);
+    if (!Number.isFinite(xPercent) || !Number.isFinite(yPercent)) {
+      return null;
+    }
+
+    return {
+      type: 'custom',
+      xPercent: Math.max(0, Math.min(100, xPercent)),
+      yPercent: Math.max(0, Math.min(100, yPercent)),
+    };
+  }
+
+  if (candidate.type === 'preset') {
+    const vertical =
+      candidate.vertical === 'top' || candidate.vertical === 'center'
+        ? candidate.vertical
+        : 'bottom';
+    const marginPercent = Number(candidate.marginPercent);
+    if (!Number.isFinite(marginPercent)) {
+      return null;
+    }
+
+    return {
+      type: 'preset',
+      vertical,
+      marginPercent: Math.max(0, Math.min(50, marginPercent)),
+    };
+  }
+
+  return null;
 }
 
 export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps): JSX.Element {
@@ -259,6 +299,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     handleTrackMuteToggle,
     handleTrackLockToggle,
     handleTrackVisibilityToggle,
+    handleTrackReorder,
     handleUpdateCaption,
   } = useTimelineActions({ sequence });
 
@@ -341,7 +382,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
             text: clip.label || '', // Using label as text storage for now
             startSec: clip.place.timelineInSec,
             endSec: clip.place.timelineInSec + duration,
-            // Style mapping could be added here if Clip supports it
+            style: clip.captionStyle,
+            position: clip.captionPosition,
           };
         }
       }
@@ -371,6 +413,18 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
           trackId,
           captionId,
           text: value,
+        });
+      } else if (property === 'position') {
+        const normalizedPosition = normalizeCaptionPositionValue(value);
+        if (!normalizedPosition) {
+          return;
+        }
+
+        handleUpdateCaption({
+          sequenceId: sequence.id,
+          trackId,
+          captionId,
+          position: normalizedPosition,
         });
       }
     },
@@ -599,6 +653,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                   onTrackMuteToggle={handleTrackMuteToggle}
                   onTrackLockToggle={handleTrackLockToggle}
                   onTrackVisibilityToggle={handleTrackVisibilityToggle}
+                  onTrackReorder={handleTrackReorder}
                   onAddText={handleOpenAddText}
                 />
               </TimelineErrorBoundary>

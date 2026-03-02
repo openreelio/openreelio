@@ -23,9 +23,19 @@ import { usePlaybackLoop } from '@/hooks/usePlaybackLoop';
 import { useAssetFrameExtractor } from '@/hooks/useFrameExtractor';
 import { videoFrameBuffer } from '@/services/videoFrameBuffer';
 import { extractTextDataFromClip, renderTextToCanvas } from '@/utils/textRenderer';
+import { getClipSourceTimeAtTimelineTime, isClipActiveAtTime } from '@/utils/clipTiming';
+import { isCaptionLikeClip } from '@/utils/captionClip';
 import { SeekBar } from './SeekBar';
 import { isTextClip } from '@/types';
-import type { Clip, Track, Sequence, Asset, BlendMode } from '@/types';
+import type {
+  Clip,
+  Track,
+  Sequence,
+  Asset,
+  BlendMode,
+  CaptionPosition,
+  CaptionStyle,
+} from '@/types';
 
 // =============================================================================
 // Types
@@ -114,15 +124,12 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   const lastSeekRenderTimeRef = useRef<number>(-1);
 
   // Store state
-  const {
-    isPlaying,
-    currentTime,
-    duration,
-    syncWithTimeline,
-    play,
-    pause,
-    seek,
-  } = usePlaybackStore();
+  const { isPlaying, currentTime, duration, syncWithTimeline, play, pause, seek } =
+    usePlaybackStore();
+
+  // Ref mirror for syncWithTimeline to safely read the latest value in cleanup
+  // without adding syncWithTimeline to the cleanup effect's dependency array.
+  const syncWithTimelineRef = useRef(syncWithTimeline);
 
   const activeSequenceId = useProjectStore((state) => state.activeSequenceId);
   const sequences = useProjectStore((state) => state.sequences);
@@ -144,7 +151,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
   // ===========================================================================
 
   /**
-   * Returns all renderable clips (video and overlay) active at the given time,
+   * Returns all renderable clips (video/overlay/caption) active at the given time,
    * sorted by layer order (lower track index = further back, rendered first).
    */
   const getActiveClipsAtTime = useCallback(
@@ -152,9 +159,10 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       const activeClips: ActiveClipInfo[] = [];
 
       tracks.forEach((track, trackIndex) => {
-        // Skip non-renderable tracks (audio, caption), hidden tracks, and muted tracks
-        // Both 'video' and 'overlay' tracks can contain visual content
-        const isRenderableTrack = track.kind === 'video' || track.kind === 'overlay';
+        // Skip non-renderable tracks (audio), hidden tracks, and muted tracks.
+        // Video, overlay, and caption tracks can render visuals in canvas mode.
+        const isRenderableTrack =
+          track.kind === 'video' || track.kind === 'overlay' || track.kind === 'caption';
         if (!isRenderableTrack || !track.visible || track.muted) {
           return;
         }
@@ -163,19 +171,9 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         // Build clip index map for efficient sorting later
         for (let clipIndex = 0; clipIndex < track.clips.length; clipIndex++) {
           const clip = track.clips[clipIndex];
-          const clipStart = clip.place.timelineInSec;
-          const clipEnd = clipStart + clip.place.durationSec;
-
-          if (time >= clipStart && time < clipEnd) {
+          if (isClipActiveAtTime(clip, time)) {
             // Calculate source time within the clip, respecting playback speed
-            const deltaTimeline = time - clipStart;
-            const sourceTimeUnclamped = clip.range.sourceInSec + deltaTimeline * clip.speed;
-            // Clamp source time to valid range [sourceInSec, sourceOutSec]
-            // This prevents both underflow (before clip start) and overflow (past clip end)
-            const sourceTime = Math.max(
-              clip.range.sourceInSec,
-              Math.min(sourceTimeUnclamped, clip.range.sourceOutSec)
-            );
+            const sourceTime = getClipSourceTimeAtTimelineTime(clip, time);
 
             activeClips.push({
               clip,
@@ -200,7 +198,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
       return activeClips;
     },
-    [tracks, assets]
+    [tracks, assets],
   );
 
   // Get active clip info for the legacy single-asset frame extractor
@@ -213,7 +211,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       const topClip = activeClips[activeClips.length - 1];
       return { clip: topClip.clip, sourceTime: topClip.sourceTime };
     },
-    [getActiveClipsAtTime]
+    [getActiveClipsAtTime],
   );
 
   // Get active clip info for frame extraction (legacy hook compatibility)
@@ -268,7 +266,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         return null;
       }
     },
-    []
+    [],
   );
 
   // ===========================================================================
@@ -309,12 +307,15 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         setIsMultiFrameLoading(true);
       }
 
-      // Separate text clips from video/image clips
+      // Separate text/caption clips from media clips.
       const textClips: ActiveClipInfo[] = [];
+      const captionClips: ActiveClipInfo[] = [];
       const mediaClips: ActiveClipInfo[] = [];
 
       for (const clipInfo of activeClips) {
-        if (isTextClip(clipInfo.clip.assetId)) {
+        if (isCaptionLikeClip(clipInfo.track, clipInfo.clip, clipInfo.asset)) {
+          captionClips.push(clipInfo);
+        } else if (isTextClip(clipInfo.clip.assetId)) {
           textClips.push(clipInfo);
         } else {
           mediaClips.push(clipInfo);
@@ -337,7 +338,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         const frameUrl = await extractFrameForAsset(
           clipInfo.asset.id,
           clipInfo.asset.uri,
-          clipInfo.sourceTime
+          clipInfo.sourceTime,
         );
 
         return { clipInfo, imgUrl: frameUrl };
@@ -368,9 +369,9 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
               img.onload = () => resolve({ clipInfo: result.clipInfo, img });
               img.onerror = () => resolve({ clipInfo: result.clipInfo, img: null });
               img.src = imgUrl;
-            }
+            },
           );
-        })
+        }),
       );
 
       // Check again for race condition after async image loading
@@ -425,13 +426,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         }
 
         // Draw image centered on anchor
-        ctx.drawImage(
-          img,
-          -anchorOffsetX,
-          -anchorOffsetY,
-          scaledWidth,
-          scaledHeight
-        );
+        ctx.drawImage(img, -anchorOffsetX, -anchorOffsetY, scaledWidth, scaledHeight);
 
         // Restore context state
         ctx.restore();
@@ -457,6 +452,24 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         ctx.restore();
       }
 
+      // Render caption clips on top of media/text clips.
+      for (const clipInfo of captionClips) {
+        const { clip } = clipInfo;
+        const text = clip.label?.trim();
+        if (!text) {
+          continue;
+        }
+
+        renderCaptionClipToCanvas(
+          ctx,
+          clip,
+          clipInfo.track.kind,
+          text,
+          canvas.width,
+          canvas.height,
+        );
+      }
+
       // Clear multi-frame loading state (only if mounted and was loading)
       const wasLoadingAtEnd = isLoadingRef.current;
       isLoadingRef.current = false;
@@ -466,7 +479,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
       onFrameRender?.(time);
     },
-    [getActiveClipsAtTime, extractFrameForAsset, onFrameRender]
+    [getActiveClipsAtTime, extractFrameForAsset, onFrameRender],
   );
 
   // Playback loop integration
@@ -474,7 +487,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     (time: number) => {
       void renderFrame(time);
     },
-    [renderFrame]
+    [renderFrame],
   );
 
   const handleEnded = useCallback(() => {
@@ -539,7 +552,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         togglePlayPause();
       }
     },
-    [togglePlayPause]
+    [togglePlayPause],
   );
 
   // ===========================================================================
@@ -556,12 +569,17 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       // seek() already clamps to [0, duration] and dispatches seek event
       seek(time);
     },
-    [seek]
+    [seek],
   );
 
   // ===========================================================================
   // Cleanup
   // ===========================================================================
+
+  // Keep the ref mirror in sync with the latest syncWithTimeline value.
+  useEffect(() => {
+    syncWithTimelineRef.current = syncWithTimeline;
+  }, [syncWithTimeline]);
 
   useEffect(() => {
     // Mark as mounted
@@ -573,8 +591,13 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     return () => {
       // Mark as unmounted to prevent state updates
       isMountedRef.current = false;
-      // Stop playback on unmount
-      pause();
+      // Stop playback on unmount only when this component owns the playback loop.
+      // In timeline-synced mode, playback ownership belongs to TimelineEngine.
+      // Use the ref so this cleanup only runs on actual unmount (not when
+      // syncWithTimeline changes), preventing unexpected playback interruption.
+      if (!syncWithTimelineRef.current) {
+        pause();
+      }
       // Clear pending extractions to prevent memory leaks
       // and stale updates after unmount
       extractionsMap.clear();
@@ -719,9 +742,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
               <span className="text-white/60 text-xs">
                 {actualFps.toFixed(1)} fps
                 {droppedFrames > 0 && (
-                  <span className="text-yellow-400 ml-1">
-                    ({droppedFrames} dropped)
-                  </span>
+                  <span className="text-yellow-400 ml-1">({droppedFrames} dropped)</span>
                 )}
               </span>
             )}
@@ -749,6 +770,242 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 // =============================================================================
 // Helpers
 // =============================================================================
+
+const DEFAULT_CAPTION_STYLE: CaptionStyle = {
+  fontFamily: 'Arial',
+  fontSize: 48,
+  fontWeight: 'normal',
+  color: { r: 255, g: 255, b: 255, a: 255 },
+  outlineColor: { r: 0, g: 0, b: 0, a: 255 },
+  outlineWidth: 2,
+  shadowColor: { r: 0, g: 0, b: 0, a: 160 },
+  shadowOffset: 2,
+  alignment: 'center',
+  italic: false,
+  underline: false,
+};
+
+const DEFAULT_CAPTION_POSITION: CaptionPosition = {
+  type: 'preset',
+  vertical: 'bottom',
+  marginPercent: 5,
+};
+
+function clampPercent(value: number, fallback: number): number {
+  if (!Number.isFinite(value)) {
+    return fallback;
+  }
+
+  return Math.max(0, Math.min(100, value));
+}
+
+function normalizeCaptionStyle(style: CaptionStyle | undefined): CaptionStyle {
+  if (!style) {
+    return DEFAULT_CAPTION_STYLE;
+  }
+
+  return {
+    ...DEFAULT_CAPTION_STYLE,
+    ...style,
+    color: {
+      ...DEFAULT_CAPTION_STYLE.color,
+      ...style.color,
+    },
+    backgroundColor: style.backgroundColor
+      ? {
+          r: style.backgroundColor.r,
+          g: style.backgroundColor.g,
+          b: style.backgroundColor.b,
+          a: style.backgroundColor.a,
+        }
+      : undefined,
+    outlineColor: style.outlineColor
+      ? {
+          r: style.outlineColor.r,
+          g: style.outlineColor.g,
+          b: style.outlineColor.b,
+          a: style.outlineColor.a,
+        }
+      : undefined,
+    shadowColor: style.shadowColor
+      ? {
+          r: style.shadowColor.r,
+          g: style.shadowColor.g,
+          b: style.shadowColor.b,
+          a: style.shadowColor.a,
+        }
+      : undefined,
+  };
+}
+
+function normalizeCaptionPosition(position: CaptionPosition | undefined): CaptionPosition {
+  if (!position) {
+    return DEFAULT_CAPTION_POSITION;
+  }
+
+  if (position.type === 'custom') {
+    return {
+      type: 'custom',
+      xPercent: clampPercent(position.xPercent, 50),
+      yPercent: clampPercent(position.yPercent, 90),
+    };
+  }
+
+  return {
+    type: 'preset',
+    vertical: position.vertical,
+    marginPercent: clampPercent(position.marginPercent, 5),
+  };
+}
+
+function toRgba(color: { r: number; g: number; b: number; a: number }): string {
+  return `rgba(${color.r}, ${color.g}, ${color.b}, ${color.a / 255})`;
+}
+
+function renderCaptionClipToCanvas(
+  ctx: CanvasRenderingContext2D,
+  clip: Clip,
+  trackKind: Track['kind'],
+  text: string,
+  canvasWidth: number,
+  canvasHeight: number,
+): void {
+  const style = normalizeCaptionStyle(clip.captionStyle);
+  const position = resolveCaptionPositionForCanvas(clip, trackKind);
+  const lines = text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) {
+    return;
+  }
+
+  const fontSizePx = Math.max(12, (style.fontSize * canvasHeight) / 1080);
+  const fontWeight =
+    style.fontWeight === 'bold' ? '700' : style.fontWeight === 'light' ? '300' : '400';
+  const fontStyle = style.italic ? 'italic ' : '';
+  const lineHeight = fontSizePx * 1.2;
+
+  let xPercent = 50;
+  if (style.alignment === 'left') {
+    xPercent = 10;
+  } else if (style.alignment === 'right') {
+    xPercent = 90;
+  }
+
+  let yPercent = 90;
+  if (position.type === 'custom') {
+    xPercent = position.xPercent;
+    yPercent = position.yPercent;
+  } else if (position.vertical === 'top') {
+    yPercent = position.marginPercent;
+  } else if (position.vertical === 'center') {
+    yPercent = 50;
+  } else {
+    yPercent = 100 - position.marginPercent;
+  }
+
+  const textX = (xPercent / 100) * canvasWidth;
+  const textY = (yPercent / 100) * canvasHeight;
+  const totalHeight = lineHeight * lines.length;
+  const firstLineY = textY - totalHeight / 2 + lineHeight / 2;
+
+  ctx.save();
+  ctx.globalAlpha = clip.opacity;
+  ctx.font = `${fontStyle}${fontWeight} ${fontSizePx}px ${style.fontFamily}`;
+  ctx.textAlign = style.alignment;
+  ctx.textBaseline = 'middle';
+
+  if (style.backgroundColor) {
+    const padding = fontSizePx * 0.25;
+    const maxLineWidth = lines.reduce((maxWidth, line) => {
+      return Math.max(maxWidth, ctx.measureText(line).width);
+    }, 0);
+
+    let bgX = textX - maxLineWidth / 2 - padding;
+    if (style.alignment === 'left') {
+      bgX = textX - padding;
+    } else if (style.alignment === 'right') {
+      bgX = textX - maxLineWidth - padding;
+    }
+
+    ctx.fillStyle = toRgba(style.backgroundColor);
+    ctx.fillRect(
+      bgX,
+      firstLineY - lineHeight / 2 - padding,
+      maxLineWidth + padding * 2,
+      totalHeight + padding * 2,
+    );
+  }
+
+  if (style.shadowColor && style.shadowOffset > 0) {
+    ctx.shadowColor = toRgba(style.shadowColor);
+    ctx.shadowOffsetX = style.shadowOffset;
+    ctx.shadowOffsetY = style.shadowOffset;
+    ctx.shadowBlur = style.shadowOffset;
+  }
+
+  if (style.outlineColor && style.outlineWidth > 0) {
+    ctx.strokeStyle = toRgba(style.outlineColor);
+    ctx.lineWidth = Math.max(1, style.outlineWidth);
+    ctx.lineJoin = 'round';
+    lines.forEach((line, index) => {
+      ctx.strokeText(line, textX, firstLineY + index * lineHeight);
+    });
+    ctx.shadowColor = 'transparent';
+    ctx.shadowOffsetX = 0;
+    ctx.shadowOffsetY = 0;
+    ctx.shadowBlur = 0;
+  }
+
+  ctx.fillStyle = toRgba(style.color);
+  lines.forEach((line, index) => {
+    const lineY = firstLineY + index * lineHeight;
+    ctx.fillText(line, textX, lineY);
+
+    if (style.underline) {
+      const metrics = ctx.measureText(line);
+      let underlineStartX = textX - metrics.width / 2;
+      if (style.alignment === 'left') {
+        underlineStartX = textX;
+      } else if (style.alignment === 'right') {
+        underlineStartX = textX - metrics.width;
+      }
+      const underlineY = lineY + fontSizePx * 0.35;
+      ctx.beginPath();
+      ctx.moveTo(underlineStartX, underlineY);
+      ctx.lineTo(underlineStartX + metrics.width, underlineY);
+      ctx.lineWidth = Math.max(1, fontSizePx * 0.06);
+      ctx.strokeStyle = toRgba(style.color);
+      ctx.stroke();
+    }
+  });
+
+  ctx.restore();
+}
+
+function resolveCaptionPositionForCanvas(clip: Clip, trackKind: Track['kind']): CaptionPosition {
+  if (clip.captionPosition) {
+    return normalizeCaptionPosition(clip.captionPosition);
+  }
+
+  if (trackKind !== 'caption') {
+    const xPercent = clampPercent(clip.transform.position.x * 100, 50);
+    const yPercent = clampPercent(clip.transform.position.y * 100, 90);
+    const hasCustomTransformPosition =
+      Math.abs(xPercent - 50) > 0.01 || Math.abs(yPercent - 50) > 0.01;
+
+    if (hasCustomTransformPosition) {
+      return {
+        type: 'custom',
+        xPercent,
+        yPercent,
+      };
+    }
+  }
+
+  return DEFAULT_CAPTION_POSITION;
+}
 
 /**
  * Format seconds to MM:SS display format.

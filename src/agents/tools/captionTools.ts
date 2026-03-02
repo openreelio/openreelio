@@ -8,7 +8,7 @@ import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
 import { executeAgentCommand } from './commandExecutor';
 import { useProjectStore } from '@/stores/projectStore';
-import type { Sequence } from '@/types';
+import type { CaptionColor, CaptionPosition, Sequence } from '@/types';
 
 const logger = createLogger('CaptionTools');
 
@@ -22,7 +22,12 @@ function resolveCaptionTrackId(
   explicitTrackId?: string,
 ): string | null {
   if (explicitTrackId) {
-    return explicitTrackId;
+    const explicitTrack = sequence.tracks.find((track) => track.id === explicitTrackId);
+    if (!explicitTrack || explicitTrack.kind !== 'caption') {
+      return null;
+    }
+
+    return explicitTrack.id;
   }
 
   for (const track of sequence.tracks) {
@@ -39,6 +44,52 @@ function resolveCaptionTrackId(
   return firstCaptionTrack?.id ?? null;
 }
 
+function parseHexColorToRgba(color: string): CaptionColor | null {
+  const trimmed = color.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  let hex = trimmed.startsWith('#') ? trimmed.slice(1) : trimmed;
+  if (!/^[0-9a-fA-F]+$/.test(hex)) {
+    return null;
+  }
+
+  if (hex.length === 3 || hex.length === 4) {
+    hex = hex
+      .split('')
+      .map((ch) => `${ch}${ch}`)
+      .join('');
+  }
+
+  if (hex.length !== 6 && hex.length !== 8) {
+    return null;
+  }
+
+  const red = Number.parseInt(hex.slice(0, 2), 16);
+  const green = Number.parseInt(hex.slice(2, 4), 16);
+  const blue = Number.parseInt(hex.slice(4, 6), 16);
+  const alpha = hex.length === 8 ? Number.parseInt(hex.slice(6, 8), 16) : 255;
+
+  return { r: red, g: green, b: blue, a: alpha };
+}
+
+function parseAgentCaptionPosition(value: unknown): CaptionPosition | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === 'top' || value === 'center' || value === 'bottom') {
+    return {
+      type: 'preset',
+      vertical: value,
+      marginPercent: 5,
+    };
+  }
+
+  return undefined;
+}
+
 async function ensureCaptionTrack(sequenceId: string, explicitTrackId?: string): Promise<string> {
   const sequence = getSequence(sequenceId);
   if (!sequence) {
@@ -46,10 +97,15 @@ async function ensureCaptionTrack(sequenceId: string, explicitTrackId?: string):
   }
 
   if (explicitTrackId) {
-    const hasTrack = sequence.tracks.some((track) => track.id === explicitTrackId);
-    if (!hasTrack) {
+    const explicitTrack = sequence.tracks.find((track) => track.id === explicitTrackId);
+    if (!explicitTrack) {
       throw new Error(`Track '${explicitTrackId}' not found in sequence '${sequenceId}'`);
     }
+
+    if (explicitTrack.kind !== 'caption') {
+      throw new Error(`Track '${explicitTrackId}' is not a caption track`);
+    }
+
     return explicitTrackId;
   }
 
@@ -192,7 +248,10 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           args.trackId as string | undefined,
         );
         if (!trackId) {
-          return { success: false, error: `Could not resolve caption track for '${captionId}'` };
+          return {
+            success: false,
+            error: `Could not resolve caption track for '${captionId}'. Ensure trackId points to a caption track.`,
+          };
         }
 
         const result = await executeAgentCommand('UpdateCaption', {
@@ -251,7 +310,10 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           args.trackId as string | undefined,
         );
         if (!trackId) {
-          return { success: false, error: `Could not resolve caption track for '${captionId}'` };
+          return {
+            success: false,
+            error: `Could not resolve caption track for '${captionId}'. Ensure trackId points to a caption track.`,
+          };
         }
 
         const result = await executeAgentCommand('DeleteCaption', {
@@ -328,28 +390,62 @@ const CAPTION_TOOLS: ToolDefinition[] = [
           args.trackId as string | undefined,
         );
         if (!trackId) {
-          return { success: false, error: `Could not resolve caption track for '${captionId}'` };
+          return {
+            success: false,
+            error: `Could not resolve caption track for '${captionId}'. Ensure trackId points to a caption track.`,
+          };
         }
 
         const style: Record<string, unknown> = {};
         if (args.fontSize !== undefined) style.fontSize = args.fontSize;
         if (args.fontFamily !== undefined) style.fontFamily = args.fontFamily;
-        if (args.color !== undefined) style.color = args.color;
-        if (args.backgroundColor !== undefined) style.backgroundColor = args.backgroundColor;
-        if (args.position !== undefined) style.position = args.position;
+
+        if (args.color !== undefined) {
+          const parsedTextColor = parseHexColorToRgba(String(args.color));
+          if (!parsedTextColor) {
+            return {
+              success: false,
+              error: `Invalid caption color '${String(args.color)}'. Use #RRGGBB or #RRGGBBAA.`,
+            };
+          }
+          style.color = parsedTextColor;
+        }
+
+        if (args.backgroundColor !== undefined) {
+          const parsedBackgroundColor = parseHexColorToRgba(String(args.backgroundColor));
+          if (!parsedBackgroundColor) {
+            return {
+              success: false,
+              error: `Invalid caption backgroundColor '${String(args.backgroundColor)}'. Use #RRGGBB or #RRGGBBAA.`,
+            };
+          }
+          style.backgroundColor = parsedBackgroundColor;
+        }
+
+        const position = parseAgentCaptionPosition(args.position);
+        if (args.position !== undefined && !position) {
+          return {
+            success: false,
+            error: `Invalid caption position '${String(args.position)}'. Use top, center, or bottom.`,
+          };
+        }
+
+        const stylePayload = Object.keys(style).length > 0 ? style : undefined;
 
         const result = await executeAgentCommand('UpdateCaption', {
           sequenceId,
           trackId,
           captionId,
-          style,
+          style: stylePayload,
+          position,
         });
 
         logger.debug('style_caption executed', {
           opId: result.opId,
           captionId,
           trackId,
-          styleKeys: Object.keys(style),
+          styleKeys: stylePayload ? Object.keys(stylePayload) : [],
+          hasPosition: position !== undefined,
         });
         return { success: true, result };
       } catch (error) {
