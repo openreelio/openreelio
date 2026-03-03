@@ -9,7 +9,10 @@
 import { memo, useCallback, useRef, useState, useEffect, useMemo } from 'react';
 import { useProjectStore } from '@/stores/projectStore';
 import { useTimelineStore } from '@/stores/timelineStore';
-import type { Asset, Transform, Sequence } from '@/types';
+import { isTextClip } from '@/types';
+import type { Asset, Transform, Sequence, TextClipData } from '@/types';
+import { extractTextDataFromClipWithMap } from '@/utils/textRenderer';
+import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 
 // =============================================================================
 // Types
@@ -62,6 +65,108 @@ interface DragState {
 
 const HANDLE_SIZE = 10;
 const HANDLE_OFFSET = HANDLE_SIZE / 2;
+const DEFAULT_TEXT_BOUNDS = { width: 320, height: 96 };
+
+let measurementCanvas: HTMLCanvasElement | null = null;
+
+function getMeasurementContext(): CanvasRenderingContext2D | null {
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  if (!measurementCanvas) {
+    measurementCanvas = document.createElement('canvas');
+  }
+
+  return measurementCanvas.getContext('2d');
+}
+
+function isIdentityTransform(transform: Transform): boolean {
+  return (
+    Math.abs(transform.position.x - 0.5) < 0.0001 &&
+    Math.abs(transform.position.y - 0.5) < 0.0001 &&
+    Math.abs(transform.scale.x - 1) < 0.0001 &&
+    Math.abs(transform.scale.y - 1) < 0.0001 &&
+    Math.abs(transform.rotationDeg) < 0.0001 &&
+    Math.abs(transform.anchor.x - 0.5) < 0.0001 &&
+    Math.abs(transform.anchor.y - 0.5) < 0.0001
+  );
+}
+
+function measureLineWidth(
+  ctx: CanvasRenderingContext2D,
+  line: string,
+  letterSpacing: number,
+): number {
+  const baseWidth = ctx.measureText(line).width;
+  if (letterSpacing === 0 || line.length <= 1) {
+    return baseWidth;
+  }
+
+  return baseWidth + (line.length - 1) * letterSpacing;
+}
+
+function measureTextBounds(
+  textData: TextClipData,
+  canvasHeight: number,
+): { width: number; height: number } {
+  const ctx = getMeasurementContext();
+  if (!ctx) {
+    return DEFAULT_TEXT_BOUNDS;
+  }
+
+  const lines = textData.content
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  if (lines.length === 0) {
+    return DEFAULT_TEXT_BOUNDS;
+  }
+
+  const scaledFontSize = Math.max(8, (textData.style.fontSize * canvasHeight) / 1080);
+  const fontStyle = textData.style.italic ? 'italic ' : '';
+  const fontWeight = textData.style.bold ? 'bold ' : '';
+  ctx.font = `${fontStyle}${fontWeight}${scaledFontSize}px ${textData.style.fontFamily}`;
+
+  const maxLineWidth = lines.reduce((maxWidth, line) => {
+    return Math.max(maxWidth, measureLineWidth(ctx, line, textData.style.letterSpacing));
+  }, 0);
+
+  const lineHeight = scaledFontSize * textData.style.lineHeight;
+  const textHeight = lineHeight * lines.length;
+
+  const backgroundPadding = textData.style.backgroundColor
+    ? textData.style.backgroundPadding * 2
+    : 0;
+  const outlinePadding = textData.outline?.width ? textData.outline.width * 2 : 0;
+  const shadowPaddingX = textData.shadow
+    ? (Math.abs(textData.shadow.offsetX) + textData.shadow.blur) * 2
+    : 0;
+  const shadowPaddingY = textData.shadow
+    ? (Math.abs(textData.shadow.offsetY) + textData.shadow.blur) * 2
+    : 0;
+
+  return {
+    width: Math.max(
+      12,
+      Math.ceil(maxLineWidth + backgroundPadding + outlinePadding + shadowPaddingX),
+    ),
+    height: Math.max(
+      12,
+      Math.ceil(textHeight + backgroundPadding + outlinePadding + shadowPaddingY),
+    ),
+  };
+}
+
+function getDefaultTransform(): Transform {
+  return {
+    position: { x: 0.5, y: 0.5 },
+    scale: { x: 1.0, y: 1.0 },
+    rotationDeg: 0,
+    anchor: { x: 0.5, y: 0.5 },
+  };
+}
 
 // =============================================================================
 // Component
@@ -86,6 +191,7 @@ export const TransformOverlay = memo(function TransformOverlay({
   // Store selectors
   const selectedClipIds = useTimelineStore((state) => state.selectedClipIds);
   const executeCommand = useProjectStore((state) => state.executeCommand);
+  const textClipDataById = useSequenceTextClipData(sequence);
 
   // Get the first selected clip (only support single selection for transform)
   const selectedClip = useMemo(() => {
@@ -108,34 +214,48 @@ export const TransformOverlay = memo(function TransformOverlay({
     const { clip } = selectedClip;
     const asset = assets.get(clip.assetId);
 
-    // Get video dimensions from asset, fallback to canvas dimensions
-    const videoWidth = asset?.video?.width ?? canvasWidth;
-    const videoHeight = asset?.video?.height ?? canvasHeight;
+    const resolvedClipTransform = previewTransform ?? clip.transform ?? getDefaultTransform();
+    const textData = isTextClip(clip.assetId)
+      ? extractTextDataFromClipWithMap(clip, textClipDataById)
+      : undefined;
 
-    const transform = previewTransform ??
-      clip.transform ?? {
-        position: { x: 0.5, y: 0.5 },
-        scale: { x: 1.0, y: 1.0 },
-        rotationDeg: 0,
-        anchor: { x: 0.5, y: 0.5 },
-      };
+    const transform =
+      textData && !previewTransform && isIdentityTransform(resolvedClipTransform)
+        ? {
+            ...resolvedClipTransform,
+            position: { ...textData.position },
+            rotationDeg: textData.rotation,
+          }
+        : resolvedClipTransform;
 
-    // Calculate base scale to fit video within canvas (maintaining aspect ratio)
-    const videoAspect = videoWidth / videoHeight;
-    const canvasAspect = canvasWidth / canvasHeight;
+    const measuredTextBounds = textData ? measureTextBounds(textData, canvasHeight) : null;
 
-    let baseScale: number;
-    if (videoAspect > canvasAspect) {
-      // Video is wider - fit to width
-      baseScale = canvasWidth / videoWidth;
-    } else {
-      // Video is taller - fit to height
-      baseScale = canvasHeight / videoHeight;
+    // Get source dimensions from asset, fallback to canvas dimensions.
+    const sourceWidth = Math.max(
+      1,
+      measuredTextBounds?.width ?? asset?.video?.width ?? canvasWidth,
+    );
+    const sourceHeight = Math.max(
+      1,
+      measuredTextBounds?.height ?? asset?.video?.height ?? canvasHeight,
+    );
+
+    // Text bounds are already in canvas-space pixels, so skip letterbox fitting.
+    let baseScale = 1;
+    if (!measuredTextBounds) {
+      const sourceAspect = sourceWidth / sourceHeight;
+      const canvasAspect = canvasWidth / canvasHeight;
+
+      if (sourceAspect > canvasAspect) {
+        baseScale = canvasWidth / sourceWidth;
+      } else {
+        baseScale = canvasHeight / sourceHeight;
+      }
     }
 
-    // Calculate the fitted video size (before clip transform)
-    const fittedWidth = videoWidth * baseScale;
-    const fittedHeight = videoHeight * baseScale;
+    // Calculate the fitted source size (before clip transform)
+    const fittedWidth = sourceWidth * baseScale;
+    const fittedHeight = sourceHeight * baseScale;
 
     // Apply clip's additional scale transform
     const clipWidth = fittedWidth * transform.scale.x;
@@ -179,6 +299,7 @@ export const TransformOverlay = memo(function TransformOverlay({
     displayScale,
     panX,
     panY,
+    textClipDataById,
   ]);
 
   // Handle positions relative to bounds
@@ -207,12 +328,19 @@ export const TransformOverlay = memo(function TransformOverlay({
 
       if (!selectedClip) return;
 
-      const transform = selectedClip.clip.transform ?? {
-        position: { x: 0.5, y: 0.5 },
-        scale: { x: 1.0, y: 1.0 },
-        rotationDeg: 0,
-        anchor: { x: 0.5, y: 0.5 },
-      };
+      const resolvedClipTransform = selectedClip.clip.transform ?? getDefaultTransform();
+      const textData = isTextClip(selectedClip.clip.assetId)
+        ? extractTextDataFromClipWithMap(selectedClip.clip, textClipDataById)
+        : undefined;
+
+      const transform =
+        textData && isIdentityTransform(resolvedClipTransform)
+          ? {
+              ...resolvedClipTransform,
+              position: { ...textData.position },
+              rotationDeg: textData.rotation,
+            }
+          : resolvedClipTransform;
 
       setDragState({
         type,
@@ -223,7 +351,7 @@ export const TransformOverlay = memo(function TransformOverlay({
       });
       setPreviewTransform({ ...transform });
     },
-    [selectedClip],
+    [selectedClip, textClipDataById],
   );
 
   // Handle drag
