@@ -1123,20 +1123,31 @@ pub struct SetClipSpeedCommand {
     pub track_id: TrackId,
     pub clip_id: ClipId,
     pub speed: f32,
+    pub reverse: bool,
     #[serde(skip)]
     previous_speed: Option<f32>,
+    #[serde(skip)]
+    previous_reverse: Option<bool>,
     #[serde(skip)]
     previous_duration_sec: Option<TimeSec>,
 }
 
 impl SetClipSpeedCommand {
-    pub fn new(sequence_id: &str, track_id: &str, clip_id: &str, speed: f32) -> Self {
+    pub fn new(
+        sequence_id: &str,
+        track_id: &str,
+        clip_id: &str,
+        speed: f32,
+        reverse: bool,
+    ) -> Self {
         Self {
             sequence_id: sequence_id.to_string(),
             track_id: track_id.to_string(),
             clip_id: clip_id.to_string(),
             speed,
+            reverse,
             previous_speed: None,
+            previous_reverse: None,
             previous_duration_sec: None,
         }
     }
@@ -1147,6 +1158,12 @@ impl Command for SetClipSpeedCommand {
         if !self.speed.is_finite() || self.speed <= 0.0 {
             return Err(CoreError::InvalidCommand(
                 "speed must be a finite number > 0".to_string(),
+            ));
+        }
+
+        if self.reverse {
+            return Err(CoreError::ValidationError(
+                "Reverse playback is not yet supported by the playback/render pipeline".to_string(),
             ));
         }
 
@@ -1169,10 +1186,12 @@ impl Command for SetClipSpeedCommand {
 
         let original = sequence.tracks[track_idx].clips[clip_idx].clone();
         self.previous_speed = Some(original.speed);
+        self.previous_reverse = Some(original.reverse);
         self.previous_duration_sec = Some(original.place.duration_sec);
 
         let mut candidate = original;
         candidate.speed = self.speed;
+        candidate.reverse = self.reverse;
         candidate.place.duration_sec = candidate.range.duration() / self.speed as f64;
 
         if !candidate.place.duration_sec.is_finite() || candidate.place.duration_sec <= 0.0 {
@@ -1198,9 +1217,11 @@ impl Command for SetClipSpeedCommand {
     }
 
     fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
-        let (Some(previous_speed), Some(previous_duration_sec)) =
-            (self.previous_speed, self.previous_duration_sec)
-        else {
+        let (Some(previous_speed), Some(previous_reverse), Some(previous_duration_sec)) = (
+            self.previous_speed,
+            self.previous_reverse,
+            self.previous_duration_sec,
+        ) else {
             return Ok(());
         };
 
@@ -1214,6 +1235,7 @@ impl Command for SetClipSpeedCommand {
 
         if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
             clip.speed = previous_speed;
+            clip.reverse = previous_reverse;
             clip.place.duration_sec = previous_duration_sec;
             sort_track_clips(track);
         }
@@ -1231,6 +1253,7 @@ impl Command for SetClipSpeedCommand {
             "trackId": self.track_id,
             "clipId": self.clip_id,
             "speed": self.speed,
+            "reverse": self.reverse,
         })
     }
 }
@@ -2047,22 +2070,50 @@ mod tests {
 
         let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
         let original_speed = state.sequences[&seq_id].tracks[0].clips[0].speed;
+        let original_reverse = state.sequences[&seq_id].tracks[0].clips[0].reverse;
         let original_duration = state.sequences[&seq_id].tracks[0].clips[0]
             .place
             .duration_sec;
 
-        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, &track_id, &clip_id, 2.0);
+        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, &track_id, &clip_id, 2.0, false);
         speed_cmd.execute(&mut state).unwrap();
 
         let updated = &state.sequences[&seq_id].tracks[0].clips[0];
         assert_eq!(updated.speed, 2.0);
+        assert!(!updated.reverse);
         assert_eq!(updated.place.duration_sec, 5.0);
 
         speed_cmd.undo(&mut state).unwrap();
 
         let restored = &state.sequences[&seq_id].tracks[0].clips[0];
         assert_eq!(restored.speed, original_speed);
+        assert_eq!(restored.reverse, original_reverse);
         assert_eq!(restored.place.duration_sec, original_duration);
+    }
+
+    #[test]
+    fn test_set_clip_speed_rejects_reverse_until_pipeline_supports_it() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let original_reverse = state.sequences[&seq_id].tracks[0].clips[0].reverse;
+        let original_speed = state.sequences[&seq_id].tracks[0].clips[0].speed;
+
+        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, &track_id, &clip_id, 1.0, true);
+        let err = speed_cmd.execute(&mut state).unwrap_err();
+
+        assert!(matches!(err, CoreError::ValidationError(_)));
+
+        let updated = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert_eq!(updated.reverse, original_reverse);
+        assert_eq!(updated.speed, original_speed);
     }
 
     #[test]
@@ -2076,7 +2127,7 @@ mod tests {
         insert_cmd.execute(&mut state).unwrap();
 
         let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
-        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, &track_id, &clip_id, 0.0);
+        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, &track_id, &clip_id, 0.0, false);
 
         let err = speed_cmd.execute(&mut state).unwrap_err();
         assert!(matches!(err, CoreError::InvalidCommand(_)));
@@ -2093,7 +2144,7 @@ mod tests {
         insert_cmd.execute(&mut state).unwrap();
 
         let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
-        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, "wrong-track", &clip_id, 2.0);
+        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, "wrong-track", &clip_id, 2.0, false);
 
         let err = speed_cmd.execute(&mut state).unwrap_err();
         assert!(matches!(err, CoreError::TrackNotFound(_)));
