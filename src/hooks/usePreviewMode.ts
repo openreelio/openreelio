@@ -6,7 +6,7 @@
  */
 
 import { useMemo, useRef } from 'react';
-import type { Sequence, Asset, Clip, Track } from '@/types';
+import { isTextClip, type Sequence, type Asset, type Clip, type Track } from '@/types';
 import { isClipActiveAtTime } from '@/utils/clipTiming';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 
@@ -147,6 +147,15 @@ function getCanvasFallbackReason({ clip, track, asset }: ActiveClipInfo): string
 
   // Caption-style overlays are supported in video mode via HTML overlay rendering.
   if (isCaptionLikeClip(track, clip, asset)) {
+    return null;
+  }
+
+  // Text clips (virtual assets) are rendered as HTML overlays in video mode.
+  // Keep blend mode guard because proxy text overlays do not support blend compositing.
+  if (isTextClip(clip.assetId)) {
+    if (track.blendMode !== 'normal') {
+      return 'Track blend mode requires canvas compositing';
+    }
     return null;
   }
 

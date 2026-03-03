@@ -17,13 +17,24 @@ import { useTimelineStore } from '@/stores/timelineStore';
 import { createLogger } from '@/services/logger';
 import { PlayerControls } from './PlayerControls';
 import { normalizeFileUriToPath } from '@/utils/uri';
+import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
+import { extractTextDataFromClipWithMap } from '@/utils/textRenderer';
 import {
   getClipSourceTimeAtTimelineTime,
   getSafeClipSpeed,
   isClipActiveAtTime,
 } from '@/utils/clipTiming';
 import { isCaptionLikeClip } from '@/utils/captionClip';
-import type { Sequence, Asset, Clip, CaptionStyle, CaptionPosition, CaptionColor } from '@/types';
+import {
+  isTextClip,
+  type Sequence,
+  type Asset,
+  type Clip,
+  type CaptionStyle,
+  type CaptionPosition,
+  type CaptionColor,
+  type TextClipData,
+} from '@/types';
 
 // =============================================================================
 // Types
@@ -59,6 +70,12 @@ interface ActiveCaption {
   text: string;
 }
 
+interface ActiveTextOverlay {
+  clip: Clip;
+  trackIndex: number;
+  textData: TextClipData;
+}
+
 interface CaptionDragState {
   captionId: string;
   trackId: string;
@@ -76,6 +93,10 @@ const PRECISE_SEEK_TOLERANCE = 0.008; // ~0.5 frame at 60fps for paused scrubbin
 const DRIFT_SEEK_TOLERANCE = 0.12; // reduce micro-stutter from overly frequent drift seeks
 const HARD_SEEK_DETECTION_DELTA = 0.25; // Treat as explicit jump when delta exceeds this
 const TIME_CHANGE_EPSILON = 0.001;
+const TRACK_LAYER_Z_INDEX_STEP = 10;
+const CAPTION_LAYER_Z_INDEX_OFFSET = 5;
+const TEXT_LAYER_Z_INDEX_OFFSET = 6;
+const CONTROLS_Z_INDEX_OFFSET = 100;
 const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z\d+\-.]*:/;
 
 const logger = createLogger('ProxyPreviewPlayer');
@@ -270,6 +291,131 @@ function resolveCaptionPositionForClip(
   return DEFAULT_CAPTION_POSITION;
 }
 
+function isIdentityClipTransform(clip: Clip): boolean {
+  const { transform } = clip;
+
+  return (
+    Math.abs(transform.position.x - 0.5) < 0.0001 &&
+    Math.abs(transform.position.y - 0.5) < 0.0001 &&
+    Math.abs(transform.scale.x - 1) < 0.0001 &&
+    Math.abs(transform.scale.y - 1) < 0.0001 &&
+    Math.abs(transform.rotationDeg) < 0.0001 &&
+    Math.abs(transform.anchor.x - 0.5) < 0.0001 &&
+    Math.abs(transform.anchor.y - 0.5) < 0.0001
+  );
+}
+
+function applyClipTransformToTextData(clip: Clip, textData: TextClipData): TextClipData {
+  if (isIdentityClipTransform(clip)) {
+    return textData;
+  }
+
+  const scaleFactor = Math.max(
+    0.1,
+    (Math.abs(clip.transform.scale.x) + Math.abs(clip.transform.scale.y)) / 2,
+  );
+
+  return {
+    ...textData,
+    position: {
+      x: clip.transform.position.x,
+      y: clip.transform.position.y,
+    },
+    rotation: clip.transform.rotationDeg,
+    style: {
+      ...textData.style,
+      fontSize: Math.max(1, Math.round(textData.style.fontSize * scaleFactor)),
+      backgroundPadding: Math.max(0, Math.round(textData.style.backgroundPadding * scaleFactor)),
+      letterSpacing: Math.round(textData.style.letterSpacing * scaleFactor),
+    },
+    shadow: textData.shadow
+      ? {
+          ...textData.shadow,
+          offsetX: Math.round(textData.shadow.offsetX * scaleFactor),
+          offsetY: Math.round(textData.shadow.offsetY * scaleFactor),
+          blur: Math.max(0, Math.round(textData.shadow.blur * scaleFactor)),
+        }
+      : textData.shadow,
+    outline: textData.outline
+      ? {
+          ...textData.outline,
+          width: Math.max(1, Math.round(textData.outline.width * scaleFactor)),
+        }
+      : textData.outline,
+  };
+}
+
+function parseHexColor(color: string): string | null {
+  if (!color.startsWith('#')) {
+    return null;
+  }
+
+  const raw = color.slice(1).trim();
+  const isValidHex = /^[a-fA-F\d]+$/.test(raw);
+  if (!isValidHex) {
+    return null;
+  }
+
+  const expand = (value: string): string =>
+    value
+      .split('')
+      .map((char) => `${char}${char}`)
+      .join('');
+
+  let normalized = raw;
+  if (normalized.length === 3 || normalized.length === 4) {
+    normalized = expand(normalized);
+  }
+
+  if (normalized.length !== 6 && normalized.length !== 8) {
+    return null;
+  }
+
+  const r = parseInt(normalized.slice(0, 2), 16);
+  const g = parseInt(normalized.slice(2, 4), 16);
+  const b = parseInt(normalized.slice(4, 6), 16);
+  const alphaValue = normalized.length === 8 ? parseInt(normalized.slice(6, 8), 16) / 255 : 1;
+
+  return `rgba(${r}, ${g}, ${b}, ${alphaValue})`;
+}
+
+function resolveTextColor(color: string | undefined, fallback: string): string {
+  const candidate = color?.trim();
+  if (!candidate) {
+    return fallback;
+  }
+
+  return parseHexColor(candidate) ?? candidate;
+}
+
+function buildTextOverlayShadow(textData: TextClipData): string | undefined {
+  const parts: string[] = [];
+
+  if (textData.outline && textData.outline.width > 0) {
+    const width = Math.max(1, Math.round(textData.outline.width));
+    const outlineColor = resolveTextColor(textData.outline.color, '#000000');
+    parts.push(
+      `${-width}px 0 ${outlineColor}`,
+      `${width}px 0 ${outlineColor}`,
+      `0 ${-width}px ${outlineColor}`,
+      `0 ${width}px ${outlineColor}`,
+      `${-width}px ${-width}px ${outlineColor}`,
+      `${width}px ${-width}px ${outlineColor}`,
+      `${-width}px ${width}px ${outlineColor}`,
+      `${width}px ${width}px ${outlineColor}`,
+    );
+  }
+
+  if (textData.shadow) {
+    const shadow = textData.shadow;
+    parts.push(
+      `${shadow.offsetX}px ${shadow.offsetY}px ${Math.max(0, shadow.blur)}px ${resolveTextColor(shadow.color, '#000000')}`,
+    );
+  }
+
+  return parts.length > 0 ? parts.join(', ') : undefined;
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -326,6 +472,8 @@ export function ProxyPreviewPlayer({
     return den > 0 ? num / den : 30;
   }, [sequence]);
 
+  const textClipDataById = useSequenceTextClipData(sequence);
+
   // Cache previous active clip result to stabilize the reference when the same
   // clips are active across consecutive frames. This prevents unnecessary
   // downstream re-renders and effect re-fires during steady-state playback.
@@ -365,8 +513,9 @@ export function ProxyPreviewPlayer({
       }
     });
 
-    // Sort by trackIndex (lower track = rendered first/behind)
-    clips.sort((a, b) => a.trackIndex - b.trackIndex);
+    // Sort back-to-front by timeline lane order.
+    // Timeline renders lower indices as higher lanes, so higher indices should render first.
+    clips.sort((a, b) => b.trackIndex - a.trackIndex);
 
     // Return the same reference if the active clip set hasn't changed.
     // This avoids cascading re-renders when playhead moves within the same clip.
@@ -497,9 +646,43 @@ export function ProxyPreviewPlayer({
       }
     });
 
-    captions.sort((a, b) => a.trackIndex - b.trackIndex);
+    captions.sort((a, b) => b.trackIndex - a.trackIndex);
     return captions;
   }, [sequence, assets, currentTime]);
+
+  const activeTextOverlays = useMemo((): ActiveTextOverlay[] => {
+    if (!sequence) {
+      return [];
+    }
+
+    const overlays: ActiveTextOverlay[] = [];
+
+    sequence.tracks.forEach((track, trackIndex) => {
+      if (track.muted || !track.visible) {
+        return;
+      }
+
+      for (const clip of track.clips) {
+        if (!isClipActiveAtTime(clip, currentTime) || !isTextClip(clip.assetId)) {
+          continue;
+        }
+
+        const textData = extractTextDataFromClipWithMap(clip, textClipDataById);
+        if (!textData || !textData.content.trim()) {
+          continue;
+        }
+
+        overlays.push({
+          clip,
+          trackIndex,
+          textData: applyClipTransformToTextData(clip, textData),
+        });
+      }
+    });
+
+    overlays.sort((a, b) => b.trackIndex - a.trackIndex);
+    return overlays;
+  }, [sequence, currentTime, textClipDataById]);
 
   const selectedCaptionId = selectedClipIds.length === 1 ? selectedClipIds[0] : null;
   const selectedActiveCaption = useMemo(() => {
@@ -1103,6 +1286,11 @@ export function ProxyPreviewPlayer({
       ? sequence.format.canvas.width / sequence.format.canvas.height
       : 16 / 9;
 
+  const controlsZIndex =
+    sequence !== null
+      ? sequence.tracks.length * TRACK_LAYER_Z_INDEX_STEP + CONTROLS_Z_INDEX_OFFSET
+      : CONTROLS_Z_INDEX_OFFSET;
+
   // Empty state
   if (!sequence) {
     return (
@@ -1151,7 +1339,7 @@ export function ProxyPreviewPlayer({
       onKeyDown={handleKeyDown}
     >
       {/* Video Layers */}
-      <div className="absolute inset-0">
+      <div className="absolute inset-0 pointer-events-none" data-testid="proxy-video-layer">
         {renderableClips.length === 0 ? (
           <div className="w-full h-full flex items-center justify-center text-gray-500">
             <p>No clips at current time</p>
@@ -1166,8 +1354,10 @@ export function ProxyPreviewPlayer({
                 <div
                   key={clip.id}
                   data-testid={`proxy-video-error-${clip.id}`}
-                  className="absolute inset-0 flex items-center justify-center bg-gray-900"
-                  style={{ zIndex: trackIndex * 10 }}
+                  className="absolute inset-0 flex items-center justify-center bg-gray-900 pointer-events-none"
+                  style={{
+                    zIndex: (sequence.tracks.length - trackIndex) * TRACK_LAYER_Z_INDEX_STEP,
+                  }}
                 >
                   <div className="text-center text-red-400">
                     <svg
@@ -1196,10 +1386,10 @@ export function ProxyPreviewPlayer({
                 ref={(el) => setVideoRef(clip.id, el)}
                 data-testid={`proxy-video-${clip.id}`}
                 src={src}
-                className="absolute inset-0 w-full h-full object-contain"
+                className="absolute inset-0 w-full h-full object-contain pointer-events-none"
                 style={{
                   opacity: clip.opacity,
-                  zIndex: trackIndex * 10,
+                  zIndex: (sequence.tracks.length - trackIndex) * TRACK_LAYER_Z_INDEX_STEP,
                 }}
                 playsInline
                 muted
@@ -1267,7 +1457,9 @@ export function ProxyPreviewPlayer({
                       ? 'grabbing'
                       : 'grab'
                     : 'default',
-                  zIndex: caption.trackIndex * 10 + 5,
+                  zIndex:
+                    (sequence.tracks.length - caption.trackIndex) * TRACK_LAYER_Z_INDEX_STEP +
+                    CAPTION_LAYER_Z_INDEX_OFFSET,
                 }}
                 title={isEditableSelected ? 'Drag to reposition caption' : undefined}
                 onPointerDown={(event) => handleCaptionPointerDown(event, caption)}
@@ -1282,9 +1474,77 @@ export function ProxyPreviewPlayer({
         </div>
       )}
 
+      {/* Text overlays (virtual text clips rendered without forcing canvas mode) */}
+      {activeTextOverlays.length > 0 && (
+        <div
+          className="absolute inset-0 pointer-events-none"
+          data-testid="proxy-text-overlay-layer"
+        >
+          {activeTextOverlays.map(({ clip, trackIndex, textData }) => {
+            const translateX =
+              textData.style.alignment === 'left'
+                ? '0%'
+                : textData.style.alignment === 'right'
+                  ? '-100%'
+                  : '-50%';
+            const rotation = Number.isFinite(textData.rotation) ? textData.rotation : 0;
+            const fontSize = Math.max(10, textData.style.fontSize * 0.75);
+            const opacity = Math.max(0, Math.min(1, textData.opacity * clip.opacity));
+            const textShadow = buildTextOverlayShadow(textData);
+            const hasBackground = !!textData.style.backgroundColor;
+            const backgroundPadding = Math.max(0, textData.style.backgroundPadding * 0.75);
+
+            return (
+              <div
+                key={clip.id}
+                data-testid={`proxy-text-overlay-${clip.id}`}
+                className="absolute select-none pointer-events-none"
+                style={{
+                  left: `${clampPercent(textData.position.x * 100, 50)}%`,
+                  top: `${clampPercent(textData.position.y * 100, 50)}%`,
+                  transform: `translate(${translateX}, -50%) rotate(${rotation}deg)`,
+                  transformOrigin:
+                    textData.style.alignment === 'left'
+                      ? 'left center'
+                      : textData.style.alignment === 'right'
+                        ? 'right center'
+                        : 'center center',
+                  color: resolveTextColor(textData.style.color, '#FFFFFF'),
+                  fontFamily: textData.style.fontFamily,
+                  fontSize: `${fontSize}px`,
+                  fontWeight: textData.style.bold ? 700 : 400,
+                  fontStyle: textData.style.italic ? 'italic' : 'normal',
+                  textAlign: textData.style.alignment,
+                  textDecoration: textData.style.underline ? 'underline' : 'none',
+                  lineHeight: textData.style.lineHeight,
+                  letterSpacing: `${textData.style.letterSpacing}px`,
+                  whiteSpace: 'pre-line',
+                  backgroundColor: hasBackground
+                    ? resolveTextColor(textData.style.backgroundColor, 'transparent')
+                    : 'transparent',
+                  borderRadius: hasBackground ? '4px' : '0',
+                  padding: hasBackground ? `${backgroundPadding}px` : '0',
+                  textShadow,
+                  opacity,
+                  zIndex:
+                    (sequence.tracks.length - trackIndex) * TRACK_LAYER_Z_INDEX_STEP +
+                    TEXT_LAYER_Z_INDEX_OFFSET,
+                }}
+              >
+                {textData.content}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
       {/* Controls Overlay */}
       {showControls && (
-        <div className="absolute bottom-0 left-0 right-0">
+        <div
+          className="absolute bottom-0 left-0 right-0 pointer-events-auto"
+          data-testid="proxy-controls-layer"
+          style={{ zIndex: controlsZIndex }}
+        >
           <PlayerControls
             currentTime={currentTime}
             duration={duration}

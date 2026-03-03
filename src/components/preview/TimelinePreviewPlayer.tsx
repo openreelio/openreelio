@@ -21,17 +21,21 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { usePlaybackLoop } from '@/hooks/usePlaybackLoop';
 import { useAssetFrameExtractor } from '@/hooks/useFrameExtractor';
+import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 import { videoFrameBuffer } from '@/services/videoFrameBuffer';
-import { extractTextDataFromClip, renderTextToCanvas } from '@/utils/textRenderer';
+import { extractTextDataFromClipWithMap, renderTextToCanvas } from '@/utils/textRenderer';
 import { getClipSourceTimeAtTimelineTime, isClipActiveAtTime } from '@/utils/clipTiming';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 import { SeekBar } from './SeekBar';
+import { TransformOverlay } from './TransformOverlay';
 import { isTextClip } from '@/types';
 import type {
   Clip,
   Track,
   Sequence,
   Asset,
+  TextClipData,
+  Transform,
   BlendMode,
   CaptionPosition,
   CaptionStyle,
@@ -89,6 +93,65 @@ const BLEND_MODE_MAP: Record<BlendMode, GlobalCompositeOperation> = {
   add: 'lighter',
 };
 
+const DEFAULT_CLIP_TRANSFORM: Transform = {
+  position: { x: 0.5, y: 0.5 },
+  scale: { x: 1.0, y: 1.0 },
+  rotationDeg: 0,
+  anchor: { x: 0.5, y: 0.5 },
+};
+
+function isIdentityTransform(transform: Transform): boolean {
+  return (
+    Math.abs(transform.position.x - DEFAULT_CLIP_TRANSFORM.position.x) < 0.0001 &&
+    Math.abs(transform.position.y - DEFAULT_CLIP_TRANSFORM.position.y) < 0.0001 &&
+    Math.abs(transform.scale.x - DEFAULT_CLIP_TRANSFORM.scale.x) < 0.0001 &&
+    Math.abs(transform.scale.y - DEFAULT_CLIP_TRANSFORM.scale.y) < 0.0001 &&
+    Math.abs(transform.rotationDeg - DEFAULT_CLIP_TRANSFORM.rotationDeg) < 0.0001 &&
+    Math.abs(transform.anchor.x - DEFAULT_CLIP_TRANSFORM.anchor.x) < 0.0001 &&
+    Math.abs(transform.anchor.y - DEFAULT_CLIP_TRANSFORM.anchor.y) < 0.0001
+  );
+}
+
+function applyClipTransformToTextData(textData: TextClipData, transform: Transform): TextClipData {
+  if (isIdentityTransform(transform)) {
+    return textData;
+  }
+
+  const scaleFactor = Math.max(
+    0.1,
+    (Math.abs(transform.scale.x) + Math.abs(transform.scale.y)) / 2,
+  );
+
+  return {
+    ...textData,
+    position: {
+      x: transform.position.x,
+      y: transform.position.y,
+    },
+    rotation: transform.rotationDeg,
+    style: {
+      ...textData.style,
+      fontSize: Math.max(1, Math.round(textData.style.fontSize * scaleFactor)),
+      backgroundPadding: Math.max(0, Math.round(textData.style.backgroundPadding * scaleFactor)),
+      letterSpacing: Math.round(textData.style.letterSpacing * scaleFactor),
+    },
+    shadow: textData.shadow
+      ? {
+          ...textData.shadow,
+          offsetX: Math.round(textData.shadow.offsetX * scaleFactor),
+          offsetY: Math.round(textData.shadow.offsetY * scaleFactor),
+          blur: Math.max(0, Math.round(textData.shadow.blur * scaleFactor)),
+        }
+      : textData.shadow,
+    outline: textData.outline
+      ? {
+          ...textData.outline,
+          width: Math.max(1, Math.round(textData.outline.width * scaleFactor)),
+        }
+      : textData.outline,
+  };
+}
+
 // =============================================================================
 // Component
 // =============================================================================
@@ -106,6 +169,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 }: TimelinePreviewPlayerProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const [containerSize, setContainerSize] = useState({ width, height });
   const [isMultiFrameLoading, setIsMultiFrameLoading] = useState(false);
 
   // Ref to track latest render request time (for race condition prevention)
@@ -143,6 +207,8 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     return activeSequence?.tracks ?? [];
   }, [activeSequence]);
 
+  const textClipDataById = useSequenceTextClipData(activeSequence ?? null);
+
   // Note: Sequence format canvas dimensions are available via activeSequence?.format.canvas
   // Currently transforms are calculated relative to the preview canvas dimensions
 
@@ -152,7 +218,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
   /**
    * Returns all renderable clips (video/overlay/caption) active at the given time,
-   * sorted by layer order (lower track index = further back, rendered first).
+   * sorted by layer order (higher track index = further back, rendered first).
    */
   const getActiveClipsAtTime = useCallback(
     (time: number): ActiveClipInfo[] => {
@@ -187,11 +253,11 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         }
       });
 
-      // Sort by track index (lower index = render first = background)
-      // Then by clip order within track (later clips render on top)
+      // Sort back-to-front by track lane order.
+      // Timeline renders lower indices as higher lanes, so higher indices should render first.
       activeClips.sort((a, b) => {
         if (a.trackIndex !== b.trackIndex) {
-          return a.trackIndex - b.trackIndex;
+          return b.trackIndex - a.trackIndex;
         }
         return a.clipIndex - b.clipIndex;
       });
@@ -307,20 +373,12 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         setIsMultiFrameLoading(true);
       }
 
-      // Separate text/caption clips from media clips.
-      const textClips: ActiveClipInfo[] = [];
-      const captionClips: ActiveClipInfo[] = [];
-      const mediaClips: ActiveClipInfo[] = [];
-
-      for (const clipInfo of activeClips) {
-        if (isCaptionLikeClip(clipInfo.track, clipInfo.clip, clipInfo.asset)) {
-          captionClips.push(clipInfo);
-        } else if (isTextClip(clipInfo.clip.assetId)) {
-          textClips.push(clipInfo);
-        } else {
-          mediaClips.push(clipInfo);
-        }
-      }
+      // Only media clips require frame extraction.
+      const mediaClips = activeClips.filter(
+        (clipInfo) =>
+          !isCaptionLikeClip(clipInfo.track, clipInfo.clip, clipInfo.asset) &&
+          !isTextClip(clipInfo.clip.assetId),
+      );
 
       // Load all frames in parallel (only for media clips)
       const framePromises = mediaClips.map(async (clipInfo) => {
@@ -381,93 +439,78 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         return;
       }
 
-      // Clear canvas again before compositing
+      const mediaFrameByClipId = new Map<string, HTMLImageElement>();
+      for (const { clipInfo, img } of loadedFrames) {
+        if (img) {
+          mediaFrameByClipId.set(clipInfo.clip.id, img);
+        }
+      }
+
+      // Clear canvas before compositing
       ctx.fillStyle = '#000000';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-      // Render each clip in layer order (back to front)
-      for (const { clipInfo, img } of loadedFrames) {
-        if (!img) continue;
+      // Render each clip in z-order (back to front) regardless of clip type.
+      for (const clipInfo of activeClips) {
+        const { clip, track, asset } = clipInfo;
 
-        const { clip, track } = clipInfo;
+        if (isCaptionLikeClip(track, clip, asset)) {
+          const text = clip.label?.trim();
+          if (!text) {
+            continue;
+          }
+
+          renderCaptionClipToCanvas(ctx, clip, track.kind, text, canvas.width, canvas.height);
+          continue;
+        }
+
+        if (isTextClip(clip.assetId)) {
+          const textData = extractTextDataFromClipWithMap(clip, textClipDataById);
+          if (!textData) {
+            continue;
+          }
+
+          const transformedTextData = applyClipTransformToTextData(textData, clip.transform);
+
+          ctx.save();
+          ctx.globalCompositeOperation = BLEND_MODE_MAP[track.blendMode] || 'source-over';
+          renderTextToCanvas(ctx, transformedTextData, canvas.width, canvas.height, clip.opacity);
+          ctx.restore();
+          continue;
+        }
+
+        const img = mediaFrameByClipId.get(clip.id);
+        if (!img) {
+          continue;
+        }
+
         const transform = clip.transform;
 
-        // Save context state
         ctx.save();
-
-        // Apply opacity
         ctx.globalAlpha = clip.opacity;
-
-        // Apply blend mode
         ctx.globalCompositeOperation = BLEND_MODE_MAP[track.blendMode] || 'source-over';
 
-        // Calculate base scale to fit image in canvas (letterboxing)
         const baseScaleX = canvas.width / img.width;
         const baseScaleY = canvas.height / img.height;
         const baseScale = Math.min(baseScaleX, baseScaleY);
 
-        // Calculate scaled dimensions
         const scaledWidth = img.width * baseScale * transform.scale.x;
         const scaledHeight = img.height * baseScale * transform.scale.y;
 
-        // Calculate center position (normalized coordinates to pixels)
         const centerX = transform.position.x * canvas.width;
         const centerY = transform.position.y * canvas.height;
 
-        // Calculate anchor offset
         const anchorOffsetX = transform.anchor.x * scaledWidth;
         const anchorOffsetY = transform.anchor.y * scaledHeight;
 
-        // Apply transformations
         ctx.translate(centerX, centerY);
 
         if (transform.rotationDeg !== 0) {
           ctx.rotate((transform.rotationDeg * Math.PI) / 180);
         }
 
-        // Draw image centered on anchor
         ctx.drawImage(img, -anchorOffsetX, -anchorOffsetY, scaledWidth, scaledHeight);
-
-        // Restore context state
         ctx.restore();
-      }
-
-      // Render text clips on top of media clips
-      for (const clipInfo of textClips) {
-        const { clip, track } = clipInfo;
-        const textData = extractTextDataFromClip(clip);
-
-        if (!textData) continue;
-
-        // Save context state
-        ctx.save();
-
-        // Apply blend mode
-        ctx.globalCompositeOperation = BLEND_MODE_MAP[track.blendMode] || 'source-over';
-
-        // Render text with clip opacity
-        renderTextToCanvas(ctx, textData, canvas.width, canvas.height, clip.opacity);
-
-        // Restore context state
-        ctx.restore();
-      }
-
-      // Render caption clips on top of media/text clips.
-      for (const clipInfo of captionClips) {
-        const { clip } = clipInfo;
-        const text = clip.label?.trim();
-        if (!text) {
-          continue;
-        }
-
-        renderCaptionClipToCanvas(
-          ctx,
-          clip,
-          clipInfo.track.kind,
-          text,
-          canvas.width,
-          canvas.height,
-        );
       }
 
       // Clear multi-frame loading state (only if mounted and was loading)
@@ -479,7 +522,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
       onFrameRender?.(time);
     },
-    [getActiveClipsAtTime, extractFrameForAsset, onFrameRender],
+    [getActiveClipsAtTime, extractFrameForAsset, onFrameRender, textClipDataById],
   );
 
   // Playback loop integration
@@ -532,6 +575,40 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       }
     }
   }, [isPlaying, currentTime, duration, activeAsset, prefetchFrames]);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) {
+      return;
+    }
+
+    const updateSize = (): void => {
+      const rect = container.getBoundingClientRect();
+      setContainerSize((prev) => {
+        const nextWidth = rect.width > 0 ? rect.width : prev.width;
+        const nextHeight = rect.height > 0 ? rect.height : prev.height;
+
+        if (Math.abs(prev.width - nextWidth) < 0.5 && Math.abs(prev.height - nextHeight) < 0.5) {
+          return prev;
+        }
+
+        return { width: nextWidth, height: nextHeight };
+      });
+    };
+
+    updateSize();
+
+    if (typeof ResizeObserver === 'undefined') {
+      return;
+    }
+
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(container);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [width, height]);
 
   // ===========================================================================
   // Playback Controls
@@ -604,6 +681,14 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     };
   }, [pause]);
 
+  const overlayDisplayScale = useMemo(() => {
+    if (width <= 0 || height <= 0 || containerSize.width <= 0 || containerSize.height <= 0) {
+      return 1;
+    }
+
+    return Math.min(containerSize.width / width, containerSize.height / height);
+  }, [containerSize.width, containerSize.height, width, height]);
+
   // ===========================================================================
   // Render Empty State
   // ===========================================================================
@@ -657,6 +742,18 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         width={width}
         height={height}
         className="absolute inset-0 w-full h-full object-contain"
+      />
+
+      <TransformOverlay
+        sequence={activeSequence ?? null}
+        assets={assets}
+        canvasWidth={width}
+        canvasHeight={height}
+        containerWidth={containerSize.width}
+        containerHeight={containerSize.height}
+        displayScale={overlayDisplayScale}
+        panX={0}
+        panY={0}
       />
 
       {/* Loading Indicator */}

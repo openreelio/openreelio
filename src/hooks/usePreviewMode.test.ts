@@ -4,7 +4,7 @@
 
 import { renderHook } from '@testing-library/react';
 import { usePreviewMode, type UsePreviewModeOptions } from './usePreviewMode';
-import type { Sequence, Asset, Track, Clip } from '@/types';
+import { TEXT_ASSET_PREFIX, type Sequence, type Asset, type Track, type Clip } from '@/types';
 
 // =============================================================================
 // Test Helpers
@@ -578,6 +578,124 @@ describe('usePreviewMode', () => {
       const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
 
       expect(result.current.mode).toBe('video');
+    });
+
+    it('should keep video mode when a virtual text subtitle clip overlaps a ready video clip', () => {
+      const videoTrack = createMockTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [createMockClip({ id: 'video-clip', assetId: 'asset-video' })],
+      });
+      const subtitleTextTrack = createMockTrack({
+        id: 'subtitle-text-track',
+        kind: 'video',
+        clips: [
+          createMockClip({
+            id: 'subtitle-text-clip',
+            assetId: `${TEXT_ASSET_PREFIX}subtitle-text-clip`,
+            label: 'Text: Hello subtitle',
+            effects: ['effect-text-overlay'],
+            place: { timelineInSec: 0, durationSec: 10 },
+            range: { sourceInSec: 0, sourceOutSec: 10 },
+            transform: {
+              position: { x: 0.5, y: 0.9 },
+              scale: { x: 1, y: 1 },
+              rotationDeg: 0,
+              anchor: { x: 0.5, y: 0.5 },
+            },
+          }),
+        ],
+      });
+      const sequence = createMockSequence([videoTrack, subtitleTextTrack]);
+      const assets = new Map([
+        [
+          'asset-video',
+          createMockAsset({
+            id: 'asset-video',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy.mp4',
+          }),
+        ],
+      ]);
+
+      const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
+
+      expect(result.current.mode).toBe('video');
+    });
+
+    it('should force canvas mode when a text overlay track uses blend compositing', () => {
+      const videoTrack = createMockTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [createMockClip({ id: 'video-clip', assetId: 'asset-video' })],
+      });
+      const blendedTextTrack = createMockTrack({
+        id: 'blended-text-track',
+        kind: 'video',
+        blendMode: 'overlay',
+        clips: [
+          createMockClip({
+            id: 'subtitle-text-clip',
+            assetId: `${TEXT_ASSET_PREFIX}subtitle-text-clip`,
+            label: 'Text: Hello subtitle',
+            effects: ['effect-text-overlay'],
+            place: { timelineInSec: 0, durationSec: 10 },
+            range: { sourceInSec: 0, sourceOutSec: 10 },
+          }),
+        ],
+      });
+      const sequence = createMockSequence([videoTrack, blendedTextTrack]);
+      const assets = new Map([
+        [
+          'asset-video',
+          createMockAsset({
+            id: 'asset-video',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy.mp4',
+          }),
+        ],
+      ]);
+
+      const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
+
+      expect(result.current.mode).toBe('canvas');
+      expect(result.current.reason).toContain('blend mode');
+    });
+
+    it('should force canvas mode when an active non-text clip has no asset', () => {
+      const videoTrack = createMockTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [createMockClip({ id: 'video-clip', assetId: 'asset-video' })],
+      });
+      const unresolvedOverlayTrack = createMockTrack({
+        id: 'overlay-track',
+        kind: 'video',
+        clips: [
+          createMockClip({
+            id: 'missing-asset-clip',
+            assetId: 'asset-missing',
+            place: { timelineInSec: 0, durationSec: 10 },
+            range: { sourceInSec: 0, sourceOutSec: 10 },
+          }),
+        ],
+      });
+      const sequence = createMockSequence([videoTrack, unresolvedOverlayTrack]);
+      const assets = new Map([
+        [
+          'asset-video',
+          createMockAsset({
+            id: 'asset-video',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy.mp4',
+          }),
+        ],
+      ]);
+
+      const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
+
+      expect(result.current.mode).toBe('canvas');
+      expect(result.current.reason).toContain('unavailable');
     });
   });
   describe('muted/hidden tracks', () => {
