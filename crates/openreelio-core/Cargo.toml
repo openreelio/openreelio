@@ -1,0 +1,19 @@
+[package]
+name = "openreelio-core"
+version = "0.1.0"
+description = "Core library for OpenReelio — AI agent-driven video editing engine"
+authors = ["OpenReelio Team"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.85"
+
+[dependencies]
+# Re-export the core library without GUI dependencies.
+# The package is named "openreelio" but the lib target is "openreelio_lib".
+openreelio_lib = { package = "openreelio", path = "../../src-tauri", default-features = false }
+
+# Event broadcasting abstraction
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["sync"] }
+tracing = "0.1"
