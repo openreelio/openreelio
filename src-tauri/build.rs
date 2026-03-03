@@ -11,7 +11,8 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
-    // Standard Tauri build
+    // Standard Tauri build (only when GUI feature is enabled)
+    #[cfg(feature = "gui")]
     tauri_build::build();
 
     // ------------------------------------------------------------------------

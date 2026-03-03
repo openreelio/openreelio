@@ -28,6 +28,7 @@ use std::sync::OnceLock;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "gui")]
 use tauri::Emitter;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -1015,7 +1016,7 @@ impl SseLineBuffer {
 /// * `system_prompt` - Optional system prompt
 /// * `options` - Optional streaming parameters (model, temperature, etc.)
 /// * `tools` - Optional tool/function definitions for model tool-calling
-#[cfg(feature = "ai-providers")]
+#[cfg(all(feature = "ai-providers", feature = "gui"))]
 #[tauri::command]
 #[specta::specta]
 pub async fn stream_ai_completion(
@@ -1294,7 +1295,7 @@ pub async fn stream_ai_completion(
 }
 
 /// Aborts an active AI stream by stream ID.
-#[cfg(feature = "ai-providers")]
+#[cfg(all(feature = "ai-providers", feature = "gui"))]
 #[tauri::command]
 #[specta::specta]
 pub async fn abort_ai_stream(stream_id: String) -> Result<(), String> {
@@ -1305,7 +1306,7 @@ pub async fn abort_ai_stream(stream_id: String) -> Result<(), String> {
 }
 
 /// Stub implementation when the `ai-providers` feature is not enabled.
-#[cfg(not(feature = "ai-providers"))]
+#[cfg(all(not(feature = "ai-providers"), feature = "gui"))]
 #[tauri::command]
 #[specta::specta]
 pub async fn stream_ai_completion(
@@ -1320,7 +1321,7 @@ pub async fn stream_ai_completion(
 }
 
 /// Stub abort implementation when the `ai-providers` feature is not enabled.
-#[cfg(not(feature = "ai-providers"))]
+#[cfg(all(not(feature = "ai-providers"), feature = "gui"))]
 #[tauri::command]
 #[specta::specta]
 pub async fn abort_ai_stream(_stream_id: String) -> Result<(), String> {

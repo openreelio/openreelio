@@ -21,6 +21,7 @@ path = "src/main.rs"
 # for the bin target can cause Windows-only manifest/resource conflicts.
 test = false
 bench = false
+required-features = ["gui"]
 
 [[bin]]
 name = "export_bindings"
@@ -29,9 +30,10 @@ path = "src/bin/export_bindings.rs"
 # and can break due to `cfg(test)` altering the app command surface.
 test = false
 bench = false
+required-features = ["gui"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2", features = [], optional = true }
 # FFmpeg bundler build dependencies
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
 sha2 = "0.10"
@@ -43,11 +45,11 @@ walkdir = "2"
 thiserror = "2.0"
 
 [dependencies]
-# Tauri
-tauri = { version = "2", features = ["protocol-asset"] }
-tauri-plugin-dialog = "2.6"
-tauri-plugin-updater = "2.9"
-tauri-plugin-stronghold = "2"
+# Tauri (optional — only needed for GUI builds)
+tauri = { version = "2", features = ["protocol-asset"], optional = true }
+tauri-plugin-dialog = { version = "2.6", optional = true }
+tauri-plugin-updater = { version = "2.9", optional = true }
+tauri-plugin-stronghold = { version = "2", optional = true }
 
 # Cryptography for credential storage and derivation
 chacha20poly1305 = "0.10"
@@ -85,8 +87,8 @@ hostname = "0.4"
 
 # Type export for TypeScript bindings (Code-as-Documentation)
 specta = { version = "2.0.0-rc.20", features = ["derive", "serde_json"] }
-tauri-specta = { version = "2.0.0-rc.20", features = ["derive", "typescript"] }
-specta-typescript = "0.0.7"
+tauri-specta = { version = "2.0.0-rc.20", features = ["derive", "typescript"], optional = true }
+specta-typescript = { version = "0.0.7", optional = true }
 
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -131,8 +133,19 @@ tempfile = "3"
 [features]
 # ADR-033: Enable remote AI providers by default.
 # Heavy local features (e.g. Whisper) stay opt-in to keep builds portable across platforms.
-default = ["custom-protocol", "ai-providers"]
-custom-protocol = ["tauri/custom-protocol"]
+default = ["gui", "ai-providers"]
+# GUI feature: enables Tauri runtime, IPC command handlers, and TypeScript binding generation.
+# Disable this feature to build the core library without any GUI or webview dependency.
+gui = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-dialog",
+    "dep:tauri-plugin-updater",
+    "dep:tauri-plugin-stronghold",
+    "dep:tauri-specta",
+    "dep:specta-typescript",
+]
+custom-protocol = ["gui", "tauri/custom-protocol"]
 # Enable FFmpeg bundling (downloads FFmpeg during build)
 bundled-ffmpeg = [
     "dep:reqwest",
