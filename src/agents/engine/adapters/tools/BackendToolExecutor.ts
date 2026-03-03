@@ -47,6 +47,7 @@ const BACKEND_DIRECT_TOOLS = new Set([
   'trim_clip',
   'split_clip',
   'delete_clip',
+  'change_clip_speed',
   'add_track',
   'remove_track',
   'remove_marker',
@@ -155,29 +156,36 @@ export class BackendToolExecutor implements IToolExecutor {
 
     const start = performance.now();
 
-    // Check if this is a compound tool that needs expansion
     const expander = compoundExpanders.get(toolName);
-    const steps = expander
-      ? expander(args).map((sub, i) => ({
-          id: `step-${i + 1}`,
-          toolName: normalizeToolNameForBackend(sub.toolName),
-          params: sub.params as Record<string, never>,
-          description: `Execute ${sub.toolName}`,
-          riskLevel: 'low' as const,
-          dependsOn: sub.dependsOn ?? (i > 0 ? [`step-${i}`] : []),
-          optional: false,
-        }))
-      : [
-          {
-            id: 'step-1',
-            toolName: normalizeToolNameForBackend(toolName),
-            params: args as Record<string, never>,
-            description: `Execute ${toolName}`,
+    let steps: AgentPlan['steps'];
+    try {
+      steps = expander
+        ? expander(args).map((sub, i) => ({
+            id: `step-${i + 1}`,
+            toolName: normalizeToolNameForBackend(sub.toolName),
+            params: sub.params as Record<string, never>,
+            description: `Execute ${sub.toolName}`,
             riskLevel: 'low' as const,
-            dependsOn: [] as string[],
+            dependsOn: sub.dependsOn ?? (i > 0 ? [`step-${i}`] : []),
             optional: false,
-          },
-        ];
+          }))
+        : [
+            {
+              id: 'step-1',
+              toolName: normalizeToolNameForBackend(toolName),
+              params: args as Record<string, never>,
+              description: `Execute ${toolName}`,
+              riskLevel: 'low' as const,
+              dependsOn: [] as string[],
+              optional: false,
+            },
+          ];
+    } catch (err) {
+      const duration = performance.now() - start;
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      logger.warn('Compound tool expansion failed', { toolName, error: errorMsg });
+      return createFailureResult(`${toolName} validation failed: ${errorMsg}`, duration);
+    }
 
     const plan: AgentPlan = {
       id: `plan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -275,13 +283,23 @@ export class BackendToolExecutor implements IToolExecutor {
         [];
       const allSteps: AgentPlan['steps'] = [];
       let stepCounter = 0;
+      let expansionError: string | null = null;
 
       for (let i = 0; i < backendTools.length; i++) {
         const t = backendTools[i];
         const exp = compoundExpanders.get(t.name);
 
         if (exp) {
-          const subSteps = exp(t.args);
+          let subSteps: ReturnType<typeof exp>;
+          try {
+            subSteps = exp(t.args);
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : String(err);
+            expansionError = `${t.name} validation failed: ${errorMsg}`;
+            logger.warn('Batch compound expansion failed', { toolName: t.name, error: errorMsg });
+            break;
+          }
+
           const startIdx = stepCounter;
           for (let j = 0; j < subSteps.length; j++) {
             // Compound sub-steps must always execute sequentially relative to
@@ -330,79 +348,89 @@ export class BackendToolExecutor implements IToolExecutor {
         }
       }
 
-      const plan: AgentPlan = {
-        id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        goal: `Batch execute ${backendTools.length} tools (${allSteps.length} steps)`,
-        steps: allSteps,
-        approvalGranted: true,
-        sessionId: context.sessionId,
-      };
-
-      try {
-        const planResult = await invoke<AgentPlanResult>('execute_agent_plan', { plan });
-
-        // If the plan failed atomically (with rollback), all tools must be
-        // reported as failed — individual step slices may look successful
-        // but the entire batch was rolled back.
-        if (!planResult.success) {
-          const batchError =
-            planResult.errorMessage ??
-            planResult.rollbackReport?.rollbackErrors?.join('; ') ??
-            'Plan execution failed';
-          for (const t of backendTools) {
-            results.push({
-              tool: t.name,
-              result: createFailureResult(`Batch rolled back: ${batchError}`, 0),
-            });
-            failureCount++;
-          }
-        } else {
-          // Map step results back to original tools using the step mapping
-          for (const mapping of toolStepMapping) {
-            const stepSlice = planResult.stepResults.slice(
-              mapping.stepStart,
-              mapping.stepStart + mapping.stepCount,
-            );
-            const allSucceeded = stepSlice.every((sr) => sr?.success);
-
-            if (allSucceeded && stepSlice.length > 0) {
-              const totalDuration = stepSlice.reduce((sum, sr) => sum + (sr?.durationMs ?? 0), 0);
-              results.push({
-                tool: backendTools[mapping.toolIndex].name,
-                result: {
-                  success: true,
-                  data:
-                    mapping.stepCount > 1
-                      ? {
-                          steps: stepSlice.map((sr) => ({ success: sr.success, data: sr.data })),
-                        }
-                      : stepSlice[0].data,
-                  duration: totalDuration,
-                  undoable: true,
-                },
-              });
-              successCount++;
-            } else {
-              const failedStep = stepSlice.find((sr) => !sr?.success);
-              results.push({
-                tool: backendTools[mapping.toolIndex].name,
-                result: createFailureResult(
-                  failedStep?.error ?? 'Step not executed',
-                  failedStep?.durationMs ?? 0,
-                ),
-              });
-              failureCount++;
-            }
-          }
-        }
-      } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
+      if (expansionError) {
         for (const t of backendTools) {
           results.push({
             tool: t.name,
-            result: createFailureResult(`Batch execution error: ${errorMsg}`, 0),
+            result: createFailureResult(`Batch expansion error: ${expansionError}`, 0),
           });
           failureCount++;
+        }
+      } else {
+        const plan: AgentPlan = {
+          id: `batch-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          goal: `Batch execute ${backendTools.length} tools (${allSteps.length} steps)`,
+          steps: allSteps,
+          approvalGranted: true,
+          sessionId: context.sessionId,
+        };
+
+        try {
+          const planResult = await invoke<AgentPlanResult>('execute_agent_plan', { plan });
+
+          // If the plan failed atomically (with rollback), all tools must be
+          // reported as failed — individual step slices may look successful
+          // but the entire batch was rolled back.
+          if (!planResult.success) {
+            const batchError =
+              planResult.errorMessage ??
+              planResult.rollbackReport?.rollbackErrors?.join('; ') ??
+              'Plan execution failed';
+            for (const t of backendTools) {
+              results.push({
+                tool: t.name,
+                result: createFailureResult(`Batch rolled back: ${batchError}`, 0),
+              });
+              failureCount++;
+            }
+          } else {
+            // Map step results back to original tools using the step mapping
+            for (const mapping of toolStepMapping) {
+              const stepSlice = planResult.stepResults.slice(
+                mapping.stepStart,
+                mapping.stepStart + mapping.stepCount,
+              );
+              const allSucceeded = stepSlice.every((sr) => sr?.success);
+
+              if (allSucceeded && stepSlice.length > 0) {
+                const totalDuration = stepSlice.reduce((sum, sr) => sum + (sr?.durationMs ?? 0), 0);
+                results.push({
+                  tool: backendTools[mapping.toolIndex].name,
+                  result: {
+                    success: true,
+                    data:
+                      mapping.stepCount > 1
+                        ? {
+                            steps: stepSlice.map((sr) => ({ success: sr.success, data: sr.data })),
+                          }
+                        : stepSlice[0].data,
+                    duration: totalDuration,
+                    undoable: true,
+                  },
+                });
+                successCount++;
+              } else {
+                const failedStep = stepSlice.find((sr) => !sr?.success);
+                results.push({
+                  tool: backendTools[mapping.toolIndex].name,
+                  result: createFailureResult(
+                    failedStep?.error ?? 'Step not executed',
+                    failedStep?.durationMs ?? 0,
+                  ),
+                });
+                failureCount++;
+              }
+            }
+          }
+        } catch (err) {
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          for (const t of backendTools) {
+            results.push({
+              tool: t.name,
+              result: createFailureResult(`Batch execution error: ${errorMsg}`, 0),
+            });
+            failureCount++;
+          }
         }
       }
     }

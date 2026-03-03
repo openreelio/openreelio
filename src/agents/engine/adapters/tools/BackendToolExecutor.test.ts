@@ -152,6 +152,12 @@ const TOOL_DEFS: TestToolDef[] = [
     parameters: { type: 'object', properties: {} },
   },
   {
+    name: 'change_clip_speed',
+    description: 'Change clip speed',
+    category: 'clip',
+    parameters: { type: 'object', properties: {} },
+  },
+  {
     name: 'freeze_frame',
     description: 'Create a freeze frame',
     category: 'clip',
@@ -247,6 +253,44 @@ describe('BackendToolExecutor', () => {
       });
 
       // Frontend executor should NOT have been called for this tool
+      expect(frontend.execute).not.toHaveBeenCalled();
+    });
+
+    it('should route change_clip_speed to backend IPC with reverse argument', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'plan-speed-1',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [{ stepId: 'step-1', success: true, data: { ok: true }, durationMs: 7 }],
+        operationIds: ['op-speed-1'],
+        executionTimeMs: 7,
+      });
+
+      const result = await backend.execute(
+        'change_clip_speed',
+        { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', speed: 1.5, reverse: true },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          goal: 'Execute change_clip_speed',
+          steps: [
+            expect.objectContaining({
+              toolName: 'changeClipSpeed',
+              params: {
+                sequenceId: 'seq-1',
+                trackId: 'track-1',
+                clipId: 'clip-1',
+                speed: 1.5,
+                reverse: true,
+              },
+            }),
+          ],
+        }),
+      });
       expect(frontend.execute).not.toHaveBeenCalled();
     });
 
@@ -436,6 +480,39 @@ describe('BackendToolExecutor', () => {
       expect(result.failureCount).toBe(2);
       expect(result.results[0].result.error).toContain('Batch execution error');
     });
+
+    it('should fail backend batch when compound expansion validation fails', async () => {
+      registerCompoundExpander('ripple_edit', () => {
+        throw new Error('Invalid ripple request');
+      });
+
+      const extendedTools = [
+        ...TOOL_DEFS,
+        { name: 'ripple_edit', description: 'Ripple edit', category: 'clip', parameters: {} },
+      ];
+      const extendedFrontend = createMockFrontendExecutor(extendedTools);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      const result = await extendedBackend.executeBatch(
+        {
+          tools: [
+            { name: 'ripple_edit', args: { clipId: 'c1', trimEnd: 4 } },
+            { name: 'split_clip', args: { clipId: 'c2', atTimelineSec: 3 } },
+          ],
+          mode: 'sequential',
+          stopOnError: true,
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.failureCount).toBe(2);
+      expect(result.results[0].result.error).toContain('Batch expansion error');
+      expect(result.results[1].result.error).toContain('Batch expansion error');
+      expect(mockInvoke).not.toHaveBeenCalled();
+
+      unregisterCompoundExpander('ripple_edit');
+    });
   });
 
   // ===========================================================================
@@ -446,7 +523,7 @@ describe('BackendToolExecutor', () => {
     it('should delegate getAvailableTools to frontend', () => {
       const tools = backend.getAvailableTools();
       expect(frontend.getAvailableTools).toHaveBeenCalled();
-      expect(tools.length).toBe(8);
+      expect(tools.length).toBe(9);
     });
 
     it('should delegate getToolDefinition to frontend', () => {
@@ -470,7 +547,7 @@ describe('BackendToolExecutor', () => {
     it('should delegate getToolsByCategory to frontend', () => {
       const byCategory = backend.getToolsByCategory();
       expect(frontend.getToolsByCategory).toHaveBeenCalled();
-      expect(byCategory.get('clip')).toHaveLength(4);
+      expect(byCategory.get('clip')).toHaveLength(5);
     });
   });
 
@@ -682,6 +759,30 @@ describe('BackendToolExecutor', () => {
           ]),
         }),
       });
+    });
+
+    it('should return validation failure when compound expander throws', async () => {
+      registerCompoundExpander('ripple_edit', () => {
+        throw new Error('Clips must be adjacent for roll edit');
+      });
+
+      const extendedTools = [
+        ...TOOL_DEFS,
+        { name: 'ripple_edit', description: 'Ripple edit', category: 'clip', parameters: {} },
+      ];
+      const extendedFrontend = createMockFrontendExecutor(extendedTools);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      const result = await extendedBackend.execute(
+        'ripple_edit',
+        { clipId: 'clip-1', trimEnd: 8 },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('ripple_edit validation failed');
+      expect(result.error).toContain('Clips must be adjacent for roll edit');
+      expect(mockInvoke).not.toHaveBeenCalled();
     });
   });
 

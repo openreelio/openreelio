@@ -18,6 +18,7 @@ import {
   cleanupOldHistories,
 } from '@/services/chatStorage';
 import { registerAllTools, globalToolRegistry } from '@/agents';
+import { registerDefaultCompoundExpanders } from '@/agents/engine/adapters/tools/registerDefaultCompoundExpanders';
 import { useConversationStore } from './conversationStore';
 
 const logger = createLogger('AIStore');
@@ -884,7 +885,10 @@ export const useAIStore = create<AIState>()(
                   convStore.appendPart(msgId, { type: 'text', content });
                   convStore.finalizeMessage(msgId);
                 } catch (innerError) {
-                  logger.warn('Failed to finalize bridged assistant message', { msgId, error: innerError });
+                  logger.warn('Failed to finalize bridged assistant message', {
+                    msgId,
+                    error: innerError,
+                  });
                 }
               }
             } else {
@@ -1238,6 +1242,7 @@ export function initializeAgentSystem(): void {
 
   // Register all agent tools with the global registry
   registerAllTools();
+  registerDefaultCompoundExpanders();
 
   isAgentSystemInitialized = true;
   logger.info('Agent system initialized', {
