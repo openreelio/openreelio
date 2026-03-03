@@ -167,7 +167,7 @@ describe('editingTools — extended tools', () => {
       });
     });
 
-    it('should reject reverse playback until backend support is available', async () => {
+    it('should reject reverse playback until pipeline support is implemented', async () => {
       const tool = globalToolRegistry.get('change_clip_speed');
       const result = await tool!.handler(
         { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', speed: 2.0, reverse: true },
@@ -176,6 +176,7 @@ describe('editingTools — extended tools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('Reverse playback is not yet supported');
+      expect(getMockExecuteCommand()).not.toHaveBeenCalled();
     });
 
     it('should reject speed outside 0.1-10.0 range', async () => {
@@ -725,6 +726,76 @@ describe('editingTools — extended tools', () => {
         payload: expect.objectContaining({ clipId: 'clip-B', newSourceIn: 2, newTimelineIn: 12 }),
       });
     });
+
+    it('should reject roll edit when clips are not adjacent', async () => {
+      vi.mocked(getTimelineSnapshot).mockReturnValue({
+        stateVersion: 1,
+        sequenceId: 'seq-1',
+        sequenceName: 'Main',
+        duration: 20,
+        trackCount: 1,
+        clipCount: 2,
+        tracks: [
+          {
+            id: 'track-1',
+            name: 'V1',
+            kind: 'video',
+            clipCount: 2,
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1,
+          },
+        ],
+        clips: [
+          {
+            id: 'clip-A',
+            assetId: 'a1',
+            trackId: 'track-1',
+            timelineIn: 0,
+            duration: 8,
+            sourceIn: 0,
+            sourceOut: 8,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
+          {
+            id: 'clip-B',
+            assetId: 'a2',
+            trackId: 'track-1',
+            timelineIn: 10,
+            duration: 10,
+            sourceIn: 0,
+            sourceOut: 10,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
+        ],
+        selectedClipIds: [],
+        selectedTrackIds: [],
+        playheadPosition: 10,
+      });
+
+      const tool = globalToolRegistry.get('roll_edit');
+      const result = await tool!.handler(
+        {
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          leftClipId: 'clip-A',
+          rightClipId: 'clip-B',
+          rollAmount: 1,
+        },
+        CTX,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Clips must be adjacent for roll edit');
+      expect(getMockExecuteCommand()).not.toHaveBeenCalled();
+    });
   });
 
   describe('slip_edit', () => {
@@ -842,6 +913,65 @@ describe('editingTools — extended tools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('source in below 0');
+    });
+
+    it('should reject slip that exceeds source media duration', async () => {
+      vi.mocked(getTimelineSnapshot).mockReturnValue({
+        stateVersion: 1,
+        sequenceId: 'seq-1',
+        sequenceName: 'Main',
+        duration: 10,
+        trackCount: 1,
+        clipCount: 1,
+        tracks: [
+          {
+            id: 'track-1',
+            name: 'V1',
+            kind: 'video',
+            clipCount: 1,
+            muted: false,
+            locked: false,
+            visible: true,
+            volume: 1,
+          },
+        ],
+        clips: [
+          {
+            id: 'clip-1',
+            assetId: 'asset-1',
+            trackId: 'track-1',
+            timelineIn: 0,
+            duration: 4,
+            sourceIn: 0,
+            sourceOut: 4,
+            speed: 1,
+            opacity: 1,
+            hasEffects: false,
+            effectCount: 0,
+          },
+        ],
+        selectedClipIds: [],
+        selectedTrackIds: [],
+        playheadPosition: 0,
+      });
+
+      const executeCommand = vi.fn().mockResolvedValue({ opId: 'op-1', success: true });
+      vi.mocked(useProjectStore.getState).mockReturnValue({
+        isLoaded: true,
+        meta: { id: 'project-1', name: 'Test' },
+        executeCommand,
+        assets: new Map([['asset-1', { durationSec: 5 }]]),
+      } as unknown as ReturnType<typeof useProjectStore.getState>);
+
+      const tool = globalToolRegistry.get('slip_edit');
+      const result = await tool!.handler(
+        { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', offsetSeconds: 2 },
+        CTX,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Slip offset exceeds source media duration');
+      expect(executeCommand).not.toHaveBeenCalled();
     });
   });
 
