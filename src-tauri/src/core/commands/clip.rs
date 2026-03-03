@@ -1191,7 +1191,7 @@ impl Command for SetClipSpeedCommand {
 
         let mut candidate = original;
         candidate.speed = self.speed;
-        candidate.reverse = self.reverse;
+        // Preserve existing reverse state; toggling is gated until pipeline supports it.
         candidate.place.duration_sec = candidate.range.duration() / self.speed as f64;
 
         if !candidate.place.duration_sec.is_finite() || candidate.place.duration_sec <= 0.0 {

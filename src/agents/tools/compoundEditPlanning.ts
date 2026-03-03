@@ -59,8 +59,13 @@ function timelineEnd(clip: ClipSnapshot): number {
   return clip.timelineIn + clip.duration;
 }
 
-function getTrackClips(trackId: string): ClipSnapshot[] {
+function getTrackClips(sequenceId: string, trackId: string): ClipSnapshot[] {
   const snapshot = getTimelineSnapshot();
+  if (snapshot.sequenceId !== sequenceId) {
+    throw new Error(
+      `Active sequence (${snapshot.sequenceId ?? 'none'}) does not match requested sequence (${sequenceId})`,
+    );
+  }
   return snapshot.clips
     .filter((clip) => clip.trackId === trackId)
     .sort((left, right) => left.timelineIn - right.timelineIn);
@@ -154,7 +159,7 @@ export function buildRippleEditPlan(args: Record<string, unknown>): RippleEditPl
   const clipId = requireStringArg(args, 'clipId');
   const trimEnd = requireNumberArg(args, 'trimEnd');
 
-  const trackClips = getTrackClips(trackId);
+  const trackClips = getTrackClips(sequenceId, trackId);
   const targetClip = trackClips.find((clip) => clip.id === clipId);
   if (!targetClip) {
     throw new Error(`Clip ${clipId} not found on track ${trackId}`);
@@ -208,7 +213,7 @@ export function buildRollEditPlan(args: Record<string, unknown>): RollEditPlan {
   const rightClipId = requireStringArg(args, 'rightClipId');
   const rollAmount = requireNumberArg(args, 'rollAmount');
 
-  const trackClips = getTrackClips(trackId);
+  const trackClips = getTrackClips(sequenceId, trackId);
   const leftClip = findClipInTrack(trackClips, trackId, leftClipId);
   const rightClip = findClipInTrack(trackClips, trackId, rightClipId);
   validateAdjacent(leftClip, rightClip, 'Clips must be adjacent for roll edit');
@@ -258,7 +263,7 @@ export function buildSlipEditPlan(args: Record<string, unknown>): SlipEditPlan {
   const clipId = requireStringArg(args, 'clipId');
   const offsetSeconds = requireNumberArg(args, 'offsetSeconds');
 
-  const trackClips = getTrackClips(trackId);
+  const trackClips = getTrackClips(sequenceId, trackId);
   const clip = findClipInTrack(trackClips, trackId, clipId);
   const newSourceIn = clip.sourceIn + offsetSeconds;
   const newSourceOut = clip.sourceOut + offsetSeconds;
@@ -287,7 +292,7 @@ export function buildSlideEditPlan(args: Record<string, unknown>): SlideEditPlan
   const clipId = requireStringArg(args, 'clipId');
   const slideAmount = requireNumberArg(args, 'slideAmount');
 
-  const trackClips = getTrackClips(trackId);
+  const trackClips = getTrackClips(sequenceId, trackId);
   const clipIndex = trackClips.findIndex((clip) => clip.id === clipId);
   if (clipIndex === -1) {
     throw new Error(`Clip ${clipId} not found on track ${trackId}`);

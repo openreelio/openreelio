@@ -486,32 +486,34 @@ describe('BackendToolExecutor', () => {
         throw new Error('Invalid ripple request');
       });
 
-      const extendedTools = [
-        ...TOOL_DEFS,
-        { name: 'ripple_edit', description: 'Ripple edit', category: 'clip', parameters: {} },
-      ];
-      const extendedFrontend = createMockFrontendExecutor(extendedTools);
-      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+      try {
+        const extendedTools = [
+          ...TOOL_DEFS,
+          { name: 'ripple_edit', description: 'Ripple edit', category: 'clip', parameters: {} },
+        ];
+        const extendedFrontend = createMockFrontendExecutor(extendedTools);
+        const extendedBackend = createBackendToolExecutor(extendedFrontend);
 
-      const result = await extendedBackend.executeBatch(
-        {
-          tools: [
-            { name: 'ripple_edit', args: { clipId: 'c1', trimEnd: 4 } },
-            { name: 'split_clip', args: { clipId: 'c2', atTimelineSec: 3 } },
-          ],
-          mode: 'sequential',
-          stopOnError: true,
-        },
-        CONTEXT,
-      );
+        const result = await extendedBackend.executeBatch(
+          {
+            tools: [
+              { name: 'ripple_edit', args: { clipId: 'c1', trimEnd: 4 } },
+              { name: 'split_clip', args: { clipId: 'c2', atTimelineSec: 3 } },
+            ],
+            mode: 'sequential',
+            stopOnError: true,
+          },
+          CONTEXT,
+        );
 
-      expect(result.success).toBe(false);
-      expect(result.failureCount).toBe(2);
-      expect(result.results[0].result.error).toContain('Batch expansion error');
-      expect(result.results[1].result.error).toContain('Batch expansion error');
-      expect(mockInvoke).not.toHaveBeenCalled();
-
-      unregisterCompoundExpander('ripple_edit');
+        expect(result.success).toBe(false);
+        expect(result.failureCount).toBe(2);
+        expect(result.results[0].result.error).toContain('Batch expansion error');
+        expect(result.results[1].result.error).toContain('Batch expansion error');
+        expect(mockInvoke).not.toHaveBeenCalled();
+      } finally {
+        unregisterCompoundExpander('ripple_edit');
+      }
     });
   });
 

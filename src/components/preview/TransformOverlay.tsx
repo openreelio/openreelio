@@ -115,12 +115,8 @@ function measureTextBounds(
     return DEFAULT_TEXT_BOUNDS;
   }
 
-  const lines = textData.content
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-
-  if (lines.length === 0) {
+  const lines = textData.content.split('\n');
+  if (lines.length === 1 && lines[0] === '') {
     return DEFAULT_TEXT_BOUNDS;
   }
 

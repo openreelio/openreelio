@@ -277,6 +277,23 @@ export function usePreviewMode({
     );
 
     if (videoClips.length === 0) {
+      const hasRenderableTextOverlay = activeClips.some(
+        ({ clip, track }) =>
+          isTextClip(clip.assetId) && track.kind !== 'audio' && track.blendMode === 'normal',
+      );
+
+      if (hasRenderableTextOverlay) {
+        const result: PreviewModeResult = {
+          mode: 'video',
+          reason: 'Text overlays can render in video mode',
+          hasGeneratingProxy: false,
+          clipsNeedingProxy: 0,
+        };
+        previousResultRef.current = result;
+        previousTimeRef.current = currentTime;
+        return result;
+      }
+
       const result: PreviewModeResult = {
         mode: 'canvas',
         reason: 'No video clips (images use canvas)',

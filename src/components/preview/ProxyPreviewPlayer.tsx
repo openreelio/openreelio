@@ -339,7 +339,10 @@ function applyClipTransformToTextData(clip: Clip, textData: TextClipData): TextC
     outline: textData.outline
       ? {
           ...textData.outline,
-          width: Math.max(1, Math.round(textData.outline.width * scaleFactor)),
+          width:
+            textData.outline.width <= 0
+              ? 0
+              : Math.max(1, Math.round(textData.outline.width * scaleFactor)),
         }
       : textData.outline,
   };

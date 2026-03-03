@@ -697,6 +697,30 @@ describe('usePreviewMode', () => {
       expect(result.current.mode).toBe('canvas');
       expect(result.current.reason).toContain('unavailable');
     });
+
+    it('should keep video mode when only text clips are active (no video clips)', () => {
+      const textOnlyTrack = createMockTrack({
+        id: 'text-only-track',
+        kind: 'video',
+        clips: [
+          createMockClip({
+            id: 'text-clip-solo',
+            assetId: `${TEXT_ASSET_PREFIX}text-solo`,
+            label: 'Text: Hello',
+            effects: ['effect-text'],
+            place: { timelineInSec: 0, durationSec: 10 },
+            range: { sourceInSec: 0, sourceOutSec: 10 },
+          }),
+        ],
+      });
+      const sequence = createMockSequence([textOnlyTrack]);
+      const assets = new Map<string, ReturnType<typeof createMockAsset>>();
+
+      const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
+
+      expect(result.current.mode).toBe('video');
+      expect(result.current.reason).toContain('Text overlays');
+    });
   });
   describe('muted/hidden tracks', () => {
     it('should ignore muted tracks', () => {
