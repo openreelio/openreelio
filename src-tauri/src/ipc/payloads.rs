@@ -86,6 +86,8 @@ pub struct SetClipSpeedPayload {
     pub track_id: TrackId,
     pub clip_id: ClipId,
     pub speed: f32,
+    #[serde(default)]
+    pub reverse: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -781,6 +783,7 @@ impl CommandPayload {
                 &p.track_id,
                 &p.clip_id,
                 p.speed,
+                p.reverse,
             )),
             CommandPayload::SetClipMute(p) => Box::new(SetClipMuteCommand::new(
                 &p.sequence_id,
@@ -1091,6 +1094,31 @@ mod tests {
             matches!(parsed, Ok(CommandPayload::SetClipSpeed(_))),
             "expected SetClipSpeed to parse, got: {parsed:?}"
         );
+
+        if let Ok(CommandPayload::SetClipSpeed(inner)) = parsed {
+            assert!(!inner.reverse, "reverse should default to false");
+        }
+    }
+
+    #[test]
+    fn parse_set_clip_speed_payload_supports_reverse_flag() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "clipId": "clip_001",
+            "speed": 1.0,
+            "reverse": true,
+        });
+
+        let parsed = CommandPayload::parse("SetClipSpeed".to_string(), payload);
+        assert!(
+            matches!(parsed, Ok(CommandPayload::SetClipSpeed(_))),
+            "expected SetClipSpeed with reverse to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::SetClipSpeed(inner)) = parsed {
+            assert!(inner.reverse, "reverse flag should be true when provided");
+        }
     }
 
     #[test]

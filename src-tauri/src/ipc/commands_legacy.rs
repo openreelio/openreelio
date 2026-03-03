@@ -843,6 +843,26 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<ProjectStat
         .as_ref()
         .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
+    let text_clips = project
+        .state
+        .sequences
+        .values()
+        .flat_map(|sequence| {
+            sequence.tracks.iter().flat_map(|track| {
+                track.clips.iter().filter_map(|clip| {
+                    crate::core::commands::get_text_data(clip, &project.state).map(|text_data| {
+                        TextClipDataDto {
+                            sequence_id: sequence.id.clone(),
+                            track_id: track.id.clone(),
+                            clip_id: clip.id.clone(),
+                            text_data,
+                        }
+                    })
+                })
+            })
+        })
+        .collect();
+
     Ok(ProjectStateDto {
         meta: ProjectMetaDto {
             name: project.state.meta.name.clone(),
@@ -855,8 +875,50 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<ProjectStat
         assets: project.state.assets.values().cloned().collect(),
         sequences: project.state.sequences.values().cloned().collect(),
         active_sequence_id: project.state.active_sequence_id.clone(),
+        text_clips,
         is_dirty: project.state.is_dirty,
     })
+}
+
+/// Returns all resolved text clip payloads for a sequence.
+///
+/// This is used by preview/inspector UIs that need fully resolved text styling
+/// from TextOverlay effects without parsing effect internals on the frontend.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_sequence_text_clip_data(
+    sequence_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<TextClipDataDto>, String> {
+    let guard = state.project.lock().await;
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let sequence = project
+        .state
+        .sequences
+        .get(&sequence_id)
+        .ok_or_else(|| CoreError::SequenceNotFound(sequence_id.clone()).to_ipc_error())?;
+
+    let text_clips = sequence
+        .tracks
+        .iter()
+        .flat_map(|track| {
+            track.clips.iter().filter_map(|clip| {
+                crate::core::commands::get_text_data(clip, &project.state).map(|text_data| {
+                    TextClipDataDto {
+                        sequence_id: sequence.id.clone(),
+                        track_id: track.id.clone(),
+                        clip_id: clip.id.clone(),
+                        text_data,
+                    }
+                })
+            })
+        })
+        .collect();
+
+    Ok(text_clips)
 }
 
 // =============================================================================
@@ -2494,6 +2556,7 @@ pub async fn apply_edit_script(
                 &p.track_id,
                 &p.clip_id,
                 p.speed,
+                p.reverse,
             )),
             CommandPayload::SetClipMute(p) => Box::new(SetClipMuteCommand::new(
                 &p.sequence_id,
@@ -3091,8 +3154,24 @@ pub struct ProjectStateDto {
     pub sequences: Vec<crate::core::timeline::Sequence>,
     /// Currently active sequence ID
     pub active_sequence_id: Option<String>,
+    /// Resolved text clip payloads (clipId -> TextClipData)
+    pub text_clips: Vec<TextClipDataDto>,
     /// Whether project has unsaved changes
     pub is_dirty: bool,
+}
+
+/// Resolved text payload for a timeline text clip.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TextClipDataDto {
+    /// Sequence containing the clip.
+    pub sequence_id: String,
+    /// Track containing the clip.
+    pub track_id: String,
+    /// Clip ID for map lookup.
+    pub clip_id: String,
+    /// Fully resolved text styling/content payload.
+    pub text_data: crate::core::text::TextClipData,
 }
 
 /// Result of importing an asset into the project.

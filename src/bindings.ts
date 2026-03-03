@@ -1922,7 +1922,11 @@ opacity: number;
 /**
  * Playback speed (1.0 = normal)
  */
-speed: number; effects: string[]; audio: AudioSettings; 
+speed: number; 
+/**
+ * Playback direction (true = reverse)
+ */
+reverse?: boolean; effects: string[]; audio: AudioSettings; 
 /**
  * Optional label for organization
  */
@@ -1930,7 +1934,15 @@ label?: string | null;
 /**
  * Optional color for UI
  */
-color?: Color | null }
+color?: Color | null; 
+/**
+ * Optional caption style override for caption track clips.
+ */
+captionStyle?: JsonValue | null; 
+/**
+ * Optional caption position override for caption track clips.
+ */
+captionPosition?: JsonValue | null }
 /**
  * Clip event payload.
  */

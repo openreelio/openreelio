@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { globalToolRegistry } from '@/agents';
 import { initializeAgentSystem } from '@/stores/aiStore';
+import { hasCompoundExpander } from '@/agents/engine/adapters/tools/BackendToolExecutor';
 
 describe('initializeAgentSystem', () => {
   beforeAll(() => {
@@ -49,5 +50,12 @@ describe('initializeAgentSystem', () => {
 
     // Transition tools
     expect(toolNames).toContain('add_transition');
+  });
+
+  it('should register default backend compound expanders', () => {
+    expect(hasCompoundExpander('ripple_edit')).toBe(true);
+    expect(hasCompoundExpander('roll_edit')).toBe(true);
+    expect(hasCompoundExpander('slip_edit')).toBe(true);
+    expect(hasCompoundExpander('slide_edit')).toBe(true);
   });
 });

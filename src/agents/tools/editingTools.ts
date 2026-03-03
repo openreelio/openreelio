@@ -13,7 +13,14 @@ import { useProjectStore } from '@/stores/projectStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { probeMedia } from '@/utils/ffmpeg';
 import { refreshProjectState } from '@/utils/stateRefreshHelper';
-import type { Asset, Color, Sequence, Track } from '@/types';
+import {
+  buildRippleEditPlan,
+  buildRollEditPlan,
+  buildSlipEditPlan,
+  buildSlideEditPlan,
+  type PlannedCommandStep,
+} from './compoundEditPlanning';
+import type { Asset, Color, Sequence, Track, CommandResult } from '@/types';
 
 const logger = createLogger('EditingTools');
 const DEFAULT_INSERT_CLIP_DURATION_SEC = 10;
@@ -190,6 +197,79 @@ async function resolveAssetHasLinkedAudio(asset: Asset): Promise<boolean> {
     });
     return false;
   }
+}
+
+interface PlannedExecutionResult {
+  success: boolean;
+  results: CommandResult[];
+  error?: string;
+  rollbackSucceeded: boolean;
+}
+
+async function rollbackExecutedCommands(appliedCount: number): Promise<boolean> {
+  if (appliedCount === 0) {
+    return true;
+  }
+
+  const project = useProjectStore.getState() as {
+    undo?: () => Promise<{ success: boolean }>;
+  };
+
+  if (typeof project.undo !== 'function') {
+    logger.warn('Compound tool rollback skipped: undo API unavailable', { appliedCount });
+    return false;
+  }
+
+  for (let index = 0; index < appliedCount; index += 1) {
+    try {
+      const undoResult = await project.undo();
+      if (!undoResult.success) {
+        logger.error('Compound tool rollback failed: undo returned unsuccessful result', {
+          step: index + 1,
+          appliedCount,
+        });
+        return false;
+      }
+    } catch (undoError) {
+      logger.error('Compound tool rollback failed: undo threw error', {
+        step: index + 1,
+        appliedCount,
+        error: undoError instanceof Error ? undoError.message : String(undoError),
+      });
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function executePlannedCommands(
+  steps: PlannedCommandStep[],
+): Promise<PlannedExecutionResult> {
+  const results: CommandResult[] = [];
+  let appliedCount = 0;
+
+  for (const step of steps) {
+    try {
+      const commandResult = await executeAgentCommand(step.commandType, step.payload);
+      results.push(commandResult);
+      appliedCount += 1;
+    } catch (error) {
+      const rollbackSucceeded = await rollbackExecutedCommands(appliedCount);
+      return {
+        success: false,
+        results,
+        error: error instanceof Error ? error.message : String(error),
+        rollbackSucceeded,
+      };
+    }
+  }
+
+  return {
+    success: true,
+    results,
+    rollbackSucceeded: true,
+  };
 }
 
 // =============================================================================
@@ -932,7 +1012,7 @@ const EDITING_TOOLS: ToolDefinition[] = [
           return {
             success: false,
             error:
-              'Reverse playback is not yet supported by the backend clip model. ' +
+              'Reverse playback is not yet supported by the playback/render pipeline. ' +
               'Set reverse=false and retry.',
           };
         }
@@ -942,6 +1022,7 @@ const EDITING_TOOLS: ToolDefinition[] = [
           trackId: args.trackId as string,
           clipId: args.clipId as string,
           speed,
+          reverse,
         });
         logger.debug('change_clip_speed executed', { opId: result.opId });
         return { success: true, result };
@@ -1204,67 +1285,30 @@ const EDITING_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const sequenceId = args.sequenceId as string;
-        const trackId = args.trackId as string;
-        const clipId = args.clipId as string;
-        const trimEnd = args.trimEnd as number;
-
-        // 1. Get current timeline state to find the clip and subsequent clips
-        const snapshot = getTimelineSnapshot();
-        if (!snapshot) {
-          return { success: false, error: 'Cannot access timeline state' };
-        }
-
-        const trackClips = snapshot.clips.filter((c) => c.trackId === trackId);
-        const targetClip = trackClips.find((c) => c.id === clipId);
-        if (!targetClip) {
-          return { success: false, error: `Clip ${clipId} not found on track ${trackId}` };
-        }
-
-        const currentEnd = targetClip.timelineIn + targetClip.duration;
-        // Compute delta in timeline-time, accounting for clip speed
-        const speed = (targetClip as unknown as Record<string, unknown>).speed as number;
-        const effectiveSpeed = speed && speed > 0 ? speed : 1;
-        const sourceDelta = trimEnd - targetClip.sourceOut;
-        const delta = sourceDelta / effectiveSpeed;
-
-        // 2. Trim the target clip
-        const trimResult = await executeAgentCommand('TrimClip', {
-          sequenceId,
-          trackId,
-          clipId,
-          newSourceOut: trimEnd,
-        });
-
-        // 3. Shift all subsequent clips on the same track
-        const subsequentClips = trackClips
-          .filter((c) => c.timelineIn >= currentEnd)
-          .sort((a, b) => a.timelineIn - b.timelineIn);
-
-        const moveResults = [];
-        for (const clip of subsequentClips) {
-          const moveResult = await executeAgentCommand('MoveClip', {
-            sequenceId,
-            trackId,
-            clipId: clip.id,
-            newTimelineIn: clip.timelineIn + delta,
-          });
-          moveResults.push(moveResult);
+        const plan = buildRippleEditPlan(args as Record<string, unknown>);
+        const execution = await executePlannedCommands(plan.steps);
+        if (!execution.success) {
+          return {
+            success: false,
+            error: execution.rollbackSucceeded
+              ? (execution.error ?? 'ripple_edit failed')
+              : `${execution.error ?? 'ripple_edit failed'} (automatic rollback did not complete)`,
+          };
         }
 
         logger.debug('ripple_edit executed', {
-          opId: trimResult.opId,
-          delta,
-          movedClips: subsequentClips.length,
+          delta: plan.timelineDelta,
+          movedClips: plan.movedClipIds.length,
         });
 
         return {
           success: true,
           result: {
-            trimResult,
-            delta,
-            movedClips: subsequentClips.length,
-            description: `Ripple edit: trimmed clip and shifted ${subsequentClips.length} clips by ${delta}s`,
+            delta: plan.timelineDelta,
+            movedClips: plan.movedClipIds.length,
+            movedClipIds: plan.movedClipIds,
+            stepsApplied: execution.results.length,
+            description: `Ripple edit: shifted ${plan.movedClipIds.length} clips by ${plan.timelineDelta}s`,
           },
         };
       } catch (error) {
@@ -1300,54 +1344,24 @@ const EDITING_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const sequenceId = args.sequenceId as string;
-        const trackId = args.trackId as string;
-        const leftClipId = args.leftClipId as string;
-        const rightClipId = args.rightClipId as string;
-        const rollAmount = args.rollAmount as number;
-
-        // Get current state to read clip positions
-        const snapshot = getTimelineSnapshot();
-        if (!snapshot) {
-          return { success: false, error: 'Cannot access timeline state' };
+        const plan = buildRollEditPlan(args as Record<string, unknown>);
+        const execution = await executePlannedCommands(plan.steps);
+        if (!execution.success) {
+          return {
+            success: false,
+            error: execution.rollbackSucceeded
+              ? (execution.error ?? 'roll_edit failed')
+              : `${execution.error ?? 'roll_edit failed'} (automatic rollback did not complete)`,
+          };
         }
 
-        const trackClips = snapshot.clips.filter((c) => c.trackId === trackId);
-        const leftClip = trackClips.find((c) => c.id === leftClipId);
-        const rightClip = trackClips.find((c) => c.id === rightClipId);
-
-        if (!leftClip) {
-          return { success: false, error: `Left clip ${leftClipId} not found` };
-        }
-        if (!rightClip) {
-          return { success: false, error: `Right clip ${rightClipId} not found` };
-        }
-
-        // 1. Trim left clip: extend its source out by rollAmount
-        const leftResult = await executeAgentCommand('TrimClip', {
-          sequenceId,
-          trackId,
-          clipId: leftClipId,
-          newSourceOut: leftClip.sourceOut + rollAmount,
-        });
-
-        // 2. Trim right clip: shrink its source in and shift timeline position
-        const rightResult = await executeAgentCommand('TrimClip', {
-          sequenceId,
-          trackId,
-          clipId: rightClipId,
-          newSourceIn: rightClip.sourceIn + rollAmount,
-          newTimelineIn: rightClip.timelineIn + rollAmount,
-        });
-
-        logger.debug('roll_edit executed', { rollAmount });
+        logger.debug('roll_edit executed', { rollAmount: plan.rollAmount });
         return {
           success: true,
           result: {
-            leftResult,
-            rightResult,
-            rollAmount,
-            description: `Roll edit: shifted cut point by ${rollAmount}s`,
+            rollAmount: plan.rollAmount,
+            stepsApplied: execution.results.length,
+            description: `Roll edit: shifted cut point by ${plan.rollAmount}s`,
           },
         };
       } catch (error) {
@@ -1383,45 +1397,24 @@ const EDITING_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const sequenceId = args.sequenceId as string;
-        const trackId = args.trackId as string;
-        const clipId = args.clipId as string;
-        const offsetSeconds = args.offsetSeconds as number;
-
-        // Get current clip state
-        const snapshot = getTimelineSnapshot();
-        if (!snapshot) {
-          return { success: false, error: 'Cannot access timeline state' };
+        const plan = buildSlipEditPlan(args as Record<string, unknown>);
+        const execution = await executePlannedCommands(plan.steps);
+        if (!execution.success) {
+          return {
+            success: false,
+            error: execution.rollbackSucceeded
+              ? (execution.error ?? 'slip_edit failed')
+              : `${execution.error ?? 'slip_edit failed'} (automatic rollback did not complete)`,
+          };
         }
 
-        const clip = snapshot.clips.find((c) => c.id === clipId && c.trackId === trackId);
-        if (!clip) {
-          return { success: false, error: `Clip ${clipId} not found on track ${trackId}` };
-        }
-
-        // Adjust source in/out by the offset while keeping timeline position unchanged
-        const newSourceIn = clip.sourceIn + offsetSeconds;
-        const newSourceOut = clip.sourceOut + offsetSeconds;
-
-        if (newSourceIn < 0) {
-          return { success: false, error: 'Slip would move source in below 0' };
-        }
-
-        const result = await executeAgentCommand('TrimClip', {
-          sequenceId,
-          trackId,
-          clipId,
-          newSourceIn,
-          newSourceOut,
-        });
-
-        logger.debug('slip_edit executed', { offsetSeconds });
+        logger.debug('slip_edit executed', { offsetSeconds: plan.offsetSeconds });
         return {
           success: true,
           result: {
-            ...result,
-            offsetSeconds,
-            description: `Slip edit: shifted source by ${offsetSeconds}s`,
+            offsetSeconds: plan.offsetSeconds,
+            stepsApplied: execution.results.length,
+            description: `Slip edit: shifted source by ${plan.offsetSeconds}s`,
           },
         };
       } catch (error) {
@@ -1456,68 +1449,26 @@ const EDITING_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
-        const sequenceId = args.sequenceId as string;
-        const trackId = args.trackId as string;
-        const clipId = args.clipId as string;
-        const slideAmount = args.slideAmount as number;
-
-        // Get current timeline state
-        const snapshot = getTimelineSnapshot();
-        if (!snapshot) {
-          return { success: false, error: 'Cannot access timeline state' };
+        const plan = buildSlideEditPlan(args as Record<string, unknown>);
+        const execution = await executePlannedCommands(plan.steps);
+        if (!execution.success) {
+          return {
+            success: false,
+            error: execution.rollbackSucceeded
+              ? (execution.error ?? 'slide_edit failed')
+              : `${execution.error ?? 'slide_edit failed'} (automatic rollback did not complete)`,
+          };
         }
 
-        const trackClips = snapshot.clips
-          .filter((c) => c.trackId === trackId)
-          .sort((a, b) => a.timelineIn - b.timelineIn);
-        const clipIndex = trackClips.findIndex((c) => c.id === clipId);
-
-        if (clipIndex === -1) {
-          return { success: false, error: `Clip ${clipId} not found on track ${trackId}` };
-        }
-
-        const targetClip = trackClips[clipIndex];
-        const prevClip = clipIndex > 0 ? trackClips[clipIndex - 1] : null;
-        const nextClip = clipIndex < trackClips.length - 1 ? trackClips[clipIndex + 1] : null;
-
-        // 1. Move the clip
-        const moveResult = await executeAgentCommand('MoveClip', {
-          sequenceId,
-          trackId,
-          clipId,
-          newTimelineIn: targetClip.timelineIn + slideAmount,
-        });
-
-        // 2. Extend previous clip's end to fill the gap
-        if (prevClip) {
-          await executeAgentCommand('TrimClip', {
-            sequenceId,
-            trackId,
-            clipId: prevClip.id,
-            newSourceOut: prevClip.sourceOut + slideAmount,
-          });
-        }
-
-        // 3. Trim next clip's start to accommodate the slid clip
-        if (nextClip) {
-          await executeAgentCommand('TrimClip', {
-            sequenceId,
-            trackId,
-            clipId: nextClip.id,
-            newSourceIn: nextClip.sourceIn + slideAmount,
-            newTimelineIn: nextClip.timelineIn + slideAmount,
-          });
-        }
-
-        logger.debug('slide_edit executed', { slideAmount });
+        logger.debug('slide_edit executed', { slideAmount: plan.slideAmount });
         return {
           success: true,
           result: {
-            ...moveResult,
-            slideAmount,
-            adjustedPrev: prevClip?.id ?? null,
-            adjustedNext: nextClip?.id ?? null,
-            description: `Slide edit: moved clip by ${slideAmount}s and adjusted neighbors`,
+            slideAmount: plan.slideAmount,
+            adjustedPrev: plan.adjustedPrevClipId,
+            adjustedNext: plan.adjustedNextClipId,
+            stepsApplied: execution.results.length,
+            description: `Slide edit: moved clip by ${plan.slideAmount}s and adjusted neighbors`,
           },
         };
       } catch (error) {

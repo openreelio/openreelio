@@ -6,7 +6,7 @@
  */
 
 import { useMemo, useRef } from 'react';
-import type { Sequence, Asset, Clip, Track } from '@/types';
+import { isTextClip, type Sequence, type Asset, type Clip, type Track } from '@/types';
 import { isClipActiveAtTime } from '@/utils/clipTiming';
 import { isCaptionLikeClip } from '@/utils/captionClip';
 
@@ -150,6 +150,15 @@ function getCanvasFallbackReason({ clip, track, asset }: ActiveClipInfo): string
     return null;
   }
 
+  // Text clips (virtual assets) are rendered as HTML overlays in video mode.
+  // Keep blend mode guard because proxy text overlays do not support blend compositing.
+  if (isTextClip(clip.assetId)) {
+    if (track.blendMode !== 'normal') {
+      return 'Track blend mode requires canvas compositing';
+    }
+    return null;
+  }
+
   if (track.kind !== 'video') {
     return 'Overlay/caption compositing requires canvas mode';
   }
@@ -268,6 +277,23 @@ export function usePreviewMode({
     );
 
     if (videoClips.length === 0) {
+      const hasRenderableTextOverlay = activeClips.some(
+        ({ clip, track }) =>
+          isTextClip(clip.assetId) && track.kind !== 'audio' && track.blendMode === 'normal',
+      );
+
+      if (hasRenderableTextOverlay) {
+        const result: PreviewModeResult = {
+          mode: 'video',
+          reason: 'Text overlays can render in video mode',
+          hasGeneratingProxy: false,
+          clipsNeedingProxy: 0,
+        };
+        previousResultRef.current = result;
+        previousTimeRef.current = currentTime;
+        return result;
+      }
+
       const result: PreviewModeResult = {
         mode: 'canvas',
         reason: 'No video clips (images use canvas)',

@@ -579,6 +579,9 @@ fn build_text_clip_filter(
             .filter(|e| e.effect_type == EffectType::TextOverlay && e.enabled)
     })?;
 
+    let mut resolved_text_effect = text_effect.clone();
+    apply_text_transform_overrides(&mut resolved_text_effect, clip);
+
     // Calculate clip duration
     let duration = clip.range.source_out_sec - clip.range.source_in_sec;
 
@@ -592,9 +595,45 @@ fn build_text_clip_filter(
     ];
 
     // Build drawtext filter from text effect parameters
-    let drawtext_filter = text_effect.to_filter_body();
+    let drawtext_filter = resolved_text_effect.to_filter_body();
 
     Some((input_args, drawtext_filter))
+}
+
+fn apply_text_transform_overrides(effect: &mut Effect, clip: &Clip) {
+    let x = if clip.transform.position.x.is_finite() {
+        clip.transform.position.x.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+
+    let y = if clip.transform.position.y.is_finite() {
+        clip.transform.position.y.clamp(0.0, 1.0)
+    } else {
+        0.5
+    };
+
+    let rotation = if clip.transform.rotation_deg.is_finite() {
+        clip.transform.rotation_deg
+    } else {
+        0.0
+    };
+
+    effect.set_param("x", ParamValue::Float(x));
+    effect.set_param("y", ParamValue::Float(y));
+    effect.set_param("rotation", ParamValue::Float(rotation));
+
+    if let Some(font_size) = effect.get_float("font_size") {
+        let raw_scale = (clip.transform.scale.x.abs() + clip.transform.scale.y.abs()) / 2.0;
+        let normalized_scale = if raw_scale.is_finite() {
+            raw_scale.clamp(0.01, 100.0)
+        } else {
+            1.0
+        };
+
+        let scaled_font_size = (font_size * normalized_scale).clamp(1.0, 500.0);
+        effect.set_param("font_size", ParamValue::Float(scaled_font_size));
+    }
 }
 
 fn get_json_field<'a>(object: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a Value> {

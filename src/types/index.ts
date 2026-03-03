@@ -405,6 +405,7 @@ export interface Clip {
   transform: Transform;
   opacity: number;
   speed: number;
+  reverse?: boolean;
   effects: EffectId[];
   audio: AudioSettings;
   label?: string;

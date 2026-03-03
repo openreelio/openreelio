@@ -23,7 +23,11 @@ import {
   InspectorErrorBoundary,
   AIErrorBoundary,
 } from '@/components/shared';
-import { Inspector, type SelectedCaption } from '@/components/features/inspector';
+import {
+  Inspector,
+  type SelectedCaption,
+  type SelectedTextClip,
+} from '@/components/features/inspector';
 import { ProjectExplorer } from '@/components/explorer';
 import { UnifiedPreviewPlayer } from '@/components/preview';
 import { Timeline } from '@/components/timeline';
@@ -33,18 +37,21 @@ import { useTimelineActions } from '@/hooks/useTimelineActions';
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts';
 import { useAudioPlayback } from '@/hooks/useAudioPlayback';
 import { useTextClip } from '@/hooks/useTextClip';
+import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 import { useAudioMixer } from '@/hooks/useAudioMixer';
 import { useMulticamSession } from '@/hooks/useMulticamSession';
 import { useResponsiveSidebarState } from './hooks/useResponsiveSidebarState';
 import { dbToLinear, linearToDb } from '@/utils/audioMeter';
+import { extractTextDataFromClipWithMap } from '@/utils/textRenderer';
 import { createLogger } from '@/services/logger';
 import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { Terminal, Sliders, Sparkles } from 'lucide-react';
-import type { Sequence, CaptionPosition } from '@/types';
+import type { Sequence, CaptionPosition, ClipId, TextClipData } from '@/types';
 import type { AddTextPayload } from '@/components/features/text';
 import type { ChannelLevels } from '@/components/features/mixer';
 import type { MulticamGroup } from '@/utils/multicam';
+import { isTextClip } from '@/types';
 
 const logger = createLogger('EditorView');
 const AI_AUTO_COLLAPSE_BREAKPOINT = 1440;
@@ -304,7 +311,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   } = useTimelineActions({ sequence });
 
   // Text clip operations
-  const { addTextClip } = useTextClip();
+  const { addTextClip, updateTextClip } = useTextClip();
+  const textClipDataById = useSequenceTextClipData(sequence);
 
   // Split at playhead handler for keyboard shortcut
   const handleSplitAtPlayhead = useCallback(() => {
@@ -390,6 +398,75 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     }
     return undefined;
   }, [sequence, selectedClipIds]);
+
+  const selectedTextClip: SelectedTextClip | undefined = useMemo(() => {
+    if (!sequence || selectedClipIds.length !== 1) {
+      return undefined;
+    }
+
+    const clipId = selectedClipIds[0];
+    for (const track of sequence.tracks) {
+      const clip = track.clips.find((candidate) => candidate.id === clipId);
+      if (!clip) {
+        continue;
+      }
+
+      if (!isTextClip(clip.assetId)) {
+        return undefined;
+      }
+
+      const textData = extractTextDataFromClipWithMap(clip, textClipDataById);
+      if (!textData) {
+        return undefined;
+      }
+
+      const safeSpeed = clip.speed > 0 ? clip.speed : 1;
+      const duration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
+
+      return {
+        id: clip.id,
+        textData,
+        timelineInSec: clip.place.timelineInSec,
+        durationSec: duration,
+      };
+    }
+
+    return undefined;
+  }, [sequence, selectedClipIds, textClipDataById]);
+
+  const onTextDataChange = useCallback(
+    (clipId: ClipId, textData: TextClipData): void => {
+      if (!sequence) {
+        return;
+      }
+
+      let trackId: string | undefined;
+      for (const track of sequence.tracks) {
+        if (track.clips.some((clip) => clip.id === clipId)) {
+          trackId = track.id;
+          break;
+        }
+      }
+
+      if (!trackId) {
+        return;
+      }
+
+      void updateTextClip({
+        trackId,
+        clipId,
+        textData,
+      }).catch((error) => {
+        logger.error('Failed to update text clip from inspector', {
+          error,
+          sequenceId: sequence.id,
+          trackId,
+          clipId,
+        });
+      });
+    },
+    [sequence, updateTextClip],
+  );
 
   // Handle caption updates
   const onCaptionChange = useCallback(
@@ -604,7 +681,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
               >
                 <Inspector
                   selectedAsset={inspectorAsset}
+                  selectedTextClip={selectedTextClip}
                   selectedCaption={selectedCaption}
+                  onTextDataChange={onTextDataChange}
                   onCaptionChange={onCaptionChange}
                 />
               </InspectorErrorBoundary>

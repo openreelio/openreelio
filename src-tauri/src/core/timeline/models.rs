@@ -550,6 +550,9 @@ pub struct Clip {
     pub opacity: f32,
     /// Playback speed (1.0 = normal)
     pub speed: f32,
+    /// Playback direction (true = reverse)
+    #[serde(default)]
+    pub reverse: bool,
     pub effects: Vec<EffectId>,
     pub audio: AudioSettings,
     /// Optional label for organization
@@ -577,6 +580,7 @@ impl Clip {
             transform: Transform::default(),
             opacity: 1.0,
             speed: 1.0,
+            reverse: false,
             effects: vec![],
             audio: AudioSettings::default(),
             label: None,
@@ -617,6 +621,7 @@ impl Clip {
             transform: Transform::default(),
             opacity: 1.0,
             speed: 1.0,
+            reverse: false,
             effects: vec![],
             audio: AudioSettings::default(),
             label: None,

@@ -711,6 +711,7 @@ mod tauri_app {
                 $crate::ipc::save_project,
                 $crate::ipc::get_project_info,
                 $crate::ipc::get_project_state,
+                $crate::ipc::get_sequence_text_clip_data,
                 // Asset commands
                 $crate::ipc::import_asset,
                 $crate::ipc::get_assets,
@@ -1044,6 +1045,7 @@ mod tauri_app {
             ipc::save_project,
             ipc::get_project_info,
             ipc::get_project_state,
+            ipc::get_sequence_text_clip_data,
             // Asset commands
             ipc::import_asset,
             ipc::get_assets,
