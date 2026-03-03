@@ -23,7 +23,7 @@ use crate::core::{
     project::ProjectState,
     text::TextClipData,
     timeline::{Clip, ClipPlace, ClipRange, TrackKind},
-    ClipId, CoreError, CoreResult, EffectId, SequenceId, TimeSec, TrackId,
+    ClipId, CoreError, CoreResult, EffectId, Point2D, SequenceId, TimeSec, TrackId,
 };
 
 /// Virtual asset prefix for text clips.
@@ -207,9 +207,15 @@ impl Command for AddTextClipCommand {
             asset_id,
             range: ClipRange::new(0.0, self.duration),
             place: candidate_place,
-            transform: crate::core::timeline::Transform::default(),
+            transform: crate::core::timeline::Transform {
+                position: Point2D::new(self.text_data.position.x, self.text_data.position.y),
+                scale: Point2D::new(1.0, 1.0),
+                rotation_deg: self.text_data.rotation,
+                anchor: Point2D::center(),
+            },
             opacity: self.text_data.opacity as f32,
             speed: 1.0,
+            reverse: false,
             effects: vec![], // Will add effect below
             audio: crate::core::timeline::AudioSettings::default(),
             label: Some(format!(
@@ -492,12 +498,15 @@ impl Command for UpdateTextCommand {
             set_text_params_on_effect(effect, &self.text_data);
         }
 
-        // 7. Update clip opacity and label
+        // 7. Update clip opacity, label, and transform anchors used by preview interactions
         clip.opacity = self.text_data.opacity as f32;
         clip.label = Some(format!(
             "Text: {}",
             truncate_text(&self.text_data.content, 20)
         ));
+        clip.transform.position =
+            Point2D::new(self.text_data.position.x, self.text_data.position.y);
+        clip.transform.rotation_deg = self.text_data.rotation;
 
         let op_id = ulid::Ulid::new().to_string();
         Ok(CommandResult::new(&op_id).with_change(StateChange::EffectUpdated { effect_id }))
@@ -517,7 +526,7 @@ impl Command for UpdateTextCommand {
             set_text_params_on_effect(effect, previous_data);
         }
 
-        // Restore clip opacity and label
+        // Restore clip opacity, label, and transform anchors used by preview interactions
         if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
             if let Some(track) = sequence.get_track_mut(&self.track_id) {
                 if let Some(clip) = track.get_clip_mut(&self.clip_id) {
@@ -526,6 +535,9 @@ impl Command for UpdateTextCommand {
                         "Text: {}",
                         truncate_text(&previous_data.content, 20)
                     ));
+                    clip.transform.position =
+                        Point2D::new(previous_data.position.x, previous_data.position.y);
+                    clip.transform.rotation_deg = previous_data.rotation;
                 }
             }
         }
