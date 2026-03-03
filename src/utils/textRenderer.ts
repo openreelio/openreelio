@@ -14,20 +14,31 @@ import { isTextClip } from '@/types';
 /**
  * Extracts TextClipData from a text clip.
  *
- * Note: Currently, clip.effects contains EffectId[] (strings), not full Effect objects.
- * The full effect data would need to be looked up from a central effect store.
- * For now, we use the clip label as the text content with default styling.
- *
- * In the future, this should be updated to:
- * 1. Look up the TextOverlay effect by ID from the sequence's effect store
- * 2. Extract the full TextClipData from the effect params
+ * clip.effects contains EffectId[] (strings), not full Effect objects.
+ * When available, callers can provide resolved text payloads via textDataByClipId.
+ * Without resolved payloads, this falls back to clip label + default style.
  *
  * Returns undefined if not a text clip.
  */
 export function extractTextDataFromClip(clip: Clip): TextClipData | undefined {
+  return extractTextDataFromClipWithMap(clip);
+}
+
+/**
+ * Extracts TextClipData from a text clip with optional resolved text map.
+ */
+export function extractTextDataFromClipWithMap(
+  clip: Clip,
+  textDataByClipId?: ReadonlyMap<string, TextClipData>,
+): TextClipData | undefined {
   // Check if this is a text clip
   if (!isTextClip(clip.assetId)) {
     return undefined;
+  }
+
+  const resolvedTextData = textDataByClipId?.get(clip.id);
+  if (resolvedTextData) {
+    return resolvedTextData;
   }
 
   // Extract text content from label
@@ -39,8 +50,7 @@ export function extractTextDataFromClip(clip: Clip): TextClipData | undefined {
     textContent = textContent.substring(6);
   }
 
-  // Create TextClipData with the extracted content and default styling
-  // TODO: Look up full effect params once effect store is available
+  // Create TextClipData with extracted content and default styling fallback.
   return createBasicTextData(textContent);
 }
 
@@ -80,7 +90,7 @@ export function renderTextToCanvas(
   textData: TextClipData,
   canvasWidth: number,
   canvasHeight: number,
-  clipOpacity: number = 1.0
+  clipOpacity: number = 1.0,
 ): void {
   const { content, style, position, shadow, outline, rotation, opacity } = textData;
 
@@ -167,7 +177,7 @@ function drawTextBackground(
   textY: number,
   _scaledFontSize: number, // Reserved for future use (e.g., padding calculations)
   lineHeight: number,
-  style: TextStyle
+  style: TextStyle,
 ): void {
   if (!style.backgroundColor) return;
 
@@ -196,12 +206,7 @@ function drawTextBackground(
   }
 
   ctx.fillStyle = style.backgroundColor;
-  ctx.fillRect(
-    bgX,
-    startY - padding,
-    maxWidth + padding * 2,
-    totalHeight + padding * 2
-  );
+  ctx.fillRect(bgX, startY - padding, maxWidth + padding * 2, totalHeight + padding * 2);
 }
 
 /**
@@ -214,7 +219,7 @@ function drawTextLines(
   textY: number,
   lineHeight: number,
   letterSpacing: number,
-  isStroke: boolean
+  isStroke: boolean,
 ): void {
   const totalHeight = lines.length * lineHeight;
   let currentY = textY - totalHeight / 2 + lineHeight / 2;
@@ -244,7 +249,7 @@ function drawTextWithLetterSpacing(
   x: number,
   y: number,
   letterSpacing: number,
-  isStroke: boolean
+  isStroke: boolean,
 ): void {
   const chars = text.split('');
   let currentX = x;
@@ -286,7 +291,7 @@ function drawUnderlines(
   textY: number,
   scaledFontSize: number,
   lineHeight: number,
-  style: TextStyle
+  style: TextStyle,
 ): void {
   const totalHeight = lines.length * lineHeight;
   let currentY = textY - totalHeight / 2 + lineHeight / 2 + scaledFontSize * 0.15;
