@@ -349,6 +349,9 @@ export function unregisterWorkspaceTools(): void {
   logger.info('Workspace tools unregistered', { count: WORKSPACE_TOOLS.length });
 }
 
-export function getWorkspaceToolNames(): string[] {
-  return WORKSPACE_TOOLS.map((tool) => tool.name);
+/** Pre-computed workspace tool names (static after module load). */
+const WORKSPACE_TOOL_NAMES: readonly string[] = WORKSPACE_TOOLS.map((tool) => tool.name);
+
+export function getWorkspaceToolNames(): readonly string[] {
+  return WORKSPACE_TOOL_NAMES;
 }

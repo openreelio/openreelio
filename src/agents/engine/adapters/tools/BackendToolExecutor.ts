@@ -28,6 +28,9 @@ import { createFailureResult } from '../../ports/IToolExecutor';
 import type { RiskLevel, ValidationResult } from '../../core/types';
 import type { AgentPlan, AgentPlanResult } from '@/bindings';
 import { createLogger } from '@/services/logger';
+import { isMetaToolsEnabled } from '@/config/featureFlags';
+import { getMetaToolNames } from '@/agents/tools/metaTools';
+import { getWorkspaceToolNames } from '@/agents/tools/workspaceTools';
 
 const logger = createLogger('BackendToolExecutor');
 
@@ -459,9 +462,21 @@ export class BackendToolExecutor implements IToolExecutor {
   // Delegate all metadata methods to the frontend executor
 
   getAvailableTools(category?: string): ToolInfo[] {
-    return this.frontendExecutor.getAvailableTools(category);
+    const allTools = this.frontendExecutor.getAvailableTools(category);
+
+    // When meta-tools are enabled, expose only meta-tools + workspace tools to the LLM.
+    // Individual tools remain registered for dispatch but are hidden from the LLM context.
+    if (isMetaToolsEnabled()) {
+      const visibleNames = new Set([...getMetaToolNames(), ...getWorkspaceToolNames()]);
+      return allTools.filter((tool) => visibleNames.has(tool.name));
+    }
+
+    return allTools;
   }
 
+  // Note: getToolDefinition and hasTool intentionally bypass the meta-tool
+  // visibility filter. The LLM only sees meta-tools via getAvailableTools(), but
+  // individual tools must remain accessible for dispatch (meta-tools forward to them).
   getToolDefinition(name: string): ToolDefinition | null {
     return this.frontendExecutor.getToolDefinition(name);
   }

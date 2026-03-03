@@ -25,6 +25,12 @@ import type {
 } from '../../ports/IToolExecutor';
 import type { RiskLevel, ValidationResult } from '../../core/types';
 
+// Disable meta-tool filtering in unit tests (mock tools don't match meta-tool names)
+vi.mock('@/config/featureFlags', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('@/config/featureFlags')>();
+  return { ...orig, isMetaToolsEnabled: () => false };
+});
+
 // =============================================================================
 // Types
 // =============================================================================

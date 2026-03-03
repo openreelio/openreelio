@@ -63,6 +63,15 @@ export interface FeatureFlags {
    * @default false
    */
   USE_BACKEND_TOOLS: boolean;
+
+  /**
+   * Enable consolidated meta-tools (6 tools) instead of individual tools (56+)
+   * When true, registers 6 high-level meta-tools (query, edit, audio, effects, text,
+   * execute_plan) that dispatch to underlying individual tools. This reduces LLM
+   * context overhead from ~15K tokens to ~2K tokens and improves agent accuracy.
+   * @default true
+   */
+  USE_META_TOOLS: boolean;
 }
 
 /**
@@ -90,6 +99,7 @@ const DEFAULT_FLAGS: FeatureFlags = {
   USE_VIDEO_GENERATION: false,
   USE_AGENT_LOOP: false,
   USE_BACKEND_TOOLS: true,
+  USE_META_TOOLS: true,
 };
 
 /**
@@ -100,6 +110,7 @@ export const FEATURE_FLAG_KEYS: readonly FeatureFlagKey[] = [
   'USE_VIDEO_GENERATION',
   'USE_AGENT_LOOP',
   'USE_BACKEND_TOOLS',
+  'USE_META_TOOLS',
 ] as const;
 
 // =============================================================================
@@ -354,6 +365,14 @@ export function isAgentLoopEnabled(): boolean {
  */
 export function isBackendToolsEnabled(): boolean {
   return getFeatureFlag('USE_BACKEND_TOOLS');
+}
+
+/**
+ * Check if meta-tools (consolidated 6-tool set) are enabled.
+ * When true, registers 6 meta-tools instead of 56+ individual tools.
+ */
+export function isMetaToolsEnabled(): boolean {
+  return getFeatureFlag('USE_META_TOOLS');
 }
 
 // =============================================================================
