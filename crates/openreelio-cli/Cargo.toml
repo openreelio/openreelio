@@ -1,0 +1,33 @@
+[package]
+name = "openreelio-cli"
+version = "0.1.0"
+description = "CLI for OpenReelio — headless AI agent-driven video editing"
+authors = ["OpenReelio Team"]
+license = "MIT"
+edition = "2021"
+rust-version = "1.85"
+
+[[bin]]
+name = "openreelio-cli"
+path = "src/main.rs"
+
+[dependencies]
+openreelio-core = { path = "../openreelio-core" }
+
+# CLI framework
+clap = { version = "4", features = ["derive"] }
+
+# Output formatting
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1"
