@@ -5,7 +5,7 @@
 //! emitting events via Tauri for progress updates.
 
 use std::collections::BinaryHeap;
-#[cfg(all(not(test), feature = "gui"))]
+#[cfg(feature = "gui")]
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 
 #[cfg(any(test, feature = "gui"))]
 use crate::core::jobs::JobType;
-#[cfg(all(not(test), feature = "gui"))]
+#[cfg(feature = "gui")]
 use crate::core::{
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
     fs::{validate_local_input_path_async, validate_path_id_component},
