@@ -85,7 +85,6 @@ pub async fn execute(action: StateAction) -> anyhow::Result<()> {
                             "name": seq.name,
                             "trackCount": seq.tracks.len(),
                             "clipCount": clip_count,
-                            "trackCount": seq.tracks.len(),
                         })
                     })
                     .collect();

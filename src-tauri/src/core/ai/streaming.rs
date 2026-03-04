@@ -242,7 +242,7 @@ fn normalized_tool_schema(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
-#[cfg(feature = "ai-providers")]
+#[cfg(all(feature = "ai-providers", feature = "gui"))]
 fn flush_pending_tool_calls(
     app: &tauri::AppHandle,
     event_name: &str,

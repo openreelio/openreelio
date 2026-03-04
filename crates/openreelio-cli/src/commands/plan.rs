@@ -4,6 +4,7 @@
 //! that are executed atomically. If any step fails, the entire plan
 //! is rolled back.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
@@ -78,7 +79,8 @@ pub async fn execute(action: PlanAction) -> anyhow::Result<()> {
             let mut results = Vec::new();
             let mut succeeded = 0;
 
-            for step in &plan.steps {
+            let sorted_steps = topological_sort(&plan.steps)?;
+            for step in sorted_steps {
                 // Build command from type + payload using the same pattern as IPC
                 match execute_step(&mut project, step) {
                     Ok(result) => {
@@ -98,13 +100,17 @@ pub async fn execute(action: PlanAction) -> anyhow::Result<()> {
                             "error": e.to_string(),
                         }));
                         // Rollback: undo all successful steps in reverse
+                        let mut rollback_failures = Vec::new();
                         for _ in 0..succeeded {
-                            let _ = project.executor.undo(&mut project.state);
+                            if let Err(undo_err) = project.executor.undo(&mut project.state) {
+                                rollback_failures.push(undo_err.to_string());
+                            }
                         }
                         return output::print_json(&serde_json::json!({
                             "status": "error",
                             "message": format!("Plan failed at step '{}': {}", step.id, e),
                             "rolledBack": succeeded,
+                            "rollbackFailures": rollback_failures,
                             "stepResults": results,
                         }));
                     }
@@ -129,7 +135,7 @@ pub async fn execute(action: PlanAction) -> anyhow::Result<()> {
             let _project = super::load_project(&path)?;
 
             // Validate step dependencies form a DAG
-            let step_ids: std::collections::HashSet<&str> =
+            let step_ids: HashSet<&str> =
                 plan.steps.iter().map(|s| s.id.as_str()).collect();
 
             let mut errors = Vec::new();
@@ -142,6 +148,11 @@ pub async fn execute(action: PlanAction) -> anyhow::Result<()> {
                         ));
                     }
                 }
+            }
+
+            // Cycle detection
+            if let Err(cycle_err) = topological_sort(&plan.steps) {
+                errors.push(cycle_err.to_string());
             }
 
             if errors.is_empty() {
@@ -254,4 +265,52 @@ fn execute_step(
         .executor
         .execute(cmd, &mut project.state)
         .map_err(|e| anyhow::anyhow!("Command '{}' failed: {}", step.command_type, e))
+}
+
+/// Sort plan steps in dependency order (Kahn's algorithm).
+/// Returns an error if the dependency graph contains a cycle.
+fn topological_sort(steps: &[PlanStep]) -> anyhow::Result<Vec<&PlanStep>> {
+    let step_map: HashMap<&str, &PlanStep> = steps.iter().map(|s| (s.id.as_str(), s)).collect();
+    let mut in_degree: HashMap<&str, usize> = steps.iter().map(|s| (s.id.as_str(), 0)).collect();
+    let mut dependents: HashMap<&str, Vec<&str>> = HashMap::new();
+
+    for step in steps {
+        for dep in &step.depends_on {
+            if let Some(deg) = in_degree.get_mut(dep.as_str()) {
+                let _ = deg; // dep exists
+            }
+            dependents.entry(dep.as_str()).or_default().push(&step.id);
+            if let Some(d) = in_degree.get_mut(step.id.as_str()) {
+                *d += 1;
+            }
+        }
+    }
+
+    let mut queue: VecDeque<&str> = in_degree
+        .iter()
+        .filter(|(_, &d)| d == 0)
+        .map(|(&id, _)| id)
+        .collect();
+    let mut sorted = Vec::new();
+
+    while let Some(id) = queue.pop_front() {
+        if let Some(&step) = step_map.get(id) {
+            sorted.push(step);
+        }
+        if let Some(deps) = dependents.get(id) {
+            for &dep_id in deps {
+                if let Some(deg) = in_degree.get_mut(dep_id) {
+                    *deg -= 1;
+                    if *deg == 0 {
+                        queue.push_back(dep_id);
+                    }
+                }
+            }
+        }
+    }
+
+    if sorted.len() != steps.len() {
+        return Err(anyhow::anyhow!("Cycle detected in plan step dependencies"));
+    }
+    Ok(sorted)
 }

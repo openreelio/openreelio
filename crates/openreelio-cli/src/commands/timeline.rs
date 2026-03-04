@@ -179,7 +179,7 @@ pub enum TimelineAction {
 
         /// Speed multiplier (e.g. 2.0 for 2x)
         #[arg(long)]
-        speed: f64,
+        speed: f32,
 
         /// Reverse playback
         #[arg(long, default_value = "false")]
@@ -445,7 +445,7 @@ pub async fn execute(action: TimelineAction) -> anyhow::Result<()> {
         TimelineAction::Speed { path, clip, track, speed, reverse, sequence } => {
             let mut project = super::load_project(&path)?;
             let seq_id = resolve_sequence_id(&project, sequence)?;
-            let cmd = SetClipSpeedCommand::new(&seq_id, &track, &clip, speed as f32, reverse);
+            let cmd = SetClipSpeedCommand::new(&seq_id, &track, &clip, speed, reverse);
             let result = project
                 .executor
                 .execute(Box::new(cmd), &mut project.state)

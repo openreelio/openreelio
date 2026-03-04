@@ -45,20 +45,19 @@ pub async fn execute(action: RenderAction) -> anyhow::Result<()> {
             }))
         }
 
-        RenderAction::Start { path, output: output_path, preset, sequence: _ } => {
+        RenderAction::Start { path, output: output_path, preset, sequence } => {
             let project = super::load_project(&path)?;
 
             // Render requires FFmpeg which is initialized at runtime.
             // For now, output the render command that would be executed.
-            let _seq_id = project
-                .state
-                .active_sequence_id
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("No active sequence to render"))?;
+            let seq_id = sequence
+                .or_else(|| project.state.active_sequence_id.clone())
+                .ok_or_else(|| anyhow::anyhow!("No sequence specified and no active sequence set"))?;
 
             output::print_json(&serde_json::json!({
                 "status": "pending",
                 "message": "Render job queued",
+                "sequenceId": seq_id,
                 "preset": preset,
                 "output": output_path.display().to_string(),
                 "note": "Full render pipeline requires FFmpeg runtime initialization. Use the GUI for interactive rendering.",

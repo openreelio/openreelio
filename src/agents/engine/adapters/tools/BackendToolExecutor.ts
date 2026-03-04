@@ -468,7 +468,13 @@ export class BackendToolExecutor implements IToolExecutor {
     // Individual tools remain registered for dispatch but are hidden from the LLM context.
     if (isMetaToolsEnabled()) {
       const visibleNames = new Set([...getMetaToolNames(), ...getWorkspaceToolNames()]);
-      return allTools.filter((tool) => visibleNames.has(tool.name));
+      const filtered = allTools.filter((tool) => visibleNames.has(tool.name));
+      // Fallback: if meta-tools are expected but none matched, return all tools
+      // to avoid silently hiding every tool from the LLM.
+      if (!category && filtered.length === 0 && allTools.length > 0) {
+        return allTools;
+      }
+      return filtered;
     }
 
     return allTools;

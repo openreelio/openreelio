@@ -318,6 +318,14 @@ const META_TOOLS: ToolDefinition[] = [
           }
         }
 
+        if (step.toolName === 'execute_plan') {
+          return {
+            success: false,
+            error: `Step '${step.id}': execute_plan cannot call itself`,
+            result: { completedSteps: results },
+          };
+        }
+
         const toolDef = globalToolRegistry.get(step.toolName);
         if (!toolDef) {
           return {

@@ -88,7 +88,13 @@ pub async fn execute(action: AssetAction) -> anyhow::Result<()> {
             }))
         }
 
-        AssetAction::List { path, format: _ } => {
+        AssetAction::List { path, format } => {
+            if !format.eq_ignore_ascii_case("json") {
+                return Err(anyhow::anyhow!(
+                    "Unsupported format '{}'. Only 'json' is currently supported.",
+                    format
+                ));
+            }
             let project = super::load_project(&path)?;
 
             let assets: Vec<serde_json::Value> = project
