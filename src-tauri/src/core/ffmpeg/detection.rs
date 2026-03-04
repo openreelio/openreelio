@@ -29,6 +29,7 @@ pub struct FFmpegInfo {
 ///
 /// In development mode, also checks the `src-tauri/binaries/` directory where binaries
 /// are downloaded during the build process.
+#[cfg(feature = "gui")]
 pub fn detect_bundled_ffmpeg(app_handle: &tauri::AppHandle) -> FFmpegResult<FFmpegInfo> {
     use tauri::Manager;
 

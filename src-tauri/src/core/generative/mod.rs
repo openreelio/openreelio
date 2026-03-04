@@ -15,6 +15,7 @@ pub mod video_input_validation;
 pub use audio::{MusicGenerationParams, MusicGenerationResult, TTSParams, TTSResult, Voice};
 pub use engine::{GenerationRequest, GenerationResult, GenerativeEngine, GenerativeEngineConfig};
 pub use image::{ImageGenerationParams, ImageGenerationResult, ImageStyle};
+#[cfg(feature = "ai-providers")]
 pub use provider_impls::SeedanceProvider;
 pub use providers::{GenerativeProvider, GenerativeProviderConfig, ProviderCapability};
 pub use video::{

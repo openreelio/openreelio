@@ -10,6 +10,7 @@
 //! Run `cargo run --manifest-path src-tauri/Cargo.toml --bin export_bindings` to regenerate `src/bindings.ts`.
 
 pub mod core;
+#[cfg(feature = "gui")]
 pub mod ipc;
 
 use std::path::{Path, PathBuf};
@@ -19,12 +20,13 @@ use std::path::{Path, PathBuf};
 // the Rust test harness from starting.
 //
 // Core business logic is tested without Tauri; the Tauri app entrypoint is compiled
-// only for non-test builds.
-#[cfg(not(test))]
+// only for non-test builds. The `gui` feature gates all Tauri-specific code so that
+// the library can be compiled without webview dependencies (e.g. for the CLI binary).
+#[cfg(all(not(test), feature = "gui"))]
 use std::sync::OnceLock;
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 use tauri::Manager;
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 use tokio::sync::Mutex;
 
 use crate::core::{
@@ -32,7 +34,7 @@ use crate::core::{
     project::{OpsLog, ProjectMeta, ProjectState, Snapshot},
 };
 
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 use crate::core::{
     ai::AIGateway,
     jobs::WorkerPool,
@@ -473,7 +475,7 @@ impl ActiveProject {
 }
 
 /// Application state shared across all commands
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 pub struct AppState {
     /// Currently active project (if any)
     pub project: Mutex<Option<ActiveProject>>,
@@ -505,7 +507,7 @@ pub struct AppState {
     pub playback_sync: Mutex<PlaybackSyncState>,
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 #[derive(Clone, Debug)]
 pub struct PlaybackSyncState {
     /// Current playhead position in seconds.
@@ -522,7 +524,7 @@ pub struct PlaybackSyncState {
     pub updated_at: String,
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 impl Default for PlaybackSyncState {
     fn default() -> Self {
         Self {
@@ -536,7 +538,7 @@ impl Default for PlaybackSyncState {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 impl AppState {
     /// Creates a new empty app state
     pub fn new() -> Self {
@@ -630,7 +632,7 @@ impl AppState {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 impl Default for AppState {
     fn default() -> Self {
         Self::new()
@@ -640,7 +642,7 @@ impl Default for AppState {
 // =============================================================================
 // Tauri Application Entry Point
 // =============================================================================
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 mod tauri_app {
     use super::*;
     use crate::core::ffmpeg::create_ffmpeg_state;
@@ -1185,7 +1187,7 @@ mod tauri_app {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 pub use tauri_app::run;
 
 // =============================================================================

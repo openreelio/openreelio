@@ -2,6 +2,10 @@
  * Agent Tools Index
  *
  * Exports all tool modules for the agent system.
+ *
+ * When USE_META_TOOLS is enabled, the 6 consolidated meta-tools are
+ * registered ON TOP of individual tools. The LLM sees only the meta-tools,
+ * and each meta-tool dispatches to the underlying individual tool handler.
  */
 
 import { registerEditingTools, unregisterEditingTools } from './editingTools';
@@ -13,7 +17,8 @@ import { registerTransitionTools, unregisterTransitionTools } from './transition
 import { registerGenerationTools, unregisterGenerationTools } from './generationTools';
 import { registerWorkspaceTools, unregisterWorkspaceTools } from './workspaceTools';
 import { registerMediaAnalysisTools, unregisterMediaAnalysisTools } from './mediaAnalysisTools';
-import { isVideoGenerationEnabled } from '@/config/featureFlags';
+import { registerMetaTools, unregisterMetaTools } from './metaTools';
+import { isVideoGenerationEnabled, isMetaToolsEnabled } from '@/config/featureFlags';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('AgentTools');
@@ -57,15 +62,26 @@ export {
   getMediaAnalysisToolNames,
 } from './mediaAnalysisTools';
 
+export { registerMetaTools, unregisterMetaTools, getMetaToolNames } from './metaTools';
+
 /** Track whether generation tools were registered (behind feature flag) */
 let generationToolsRegistered = false;
 
+/** Track whether meta-tools were registered */
+let metaToolsRegistered = false;
+
 /**
  * Register all agent tools with the global registry.
+ *
+ * Individual tools are always registered (they serve as the execution layer).
+ * When USE_META_TOOLS is enabled, the 6 meta-tools are additionally registered
+ * and the Planner will expose only the meta-tools to the LLM.
+ *
  * Each registration is isolated so a single module failure
  * does not prevent other tools from being available.
  */
 export function registerAllTools(): void {
+  // Always register individual tools (they're the execution backend for meta-tools)
   const registrations: Array<[string, () => void]> = [
     ['editing', registerEditingTools],
     ['analysis', registerAnalysisTools],
@@ -97,12 +113,37 @@ export function registerAllTools(): void {
       });
     }
   }
+
+  // Register meta-tools on top of individual tools
+  if (isMetaToolsEnabled()) {
+    try {
+      registerMetaTools();
+      metaToolsRegistered = true;
+      logger.info('Meta-tools enabled: LLM will see 6 consolidated tools');
+    } catch (error) {
+      logger.error('Failed to register meta-tools', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
 }
 
 /**
  * Unregister all agent tools from the global registry.
  */
 export function unregisterAllTools(): void {
+  // Unregister meta-tools first (they depend on individual tools)
+  if (metaToolsRegistered) {
+    try {
+      unregisterMetaTools();
+      metaToolsRegistered = false;
+    } catch (error) {
+      logger.error('Failed to unregister meta-tools', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   const unregistrations: Array<[string, () => void]> = [
     ['editing', unregisterEditingTools],
     ['analysis', unregisterAnalysisTools],

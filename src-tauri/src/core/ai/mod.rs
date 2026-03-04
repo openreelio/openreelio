@@ -4,14 +4,14 @@
 
 pub mod agent_plan;
 pub mod conversation;
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 pub mod conversation_commands;
 pub mod cost_tracker;
 pub mod edit_script;
 pub mod executor;
 pub mod gateway;
 pub mod knowledge;
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 pub mod knowledge_commands;
 pub mod memory;
 pub mod plan_executor;
@@ -28,7 +28,7 @@ pub mod streaming;
 ///
 /// Shared by `conversation_commands` and `knowledge_commands` to avoid
 /// duplicating the same helper in each module.
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 pub(crate) fn get_app_data_dir(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     use tauri::Manager;
     app.path()

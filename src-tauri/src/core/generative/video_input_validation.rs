@@ -47,6 +47,7 @@ pub fn quality_to_wire_value(quality: VideoQuality) -> &'static str {
 /// - Requires http/https
 /// - Trims whitespace
 /// - Removes trailing slash
+#[cfg(feature = "ai-providers")]
 pub fn validate_base_url(url: &str) -> Result<String, String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
@@ -92,6 +93,7 @@ mod tests {
         assert_eq!(quality_to_wire_value(VideoQuality::Cinema), "cinema");
     }
 
+    #[cfg(feature = "ai-providers")]
     #[test]
     fn validate_base_url_accepts_http_and_https() {
         assert_eq!(
@@ -104,11 +106,13 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "ai-providers")]
     #[test]
     fn validate_base_url_rejects_invalid_scheme() {
         assert!(validate_base_url("file:///tmp/test").is_err());
     }
 
+    #[cfg(feature = "ai-providers")]
     #[test]
     fn validate_base_url_rejects_empty() {
         assert!(validate_base_url("   ").is_err());

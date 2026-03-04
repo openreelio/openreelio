@@ -18,7 +18,7 @@
 //! This will download platform-specific FFmpeg binaries and include them in the app bundle.
 
 pub mod bundler;
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 mod commands;
 mod detection;
 mod runner;
@@ -27,7 +27,7 @@ mod state;
 pub use bundler::{
     Arch, BundlerConfig, BundlerError, BundlerResult, DownloadSource, FFmpegPaths, Platform,
 };
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 pub use commands::*;
 pub use detection::*;
 pub use runner::{

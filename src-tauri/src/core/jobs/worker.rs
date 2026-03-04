@@ -11,8 +11,9 @@ use std::sync::{
     Arc, Mutex, MutexGuard, PoisonError,
 };
 
+#[cfg(feature = "gui")]
 use tauri::Emitter;
-#[cfg(not(test))]
+#[cfg(all(not(test), feature = "gui"))]
 use tauri::Manager;
 use tokio::sync::{mpsc, oneshot, Notify};
 
@@ -68,6 +69,7 @@ fn try_acquire_lock<T>(mutex: &Mutex<T>) -> Result<MutexGuard<'_, T>, String> {
 /// propagating that error up the call stack—which would mask the *actual*
 /// job result—we log a `WARN` and continue so the job status is still
 /// recorded correctly.
+#[cfg(feature = "gui")]
 fn emit_or_warn<S>(handle: &tauri::AppHandle, event: &str, payload: S)
 where
     S: serde::Serialize + Clone,
@@ -336,6 +338,7 @@ impl WorkerPool {
     ///
     /// # Returns
     /// Vector of task handles for the spawned workers.
+    #[cfg(feature = "gui")]
     pub fn spawn_workers(
         &self,
         ffmpeg_state: SharedFFmpegState,
@@ -359,6 +362,7 @@ impl Default for WorkerPool {
 
 /// Job processor handles the actual execution of jobs.
 /// It holds references to FFmpeg and emits events via Tauri.
+#[cfg(feature = "gui")]
 pub struct JobProcessor {
     /// FFmpeg state for video operations
     ffmpeg_state: SharedFFmpegState,
@@ -368,6 +372,7 @@ pub struct JobProcessor {
     cache_dir: PathBuf,
 }
 
+#[cfg(feature = "gui")]
 impl JobProcessor {
     /// Creates a new job processor
     pub fn new(
@@ -1716,6 +1721,7 @@ impl JobProcessor {
 /// * `app_handle` - Tauri app handle for emitting events
 /// * `cache_dir` - Directory for cached files (thumbnails, proxies, etc.)
 /// * `shutdown` - Notify signal to stop workers gracefully
+#[cfg(feature = "gui")]
 #[allow(dead_code)]
 pub(crate) fn start_workers_with_arcs(
     queue: Arc<Mutex<BinaryHeap<QueueEntry>>>,
@@ -1848,6 +1854,7 @@ pub(crate) fn start_workers_with_arcs(
 /// * `app_handle` - Tauri app handle for emitting events
 /// * `cache_dir` - Directory for cached files (thumbnails, proxies, etc.)
 /// * `shutdown` - Notify signal to stop workers gracefully
+#[cfg(feature = "gui")]
 pub fn start_workers(
     pool: &WorkerPool,
     ffmpeg_state: SharedFFmpegState,

@@ -30,7 +30,7 @@ impl FFmpegState {
     /// Initialize FFmpeg by detecting installation.
     ///
     /// In non-test builds, this optionally attempts bundled FFmpeg detection first.
-    #[cfg(not(test))]
+    #[cfg(all(not(test), feature = "gui"))]
     pub fn initialize(&mut self, app_handle: Option<&tauri::AppHandle>) -> Result<(), FFmpegError> {
         // Try bundled first (if app_handle provided)
         if let Some(handle) = app_handle {
