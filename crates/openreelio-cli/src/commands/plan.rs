@@ -4,11 +4,11 @@
 //! that are executed atomically. If any step fails, the entire plan
 //! is rolled back.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use crate::output;
 use clap::Subcommand;
 use serde::{Deserialize, Serialize};
-use crate::output;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum PlanAction {
@@ -70,8 +70,9 @@ pub struct EditPlan {
 pub async fn execute(action: PlanAction) -> anyhow::Result<()> {
     match action {
         PlanAction::Execute { path, file } => {
-            let plan_content = std::fs::read_to_string(&file)
-                .map_err(|e| anyhow::anyhow!("Failed to read plan file '{}': {}", file.display(), e))?;
+            let plan_content = std::fs::read_to_string(&file).map_err(|e| {
+                anyhow::anyhow!("Failed to read plan file '{}': {}", file.display(), e)
+            })?;
             let plan: EditPlan = serde_json::from_str(&plan_content)
                 .map_err(|e| anyhow::anyhow!("Invalid plan JSON: {}", e))?;
 
@@ -127,16 +128,16 @@ pub async fn execute(action: PlanAction) -> anyhow::Result<()> {
         }
 
         PlanAction::Validate { path, file } => {
-            let plan_content = std::fs::read_to_string(&file)
-                .map_err(|e| anyhow::anyhow!("Failed to read plan file '{}': {}", file.display(), e))?;
+            let plan_content = std::fs::read_to_string(&file).map_err(|e| {
+                anyhow::anyhow!("Failed to read plan file '{}': {}", file.display(), e)
+            })?;
             let plan: EditPlan = serde_json::from_str(&plan_content)
                 .map_err(|e| anyhow::anyhow!("Invalid plan JSON: {}", e))?;
 
             let _project = super::load_project(&path)?;
 
             // Validate step dependencies form a DAG
-            let step_ids: HashSet<&str> =
-                plan.steps.iter().map(|s| s.id.as_str()).collect();
+            let step_ids: HashSet<&str> = plan.steps.iter().map(|s| s.id.as_str()).collect();
 
             let mut errors = Vec::new();
             for step in &plan.steps {
@@ -239,23 +240,45 @@ fn execute_step(
 
     let payload = &step.payload;
     let cmd: Box<dyn Command> = match step.command_type.as_str() {
-        "InsertClip" => Box::new(serde_json::from_value::<InsertClipCommand>(payload.clone())?),
-        "RemoveClip" => Box::new(serde_json::from_value::<RemoveClipCommand>(payload.clone())?),
+        "InsertClip" => Box::new(serde_json::from_value::<InsertClipCommand>(
+            payload.clone(),
+        )?),
+        "RemoveClip" => Box::new(serde_json::from_value::<RemoveClipCommand>(
+            payload.clone(),
+        )?),
         "MoveClip" => Box::new(serde_json::from_value::<MoveClipCommand>(payload.clone())?),
         "TrimClip" => Box::new(serde_json::from_value::<TrimClipCommand>(payload.clone())?),
         "SplitClip" => Box::new(serde_json::from_value::<SplitClipCommand>(payload.clone())?),
-        "SetClipSpeed" => Box::new(serde_json::from_value::<SetClipSpeedCommand>(payload.clone())?),
+        "SetClipSpeed" => Box::new(serde_json::from_value::<SetClipSpeedCommand>(
+            payload.clone(),
+        )?),
         "AddTrack" => Box::new(serde_json::from_value::<AddTrackCommand>(payload.clone())?),
-        "RemoveTrack" => Box::new(serde_json::from_value::<RemoveTrackCommand>(payload.clone())?),
+        "RemoveTrack" => Box::new(serde_json::from_value::<RemoveTrackCommand>(
+            payload.clone(),
+        )?),
         "AddEffect" => Box::new(serde_json::from_value::<AddEffectCommand>(payload.clone())?),
-        "RemoveEffect" => Box::new(serde_json::from_value::<RemoveEffectCommand>(payload.clone())?),
-        "CreateCaption" => Box::new(serde_json::from_value::<CreateCaptionCommand>(payload.clone())?),
-        "DeleteCaption" => Box::new(serde_json::from_value::<DeleteCaptionCommand>(payload.clone())?),
-        "UpdateCaption" => Box::new(serde_json::from_value::<UpdateCaptionCommand>(payload.clone())?),
-        "ImportAsset" => Box::new(serde_json::from_value::<ImportAssetCommand>(payload.clone())?),
-        "RemoveAsset" => Box::new(serde_json::from_value::<RemoveAssetCommand>(payload.clone())?),
+        "RemoveEffect" => Box::new(serde_json::from_value::<RemoveEffectCommand>(
+            payload.clone(),
+        )?),
+        "CreateCaption" => Box::new(serde_json::from_value::<CreateCaptionCommand>(
+            payload.clone(),
+        )?),
+        "DeleteCaption" => Box::new(serde_json::from_value::<DeleteCaptionCommand>(
+            payload.clone(),
+        )?),
+        "UpdateCaption" => Box::new(serde_json::from_value::<UpdateCaptionCommand>(
+            payload.clone(),
+        )?),
+        "ImportAsset" => Box::new(serde_json::from_value::<ImportAssetCommand>(
+            payload.clone(),
+        )?),
+        "RemoveAsset" => Box::new(serde_json::from_value::<RemoveAssetCommand>(
+            payload.clone(),
+        )?),
         "AddMarker" => Box::new(serde_json::from_value::<AddMarkerCommand>(payload.clone())?),
-        "RemoveMarker" => Box::new(serde_json::from_value::<RemoveMarkerCommand>(payload.clone())?),
+        "RemoveMarker" => Box::new(serde_json::from_value::<RemoveMarkerCommand>(
+            payload.clone(),
+        )?),
         other => {
             return Err(anyhow::anyhow!("Unknown command type: '{}'", other));
         }

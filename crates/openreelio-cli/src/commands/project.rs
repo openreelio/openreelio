@@ -1,9 +1,9 @@
 //! Project lifecycle commands: create, open, info, save.
 
-use std::path::PathBuf;
+use crate::output;
 use clap::Subcommand;
 use openreelio_core::ActiveProject;
-use crate::output;
+use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum ProjectAction {

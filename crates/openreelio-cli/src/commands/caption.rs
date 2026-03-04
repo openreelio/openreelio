@@ -1,9 +1,9 @@
 //! Caption and subtitle commands: add, update, remove, list, export.
 
-use std::path::PathBuf;
+use crate::output;
 use clap::Subcommand;
 use openreelio_core::commands::*;
-use crate::output;
+use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum CaptionAction {
@@ -118,11 +118,17 @@ fn resolve_sequence_id(
 
 pub async fn execute(action: CaptionAction) -> anyhow::Result<()> {
     match action {
-        CaptionAction::Add { path, track, text, start, end, sequence } => {
+        CaptionAction::Add {
+            path,
+            track,
+            text,
+            start,
+            end,
+            sequence,
+        } => {
             let mut project = super::load_project(&path)?;
             let seq_id = resolve_sequence_id(&project, sequence)?;
-            let cmd = CreateCaptionCommand::new(&seq_id, &track, start, end)
-                .with_text(&text);
+            let cmd = CreateCaptionCommand::new(&seq_id, &track, start, end).with_text(&text);
             let result = project
                 .executor
                 .execute(Box::new(cmd), &mut project.state)
@@ -136,7 +142,13 @@ pub async fn execute(action: CaptionAction) -> anyhow::Result<()> {
             }))
         }
 
-        CaptionAction::Update { path, id, track, text, sequence } => {
+        CaptionAction::Update {
+            path,
+            id,
+            track,
+            text,
+            sequence,
+        } => {
             let mut project = super::load_project(&path)?;
             let seq_id = resolve_sequence_id(&project, sequence)?;
             let mut cmd = UpdateCaptionCommand::new(&seq_id, &track, &id);
@@ -155,7 +167,12 @@ pub async fn execute(action: CaptionAction) -> anyhow::Result<()> {
             }))
         }
 
-        CaptionAction::Remove { path, id, track, sequence } => {
+        CaptionAction::Remove {
+            path,
+            id,
+            track,
+            sequence,
+        } => {
             let mut project = super::load_project(&path)?;
             let seq_id = resolve_sequence_id(&project, sequence)?;
             let cmd = DeleteCaptionCommand::new(&seq_id, &track, &id);
@@ -204,7 +221,12 @@ pub async fn execute(action: CaptionAction) -> anyhow::Result<()> {
             }))
         }
 
-        CaptionAction::Export { path, format, output: output_path, sequence } => {
+        CaptionAction::Export {
+            path,
+            format,
+            output: output_path,
+            sequence,
+        } => {
             let project = super::load_project(&path)?;
             let seq_id = resolve_sequence_id(&project, sequence)?;
             let seq = project
@@ -235,7 +257,12 @@ pub async fn execute(action: CaptionAction) -> anyhow::Result<()> {
             let content = match format.to_lowercase().as_str() {
                 "srt" => openreelio_core::captions::export_srt(&caption_data),
                 "vtt" => openreelio_core::captions::export_vtt(&caption_data),
-                _ => return Err(anyhow::anyhow!("Unsupported format: '{}'. Use 'srt' or 'vtt'.", format)),
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Unsupported format: '{}'. Use 'srt' or 'vtt'.",
+                        format
+                    ))
+                }
             };
 
             std::fs::write(&output_path, content)?;

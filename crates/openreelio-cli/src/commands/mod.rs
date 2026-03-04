@@ -7,14 +7,14 @@
 //! 4. Save project state
 //! 5. Output JSON result to stdout
 
-mod project;
 mod asset;
-mod timeline;
 mod caption;
-mod render;
-mod plan;
-mod state;
 mod help_json;
+mod plan;
+mod project;
+mod render;
+mod state;
+mod timeline;
 
 use clap::{Parser, Subcommand};
 
@@ -90,8 +90,8 @@ pub async fn execute(cli: Cli) -> anyhow::Result<()> {
 
 // ── Shared Helpers ──────────────────────────────────────────────────────
 
-use std::path::PathBuf;
 use openreelio_core::ActiveProject;
+use std::path::PathBuf;
 
 /// Load an existing project from the given path.
 pub(crate) fn load_project(path: &PathBuf) -> anyhow::Result<ActiveProject> {

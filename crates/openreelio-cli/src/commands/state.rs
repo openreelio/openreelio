@@ -1,8 +1,8 @@
 //! State inspection commands: dump, ops, snapshot.
 
-use std::path::PathBuf;
-use clap::Subcommand;
 use crate::output;
+use clap::Subcommand;
+use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum StateAction {
@@ -118,7 +118,11 @@ pub async fn execute(action: StateAction) -> anyhow::Result<()> {
 
             let content = std::fs::read_to_string(&ops_path)?;
             let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
-            let start = if lines.len() > last { lines.len() - last } else { 0 };
+            let start = if lines.len() > last {
+                lines.len() - last
+            } else {
+                0
+            };
 
             let ops: Vec<serde_json::Value> = lines[start..]
                 .iter()
