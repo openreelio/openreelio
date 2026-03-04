@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! OpenReelio CLI
 //!
 //! Headless command-line interface for AI agent-driven video editing.
@@ -13,8 +14,6 @@
 //! openreelio-cli timeline split --path ./my-project --clip clip_001 --at 5.0
 //! openreelio-cli state dump --path ./my-project
 //! ```
-
-#![recursion_limit = "256"]
 mod commands;
 mod output;
 mod validate;
