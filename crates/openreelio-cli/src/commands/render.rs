@@ -50,19 +50,39 @@ pub fn execute(action: RenderAction) -> anyhow::Result<()> {
             sequence,
         } => {
             let project = super::load_project(&path)?;
-
-            // Render requires FFmpeg which is initialized at runtime.
-            // For now, output the render command that would be executed.
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
 
-            output::print_json(&serde_json::json!({
-                "status": "pending",
-                "message": "Render job queued",
-                "sequenceId": seq_id,
-                "preset": preset,
-                "output": output_path.display().to_string(),
-                "note": "Full render pipeline requires FFmpeg runtime initialization. Use the GUI for interactive rendering.",
-            }))
+            // Validate the preset name
+            let valid_presets = [
+                "mp4_h264_1080p",
+                "mp4_h264_4k",
+                "mp4_h265_1080p",
+                "webm_vp9_1080p",
+                "prores_422",
+                "prores_4444",
+                "gif",
+            ];
+            if !valid_presets.contains(&preset.as_str()) {
+                return Err(anyhow::anyhow!(
+                    "Unknown preset '{}'. Use 'render presets' to list available presets.",
+                    preset
+                ));
+            }
+
+            // Validate sequence exists
+            if !project.state.sequences.contains_key(&seq_id) {
+                return Err(anyhow::anyhow!("Sequence '{}' not found", seq_id));
+            }
+
+            Err(anyhow::anyhow!(
+                "Render is not yet implemented in CLI mode. \
+                 Sequence '{}' with preset '{}' to '{}' validated successfully, \
+                 but FFmpeg render pipeline requires runtime initialization. \
+                 This feature is planned for a future release.",
+                seq_id,
+                preset,
+                output_path.display()
+            ))
         }
     }
 }
