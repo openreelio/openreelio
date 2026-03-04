@@ -49,7 +49,12 @@ pub fn non_empty(value: &str, param_name: &str) -> anyhow::Result<()> {
 }
 
 /// Validates that start < end for a time range.
-pub fn time_range_ordered(start: f64, end: f64, start_name: &str, end_name: &str) -> anyhow::Result<()> {
+pub fn time_range_ordered(
+    start: f64,
+    end: f64,
+    start_name: &str,
+    end_name: &str,
+) -> anyhow::Result<()> {
     time_non_negative(start, start_name)?;
     time_non_negative(end, end_name)?;
     if start >= end {

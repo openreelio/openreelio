@@ -338,15 +338,7 @@ fn test_timeline_insert_clip() {
 
     // Insert clip
     let result = run_cli_ok(&[
-        "timeline",
-        "insert",
-        "--path",
-        &path,
-        "--asset",
-        &asset_id,
-        "--track",
-        &track_id,
-        "--at",
+        "timeline", "insert", "--path", &path, "--asset", &asset_id, "--track", &track_id, "--at",
         "0.0",
     ]);
     assert_eq!(result["status"], "ok");
@@ -405,16 +397,7 @@ fn test_validation_zero_speed() {
     let dir = create_temp_project("val_zero_speed");
     let path = project_path(&dir, "val_zero_speed");
     let (_stdout, stderr) = run_cli_err(&[
-        "timeline",
-        "speed",
-        "--path",
-        &path,
-        "--clip",
-        "test",
-        "--track",
-        "test",
-        "--speed",
-        "0.0",
+        "timeline", "speed", "--path", &path, "--clip", "test", "--track", "test", "--speed", "0.0",
     ]);
     assert!(
         stderr.contains("must be positive"),
@@ -450,14 +433,7 @@ fn test_validation_empty_clip_id() {
     let dir = create_temp_project("val_empty_clip");
     let path = project_path(&dir, "val_empty_clip");
     let (_stdout, stderr) = run_cli_err(&[
-        "timeline",
-        "remove",
-        "--path",
-        &path,
-        "--clip",
-        "",
-        "--track",
-        "test",
+        "timeline", "remove", "--path", &path, "--clip", "", "--track", "test",
     ]);
     assert!(
         stderr.contains("cannot be empty"),
@@ -497,18 +473,8 @@ fn test_validation_caption_inverted_range() {
     let dir = create_temp_project("val_caption_range");
     let path = project_path(&dir, "val_caption_range");
     let (_stdout, stderr) = run_cli_err(&[
-        "caption",
-        "add",
-        "--path",
-        &path,
-        "--track",
-        "test",
-        "--text",
-        "Hello",
-        "--start",
-        "10.0",
-        "--end",
-        "5.0",
+        "caption", "add", "--path", &path, "--track", "test", "--text", "Hello", "--start", "10.0",
+        "--end", "5.0",
     ]);
     assert!(
         stderr.contains("must be less than"),

@@ -33,11 +33,10 @@ fn main() -> anyhow::Result<()> {
         tracing::Level::WARN
     };
 
-    // Initialize logging (flags override RUST_LOG env var)
+    // Initialize logging (flags augment RUST_LOG env var)
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(level.into()),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into()),
         )
         .with_writer(std::io::stderr)
         .init();

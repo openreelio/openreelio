@@ -147,6 +147,9 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
         } => {
             validate::non_empty(&id, "id")?;
             validate::non_empty(&track, "track")?;
+            if let Some(ref t) = text {
+                validate::non_empty(t, "text")?;
+            }
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let mut cmd = UpdateCaptionCommand::new(&seq_id, &track, &id);

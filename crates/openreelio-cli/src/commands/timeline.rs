@@ -404,6 +404,9 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
         } => {
             validate::non_empty(&clip, "clip")?;
             validate::non_empty(&track, "track")?;
+            if let Some(ref nt) = new_track {
+                validate::non_empty(nt, "new-track")?;
+            }
             validate::time_non_negative(to, "to")?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
@@ -543,6 +546,7 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             track,
             sequence,
         } => {
+            validate::non_empty(&track, "track")?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = RemoveTrackCommand::new(&seq_id, &track);
