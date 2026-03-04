@@ -22,6 +22,14 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "openreelio-cli", version, about, long_about = None)]
 pub struct Cli {
+    /// Increase log verbosity (show INFO and DEBUG messages)
+    #[arg(long, short = 'v', global = true)]
+    pub verbose: bool,
+
+    /// Suppress all log output
+    #[arg(long, short = 'q', global = true, conflicts_with = "verbose")]
+    pub quiet: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }

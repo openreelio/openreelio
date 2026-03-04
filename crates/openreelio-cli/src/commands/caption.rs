@@ -1,8 +1,10 @@
 //! Caption and subtitle commands: add, update, remove, list, export.
 
 use crate::output;
+use crate::validate;
 use clap::Subcommand;
 use openreelio_core::commands::*;
+use openreelio_core::timeline::TrackKind;
 use std::path::PathBuf;
 
 #[derive(Subcommand)]
@@ -117,6 +119,9 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             end,
             sequence,
         } => {
+            validate::non_empty(&track, "track")?;
+            validate::non_empty(&text, "text")?;
+            validate::time_range_ordered(start, end, "start", "end")?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = CreateCaptionCommand::new(&seq_id, &track, start, end).with_text(&text);
@@ -140,6 +145,8 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             text,
             sequence,
         } => {
+            validate::non_empty(&id, "id")?;
+            validate::non_empty(&track, "track")?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let mut cmd = UpdateCaptionCommand::new(&seq_id, &track, &id);
@@ -164,6 +171,8 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             track,
             sequence,
         } => {
+            validate::non_empty(&id, "id")?;
+            validate::non_empty(&track, "track")?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = DeleteCaptionCommand::new(&seq_id, &track, &id);
@@ -192,7 +201,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             // Captions are stored as clips on caption tracks
             let mut captions = Vec::new();
             for t in &seq.tracks {
-                if format!("{:?}", t.kind) == "Caption" {
+                if t.kind == TrackKind::Caption {
                     for c in &t.clips {
                         captions.push(serde_json::json!({
                             "id": c.id,
@@ -229,7 +238,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             // Collect caption clips and build Caption structs for export
             let mut caption_data = Vec::new();
             for t in &seq.tracks {
-                if format!("{:?}", t.kind) == "Caption" {
+                if t.kind == TrackKind::Caption {
                     for c in &t.clips {
                         caption_data.push(openreelio_core::captions::Caption {
                             id: c.id.clone(),

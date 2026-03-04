@@ -1,6 +1,7 @@
 //! Timeline editing commands: insert, move, trim, split, speed, tracks, effects.
 
 use crate::output;
+use crate::validate;
 use clap::Subcommand;
 use openreelio_core::commands::*;
 use std::path::PathBuf;
@@ -350,6 +351,9 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             at,
             sequence,
         } => {
+            validate::non_empty(&asset, "asset")?;
+            validate::non_empty(&track, "track")?;
+            validate::time_non_negative(at, "at")?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = InsertClipCommand::new(&seq_id, &track, &asset, at);
@@ -372,6 +376,8 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             track,
             sequence,
         } => {
+            validate::non_empty(&clip, "clip")?;
+            validate::non_empty(&track, "track")?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = RemoveClipCommand::new(&seq_id, &track, &clip);
@@ -396,6 +402,9 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             new_track,
             sequence,
         } => {
+            validate::non_empty(&clip, "clip")?;
+            validate::non_empty(&track, "track")?;
+            validate::time_non_negative(to, "to")?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let mut cmd = MoveClipCommand::new(&seq_id, &track, &clip, to, None);
@@ -422,6 +431,9 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             source_out,
             sequence,
         } => {
+            validate::non_empty(&clip, "clip")?;
+            validate::non_empty(&track, "track")?;
+            validate::trim_points_ordered(source_in, source_out)?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = TrimClipCommand::new(
@@ -446,6 +458,9 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             at,
             sequence,
         } => {
+            validate::non_empty(&clip, "clip")?;
+            validate::non_empty(&track, "track")?;
+            validate::time_non_negative(at, "at")?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = SplitClipCommand::new(&seq_id, &track, &clip, at);
@@ -470,6 +485,9 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             reverse,
             sequence,
         } => {
+            validate::non_empty(&clip, "clip")?;
+            validate::non_empty(&track, "track")?;
+            validate::speed_positive(speed)?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = SetClipSpeedCommand::new(&seq_id, &track, &clip, speed, reverse);
@@ -491,6 +509,7 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             name,
             sequence,
         } => {
+            validate::non_empty(&name, "name")?;
             let mut project = super::load_project(&path)?;
             let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let track_kind = match kind.to_lowercase().as_str() {
