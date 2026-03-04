@@ -16,17 +16,17 @@ use std::sync::{
 use tauri::Emitter;
 #[cfg(all(not(test), feature = "gui"))]
 use tauri::Manager;
-use tokio::sync::{mpsc, oneshot};
 #[cfg(feature = "gui")]
 use tokio::sync::Notify;
+use tokio::sync::{mpsc, oneshot};
 
+#[cfg(any(test, feature = "gui"))]
+use crate::core::jobs::JobType;
 #[cfg(all(not(test), feature = "gui"))]
 use crate::core::{
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
     fs::{validate_local_input_path_async, validate_path_id_component},
 };
-#[cfg(any(test, feature = "gui"))]
-use crate::core::jobs::JobType;
 use crate::core::{
     jobs::{Job, JobStatus},
     CoreResult, JobId,
