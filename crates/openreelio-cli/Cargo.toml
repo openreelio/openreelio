@@ -27,3 +27,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
 anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"
+serde_json = "1.0"
