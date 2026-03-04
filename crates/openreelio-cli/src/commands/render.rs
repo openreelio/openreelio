@@ -53,11 +53,7 @@ pub fn execute(action: RenderAction) -> anyhow::Result<()> {
 
             // Render requires FFmpeg which is initialized at runtime.
             // For now, output the render command that would be executed.
-            let seq_id = sequence
-                .or_else(|| project.state.active_sequence_id.clone())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("No sequence specified and no active sequence set")
-                })?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
 
             output::print_json(&serde_json::json!({
                 "status": "pending",

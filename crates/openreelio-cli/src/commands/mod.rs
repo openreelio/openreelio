@@ -106,3 +106,13 @@ pub(crate) fn save_project(project: &mut ActiveProject) -> anyhow::Result<()> {
         .save()
         .map_err(|e| anyhow::anyhow!("Failed to save project: {}", e))
 }
+
+/// Resolve the sequence ID: use explicit arg or fall back to active sequence.
+pub(crate) fn resolve_sequence_id(
+    project: &ActiveProject,
+    explicit: Option<String>,
+) -> anyhow::Result<String> {
+    explicit
+        .or_else(|| project.state.active_sequence_id.clone())
+        .ok_or_else(|| anyhow::anyhow!("No sequence specified and no active sequence set"))
+}

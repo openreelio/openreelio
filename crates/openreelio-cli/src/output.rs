@@ -26,12 +26,3 @@ pub fn print_success(message: &str) -> anyhow::Result<()> {
         "message": message
     }))
 }
-
-/// Prints a result to stdout, pretty-printing if the user requested it.
-pub fn print_result<T: Serialize>(value: &T, pretty: bool) -> anyhow::Result<()> {
-    if pretty {
-        print_json_pretty(value)
-    } else {
-        print_json(value)
-    }
-}

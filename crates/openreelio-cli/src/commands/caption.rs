@@ -107,15 +107,6 @@ pub enum CaptionAction {
     },
 }
 
-fn resolve_sequence_id(
-    project: &openreelio_core::ActiveProject,
-    explicit: Option<String>,
-) -> anyhow::Result<String> {
-    explicit
-        .or_else(|| project.state.active_sequence_id.clone())
-        .ok_or_else(|| anyhow::anyhow!("No sequence specified and no active sequence set"))
-}
-
 pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
     match action {
         CaptionAction::Add {
@@ -127,7 +118,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             sequence,
         } => {
             let mut project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = CreateCaptionCommand::new(&seq_id, &track, start, end).with_text(&text);
             let result = project
                 .executor
@@ -150,7 +141,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             sequence,
         } => {
             let mut project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let mut cmd = UpdateCaptionCommand::new(&seq_id, &track, &id);
             if let Some(t) = text {
                 cmd = cmd.with_text(Some(t));
@@ -174,7 +165,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             sequence,
         } => {
             let mut project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = DeleteCaptionCommand::new(&seq_id, &track, &id);
             let result = project
                 .executor
@@ -191,7 +182,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
 
         CaptionAction::List { path, sequence } => {
             let project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let seq = project
                 .state
                 .sequences
@@ -228,7 +219,7 @@ pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
             sequence,
         } => {
             let project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let seq = project
                 .state
                 .sequences

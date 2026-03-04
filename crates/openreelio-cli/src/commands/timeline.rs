@@ -239,21 +239,11 @@ pub enum TimelineAction {
     },
 }
 
-/// Resolve the sequence ID: use explicit arg or fall back to active sequence.
-fn resolve_sequence_id(
-    project: &openreelio_core::ActiveProject,
-    explicit: Option<String>,
-) -> anyhow::Result<String> {
-    explicit
-        .or_else(|| project.state.active_sequence_id.clone())
-        .ok_or_else(|| anyhow::anyhow!("No sequence specified and no active sequence set"))
-}
-
 pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
     match action {
         TimelineAction::Info { path, sequence } => {
             let project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let seq = project
                 .state
                 .sequences
@@ -287,7 +277,7 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             track,
         } => {
             let project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let seq = project
                 .state
                 .sequences
@@ -324,7 +314,7 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
 
         TimelineAction::Tracks { path, sequence } => {
             let project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let seq = project
                 .state
                 .sequences
@@ -361,7 +351,7 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             sequence,
         } => {
             let mut project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = InsertClipCommand::new(&seq_id, &track, &asset, at);
             let result = project
                 .executor
@@ -383,7 +373,7 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             sequence,
         } => {
             let mut project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = RemoveClipCommand::new(&seq_id, &track, &clip);
             let result = project
                 .executor
@@ -407,7 +397,7 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             sequence,
         } => {
             let mut project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let mut cmd = MoveClipCommand::new(&seq_id, &track, &clip, to, None);
             if let Some(ref target_track) = new_track {
                 cmd = cmd.to_track(target_track);
@@ -433,7 +423,7 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             sequence,
         } => {
             let mut project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = TrimClipCommand::new(
                 &seq_id, &track, &clip, source_in, source_out, None, // timeline_in
             );
@@ -457,7 +447,7 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             sequence,
         } => {
             let mut project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = SplitClipCommand::new(&seq_id, &track, &clip, at);
             let result = project
                 .executor
@@ -481,7 +471,7 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             sequence,
         } => {
             let mut project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = SetClipSpeedCommand::new(&seq_id, &track, &clip, speed, reverse);
             let result = project
                 .executor
@@ -502,7 +492,7 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             sequence,
         } => {
             let mut project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let track_kind = match kind.to_lowercase().as_str() {
                 "video" => openreelio_core::timeline::TrackKind::Video,
                 "audio" => openreelio_core::timeline::TrackKind::Audio,
@@ -535,7 +525,7 @@ pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
             sequence,
         } => {
             let mut project = super::load_project(&path)?;
-            let seq_id = resolve_sequence_id(&project, sequence)?;
+            let seq_id = super::resolve_sequence_id(&project, sequence)?;
             let cmd = RemoveTrackCommand::new(&seq_id, &track);
             let result = project
                 .executor
