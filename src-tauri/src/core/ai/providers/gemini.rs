@@ -105,6 +105,7 @@ impl std::fmt::Debug for GeminiProvider {
 }
 
 impl GeminiProvider {
+    #[cfg(any(test, feature = "ai-providers"))]
     fn build_generate_content_request(
         &self,
         request: &CompletionRequest,

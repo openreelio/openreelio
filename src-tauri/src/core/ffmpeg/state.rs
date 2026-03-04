@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-use super::{detect_system_ffmpeg, FFmpegError, FFmpegInfo, FFmpegRunner};
+use super::{FFmpegInfo, FFmpegRunner};
+#[cfg(any(test, feature = "gui"))]
+use super::{detect_system_ffmpeg, FFmpegError};
 
 /// Global FFmpeg runner state.
 ///

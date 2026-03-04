@@ -182,6 +182,7 @@ pub async fn clear_streaming_provider_config() {
 }
 
 /// Reads a clone of the current streaming provider configuration.
+#[cfg(feature = "ai-providers")]
 async fn get_streaming_config() -> Option<StreamingProviderConfig> {
     let mutex = STREAMING_CONFIG.get_or_init(|| TokioMutex::new(None));
     let guard = mutex.lock().await;
@@ -222,6 +223,7 @@ async fn unregister_stream(stream_id: &str) {
 /// Returns `Some(data)` for lines starting with `"data: "` that are not the
 /// `[DONE]` sentinel. Returns `None` for comment lines, event type lines,
 /// empty lines, and the `[DONE]` marker.
+#[cfg(all(feature = "ai-providers", feature = "gui"))]
 fn parse_sse_line(line: &str) -> Option<&str> {
     let data = line.strip_prefix("data: ")?;
     if data == "[DONE]" {
@@ -230,6 +232,7 @@ fn parse_sse_line(line: &str) -> Option<&str> {
     Some(data)
 }
 
+#[cfg(feature = "ai-providers")]
 fn normalized_tool_schema(value: &serde_json::Value) -> serde_json::Value {
     if value.is_object() {
         value.clone()
@@ -277,6 +280,7 @@ fn flush_pending_tool_calls(
 ///
 /// Returns `None` for events that do not map to a meaningful `StreamEvent`
 /// (e.g., `ping`, `content_block_start`, `content_block_stop`).
+#[cfg(all(feature = "ai-providers", feature = "gui"))]
 fn parse_anthropic_event(data: &str) -> Option<StreamEvent> {
     let value: serde_json::Value = serde_json::from_str(data).ok()?;
     let event_type = value.get("type")?.as_str()?;
@@ -392,6 +396,7 @@ fn parse_anthropic_event(data: &str) -> Option<StreamEvent> {
 /// The final chunk often has `finish_reason` set.
 ///
 /// Returns `None` for events without meaningful content (e.g., role-only deltas).
+#[cfg(all(feature = "ai-providers", feature = "gui"))]
 fn parse_openai_event(data: &str) -> Option<StreamEvent> {
     let value: serde_json::Value = serde_json::from_str(data).ok()?;
 
@@ -483,6 +488,7 @@ fn parse_openai_event(data: &str) -> Option<StreamEvent> {
 /// and `usageMetadata` for token counts.
 ///
 /// Returns `None` for events without extractable content.
+#[cfg(all(feature = "ai-providers", feature = "gui"))]
 fn parse_gemini_event(data: &str) -> Option<StreamEvent> {
     let value: serde_json::Value = serde_json::from_str(data).ok()?;
 
@@ -589,6 +595,7 @@ fn parse_gemini_event(data: &str) -> Option<StreamEvent> {
 ///
 /// Ollama streams newline-delimited JSON (not SSE). Each line is a complete
 /// JSON object with a `response` field for text content and a `done` boolean.
+#[cfg(all(feature = "ai-providers", feature = "gui"))]
 fn parse_local_event(data: &str) -> Option<StreamEvent> {
     let value: serde_json::Value = serde_json::from_str(data).ok()?;
 
@@ -947,11 +954,13 @@ fn build_local_request(
 /// SSE events are delimited by newlines (`\n` or `\r\n`). This buffer
 /// collects incoming bytes and splits them into complete lines as they
 /// become available.
+#[cfg(all(feature = "ai-providers", feature = "gui"))]
 struct SseLineBuffer {
     /// Accumulated bytes that haven't yet formed a complete line.
     buffer: String,
 }
 
+#[cfg(all(feature = "ai-providers", feature = "gui"))]
 impl SseLineBuffer {
     fn new() -> Self {
         Self {
