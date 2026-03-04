@@ -249,7 +249,7 @@ fn resolve_sequence_id(
         .ok_or_else(|| anyhow::anyhow!("No sequence specified and no active sequence set"))
 }
 
-pub async fn execute(action: TimelineAction) -> anyhow::Result<()> {
+pub fn execute(action: TimelineAction) -> anyhow::Result<()> {
     match action {
         TimelineAction::Info { path, sequence } => {
             let project = super::load_project(&path)?;

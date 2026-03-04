@@ -36,7 +36,7 @@ pub enum StateAction {
     },
 }
 
-pub async fn execute(action: StateAction) -> anyhow::Result<()> {
+pub fn execute(action: StateAction) -> anyhow::Result<()> {
     match action {
         StateAction::Dump { path, sequence } => {
             let project = super::load_project(&path)?;

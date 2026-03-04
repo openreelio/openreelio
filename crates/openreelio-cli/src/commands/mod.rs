@@ -75,16 +75,16 @@ pub enum Commands {
 }
 
 /// Execute the parsed CLI command.
-pub async fn execute(cli: Cli) -> anyhow::Result<()> {
+pub fn execute(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Commands::Project { action } => project::execute(action).await,
-        Commands::Asset { action } => asset::execute(action).await,
-        Commands::Timeline { action } => timeline::execute(action).await,
-        Commands::Caption { action } => caption::execute(action).await,
-        Commands::Render { action } => render::execute(action).await,
-        Commands::Plan { action } => plan::execute(action).await,
-        Commands::State { action } => state::execute(action).await,
-        Commands::HelpJson => help_json::execute().await,
+        Commands::Project { action } => project::execute(action),
+        Commands::Asset { action } => asset::execute(action),
+        Commands::Timeline { action } => timeline::execute(action),
+        Commands::Caption { action } => caption::execute(action),
+        Commands::Render { action } => render::execute(action),
+        Commands::Plan { action } => plan::execute(action),
+        Commands::State { action } => state::execute(action),
+        Commands::HelpJson => help_json::execute(),
     }
 }
 

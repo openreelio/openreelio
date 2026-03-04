@@ -5,7 +5,7 @@
 
 use crate::output;
 
-pub async fn execute() -> anyhow::Result<()> {
+pub fn execute() -> anyhow::Result<()> {
     output::print_json_pretty(&serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "description": "OpenReelio CLI — Headless AI agent-driven video editing",

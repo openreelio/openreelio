@@ -116,7 +116,7 @@ fn resolve_sequence_id(
         .ok_or_else(|| anyhow::anyhow!("No sequence specified and no active sequence set"))
 }
 
-pub async fn execute(action: CaptionAction) -> anyhow::Result<()> {
+pub fn execute(action: CaptionAction) -> anyhow::Result<()> {
     match action {
         CaptionAction::Add {
             path,

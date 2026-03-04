@@ -29,7 +29,7 @@ pub enum RenderAction {
     },
 }
 
-pub async fn execute(action: RenderAction) -> anyhow::Result<()> {
+pub fn execute(action: RenderAction) -> anyhow::Result<()> {
     match action {
         RenderAction::Presets => output::print_json_pretty(&serde_json::json!({
             "presets": [

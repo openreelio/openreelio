@@ -32,10 +32,5 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    // Build a single-threaded Tokio runtime for async operations
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-
-    rt.block_on(commands::execute(cli))
+    commands::execute(cli)
 }
