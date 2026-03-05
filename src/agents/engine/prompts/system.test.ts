@@ -60,6 +60,36 @@ describe('assembleSystemPrompt', () => {
     expect(result).toContain('Project: test-project');
   });
 
+  it('should include tool reference with all sections for editor role', () => {
+    const result = assembleSystemPrompt({
+      role: 'editor',
+      context: makeContext(),
+    });
+
+    expect(result).toContain('<tool_reference>');
+    expect(result).toContain('## Query Actions');
+    expect(result).toContain('## Edit Actions');
+    expect(result).toContain('## Audio Actions');
+    expect(result).toContain('## Effects Actions');
+    expect(result).toContain('## Text Actions');
+    expect(result).toContain('## Common Workflows');
+    expect(result).toContain('</tool_reference>');
+  });
+
+  it('should include only query tools for analyst role', () => {
+    const result = assembleSystemPrompt({
+      role: 'analyst',
+      context: makeContext(),
+    });
+
+    expect(result).toContain('<tool_reference>');
+    expect(result).toContain('## Query Actions');
+    expect(result).not.toContain('## Edit Actions');
+    expect(result).not.toContain('## Audio Actions');
+    expect(result).not.toContain('## Effects Actions');
+    expect(result).toContain('</tool_reference>');
+  });
+
   it('should include knowledge entries when provided', () => {
     const result = assembleSystemPrompt({
       role: 'editor',
@@ -133,15 +163,17 @@ describe('assembleSystemPrompt', () => {
       customInstructions: 'Custom rule here',
     });
 
-    // Verify ordering: base prompt → environment → knowledge → language → custom
+    // Verify ordering: base → environment → tool_reference → knowledge → language → custom
     const baseIdx = result.indexOf('AI video editing assistant');
     const envIdx = result.indexOf('<environment>');
+    const toolRefIdx = result.indexOf('<tool_reference>');
     const knowledgeIdx = result.indexOf('<knowledge>');
     const langIdx = result.indexOf('<language_policy>');
     const customIdx = result.indexOf('<custom_instructions>');
 
     expect(baseIdx).toBeLessThan(envIdx);
-    expect(envIdx).toBeLessThan(knowledgeIdx);
+    expect(envIdx).toBeLessThan(toolRefIdx);
+    expect(toolRefIdx).toBeLessThan(knowledgeIdx);
     expect(knowledgeIdx).toBeLessThan(langIdx);
     expect(langIdx).toBeLessThan(customIdx);
   });

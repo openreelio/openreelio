@@ -4,9 +4,10 @@
  * Assembles the full system prompt for agent loops by combining:
  * 1. Base prompt (agent role and capabilities)
  * 2. Environment context (project state, timeline, assets)
- * 3. Knowledge base (learned conventions and preferences)
- * 4. Tool descriptions (from registry)
+ * 3. Tool reference (action docs, workflow recipes, CLI guide)
+ * 4. Knowledge base (learned conventions and preferences)
  * 5. Language policy
+ * 6. Custom instructions
  *
  * Follows the opencode pattern for structured prompt assembly.
  */
@@ -14,6 +15,7 @@
 import type { AgentContext } from '../core/types';
 import { buildFullEnvironmentPrompt } from './environment';
 import { EDITOR_PROMPT, ANALYST_PROMPT, COLORIST_PROMPT, AUDIO_PROMPT } from './agentPrompts';
+import { buildToolReference } from './toolReference';
 
 // =============================================================================
 // Types
@@ -87,9 +89,10 @@ function buildKnowledgeSection(knowledge: string[]): string | null {
  * Assembly order:
  * 1. Base prompt (agent-specific role and capabilities)
  * 2. Environment context (project info, timeline state, assets)
- * 3. Knowledge base (learned conventions/preferences)
- * 4. Language policy
- * 5. Custom instructions
+ * 3. Tool reference (action descriptions, workflows, CLI guide)
+ * 4. Knowledge base (learned conventions/preferences)
+ * 5. Language policy
+ * 6. Custom instructions
  */
 export function assembleSystemPrompt(options: SystemPromptOptions): string {
   const { role, context, knowledge = [], customInstructions } = options;
@@ -102,15 +105,18 @@ export function assembleSystemPrompt(options: SystemPromptOptions): string {
   // 2. Environment context
   sections.push(buildFullEnvironmentPrompt(context));
 
-  // 3. Knowledge base
+  // 3. Tool reference (action docs, workflows, CLI — filtered by role)
+  sections.push(buildToolReference(role));
+
+  // 4. Knowledge base
   const knowledgeSection = buildKnowledgeSection(knowledge);
   if (knowledgeSection) sections.push(knowledgeSection);
 
-  // 4. Language policy
+  // 5. Language policy
   const languageSection = buildLanguageSection(context);
   if (languageSection) sections.push(languageSection);
 
-  // 5. Custom instructions
+  // 6. Custom instructions
   if (customInstructions) {
     sections.push([
       '<custom_instructions>',
