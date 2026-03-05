@@ -56,7 +56,7 @@ pub enum AssetAction {
     },
 }
 
-pub async fn execute(action: AssetAction) -> anyhow::Result<()> {
+pub fn execute(action: AssetAction) -> anyhow::Result<()> {
     match action {
         AssetAction::Import { path, file, name } => {
             let mut project = super::load_project(&path)?;

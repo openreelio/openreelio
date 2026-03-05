@@ -5,7 +5,7 @@
 
 use crate::output;
 
-pub async fn execute() -> anyhow::Result<()> {
+pub fn execute() -> anyhow::Result<()> {
     output::print_json_pretty(&serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "description": "OpenReelio CLI — Headless AI agent-driven video editing",
@@ -227,6 +227,27 @@ pub async fn execute() -> anyhow::Result<()> {
                 },
                 "example": "openreelio-cli caption export --path ./project --format srt --output captions.srt"
             },
+            "caption.update": {
+                "description": "Update a caption's text",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Caption ID to update" },
+                    "track": { "type": "string", "required": true, "desc": "Track ID containing the caption" },
+                    "text": { "type": "string", "required": false, "desc": "New caption text" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                },
+                "example": "openreelio-cli caption update --path ./project --id cap_001 --track track_c1 --text \"Updated text\""
+            },
+            "caption.remove": {
+                "description": "Remove a caption from the timeline",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Caption ID to remove" },
+                    "track": { "type": "string", "required": true, "desc": "Track ID containing the caption" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                },
+                "example": "openreelio-cli caption remove --path ./project --id cap_001 --track track_c1"
+            },
             "plan.execute": {
                 "description": "Execute a plan file atomically (rollback on failure)",
                 "params": {
@@ -277,6 +298,16 @@ pub async fn execute() -> anyhow::Result<()> {
                 "description": "List available render presets",
                 "params": {},
                 "example": "openreelio-cli render presets"
+            },
+            "render.start": {
+                "description": "Start a render job (not yet implemented in CLI — returns error with validation)",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "output": { "type": "string", "required": true, "desc": "Output file path" },
+                    "preset": { "type": "string", "required": false, "desc": "Render preset name (default: mp4_h264_1080p)" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
+                },
+                "example": "openreelio-cli render start --path ./project --output output.mp4"
             },
             "help-json": {
                 "description": "Output this command schema as JSON for agent consumption",

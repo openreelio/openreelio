@@ -61,6 +61,7 @@ impl EventBroadcaster for ChannelBroadcaster {
 ///
 /// Useful for CLI mode where events should appear in structured logs
 /// rather than being sent to a UI.
+#[allow(dead_code)] // Public API — constructed by CLI consumers
 pub struct LogBroadcaster;
 
 impl EventBroadcaster for LogBroadcaster {

@@ -22,6 +22,14 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "openreelio-cli", version, about, long_about = None)]
 pub struct Cli {
+    /// Increase log verbosity (show INFO and DEBUG messages)
+    #[arg(long, short = 'v', global = true)]
+    pub verbose: bool,
+
+    /// Suppress all log output
+    #[arg(long, short = 'q', global = true, conflicts_with = "verbose")]
+    pub quiet: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -75,16 +83,16 @@ pub enum Commands {
 }
 
 /// Execute the parsed CLI command.
-pub async fn execute(cli: Cli) -> anyhow::Result<()> {
+pub fn execute(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Commands::Project { action } => project::execute(action).await,
-        Commands::Asset { action } => asset::execute(action).await,
-        Commands::Timeline { action } => timeline::execute(action).await,
-        Commands::Caption { action } => caption::execute(action).await,
-        Commands::Render { action } => render::execute(action).await,
-        Commands::Plan { action } => plan::execute(action).await,
-        Commands::State { action } => state::execute(action).await,
-        Commands::HelpJson => help_json::execute().await,
+        Commands::Project { action } => project::execute(action),
+        Commands::Asset { action } => asset::execute(action),
+        Commands::Timeline { action } => timeline::execute(action),
+        Commands::Caption { action } => caption::execute(action),
+        Commands::Render { action } => render::execute(action),
+        Commands::Plan { action } => plan::execute(action),
+        Commands::State { action } => state::execute(action),
+        Commands::HelpJson => help_json::execute(),
     }
 }
 
@@ -105,4 +113,14 @@ pub(crate) fn save_project(project: &mut ActiveProject) -> anyhow::Result<()> {
     project
         .save()
         .map_err(|e| anyhow::anyhow!("Failed to save project: {}", e))
+}
+
+/// Resolve the sequence ID: use explicit arg or fall back to active sequence.
+pub(crate) fn resolve_sequence_id(
+    project: &ActiveProject,
+    explicit: Option<String>,
+) -> anyhow::Result<String> {
+    explicit
+        .or_else(|| project.state.active_sequence_id.clone())
+        .ok_or_else(|| anyhow::anyhow!("No sequence specified and no active sequence set"))
 }

@@ -67,6 +67,7 @@ pub fn detect_bundled_ffmpeg(app_handle: &tauri::AppHandle) -> FFmpegResult<FFmp
 ///
 /// During development (`npm run tauri dev`), binaries are in `src-tauri/binaries/`
 /// which is not the same as the resource directory. This function checks that path.
+#[cfg(any(test, feature = "gui"))]
 fn detect_dev_mode_binaries() -> FFmpegResult<FFmpegInfo> {
     // Get the path to src-tauri/binaries from CARGO_MANIFEST_DIR or relative to executable
     let dev_binaries_paths = get_dev_mode_paths();
@@ -116,6 +117,7 @@ fn detect_dev_mode_binaries() -> FFmpegResult<FFmpegInfo> {
 }
 
 /// Get possible paths where dev mode binaries might be located
+#[cfg(any(test, feature = "gui"))]
 fn get_dev_mode_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 

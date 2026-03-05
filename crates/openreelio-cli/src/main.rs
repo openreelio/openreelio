@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! OpenReelio CLI
 //!
 //! Headless command-line interface for AI agent-driven video editing.
@@ -13,29 +14,32 @@
 //! openreelio-cli timeline split --path ./my-project --clip clip_001 --at 5.0
 //! openreelio-cli state dump --path ./my-project
 //! ```
-
 mod commands;
 mod output;
+mod validate;
 
 use clap::Parser;
 use commands::Cli;
 
 fn main() -> anyhow::Result<()> {
-    // Initialize logging (respects RUST_LOG env var)
+    let cli = Cli::parse();
+
+    // Determine log level from flags
+    let level = if cli.quiet {
+        tracing::Level::ERROR
+    } else if cli.verbose {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::WARN
+    };
+
+    // Initialize logging (flags augment RUST_LOG env var)
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(tracing::Level::WARN.into()),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into()),
         )
         .with_writer(std::io::stderr)
         .init();
 
-    let cli = Cli::parse();
-
-    // Build a single-threaded Tokio runtime for async operations
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-
-    rt.block_on(commands::execute(cli))
+    commands::execute(cli)
 }

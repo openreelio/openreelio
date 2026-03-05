@@ -67,7 +67,7 @@ pub struct EditPlan {
     pub steps: Vec<PlanStep>,
 }
 
-pub async fn execute(action: PlanAction) -> anyhow::Result<()> {
+pub fn execute(action: PlanAction) -> anyhow::Result<()> {
     match action {
         PlanAction::Execute { path, file } => {
             let plan_content = std::fs::read_to_string(&file).map_err(|e| {

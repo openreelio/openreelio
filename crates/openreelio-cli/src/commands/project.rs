@@ -40,7 +40,7 @@ pub enum ProjectAction {
     },
 }
 
-pub async fn execute(action: ProjectAction) -> anyhow::Result<()> {
+pub fn execute(action: ProjectAction) -> anyhow::Result<()> {
     match action {
         ProjectAction::Create { name, path } => {
             std::fs::create_dir_all(&path)?;
