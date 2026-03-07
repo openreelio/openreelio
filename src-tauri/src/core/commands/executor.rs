@@ -687,9 +687,8 @@ impl CommandExecutor {
             "RemoveClip" | "DeleteClip" => OpKind::ClipRemove,
             "MoveClip" => OpKind::ClipMove,
             "TrimClip" => OpKind::ClipTrim,
-            "SetClipMute" | "SetClipTransform" | "SetClipAudio" | "SetClipSpeed" => {
-                OpKind::ClipUpdate
-            }
+            "SetClipMute" | "SetClipTransform" | "SetClipAudio" | "SetClipSpeed"
+            | "SetClipBlendMode" => OpKind::ClipUpdate,
             "SplitClip" => OpKind::ClipSplit,
             "AddTrack" | "InsertTrack" => OpKind::TrackAdd,
             "RemoveTrack" | "DeleteTrack" => OpKind::TrackRemove,
@@ -743,7 +742,8 @@ mod tests {
     use crate::core::assets::{Asset, VideoInfo};
     use crate::core::commands::{
         AddEffectCommand, CreateSequenceCommand, ImportAssetCommand, InsertClipCommand,
-        MoveClipCommand, SetTrackBlendModeCommand, SplitClipCommand, StateChange, TrimClipCommand,
+        MoveClipCommand, SetClipBlendModeCommand, SetTrackBlendModeCommand, SplitClipCommand,
+        StateChange, TrimClipCommand,
     };
     use crate::core::effects::{EffectType, ParamValue};
     use crate::core::project::{OpKind, Operation, OpsLog, ProjectMeta, ProjectState};
@@ -992,6 +992,66 @@ mod tests {
                 .unwrap();
         let replayed_track = &replayed.sequences[&seq_id].tracks[0];
         assert_eq!(replayed_track.blend_mode, BlendMode::Multiply);
+    }
+
+    #[test]
+    fn test_executor_persists_clip_blend_mode_update_is_replayable() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let asset_path = temp_dir.path().join("test.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+
+        let import_cmd = ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(30.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+        let asset_id = import_cmd.asset_id().to_string();
+
+        let insert_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)
+                        .with_source_range(0.0, 5.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let clip_id = insert_result.created_ids[0].clone();
+
+        executor
+            .execute(
+                Box::new(SetClipBlendModeCommand::new(
+                    &seq_id,
+                    &track_id,
+                    &clip_id,
+                    BlendMode::Screen,
+                )),
+                &mut state,
+            )
+            .unwrap();
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_track = replayed.sequences[&seq_id].get_track(&track_id).unwrap();
+        let replayed_clip = replayed_track.get_clip(&clip_id).unwrap();
+
+        assert_eq!(replayed_clip.blend_mode, BlendMode::Screen);
     }
 
     #[test]

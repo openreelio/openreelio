@@ -57,6 +57,15 @@ pub struct SetTrackBlendModePayload {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetClipBlendModePayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub blend_mode: BlendMode,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TrimClipPayload {
     pub sequence_id: SequenceId,
     /// Track containing the clip.
@@ -567,6 +576,9 @@ pub enum CommandPayload {
     #[serde(alias = "setTrackBlendMode", alias = "SetTrackBlendMode")]
     SetTrackBlendMode(SetTrackBlendModePayload),
 
+    #[serde(alias = "setClipBlendMode", alias = "SetClipBlendMode")]
+    SetClipBlendMode(SetClipBlendModePayload),
+
     #[serde(alias = "importAsset", alias = "ImportAsset")]
     ImportAsset(ImportAssetPayload),
 
@@ -734,9 +746,9 @@ impl CommandPayload {
             MoveClipCommand, MoveFileCommand, RemoveAssetCommand, RemoveClipCommand,
             RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
             RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, ReorderTracksCommand,
-            SetClipAudioCommand, SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
-            SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand, UpdateEffectCommand,
-            UpdateMaskCommand, UpdateTextCommand,
+            SetClipAudioCommand, SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand,
+            SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand,
+            UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
         };
 
         match self {
@@ -804,6 +816,12 @@ impl CommandPayload {
             CommandPayload::SetTrackBlendMode(p) => Box::new(SetTrackBlendModeCommand::new(
                 &p.sequence_id,
                 &p.track_id,
+                p.blend_mode,
+            )),
+            CommandPayload::SetClipBlendMode(p) => Box::new(SetClipBlendModeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
                 p.blend_mode,
             )),
             CommandPayload::ImportAsset(p) => Box::new(ImportAssetCommand::new(&p.name, &p.uri)),

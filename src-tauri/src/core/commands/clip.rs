@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
     project::ProjectState,
-    timeline::{AudioSettings, Clip, ClipPlace, ClipRange, Track, Transform},
+    timeline::{AudioSettings, BlendMode, Clip, ClipPlace, ClipRange, Track, Transform},
     AssetId, ClipId, CoreError, CoreResult, SequenceId, TimeSec, TrackId,
 };
 
@@ -1375,6 +1375,107 @@ impl Command for SetClipTransformCommand {
     }
 }
 
+// =============================================================================
+// SetClipBlendModeCommand
+// =============================================================================
+
+/// Command to set a clip's blend mode.
+///
+/// Blend modes control how a clip composites with clips below it.
+/// Only supported on video/overlay tracks.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetClipBlendModeCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub blend_mode: BlendMode,
+    #[serde(skip)]
+    previous_blend_mode: Option<BlendMode>,
+}
+
+impl SetClipBlendModeCommand {
+    pub fn new(sequence_id: &str, track_id: &str, clip_id: &str, blend_mode: BlendMode) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            blend_mode,
+            previous_blend_mode: None,
+        }
+    }
+}
+
+impl Command for SetClipBlendModeCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        if !track.is_video() {
+            return Err(CoreError::NotSupported(
+                "Blend mode is only supported for video clips".to_string(),
+            ));
+        }
+
+        let clip = track
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        self.previous_blend_mode = Some(clip.blend_mode.clone());
+        clip.blend_mode = self.blend_mode.clone();
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(prev) = &self.previous_blend_mode else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) else {
+            return Ok(());
+        };
+
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.blend_mode = prev.clone();
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetClipBlendMode"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "blendMode": self.blend_mode,
+        })
+    }
+}
+
 impl Command for SplitClipCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
         let sequence = state
@@ -1436,6 +1537,7 @@ impl Command for SplitClipCommand {
         second_clip.audio = original.audio.clone();
         second_clip.speed = original.speed;
         second_clip.opacity = original.opacity;
+        second_clip.blend_mode = original.blend_mode.clone();
         second_clip.effects = original.effects.clone();
         second_clip.label = original.label.clone();
         second_clip.color = original.color.clone();
@@ -2213,5 +2315,535 @@ mod tests {
         assert!(!restored.muted);
         assert_eq!(restored.fade_in_sec, 0.0);
         assert_eq!(restored.fade_out_sec, 0.0);
+    }
+
+    // =============================================================================
+    // Multi-Clip Compound Edit Scenario Tests
+    // =============================================================================
+    //
+    // These tests verify that sequences of primitive commands (TrimClip, MoveClip)
+    // produce correct results on multi-clip timelines, simulating the compound
+    // editing operations: ripple, roll, slip, and slide edits.
+
+    /// Insert N contiguous 10-second clips on the first track.
+    /// Returns (sequence_id, track_id, clip_ids).
+    fn setup_multi_clip_timeline(
+        state: &mut ProjectState,
+        clip_count: usize,
+    ) -> (SequenceId, TrackId, Vec<ClipId>) {
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut clip_ids = Vec::new();
+        for i in 0..clip_count {
+            let mut cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, (i * 10) as f64)
+                .with_source_range(0.0, 10.0);
+            let result = cmd.execute(state).unwrap();
+            clip_ids.push(result.created_ids[0].clone());
+        }
+
+        (seq_id, track_id, clip_ids)
+    }
+
+    // -- Ripple Edit Scenarios --
+
+    #[test]
+    fn test_ripple_edit_shorten_shifts_subsequent_clips() {
+        // Given: 3 contiguous clips [A(0-10), B(10-20), C(20-30)]
+        let mut state = create_test_state();
+        let (seq_id, _track_id, clips) = setup_multi_clip_timeline(&mut state, 3);
+
+        // When: Ripple-shorten B's out-point from 10 to 5 (delta = -5s)
+        // Negative delta → trim first, then move subsequent clips left.
+        let mut trim_cmd = TrimClipCommand::new_simple(&seq_id, &clips[1]).with_source_out(5.0);
+        trim_cmd.execute(&mut state).unwrap();
+
+        let mut move_cmd = MoveClipCommand::new_simple(&seq_id, &clips[2], 15.0);
+        move_cmd.execute(&mut state).unwrap();
+
+        // Then: A unchanged, B shortened, C shifted left
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 3);
+
+        assert_eq!(track.clips[0].place.timeline_in_sec, 0.0);
+        assert_eq!(track.clips[0].place.duration_sec, 10.0);
+
+        assert_eq!(track.clips[1].place.timeline_in_sec, 10.0);
+        assert_eq!(track.clips[1].place.duration_sec, 5.0);
+        assert_eq!(track.clips[1].range.source_out_sec, 5.0);
+
+        assert_eq!(track.clips[2].place.timeline_in_sec, 15.0);
+        assert_eq!(track.clips[2].place.duration_sec, 10.0);
+    }
+
+    #[test]
+    fn test_ripple_edit_extend_shifts_subsequent_clips() {
+        // Given: 3 contiguous clips [A(0-10), B(10-20), C(20-30)]
+        let mut state = create_test_state();
+        let (seq_id, _track_id, clips) = setup_multi_clip_timeline(&mut state, 3);
+
+        // When: Ripple-extend B's out-point from 10 to 15 (delta = +5s)
+        // Positive delta → move subsequent clips right first, then trim.
+        let mut move_cmd = MoveClipCommand::new_simple(&seq_id, &clips[2], 25.0);
+        move_cmd.execute(&mut state).unwrap();
+
+        let mut trim_cmd = TrimClipCommand::new_simple(&seq_id, &clips[1]).with_source_out(15.0);
+        trim_cmd.execute(&mut state).unwrap();
+
+        // Then: A unchanged, B extended, C shifted right
+        let track = &state.sequences[&seq_id].tracks[0];
+
+        assert_eq!(track.clips[0].place.timeline_in_sec, 0.0);
+        assert_eq!(track.clips[0].place.duration_sec, 10.0);
+
+        assert_eq!(track.clips[1].place.timeline_in_sec, 10.0);
+        assert_eq!(track.clips[1].place.duration_sec, 15.0);
+        assert_eq!(track.clips[1].range.source_out_sec, 15.0);
+
+        assert_eq!(track.clips[2].place.timeline_in_sec, 25.0);
+        assert_eq!(track.clips[2].place.duration_sec, 10.0);
+    }
+
+    #[test]
+    fn test_ripple_edit_undo_restores_original_positions() {
+        // Given: 3 clips with ripple-shorten applied
+        let mut state = create_test_state();
+        let (seq_id, _track_id, clips) = setup_multi_clip_timeline(&mut state, 3);
+
+        let mut trim_cmd = TrimClipCommand::new_simple(&seq_id, &clips[1]).with_source_out(5.0);
+        trim_cmd.execute(&mut state).unwrap();
+
+        let mut move_cmd = MoveClipCommand::new_simple(&seq_id, &clips[2], 15.0);
+        move_cmd.execute(&mut state).unwrap();
+
+        // When: Undo in reverse order
+        move_cmd.undo(&mut state).unwrap();
+        trim_cmd.undo(&mut state).unwrap();
+
+        // Then: All clips restored to original positions
+        let track = &state.sequences[&seq_id].tracks[0];
+        for (i, clip) in track.clips.iter().enumerate() {
+            assert_eq!(clip.place.timeline_in_sec, (i * 10) as f64);
+            assert_eq!(clip.place.duration_sec, 10.0);
+            assert_eq!(clip.range.source_in_sec, 0.0);
+            assert_eq!(clip.range.source_out_sec, 10.0);
+        }
+    }
+
+    #[test]
+    fn test_ripple_edit_with_speed_factor() {
+        // Given: 3 clips, middle clip at 2x speed (source 0-20, plays in 10s)
+        let mut state = create_test_state();
+        let (seq_id, _track_id, clips) = setup_multi_clip_timeline(&mut state, 3);
+
+        // Reconfigure B: source 0-20 at speed 2.0 → duration 10s (fits timeline slot)
+        {
+            let seq = state.sequences.get_mut(&seq_id).unwrap();
+            let clip_b = &mut seq.tracks[0].clips[1];
+            clip_b.range.source_out_sec = 20.0;
+            clip_b.speed = 2.0;
+            clip_b.place.duration_sec = 10.0;
+        }
+
+        // When: Ripple-trim B's sourceOut from 20 to 10 → sourceDelta = -10
+        // timelineDelta = -10 / 2.0 = -5s (speed factor applies)
+        let mut trim_cmd = TrimClipCommand::new_simple(&seq_id, &clips[1]).with_source_out(10.0);
+        trim_cmd.execute(&mut state).unwrap();
+
+        let mut move_cmd = MoveClipCommand::new_simple(&seq_id, &clips[2], 15.0);
+        move_cmd.execute(&mut state).unwrap();
+
+        // Then: B duration = (10 - 0) / 2.0 = 5s at speed 2.0
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips[1].place.timeline_in_sec, 10.0);
+        assert_eq!(track.clips[1].place.duration_sec, 5.0);
+        assert_eq!(track.clips[1].range.source_out_sec, 10.0);
+        assert_eq!(track.clips[1].speed, 2.0);
+
+        // C moved left by 5s (the timeline delta)
+        assert_eq!(track.clips[2].place.timeline_in_sec, 15.0);
+    }
+
+    #[test]
+    fn test_ripple_edit_shifts_all_subsequent_clips() {
+        // Given: 5 contiguous clips [A(0-10), B(10-20), C(20-30), D(30-40), E(40-50)]
+        let mut state = create_test_state();
+        let (seq_id, _track_id, clips) = setup_multi_clip_timeline(&mut state, 5);
+
+        // When: Ripple-shorten B (delta = -5s) → move C, D, E left by 5s
+        let mut trim_cmd = TrimClipCommand::new_simple(&seq_id, &clips[1]).with_source_out(5.0);
+        trim_cmd.execute(&mut state).unwrap();
+
+        // Move all subsequent clips (C, D, E) in forward order (negative delta)
+        for (i, clip_id) in clips[2..].iter().enumerate() {
+            let original_pos = ((i + 2) * 10) as f64;
+            let mut move_cmd = MoveClipCommand::new_simple(&seq_id, clip_id, original_pos - 5.0);
+            move_cmd.execute(&mut state).unwrap();
+        }
+
+        // Then: All subsequent clips shifted left by 5s
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips[0].place.timeline_in_sec, 0.0); // A unchanged
+        assert_eq!(track.clips[1].place.timeline_in_sec, 10.0); // B unchanged pos
+        assert_eq!(track.clips[1].place.duration_sec, 5.0); // B shortened
+        assert_eq!(track.clips[2].place.timeline_in_sec, 15.0); // C: 20 - 5
+        assert_eq!(track.clips[3].place.timeline_in_sec, 25.0); // D: 30 - 5
+        assert_eq!(track.clips[4].place.timeline_in_sec, 35.0); // E: 40 - 5
+    }
+
+    // -- Roll Edit Scenarios --
+
+    #[test]
+    fn test_roll_edit_positive_extends_left_shrinks_right() {
+        // Given: 2 adjacent clips with source headroom for extension
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        // A: source 5-15, timeline 0-10
+        let mut cmd_a =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(5.0, 15.0);
+        let result_a = cmd_a.execute(&mut state).unwrap();
+        let clip_a = result_a.created_ids[0].clone();
+
+        // B: source 5-15, timeline 10-20
+        let mut cmd_b = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 10.0)
+            .with_source_range(5.0, 15.0);
+        let result_b = cmd_b.execute(&mut state).unwrap();
+        let clip_b = result_b.created_ids[0].clone();
+
+        // When: Roll +3s (extend A, shrink B)
+        // Positive roll → trim right clip first to avoid overlap
+        let mut trim_b = TrimClipCommand::new_simple(&seq_id, &clip_b)
+            .with_source_in(8.0)
+            .with_timeline_in(13.0);
+        trim_b.execute(&mut state).unwrap();
+
+        let mut trim_a = TrimClipCommand::new_simple(&seq_id, &clip_a).with_source_out(18.0);
+        trim_a.execute(&mut state).unwrap();
+
+        // Then: Cut point moved from 10 to 13
+        let track = &state.sequences[&seq_id].tracks[0];
+
+        // A: source 5-18, duration=13, timeline 0-13
+        assert_eq!(track.clips[0].range.source_in_sec, 5.0);
+        assert_eq!(track.clips[0].range.source_out_sec, 18.0);
+        assert_eq!(track.clips[0].place.timeline_in_sec, 0.0);
+        assert_eq!(track.clips[0].place.duration_sec, 13.0);
+
+        // B: source 8-15, duration=7, timeline 13-20
+        assert_eq!(track.clips[1].range.source_in_sec, 8.0);
+        assert_eq!(track.clips[1].range.source_out_sec, 15.0);
+        assert_eq!(track.clips[1].place.timeline_in_sec, 13.0);
+        assert_eq!(track.clips[1].place.duration_sec, 7.0);
+    }
+
+    #[test]
+    fn test_roll_edit_negative_shrinks_left_extends_right() {
+        // Given: 2 adjacent clips with source headroom
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut cmd_a =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(5.0, 15.0);
+        let result_a = cmd_a.execute(&mut state).unwrap();
+        let clip_a = result_a.created_ids[0].clone();
+
+        let mut cmd_b = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 10.0)
+            .with_source_range(5.0, 15.0);
+        let result_b = cmd_b.execute(&mut state).unwrap();
+        let clip_b = result_b.created_ids[0].clone();
+
+        // When: Roll -3s (shrink A, extend B)
+        // Negative roll → trim left clip first to avoid overlap
+        let mut trim_a = TrimClipCommand::new_simple(&seq_id, &clip_a).with_source_out(12.0);
+        trim_a.execute(&mut state).unwrap();
+
+        let mut trim_b = TrimClipCommand::new_simple(&seq_id, &clip_b)
+            .with_source_in(2.0)
+            .with_timeline_in(7.0);
+        trim_b.execute(&mut state).unwrap();
+
+        // Then: Cut point moved from 10 to 7
+        let track = &state.sequences[&seq_id].tracks[0];
+
+        // A: source 5-12, duration=7, timeline 0-7
+        assert_eq!(track.clips[0].range.source_in_sec, 5.0);
+        assert_eq!(track.clips[0].range.source_out_sec, 12.0);
+        assert_eq!(track.clips[0].place.timeline_in_sec, 0.0);
+        assert_eq!(track.clips[0].place.duration_sec, 7.0);
+
+        // B: source 2-15, duration=13, timeline 7-20
+        assert_eq!(track.clips[1].range.source_in_sec, 2.0);
+        assert_eq!(track.clips[1].range.source_out_sec, 15.0);
+        assert_eq!(track.clips[1].place.timeline_in_sec, 7.0);
+        assert_eq!(track.clips[1].place.duration_sec, 13.0);
+    }
+
+    #[test]
+    fn test_roll_edit_undo_restores_cut_point() {
+        // Given: 2 adjacent clips with roll edit applied
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut cmd_a =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(5.0, 15.0);
+        let result_a = cmd_a.execute(&mut state).unwrap();
+        let clip_a = result_a.created_ids[0].clone();
+
+        let mut cmd_b = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 10.0)
+            .with_source_range(5.0, 15.0);
+        let result_b = cmd_b.execute(&mut state).unwrap();
+        let clip_b = result_b.created_ids[0].clone();
+
+        // Roll +3
+        let mut trim_b = TrimClipCommand::new_simple(&seq_id, &clip_b)
+            .with_source_in(8.0)
+            .with_timeline_in(13.0);
+        trim_b.execute(&mut state).unwrap();
+
+        let mut trim_a = TrimClipCommand::new_simple(&seq_id, &clip_a).with_source_out(18.0);
+        trim_a.execute(&mut state).unwrap();
+
+        // When: Undo in reverse order
+        trim_a.undo(&mut state).unwrap();
+        trim_b.undo(&mut state).unwrap();
+
+        // Then: Original cut point at 10 restored
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips[0].range.source_in_sec, 5.0);
+        assert_eq!(track.clips[0].range.source_out_sec, 15.0);
+        assert_eq!(track.clips[0].place.timeline_in_sec, 0.0);
+        assert_eq!(track.clips[0].place.duration_sec, 10.0);
+
+        assert_eq!(track.clips[1].range.source_in_sec, 5.0);
+        assert_eq!(track.clips[1].range.source_out_sec, 15.0);
+        assert_eq!(track.clips[1].place.timeline_in_sec, 10.0);
+        assert_eq!(track.clips[1].place.duration_sec, 10.0);
+    }
+
+    // -- Slip Edit Scenarios --
+
+    #[test]
+    fn test_slip_edit_shifts_source_without_timeline_change() {
+        // Given: 3 contiguous clips [A(0-10), B(10-20), C(20-30)]
+        let mut state = create_test_state();
+        let (seq_id, _track_id, clips) = setup_multi_clip_timeline(&mut state, 3);
+
+        // When: Slip B's source forward by 3s (no timeline movement)
+        let mut trim_cmd = TrimClipCommand::new_simple(&seq_id, &clips[1])
+            .with_source_in(3.0)
+            .with_source_out(13.0);
+        trim_cmd.execute(&mut state).unwrap();
+
+        // Then: B's timeline position unchanged, source shifted
+        let track = &state.sequences[&seq_id].tracks[0];
+
+        // B: timeline still 10-20, source now 3-13
+        assert_eq!(track.clips[1].place.timeline_in_sec, 10.0);
+        assert_eq!(track.clips[1].place.duration_sec, 10.0);
+        assert_eq!(track.clips[1].range.source_in_sec, 3.0);
+        assert_eq!(track.clips[1].range.source_out_sec, 13.0);
+
+        // Neighbors unchanged
+        assert_eq!(track.clips[0].place.timeline_in_sec, 0.0);
+        assert_eq!(track.clips[0].range.source_in_sec, 0.0);
+        assert_eq!(track.clips[2].place.timeline_in_sec, 20.0);
+        assert_eq!(track.clips[2].range.source_in_sec, 0.0);
+    }
+
+    // -- Slide Edit Scenarios --
+
+    #[test]
+    fn test_slide_edit_moves_clip_adjusts_neighbors() {
+        // Given: 3 contiguous clips [A(0-10), B(10-20), C(20-30)]
+        let mut state = create_test_state();
+        let (seq_id, _track_id, clips) = setup_multi_clip_timeline(&mut state, 3);
+
+        // When: Slide B right by 3s
+        // Positive slide → shrink next first, then move, then extend prev.
+
+        // Step 1: Trim C (shrink from start): sourceIn=3, timelineIn=23
+        let mut trim_c = TrimClipCommand::new_simple(&seq_id, &clips[2])
+            .with_source_in(3.0)
+            .with_timeline_in(23.0);
+        trim_c.execute(&mut state).unwrap();
+
+        // Step 2: Move B to timeline 13
+        let mut move_b = MoveClipCommand::new_simple(&seq_id, &clips[1], 13.0);
+        move_b.execute(&mut state).unwrap();
+
+        // Step 3: Trim A (extend): sourceOut=13
+        let mut trim_a = TrimClipCommand::new_simple(&seq_id, &clips[0]).with_source_out(13.0);
+        trim_a.execute(&mut state).unwrap();
+
+        // Then: Clips still contiguous, B shifted right
+        let track = &state.sequences[&seq_id].tracks[0];
+
+        // A: source 0-13, timeline 0-13
+        assert_eq!(track.clips[0].range.source_out_sec, 13.0);
+        assert_eq!(track.clips[0].place.timeline_in_sec, 0.0);
+        assert_eq!(track.clips[0].place.duration_sec, 13.0);
+
+        // B: source 0-10, timeline 13-23
+        assert_eq!(track.clips[1].place.timeline_in_sec, 13.0);
+        assert_eq!(track.clips[1].place.duration_sec, 10.0);
+
+        // C: source 3-10, timeline 23-30
+        assert_eq!(track.clips[2].range.source_in_sec, 3.0);
+        assert_eq!(track.clips[2].place.timeline_in_sec, 23.0);
+        assert_eq!(track.clips[2].place.duration_sec, 7.0);
+
+        // Total timeline length preserved: 0-30
+        let last = &track.clips[2];
+        let total_end = last.place.timeline_in_sec + last.place.duration_sec;
+        assert_eq!(total_end, 30.0);
+    }
+
+    #[test]
+    fn test_slide_edit_undo_restores_all_positions() {
+        // Given: 3 clips with slide edit applied
+        let mut state = create_test_state();
+        let (seq_id, _track_id, clips) = setup_multi_clip_timeline(&mut state, 3);
+
+        let mut trim_c = TrimClipCommand::new_simple(&seq_id, &clips[2])
+            .with_source_in(3.0)
+            .with_timeline_in(23.0);
+        trim_c.execute(&mut state).unwrap();
+
+        let mut move_b = MoveClipCommand::new_simple(&seq_id, &clips[1], 13.0);
+        move_b.execute(&mut state).unwrap();
+
+        let mut trim_a = TrimClipCommand::new_simple(&seq_id, &clips[0]).with_source_out(13.0);
+        trim_a.execute(&mut state).unwrap();
+
+        // When: Undo in reverse order
+        trim_a.undo(&mut state).unwrap();
+        move_b.undo(&mut state).unwrap();
+        trim_c.undo(&mut state).unwrap();
+
+        // Then: All clips restored to original contiguous positions
+        let track = &state.sequences[&seq_id].tracks[0];
+        for (i, clip) in track.clips.iter().enumerate() {
+            assert_eq!(clip.place.timeline_in_sec, (i * 10) as f64);
+            assert_eq!(clip.place.duration_sec, 10.0);
+            assert_eq!(clip.range.source_in_sec, 0.0);
+            assert_eq!(clip.range.source_out_sec, 10.0);
+        }
+    }
+
+    // =========================================================================
+    // SetClipBlendModeCommand Tests
+    // =========================================================================
+
+    /// Creates a test state with a video track containing one clip.
+    fn create_test_state_with_clip() -> (ProjectState, String, String, String) {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        (state, seq_id, track_id, clip_id)
+    }
+
+    #[test]
+    fn test_set_clip_blend_mode_should_change_blend_mode_when_video_track() {
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+
+        let mut cmd =
+            SetClipBlendModeCommand::new(&seq_id, &track_id, &clip_id, BlendMode::Multiply);
+        let result = cmd.execute(&mut state);
+        assert!(result.is_ok());
+
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert_eq!(clip.blend_mode, BlendMode::Multiply);
+    }
+
+    #[test]
+    fn test_set_clip_blend_mode_should_default_to_normal() {
+        let (state, seq_id, _track_id, _clip_id) = create_test_state_with_clip();
+
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert_eq!(clip.blend_mode, BlendMode::Normal);
+    }
+
+    #[test]
+    fn test_set_clip_blend_mode_should_undo_to_previous_mode() {
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+
+        let mut cmd = SetClipBlendModeCommand::new(&seq_id, &track_id, &clip_id, BlendMode::Screen);
+        cmd.execute(&mut state).unwrap();
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0].blend_mode,
+            BlendMode::Screen
+        );
+
+        cmd.undo(&mut state).unwrap();
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0].blend_mode,
+            BlendMode::Normal
+        );
+    }
+
+    #[test]
+    fn test_set_clip_blend_mode_should_reject_audio_track() {
+        let (mut state, seq_id, _track_id, _clip_id) = create_test_state_with_clip();
+
+        // Add an audio track with a clip
+        let seq = state.sequences.get_mut(&seq_id).unwrap();
+        let mut audio_track = Track::new_audio("Audio 1");
+        let audio_clip = Clip::new("asset1");
+        let audio_clip_id = audio_clip.id.clone();
+        let audio_track_id = audio_track.id.clone();
+        audio_track.add_clip(audio_clip);
+        seq.tracks.push(audio_track);
+
+        let mut cmd = SetClipBlendModeCommand::new(
+            &seq_id,
+            &audio_track_id,
+            &audio_clip_id,
+            BlendMode::Overlay,
+        );
+        let result = cmd.execute(&mut state);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_clip_blend_mode_should_support_all_expanded_modes() {
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+
+        let modes = vec![
+            BlendMode::Subtract,
+            BlendMode::Darken,
+            BlendMode::Lighten,
+            BlendMode::ColorBurn,
+            BlendMode::ColorDodge,
+            BlendMode::LinearBurn,
+            BlendMode::LinearDodge,
+            BlendMode::SoftLight,
+            BlendMode::HardLight,
+            BlendMode::VividLight,
+            BlendMode::LinearLight,
+            BlendMode::PinLight,
+            BlendMode::Difference,
+            BlendMode::Exclusion,
+        ];
+
+        for mode in modes {
+            let mut cmd = SetClipBlendModeCommand::new(&seq_id, &track_id, &clip_id, mode.clone());
+            let result = cmd.execute(&mut state);
+            assert!(result.is_ok(), "Failed to set blend mode {:?}", mode);
+            assert_eq!(state.sequences[&seq_id].tracks[0].clips[0].blend_mode, mode);
+        }
     }
 }

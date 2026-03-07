@@ -214,6 +214,7 @@ impl Command for AddTextClipCommand {
                 anchor: Point2D::center(),
             },
             opacity: self.text_data.opacity as f32,
+            blend_mode: crate::core::timeline::BlendMode::Normal,
             speed: 1.0,
             reverse: false,
             effects: vec![], // Will add effect below

@@ -775,6 +775,7 @@ impl ProjectState {
 
         // Find clip across all tracks
         for track in &mut sequence.tracks {
+            let is_video_track = track.is_video();
             if let Some(clip) = track.get_clip_mut(clip_id) {
                 // Apply mute change if present
                 if let Some(muted_value) = op.payload.get("muted") {
@@ -820,6 +821,24 @@ impl ProjectState {
                         return Err(CoreError::InvalidCommand(
                             "Invalid pan value (expected number)".to_string(),
                         ));
+                    }
+                }
+
+                if let Some(blend_value) = op.payload.get("blendMode") {
+                    if blend_value.is_null() {
+                        // no-op: null means no change
+                    } else {
+                        if !is_video_track {
+                            return Err(CoreError::ValidationError(format!(
+                                "Blend mode is only supported for video clips: {}",
+                                clip_id
+                            )));
+                        }
+                        let blend_mode: BlendMode = serde_json::from_value(blend_value.clone())
+                            .map_err(|e| {
+                                CoreError::InvalidCommand(format!("Invalid blendMode: {}", e))
+                            })?;
+                        clip.blend_mode = blend_mode;
                     }
                 }
 
@@ -2553,6 +2572,71 @@ mod tests {
         ));
 
         assert!(matches!(result, Err(CoreError::InvalidCommand(_))));
+    }
+
+    #[test]
+    fn test_clip_update_blend_mode_updates_video_clip() {
+        let mut state = ProjectState::new("Test Project");
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let video_track = state
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .tracks
+            .get_mut(0)
+            .unwrap();
+
+        let clip = Clip::new("asset_video")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        let clip_id = clip.id.clone();
+        video_track.add_clip(clip);
+
+        state
+            .apply_operation(&Operation::new(
+                OpKind::ClipUpdate,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": clip_id,
+                    "blendMode": "screen",
+                }),
+            ))
+            .unwrap();
+
+        let updated_clip = state.sequences[&seq_id].tracks[0]
+            .get_clip(&clip_id)
+            .unwrap();
+        assert_eq!(updated_clip.blend_mode, BlendMode::Screen);
+    }
+
+    #[test]
+    fn test_clip_update_blend_mode_on_audio_track_fails() {
+        let mut state = ProjectState::new("Test Project");
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let audio_track = state
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .tracks
+            .get_mut(1)
+            .unwrap();
+
+        let clip = Clip::new("asset_audio")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        let clip_id = clip.id.clone();
+        audio_track.add_clip(clip);
+
+        let result = state.apply_operation(&Operation::new(
+            OpKind::ClipUpdate,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "clipId": clip_id,
+                "blendMode": "multiply",
+            }),
+        ));
+
+        assert!(matches!(result, Err(CoreError::ValidationError(_))));
     }
 
     #[test]
