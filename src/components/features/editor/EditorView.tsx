@@ -48,6 +48,7 @@ import { extractTextDataFromClipWithMap } from '@/utils/textRenderer';
 import { createLogger } from '@/services/logger';
 import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
+import { getSplitTargetsAtTime } from '@/utils/clipLinking';
 import { Terminal, Sliders, Sparkles } from 'lucide-react';
 import type { BlendMode, Sequence, CaptionPosition, ClipId, TextClipData } from '@/types';
 import type { AddTextPayload } from '@/components/features/text';
@@ -137,7 +138,7 @@ function normalizeCaptionPositionValue(value: unknown): CaptionPosition | null {
 export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps): JSX.Element {
   const { selectedAssetId, assets } = useProjectStore();
   const currentTime = usePlaybackStore((state) => state.currentTime);
-  const { selectedClipIds } = useTimelineStore();
+  const { selectedClipIds, linkedSelectionEnabled } = useTimelineStore();
 
   // Export dialog state
   const [showExportDialog, setShowExportDialog] = useState(false);
@@ -305,6 +306,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     pendingWorkspaceDrops,
     handleDeleteClips,
     handleTrackCreate,
+    handleTrackDelete,
     handleTrackMuteToggle,
     handleTrackLockToggle,
     handleTrackVisibilityToggle,
@@ -318,29 +320,26 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
 
   // Split at playhead handler for keyboard shortcut
   const handleSplitAtPlayhead = useCallback(() => {
-    if (!sequence || selectedClipIds.length !== 1) return;
-
-    const clipId = selectedClipIds[0];
-    for (const track of sequence.tracks) {
-      const clip = track.clips.find((c) => c.id === clipId);
-      if (clip) {
-        const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-        const clipEnd =
-          clip.place.timelineInSec + (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-
-        // Check if playhead is within the clip
-        if (currentTime > clip.place.timelineInSec && currentTime < clipEnd) {
-          handleClipSplit?.({
-            sequenceId: sequence.id,
-            trackId: track.id,
-            clipId: clip.id,
-            splitTime: currentTime,
-          });
-        }
-        break;
-      }
+    if (!sequence || selectedClipIds.length === 0 || !handleClipSplit) {
+      return;
     }
-  }, [sequence, selectedClipIds, currentTime, handleClipSplit]);
+
+    const splitTargets = getSplitTargetsAtTime(
+      sequence,
+      selectedClipIds,
+      currentTime,
+      linkedSelectionEnabled,
+    );
+
+    for (const splitTarget of splitTargets) {
+      handleClipSplit({
+        sequenceId: sequence.id,
+        trackId: splitTarget.trackId,
+        clipId: splitTarget.clipId,
+        splitTime: currentTime,
+      });
+    }
+  }, [sequence, selectedClipIds, linkedSelectionEnabled, currentTime, handleClipSplit]);
 
   // Global keyboard shortcuts
   useKeyboardShortcuts({
@@ -777,6 +776,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                   pendingAssetDrops={pendingWorkspaceDrops}
                   onDeleteClips={handleDeleteClips}
                   onTrackCreate={handleTrackCreate}
+                  onTrackDelete={handleTrackDelete}
                   onTrackMuteToggle={handleTrackMuteToggle}
                   onTrackLockToggle={handleTrackLockToggle}
                   onTrackVisibilityToggle={handleTrackVisibilityToggle}

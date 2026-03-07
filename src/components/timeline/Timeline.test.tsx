@@ -398,6 +398,23 @@ describe('Timeline', () => {
       expect(useTimelineStore.getState().selectedClipIds).toEqual([]);
     });
 
+    it('should show razor guide and cursor while hovering in razor mode', () => {
+      useEditorToolStore.setState({ activeTool: 'razor' });
+      render(<Timeline sequence={mockSequence} />);
+
+      const tracksArea = screen.getByTestId('timeline-tracks-area');
+      fireEvent.mouseMove(tracksArea, { clientX: 320, clientY: 60 });
+
+      expect(tracksArea.style.cursor).toContain('url(');
+      expect(screen.getByTestId('razor-guide-vertical')).toBeInTheDocument();
+      expect(screen.getByTestId('razor-guide-horizontal')).toBeInTheDocument();
+
+      fireEvent.mouseLeave(tracksArea);
+
+      expect(screen.queryByTestId('razor-guide-vertical')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('razor-guide-horizontal')).not.toBeInTheDocument();
+    });
+
     it('should select linked companion clips when linked selection is enabled', () => {
       const sequenceWithLinkedClips: Sequence = {
         ...mockSequence,
@@ -762,6 +779,50 @@ describe('Timeline', () => {
       expect(screen.getByTestId('playhead')).toHaveAttribute('data-dragging', 'false');
     });
 
+    it('should disable playhead dragging and show a razor hit area in razor mode', async () => {
+      useEditorToolStore.setState({ activeTool: 'razor' });
+
+      const sequenceWithClip: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            clips: [
+              {
+                id: 'clip_playhead_cut_001',
+                assetId: 'asset_001',
+                range: { sourceInSec: 0, sourceOutSec: 10 },
+                place: { timelineInSec: 0, durationSec: 10 },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+          mockSequence.tracks[1],
+        ],
+      };
+
+      render(<Timeline sequence={sequenceWithClip} onClipSplit={vi.fn()} />);
+
+      await act(async () => {
+        usePlaybackStore.getState().seek(4);
+      });
+
+      expect(screen.getByTestId('playhead-line-hit-area')).toHaveStyle({ pointerEvents: 'none' });
+      expect(screen.getByTestId('playhead-head')).toHaveStyle({ pointerEvents: 'none' });
+      expect(screen.getByTestId('playhead-razor-hit-area')).toBeInTheDocument();
+      expect(screen.getByTestId('playhead-razor-hit-area').style.cursor).toContain('url(');
+      expect(screen.getByTestId('playhead')).toHaveAttribute('data-dragging', 'false');
+    });
+
     it('should not seek when clicking directly on a clip body', async () => {
       const sequenceWithClip: Sequence = {
         ...mockSequence,
@@ -935,6 +996,22 @@ describe('Timeline', () => {
       });
 
       expect(usePlaybackStore.getState().isPlaying).toBe(true);
+    });
+
+    it('should switch to razor tool on C', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      fireEvent.keyDown(screen.getByTestId('timeline'), { key: 'c' });
+
+      expect(useEditorToolStore.getState().activeTool).toBe('razor');
+    });
+
+    it('should switch to ripple tool on B', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      fireEvent.keyDown(screen.getByTestId('timeline'), { key: 'b' });
+
+      expect(useEditorToolStore.getState().activeTool).toBe('ripple');
     });
 
     it('should delete selected clips on delete key', () => {
