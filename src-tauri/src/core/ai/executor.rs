@@ -202,6 +202,17 @@ pub struct EditScriptExecutor {
     pub validate_first: bool,
 }
 
+fn get_split_time(params: &serde_json::Value) -> Option<f64> {
+    params
+        .get("splitTime")
+        .or_else(|| params.get("atTimelineSec"))
+        .and_then(|v| v.as_f64())
+}
+
+fn has_split_time(params: &serde_json::Value) -> bool {
+    params.get("splitTime").is_some() || params.get("atTimelineSec").is_some()
+}
+
 impl EditScriptExecutor {
     /// Creates a new executor with default settings
     pub fn new() -> Self {
@@ -378,11 +389,11 @@ impl EditScriptExecutor {
                 // Command-specific validation
                 match cmd.command_type.as_str() {
                     "SplitClip" => {
-                        if cmd.params.get("atTimelineSec").is_none() {
+                        if !has_split_time(&cmd.params) {
                             errors.push(ValidationError::for_command(
                                 index,
                                 "MISSING_SPLIT_POINT",
-                                "SplitClip requires atTimelineSec",
+                                "SplitClip requires splitTime or atTimelineSec",
                             ));
                         }
                     }
@@ -464,13 +475,11 @@ impl EditScriptExecutor {
                     .ok_or_else(|| {
                         CoreError::ValidationError("SplitClip missing clipId".to_string())
                     })?;
-                let at_sec = cmd
-                    .params
-                    .get("atTimelineSec")
-                    .and_then(|v| v.as_f64())
-                    .ok_or_else(|| {
-                        CoreError::ValidationError("SplitClip missing atTimelineSec".to_string())
-                    })?;
+                let at_sec = get_split_time(&cmd.params).ok_or_else(|| {
+                    CoreError::ValidationError(
+                        "SplitClip missing splitTime/atTimelineSec".to_string(),
+                    )
+                })?;
 
                 Ok(Box::new(SplitClipInfo {
                     clip_id: clip_id.to_string(),
@@ -790,6 +799,24 @@ mod tests {
 
         assert_eq!(info.clip_id, "clip_1");
         assert_eq!(info.at_timeline_sec, 10.0);
+    }
+
+    #[test]
+    fn test_command_to_project_command_split_accepts_split_time_alias() {
+        let executor = EditScriptExecutor::new();
+        let cmd = EditCommand::new(
+            "SplitClip",
+            serde_json::json!({
+                "clipId": "clip_1",
+                "splitTime": 12.0
+            }),
+        );
+
+        let result = executor.command_to_project_command(&cmd).unwrap();
+        let info = result.downcast::<SplitClipInfo>().unwrap();
+
+        assert_eq!(info.clip_id, "clip_1");
+        assert_eq!(info.at_timeline_sec, 12.0);
     }
 
     #[test]

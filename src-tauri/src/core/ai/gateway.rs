@@ -684,14 +684,21 @@ Return JSON array of edit scripts."#;
                     if cmd.params.get("clipId").is_none() {
                         issues.push(format!("SplitClip command {} missing clipId", i));
                     }
-                    match cmd.params.get("atTimelineSec") {
-                        None => {
-                            issues.push(format!("SplitClip command {} missing atTimelineSec", i))
-                        }
+                    match cmd
+                        .params
+                        .get("splitTime")
+                        .or_else(|| cmd.params.get("atTimelineSec"))
+                    {
+                        None => issues.push(format!(
+                            "SplitClip command {} missing splitTime or atTimelineSec",
+                            i
+                        )),
                         Some(v) => match v.as_f64() {
                             Some(t) if t.is_finite() && t >= 0.0 => {}
-                            _ => issues
-                                .push(format!("SplitClip command {} invalid atTimelineSec", i)),
+                            _ => issues.push(format!(
+                                "SplitClip command {} invalid splitTime/atTimelineSec",
+                                i
+                            )),
                         },
                     }
                 }
@@ -1546,6 +1553,21 @@ This will add the clip."#;
         let gateway = AIGateway::with_defaults();
         let script =
             EditScript::new("Split clip").add_command(EditCommand::split_clip("clip_1", 5.0));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(result.is_valid);
+    }
+
+    #[tokio::test]
+    async fn test_validate_split_clip_valid_with_split_time_alias() {
+        let gateway = AIGateway::with_defaults();
+        let script = EditScript::new("Split clip").add_command(EditCommand::new(
+            "SplitClip",
+            serde_json::json!({
+                "clipId": "clip_1",
+                "splitTime": 5.0
+            }),
+        ));
 
         let result = gateway.validate_script(&script).await.unwrap();
         assert!(result.is_valid);
