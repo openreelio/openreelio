@@ -45,7 +45,20 @@ export interface QualifierValues {
 }
 
 /** Preset qualifier names */
-export type QualifierPreset = 'skin_tones' | 'sky_blue' | 'foliage' | 'custom';
+export type QualifierPreset =
+  | 'skin_tones'
+  | 'skin_warm'
+  | 'skin_cool'
+  | 'sky_blue'
+  | 'sky_warm'
+  | 'sky_cool'
+  | 'foliage'
+  | 'foliage_autumn'
+  | 'foliage_spring'
+  | 'water'
+  | 'sunset'
+  | 'neutral_desaturate'
+  | 'custom';
 
 /** Default qualifier values */
 export const DEFAULT_QUALIFIER_VALUES: QualifierValues = {
@@ -67,44 +80,71 @@ export const QUALIFIER_PRESETS: Record<
   Exclude<QualifierPreset, 'custom'>,
   QualifierValues
 > = {
+  // Skin tone presets
   skin_tones: {
-    hue_center: 20,
-    hue_width: 40,
-    sat_min: 0.15,
-    sat_max: 0.7,
-    lum_min: 0.2,
-    lum_max: 0.85,
-    softness: 0.15,
-    hue_shift: 0,
-    sat_adjust: 0,
-    lum_adjust: 0,
-    invert: false,
+    hue_center: 20, hue_width: 40, sat_min: 0.15, sat_max: 0.7,
+    lum_min: 0.2, lum_max: 0.85, softness: 0.15,
+    hue_shift: 0, sat_adjust: 0, lum_adjust: 0, invert: false,
   },
+  skin_warm: {
+    hue_center: 25, hue_width: 35, sat_min: 0.2, sat_max: 0.65,
+    lum_min: 0.25, lum_max: 0.8, softness: 0.15,
+    hue_shift: 10, sat_adjust: 0.1, lum_adjust: 0.05, invert: false,
+  },
+  skin_cool: {
+    hue_center: 15, hue_width: 35, sat_min: 0.15, sat_max: 0.6,
+    lum_min: 0.2, lum_max: 0.85, softness: 0.15,
+    hue_shift: -10, sat_adjust: -0.05, lum_adjust: 0, invert: false,
+  },
+  // Sky presets
   sky_blue: {
-    hue_center: 210,
-    hue_width: 60,
-    sat_min: 0.2,
-    sat_max: 1.0,
-    lum_min: 0.3,
-    lum_max: 0.9,
-    softness: 0.1,
-    hue_shift: 0,
-    sat_adjust: 0,
-    lum_adjust: 0,
-    invert: false,
+    hue_center: 210, hue_width: 60, sat_min: 0.2, sat_max: 1.0,
+    lum_min: 0.3, lum_max: 0.9, softness: 0.1,
+    hue_shift: 0, sat_adjust: 0, lum_adjust: 0, invert: false,
   },
+  sky_warm: {
+    hue_center: 210, hue_width: 50, sat_min: 0.15, sat_max: 1.0,
+    lum_min: 0.3, lum_max: 0.95, softness: 0.12,
+    hue_shift: -15, sat_adjust: 0.1, lum_adjust: 0.05, invert: false,
+  },
+  sky_cool: {
+    hue_center: 220, hue_width: 50, sat_min: 0.2, sat_max: 1.0,
+    lum_min: 0.25, lum_max: 0.9, softness: 0.1,
+    hue_shift: 10, sat_adjust: 0.15, lum_adjust: -0.05, invert: false,
+  },
+  // Foliage presets
   foliage: {
-    hue_center: 100,
-    hue_width: 80,
-    sat_min: 0.15,
-    sat_max: 1.0,
-    lum_min: 0.1,
-    lum_max: 0.85,
-    softness: 0.1,
-    hue_shift: 0,
-    sat_adjust: 0,
-    lum_adjust: 0,
-    invert: false,
+    hue_center: 100, hue_width: 80, sat_min: 0.15, sat_max: 1.0,
+    lum_min: 0.1, lum_max: 0.85, softness: 0.1,
+    hue_shift: 0, sat_adjust: 0, lum_adjust: 0, invert: false,
+  },
+  foliage_autumn: {
+    hue_center: 80, hue_width: 70, sat_min: 0.2, sat_max: 1.0,
+    lum_min: 0.15, lum_max: 0.8, softness: 0.1,
+    hue_shift: -30, sat_adjust: 0.2, lum_adjust: -0.05, invert: false,
+  },
+  foliage_spring: {
+    hue_center: 110, hue_width: 60, sat_min: 0.25, sat_max: 1.0,
+    lum_min: 0.2, lum_max: 0.9, softness: 0.08,
+    hue_shift: 10, sat_adjust: 0.15, lum_adjust: 0.1, invert: false,
+  },
+  // Water preset
+  water: {
+    hue_center: 190, hue_width: 50, sat_min: 0.15, sat_max: 0.9,
+    lum_min: 0.1, lum_max: 0.8, softness: 0.12,
+    hue_shift: 0, sat_adjust: 0, lum_adjust: 0, invert: false,
+  },
+  // Sunset preset
+  sunset: {
+    hue_center: 30, hue_width: 70, sat_min: 0.3, sat_max: 1.0,
+    lum_min: 0.15, lum_max: 0.7, softness: 0.15,
+    hue_shift: 0, sat_adjust: 0.1, lum_adjust: 0.05, invert: false,
+  },
+  // Neutral desaturate preset (select all colors, reduce saturation)
+  neutral_desaturate: {
+    hue_center: 0, hue_width: 180, sat_min: 0.1, sat_max: 1.0,
+    lum_min: 0.0, lum_max: 1.0, softness: 0.2,
+    hue_shift: 0, sat_adjust: -0.5, lum_adjust: 0, invert: false,
   },
 };
 
