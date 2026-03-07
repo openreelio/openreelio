@@ -1467,6 +1467,94 @@ describe('useTimelineActions', () => {
   });
 
   // ===========================================================================
+  // Track Delete Tests
+  // ===========================================================================
+
+  describe('handleTrackDelete', () => {
+    it('should execute DeleteTrack for non-base tracks', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1', isBaseTrack: true }),
+          createMockTrack({ id: 'track_v2', kind: 'video', name: 'Video 2', isBaseTrack: false }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', name: 'Audio 1', isBaseTrack: true }),
+        ],
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_delete_track_001',
+            createdIds: [],
+            deletedIds: ['track_v2'],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleTrackDelete({
+          sequenceId: 'seq_001',
+          trackId: 'track_v2',
+        });
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'DeleteTrack',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_v2',
+        },
+      });
+    });
+
+    it('should not delete protected base tracks', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1', isBaseTrack: true }),
+          createMockTrack({ id: 'track_v2', kind: 'video', name: 'Video 2', isBaseTrack: false }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', name: 'Audio 1', isBaseTrack: true }),
+        ],
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleTrackDelete({
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+        });
+      });
+
+      const executeCommandCalls = mockedInvoke.mock.calls.filter(
+        ([cmd]) => cmd === 'execute_command',
+      );
+      expect(executeCommandCalls).toHaveLength(0);
+    });
+  });
+
+  // ===========================================================================
   // Track Reorder Tests
   // ===========================================================================
 
@@ -1506,6 +1594,7 @@ describe('useTimelineActions', () => {
           sequenceId: 'seq_001',
           trackId: 'track_v2',
           newIndex: 0,
+          targetTrackId: 'track_v1',
         });
       });
 
@@ -1518,7 +1607,7 @@ describe('useTimelineActions', () => {
       });
     });
 
-    it('should clamp out-of-range target index before reordering', async () => {
+    it('should skip reordering when the target resolves to a different track kind', async () => {
       const sequence = createMockSequence({
         id: 'seq_001',
         tracks: [
@@ -1556,13 +1645,55 @@ describe('useTimelineActions', () => {
         });
       });
 
-      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
-        commandType: 'ReorderTracks',
-        payload: {
-          sequenceId: 'seq_001',
-          newOrder: ['track_v2', 'track_a1', 'track_v1'],
-        },
+      const executeCommandCalls = mockedInvoke.mock.calls.filter(
+        ([cmd]) => cmd === 'execute_command',
+      );
+      expect(executeCommandCalls).toHaveLength(0);
+    });
+
+    it('should skip reordering when an explicit swap target has a different track kind', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' }),
+          createMockTrack({ id: 'track_v2', kind: 'video', name: 'Video 2' }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', name: 'Audio 1' }),
+        ],
       });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_reorder_003',
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleTrackReorder({
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          newIndex: 2,
+          targetTrackId: 'track_a1',
+        });
+      });
+
+      const executeCommandCalls = mockedInvoke.mock.calls.filter(
+        ([cmd]) => cmd === 'execute_command',
+      );
+      expect(executeCommandCalls).toHaveLength(0);
     });
   });
 
@@ -2209,6 +2340,65 @@ describe('useTimelineActions', () => {
         sequenceId: 'seq_001',
         trackId: 'track_a1',
         clipId: 'clip_audio_001',
+        splitTime: 9,
+      });
+    });
+
+    it('should skip linked companion split when ignoreLinkedSelection is true', async () => {
+      const videoClip = createMockClip({
+        id: 'clip_video_001',
+        assetId: 'asset_linked_001',
+        place: { timelineInSec: 5, durationSec: 10 },
+      });
+      const audioClip = createMockClip({
+        id: 'clip_audio_001',
+        assetId: 'asset_linked_001',
+        place: { timelineInSec: 5, durationSec: 10 },
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_v1', kind: 'video', clips: [videoClip] }),
+          createMockTrack({ id: 'track_a1', kind: 'audio', clips: [audioClip] }),
+        ],
+      });
+
+      useProjectStore.setState({ sequences: new Map([[sequence.id, sequence]]) });
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          executeCalls.push(args as { commandType: string; payload: Record<string, unknown> });
+          return Promise.resolve({ opId: 'op_001', createdIds: [], deletedIds: [] });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleClipSplit({
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          clipId: 'clip_video_001',
+          splitTime: 9,
+          ignoreLinkedSelection: true,
+        });
+      });
+
+      const splitCalls = executeCalls.filter((call) => call.commandType === 'SplitClip');
+      expect(splitCalls).toHaveLength(1);
+      expect(splitCalls[0]?.payload).toEqual({
+        sequenceId: 'seq_001',
+        trackId: 'track_v1',
+        clipId: 'clip_video_001',
         splitTime: 9,
       });
     });

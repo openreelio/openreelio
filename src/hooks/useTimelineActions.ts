@@ -56,6 +56,11 @@ import {
   selectPreferredVisualTrack,
   trackHasOverlap,
 } from '@/hooks/timelineActions/helpers';
+import {
+  buildTrackSwapOrder,
+  isProtectedBaseTrack,
+  resolveTrackSwapTargetId,
+} from '@/utils/trackReorder';
 
 const logger = createLogger('TimelineActions');
 
@@ -79,6 +84,7 @@ interface TimelineActions {
   pendingWorkspaceDrops: PendingWorkspaceDropState[];
   handleDeleteClips: (clipIds: string[]) => Promise<void>;
   handleTrackCreate: (data: TrackCreateData) => Promise<void>;
+  handleTrackDelete: (data: TrackControlData) => Promise<void>;
   handleTrackMuteToggle: (data: TrackControlData) => Promise<void>;
   handleTrackLockToggle: (data: TrackControlData) => Promise<void>;
   handleTrackVisibilityToggle: (data: TrackControlData) => Promise<void>;
@@ -1671,6 +1677,62 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
   );
 
   /**
+   * Handle deleting a non-base track.
+   */
+  const handleTrackDelete = useCallback(
+    async (data: TrackControlData): Promise<void> => {
+      if (!sequence) {
+        logger.warn('Cannot delete track: no sequence');
+        return;
+      }
+
+      const sequenceSnapshot = getCurrentSequence();
+      if (!sequenceSnapshot) {
+        logger.warn('Cannot delete track: sequence snapshot unavailable', {
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+        });
+        return;
+      }
+
+      const track = sequenceSnapshot.tracks.find((candidate) => candidate.id === data.trackId);
+      if (!track) {
+        logger.warn('Cannot delete track: track not found', {
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+        });
+        return;
+      }
+
+      if (isProtectedBaseTrack(sequenceSnapshot.tracks, data.trackId)) {
+        logger.warn('Cannot delete track: base tracks are protected', {
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+          trackKind: track.kind,
+        });
+        return;
+      }
+
+      try {
+        await executeCommand({
+          type: 'DeleteTrack',
+          payload: {
+            sequenceId: data.sequenceId,
+            trackId: data.trackId,
+          },
+        });
+      } catch (error) {
+        logger.error('Failed to delete track', {
+          error,
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+        });
+      }
+    },
+    [sequence, executeCommand, getCurrentSequence],
+  );
+
+  /**
    * Handle track reorder.
    */
   const handleTrackReorder = useCallback(
@@ -1699,20 +1761,38 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         return;
       }
 
-      const clampedTargetIndex = Math.max(
-        0,
-        Math.min(data.newIndex, sequenceSnapshot.tracks.length - 1),
-      );
-      if (clampedTargetIndex === currentIndex) {
+      const targetTrackId =
+        data.targetTrackId ??
+        resolveTrackSwapTargetId(sequenceSnapshot.tracks, data.trackId, data.newIndex);
+      if (!targetTrackId) {
         return;
       }
 
-      const reorderedTrackIds = sequenceSnapshot.tracks.map((track) => track.id);
-      const [movedTrackId] = reorderedTrackIds.splice(currentIndex, 1);
-      if (!movedTrackId) {
+      const targetIndex = sequenceSnapshot.tracks.findIndex((track) => track.id === targetTrackId);
+      if (targetIndex < 0) {
+        logger.warn('Cannot reorder track: target track not found', {
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+          targetTrackId,
+        });
         return;
       }
-      reorderedTrackIds.splice(clampedTargetIndex, 0, movedTrackId);
+
+      const reorderedTrackIds = buildTrackSwapOrder(
+        sequenceSnapshot.tracks,
+        data.trackId,
+        targetTrackId,
+      );
+      if (!reorderedTrackIds) {
+        logger.warn('Cannot reorder track: track swap must stay within the same kind', {
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+          currentIndex,
+          targetTrackId,
+          targetIndex,
+        });
+        return;
+      }
 
       try {
         await executeCommand({
@@ -1728,7 +1808,8 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           sequenceId: data.sequenceId,
           trackId: data.trackId,
           currentIndex,
-          newIndex: clampedTargetIndex,
+          newIndex: targetIndex,
+          targetTrackId,
         });
       }
     },
@@ -1824,6 +1905,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     pendingWorkspaceDrops,
     handleDeleteClips,
     handleTrackCreate,
+    handleTrackDelete,
     handleTrackMuteToggle,
     handleTrackLockToggle,
     handleTrackVisibilityToggle,
