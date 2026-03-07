@@ -15,7 +15,7 @@ interface LinkedMoveTarget {
   newTimelineIn: number;
 }
 
-interface LinkedSplitTarget {
+export interface ClipSplitTarget {
   clipId: string;
   trackId: string;
 }
@@ -228,13 +228,51 @@ export function buildLinkedTrimTargets(sequence: Sequence, trimData: ClipTrimDat
   return targets;
 }
 
+export function getSplitTargetsAtTime(
+  sequence: Sequence,
+  clipIds: string[],
+  splitTime: number,
+  linkedSelectionEnabled = false,
+): ClipSplitTarget[] {
+  const coveredClipIds = new Set<string>();
+  const targets: ClipSplitTarget[] = [];
+
+  for (const clipId of clipIds) {
+    if (coveredClipIds.has(clipId)) {
+      continue;
+    }
+
+    const clipRef = findClipReference(sequence, clipId);
+    if (!clipRef || !clipContainsTime(clipRef.clip, splitTime)) {
+      continue;
+    }
+
+    targets.push({
+      clipId: clipRef.clip.id,
+      trackId: clipRef.track.id,
+    });
+
+    coveredClipIds.add(clipRef.clip.id);
+
+    if (!linkedSelectionEnabled) {
+      continue;
+    }
+
+    for (const companionId of findLinkedCompanionClipIds(sequence, clipId)) {
+      coveredClipIds.add(companionId);
+    }
+  }
+
+  return targets;
+}
+
 export function getLinkedSplitTargets(
   sequence: Sequence,
   clipId: string,
   splitTime: number,
-): LinkedSplitTarget[] {
+): ClipSplitTarget[] {
   const companionIds = findLinkedCompanionClipIds(sequence, clipId);
-  const targets: LinkedSplitTarget[] = [];
+  const targets: ClipSplitTarget[] = [];
 
   for (const companionId of companionIds) {
     const companionRef = findClipReference(sequence, companionId);

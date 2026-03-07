@@ -5,6 +5,7 @@ import {
   buildLinkedTrimTargets,
   expandClipIdsWithLinkedCompanions,
   findLinkedCompanionClipIds,
+  getSplitTargetsAtTime,
   getLinkedSplitTargets,
 } from './clipLinking';
 
@@ -190,5 +191,53 @@ describe('clipLinking utilities', () => {
       },
     ]);
     expect(getLinkedSplitTargets(sequence, 'video-clip', 25)).toEqual([]);
+  });
+
+  it('returns every selected clip that contains the split time', () => {
+    const sequence = createSequence([
+      createTrack({
+        id: 'video-track-1',
+        kind: 'video',
+        clips: [createClip({ id: 'video-clip-1', assetId: 'asset-1' })],
+      }),
+      createTrack({
+        id: 'video-track-2',
+        kind: 'video',
+        clips: [createClip({ id: 'video-clip-2', assetId: 'asset-2' })],
+      }),
+    ]);
+
+    expect(getSplitTargetsAtTime(sequence, ['video-clip-1', 'video-clip-2'], 12)).toEqual([
+      {
+        clipId: 'video-clip-1',
+        trackId: 'video-track-1',
+      },
+      {
+        clipId: 'video-clip-2',
+        trackId: 'video-track-2',
+      },
+    ]);
+  });
+
+  it('dedupes linked companions when linked selection is enabled', () => {
+    const sequence = createSequence([
+      createTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [createClip({ id: 'video-clip', assetId: 'asset-1' })],
+      }),
+      createTrack({
+        id: 'audio-track',
+        kind: 'audio',
+        clips: [createClip({ id: 'audio-clip', assetId: 'asset-1' })],
+      }),
+    ]);
+
+    expect(getSplitTargetsAtTime(sequence, ['video-clip', 'audio-clip'], 12, true)).toEqual([
+      {
+        clipId: 'video-clip',
+        trackId: 'video-track',
+      },
+    ]);
   });
 });
