@@ -446,6 +446,27 @@ describe('usePreviewMode', () => {
       expect(result.current.reason).toContain('blend mode');
     });
 
+    it('should force canvas mode when active clip uses non-normal blend mode', () => {
+      const clip = createMockClip({ blendMode: 'multiply' });
+      const track = createMockTrack({ clips: [clip] });
+      const sequence = createMockSequence([track]);
+      const assets = new Map([
+        [
+          'asset-1',
+          createMockAsset({
+            id: 'asset-1',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy.mp4',
+          }),
+        ],
+      ]);
+
+      const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
+
+      expect(result.current.mode).toBe('canvas');
+      expect(result.current.reason).toContain('blend mode');
+    });
+
     it('should force canvas mode when active clip has effects', () => {
       const clip = createMockClip({ effects: ['fx-1'] });
       const track = createMockTrack({ clips: [clip] });
@@ -638,6 +659,45 @@ describe('usePreviewMode', () => {
             id: 'subtitle-text-clip',
             assetId: `${TEXT_ASSET_PREFIX}subtitle-text-clip`,
             label: 'Text: Hello subtitle',
+            effects: ['effect-text-overlay'],
+            place: { timelineInSec: 0, durationSec: 10 },
+            range: { sourceInSec: 0, sourceOutSec: 10 },
+          }),
+        ],
+      });
+      const sequence = createMockSequence([videoTrack, blendedTextTrack]);
+      const assets = new Map([
+        [
+          'asset-video',
+          createMockAsset({
+            id: 'asset-video',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy.mp4',
+          }),
+        ],
+      ]);
+
+      const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
+
+      expect(result.current.mode).toBe('canvas');
+      expect(result.current.reason).toContain('blend mode');
+    });
+
+    it('should force canvas mode when a text clip uses clip-level blend compositing', () => {
+      const videoTrack = createMockTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [createMockClip({ id: 'video-clip', assetId: 'asset-video' })],
+      });
+      const blendedTextTrack = createMockTrack({
+        id: 'blended-text-track',
+        kind: 'video',
+        clips: [
+          createMockClip({
+            id: 'subtitle-text-clip',
+            assetId: `${TEXT_ASSET_PREFIX}subtitle-text-clip`,
+            label: 'Text: Hello subtitle',
+            blendMode: 'screen',
             effects: ['effect-text-overlay'],
             place: { timelineInSec: 0, durationSec: 10 },
             range: { sourceInSec: 0, sourceOutSec: 10 },

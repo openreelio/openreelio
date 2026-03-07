@@ -1,7 +1,7 @@
 /**
  * useBlendMode Hook
  *
- * Manages blend mode operations for video tracks.
+ * Manages blend mode operations for video tracks and clips.
  * Provides utilities to get, set, and reset blend modes.
  *
  * @module hooks/useBlendMode
@@ -9,7 +9,7 @@
 
 import { useCallback, useMemo } from 'react';
 import { useProjectStore } from '@/stores/projectStore';
-import type { BlendMode, Track } from '@/types';
+import type { BlendMode, Clip, Track } from '@/types';
 import { DEFAULT_BLEND_MODE } from '@/utils/blendModes';
 import { createLogger } from '@/services/logger';
 
@@ -39,6 +39,14 @@ export interface UseBlendModeReturn {
   canChangeBlendMode: (trackId: string) => boolean;
   /** Get all video tracks with their blend modes */
   getVideoTracks: () => VideoTrackInfo[];
+  /** Get the blend mode for a clip */
+  getClipBlendMode: (trackId: string, clipId: string) => BlendMode;
+  /** Set the blend mode for a clip */
+  setClipBlendMode: (trackId: string, clipId: string, blendMode: BlendMode) => Promise<boolean>;
+  /** Reset a clip's blend mode to default (normal) */
+  resetClipBlendMode: (trackId: string, clipId: string) => Promise<boolean>;
+  /** Check if a clip's blend mode can be changed */
+  canChangeClipBlendMode: (trackId: string) => boolean;
 }
 
 // =============================================================================
@@ -63,6 +71,15 @@ export function useBlendMode(): UseBlendModeReturn {
     [tracks],
   );
 
+  // Get a specific clip from a track
+  const getClip = useCallback(
+    (trackId: string, clipId: string): Clip | undefined => {
+      const track = getTrack(trackId);
+      return track?.clips.find((clip) => clip.id === clipId);
+    },
+    [getTrack],
+  );
+
   // Get the blend mode for a track
   const getBlendMode = useCallback(
     (trackId: string): BlendMode => {
@@ -81,7 +98,7 @@ export function useBlendMode(): UseBlendModeReturn {
     [getTrack],
   );
 
-  // Check if blend mode can be changed
+  // Check if blend mode can be changed for a track
   const canChangeBlendMode = useCallback(
     (trackId: string): boolean => {
       const track = getTrack(trackId);
@@ -145,6 +162,67 @@ export function useBlendMode(): UseBlendModeReturn {
       }));
   }, [tracks]);
 
+  // Get the blend mode for a clip
+  const getClipBlendMode = useCallback(
+    (trackId: string, clipId: string): BlendMode => {
+      const clip = getClip(trackId, clipId);
+      return clip?.blendMode ?? DEFAULT_BLEND_MODE;
+    },
+    [getClip],
+  );
+
+  // Check if a clip's blend mode can be changed
+  const canChangeClipBlendMode = useCallback(
+    (trackId: string): boolean => {
+      const track = getTrack(trackId);
+      if (!track) return false;
+      if (track.locked) return false;
+      return track.kind === 'video' || track.kind === 'overlay';
+    },
+    [getTrack],
+  );
+
+  // Set the blend mode for a clip
+  const setClipBlendMode = useCallback(
+    async (trackId: string, clipId: string, blendMode: BlendMode): Promise<boolean> => {
+      const sequence = getActiveSequence();
+      if (!sequence) {
+        logger.warn('No active sequence');
+        return false;
+      }
+
+      const currentBlendMode = getClipBlendMode(trackId, clipId);
+      if (currentBlendMode === blendMode) {
+        return true;
+      }
+
+      try {
+        await executeCommand({
+          type: 'SetClipBlendMode',
+          payload: {
+            sequenceId: sequence.id,
+            trackId,
+            clipId,
+            blendMode,
+          },
+        });
+        return true;
+      } catch (error) {
+        logger.error('Failed to set clip blend mode', { trackId, clipId, blendMode, error });
+        return false;
+      }
+    },
+    [executeCommand, getActiveSequence, getClipBlendMode],
+  );
+
+  // Reset a clip's blend mode to default
+  const resetClipBlendMode = useCallback(
+    async (trackId: string, clipId: string): Promise<boolean> => {
+      return setClipBlendMode(trackId, clipId, DEFAULT_BLEND_MODE);
+    },
+    [setClipBlendMode],
+  );
+
   return {
     getBlendMode,
     setBlendMode,
@@ -152,5 +230,9 @@ export function useBlendMode(): UseBlendModeReturn {
     isVideoTrack,
     canChangeBlendMode,
     getVideoTracks,
+    getClipBlendMode,
+    setClipBlendMode,
+    resetClipBlendMode,
+    canChangeClipBlendMode,
   };
 }

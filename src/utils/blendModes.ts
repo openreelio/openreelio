@@ -16,12 +16,7 @@ import type { BlendMode } from '@/types';
 /**
  * Categories for grouping blend modes in the UI
  */
-export type BlendModeCategory =
-  | 'basic'
-  | 'darken'
-  | 'lighten'
-  | 'contrast'
-  | 'component';
+export type BlendModeCategory = 'basic' | 'darken' | 'lighten' | 'contrast' | 'component';
 
 /**
  * Complete definition for a blend mode
@@ -53,6 +48,20 @@ export const ALL_BLEND_MODES: readonly BlendMode[] = [
   'screen',
   'overlay',
   'add',
+  'subtract',
+  'darken',
+  'lighten',
+  'color_burn',
+  'color_dodge',
+  'linear_burn',
+  'linear_dodge',
+  'soft_light',
+  'hard_light',
+  'vivid_light',
+  'linear_light',
+  'pin_light',
+  'difference',
+  'exclusion',
 ] as const;
 
 /**
@@ -61,14 +70,12 @@ export const ALL_BLEND_MODES: readonly BlendMode[] = [
 export const BLEND_MODE_DEFINITIONS: Record<BlendMode, BlendModeDefinition> = {
   normal: {
     label: 'Normal',
-    description:
-      'Standard compositing - top layer fully covers layers below based on opacity.',
+    description: 'Standard compositing - top layer fully covers layers below based on opacity.',
     category: 'basic',
   },
   multiply: {
     label: 'Multiply',
-    description:
-      'Darkens the image by multiplying colors. Good for shadows and darkening effects.',
+    description: 'Darkens the image by multiplying colors. Good for shadows and darkening effects.',
     category: 'darken',
   },
   screen: {
@@ -88,6 +95,79 @@ export const BLEND_MODE_DEFINITIONS: Record<BlendMode, BlendModeDefinition> = {
     description:
       'Adds color values together. Creates bright, glowing effects. Good for light effects.',
     category: 'lighten',
+  },
+  subtract: {
+    label: 'Subtract',
+    description: 'Subtracts color values. Darkens and creates high-contrast effects.',
+    category: 'darken',
+  },
+  darken: {
+    label: 'Darken',
+    description: 'Keeps the darker pixel from each layer. Removes light areas.',
+    category: 'darken',
+  },
+  lighten: {
+    label: 'Lighten',
+    description: 'Keeps the lighter pixel from each layer. Removes dark areas.',
+    category: 'lighten',
+  },
+  color_burn: {
+    label: 'Color Burn',
+    description: 'Intensifies dark areas by increasing contrast. Rich, saturated shadows.',
+    category: 'darken',
+  },
+  color_dodge: {
+    label: 'Color Dodge',
+    description: 'Intensifies light areas by decreasing contrast. Bright, blown-out highlights.',
+    category: 'lighten',
+  },
+  linear_burn: {
+    label: 'Linear Burn',
+    description: 'Darkens by decreasing brightness linearly. More extreme than Multiply.',
+    category: 'darken',
+  },
+  linear_dodge: {
+    label: 'Linear Dodge',
+    description: 'Lightens by increasing brightness linearly. Same as Add.',
+    category: 'lighten',
+  },
+  soft_light: {
+    label: 'Soft Light',
+    description:
+      'Gently darkens or lightens based on blend color. Like shining a diffused light on the image.',
+    category: 'contrast',
+  },
+  hard_light: {
+    label: 'Hard Light',
+    description:
+      'Strongly darkens or lightens based on blend color. Like shining a harsh spotlight.',
+    category: 'contrast',
+  },
+  vivid_light: {
+    label: 'Vivid Light',
+    description: 'Burns or dodges colors by increasing or decreasing contrast.',
+    category: 'contrast',
+  },
+  linear_light: {
+    label: 'Linear Light',
+    description: 'Burns or dodges colors by decreasing or increasing brightness.',
+    category: 'contrast',
+  },
+  pin_light: {
+    label: 'Pin Light',
+    description:
+      'Replaces colors depending on brightness. Useful for creating special artistic effects.',
+    category: 'contrast',
+  },
+  difference: {
+    label: 'Difference',
+    description: 'Shows the absolute difference between layers. Identical areas become black.',
+    category: 'component',
+  },
+  exclusion: {
+    label: 'Exclusion',
+    description: 'Similar to Difference but with lower contrast. Produces a softer effect.',
+    category: 'component',
   },
 };
 
@@ -130,12 +210,22 @@ export function getBlendModeCategory(mode: BlendMode): BlendModeCategory {
 /**
  * Get all blend modes in a specific category
  */
-export function getBlendModesByCategory(
-  category: BlendModeCategory
-): BlendMode[] {
-  return ALL_BLEND_MODES.filter(
-    (mode) => BLEND_MODE_DEFINITIONS[mode].category === category
-  );
+export function getBlendModesByCategory(category: BlendModeCategory): BlendMode[] {
+  return ALL_BLEND_MODES.filter((mode) => BLEND_MODE_DEFINITIONS[mode].category === category);
+}
+
+/**
+ * Resolve the effective clip blend mode while preserving track-level fallback.
+ */
+export function getEffectiveBlendMode(
+  clipMode: BlendMode | undefined,
+  trackMode: BlendMode | undefined,
+): BlendMode {
+  if (clipMode && clipMode !== DEFAULT_BLEND_MODE) {
+    return clipMode;
+  }
+
+  return trackMode ?? DEFAULT_BLEND_MODE;
 }
 
 /**

@@ -25,6 +25,7 @@ import {
 } from '@/components/shared';
 import {
   Inspector,
+  type SelectedClip,
   type SelectedCaption,
   type SelectedTextClip,
 } from '@/components/features/inspector';
@@ -40,6 +41,7 @@ import { useTextClip } from '@/hooks/useTextClip';
 import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 import { useAudioMixer } from '@/hooks/useAudioMixer';
 import { useMulticamSession } from '@/hooks/useMulticamSession';
+import { useBlendMode } from '@/hooks/useBlendMode';
 import { useResponsiveSidebarState } from './hooks/useResponsiveSidebarState';
 import { dbToLinear, linearToDb } from '@/utils/audioMeter';
 import { extractTextDataFromClipWithMap } from '@/utils/textRenderer';
@@ -47,7 +49,7 @@ import { createLogger } from '@/services/logger';
 import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { Terminal, Sliders, Sparkles } from 'lucide-react';
-import type { Sequence, CaptionPosition, ClipId, TextClipData } from '@/types';
+import type { BlendMode, Sequence, CaptionPosition, ClipId, TextClipData } from '@/types';
 import type { AddTextPayload } from '@/components/features/text';
 import type { ChannelLevels } from '@/components/features/mixer';
 import type { MulticamGroup } from '@/utils/multicam';
@@ -372,6 +374,50 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     };
   }, [selectedAssetId, assets]);
 
+  // Get selected clip for inspector (non-text, non-caption video/audio clips)
+  const inspectorClip: SelectedClip | undefined = useMemo(() => {
+    if (!sequence || selectedClipIds.length !== 1) return undefined;
+    const clipId = selectedClipIds[0];
+
+    for (const track of sequence.tracks) {
+      // Skip caption tracks — they use the SelectedCaption path
+      if (track.kind === 'caption') continue;
+
+      const clip = track.clips.find((c) => c.id === clipId);
+      if (!clip) continue;
+
+      // Skip text clips — they use the SelectedTextClip path
+      if (isTextClip(clip.assetId)) return undefined;
+
+      const asset = assets.get(clip.assetId);
+      return {
+        id: clip.id,
+        name: asset?.name ?? clip.assetId,
+        assetId: clip.assetId,
+        range: {
+          sourceInSec: clip.range.sourceInSec,
+          sourceOutSec: clip.range.sourceOutSec,
+        },
+        place: {
+          trackId: track.id,
+          timelineInSec: clip.place.timelineInSec,
+        },
+        blendMode: clip.blendMode,
+      };
+    }
+    return undefined;
+  }, [sequence, selectedClipIds, assets]);
+
+  // Blend mode operations
+  const { setClipBlendMode } = useBlendMode();
+
+  const handleClipBlendModeChange = useCallback(
+    (clipId: string, trackId: string, blendMode: BlendMode) => {
+      setClipBlendMode(trackId, clipId, blendMode);
+    },
+    [setClipBlendMode],
+  );
+
   // Get selected caption for inspector
   const selectedCaption: SelectedCaption | undefined = useMemo(() => {
     if (!sequence || !selectedClipIds || selectedClipIds.length !== 1) return undefined;
@@ -680,9 +726,11 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                 onError={(error) => logger.error('Inspector error', { error })}
               >
                 <Inspector
+                  selectedClip={inspectorClip}
                   selectedAsset={inspectorAsset}
                   selectedTextClip={selectedTextClip}
                   selectedCaption={selectedCaption}
+                  onClipBlendModeChange={handleClipBlendModeChange}
                   onTextDataChange={onTextDataChange}
                   onCaptionChange={onCaptionChange}
                 />

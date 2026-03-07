@@ -244,10 +244,120 @@ describe('BlendModePicker', () => {
       const button = screen.getByRole('button');
       await userEvent.click(button);
 
-      expect(screen.getByText('Basic')).toBeInTheDocument();
-      expect(screen.getByText('Darken')).toBeInTheDocument();
-      expect(screen.getByText('Lighten')).toBeInTheDocument();
-      expect(screen.getByText('Contrast')).toBeInTheDocument();
+      expect(screen.getByTestId('blend-category-basic')).toBeInTheDocument();
+      expect(screen.getByTestId('blend-category-darken')).toBeInTheDocument();
+      expect(screen.getByTestId('blend-category-lighten')).toBeInTheDocument();
+      expect(screen.getByTestId('blend-category-contrast')).toBeInTheDocument();
+    });
+
+    it('should show all 19 blend modes in grouped view', async () => {
+      render(<BlendModePicker {...defaultProps} grouped />);
+
+      const button = screen.getByRole('button');
+      await userEvent.click(button);
+
+      const listbox = screen.getByRole('listbox');
+      const options = within(listbox).getAllByRole('option');
+      expect(options.length).toBe(19);
+    });
+
+    it('should collapse a category when header is clicked', async () => {
+      render(<BlendModePicker {...defaultProps} grouped />);
+
+      const button = screen.getByRole('button');
+      await userEvent.click(button);
+
+      // Darken category should have modes visible
+      expect(screen.getByTestId('blend-option-multiply')).toBeInTheDocument();
+
+      // Click darken category header to collapse
+      await userEvent.click(screen.getByTestId('blend-category-darken'));
+
+      // Multiply is in the darken category - should be hidden
+      expect(screen.queryByTestId('blend-option-multiply')).not.toBeInTheDocument();
+    });
+
+    it('should expand a collapsed category when header is clicked again', async () => {
+      render(<BlendModePicker {...defaultProps} grouped />);
+
+      const button = screen.getByRole('button');
+      await userEvent.click(button);
+
+      // Collapse then expand
+      await userEvent.click(screen.getByTestId('blend-category-darken'));
+      expect(screen.queryByTestId('blend-option-multiply')).not.toBeInTheDocument();
+
+      await userEvent.click(screen.getByTestId('blend-category-darken'));
+      expect(screen.getByTestId('blend-option-multiply')).toBeInTheDocument();
+    });
+  });
+
+  describe('search filter', () => {
+    it('should show search input when grouped', async () => {
+      render(<BlendModePicker {...defaultProps} grouped />);
+
+      const button = screen.getByRole('button');
+      await userEvent.click(button);
+
+      expect(screen.getByTestId('blend-mode-search')).toBeInTheDocument();
+    });
+
+    it('should not show search input when not grouped', async () => {
+      render(<BlendModePicker {...defaultProps} />);
+
+      const button = screen.getByRole('button');
+      await userEvent.click(button);
+
+      expect(screen.queryByTestId('blend-mode-search')).not.toBeInTheDocument();
+    });
+
+    it('should filter modes by search query', async () => {
+      render(<BlendModePicker {...defaultProps} grouped />);
+
+      const button = screen.getByRole('button');
+      await userEvent.click(button);
+
+      const searchInput = screen.getByTestId('blend-mode-search');
+      await userEvent.type(searchInput, 'burn');
+
+      // Should show Color Burn and Linear Burn
+      expect(screen.getByTestId('blend-option-color_burn')).toBeInTheDocument();
+      expect(screen.getByTestId('blend-option-linear_burn')).toBeInTheDocument();
+
+      // Should not show unrelated modes
+      expect(screen.queryByTestId('blend-option-screen')).not.toBeInTheDocument();
+    });
+
+    it('should show empty state when no modes match search', async () => {
+      render(<BlendModePicker {...defaultProps} grouped />);
+
+      const button = screen.getByRole('button');
+      await userEvent.click(button);
+
+      const searchInput = screen.getByTestId('blend-mode-search');
+      await userEvent.type(searchInput, 'nonexistent');
+
+      expect(screen.getByText('No matching blend modes')).toBeInTheDocument();
+    });
+
+    it('should clear search when dropdown closes', async () => {
+      render(<BlendModePicker {...defaultProps} grouped />);
+
+      const button = screen.getByRole('button');
+      await userEvent.click(button);
+
+      const searchInput = screen.getByTestId('blend-mode-search');
+      await userEvent.type(searchInput, 'burn');
+
+      // Close dropdown
+      fireEvent.keyDown(screen.getByRole('listbox'), { key: 'Escape' });
+
+      // Reopen
+      await userEvent.click(button);
+
+      // Search should be cleared
+      const newSearchInput = screen.getByTestId('blend-mode-search') as HTMLInputElement;
+      expect(newSearchInput.value).toBe('');
     });
   });
 });
