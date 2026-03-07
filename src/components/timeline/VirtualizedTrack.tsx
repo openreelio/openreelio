@@ -38,6 +38,7 @@ import {
 } from './Clip';
 // Direct import instead of barrel to avoid bundling all hooks
 import { useVirtualizedClips, type VirtualizationConfig } from '@/hooks/useVirtualizedClips';
+import { TRACK_HEIGHT } from './constants';
 
 // =============================================================================
 // Types
@@ -277,7 +278,8 @@ export const VirtualizedTrack = memo(function VirtualizedTrack({
         ref={containerRef}
         data-testid="track-content"
         data-virtualized={isVirtualized}
-        className={`flex-1 h-16 bg-editor-bg relative overflow-hidden ${!track.visible ? 'opacity-50' : ''}`}
+        className={`flex-1 bg-editor-bg relative overflow-hidden ${!track.visible ? 'opacity-50' : ''}`}
+        style={{ height: TRACK_HEIGHT }}
       >
         {/* Scrollable clips container */}
         <div

@@ -6,7 +6,8 @@
  */
 
 import { useCallback, useMemo, type KeyboardEvent } from 'react';
-import type { Sequence, Clip as ClipType } from '@/types';
+import type { Sequence } from '@/types';
+import { getSplitTargetsAtTime } from '@/utils/clipLinking';
 
 // =============================================================================
 // Types
@@ -24,6 +25,8 @@ export interface UseTimelineKeyboardOptions {
   sequence: Sequence | null;
   /** Currently selected clip IDs */
   selectedClipIds: string[];
+  /** Whether linked selection should be treated as a single split group */
+  linkedSelectionEnabled?: boolean;
   /** Current playhead position */
   playhead: number;
   /** Toggle playback state */
@@ -68,6 +71,7 @@ interface KeyboardCommand {
 interface CommandContext {
   sequence: Sequence | null;
   selectedClipIds: string[];
+  linkedSelectionEnabled: boolean;
   playhead: number;
   togglePlayback: () => void;
   stepForward: () => void;
@@ -76,23 +80,6 @@ interface CommandContext {
   selectClips: (clipIds: string[]) => void;
   onDeleteClips?: (clipIds: string[]) => void | Promise<void>;
   onClipSplit?: (data: ClipSplitData) => void;
-  findClip: (clipId: string) => { clip: ClipType; trackId: string } | null;
-}
-
-/**
- * Find a clip by ID across all tracks in the sequence
- */
-function createFindClip(sequence: Sequence | null) {
-  return (clipId: string): { clip: ClipType; trackId: string } | null => {
-    if (!sequence) return null;
-    for (const track of sequence.tracks) {
-      const clip = track.clips.find((c) => c.id === clipId);
-      if (clip) {
-        return { clip, trackId: track.id };
-      }
-    }
-    return null;
-  };
 }
 
 /**
@@ -132,25 +119,22 @@ const KEYBOARD_COMMANDS: KeyboardCommand[] = [
     keys: ['s', 'S'],
     requiresCtrl: false,
     execute: (ctx) => {
-      if (!ctx.sequence || ctx.selectedClipIds.length !== 1 || !ctx.onClipSplit) {
+      if (!ctx.sequence || ctx.selectedClipIds.length === 0 || !ctx.onClipSplit) {
         return;
       }
 
-      const clipInfo = ctx.findClip(ctx.selectedClipIds[0]);
-      if (!clipInfo) return;
+      const splitTargets = getSplitTargetsAtTime(
+        ctx.sequence,
+        ctx.selectedClipIds,
+        ctx.playhead,
+        ctx.linkedSelectionEnabled,
+      );
 
-      const { clip, trackId } = clipInfo;
-      const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-      const clipEnd =
-        clip.place.timelineInSec +
-        (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-
-      // Check if playhead is within the clip
-      if (ctx.playhead > clip.place.timelineInSec && ctx.playhead < clipEnd) {
+      for (const splitTarget of splitTargets) {
         ctx.onClipSplit({
           sequenceId: ctx.sequence.id,
-          trackId,
-          clipId: clip.id,
+          trackId: splitTarget.trackId,
+          clipId: splitTarget.clipId,
           splitTime: ctx.playhead,
         });
       }
@@ -162,9 +146,7 @@ const KEYBOARD_COMMANDS: KeyboardCommand[] = [
     requiresCtrl: true,
     execute: (ctx) => {
       if (!ctx.sequence) return;
-      const allClipIds = ctx.sequence.tracks.flatMap((track) =>
-        track.clips.map((clip) => clip.id)
-      );
+      const allClipIds = ctx.sequence.tracks.flatMap((track) => track.clips.map((clip) => clip.id));
       ctx.selectClips(allClipIds);
     },
   },
@@ -201,6 +183,7 @@ const KEYBOARD_COMMANDS: KeyboardCommand[] = [
 export function useTimelineKeyboard({
   sequence,
   selectedClipIds,
+  linkedSelectionEnabled = false,
   playhead,
   togglePlayback,
   stepForward,
@@ -210,14 +193,12 @@ export function useTimelineKeyboard({
   onDeleteClips,
   onClipSplit,
 }: UseTimelineKeyboardOptions): UseTimelineKeyboardResult {
-  // Create findClip helper
-  const findClip = useMemo(() => createFindClip(sequence), [sequence]);
-
   // Create command context
   const context: CommandContext = useMemo(
     () => ({
       sequence,
       selectedClipIds,
+      linkedSelectionEnabled,
       playhead,
       togglePlayback,
       stepForward,
@@ -226,11 +207,11 @@ export function useTimelineKeyboard({
       selectClips,
       onDeleteClips,
       onClipSplit,
-      findClip,
     }),
     [
       sequence,
       selectedClipIds,
+      linkedSelectionEnabled,
       playhead,
       togglePlayback,
       stepForward,
@@ -239,8 +220,7 @@ export function useTimelineKeyboard({
       selectClips,
       onDeleteClips,
       onClipSplit,
-      findClip,
-    ]
+    ],
   );
 
   const handleKeyDown = useCallback(
@@ -272,7 +252,7 @@ export function useTimelineKeyboard({
         command.execute(context);
       }
     },
-    [context]
+    [context],
   );
 
   return {

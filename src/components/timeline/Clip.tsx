@@ -8,6 +8,7 @@
 import { useMemo, useRef, useEffect, type MouseEvent } from 'react';
 import { Type, AlertTriangle } from 'lucide-react';
 import { useProjectStore } from '@/stores/projectStore';
+import { useEditorToolStore } from '@/stores/editorToolStore';
 import { useClipDrag, type DragPreviewPosition, type ClipDragData } from '@/hooks/useClipDrag';
 import { useWaveformPeaks } from '@/hooks/useWaveformPeaks';
 import type { Clip as ClipType, SnapPoint, Asset, TrackKind } from '@/types';
@@ -16,6 +17,7 @@ import { AudioClipWaveform } from './AudioClipWaveform';
 import { WaveformPeaksDisplay } from './WaveformPeaksDisplay';
 import { LazyThumbnailStrip } from './LazyThumbnailStrip';
 import { AudioClipControls, type ClipAudioSettingsPatch } from './AudioClipControls';
+import { TRACK_HEIGHT } from './constants';
 
 // =============================================================================
 // Types
@@ -87,6 +89,8 @@ interface ClipProps {
   snapThreshold?: number;
   /** Click handler with modifier keys */
   onClick?: (clipId: string, modifiers: ClickModifiers) => void;
+  /** Razor tool click handler */
+  onRazorClick?: (event: MouseEvent) => void;
   /** Double-click handler */
   onDoubleClick?: (clipId: string) => void;
   /** Drag start handler */
@@ -117,6 +121,7 @@ export function Clip({
   snapPoints = [],
   snapThreshold = 0,
   onClick,
+  onRazorClick,
   onDoubleClick,
   onDragStart,
   onDrag,
@@ -124,6 +129,9 @@ export function Clip({
   onSnapPointChange,
 }: ClipProps) {
   // Use the clip drag hook for smooth drag operations
+  const activeTool = useEditorToolStore((state) => state.activeTool);
+  const isRazorToolActive = activeTool === 'razor';
+
   const { isDragging, previewPosition, activeSnapPoint, handleMouseDown } = useClipDrag({
     clipId: clip.id,
     initialTimelineIn: clip.place.timelineInSec,
@@ -204,6 +212,15 @@ export function Clip({
   const handleClick = (e: MouseEvent) => {
     e.stopPropagation();
 
+    if (disabled) {
+      return;
+    }
+
+    if (isRazorToolActive) {
+      onRazorClick?.(e);
+      return;
+    }
+
     // Read and reset the drag-completed flag
     const wasDragCompleted = dragCompletedRef.current;
     dragCompletedRef.current = false;
@@ -223,6 +240,10 @@ export function Clip({
   // Handle double-click
   const handleDoubleClick = (e: MouseEvent) => {
     e.stopPropagation();
+    if (isRazorToolActive) {
+      return;
+    }
+
     if (!disabled && onDoubleClick) {
       onDoubleClick(clip.id);
     }
@@ -230,17 +251,29 @@ export function Clip({
 
   // Handle mouse down on main clip area
   const handleClipMouseDown = (e: MouseEvent) => {
+    if (isRazorToolActive) {
+      return;
+    }
+
     handleMouseDown(e, 'move');
   };
 
   // Handle mouse down on left trim handle
   const handleLeftTrimMouseDown = (e: MouseEvent) => {
+    if (isRazorToolActive) {
+      return;
+    }
+
     e.stopPropagation();
     handleMouseDown(e, 'trim-left');
   };
 
   // Handle mouse down on right trim handle
   const handleRightTrimMouseDown = (e: MouseEvent) => {
+    if (isRazorToolActive) {
+      return;
+    }
+
     e.stopPropagation();
     handleMouseDown(e, 'trim-right');
   };
@@ -252,9 +285,7 @@ export function Clip({
   const isText = isTextClip(clip.assetId);
 
   // Subscribe only to the missing flag to avoid re-renders on unrelated asset updates
-  const isAssetMissing = useProjectStore(
-    (s) => s.assets.get(clip.assetId)?.missing === true,
-  );
+  const isAssetMissing = useProjectStore((s) => s.assets.get(clip.assetId)?.missing === true);
 
   // Determine if clip has visual content (thumbnails or waveform)
   // Text clips don't have visual content like thumbnails or waveforms
@@ -297,6 +328,7 @@ export function Clip({
         left: `${displayPosition.left}px`,
         width: `${Math.max(displayPosition.width, 4)}px`,
         backgroundColor: isText ? undefined : backgroundColor,
+        cursor: isRazorToolActive ? 'inherit' : undefined,
       }}
       title={displayLabel}
       onClick={handleClick}
@@ -310,7 +342,7 @@ export function Clip({
           sourceInSec={clip.range.sourceInSec}
           sourceOutSec={clip.range.sourceOutSec}
           width={displayPosition.width}
-          height={64}
+          height={TRACK_HEIGHT}
           className="absolute inset-0"
         />
       )}
@@ -321,7 +353,7 @@ export function Clip({
           config={waveformConfig}
           clipRange={clip.range}
           width={displayPosition.width}
-          height={64}
+          height={TRACK_HEIGHT}
         />
       )}
 
@@ -413,6 +445,7 @@ export function Clip({
           absolute left-0 top-0 w-2 h-full cursor-ew-resize
           ${selected ? 'bg-primary-400 bg-opacity-50' : 'bg-white bg-opacity-0 hover:bg-opacity-20'}
         `}
+        style={{ cursor: isRazorToolActive ? 'inherit' : undefined }}
         onMouseDown={handleLeftTrimMouseDown}
       />
       <div
@@ -421,6 +454,7 @@ export function Clip({
           absolute right-0 top-0 w-2 h-full cursor-ew-resize
           ${selected ? 'bg-primary-400 bg-opacity-50' : 'bg-white bg-opacity-0 hover:bg-opacity-20'}
         `}
+        style={{ cursor: isRazorToolActive ? 'inherit' : undefined }}
         onMouseDown={handleRightTrimMouseDown}
       />
     </div>

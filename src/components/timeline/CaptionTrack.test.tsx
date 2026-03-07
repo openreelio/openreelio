@@ -69,45 +69,57 @@ describe('CaptionTrack', () => {
   });
 
   describe('Track Controls', () => {
-    it('calls onMoveUp when move-up button clicked', () => {
-      const onMoveUp = vi.fn();
-      const track = createTestTrack({ id: 'track_move_up_test' });
-
-      render(<CaptionTrack track={track} zoom={100} onMoveUp={onMoveUp} canMoveUp canMoveDown />);
-
-      const moveUpButton = screen.getByTestId('caption-move-up-button');
-      fireEvent.click(moveUpButton);
-
-      expect(onMoveUp).toHaveBeenCalledWith('track_move_up_test');
-    });
-
-    it('disables move buttons when moving is not allowed', () => {
-      const onMoveUp = vi.fn();
-      const onMoveDown = vi.fn();
-      const track = createTestTrack();
+    it('calls onSwapTracks when a caption target is selected from the context menu', () => {
+      const onSwapTracks = vi.fn();
+      const track = createTestTrack({ id: 'track_swap_test' });
 
       render(
         <CaptionTrack
           track={track}
           zoom={100}
-          onMoveUp={onMoveUp}
-          onMoveDown={onMoveDown}
-          canMoveUp={false}
-          canMoveDown={false}
+          swapTargets={[{ trackId: 'track_002', name: 'Subtitles 2' }]}
+          onSwapTracks={onSwapTracks}
         />,
       );
 
-      const moveUpButton = screen.getByTestId('caption-move-up-button');
-      const moveDownButton = screen.getByTestId('caption-move-down-button');
+      fireEvent.contextMenu(screen.getByTestId('caption-track-header'));
+      fireEvent.click(screen.getByRole('button', { name: 'Swap with Subtitles 2' }));
 
-      expect(moveUpButton).toBeDisabled();
-      expect(moveDownButton).toBeDisabled();
+      expect(onSwapTracks).toHaveBeenCalledWith('track_swap_test', 'track_002');
+    });
 
-      fireEvent.click(moveUpButton);
-      fireEvent.click(moveDownButton);
+    it('shows a disabled context menu item when no caption swap targets exist', () => {
+      const track = createTestTrack();
 
-      expect(onMoveUp).not.toHaveBeenCalled();
-      expect(onMoveDown).not.toHaveBeenCalled();
+      render(<CaptionTrack track={track} zoom={100} />);
+
+      fireEvent.contextMenu(screen.getByTestId('caption-track-header'));
+
+      expect(screen.getByRole('button', { name: 'No other caption tracks' })).toBeDisabled();
+    });
+
+    it('calls onDeleteTrack when delete is selected from the context menu', () => {
+      const onDeleteTrack = vi.fn();
+      const track = createTestTrack({ id: 'track_delete_test' });
+
+      render(
+        <CaptionTrack track={track} zoom={100} onDeleteTrack={onDeleteTrack} canDeleteTrack />,
+      );
+
+      fireEvent.contextMenu(screen.getByTestId('caption-track-header'));
+      fireEvent.click(screen.getByRole('button', { name: 'Delete track' }));
+
+      expect(onDeleteTrack).toHaveBeenCalledWith('track_delete_test');
+    });
+
+    it('disables delete for protected tracks in the context menu', () => {
+      const track = createTestTrack();
+
+      render(<CaptionTrack track={track} zoom={100} canDeleteTrack={false} />);
+
+      fireEvent.contextMenu(screen.getByTestId('caption-track-header'));
+
+      expect(screen.getByRole('button', { name: 'Delete track' })).toBeDisabled();
     });
 
     it('calls onLockToggle when lock button clicked', () => {

@@ -3,7 +3,7 @@
 //! Implements the ProjectState that is reconstructed from ops.jsonl by replaying operations.
 //! Uses Event Sourcing pattern where the ops.jsonl is the single source of truth.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -111,11 +111,13 @@ impl ProjectState {
         );
 
         // Add default video track
-        let video_track = Track::new("Video 1", crate::core::timeline::TrackKind::Video);
+        let video_track =
+            Track::new("Video 1", crate::core::timeline::TrackKind::Video).with_base_track(true);
         default_sequence.add_track(video_track);
 
         // Add default audio track
-        let audio_track = Track::new("Audio 1", crate::core::timeline::TrackKind::Audio);
+        let audio_track =
+            Track::new("Audio 1", crate::core::timeline::TrackKind::Audio).with_base_track(true);
         default_sequence.add_track(audio_track);
 
         let seq_id = default_sequence.id.clone();
@@ -407,8 +409,104 @@ impl ProjectState {
             .ok_or_else(|| CoreError::InvalidCommand("Missing trackId".to_string()))?;
 
         if let Some(sequence) = self.sequences.get_mut(seq_id) {
+            if Self::is_protected_base_track(&sequence.tracks, track_id) {
+                return Err(CoreError::InvalidCommand(
+                    "Base timeline tracks cannot be deleted".to_string(),
+                ));
+            }
+
             sequence.remove_track(&track_id.to_string());
         }
+        Ok(())
+    }
+
+    fn is_protected_base_track(tracks: &[Track], target_track_id: &str) -> bool {
+        let Some(target_track) = tracks.iter().find(|track| track.id == target_track_id) else {
+            return false;
+        };
+
+        if target_track.is_base_track == Some(true) {
+            return true;
+        }
+
+        if !matches!(
+            target_track.kind,
+            crate::core::timeline::TrackKind::Video | crate::core::timeline::TrackKind::Audio
+        ) {
+            return false;
+        }
+
+        let same_kind_tracks: Vec<&Track> = tracks
+            .iter()
+            .filter(|track| track.kind == target_track.kind)
+            .collect();
+
+        if same_kind_tracks
+            .iter()
+            .any(|track| track.is_base_track == Some(true))
+        {
+            return false;
+        }
+
+        let legacy_candidate_tracks: Vec<&&Track> = same_kind_tracks
+            .iter()
+            .filter(|track| track.is_base_track.is_none())
+            .collect();
+
+        if legacy_candidate_tracks.is_empty() {
+            return false;
+        }
+
+        legacy_candidate_tracks
+            .iter()
+            .min_by(|left, right| left.id.cmp(&right.id))
+            .is_some_and(|track| track.id == target_track_id)
+    }
+
+    fn validate_track_reorder(tracks: &[Track], order: &[String]) -> CoreResult<()> {
+        if order.len() != tracks.len() {
+            return Err(CoreError::InvalidCommand(
+                "Track reorder must include every track exactly once".to_string(),
+            ));
+        }
+
+        let unique_track_ids: HashSet<&String> = order.iter().collect();
+        if unique_track_ids.len() != order.len() {
+            return Err(CoreError::InvalidCommand(
+                "Track reorder contains duplicate track IDs".to_string(),
+            ));
+        }
+
+        let track_kind_by_id: HashMap<&String, _> = tracks
+            .iter()
+            .map(|track| (&track.id, &track.kind))
+            .collect();
+
+        for reordered_track_id in order {
+            if !track_kind_by_id.contains_key(reordered_track_id) {
+                return Err(CoreError::InvalidCommand(format!(
+                    "Track reorder references unknown track: {}",
+                    reordered_track_id
+                )));
+            }
+        }
+
+        for (index, original_track) in tracks.iter().enumerate() {
+            let reordered_track_id = &order[index];
+            let reordered_kind = track_kind_by_id.get(reordered_track_id).ok_or_else(|| {
+                CoreError::InvalidCommand(format!(
+                    "Track reorder references unknown track: {}",
+                    reordered_track_id
+                ))
+            })?;
+
+            if *reordered_kind != &original_track.kind {
+                return Err(CoreError::InvalidCommand(
+                    "Track reorder must stay within the same track kind".to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
 
@@ -420,6 +518,8 @@ impl ProjectState {
             .map_err(|e| CoreError::InvalidCommand(format!("Invalid order: {}", e)))?;
 
         if let Some(sequence) = self.sequences.get_mut(seq_id) {
+            Self::validate_track_reorder(&sequence.tracks, &order)?;
+
             // Reorder tracks based on the provided order
             sequence.tracks.sort_by(|a, b| {
                 let a_idx = order

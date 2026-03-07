@@ -114,6 +114,45 @@ describe('commandSchemas', () => {
       expect(result.success).toBe(true);
     });
 
+    it('should validate valid SplitClip command with splitTime alias', () => {
+      const command = {
+        commandType: 'SplitClip',
+        params: {
+          clipId: '550e8400-e29b-41d4-a716-446655440000',
+          splitTime: 5.0,
+        },
+      };
+
+      const result = SplitClipSchema.safeParse(command);
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject when neither splitTime nor atTimelineSec is provided', () => {
+      const command = {
+        commandType: 'SplitClip',
+        params: {
+          clipId: '550e8400-e29b-41d4-a716-446655440000',
+        },
+      };
+
+      const result = SplitClipSchema.safeParse(command);
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject when both splitTime and atTimelineSec are provided', () => {
+      const command = {
+        commandType: 'SplitClip',
+        params: {
+          clipId: '550e8400-e29b-41d4-a716-446655440000',
+          splitTime: 5.0,
+          atTimelineSec: 10.0,
+        },
+      };
+
+      const result = SplitClipSchema.safeParse(command);
+      expect(result.success).toBe(false);
+    });
+
     it('should reject non-uuid clipId', () => {
       const command = {
         commandType: 'SplitClip',
@@ -829,7 +868,7 @@ describe('commandSchemas', () => {
             description: 'Video track 1',
           },
         ],
-        qcRules: ['Check clip doesn\'t overlap existing clips'],
+        qcRules: ["Check clip doesn't overlap existing clips"],
         risk: {
           level: 'medium',
           reasons: ['Creates new clip on timeline'],
@@ -909,27 +948,66 @@ describe('commandSchemas', () => {
   describe('EffectType enum', () => {
     const allEffectTypes = [
       // Color effects
-      'brightness', 'contrast', 'saturation', 'hue', 'color_balance',
-      'color_wheels', 'gamma', 'levels', 'curves', 'lut',
+      'brightness',
+      'contrast',
+      'saturation',
+      'hue',
+      'color_balance',
+      'color_wheels',
+      'gamma',
+      'levels',
+      'curves',
+      'lut',
       // Transform effects
-      'crop', 'flip', 'mirror', 'rotate',
+      'crop',
+      'flip',
+      'mirror',
+      'rotate',
       // Blur/Sharpen
-      'gaussian_blur', 'box_blur', 'motion_blur', 'radial_blur', 'sharpen', 'unsharp_mask',
+      'gaussian_blur',
+      'box_blur',
+      'motion_blur',
+      'radial_blur',
+      'sharpen',
+      'unsharp_mask',
       // Stylize
-      'vignette', 'glow', 'film_grain', 'chromatic_aberration', 'noise', 'pixelate', 'posterize',
+      'vignette',
+      'glow',
+      'film_grain',
+      'chromatic_aberration',
+      'noise',
+      'pixelate',
+      'posterize',
       // Transitions
-      'cross_dissolve', 'fade', 'wipe', 'slide', 'zoom',
+      'cross_dissolve',
+      'fade',
+      'wipe',
+      'slide',
+      'zoom',
       // Audio
-      'volume', 'gain', 'eq_band', 'compressor', 'limiter',
-      'noise_reduction', 'reverb', 'delay',
+      'volume',
+      'gain',
+      'eq_band',
+      'compressor',
+      'limiter',
+      'noise_reduction',
+      'reverb',
+      'delay',
       // Text
-      'text_overlay', 'subtitle',
+      'text_overlay',
+      'subtitle',
       // AI
-      'background_removal', 'auto_reframe', 'face_blur', 'object_tracking',
+      'background_removal',
+      'auto_reframe',
+      'face_blur',
+      'object_tracking',
       // Keying
-      'chroma_key', 'luma_key', 'hsl_qualifier',
+      'chroma_key',
+      'luma_key',
+      'hsl_qualifier',
       // Compositing
-      'blend_mode', 'opacity',
+      'blend_mode',
+      'opacity',
       // Audio normalization
       'loudness_normalize',
     ];
@@ -963,8 +1041,14 @@ describe('commandSchemas', () => {
   describe('TransitionType enum', () => {
     it('should validate all transition types', () => {
       const transitions = [
-        'crossfade', 'dissolve', 'wipe', 'slide',
-        'zoom', 'iris', 'push', 'fade',
+        'crossfade',
+        'dissolve',
+        'wipe',
+        'slide',
+        'zoom',
+        'iris',
+        'push',
+        'fade',
       ];
 
       for (const transition of transitions) {
@@ -976,10 +1060,7 @@ describe('commandSchemas', () => {
 
   describe('EasingType enum', () => {
     it('should validate all easing types', () => {
-      const easings = [
-        'linear', 'easeIn', 'easeOut', 'easeInOut',
-        'cubicBezier', 'spring',
-      ];
+      const easings = ['linear', 'easeIn', 'easeOut', 'easeInOut', 'cubicBezier', 'spring'];
 
       for (const easing of easings) {
         const result = EasingType.safeParse(easing);

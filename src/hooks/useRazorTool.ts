@@ -8,7 +8,8 @@
  */
 
 import { useCallback, useEffect } from 'react';
-import { useEditorToolStore, type EditorTool } from '@/stores/editorToolStore';
+import { RAZOR_CURSOR, useEditorToolStore, type EditorTool } from '@/stores/editorToolStore';
+import { RAZOR_EDGE_THRESHOLD_SEC } from '@/constants/editing';
 import type { Sequence, Clip } from '@/types';
 
 // =============================================================================
@@ -26,6 +27,11 @@ export interface RazorSplitData {
   trackId: string;
   clipId: string;
   splitTime: number;
+  ignoreLinkedSelection?: boolean;
+}
+
+export interface RazorClickOptions {
+  altKey?: boolean;
 }
 
 export interface UseRazorToolOptions {
@@ -35,6 +41,8 @@ export interface UseRazorToolOptions {
   zoom: number;
   /** Horizontal scroll offset */
   scrollX: number;
+  /** Vertical scroll offset */
+  scrollY?: number;
   /** Track header width in pixels */
   trackHeaderWidth?: number;
   /** Track height in pixels */
@@ -54,16 +62,13 @@ export interface UseRazorToolReturn {
   handleTimelineClick: (
     clientX: number,
     clientY: number,
-    containerRect: DOMRect
+    containerRect: DOMRect,
+    options?: RazorClickOptions,
   ) => boolean;
   /** Find clip at a specific time position on a track */
   findClipAtTime: (trackId: string, time: number) => Clip | null;
   /** Find all clips at a specific pixel position */
-  findClipsAtPosition: (
-    pixelX: number,
-    pixelY: number,
-    containerRect: DOMRect
-  ) => ClipAtPosition[];
+  findClipsAtPosition: (pixelX: number, pixelY: number, containerRect: DOMRect) => ClipAtPosition[];
 }
 
 // =============================================================================
@@ -103,6 +108,7 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
     sequence,
     zoom,
     scrollX,
+    scrollY = 0,
     trackHeaderWidth = DEFAULT_TRACK_HEADER_WIDTH,
     trackHeight = DEFAULT_TRACK_HEIGHT,
     onSplit,
@@ -119,7 +125,7 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
     (pixelX: number): number => {
       return (pixelX + scrollX) / zoom;
     },
-    [scrollX, zoom]
+    [scrollX, zoom],
   );
 
   /**
@@ -129,7 +135,7 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
     (pixelY: number): number => {
       return Math.floor(pixelY / trackHeight);
     },
-    [trackHeight]
+    [trackHeight],
   );
 
   /**
@@ -161,23 +167,19 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
 
       return null;
     },
-    [sequence, getClipDuration]
+    [sequence, getClipDuration],
   );
 
   /**
    * Find all clips at a specific pixel position
    */
   const findClipsAtPosition = useCallback(
-    (
-      pixelX: number,
-      pixelY: number,
-      containerRect: DOMRect
-    ): ClipAtPosition[] => {
+    (pixelX: number, pixelY: number, containerRect: DOMRect): ClipAtPosition[] => {
       if (!sequence) return [];
 
-      // Adjust for container offset and track header
+      // Adjust for container offset, track header, and vertical scroll
       const relativeX = pixelX - containerRect.left - trackHeaderWidth;
-      const relativeY = pixelY - containerRect.top;
+      const relativeY = pixelY - containerRect.top + scrollY;
 
       // Early return if clicking in track header area
       if (relativeX < 0) return [];
@@ -199,7 +201,7 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
 
       return [];
     },
-    [sequence, trackHeaderWidth, pixelToTime, getTrackIndexFromY, findClipAtTime]
+    [sequence, trackHeaderWidth, scrollY, pixelToTime, getTrackIndexFromY, findClipAtTime],
   );
 
   /**
@@ -210,7 +212,8 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
     (
       clientX: number,
       clientY: number,
-      containerRect: DOMRect
+      containerRect: DOMRect,
+      options?: RazorClickOptions,
     ): boolean => {
       // Only process when razor tool is active
       if (!isActive || !sequence || !onSplit) {
@@ -228,26 +231,28 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
       const splitTime = pixelToTime(relativeX);
 
       // Split each clip at the position
+      let splitPerformed = false;
       for (const { clip, trackId } of clipsAtPosition) {
         const clipStart = clip.place.timelineInSec;
         const clipEnd = clipStart + getClipDuration(clip);
 
         // Only split if click is within the clip (not at edges)
-        const edgeThreshold = 0.1; // 100ms from edge
         if (
-          splitTime > clipStart + edgeThreshold &&
-          splitTime < clipEnd - edgeThreshold
+          splitTime > clipStart + RAZOR_EDGE_THRESHOLD_SEC &&
+          splitTime < clipEnd - RAZOR_EDGE_THRESHOLD_SEC
         ) {
           onSplit({
             sequenceId: sequence.id,
             trackId,
             clipId: clip.id,
             splitTime,
+            ignoreLinkedSelection: options?.altKey === true,
           });
+          splitPerformed = true;
         }
       }
 
-      return clipsAtPosition.length > 0;
+      return splitPerformed;
     },
     [
       isActive,
@@ -257,7 +262,7 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
       trackHeaderWidth,
       pixelToTime,
       getClipDuration,
-    ]
+    ],
   );
 
   /**
@@ -266,7 +271,7 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
   const getCursorStyle = useCallback((): string => {
     switch (activeTool) {
       case 'razor':
-        return 'crosshair';
+        return RAZOR_CURSOR;
       case 'hand':
         return 'grab';
       case 'slip':

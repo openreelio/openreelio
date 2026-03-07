@@ -11,6 +11,9 @@ import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { devtools } from 'zustand/middleware';
 
+export const RAZOR_CURSOR =
+  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23f8fafc' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='6' r='3.25' fill='%230f172a'/%3E%3Ccircle cx='6' cy='18' r='3.25' fill='%230f172a'/%3E%3Cpath d='M20 4 8.6 15.4'/%3E%3Cpath d='M8.6 8.6 20 20'/%3E%3Cpath d='m13.4 4-4 4'/%3E%3Cpath d='m9.9 14.1-1.3 1.3'/%3E%3C/svg%3E\") 6 6, crosshair";
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -19,13 +22,13 @@ import { devtools } from 'zustand/middleware';
  * Available editing tools
  */
 export type EditorTool =
-  | 'select'    // Default selection tool (V)
-  | 'razor'     // Split/cut clips at click position (C or B)
-  | 'slip'      // Slip edit - adjust source range without moving clip
-  | 'slide'     // Slide edit - move clip while adjusting neighbors
-  | 'ripple'    // Ripple edit - move clip and shift all subsequent clips
-  | 'roll'      // Roll edit - adjust edit point between two adjacent clips
-  | 'hand';     // Pan/navigate timeline (H)
+  | 'select' // Default selection tool (V)
+  | 'razor' // Split/cut clips at click position (C)
+  | 'slip' // Slip edit - adjust source range without moving clip
+  | 'slide' // Slide edit - move clip while adjusting neighbors
+  | 'ripple' // Ripple edit - move clip and shift all subsequent clips
+  | 'roll' // Roll edit - adjust edit point between two adjacent clips
+  | 'hand'; // Pan/navigate timeline (H)
 
 /**
  * Tool configuration and metadata
@@ -120,7 +123,7 @@ export const TOOL_CONFIGS: Record<EditorTool, ToolConfig> = {
     id: 'razor',
     label: 'Razor Tool',
     shortcut: 'C',
-    cursor: 'crosshair',
+    cursor: RAZOR_CURSOR,
     description: 'Split clips at click position',
   },
   slip: {
@@ -250,8 +253,8 @@ export const useEditorToolStore = create<EditorToolStore>()(
         set(() => ({ ...initialState }));
       },
     })),
-    { name: 'editor-tool-store' }
-  )
+    { name: 'editor-tool-store' },
+  ),
 );
 
 /**

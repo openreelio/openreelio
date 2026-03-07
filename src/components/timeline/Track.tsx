@@ -4,7 +4,7 @@
  * Displays a single track with its clips and controls.
  */
 
-import { useRef, useMemo, useCallback } from 'react';
+import { useRef, useMemo, useCallback, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import {
   Video,
   Music,
@@ -16,13 +16,13 @@ import {
   Unlock,
   Volume2,
   VolumeX,
-  ArrowUp,
-  ArrowDown,
   type LucideIcon,
 } from 'lucide-react';
 import type { Track as TrackType, Clip as ClipType, TrackKind, SnapPoint } from '@/types';
 import { useVirtualizedClips } from '@/hooks/useVirtualizedClips';
 import { useTransitionZones } from '@/hooks/useTransitionZones';
+import { ContextMenu, type MenuItemOrDivider } from '@/components/ui';
+import type { TrackSwapTarget } from '@/utils/trackReorder';
 import {
   Clip,
   type ClipDragData,
@@ -34,6 +34,7 @@ import {
 } from './Clip';
 import { TransitionZone } from './TransitionZone';
 import type { DropValidity } from '@/utils/dropValidity';
+import { TRACK_HEIGHT } from './constants';
 
 // =============================================================================
 // Types
@@ -76,16 +77,18 @@ interface TrackProps {
   onLockToggle?: (trackId: string) => void;
   /** Visibility toggle handler */
   onVisibilityToggle?: (trackId: string) => void;
-  /** Move track one row up */
-  onMoveUp?: (trackId: string) => void;
-  /** Move track one row down */
-  onMoveDown?: (trackId: string) => void;
-  /** Whether moving up is possible */
-  canMoveUp?: boolean;
-  /** Whether moving down is possible */
-  canMoveDown?: boolean;
+  /** Delete track handler */
+  onDeleteTrack?: (trackId: string) => void;
+  /** Whether this track can be deleted */
+  canDeleteTrack?: boolean;
+  /** Same-kind tracks available for swapping */
+  swapTargets?: TrackSwapTarget[];
+  /** Swap handler */
+  onSwapTracks?: (trackId: string, targetTrackId: string) => void;
   /** Clip click handler with modifier keys */
   onClipClick?: (clipId: string, modifiers: ClickModifiers) => void;
+  /** Razor tool click handler */
+  onClipRazorClick?: (event: ReactMouseEvent) => void;
   /** Clip double-click handler */
   onClipDoubleClick?: (clipId: string) => void;
   /** Clip audio settings commit handler */
@@ -154,11 +157,12 @@ export function Track({
   onMuteToggle,
   onLockToggle,
   onVisibilityToggle,
-  onMoveUp,
-  onMoveDown,
-  canMoveUp = false,
-  canMoveDown = false,
+  onDeleteTrack,
+  canDeleteTrack = false,
+  swapTargets = [],
+  onSwapTracks,
   onClipClick,
+  onClipRazorClick,
   onClipDoubleClick,
   onClipAudioSettingsChange,
   onClipDragStart,
@@ -170,6 +174,9 @@ export function Track({
 }: TrackProps) {
   // Ref for measuring viewport width if not provided
   const contentRef = useRef<HTMLDivElement>(null);
+  const [contextMenuPosition, setContextMenuPosition] = useState<{ x: number; y: number } | null>(
+    null,
+  );
 
   // Calculate actual viewport width (use provided or measure from ref)
   const actualViewportWidth =
@@ -205,194 +212,213 @@ export function Track({
   // Calculate track content width based on duration and zoom
   const contentWidth = duration * zoom;
   const TrackIcon = TrackIcons[track.kind] || Video;
+  const contextMenuItems = useMemo<MenuItemOrDivider[]>(() => {
+    const items: MenuItemOrDivider[] =
+      swapTargets.length === 0
+        ? [
+            {
+              label: `No other ${track.kind} tracks`,
+              onClick: () => {},
+              disabled: true,
+            },
+          ]
+        : swapTargets.map((target) => ({
+            label: `Swap with ${target.name}`,
+            onClick: () => onSwapTracks?.(track.id, target.trackId),
+          }));
+
+    items.push({ type: 'divider' });
+    items.push({
+      label: 'Delete track',
+      onClick: () => onDeleteTrack?.(track.id),
+      disabled: !canDeleteTrack,
+      danger: true,
+    });
+
+    return items;
+  }, [canDeleteTrack, onDeleteTrack, onSwapTracks, swapTargets, track.id, track.kind]);
+
+  const handleHeaderContextMenu = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenuPosition({ x: event.clientX, y: event.clientY });
+  }, []);
 
   return (
-    <div
-      data-track-row="true"
-      data-track-id={track.id}
-      data-track-kind={track.kind}
-      className="flex border-b border-editor-border"
-    >
-      {/* Track Header */}
+    <>
       <div
-        data-testid="track-header"
+        data-track-row="true"
+        data-track-id={track.id}
         data-track-kind={track.kind}
-        className="w-48 flex-shrink-0 bg-editor-sidebar p-2 flex items-center gap-2 border-r border-editor-border"
+        className="flex border-b border-editor-border"
       >
-        {/* Track type icon */}
-        <TrackIcon className="w-4 h-4 text-editor-text-muted" />
-
-        {/* Track name */}
-        <span className="flex-1 text-sm text-editor-text truncate">{track.name}</span>
-
-        {/* Track controls */}
-        <div className="flex items-center gap-1">
-          {/* Move up button */}
-          <button
-            data-testid="move-track-up-button"
-            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
-            onClick={(event) => {
-              event.stopPropagation();
-              onMoveUp?.(track.id);
-            }}
-            title="Move track up"
-            disabled={!canMoveUp}
-          >
-            <ArrowUp className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Move down button */}
-          <button
-            data-testid="move-track-down-button"
-            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
-            onClick={(event) => {
-              event.stopPropagation();
-              onMoveDown?.(track.id);
-            }}
-            title="Move track down"
-            disabled={!canMoveDown}
-          >
-            <ArrowDown className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Mute button */}
-          <button
-            data-testid="mute-button"
-            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
-            onClick={(event) => {
-              event.stopPropagation();
-              onMuteToggle?.(track.id);
-            }}
-            title={track.muted ? 'Unmute' : 'Mute'}
-          >
-            {track.muted ? (
-              <>
-                <VolumeX className="w-3.5 h-3.5" />
-                <span data-testid="muted-indicator" className="sr-only">
-                  Muted
-                </span>
-              </>
-            ) : (
-              <Volume2 className="w-3.5 h-3.5" />
-            )}
-          </button>
-
-          {/* Lock button */}
-          <button
-            data-testid="lock-button"
-            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
-            onClick={(event) => {
-              event.stopPropagation();
-              onLockToggle?.(track.id);
-            }}
-            title={track.locked ? 'Unlock' : 'Lock'}
-          >
-            {track.locked ? (
-              <>
-                <Lock className="w-3.5 h-3.5" />
-                <span data-testid="locked-indicator" className="sr-only">
-                  Locked
-                </span>
-              </>
-            ) : (
-              <Unlock className="w-3.5 h-3.5" />
-            )}
-          </button>
-
-          {/* Visibility button */}
-          <button
-            data-testid="visibility-button"
-            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
-            onClick={(event) => {
-              event.stopPropagation();
-              onVisibilityToggle?.(track.id);
-            }}
-            title={track.visible ? 'Hide' : 'Show'}
-          >
-            {track.visible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-          </button>
-        </div>
-      </div>
-
-      {/* Track Content (Clips Area) */}
-      <div
-        ref={contentRef}
-        data-testid="track-content"
-        data-drop-target={isDropTarget}
-        data-drop-valid={dropValidity?.isValid}
-        className={`
-          flex-1 h-16 bg-editor-bg relative overflow-hidden transition-colors duration-100
-          ${!track.visible ? 'opacity-50' : ''}
-          ${isDropTarget && dropValidity?.isValid ? 'bg-blue-500/10 ring-1 ring-blue-500/50 ring-inset' : ''}
-          ${isDropTarget && dropValidity && !dropValidity.isValid ? 'bg-red-500/10 ring-1 ring-red-500/50 ring-inset' : ''}
-          ${track.locked ? 'cursor-not-allowed' : ''}
-        `}
-      >
-        {/* Scrollable clips container */}
+        {/* Track Header */}
         <div
-          className="absolute inset-0"
-          style={{
-            width: `${contentWidth}px`,
-            transform: `translateX(-${scrollX}px)`,
-          }}
+          data-testid="track-header"
+          data-track-kind={track.kind}
+          className="w-48 flex-shrink-0 bg-editor-sidebar px-2 py-1.5 flex items-center gap-2 border-r border-editor-border cursor-context-menu"
+          style={{ height: TRACK_HEIGHT }}
+          title="Right-click to swap or delete this track"
+          onContextMenu={handleHeaderContextMenu}
         >
-          {/* Only render visible clips (virtualized) */}
-          {visibleClips.map((clip) => (
-            <Clip
-              key={clip.id}
-              clip={clip}
-              zoom={zoom}
-              selected={selectedClipIds.includes(clip.id)}
-              disabled={track.locked}
-              waveformConfig={getClipWaveformConfig?.(clip.id, clip.assetId)}
-              thumbnailConfig={getClipThumbnailConfig?.(clip.id, clip.assetId, track.kind)}
-              trackKind={track.kind}
-              onAudioSettingsChange={(clipId, patch) =>
-                onClipAudioSettingsChange?.(track.id, clipId, patch)
-              }
-              snapPoints={snapPoints}
-              snapThreshold={snapThreshold}
-              onClick={onClipClick}
-              onDoubleClick={onClipDoubleClick}
-              onDragStart={(data) => onClipDragStart?.(track.id, data)}
-              onDrag={(data, previewPosition) => onClipDrag?.(track.id, data, previewPosition)}
-              onDragEnd={(data, finalPosition) => onClipDragEnd?.(track.id, data, finalPosition)}
-              onSnapPointChange={onSnapPointChange}
-            />
-          ))}
+          {/* Track type icon */}
+          <TrackIcon className="w-4 h-4 text-editor-text-muted" />
 
-          {/* Transition zones between adjacent clips */}
-          {showTransitionZones &&
-            transitionZones.map((zone) => {
-              const clipA = clipMap.get(zone.clipAId);
-              const clipB = clipMap.get(zone.clipBId);
-              if (!clipA || !clipB) return null;
+          {/* Track name */}
+          <span className="flex-1 text-sm text-editor-text truncate">{track.name}</span>
 
-              return (
-                <TransitionZone
-                  key={`transition-${zone.clipAId}-${zone.clipBId}`}
-                  clipA={clipA}
-                  clipB={clipB}
-                  zoom={zoom}
-                  disabled={track.locked}
-                  onClick={handleTransitionZoneClick}
-                />
-              );
-            })}
+          {/* Track controls */}
+          <div className="flex items-center gap-1">
+            {/* Mute button */}
+            <button
+              data-testid="mute-button"
+              className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
+              onClick={(event) => {
+                event.stopPropagation();
+                onMuteToggle?.(track.id);
+              }}
+              title={track.muted ? 'Unmute' : 'Mute'}
+            >
+              {track.muted ? (
+                <>
+                  <VolumeX className="w-3.5 h-3.5" />
+                  <span data-testid="muted-indicator" className="sr-only">
+                    Muted
+                  </span>
+                </>
+              ) : (
+                <Volume2 className="w-3.5 h-3.5" />
+              )}
+            </button>
+
+            {/* Lock button */}
+            <button
+              data-testid="lock-button"
+              className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
+              onClick={(event) => {
+                event.stopPropagation();
+                onLockToggle?.(track.id);
+              }}
+              title={track.locked ? 'Unlock' : 'Lock'}
+            >
+              {track.locked ? (
+                <>
+                  <Lock className="w-3.5 h-3.5" />
+                  <span data-testid="locked-indicator" className="sr-only">
+                    Locked
+                  </span>
+                </>
+              ) : (
+                <Unlock className="w-3.5 h-3.5" />
+              )}
+            </button>
+
+            {/* Visibility button */}
+            <button
+              data-testid="visibility-button"
+              className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
+              onClick={(event) => {
+                event.stopPropagation();
+                onVisibilityToggle?.(track.id);
+              }}
+              title={track.visible ? 'Hide' : 'Show'}
+            >
+              {track.visible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+            </button>
+          </div>
         </div>
 
-        {/* Drop validity message overlay */}
-        {isDropTarget && dropValidity && !dropValidity.isValid && (
+        {/* Track Content (Clips Area) */}
+        <div
+          ref={contentRef}
+          data-testid="track-content"
+          data-drop-target={isDropTarget}
+          data-drop-valid={dropValidity?.isValid}
+          className={`
+            flex-1 bg-editor-bg relative overflow-hidden transition-colors duration-100
+            ${!track.visible ? 'opacity-50' : ''}
+            ${isDropTarget && dropValidity?.isValid ? 'bg-blue-500/10 ring-1 ring-blue-500/50 ring-inset' : ''}
+            ${isDropTarget && dropValidity && !dropValidity.isValid ? 'bg-red-500/10 ring-1 ring-red-500/50 ring-inset' : ''}
+            ${track.locked ? 'cursor-not-allowed' : ''}
+          `}
+          style={{ height: TRACK_HEIGHT }}
+        >
+          {/* Scrollable clips container */}
           <div
-            data-testid="drop-invalid-overlay"
-            className="absolute inset-0 flex items-center justify-center pointer-events-none z-30"
+            className="absolute inset-0"
+            style={{
+              width: `${contentWidth}px`,
+              transform: `translateX(-${scrollX}px)`,
+            }}
           >
-            <span className="px-3 py-1 bg-red-500/90 text-white text-sm rounded shadow-lg">
-              {dropValidity.message}
-            </span>
+            {/* Only render visible clips (virtualized) */}
+            {visibleClips.map((clip) => (
+              <Clip
+                key={clip.id}
+                clip={clip}
+                zoom={zoom}
+                selected={selectedClipIds.includes(clip.id)}
+                disabled={track.locked}
+                waveformConfig={getClipWaveformConfig?.(clip.id, clip.assetId)}
+                thumbnailConfig={getClipThumbnailConfig?.(clip.id, clip.assetId, track.kind)}
+                trackKind={track.kind}
+                onAudioSettingsChange={(clipId, patch) =>
+                  onClipAudioSettingsChange?.(track.id, clipId, patch)
+                }
+                snapPoints={snapPoints}
+                snapThreshold={snapThreshold}
+                onClick={onClipClick}
+                onRazorClick={onClipRazorClick}
+                onDoubleClick={onClipDoubleClick}
+                onDragStart={(data) => onClipDragStart?.(track.id, data)}
+                onDrag={(data, previewPosition) => onClipDrag?.(track.id, data, previewPosition)}
+                onDragEnd={(data, finalPosition) => onClipDragEnd?.(track.id, data, finalPosition)}
+                onSnapPointChange={onSnapPointChange}
+              />
+            ))}
+
+            {/* Transition zones between adjacent clips */}
+            {showTransitionZones &&
+              transitionZones.map((zone) => {
+                const clipA = clipMap.get(zone.clipAId);
+                const clipB = clipMap.get(zone.clipBId);
+                if (!clipA || !clipB) return null;
+
+                return (
+                  <TransitionZone
+                    key={`transition-${zone.clipAId}-${zone.clipBId}`}
+                    clipA={clipA}
+                    clipB={clipB}
+                    zoom={zoom}
+                    disabled={track.locked}
+                    onClick={handleTransitionZoneClick}
+                  />
+                );
+              })}
           </div>
-        )}
+
+          {/* Drop validity message overlay */}
+          {isDropTarget && dropValidity && !dropValidity.isValid && (
+            <div
+              data-testid="drop-invalid-overlay"
+              className="absolute inset-0 flex items-center justify-center pointer-events-none z-30"
+            >
+              <span className="px-2 py-0.5 bg-red-500/90 text-white text-xs rounded shadow-lg">
+                {dropValidity.message}
+              </span>
+            </div>
+          )}
+        </div>
       </div>
-    </div>
+
+      {contextMenuPosition && (
+        <ContextMenu
+          x={contextMenuPosition.x}
+          y={contextMenuPosition.y}
+          items={contextMenuItems}
+          onClose={() => setContextMenuPosition(null)}
+        />
+      )}
+    </>
   );
 }

@@ -71,6 +71,7 @@ const LINE_WIDTH = 2;
 
 /** Width of the invisible draggable hit area around the line in pixels */
 const LINE_HIT_AREA_WIDTH = 14;
+export const PLAYHEAD_LINE_HIT_AREA_WIDTH = LINE_HIT_AREA_WIDTH;
 
 /** Size of the playhead head marker in pixels */
 const HEAD_SIZE = 10;
@@ -83,6 +84,7 @@ const DEFAULT_TRACK_HEADER_WIDTH = 192;
 
 /** Height of the ruler area in pixels */
 const RULER_HEIGHT = 24;
+export const PLAYHEAD_RULER_HEIGHT = RULER_HEIGHT;
 
 // =============================================================================
 // Component
@@ -115,6 +117,7 @@ const PlayheadComponent = forwardRef<PlayheadHandle, PlayheadProps>(function Pla
   ref,
 ) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const isInteractive = Boolean(onDragStart || onPointerDown);
 
   // Calculate pixel position: (time * zoom) + trackHeader - scroll
   const pixelPosition = position * zoom + trackHeaderWidth - scrollX;
@@ -142,11 +145,15 @@ const PlayheadComponent = forwardRef<PlayheadHandle, PlayheadProps>(function Pla
    */
   const handleMouseDown = useCallback(
     (e: MouseEvent<HTMLDivElement>) => {
+      if (!isInteractive) {
+        return;
+      }
+
       e.preventDefault();
       e.stopPropagation();
       onDragStart?.(e);
     },
-    [onDragStart],
+    [isInteractive, onDragStart],
   );
 
   /**
@@ -154,15 +161,18 @@ const PlayheadComponent = forwardRef<PlayheadHandle, PlayheadProps>(function Pla
    */
   const handlePointerDown = useCallback(
     (e: PointerEvent<HTMLDivElement>) => {
+      if (!isInteractive) {
+        return;
+      }
+
       e.preventDefault();
       e.stopPropagation();
       onPointerDown?.(e);
     },
-    [onPointerDown],
+    [isInteractive, onPointerDown],
   );
 
   // Determine visual state
-  const isInteractive = Boolean(onDragStart || onPointerDown);
   const headCursor = isDragging ? 'grabbing' : isInteractive ? 'grab' : 'default';
 
   // Track the last known pixel position for smooth drag transitions

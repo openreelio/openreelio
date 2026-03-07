@@ -184,16 +184,17 @@ export type RequirementType = z.infer<typeof RequirementType>;
  */
 export const InsertClipSchema = z.object({
   commandType: z.literal('InsertClip'),
-  params: z.object({
-    trackId: TrackId,
-    assetId: AssetId,
-    timelineStart: TimeSec,
-    sourceIn: TimeSec.optional().default(0),
-    sourceOut: TimeSec.optional(),
-  }).refine(
-    (data) => data.sourceOut === undefined || data.sourceOut > (data.sourceIn ?? 0),
-    { message: 'sourceOut must be greater than sourceIn' }
-  ),
+  params: z
+    .object({
+      trackId: TrackId,
+      assetId: AssetId,
+      timelineStart: TimeSec,
+      sourceIn: TimeSec.optional().default(0),
+      sourceOut: TimeSec.optional(),
+    })
+    .refine((data) => data.sourceOut === undefined || data.sourceOut > (data.sourceIn ?? 0), {
+      message: 'sourceOut must be greater than sourceIn',
+    }),
 });
 export type InsertClipCommand = z.infer<typeof InsertClipSchema>;
 
@@ -202,10 +203,21 @@ export type InsertClipCommand = z.infer<typeof InsertClipSchema>;
  */
 export const SplitClipSchema = z.object({
   commandType: z.literal('SplitClip'),
-  params: z.object({
-    clipId: ClipId,
-    atTimelineSec: TimeSec,
-  }),
+  params: z
+    .object({
+      clipId: ClipId,
+      splitTime: TimeSec.optional(),
+      atTimelineSec: TimeSec.optional(),
+    })
+    .refine((data) => data.splitTime !== undefined || data.atTimelineSec !== undefined, {
+      message: 'SplitClip requires splitTime or atTimelineSec',
+    })
+    .refine(
+      (data) => !(data.splitTime !== undefined && data.atTimelineSec !== undefined),
+      {
+        message: 'SplitClip accepts splitTime or atTimelineSec, not both',
+      },
+    ),
 });
 export type SplitClipCommand = z.infer<typeof SplitClipSchema>;
 
@@ -293,12 +305,7 @@ export type MuteTrackCommand = z.infer<typeof MuteTrackSchema>;
 /**
  * Effect parameter value schema - allows numbers, strings, booleans, and hex colors
  */
-const EffectParamValue = z.union([
-  z.number(),
-  z.string(),
-  z.boolean(),
-  z.array(z.number()),
-]);
+const EffectParamValue = z.union([z.number(), z.string(), z.boolean(), z.array(z.number())]);
 
 /**
  * Effect parameters record - enforces valid parameter types
@@ -412,33 +419,42 @@ export type DeleteKeyframeCommand = z.infer<typeof DeleteKeyframeSchema>;
 /**
  * Caption style properties (validated subset of CSS properties)
  */
-export const CaptionStyleSchema = z.object({
-  fontFamily: z.string().optional(),
-  fontSize: z.number().positive().optional(),
-  fontWeight: z.union([z.number(), z.string()]).optional(),
-  color: z.string().regex(/^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/, 'Invalid hex color').optional(),
-  backgroundColor: z.string().regex(/^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/, 'Invalid hex color').optional(),
-  textAlign: z.enum(['left', 'center', 'right']).optional(),
-  verticalAlign: z.enum(['top', 'middle', 'bottom']).optional(),
-  textShadow: z.string().optional(),
-  opacity: z.number().min(0).max(1).optional(),
-}).passthrough(); // Allow additional CSS properties
+export const CaptionStyleSchema = z
+  .object({
+    fontFamily: z.string().optional(),
+    fontSize: z.number().positive().optional(),
+    fontWeight: z.union([z.number(), z.string()]).optional(),
+    color: z
+      .string()
+      .regex(/^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/, 'Invalid hex color')
+      .optional(),
+    backgroundColor: z
+      .string()
+      .regex(/^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$/, 'Invalid hex color')
+      .optional(),
+    textAlign: z.enum(['left', 'center', 'right']).optional(),
+    verticalAlign: z.enum(['top', 'middle', 'bottom']).optional(),
+    textShadow: z.string().optional(),
+    opacity: z.number().min(0).max(1).optional(),
+  })
+  .passthrough(); // Allow additional CSS properties
 
 /**
  * AddCaption - Create caption
  */
 export const AddCaptionSchema = z.object({
   commandType: z.literal('AddCaption'),
-  params: z.object({
-    trackId: TrackId,
-    text: z.string().min(1),
-    startTime: TimeSec,
-    endTime: TimeSec,
-    style: CaptionStyleSchema.optional(),
-  }).refine(
-    (data) => data.endTime > data.startTime,
-    { message: 'endTime must be greater than startTime' }
-  ),
+  params: z
+    .object({
+      trackId: TrackId,
+      text: z.string().min(1),
+      startTime: TimeSec,
+      endTime: TimeSec,
+      style: CaptionStyleSchema.optional(),
+    })
+    .refine((data) => data.endTime > data.startTime, {
+      message: 'endTime must be greater than startTime',
+    }),
 });
 export type AddCaptionCommand = z.infer<typeof AddCaptionSchema>;
 
@@ -472,10 +488,9 @@ export const ExportVideoSchema = z.object({
         start: TimeSec,
         end: TimeSec,
       })
-      .refine(
-        (data) => data.end > data.start,
-        { message: 'Export range end must be greater than start' }
-      )
+      .refine((data) => data.end > data.start, {
+        message: 'Export range end must be greater than start',
+      })
       .optional(),
   }),
 });
@@ -561,7 +576,7 @@ export type EditScript = z.infer<typeof EditScriptSchema>;
  * Validate an EditScript and return typed result or errors
  */
 export function validateEditScript(
-  input: unknown
+  input: unknown,
 ): { success: true; data: EditScript } | { success: false; errors: string[] } {
   const result = EditScriptSchema.safeParse(input);
 
@@ -581,7 +596,7 @@ export function validateEditScript(
  * Validate a single command and return typed result or errors
  */
 export function validateCommand(
-  input: unknown
+  input: unknown,
 ): { success: true; data: EditCommand } | { success: false; errors: string[] } {
   const result = EditCommandSchema.safeParse(input);
 

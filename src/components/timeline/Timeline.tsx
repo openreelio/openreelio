@@ -18,7 +18,8 @@ import {
 import type { PlayheadHandle } from './Playhead';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores/projectStore';
-import { useEditorToolStore } from '@/stores/editorToolStore';
+import { usePlaybackStore } from '@/stores/playbackStore';
+import { RAZOR_CURSOR, useEditorToolStore } from '@/stores/editorToolStore';
 import { useTimelineEngine } from '@/hooks/useTimelineEngine';
 import { useScrubbing } from '@/hooks/useScrubbing';
 import { useTimelineCoordinates } from '@/hooks/useTimelineCoordinates';
@@ -43,7 +44,7 @@ import { createLogger } from '@/services/logger';
 import { TimeRuler } from './TimeRuler';
 import { Track } from './Track';
 import { CaptionTrack } from './CaptionTrack';
-import { Playhead } from './Playhead';
+import { Playhead, PLAYHEAD_LINE_HIT_AREA_WIDTH, PLAYHEAD_RULER_HEIGHT } from './Playhead';
 import { EnhancedTimelineToolbar } from './EnhancedTimelineToolbar';
 import { DragPreviewLayer } from './DragPreviewLayer';
 import { SnapIndicator, type SnapPoint } from './SnapIndicator';
@@ -62,7 +63,9 @@ import {
   DEFAULT_FPS,
 } from './constants';
 import { resolveTrackDropTarget } from '@/utils/trackDropTarget';
-import { expandClipIdsWithLinkedCompanions } from '@/utils/clipLinking';
+import { getTrackSwapTargets, isProtectedBaseTrack } from '@/utils/trackReorder';
+import { expandClipIdsWithLinkedCompanions, getSplitTargetsAtTime } from '@/utils/clipLinking';
+import { getPlayheadRazorSplitTarget } from '@/utils/playheadRazor';
 import type { PendingAssetDrop } from './types';
 
 // Re-export types for backward compatibility
@@ -86,12 +89,19 @@ const logger = createLogger('Timeline');
 const EMPTY_AREA_DRAG_THRESHOLD_PX = 4;
 const MIN_PENDING_DROP_WIDTH_PX = 88;
 const DEFAULT_PENDING_DROP_DURATION_SEC = 10;
+const PENDING_DROP_VERTICAL_INSET_PX = 3;
+const PENDING_DROP_HEIGHT_PX = TRACK_HEIGHT - PENDING_DROP_VERTICAL_INSET_PX * 2;
 
 interface EmptyAreaPanGesture {
   startX: number;
   startY: number;
   startScrollX: number;
   didPan: boolean;
+}
+
+interface RazorGuideState {
+  x: number;
+  trackCenterY: number;
 }
 
 function firstFiniteNumber(...candidates: unknown[]): number | null {
@@ -200,6 +210,7 @@ export function Timeline({
   onTrackMuteToggle,
   onTrackLockToggle,
   onTrackVisibilityToggle,
+  onTrackDelete,
   onTrackCreate,
   onAddText,
   onTrackReorder,
@@ -261,6 +272,7 @@ export function Timeline({
     captions: Caption[];
     trackName: string;
   } | null>(null);
+  const [razorGuide, setRazorGuide] = useState<RazorGuideState | null>(null);
 
   // ===========================================================================
   // Caption Hook
@@ -532,6 +544,7 @@ export function Timeline({
     sequence,
     zoom,
     scrollX,
+    scrollY,
     trackHeaderWidth: TRACK_HEADER_WIDTH,
     trackHeight: TRACK_HEIGHT,
     onSplit: onClipSplit,
@@ -725,6 +738,7 @@ export function Timeline({
   const { handleKeyDown: baseHandleKeyDown } = useTimelineKeyboard({
     sequence,
     selectedClipIds,
+    linkedSelectionEnabled,
     playhead,
     togglePlayback,
     stepForward,
@@ -784,7 +798,7 @@ export function Timeline({
             e.preventDefault();
             return;
           case 'b':
-            setActiveTool('razor');
+            setActiveTool('ripple');
             e.preventDefault();
             return;
           case 'y':
@@ -856,6 +870,7 @@ export function Timeline({
   } = useTimelineClipOperations({
     sequence,
     zoom,
+    trackHeight: TRACK_HEIGHT,
     onClipMove,
     onClipTrim,
     selectClip,
@@ -1196,6 +1211,47 @@ export function Timeline({
   }, []);
 
   useEffect(() => {
+    if (!isRazorActive) {
+      setRazorGuide(null);
+    }
+  }, [isRazorActive]);
+
+  const updateRazorGuide = useCallback(
+    (clientX: number, clientY: number) => {
+      if (!tracksAreaRef.current || !sequence || !isRazorActive) {
+        setRazorGuide(null);
+        return;
+      }
+
+      const containerRect = tracksAreaRef.current.getBoundingClientRect();
+      const relativeX = clientX - containerRect.left;
+      const relativeY = clientY - containerRect.top;
+
+      if (
+        relativeX < TRACK_HEADER_WIDTH ||
+        relativeX > containerRect.width ||
+        relativeY < 0 ||
+        relativeY > containerRect.height
+      ) {
+        setRazorGuide(null);
+        return;
+      }
+
+      const trackIndex = Math.floor((relativeY + scrollY) / TRACK_HEIGHT);
+      if (trackIndex < 0 || trackIndex >= sequence.tracks.length) {
+        setRazorGuide(null);
+        return;
+      }
+
+      setRazorGuide({
+        x: relativeX,
+        trackCenterY: trackIndex * TRACK_HEIGHT - scrollY + TRACK_HEIGHT / 2,
+      });
+    },
+    [isRazorActive, scrollY, sequence],
+  );
+
+  useEffect(() => {
     return () => {
       clearEmptyAreaPanGesture();
     };
@@ -1383,14 +1439,10 @@ export function Timeline({
         return;
       }
 
-      // Handle razor tool click - split clip at click position
       if (isRazorActive && tracksAreaRef.current) {
         const containerRect = tracksAreaRef.current.getBoundingClientRect();
-        const handled = handleRazorClick(e.clientX, e.clientY, containerRect);
-        if (handled) {
-          // Razor tool handled the click, don't process further
-          return;
-        }
+        void handleRazorClick(e.clientX, e.clientY, containerRect, { altKey: e.altKey });
+        return;
       }
 
       // Don't clear selection if we were doing a selection box drag
@@ -1403,6 +1455,75 @@ export function Timeline({
     [clearClipSelection, isSelecting, isRazorActive, handleRazorClick],
   );
 
+  const handleTracksAreaMouseMove = useCallback(
+    (e: MouseEvent<HTMLDivElement>) => {
+      if (!isRazorActive) {
+        return;
+      }
+
+      updateRazorGuide(e.clientX, e.clientY);
+    },
+    [isRazorActive, updateRazorGuide],
+  );
+
+  const handleTracksAreaMouseLeave = useCallback(() => {
+    setRazorGuide(null);
+  }, []);
+
+  const handleClipRazorClick = useCallback(
+    (e: MouseEvent) => {
+      if (!isRazorActive || !tracksAreaRef.current) {
+        return;
+      }
+
+      const containerRect = tracksAreaRef.current.getBoundingClientRect();
+      void handleRazorClick(e.clientX, e.clientY, containerRect, { altKey: e.altKey });
+    },
+    [handleRazorClick, isRazorActive],
+  );
+
+  const handlePlayheadRazorCut = useCallback(
+    (clientY: number, altKey = false) => {
+      if (!sequence || !tracksAreaRef.current || !onClipSplit) {
+        return;
+      }
+
+      const currentPlayheadTime = usePlaybackStore.getState().currentTime;
+      const splitTime = Number.isFinite(currentPlayheadTime) ? currentPlayheadTime : playhead;
+
+      const tracksRect = tracksAreaRef.current.getBoundingClientRect();
+      const relativeY = clientY - tracksRect.top + scrollY;
+      const trackIndex = Math.floor(relativeY / TRACK_HEIGHT);
+
+      if (trackIndex < 0 || trackIndex >= sequence.tracks.length) {
+        return;
+      }
+
+      const splitTarget = getPlayheadRazorSplitTarget(sequence, trackIndex, splitTime);
+      if (!splitTarget) {
+        return;
+      }
+
+      onClipSplit({
+        sequenceId: sequence.id,
+        trackId: splitTarget.trackId,
+        clipId: splitTarget.clipId,
+        splitTime: splitTarget.splitTime,
+        ignoreLinkedSelection: altKey,
+      });
+    },
+    [onClipSplit, playhead, scrollY, sequence],
+  );
+
+  const handlePlayheadRazorPointerDown = useCallback(
+    (e: PointerEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      e.stopPropagation();
+      handlePlayheadRazorCut(e.clientY, e.altKey);
+    },
+    [handlePlayheadRazorCut],
+  );
+
   const createTrackHandler = useCallback(
     (callback?: (data: { sequenceId: string; trackId: string }) => void) => (trackId: string) => {
       if (sequence && callback) callback({ sequenceId: sequence.id, trackId });
@@ -1410,56 +1531,25 @@ export function Timeline({
     [sequence],
   );
 
-  const moveTrackToIndex = useCallback(
-    (trackId: string, newIndex: number) => {
+  const handleTrackSwap = useCallback(
+    (trackId: string, targetTrackId: string) => {
       if (!sequence || !onTrackReorder) {
         return;
       }
 
-      const trackIndex = sequence.tracks.findIndex((track) => track.id === trackId);
-      if (trackIndex < 0) {
-        return;
-      }
-
-      if (newIndex < 0 || newIndex >= sequence.tracks.length || newIndex === trackIndex) {
+      const targetIndex = sequence.tracks.findIndex((track) => track.id === targetTrackId);
+      if (targetIndex < 0) {
         return;
       }
 
       void onTrackReorder({
         sequenceId: sequence.id,
         trackId,
-        newIndex,
+        newIndex: targetIndex,
+        targetTrackId,
       });
     },
     [sequence, onTrackReorder],
-  );
-
-  const handleTrackMoveUp = useCallback(
-    (trackId: string) => {
-      if (!sequence) {
-        return;
-      }
-
-      const trackIndex = sequence.tracks.findIndex((track) => track.id === trackId);
-      if (trackIndex > 0) {
-        moveTrackToIndex(trackId, trackIndex - 1);
-      }
-    },
-    [sequence, moveTrackToIndex],
-  );
-
-  const handleTrackMoveDown = useCallback(
-    (trackId: string) => {
-      if (!sequence) {
-        return;
-      }
-
-      const trackIndex = sequence.tracks.findIndex((track) => track.id === trackId);
-      if (trackIndex >= 0 && trackIndex < sequence.tracks.length - 1) {
-        moveTrackToIndex(trackId, trackIndex + 1);
-      }
-    },
-    [sequence, moveTrackToIndex],
   );
 
   // ===========================================================================
@@ -1562,29 +1652,26 @@ export function Timeline({
   // ===========================================================================
 
   const handleToolbarSplit = useCallback(() => {
-    if (selectedClipIds.length > 0 && sequence && onClipSplit) {
-      for (const clipId of selectedClipIds) {
-        for (const track of sequence.tracks) {
-          const clip = track.clips.find((c) => c.id === clipId);
-          if (clip) {
-            const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-            const clipEnd =
-              clip.place.timelineInSec +
-              (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-            if (playhead > clip.place.timelineInSec && playhead < clipEnd) {
-              onClipSplit({
-                sequenceId: sequence.id,
-                trackId: track.id,
-                clipId,
-                splitTime: playhead,
-              });
-            }
-            break;
-          }
-        }
-      }
+    if (!sequence || selectedClipIds.length === 0 || !onClipSplit) {
+      return;
     }
-  }, [selectedClipIds, sequence, playhead, onClipSplit]);
+
+    const splitTargets = getSplitTargetsAtTime(
+      sequence,
+      selectedClipIds,
+      playhead,
+      linkedSelectionEnabled,
+    );
+
+    for (const splitTarget of splitTargets) {
+      onClipSplit({
+        sequenceId: sequence.id,
+        trackId: splitTarget.trackId,
+        clipId: splitTarget.clipId,
+        splitTime: playhead,
+      });
+    }
+  }, [selectedClipIds, sequence, playhead, onClipSplit, linkedSelectionEnabled]);
 
   const handleToolbarDuplicate = useCallback(() => {
     if (selectedClipIds.length > 0 && sequence && onClipDuplicate) {
@@ -1727,6 +1814,27 @@ export function Timeline({
     return '';
   };
 
+  const getTracksAreaCursorStyle = (): { cursor: string } | undefined => {
+    if (
+      isPanning ||
+      isEmptyAreaPanning ||
+      isHandToolActive ||
+      isScrubbing ||
+      isDraggingPlayhead ||
+      isSelecting ||
+      isSlipToolActive ||
+      isSlideToolActive ||
+      isRollToolActive
+    ) {
+      return undefined;
+    }
+
+    const toolCursor = getToolCursorStyle();
+    return toolCursor.startsWith('url(') ? { cursor: toolCursor } : undefined;
+  };
+
+  const playheadLineHitAreaLeft = playhead * zoom - scrollX - PLAYHEAD_LINE_HIT_AREA_WIDTH / 2 + 1;
+
   return (
     <TimelineOperationsProvider operations={timelineOperations}>
       <div
@@ -1774,12 +1882,15 @@ export function Timeline({
             ref={tracksAreaRef}
             data-testid="timeline-tracks-area"
             className={`flex-1 overflow-hidden relative ${getTracksAreaCursor()}`}
+            style={getTracksAreaCursorStyle()}
             onClick={handleTracksAreaClick}
             onPointerDown={handleTracksAreaPointerDown}
             onPointerMove={handleTracksAreaPointerMove}
             onPointerUp={handleTracksAreaPointerUp}
             onPointerCancel={handleTracksAreaPointerCancel}
             onMouseDown={handleTracksAreaMouseDownCombined}
+            onMouseMove={handleTracksAreaMouseMove}
+            onMouseLeave={handleTracksAreaMouseLeave}
             onWheel={handleWheel}
             onDragEnter={handleDragEnter}
             onDragOver={handleDragOver}
@@ -1790,9 +1901,8 @@ export function Timeline({
               data-testid="timeline-tracks-scroll-layer"
               style={{ transform: `translateY(-${scrollY}px)` }}
             >
-              {sequence.tracks.map((track, trackIndex) => {
-                const canMoveUp = trackIndex > 0;
-                const canMoveDown = trackIndex < sequence.tracks.length - 1;
+              {sequence.tracks.map((track) => {
+                const swapTargets = getTrackSwapTargets(sequence.tracks, track.id);
 
                 if (track.kind === 'caption') {
                   const captionTrack = adaptTrackToCaptionTrack(track);
@@ -1807,10 +1917,10 @@ export function Timeline({
                       selectedCaptionIds={selectedClipIds}
                       onLockToggle={createTrackHandler(onTrackLockToggle)}
                       onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
-                      onMoveUp={handleTrackMoveUp}
-                      onMoveDown={handleTrackMoveDown}
-                      canMoveUp={canMoveUp}
-                      canMoveDown={canMoveDown}
+                      onDeleteTrack={createTrackHandler(onTrackDelete)}
+                      canDeleteTrack={!isProtectedBaseTrack(sequence.tracks, track.id)}
+                      swapTargets={swapTargets}
+                      onSwapTracks={handleTrackSwap}
                       onCaptionClick={handleClipClick}
                       onCaptionDoubleClick={createCaptionDoubleClickHandler(track.id)}
                       onExportClick={handleCaptionExportClick}
@@ -1833,6 +1943,7 @@ export function Timeline({
                     snapPoints={snapEnabled ? snapPoints : []}
                     snapThreshold={snapEnabled ? snapThreshold : 0}
                     onClipClick={handleClipClick}
+                    onClipRazorClick={handleClipRazorClick}
                     onClipDragStart={handleClipDragStart}
                     onClipDrag={handleClipDrag}
                     onClipDragEnd={handleClipDragEnd}
@@ -1841,10 +1952,10 @@ export function Timeline({
                     onMuteToggle={createTrackHandler(onTrackMuteToggle)}
                     onLockToggle={createTrackHandler(onTrackLockToggle)}
                     onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
-                    onMoveUp={handleTrackMoveUp}
-                    onMoveDown={handleTrackMoveDown}
-                    canMoveUp={canMoveUp}
-                    canMoveDown={canMoveDown}
+                    onDeleteTrack={createTrackHandler(onTrackDelete)}
+                    canDeleteTrack={!isProtectedBaseTrack(sequence.tracks, track.id)}
+                    swapTargets={swapTargets}
+                    onSwapTracks={handleTrackSwap}
                   />
                 );
               })}
@@ -1855,15 +1966,34 @@ export function Timeline({
               trackHeight={TRACK_HEIGHT}
               scrollX={scrollX}
             />
+            {isRazorActive && razorGuide && (
+              <>
+                <div
+                  data-testid="razor-guide-vertical"
+                  className="absolute top-0 bottom-0 w-px border-l border-dashed border-amber-200/70 pointer-events-none z-20"
+                  style={{ left: `${razorGuide.x}px` }}
+                />
+                <div
+                  data-testid="razor-guide-horizontal"
+                  className="absolute h-px border-t border-dashed border-amber-200/40 pointer-events-none z-20"
+                  style={{
+                    top: `${razorGuide.trackCenterY}px`,
+                    left: `${TRACK_HEADER_WIDTH}px`,
+                    right: 0,
+                  }}
+                />
+              </>
+            )}
             {pendingDropOverlays.map((overlay) => (
               <div
                 key={overlay.id}
                 data-testid="pending-workspace-drop"
-                className={`absolute h-14 border border-dashed rounded-md pointer-events-none z-10 px-2 py-1 shadow-sm ${overlay.statusClassName}`}
+                className={`absolute border border-dashed rounded-md pointer-events-none z-10 px-2 py-1 shadow-sm ${overlay.statusClassName}`}
                 style={{
                   left: `${overlay.left}px`,
-                  top: `${overlay.top + 5}px`,
+                  top: `${overlay.top + PENDING_DROP_VERTICAL_INSET_PX}px`,
                   width: `${overlay.width}px`,
+                  height: `${PENDING_DROP_HEIGHT_PX}px`,
                 }}
               >
                 <div className="text-[11px] leading-tight truncate font-medium">
@@ -1920,6 +2050,21 @@ export function Timeline({
               right: 0,
             }}
           >
+            {isRazorActive && (
+              <div
+                data-testid="playhead-razor-hit-area"
+                className="absolute select-none touch-none z-40"
+                style={{
+                  top: `${PLAYHEAD_RULER_HEIGHT}px`,
+                  bottom: 0,
+                  left: `${playheadLineHitAreaLeft}px`,
+                  width: `${PLAYHEAD_LINE_HIT_AREA_WIDTH}px`,
+                  cursor: RAZOR_CURSOR,
+                  pointerEvents: 'auto',
+                }}
+                onPointerDown={handlePlayheadRazorPointerDown}
+              />
+            )}
             {/* Playhead - repositioned relative to clipping container */}
             <Playhead
               ref={playheadRef}
@@ -1929,8 +2074,8 @@ export function Timeline({
               trackHeaderWidth={0} // No offset needed - container handles it
               isPlaying={isPlaying}
               isDragging={isDraggingPlayhead}
-              onDragStart={handlePlayheadDragStart}
-              onPointerDown={handlePlayheadPointerDown}
+              onDragStart={isRazorActive ? undefined : handlePlayheadDragStart}
+              onPointerDown={isRazorActive ? undefined : handlePlayheadPointerDown}
             />
           </div>
         </div>

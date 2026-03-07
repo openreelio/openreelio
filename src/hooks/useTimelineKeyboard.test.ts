@@ -11,11 +11,7 @@ import type { Sequence, Track, Clip } from '@/types';
 // Test Fixtures
 // =============================================================================
 
-const createMockClip = (
-  id: string,
-  timelineInSec: number,
-  durationSec: number
-): Clip => ({
+const createMockClip = (id: string, timelineInSec: number, durationSec: number): Clip => ({
   id,
   assetId: `asset-${id}`,
   range: {
@@ -42,9 +38,9 @@ const createMockClip = (
   },
 });
 
-const createMockTrack = (id: string, clips: Clip[] = []): Track => ({
+const createMockTrack = (id: string, clips: Clip[] = [], kind: Track['kind'] = 'video'): Track => ({
   id,
-  kind: 'video',
+  kind,
   name: `Track ${id}`,
   clips,
   blendMode: 'normal',
@@ -63,9 +59,7 @@ const createMockSequence = (clips: Clip[][] = [[]]): Sequence => ({
     audioSampleRate: 48000,
     audioChannels: 2,
   },
-  tracks: clips.map((trackClips, i) =>
-    createMockTrack(`track-${i}`, trackClips)
-  ),
+  tracks: clips.map((trackClips, i) => createMockTrack(`track-${i}`, trackClips)),
   markers: [],
 });
 
@@ -76,15 +70,16 @@ const createKeyboardEvent = (
     metaKey: boolean;
     shiftKey: boolean;
     altKey: boolean;
-  }> = {}
-): React.KeyboardEvent => ({
-  key,
-  ctrlKey: options.ctrlKey ?? false,
-  metaKey: options.metaKey ?? false,
-  shiftKey: options.shiftKey ?? false,
-  altKey: options.altKey ?? false,
-  preventDefault: vi.fn(),
-} as unknown as React.KeyboardEvent);
+  }> = {},
+): React.KeyboardEvent =>
+  ({
+    key,
+    ctrlKey: options.ctrlKey ?? false,
+    metaKey: options.metaKey ?? false,
+    shiftKey: options.shiftKey ?? false,
+    altKey: options.altKey ?? false,
+    preventDefault: vi.fn(),
+  }) as unknown as React.KeyboardEvent;
 
 // =============================================================================
 // Tests
@@ -94,6 +89,7 @@ describe('useTimelineKeyboard', () => {
   const createDefaultOptions = () => ({
     sequence: createMockSequence(),
     selectedClipIds: [] as string[],
+    linkedSelectionEnabled: false,
     playhead: 0,
     togglePlayback: vi.fn(),
     stepForward: vi.fn(),
@@ -110,9 +106,7 @@ describe('useTimelineKeyboard', () => {
 
   describe('initial state', () => {
     it('should return handleKeyDown function', () => {
-      const { result } = renderHook(() =>
-        useTimelineKeyboard(createDefaultOptions())
-      );
+      const { result } = renderHook(() => useTimelineKeyboard(createDefaultOptions()));
       expect(typeof result.current.handleKeyDown).toBe('function');
     });
   });
@@ -185,11 +179,7 @@ describe('useTimelineKeyboard', () => {
         result.current.handleKeyDown(event);
       });
 
-      expect(options.selectClips).toHaveBeenCalledWith([
-        'clip-1',
-        'clip-2',
-        'clip-3',
-      ]);
+      expect(options.selectClips).toHaveBeenCalledWith(['clip-1', 'clip-2', 'clip-3']);
     });
 
     it('should select all clips on Meta+A (Mac)', () => {
@@ -382,10 +372,8 @@ describe('useTimelineKeyboard', () => {
       expect(options.onClipSplit).not.toHaveBeenCalled();
     });
 
-    it('should not split when multiple clips are selected', () => {
-      const clips = [
-        [createMockClip('clip-1', 0, 5), createMockClip('clip-2', 6, 3)],
-      ];
+    it('should split every selected clip that contains the playhead', () => {
+      const clips = [[createMockClip('clip-1', 0, 5)], [createMockClip('clip-2', 0, 5)]];
       const options = {
         ...createDefaultOptions(),
         sequence: createMockSequence(clips),
@@ -399,7 +387,54 @@ describe('useTimelineKeyboard', () => {
         result.current.handleKeyDown(event);
       });
 
-      expect(options.onClipSplit).not.toHaveBeenCalled();
+      expect(options.onClipSplit).toHaveBeenCalledTimes(2);
+      expect(options.onClipSplit).toHaveBeenNthCalledWith(1, {
+        sequenceId: 'seq-1',
+        trackId: 'track-0',
+        clipId: 'clip-1',
+        splitTime: 2,
+      });
+      expect(options.onClipSplit).toHaveBeenNthCalledWith(2, {
+        sequenceId: 'seq-1',
+        trackId: 'track-1',
+        clipId: 'clip-2',
+        splitTime: 2,
+      });
+    });
+
+    it('should dedupe linked companions when linked selection is enabled', () => {
+      const videoClip = createMockClip('clip-video', 0, 5);
+      const audioClip: Clip = {
+        ...createMockClip('clip-audio', 0, 5),
+        assetId: videoClip.assetId,
+      };
+      const options = {
+        ...createDefaultOptions(),
+        sequence: {
+          ...createMockSequence(),
+          tracks: [
+            createMockTrack('track-video', [videoClip]),
+            createMockTrack('track-audio', [audioClip], 'audio'),
+          ],
+        },
+        selectedClipIds: ['clip-video', 'clip-audio'],
+        linkedSelectionEnabled: true,
+        playhead: 2,
+      };
+      const { result } = renderHook(() => useTimelineKeyboard(options));
+
+      const event = createKeyboardEvent('s');
+      act(() => {
+        result.current.handleKeyDown(event);
+      });
+
+      expect(options.onClipSplit).toHaveBeenCalledTimes(1);
+      expect(options.onClipSplit).toHaveBeenCalledWith({
+        sequenceId: 'seq-1',
+        trackId: 'track-video',
+        clipId: 'clip-video',
+        splitTime: 2,
+      });
     });
 
     it('should not split when playhead is before clip start', () => {
@@ -514,9 +549,7 @@ describe('useTimelineKeyboard', () => {
         result.current.handleKeyDown(event);
       });
 
-      expect(options.onClipSplit).toHaveBeenCalledWith(
-        expect.objectContaining({ splitTime: 4 })
-      );
+      expect(options.onClipSplit).toHaveBeenCalledWith(expect.objectContaining({ splitTime: 4 }));
     });
   });
 
@@ -537,9 +570,7 @@ describe('useTimelineKeyboard', () => {
   describe('memoization', () => {
     it('should memoize handleKeyDown', () => {
       const options = createDefaultOptions();
-      const { result, rerender } = renderHook(() =>
-        useTimelineKeyboard(options)
-      );
+      const { result, rerender } = renderHook(() => useTimelineKeyboard(options));
 
       const initialHandler = result.current.handleKeyDown;
       rerender();
@@ -548,10 +579,9 @@ describe('useTimelineKeyboard', () => {
 
     it('should update handleKeyDown when dependencies change', () => {
       const options = createDefaultOptions();
-      const { result, rerender } = renderHook(
-        (props) => useTimelineKeyboard(props),
-        { initialProps: options }
-      );
+      const { result, rerender } = renderHook((props) => useTimelineKeyboard(props), {
+        initialProps: options,
+      });
 
       // Store initial handler to verify it's a function
       expect(typeof result.current.handleKeyDown).toBe('function');

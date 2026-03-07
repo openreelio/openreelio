@@ -375,6 +375,8 @@ export interface Track {
   name: string;
   clips: Clip[];
   blendMode: BlendMode;
+  /** Present for modern projects; true only for protected default timeline tracks */
+  isBaseTrack?: boolean;
   muted: boolean;
   locked: boolean;
   visible: boolean;

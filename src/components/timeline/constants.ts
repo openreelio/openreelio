@@ -12,8 +12,8 @@
 /** Width of track header in pixels (w-48 = 12rem = 192px) */
 export const TRACK_HEADER_WIDTH = 192;
 
-/** Height of each track in pixels (h-16 = 4rem = 64px) */
-export const TRACK_HEIGHT = 64;
+/** Height of each track in pixels */
+export const TRACK_HEIGHT = 40;
 
 // =============================================================================
 // Timeline Settings
