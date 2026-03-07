@@ -78,7 +78,7 @@ async openProject(path: string) : Promise<Result<ProjectInfo, string>> {
  * - If the folder is empty or contains only media files (no project files), it initializes
  * a new project in-place, deriving the project name from the folder name.
  * 
- * This replaces the old two-step "create project" flow (name + parent → subfolder).
+ * This replaces the old two-step "create project" flow (name + parent -> subfolder).
  */
 async openOrInitProject(path: string) : Promise<Result<ProjectInfo, string>> {
     try {
@@ -126,6 +126,19 @@ async getProjectInfo() : Promise<Result<ProjectInfo | null, string>> {
 async getProjectState() : Promise<Result<ProjectStateDto, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("get_project_state") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Returns all resolved text clip payloads for a sequence.
+ * 
+ * This is used by preview/inspector UIs that need fully resolved text styling
+ * from TextOverlay effects without parsing effect internals on the frontend.
+ */
+async getSequenceTextClipData(sequenceId: string) : Promise<Result<TextClipDataDto[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_sequence_text_clip_data", { sequenceId }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -191,6 +204,32 @@ async generateProxyForAsset(assetId: string) : Promise<Result<string | null, str
 async updateAssetProxy(assetId: string, proxyUrl: string | null, proxyStatus: ProxyStatus) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("update_asset_proxy", { assetId, proxyUrl, proxyStatus }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Gets waveform peak data for an asset.
+ * 
+ * Returns normalized peak values (0.0 - 1.0) for audio visualization.
+ * Returns None if waveform has not been generated yet.
+ */
+async getWaveformData(assetId: string) : Promise<Result<WaveformData | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_waveform_data", { assetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Generates waveform peak data for an asset.
+ * 
+ * Extracts audio peaks from the asset and saves as JSON.
+ * Emits `waveform-complete` event on success, `waveform-error` on failure.
+ */
+async generateWaveformForAsset(assetId: string, samplesPerSecond: number | null) : Promise<Result<WaveformData | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("generate_waveform_for_asset", { assetId, samplesPerSecond }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -752,6 +791,72 @@ async submitTranscriptionJob(assetId: string, options: TranscriptionOptionsDto |
 }
 },
 /**
+ * Exports captions to a file in the specified format
+ * 
+ * # Arguments
+ * 
+ * * `captions` - Array of captions to export
+ * * `output_path` - File path where captions will be saved
+ * * `format` - Export format (SRT or VTT)
+ */
+async exportCaptions(captions: CaptionForExport[], outputPath: string, format: CaptionExportFormat) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_captions", { captions, outputPath, format }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Gets caption content as a string in the specified format (without writing to file)
+ */
+async getCaptionsAsString(captions: CaptionForExport[], format: CaptionExportFormat) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_captions_as_string", { captions, format }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Detects shots/scenes in a video file
+ */
+async detectShots(assetId: string, videoPath: string, config: ShotDetectionConfig | null) : Promise<Result<ShotDetectionResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("detect_shots", { assetId, videoPath, config }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Retrieves cached shots for an asset from the database
+ */
+async getAssetShots(assetId: string) : Promise<Result<ShotDto[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_asset_shots", { assetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Deletes all shots for an asset from the database
+ */
+async deleteAssetShots(assetId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_asset_shots", { assetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Checks if shot detection is available (requires FFmpeg)
+ */
+async isShotDetectionAvailable() : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("is_shot_detection_available") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Searches assets using SQLite-based search engine (always available)
  * 
  * This command performs search across transcripts and shots stored in the
@@ -1169,6 +1274,33 @@ async writeAgentTrace(traceJson: string, traceId: string, maxFiles: number) : Pr
 }
 },
 /**
+ * List agent trace files from the project's trace directory.
+ * 
+ * Returns up to `limit` entries sorted by modification time (newest first).
+ * Traces are read from `{project_path}/.openreelio/traces/`.
+ */
+async listAgentTraces(limit: number | null) : Promise<Result<TraceSummary[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_agent_traces", { limit }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Read a single agent trace file by its trace ID.
+ * 
+ * Returns the raw JSON content of the trace file at
+ * `{project_path}/.openreelio/traces/{trace_id}.json`.
+ * The `trace_id` is sanitized to prevent path traversal.
+ */
+async readAgentTrace(traceId: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_agent_trace", { traceId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Execute an agent plan atomically against the active project.
  * 
  * Runs each plan step as a command through the CommandExecutor,
@@ -1183,6 +1315,20 @@ async writeAgentTrace(traceJson: string, traceId: string, maxFiles: number) : Pr
 async executeAgentPlan(plan: AgentPlan) : Promise<Result<AgentPlanResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("execute_agent_plan", { plan }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Search stock media providers for assets matching a query.
+ * 
+ * Uses the built-in StockMediaProvider (Pexels/Pixabay) to search for
+ * royalty-free images and videos. Returns mock data when no API key
+ * is configured.
+ */
+async searchStockMedia(query: string, assetType: string | null, limit: number | null) : Promise<Result<StockMediaSearchResult[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("search_stock_media", { query, assetType, limit }) };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -1848,9 +1994,9 @@ codec: string;
 bitrate: number | null }
 export type AutoSaveSettingsDto = { enabled: boolean; intervalSeconds: number; backupCount: number }
 /**
- * Blend mode for video tracks
+ * Blend mode for video tracks and clips
  */
-export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "add"
+export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "add" | "subtract" | "darken" | "lighten" | "colorBurn" | "colorDodge" | "linearBurn" | "linearDodge" | "softLight" | "hardLight" | "vividLight" | "linearLight" | "pinLight" | "difference" | "exclusion"
 /**
  * Bounding box for detected objects
  */
@@ -1904,6 +2050,38 @@ hitRate: number }
  */
 export type Canvas = { width: number; height: number }
 /**
+ * Export format for captions
+ */
+export type CaptionExportFormat = 
+/**
+ * SubRip format (.srt)
+ */
+"srt" | 
+/**
+ * WebVTT format (.vtt)
+ */
+"vtt"
+/**
+ * Caption data for export
+ */
+export type CaptionForExport = { 
+/**
+ * Start time in seconds
+ */
+startSec: number; 
+/**
+ * End time in seconds
+ */
+endSec: number; 
+/**
+ * Caption text
+ */
+text: string; 
+/**
+ * Optional speaker name
+ */
+speaker: string | null }
+/**
  * Clip (media segment on timeline)
  */
 export type Clip = { id: string; assetId: string; 
@@ -1919,6 +2097,10 @@ place: ClipPlace; transform: Transform;
  * Opacity (0.0 - 1.0)
  */
 opacity: number; 
+/**
+ * Blend mode for compositing (default: Normal)
+ */
+blendMode?: BlendMode; 
 /**
  * Playback speed (1.0 = normal)
  */
@@ -2794,6 +2976,10 @@ sequences: Sequence[];
  */
 activeSequenceId: string | null; 
 /**
+ * Resolved text clip payloads (clipId -> TextClipData)
+ */
+textClips: TextClipDataDto[]; 
+/**
  * Whether project has unsaved changes
  */
 isDirty: boolean }
@@ -3248,6 +3434,67 @@ minDurationSec?: number;
  */
 generateKeyframes?: boolean }
 /**
+ * Configuration options for shot detection
+ */
+export type ShotDetectionConfig = { 
+/**
+ * Scene change detection threshold (0.0 - 1.0)
+ * Lower values detect more scene changes
+ */
+threshold: number | null; 
+/**
+ * Minimum shot duration in seconds
+ */
+minShotDuration: number | null }
+/**
+ * Result of shot detection operation
+ */
+export type ShotDetectionResult = { 
+/**
+ * Number of shots detected
+ */
+shotCount: number; 
+/**
+ * Detected shots
+ */
+shots: ShotDto[]; 
+/**
+ * Total video duration in seconds
+ */
+totalDuration: number }
+/**
+ * Detected shot data for frontend
+ */
+export type ShotDto = { 
+/**
+ * Unique shot ID
+ */
+id: string; 
+/**
+ * Asset ID this shot belongs to
+ */
+assetId: string; 
+/**
+ * Start time in seconds
+ */
+startSec: number; 
+/**
+ * End time in seconds
+ */
+endSec: number; 
+/**
+ * Path to keyframe thumbnail (if generated)
+ */
+keyframePath: string | null; 
+/**
+ * Quality score (0.0 - 1.0)
+ */
+qualityScore: number | null; 
+/**
+ * Tags/labels for this shot
+ */
+tags: string[] }
+/**
  * A detected shot/scene boundary
  */
 export type ShotResult = { 
@@ -3400,6 +3647,38 @@ durationMs: number;
  */
 operationId?: string | null }
 /**
+ * A single stock media search result (IPC-safe DTO).
+ */
+export type StockMediaSearchResult = { 
+/**
+ * Unique identifier within the provider.
+ */
+id: string; 
+/**
+ * Display name.
+ */
+name: string; 
+/**
+ * Asset type: "image", "video", or "audio".
+ */
+assetType: string; 
+/**
+ * Thumbnail URL (if available).
+ */
+thumbnail: string | null; 
+/**
+ * Duration in seconds (for video/audio).
+ */
+durationSec: number | null; 
+/**
+ * File size in bytes (if known).
+ */
+sizeBytes: number | null; 
+/**
+ * Tags for categorization.
+ */
+tags: string[] }
+/**
  * A single message in the conversation history for streaming requests.
  * 
  * This mirrors `ConversationMessage` from the provider module but carries
@@ -3479,6 +3758,77 @@ usedBytes: number;
  */
 usagePercent: number }
 /**
+ * Text alignment options for horizontal text positioning.
+ */
+export type TextAlignment = 
+/**
+ * Align text to the left
+ */
+"left" | 
+/**
+ * Align text to the center (default)
+ */
+"center" | 
+/**
+ * Align text to the right
+ */
+"right"
+/**
+ * Complete text clip configuration.
+ * 
+ * Contains all properties needed to render a text overlay including
+ * content, styling, positioning, and effects.
+ */
+export type TextClipData = { 
+/**
+ * The text content (can be multi-line with \n)
+ */
+content: string; 
+/**
+ * Text styling (font, size, color, etc.)
+ */
+style: TextStyle; 
+/**
+ * Position on screen (normalized coordinates)
+ */
+position: TextPosition; 
+/**
+ * Optional shadow effect
+ */
+shadow?: TextShadow | null; 
+/**
+ * Optional outline/stroke effect
+ */
+outline?: TextOutline | null; 
+/**
+ * Rotation in degrees (clockwise)
+ */
+rotation?: number; 
+/**
+ * Opacity (0.0 = transparent, 1.0 = opaque)
+ */
+opacity?: number }
+/**
+ * Resolved text payload for a timeline text clip.
+ */
+export type TextClipDataDto = { 
+/**
+ * Sequence containing the clip.
+ */
+sequenceId: string; 
+/**
+ * Track containing the clip.
+ */
+trackId: string; 
+/**
+ * Clip ID for map lookup.
+ */
+clipId: string; 
+/**
+ * Fully resolved text styling/content payload.
+ */
+textData: TextClipData }
+/**
  * Detected text in a frame
  */
 export type TextDetection = { 
@@ -3502,6 +3852,135 @@ boundingBox?: BoundingBox | null;
  * Detected language code
  */
 language?: string | null }
+/**
+ * Text outline (stroke) effect configuration.
+ * 
+ * Creates an outline around the text for improved readability,
+ * especially on busy backgrounds.
+ */
+export type TextOutline = { 
+/**
+ * Outline color in hex format (#RRGGBB or #RRGGBBAA)
+ */
+color: string; 
+/**
+ * Outline width in pixels
+ */
+width: number }
+/**
+ * Text position on screen using normalized coordinates.
+ * 
+ * Position is specified as normalized values (0.0 to 1.0) where:
+ * - (0.0, 0.0) = top-left corner
+ * - (0.5, 0.5) = center
+ * - (1.0, 1.0) = bottom-right corner
+ */
+export type TextPosition = { 
+/**
+ * X position (0.0 = left, 0.5 = center, 1.0 = right)
+ */
+x: number; 
+/**
+ * Y position (0.0 = top, 0.5 = center, 1.0 = bottom)
+ */
+y: number }
+/**
+ * Text shadow effect configuration.
+ * 
+ * Creates a drop shadow behind the text for improved readability
+ * or visual effect.
+ */
+export type TextShadow = { 
+/**
+ * Shadow color in hex format (#RRGGBB or #RRGGBBAA)
+ */
+color: string; 
+/**
+ * Horizontal offset in pixels (positive = right)
+ */
+offsetX: number; 
+/**
+ * Vertical offset in pixels (positive = down)
+ */
+offsetY: number; 
+/**
+ * Shadow blur radius (0 = sharp shadow)
+ * Note: FFmpeg drawtext doesn't support blur, so this is for future use
+ * or canvas-based preview rendering.
+ */
+blur?: number }
+/**
+ * Text styling configuration.
+ * 
+ * Controls the visual appearance of text including font, size, color,
+ * and formatting options.
+ */
+export type TextStyle = { 
+/**
+ * Font family name (system font)
+ * Common values: "Arial", "Helvetica", "Times New Roman", "Georgia", "Courier New"
+ */
+fontFamily: string; 
+/**
+ * Font size in points (12-200 typical range)
+ */
+fontSize: number; 
+/**
+ * Text color in hex format (#RRGGBB or #RRGGBBAA)
+ */
+color: string; 
+/**
+ * Background color (optional, for lower thirds or text boxes)
+ */
+backgroundColor?: string | null; 
+/**
+ * Background padding in pixels (applies when background_color is set)
+ */
+backgroundPadding?: number; 
+/**
+ * Text alignment
+ */
+alignment?: TextAlignment; 
+/**
+ * Bold text
+ */
+bold?: boolean; 
+/**
+ * Italic text
+ */
+italic?: boolean; 
+/**
+ * Underline text
+ */
+underline?: boolean; 
+/**
+ * Line height multiplier (1.0 = normal, 1.5 = 150% spacing)
+ */
+lineHeight?: number; 
+/**
+ * Letter spacing in pixels (0 = normal, positive = expanded, negative = condensed)
+ */
+letterSpacing?: number }
+/**
+ * Summary information about a single agent trace file.
+ */
+export type TraceSummary = { 
+/**
+ * Trace identifier (filename without `.json` extension).
+ */
+traceId: string; 
+/**
+ * Full filename including extension.
+ */
+fileName: string; 
+/**
+ * File size in bytes.
+ */
+sizeBytes: number; 
+/**
+ * Last modification time in ISO 8601 format.
+ */
+modifiedAt: string }
 /**
  * Track (contains clips directly for denormalized storage)
  */
@@ -3721,7 +4200,15 @@ bitrate?: number | null;
 /**
  * Whether the video has alpha channel
  */
-hasAlpha: boolean }
+hasAlpha: boolean; 
+/**
+ * Whether the video contains HDR content (PQ or HLG transfer)
+ */
+isHdr?: boolean; 
+/**
+ * Color transfer function (e.g., "smpte2084" for HDR10, "arib-std-b67" for HLG)
+ */
+colorTransfer?: string | null }
 /**
  * Video stream information.
  */
@@ -3749,7 +4236,38 @@ pixelFormat: string;
 /**
  * Bitrate in bits/s (if available)
  */
-bitrate: number | null }
+bitrate: number | null; 
+/**
+ * Whether the source stream advertises HDR transfer characteristics.
+ */
+isHdr?: boolean; 
+/**
+ * FFprobe color transfer string (e.g. `smpte2084`, `arib-std-b67`).
+ */
+colorTransfer?: string | null }
+/**
+ * Audio waveform peak data for visualization.
+ * 
+ * Contains normalized peak values (0.0 - 1.0) sampled at a fixed rate.
+ * Used for rendering waveform displays in the timeline UI.
+ */
+export type WaveformData = { 
+/**
+ * Number of peak samples per second of audio
+ */
+samplesPerSecond: number; 
+/**
+ * Normalized peak values (0.0 - 1.0)
+ */
+peaks: number[]; 
+/**
+ * Total audio duration in seconds
+ */
+durationSec: number; 
+/**
+ * Number of audio channels (1=mono, 2=stereo)
+ */
+channels: number }
 /**
  * Full text payload for a workspace document.
  */
