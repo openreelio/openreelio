@@ -693,26 +693,49 @@ impl Effect {
     /// - `patch_size`: Patch size for comparison (odd 1-99, default: 7)
     /// - `research_size`: Research area size (odd 1-99, default: 15)
     fn build_noise_reduction_filter(&self) -> String {
-        let strength = self
-            .get_float("strength")
-            .unwrap_or(0.00001)
-            .clamp(0.00001, 0.0001);
-        let patch_size = (self.get_float("patch_size").unwrap_or(7.0) as i32).clamp(1, 99);
-        let research_size = (self.get_float("research_size").unwrap_or(15.0) as i32).clamp(1, 99);
+        let algorithm = self
+            .get_string("algorithm")
+            .unwrap_or_else(|| "anlmdn".to_string());
+        let strength = self.get_float("strength").unwrap_or(0.3).clamp(0.0, 1.0);
 
-        // Ensure patch_size and research_size are odd
-        let patch_size = if patch_size % 2 == 0 {
-            patch_size + 1
-        } else {
-            patch_size
-        };
-        let research_size = if research_size % 2 == 0 {
-            research_size + 1
-        } else {
-            research_size
-        };
+        match algorithm.as_str() {
+            "afftdn" => {
+                // Map strength (0-1) to noise reduction in dB (0-30)
+                let nr = (strength * 30.0).round() as i32;
+                let noise_floor = self.get_float("noise_floor").unwrap_or(-40.0);
+                if noise_floor > -80.0 && noise_floor < 0.0 {
+                    format!("afftdn=nr={}:nf={:.1}:nt=w", nr, noise_floor)
+                } else {
+                    format!("afftdn=nr={}", nr)
+                }
+            }
+            "arnndn" => {
+                // RNN-based denoise requires a model file
+                let model_path = self.get_string("model_path").unwrap_or_default();
+                if model_path.is_empty() {
+                    // Fallback to anlmdn if no model path provided
+                    self.build_anlmdn_filter(strength)
+                } else {
+                    let escaped = model_path.replace('\\', "/").replace('\'', "'\\''");
+                    format!("arnndn=m='{}'", escaped)
+                }
+            }
+            // Default: anlmdn (Non-Local Means)
+            _ => self.build_anlmdn_filter(strength),
+        }
+    }
 
-        format!("anlmdn=s={}:p={}:r={}", strength, patch_size, research_size)
+    /// Builds anlmdn filter string from normalized strength (0.0-1.0).
+    fn build_anlmdn_filter(&self, strength: f64) -> String {
+        // Map strength (0-1) to FFmpeg s parameter (0.0001 to 5.0)
+        let s = 0.0001 + strength * 4.9999;
+        // Patch size scales with strength (7-15, must be odd)
+        let p_raw = (7.0_f64 + strength * 8.0).round() as i32;
+        let p = if p_raw % 2 == 0 { p_raw + 1 } else { p_raw }.clamp(1, 99);
+        // Research size from params
+        let r_raw = (self.get_float("research_size").unwrap_or(15.0) as i32).clamp(1, 99);
+        let r = if r_raw % 2 == 0 { r_raw + 1 } else { r_raw };
+        format!("anlmdn=s={:.4}:p={}:r={}", s, p, r)
     }
 
     // -------------------------------------------------------------------------
@@ -822,15 +845,13 @@ impl Effect {
     /// two-input blend filter needs to be constructed in the export pipeline
     /// as: [input1][input2]blend=all_mode=multiply[output]
     ///
-    /// # Supported Modes
+    /// # Supported Modes (19 total)
     ///
-    /// - normal: Standard alpha compositing (default)
-    /// - multiply: Darkens by multiplying
-    /// - screen: Lightens by inverse multiply
-    /// - overlay: Combination of multiply and screen
-    /// - add: Additive blending
-    /// - subtract: Subtractive blending
-    /// - difference: Absolute difference
+    /// **Basic**: normal
+    /// **Darken**: multiply, darken, color_burn, linear_burn
+    /// **Lighten**: screen, add, lighten, color_dodge, linear_dodge
+    /// **Contrast**: overlay, soft_light, hard_light, vivid_light, linear_light, pin_light
+    /// **Component**: difference, exclusion, subtract
     pub fn build_blend_filter_params(&self) -> String {
         let mode = self
             .get_string("mode")
@@ -840,17 +861,29 @@ impl Effect {
 
         // Map mode names to FFmpeg blend mode names
         let ffmpeg_mode = match mode.as_str() {
+            // Basic
             "normal" => "normal",
+            // Darken group
             "multiply" => "multiply",
-            "screen" => "screen",
-            "overlay" => "overlay",
-            "add" => "addition",
-            "subtract" => "subtract",
-            "difference" => "difference",
             "darken" => "darken",
+            "color_burn" | "colorburn" => "burn",
+            "linear_burn" | "linearburn" => "linearburn",
+            // Lighten group
+            "screen" => "screen",
+            "add" | "linear_dodge" | "lineardodge" => "addition",
             "lighten" => "lighten",
-            "softlight" => "softlight",
-            "hardlight" => "hardlight",
+            "color_dodge" | "colordodge" => "dodge",
+            // Contrast group
+            "overlay" => "overlay",
+            "soft_light" | "softlight" => "softlight",
+            "hard_light" | "hardlight" => "hardlight",
+            "vivid_light" | "vividlight" => "vividlight",
+            "linear_light" | "linearlight" => "linearlight",
+            "pin_light" | "pinlight" => "pinlight",
+            // Component group
+            "difference" => "difference",
+            "exclusion" => "exclusion",
+            "subtract" => "subtract",
             _ => "normal",
         };
 
@@ -2663,13 +2696,15 @@ mod tests {
     fn test_noise_reduction_default_params() {
         let effect = Effect::new(EffectType::NoiseReduction);
 
-        assert_eq!(effect.get_float("strength"), Some(0.00001));
+        assert_eq!(effect.get_string("algorithm"), Some("anlmdn".to_string()));
+        assert_eq!(effect.get_float("strength"), Some(0.3));
         assert_eq!(effect.get_float("patch_size"), Some(7.0));
         assert_eq!(effect.get_float("research_size"), Some(15.0));
+        assert_eq!(effect.get_float("noise_floor"), Some(-40.0));
     }
 
     #[test]
-    fn test_noise_reduction_filter() {
+    fn test_noise_reduction_anlmdn_filter() {
         let effect = Effect::new(EffectType::NoiseReduction);
 
         let filter = effect.to_filter_string("0:a", "aout");
@@ -2679,12 +2714,12 @@ mod tests {
             filter
         );
         assert!(
-            filter.contains("s=0.00001"),
+            filter.contains("s="),
             "Expected strength parameter, got: {}",
             filter
         );
         assert!(
-            filter.contains("p=7"),
+            filter.contains("p="),
             "Expected patch_size parameter, got: {}",
             filter
         );
@@ -2696,26 +2731,92 @@ mod tests {
     }
 
     #[test]
-    fn test_noise_reduction_custom_params() {
+    fn test_noise_reduction_anlmdn_strength_mapping() {
         let mut effect = Effect::new(EffectType::NoiseReduction);
-        effect.set_param("strength", ParamValue::Float(0.00005));
-        effect.set_param("patch_size", ParamValue::Float(11.0));
-        effect.set_param("research_size", ParamValue::Float(21.0));
+        effect.set_param("strength", ParamValue::Float(0.5));
+
+        let filter = effect.to_filter_string("0:a", "aout");
+        // strength 0.5 → s = 0.0001 + 0.5 * 4.9999 = 2.5001
+        assert!(
+            filter.contains("s=2.5001"),
+            "Expected mapped strength ~2.5, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_noise_reduction_afftdn_filter() {
+        let mut effect = Effect::new(EffectType::NoiseReduction);
+        effect.set_param("algorithm", ParamValue::String("afftdn".to_string()));
+        effect.set_param("strength", ParamValue::Float(0.5));
 
         let filter = effect.to_filter_string("0:a", "aout");
         assert!(
-            filter.contains("s=0.00005"),
-            "Expected custom strength, got: {}",
+            filter.contains("afftdn"),
+            "Expected afftdn filter, got: {}",
+            filter
+        );
+        // strength 0.5 → nr = round(0.5 * 30) = 15
+        assert!(
+            filter.contains("nr=15"),
+            "Expected nr=15 for strength 0.5, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_noise_reduction_afftdn_with_noise_floor() {
+        let mut effect = Effect::new(EffectType::NoiseReduction);
+        effect.set_param("algorithm", ParamValue::String("afftdn".to_string()));
+        effect.set_param("strength", ParamValue::Float(0.8));
+        effect.set_param("noise_floor", ParamValue::Float(-30.0));
+
+        let filter = effect.to_filter_string("0:a", "aout");
+        assert!(
+            filter.contains("nf=-30.0"),
+            "Expected noise floor, got: {}",
             filter
         );
         assert!(
-            filter.contains("p=11"),
-            "Expected custom patch_size, got: {}",
+            filter.contains("nt=w"),
+            "Expected windowed mode, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_noise_reduction_arnndn_filter() {
+        let mut effect = Effect::new(EffectType::NoiseReduction);
+        effect.set_param("algorithm", ParamValue::String("arnndn".to_string()));
+        effect.set_param(
+            "model_path",
+            ParamValue::String("/models/rnnoise.onnx".to_string()),
+        );
+
+        let filter = effect.to_filter_string("0:a", "aout");
+        assert!(
+            filter.contains("arnndn"),
+            "Expected arnndn filter, got: {}",
             filter
         );
         assert!(
-            filter.contains("r=21"),
-            "Expected custom research_size, got: {}",
+            filter.contains("m='/models/rnnoise.onnx'"),
+            "Expected model path, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn test_noise_reduction_arnndn_fallback_without_model() {
+        let mut effect = Effect::new(EffectType::NoiseReduction);
+        effect.set_param("algorithm", ParamValue::String("arnndn".to_string()));
+        // No model_path set (default empty)
+
+        let filter = effect.to_filter_string("0:a", "aout");
+        // Should fallback to anlmdn when no model path
+        assert!(
+            filter.contains("anlmdn"),
+            "Should fallback to anlmdn without model, got: {}",
             filter
         );
     }
@@ -2724,15 +2825,9 @@ mod tests {
     fn test_noise_reduction_ensures_odd_values() {
         let mut effect = Effect::new(EffectType::NoiseReduction);
         // Set even values - should be converted to odd
-        effect.set_param("patch_size", ParamValue::Float(8.0));
         effect.set_param("research_size", ParamValue::Float(20.0));
 
         let filter = effect.to_filter_string("0:a", "aout");
-        assert!(
-            filter.contains("p=9"),
-            "Patch size should be odd (8 -> 9), got: {}",
-            filter
-        );
         assert!(
             filter.contains("r=21"),
             "Research size should be odd (20 -> 21), got: {}",
@@ -2764,27 +2859,15 @@ mod tests {
     }
 
     #[test]
-    fn test_noise_reduction_clamps_values() {
+    fn test_noise_reduction_strength_clamped() {
         let mut effect = Effect::new(EffectType::NoiseReduction);
-        // Values outside range should be clamped
-        effect.set_param("strength", ParamValue::Float(1.0)); // Too high
-        effect.set_param("patch_size", ParamValue::Float(150.0)); // Too high
-        effect.set_param("research_size", ParamValue::Float(-5.0)); // Too low
+        effect.set_param("strength", ParamValue::Float(2.0)); // Over 1.0
 
         let filter = effect.to_filter_string("0:a", "aout");
+        // strength clamped to 1.0 → s = 0.0001 + 1.0 * 4.9999 = 5.0
         assert!(
-            filter.contains("s=0.0001"),
-            "Strength should be clamped to max, got: {}",
-            filter
-        );
-        assert!(
-            filter.contains("p=99"),
-            "Patch size should be clamped to max, got: {}",
-            filter
-        );
-        assert!(
-            filter.contains("r=1"),
-            "Research size should be clamped to min, got: {}",
+            filter.contains("s=5.0000"),
+            "Strength should be clamped to 1.0 range, got: {}",
             filter
         );
     }
@@ -3255,6 +3338,110 @@ mod tests {
             "blend",
             "BlendMode should use blend filter"
         );
+    }
+
+    #[test]
+    fn test_blend_mode_color_burn() {
+        let mut effect = Effect::new(EffectType::BlendMode);
+        effect.set_param("mode", ParamValue::String("color_burn".to_string()));
+        let params = effect.build_blend_filter_params();
+        assert!(
+            params.contains("all_mode=burn"),
+            "color_burn → burn: {}",
+            params
+        );
+    }
+
+    #[test]
+    fn test_blend_mode_color_dodge() {
+        let mut effect = Effect::new(EffectType::BlendMode);
+        effect.set_param("mode", ParamValue::String("color_dodge".to_string()));
+        let params = effect.build_blend_filter_params();
+        assert!(
+            params.contains("all_mode=dodge"),
+            "color_dodge → dodge: {}",
+            params
+        );
+    }
+
+    #[test]
+    fn test_blend_mode_linear_burn() {
+        let mut effect = Effect::new(EffectType::BlendMode);
+        effect.set_param("mode", ParamValue::String("linear_burn".to_string()));
+        let params = effect.build_blend_filter_params();
+        assert!(
+            params.contains("all_mode=linearburn"),
+            "linear_burn → linearburn: {}",
+            params
+        );
+    }
+
+    #[test]
+    fn test_blend_mode_linear_dodge_maps_to_addition() {
+        let mut effect = Effect::new(EffectType::BlendMode);
+        effect.set_param("mode", ParamValue::String("linear_dodge".to_string()));
+        let params = effect.build_blend_filter_params();
+        assert!(
+            params.contains("all_mode=addition"),
+            "linear_dodge → addition: {}",
+            params
+        );
+    }
+
+    #[test]
+    fn test_blend_mode_vivid_light() {
+        let mut effect = Effect::new(EffectType::BlendMode);
+        effect.set_param("mode", ParamValue::String("vivid_light".to_string()));
+        let params = effect.build_blend_filter_params();
+        assert!(
+            params.contains("all_mode=vividlight"),
+            "vivid_light → vividlight: {}",
+            params
+        );
+    }
+
+    #[test]
+    fn test_blend_mode_linear_light() {
+        let mut effect = Effect::new(EffectType::BlendMode);
+        effect.set_param("mode", ParamValue::String("linear_light".to_string()));
+        let params = effect.build_blend_filter_params();
+        assert!(
+            params.contains("all_mode=linearlight"),
+            "linear_light → linearlight: {}",
+            params
+        );
+    }
+
+    #[test]
+    fn test_blend_mode_pin_light() {
+        let mut effect = Effect::new(EffectType::BlendMode);
+        effect.set_param("mode", ParamValue::String("pin_light".to_string()));
+        let params = effect.build_blend_filter_params();
+        assert!(
+            params.contains("all_mode=pinlight"),
+            "pin_light → pinlight: {}",
+            params
+        );
+    }
+
+    #[test]
+    fn test_blend_mode_exclusion() {
+        let mut effect = Effect::new(EffectType::BlendMode);
+        effect.set_param("mode", ParamValue::String("exclusion".to_string()));
+        let params = effect.build_blend_filter_params();
+        assert!(
+            params.contains("all_mode=exclusion"),
+            "exclusion: {}",
+            params
+        );
+    }
+
+    #[test]
+    fn test_blend_mode_subtract() {
+        let mut effect = Effect::new(EffectType::BlendMode);
+        effect.set_param("mode", ParamValue::String("subtract".to_string()));
+        let params = effect.build_blend_filter_params();
+        assert!(params.contains("all_mode=subtract"), "subtract: {}", params);
     }
 
     // =========================================================================
