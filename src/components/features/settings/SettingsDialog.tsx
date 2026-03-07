@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useRef, useCallback } from 'react';
-import { X, Settings2, Palette, Keyboard, RotateCcw, Bot, Shield } from 'lucide-react';
+import { X, Settings2, Palette, Keyboard, RotateCcw, Bot, Shield, Wrench } from 'lucide-react';
 import { useSettings } from '@/hooks/useSettings';
 import { useUIStore } from '@/stores';
 import { GeneralSettings } from './sections/GeneralSettings';
@@ -13,6 +13,7 @@ import { AppearanceSettings } from './sections/AppearanceSettings';
 import { ShortcutsSettings } from './sections/ShortcutsSettings';
 import { AISettingsSection } from './sections/AISettingsSection';
 import { AgentPermissionsSection } from './sections/AgentPermissionsSection';
+import { DeveloperSettings } from './sections/DeveloperSettings';
 
 // =============================================================================
 // Types
@@ -23,7 +24,7 @@ export interface SettingsDialogProps {
   onClose: () => void;
 }
 
-type TabId = 'general' | 'appearance' | 'shortcuts' | 'ai' | 'permissions';
+type TabId = 'general' | 'appearance' | 'shortcuts' | 'ai' | 'permissions' | 'developer';
 
 interface Tab {
   id: TabId;
@@ -41,6 +42,7 @@ const TABS: Tab[] = [
   { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard className="w-4 h-4" /> },
   { id: 'ai', label: 'AI', icon: <Bot className="w-4 h-4" /> },
   { id: 'permissions', label: 'Permissions', icon: <Shield className="w-4 h-4" /> },
+  { id: 'developer', label: 'Developer', icon: <Wrench className="w-4 h-4" /> },
 ];
 
 // =============================================================================
@@ -212,6 +214,8 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
             )}
 
             {activeTab === 'permissions' && <AgentPermissionsSection />}
+
+            {activeTab === 'developer' && <DeveloperSettings />}
           </div>
         </div>
 
