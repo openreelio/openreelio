@@ -685,8 +685,7 @@ Return JSON array of edit scripts."#;
                         issues.push(format!("SplitClip command {} missing clipId", i));
                     }
                     let split_time = cmd.params.get("splitTime").and_then(|v| v.as_f64());
-                    let at_timeline_sec =
-                        cmd.params.get("atTimelineSec").and_then(|v| v.as_f64());
+                    let at_timeline_sec = cmd.params.get("atTimelineSec").and_then(|v| v.as_f64());
 
                     match (split_time, at_timeline_sec) {
                         (Some(a), Some(b)) if a != b => issues.push(format!(
