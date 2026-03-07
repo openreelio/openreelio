@@ -2,43 +2,26 @@
 //!
 //! This module organizes Tauri IPC commands by domain.
 //!
-//! ## Module Structure (Target)
+//! ## Module Structure
 //!
 //! ```text
 //! commands/
 //! ├── mod.rs           # Re-exports all command modules
 //! ├── helpers.rs       # get_active_project! macro, shared error handling
-//! ├── project.rs       # create/open/close/save/get project (TODO)
-//! ├── asset.rs         # import/remove/thumbnail/proxy/waveform (TODO)
-//! ├── timeline.rs      # sequence CRUD (TODO)
-//! ├── command.rs       # execute/undo/redo (TODO)
-//! ├── job.rs           # job queue management (TODO)
-//! ├── render.rs        # export/render (TODO)
-//! ├── ai.rs            # AI integration (TODO)
-//! ├── transcription.rs # speech-to-text (TODO)
-//! ├── search.rs        # search/indexing (TODO)
-//! ├── memory.rs        # performance stats (TODO)
-//! └── settings.rs      # app settings (TODO)
+//! ├── project.rs       # create/open/close/save/get project
+//! ├── asset.rs         # import/remove/thumbnail/proxy/waveform
+//! ├── timeline.rs      # sequence CRUD, execute/undo/redo
+//! ├── render.rs        # export/render
+//! ├── ai_legacy.rs     # AI integration (intent, provider, chat, completion)
+//! ├── transcription.rs # speech-to-text, captions, shot detection
+//! ├── search.rs        # search/indexing (SQLite + Meilisearch)
+//! ├── jobs.rs          # job queue, memory/performance stats
+//! ├── system.rs        # app lifecycle, settings, credentials, updates
+//! ├── annotations.rs   # asset annotation system (ADR-036)
+//! ├── video_generation.rs # Seedance 2.0 integration
+//! ├── workspace.rs     # workspace scanning, file tree, registration
+//! └── agent.rs         # trace writing, plan execution, memory persistence
 //! ```
-//!
-//! ## Migration Notes
-//!
-//! Commands are being incrementally extracted from the monolithic `commands_legacy.rs`
-//! file (originally `commands.rs`). Each domain-specific module should:
-//!
-//! 1. Import only necessary types from `crate::core`
-//! 2. Use helpers from `helpers.rs` for common patterns
-//! 3. Re-export commands at the module level
-//!
-//! ## Current Status
-//!
-//! All commands are currently in `commands_legacy.rs`. The scaffolding is in place
-//! for incremental extraction. To extract a command group:
-//!
-//! 1. Create a new module file (e.g., `settings.rs`)
-//! 2. Move the relevant commands from `commands_legacy.rs`
-//! 3. Add `pub mod settings;` and `pub use settings::*;` here
-//! 4. Remove the corresponding `pub use legacy::command_name;` line
 //!
 //! ## Usage
 //!
@@ -50,6 +33,17 @@
 
 // Core helpers shared across command modules
 pub mod helpers;
+
+// Domain modules (extracted from commands_legacy.rs)
+pub mod ai_legacy;
+pub mod asset;
+pub mod jobs;
+pub mod project;
+pub mod render;
+pub mod search;
+pub mod system;
+pub mod timeline;
+pub mod transcription;
 
 // Annotation commands (Asset Annotation System - ADR-036)
 pub mod annotations;
@@ -63,15 +57,16 @@ pub mod workspace;
 // Agent commands (trace writing, plan execution, memory persistence)
 pub mod agent;
 
-// Placeholder for future extracted modules
-// pub mod settings;
-
-// Legacy module containing all commands (not yet extracted)
-#[path = "../commands_legacy.rs"]
-mod legacy;
-
-// Re-export all commands from legacy module
-pub use legacy::*;
+// Re-export all domain modules
+pub use ai_legacy::*;
+pub use asset::*;
+pub use jobs::*;
+pub use project::*;
+pub use render::*;
+pub use search::*;
+pub use system::*;
+pub use timeline::*;
+pub use transcription::*;
 
 // Re-export annotation commands
 pub use annotations::*;
