@@ -4,10 +4,11 @@
  * Tests for the timeline clip component.
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import type { Clip as ClipType, Asset } from '@/types';
 import { TEXT_ASSET_PREFIX } from '@/types';
+import { useEditorToolStore } from '@/stores/editorToolStore';
 
 vi.mock('./LazyThumbnailStrip', () => ({
   LazyThumbnailStrip: () => <div data-testid="lazy-thumbnail-strip-mock" />,
@@ -64,6 +65,10 @@ const mockVisualAsset: Asset = {
 // =============================================================================
 
 describe('Clip', () => {
+  beforeEach(() => {
+    useEditorToolStore.setState({ activeTool: 'select', previousTool: null });
+  });
+
   // ===========================================================================
   // Rendering Tests
   // ===========================================================================
@@ -260,6 +265,27 @@ describe('Clip', () => {
       render(<Clip clip={mockClip} zoom={100} selected={false} onClick={onClick} disabled />);
 
       fireEvent.click(screen.getByTestId('clip-clip_001'));
+      expect(onClick).not.toHaveBeenCalled();
+    });
+
+    it('should call onRazorClick instead of onClick when razor tool is active', () => {
+      useEditorToolStore.setState({ activeTool: 'razor' });
+
+      const onClick = vi.fn();
+      const onRazorClick = vi.fn();
+      render(
+        <Clip
+          clip={mockClip}
+          zoom={100}
+          selected={false}
+          onClick={onClick}
+          onRazorClick={onRazorClick}
+        />,
+      );
+
+      fireEvent.click(screen.getByTestId('clip-clip_001'), { clientX: 320, clientY: 40 });
+
+      expect(onRazorClick).toHaveBeenCalledTimes(1);
       expect(onClick).not.toHaveBeenCalled();
     });
   });
