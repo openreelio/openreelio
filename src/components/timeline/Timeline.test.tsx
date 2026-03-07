@@ -1231,7 +1231,7 @@ describe('Timeline', () => {
     it('should scroll vertically on wheel when tracks overflow viewport', () => {
       const sequenceWithManyTracks: Sequence = {
         ...mockSequence,
-        tracks: Array.from({ length: 10 }, (_, index) => {
+        tracks: Array.from({ length: 20 }, (_, index) => {
           const template = index % 2 === 0 ? mockSequence.tracks[0] : mockSequence.tracks[1];
           return {
             ...template,
