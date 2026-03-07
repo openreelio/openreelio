@@ -777,13 +777,11 @@ impl ProjectState {
         for track in &mut sequence.tracks {
             let is_video_track = track.is_video();
             if let Some(clip) = track.get_clip_mut(clip_id) {
-                // Apply mute change if present
+                // ── Phase 1: Validate all payload fields before any mutation ──
+                // This ensures atomicity: either all fields apply or none do.
+
                 if let Some(muted_value) = op.payload.get("muted") {
-                    if muted_value.is_null() {
-                        // no-op: null means no change
-                    } else if let Some(muted) = muted_value.as_bool() {
-                        clip.audio.muted = muted;
-                    } else {
+                    if !muted_value.is_null() && !muted_value.is_boolean() {
                         return Err(CoreError::InvalidCommand(
                             "Invalid muted value (expected boolean)".to_string(),
                         ));
@@ -791,55 +789,85 @@ impl ProjectState {
                 }
 
                 if let Some(volume_value) = op.payload.get("volumeDb") {
-                    if volume_value.is_null() {
-                        // no-op: null means no change
-                    } else if let Some(volume_db) = volume_value.as_f64() {
-                        if !volume_db.is_finite() {
-                            return Err(CoreError::InvalidCommand(
-                                "Invalid volumeDb value (expected finite number)".to_string(),
-                            ));
+                    if !volume_value.is_null() {
+                        match volume_value.as_f64() {
+                            Some(v) if !v.is_finite() => {
+                                return Err(CoreError::InvalidCommand(
+                                    "Invalid volumeDb value (expected finite number)".to_string(),
+                                ));
+                            }
+                            None => {
+                                return Err(CoreError::InvalidCommand(
+                                    "Invalid volumeDb value (expected number)".to_string(),
+                                ));
+                            }
+                            _ => {}
                         }
-                        clip.audio.volume_db = (volume_db as f32).clamp(-60.0, 6.0);
-                    } else {
-                        return Err(CoreError::InvalidCommand(
-                            "Invalid volumeDb value (expected number)".to_string(),
-                        ));
                     }
                 }
 
                 if let Some(pan_value) = op.payload.get("pan") {
-                    if pan_value.is_null() {
-                        // no-op: null means no change
-                    } else if let Some(pan) = pan_value.as_f64() {
-                        if !pan.is_finite() {
-                            return Err(CoreError::InvalidCommand(
-                                "Invalid pan value (expected finite number)".to_string(),
-                            ));
+                    if !pan_value.is_null() {
+                        match pan_value.as_f64() {
+                            Some(v) if !v.is_finite() => {
+                                return Err(CoreError::InvalidCommand(
+                                    "Invalid pan value (expected finite number)".to_string(),
+                                ));
+                            }
+                            None => {
+                                return Err(CoreError::InvalidCommand(
+                                    "Invalid pan value (expected number)".to_string(),
+                                ));
+                            }
+                            _ => {}
                         }
-                        clip.audio.pan = (pan as f32).clamp(-1.0, 1.0);
-                    } else {
-                        return Err(CoreError::InvalidCommand(
-                            "Invalid pan value (expected number)".to_string(),
-                        ));
                     }
                 }
 
-                if let Some(blend_value) = op.payload.get("blendMode") {
-                    if blend_value.is_null() {
-                        // no-op: null means no change
-                    } else {
-                        if !is_video_track {
-                            return Err(CoreError::ValidationError(format!(
-                                "Blend mode is only supported for video clips: {}",
-                                clip_id
-                            )));
+                // Pre-validate and parse blendMode before any mutation
+                let parsed_blend_mode: Option<BlendMode> =
+                    if let Some(blend_value) = op.payload.get("blendMode") {
+                        if blend_value.is_null() {
+                            None
+                        } else {
+                            if !is_video_track {
+                                return Err(CoreError::ValidationError(format!(
+                                    "Blend mode is only supported for video clips: {}",
+                                    clip_id
+                                )));
+                            }
+                            Some(
+                                serde_json::from_value(blend_value.clone()).map_err(|e| {
+                                    CoreError::InvalidCommand(format!("Invalid blendMode: {}", e))
+                                })?,
+                            )
                         }
-                        let blend_mode: BlendMode = serde_json::from_value(blend_value.clone())
-                            .map_err(|e| {
-                                CoreError::InvalidCommand(format!("Invalid blendMode: {}", e))
-                            })?;
-                        clip.blend_mode = blend_mode;
+                    } else {
+                        None
+                    };
+
+                // ── Phase 2: Apply all mutations (validation already passed) ──
+
+                if let Some(muted_value) = op.payload.get("muted") {
+                    if let Some(muted) = muted_value.as_bool() {
+                        clip.audio.muted = muted;
                     }
+                }
+
+                if let Some(volume_value) = op.payload.get("volumeDb") {
+                    if let Some(volume_db) = volume_value.as_f64() {
+                        clip.audio.volume_db = (volume_db as f32).clamp(-60.0, 6.0);
+                    }
+                }
+
+                if let Some(pan_value) = op.payload.get("pan") {
+                    if let Some(pan) = pan_value.as_f64() {
+                        clip.audio.pan = (pan as f32).clamp(-1.0, 1.0);
+                    }
+                }
+
+                if let Some(blend_mode) = parsed_blend_mode {
+                    clip.blend_mode = blend_mode;
                 }
 
                 let mut fade_in_updated = false;

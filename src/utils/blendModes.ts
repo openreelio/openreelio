@@ -51,15 +51,15 @@ export const ALL_BLEND_MODES: readonly BlendMode[] = [
   'subtract',
   'darken',
   'lighten',
-  'color_burn',
-  'color_dodge',
-  'linear_burn',
-  'linear_dodge',
-  'soft_light',
-  'hard_light',
-  'vivid_light',
-  'linear_light',
-  'pin_light',
+  'colorBurn',
+  'colorDodge',
+  'linearBurn',
+  'linearDodge',
+  'softLight',
+  'hardLight',
+  'vividLight',
+  'linearLight',
+  'pinLight',
   'difference',
   'exclusion',
 ] as const;
@@ -111,49 +111,49 @@ export const BLEND_MODE_DEFINITIONS: Record<BlendMode, BlendModeDefinition> = {
     description: 'Keeps the lighter pixel from each layer. Removes dark areas.',
     category: 'lighten',
   },
-  color_burn: {
+  colorBurn: {
     label: 'Color Burn',
     description: 'Intensifies dark areas by increasing contrast. Rich, saturated shadows.',
     category: 'darken',
   },
-  color_dodge: {
+  colorDodge: {
     label: 'Color Dodge',
     description: 'Intensifies light areas by decreasing contrast. Bright, blown-out highlights.',
     category: 'lighten',
   },
-  linear_burn: {
+  linearBurn: {
     label: 'Linear Burn',
     description: 'Darkens by decreasing brightness linearly. More extreme than Multiply.',
     category: 'darken',
   },
-  linear_dodge: {
+  linearDodge: {
     label: 'Linear Dodge',
     description: 'Lightens by increasing brightness linearly. Same as Add.',
     category: 'lighten',
   },
-  soft_light: {
+  softLight: {
     label: 'Soft Light',
     description:
       'Gently darkens or lightens based on blend color. Like shining a diffused light on the image.',
     category: 'contrast',
   },
-  hard_light: {
+  hardLight: {
     label: 'Hard Light',
     description:
       'Strongly darkens or lightens based on blend color. Like shining a harsh spotlight.',
     category: 'contrast',
   },
-  vivid_light: {
+  vividLight: {
     label: 'Vivid Light',
     description: 'Burns or dodges colors by increasing or decreasing contrast.',
     category: 'contrast',
   },
-  linear_light: {
+  linearLight: {
     label: 'Linear Light',
     description: 'Burns or dodges colors by decreasing or increasing brightness.',
     category: 'contrast',
   },
-  pin_light: {
+  pinLight: {
     label: 'Pin Light',
     description:
       'Replaces colors depending on brightness. Useful for creating special artistic effects.',

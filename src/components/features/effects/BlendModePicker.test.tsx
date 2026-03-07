@@ -321,8 +321,8 @@ describe('BlendModePicker', () => {
       await userEvent.type(searchInput, 'burn');
 
       // Should show Color Burn and Linear Burn
-      expect(screen.getByTestId('blend-option-color_burn')).toBeInTheDocument();
-      expect(screen.getByTestId('blend-option-linear_burn')).toBeInTheDocument();
+      expect(screen.getByTestId('blend-option-colorBurn')).toBeInTheDocument();
+      expect(screen.getByTestId('blend-option-linearBurn')).toBeInTheDocument();
 
       // Should not show unrelated modes
       expect(screen.queryByTestId('blend-option-screen')).not.toBeInTheDocument();
