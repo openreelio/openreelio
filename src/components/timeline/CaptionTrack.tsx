@@ -5,10 +5,13 @@
  * Similar to Track component but specialized for caption display.
  */
 
-import { useRef, useMemo } from 'react';
-import { Type, Eye, EyeOff, Lock, Unlock, Globe, Download, ArrowUp, ArrowDown } from 'lucide-react';
+import { useRef, useMemo, useState, useCallback, type MouseEvent as ReactMouseEvent } from 'react';
+import { Type, Eye, EyeOff, Lock, Unlock, Globe, Download } from 'lucide-react';
 import type { Caption, CaptionTrack as CaptionTrackType, CaptionColor } from '@/types';
+import { ContextMenu, type MenuItemOrDivider } from '@/components/ui';
+import type { TrackSwapTarget } from '@/utils/trackReorder';
 import { CaptionClip, type ClickModifiers } from './CaptionClip';
+import { TRACK_HEIGHT } from './constants';
 
 // =============================================================================
 // Types
@@ -39,14 +42,14 @@ interface CaptionTrackProps {
   onCaptionDoubleClick?: (captionId: string) => void;
   /** Track header click handler */
   onTrackClick?: (trackId: string) => void;
-  /** Move track one row up */
-  onMoveUp?: (trackId: string) => void;
-  /** Move track one row down */
-  onMoveDown?: (trackId: string) => void;
-  /** Whether moving up is possible */
-  canMoveUp?: boolean;
-  /** Whether moving down is possible */
-  canMoveDown?: boolean;
+  /** Delete track handler */
+  onDeleteTrack?: (trackId: string) => void;
+  /** Whether this track can be deleted */
+  canDeleteTrack?: boolean;
+  /** Same-kind tracks available for swapping */
+  swapTargets?: TrackSwapTarget[];
+  /** Swap handler */
+  onSwapTracks?: (trackId: string, targetTrackId: string) => void;
   /** Export click handler - receives track ID and all captions */
   onExportClick?: (trackId: string, captions: Caption[]) => void;
 }
@@ -128,14 +131,17 @@ export function CaptionTrack({
   onCaptionClick,
   onCaptionDoubleClick,
   onTrackClick,
-  onMoveUp,
-  onMoveDown,
-  canMoveUp = false,
-  canMoveDown = false,
+  onDeleteTrack,
+  canDeleteTrack = false,
+  swapTargets = [],
+  onSwapTracks,
   onExportClick,
 }: CaptionTrackProps) {
   // Ref for measuring viewport width if not provided
   const contentRef = useRef<HTMLDivElement>(null);
+  const [contextMenuPosition, setContextMenuPosition] = useState<{ x: number; y: number } | null>(
+    null,
+  );
 
   // Calculate actual viewport width
   const actualViewportWidth =
@@ -159,154 +165,172 @@ export function CaptionTrack({
 
   // Language display
   const languageDisplay = getLanguageDisplayName(track.language);
+  const contextMenuItems = useMemo<MenuItemOrDivider[]>(() => {
+    const items: MenuItemOrDivider[] =
+      swapTargets.length === 0
+        ? [
+            {
+              label: 'No other caption tracks',
+              onClick: () => {},
+              disabled: true,
+            },
+          ]
+        : swapTargets.map((target) => ({
+            label: `Swap with ${target.name}`,
+            onClick: () => onSwapTracks?.(track.id, target.trackId),
+          }));
+
+    items.push({ type: 'divider' });
+    items.push({
+      label: 'Delete track',
+      onClick: () => onDeleteTrack?.(track.id),
+      disabled: !canDeleteTrack,
+      danger: true,
+    });
+
+    return items;
+  }, [canDeleteTrack, onDeleteTrack, onSwapTracks, swapTargets, track.id]);
+
+  const handleHeaderContextMenu = useCallback((event: ReactMouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenuPosition({ x: event.clientX, y: event.clientY });
+  }, []);
 
   return (
-    <div
-      data-track-row="true"
-      data-track-id={track.id}
-      data-track-kind="caption"
-      className="flex border-b border-editor-border"
-    >
-      {/* Track Header */}
+    <>
       <div
-        data-testid="caption-track-header"
-        className="w-48 flex-shrink-0 bg-editor-sidebar p-2 flex items-center gap-2 border-r border-editor-border cursor-pointer hover:bg-editor-border/50"
-        onClick={() => onTrackClick?.(track.id)}
+        data-track-row="true"
+        data-track-id={track.id}
+        data-track-kind="caption"
+        className="flex border-b border-editor-border"
       >
-        {/* Track type icon */}
-        <Type className="w-4 h-4 text-teal-400" />
-
-        {/* Track info */}
-        <div className="flex-1 min-w-0">
-          <span className="text-sm text-editor-text truncate block">{track.name}</span>
-          <div className="flex items-center gap-1 text-[10px] text-editor-text-muted">
-            <Globe className="w-3 h-3" />
-            <span>{languageDisplay}</span>
-          </div>
-        </div>
-
-        {/* Track controls */}
-        <div className="flex items-center gap-1">
-          {/* Move up button */}
-          <button
-            data-testid="caption-move-up-button"
-            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
-            onClick={(e) => {
-              e.stopPropagation();
-              onMoveUp?.(track.id);
-            }}
-            disabled={!canMoveUp}
-            title="Move track up"
-          >
-            <ArrowUp className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Move down button */}
-          <button
-            data-testid="caption-move-down-button"
-            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
-            onClick={(e) => {
-              e.stopPropagation();
-              onMoveDown?.(track.id);
-            }}
-            disabled={!canMoveDown}
-            title="Move track down"
-          >
-            <ArrowDown className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Export button */}
-          <button
-            data-testid="caption-export-button"
-            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
-            onClick={(e) => {
-              e.stopPropagation();
-              if (track.captions.length > 0) {
-                onExportClick?.(track.id, track.captions);
-              }
-            }}
-            disabled={track.captions.length === 0}
-            title="Export captions"
-          >
-            <Download className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Lock button */}
-          <button
-            data-testid="caption-lock-button"
-            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
-            onClick={(e) => {
-              e.stopPropagation();
-              onLockToggle?.(track.id);
-            }}
-            title={track.locked ? 'Unlock' : 'Lock'}
-          >
-            {track.locked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
-          </button>
-
-          {/* Visibility button */}
-          <button
-            data-testid="caption-visibility-button"
-            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
-            onClick={(e) => {
-              e.stopPropagation();
-              onVisibilityToggle?.(track.id);
-            }}
-            title={track.visible ? 'Hide' : 'Show'}
-          >
-            {track.visible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-          </button>
-        </div>
-      </div>
-
-      {/* Track Content (Captions Area) */}
-      <div
-        ref={contentRef}
-        data-testid="caption-track-content"
-        className={`flex-1 h-12 bg-editor-bg relative overflow-hidden ${
-          !track.visible ? 'opacity-50' : ''
-        }`}
-      >
-        {/* Background pattern for caption track */}
+        {/* Track Header */}
         <div
-          className="absolute inset-0 opacity-5"
-          style={{
-            backgroundImage:
-              'repeating-linear-gradient(45deg, currentColor, currentColor 1px, transparent 1px, transparent 6px)',
-          }}
-        />
-
-        {/* Scrollable captions container */}
-        <div
-          className="absolute inset-0"
-          style={{
-            width: `${contentWidth}px`,
-            transform: `translateX(-${scrollX}px)`,
-          }}
+          data-testid="caption-track-header"
+          className="w-48 flex-shrink-0 bg-editor-sidebar px-2 py-1.5 flex items-center gap-2 border-r border-editor-border cursor-pointer hover:bg-editor-border/50"
+          style={{ height: TRACK_HEIGHT }}
+          title="Right-click to swap or delete this track"
+          onClick={() => onTrackClick?.(track.id)}
+          onContextMenu={handleHeaderContextMenu}
         >
-          {/* Only render visible captions (virtualized) */}
-          {visibleCaptions.map((caption) => (
-            <CaptionClip
-              key={caption.id}
-              caption={caption}
-              zoom={zoom}
-              selected={selectedCaptionIds.includes(caption.id)}
-              disabled={track.locked}
-              speakerColor={caption.speaker ? speakerColors?.get(caption.speaker) : undefined}
-              onClick={onCaptionClick}
-              onDoubleClick={onCaptionDoubleClick}
-            />
-          ))}
+          {/* Track type icon */}
+          <Type className="w-4 h-4 text-teal-400" />
+
+          {/* Track info */}
+          <div className="flex-1 min-w-0">
+            <span className="text-sm text-editor-text truncate block">{track.name}</span>
+            <div className="flex items-center gap-1 text-[10px] text-editor-text-muted">
+              <Globe className="w-3 h-3" />
+              <span>{languageDisplay}</span>
+            </div>
+          </div>
+
+          {/* Track controls */}
+          <div className="flex items-center gap-1">
+            {/* Export button */}
+            <button
+              data-testid="caption-export-button"
+              className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent"
+              onClick={(e) => {
+                e.stopPropagation();
+                if (track.captions.length > 0) {
+                  onExportClick?.(track.id, track.captions);
+                }
+              }}
+              disabled={track.captions.length === 0}
+              title="Export captions"
+            >
+              <Download className="w-3.5 h-3.5" />
+            </button>
+
+            {/* Lock button */}
+            <button
+              data-testid="caption-lock-button"
+              className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
+              onClick={(e) => {
+                e.stopPropagation();
+                onLockToggle?.(track.id);
+              }}
+              title={track.locked ? 'Unlock' : 'Lock'}
+            >
+              {track.locked ? <Lock className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5" />}
+            </button>
+
+            {/* Visibility button */}
+            <button
+              data-testid="caption-visibility-button"
+              className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
+              onClick={(e) => {
+                e.stopPropagation();
+                onVisibilityToggle?.(track.id);
+              }}
+              title={track.visible ? 'Hide' : 'Show'}
+            >
+              {track.visible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+            </button>
+          </div>
         </div>
 
-        {/* Empty state */}
-        {track.captions.length === 0 && (
-          <div className="absolute inset-0 flex items-center justify-center text-editor-text-muted text-sm">
-            No captions
+        {/* Track Content (Captions Area) */}
+        <div
+          ref={contentRef}
+          data-testid="caption-track-content"
+          className={`flex-1 bg-editor-bg relative overflow-hidden ${
+            !track.visible ? 'opacity-50' : ''
+          }`}
+          style={{ height: TRACK_HEIGHT }}
+        >
+          {/* Background pattern for caption track */}
+          <div
+            className="absolute inset-0 opacity-5"
+            style={{
+              backgroundImage:
+                'repeating-linear-gradient(45deg, currentColor, currentColor 1px, transparent 1px, transparent 6px)',
+            }}
+          />
+
+          {/* Scrollable captions container */}
+          <div
+            className="absolute inset-0"
+            style={{
+              width: `${contentWidth}px`,
+              transform: `translateX(-${scrollX}px)`,
+            }}
+          >
+            {/* Only render visible captions (virtualized) */}
+            {visibleCaptions.map((caption) => (
+              <CaptionClip
+                key={caption.id}
+                caption={caption}
+                zoom={zoom}
+                selected={selectedCaptionIds.includes(caption.id)}
+                disabled={track.locked}
+                speakerColor={caption.speaker ? speakerColors?.get(caption.speaker) : undefined}
+                onClick={onCaptionClick}
+                onDoubleClick={onCaptionDoubleClick}
+              />
+            ))}
           </div>
-        )}
+
+          {/* Empty state */}
+          {track.captions.length === 0 && (
+            <div className="absolute inset-0 flex items-center justify-center text-editor-text-muted text-sm">
+              No captions
+            </div>
+          )}
+        </div>
       </div>
-    </div>
+
+      {contextMenuPosition && (
+        <ContextMenu
+          x={contextMenuPosition.x}
+          y={contextMenuPosition.y}
+          items={contextMenuItems}
+          onClose={() => setContextMenuPosition(null)}
+        />
+      )}
+    </>
   );
 }
 

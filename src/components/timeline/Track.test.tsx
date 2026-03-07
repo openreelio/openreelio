@@ -157,60 +157,56 @@ describe('Track', () => {
   // ===========================================================================
 
   describe('interactions', () => {
-    it('should call onMoveUp when move-up button is clicked', () => {
-      const onMoveUp = vi.fn();
-      render(
-        <Track track={mockTrack} clips={[]} zoom={100} onMoveUp={onMoveUp} canMoveUp canMoveDown />,
-      );
-
-      fireEvent.click(screen.getByTestId('move-track-up-button'));
-      expect(onMoveUp).toHaveBeenCalledWith('track_001');
-    });
-
-    it('should call onMoveDown when move-down button is clicked', () => {
-      const onMoveDown = vi.fn();
+    it('should call onSwapTracks when a same-kind target is selected from the context menu', () => {
+      const onSwapTracks = vi.fn();
       render(
         <Track
           track={mockTrack}
           clips={[]}
           zoom={100}
-          onMoveDown={onMoveDown}
-          canMoveUp
-          canMoveDown
+          swapTargets={[{ trackId: 'track_002', name: 'Video 2' }]}
+          onSwapTracks={onSwapTracks}
         />,
       );
 
-      fireEvent.click(screen.getByTestId('move-track-down-button'));
-      expect(onMoveDown).toHaveBeenCalledWith('track_001');
+      fireEvent.contextMenu(screen.getByTestId('track-header'));
+      fireEvent.click(screen.getByRole('button', { name: 'Swap with Video 2' }));
+
+      expect(onSwapTracks).toHaveBeenCalledWith('track_001', 'track_002');
     });
 
-    it('should disable move buttons when moving is not allowed', () => {
-      const onMoveUp = vi.fn();
-      const onMoveDown = vi.fn();
+    it('should show a disabled context menu item when no same-kind swap targets exist', () => {
+      render(<Track track={mockTrack} clips={[]} zoom={100} />);
 
+      fireEvent.contextMenu(screen.getByTestId('track-header'));
+
+      expect(screen.getByRole('button', { name: 'No other video tracks' })).toBeDisabled();
+    });
+
+    it('should call onDeleteTrack when delete is selected from the context menu', () => {
+      const onDeleteTrack = vi.fn();
       render(
         <Track
           track={mockTrack}
           clips={[]}
           zoom={100}
-          onMoveUp={onMoveUp}
-          onMoveDown={onMoveDown}
-          canMoveUp={false}
-          canMoveDown={false}
+          onDeleteTrack={onDeleteTrack}
+          canDeleteTrack
         />,
       );
 
-      const moveUpButton = screen.getByTestId('move-track-up-button');
-      const moveDownButton = screen.getByTestId('move-track-down-button');
+      fireEvent.contextMenu(screen.getByTestId('track-header'));
+      fireEvent.click(screen.getByRole('button', { name: 'Delete track' }));
 
-      expect(moveUpButton).toBeDisabled();
-      expect(moveDownButton).toBeDisabled();
+      expect(onDeleteTrack).toHaveBeenCalledWith('track_001');
+    });
 
-      fireEvent.click(moveUpButton);
-      fireEvent.click(moveDownButton);
+    it('should disable delete for protected tracks in the context menu', () => {
+      render(<Track track={mockTrack} clips={[]} zoom={100} canDeleteTrack={false} />);
 
-      expect(onMoveUp).not.toHaveBeenCalled();
-      expect(onMoveDown).not.toHaveBeenCalled();
+      fireEvent.contextMenu(screen.getByTestId('track-header'));
+
+      expect(screen.getByRole('button', { name: 'Delete track' })).toBeDisabled();
     });
 
     it('should call onMuteToggle when mute button is clicked', () => {
