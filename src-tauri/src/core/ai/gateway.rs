@@ -684,22 +684,24 @@ Return JSON array of edit scripts."#;
                     if cmd.params.get("clipId").is_none() {
                         issues.push(format!("SplitClip command {} missing clipId", i));
                     }
-                    match cmd
-                        .params
-                        .get("splitTime")
-                        .or_else(|| cmd.params.get("atTimelineSec"))
-                    {
-                        None => issues.push(format!(
+                    let split_time = cmd.params.get("splitTime").and_then(|v| v.as_f64());
+                    let at_timeline_sec =
+                        cmd.params.get("atTimelineSec").and_then(|v| v.as_f64());
+
+                    match (split_time, at_timeline_sec) {
+                        (Some(a), Some(b)) if a != b => issues.push(format!(
+                            "SplitClip command {} has conflicting splitTime/atTimelineSec",
+                            i
+                        )),
+                        (Some(t), _) | (_, Some(t)) if t.is_finite() && t >= 0.0 => {}
+                        (None, None) => issues.push(format!(
                             "SplitClip command {} missing splitTime or atTimelineSec",
                             i
                         )),
-                        Some(v) => match v.as_f64() {
-                            Some(t) if t.is_finite() && t >= 0.0 => {}
-                            _ => issues.push(format!(
-                                "SplitClip command {} invalid splitTime/atTimelineSec",
-                                i
-                            )),
-                        },
+                        _ => issues.push(format!(
+                            "SplitClip command {} invalid splitTime/atTimelineSec",
+                            i
+                        )),
                     }
                 }
                 "DeleteClip" | "RippleDelete" | "DuplicateClip" => {

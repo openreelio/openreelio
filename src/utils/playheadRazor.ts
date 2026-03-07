@@ -17,7 +17,12 @@ export function getPlayheadRazorSplitTarget(
   trackIndex: number,
   splitTime: number,
 ): PlayheadRazorSplitTarget | null {
-  if (!Number.isFinite(splitTime) || trackIndex < 0 || trackIndex >= sequence.tracks.length) {
+  if (
+    !Number.isFinite(splitTime) ||
+    !Number.isInteger(trackIndex) ||
+    trackIndex < 0 ||
+    trackIndex >= sequence.tracks.length
+  ) {
     return null;
   }
 

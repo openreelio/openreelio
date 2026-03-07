@@ -544,6 +544,7 @@ export function Timeline({
     sequence,
     zoom,
     scrollX,
+    scrollY,
     trackHeaderWidth: TRACK_HEADER_WIDTH,
     trackHeight: TRACK_HEIGHT,
     onSplit: onClipSplit,

@@ -211,7 +211,13 @@ export const SplitClipSchema = z.object({
     })
     .refine((data) => data.splitTime !== undefined || data.atTimelineSec !== undefined, {
       message: 'SplitClip requires splitTime or atTimelineSec',
-    }),
+    })
+    .refine(
+      (data) => !(data.splitTime !== undefined && data.atTimelineSec !== undefined),
+      {
+        message: 'SplitClip accepts splitTime or atTimelineSec, not both',
+      },
+    ),
 });
 export type SplitClipCommand = z.infer<typeof SplitClipSchema>;
 

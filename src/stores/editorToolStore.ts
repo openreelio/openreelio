@@ -23,7 +23,7 @@ export const RAZOR_CURSOR =
  */
 export type EditorTool =
   | 'select' // Default selection tool (V)
-  | 'razor' // Split/cut clips at click position (C or B)
+  | 'razor' // Split/cut clips at click position (C)
   | 'slip' // Slip edit - adjust source range without moving clip
   | 'slide' // Slide edit - move clip while adjusting neighbors
   | 'ripple' // Ripple edit - move clip and shift all subsequent clips

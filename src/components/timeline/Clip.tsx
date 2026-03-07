@@ -210,13 +210,16 @@ export function Clip({
 
   // Handle click (differentiate from drag)
   const handleClick = (e: MouseEvent) => {
-    if (isRazorToolActive) {
-      e.stopPropagation();
-      onRazorClick?.(e);
+    e.stopPropagation();
+
+    if (disabled) {
       return;
     }
 
-    e.stopPropagation();
+    if (isRazorToolActive) {
+      onRazorClick?.(e);
+      return;
+    }
 
     // Read and reset the drag-completed flag
     const wasDragCompleted = dragCompletedRef.current;

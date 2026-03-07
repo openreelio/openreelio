@@ -205,12 +205,13 @@ pub struct EditScriptExecutor {
 fn get_split_time(params: &serde_json::Value) -> Option<f64> {
     params
         .get("splitTime")
-        .or_else(|| params.get("atTimelineSec"))
         .and_then(|v| v.as_f64())
+        .or_else(|| params.get("atTimelineSec").and_then(|v| v.as_f64()))
+        .filter(|value| value.is_finite())
 }
 
 fn has_split_time(params: &serde_json::Value) -> bool {
-    params.get("splitTime").is_some() || params.get("atTimelineSec").is_some()
+    get_split_time(params).is_some()
 }
 
 impl EditScriptExecutor {

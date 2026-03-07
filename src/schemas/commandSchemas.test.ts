@@ -127,6 +127,32 @@ describe('commandSchemas', () => {
       expect(result.success).toBe(true);
     });
 
+    it('should reject when neither splitTime nor atTimelineSec is provided', () => {
+      const command = {
+        commandType: 'SplitClip',
+        params: {
+          clipId: '550e8400-e29b-41d4-a716-446655440000',
+        },
+      };
+
+      const result = SplitClipSchema.safeParse(command);
+      expect(result.success).toBe(false);
+    });
+
+    it('should reject when both splitTime and atTimelineSec are provided', () => {
+      const command = {
+        commandType: 'SplitClip',
+        params: {
+          clipId: '550e8400-e29b-41d4-a716-446655440000',
+          splitTime: 5.0,
+          atTimelineSec: 10.0,
+        },
+      };
+
+      const result = SplitClipSchema.safeParse(command);
+      expect(result.success).toBe(false);
+    });
+
     it('should reject non-uuid clipId', () => {
       const command = {
         commandType: 'SplitClip',

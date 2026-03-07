@@ -41,6 +41,8 @@ export interface UseRazorToolOptions {
   zoom: number;
   /** Horizontal scroll offset */
   scrollX: number;
+  /** Vertical scroll offset */
+  scrollY?: number;
   /** Track header width in pixels */
   trackHeaderWidth?: number;
   /** Track height in pixels */
@@ -106,6 +108,7 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
     sequence,
     zoom,
     scrollX,
+    scrollY = 0,
     trackHeaderWidth = DEFAULT_TRACK_HEADER_WIDTH,
     trackHeight = DEFAULT_TRACK_HEIGHT,
     onSplit,
@@ -174,9 +177,9 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
     (pixelX: number, pixelY: number, containerRect: DOMRect): ClipAtPosition[] => {
       if (!sequence) return [];
 
-      // Adjust for container offset and track header
+      // Adjust for container offset, track header, and vertical scroll
       const relativeX = pixelX - containerRect.left - trackHeaderWidth;
-      const relativeY = pixelY - containerRect.top;
+      const relativeY = pixelY - containerRect.top + scrollY;
 
       // Early return if clicking in track header area
       if (relativeX < 0) return [];
@@ -198,7 +201,7 @@ export function useRazorTool(options: UseRazorToolOptions): UseRazorToolReturn {
 
       return [];
     },
-    [sequence, trackHeaderWidth, pixelToTime, getTrackIndexFromY, findClipAtTime],
+    [sequence, trackHeaderWidth, scrollY, pixelToTime, getTrackIndexFromY, findClipAtTime],
   );
 
   /**
