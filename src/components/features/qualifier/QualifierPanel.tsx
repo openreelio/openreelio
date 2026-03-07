@@ -259,37 +259,41 @@ export function QualifierPanel({
       {!collapsed && (
         <div className="p-4 space-y-4">
           {/* Preset Buttons */}
-          <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={() => applyPreset('skin_tones')}
-              disabled={disabled}
-              className="flex-1 px-2 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700
-                         border border-zinc-600 rounded text-zinc-200
-                         disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              Skin Tones
-            </button>
-            <button
-              type="button"
-              onClick={() => applyPreset('sky_blue')}
-              disabled={disabled}
-              className="flex-1 px-2 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700
-                         border border-zinc-600 rounded text-zinc-200
-                         disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              Sky Blue
-            </button>
-            <button
-              type="button"
-              onClick={() => applyPreset('foliage')}
-              disabled={disabled}
-              className="flex-1 px-2 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700
-                         border border-zinc-600 rounded text-zinc-200
-                         disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              Foliage
-            </button>
+          <div className="space-y-2">
+            <div className="flex gap-1.5 flex-wrap">
+              {([
+                { key: 'skin_tones', label: 'Skin', color: '#E8A87C' },
+                { key: 'skin_warm', label: 'Skin Warm', color: '#F0B886' },
+                { key: 'skin_cool', label: 'Skin Cool', color: '#D4A08C' },
+                { key: 'sky_blue', label: 'Sky', color: '#6BB3E0' },
+                { key: 'sky_warm', label: 'Sky Warm', color: '#8BAFE0' },
+                { key: 'sky_cool', label: 'Sky Cool', color: '#5A9ED6' },
+                { key: 'foliage', label: 'Foliage', color: '#6DBF5C' },
+                { key: 'foliage_autumn', label: 'Autumn', color: '#D4883C' },
+                { key: 'foliage_spring', label: 'Spring', color: '#88D668' },
+                { key: 'water', label: 'Water', color: '#46B5C8' },
+                { key: 'sunset', label: 'Sunset', color: '#E87D4A' },
+                { key: 'neutral_desaturate', label: 'Desat', color: '#999' },
+              ] as const).map(({ key, label, color }) => (
+                <button
+                  key={key}
+                  type="button"
+                  data-testid={`qualifier-preset-${key}`}
+                  onClick={() => applyPreset(key)}
+                  disabled={disabled}
+                  className="px-2 py-1 text-[10px] bg-zinc-800 hover:bg-zinc-700
+                             border border-zinc-600 rounded text-zinc-200
+                             disabled:opacity-50 disabled:cursor-not-allowed transition-colors
+                             flex items-center gap-1"
+                >
+                  <span
+                    className="w-2 h-2 rounded-full inline-block flex-shrink-0"
+                    style={{ backgroundColor: color }}
+                  />
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
 
           {/* Hue Section */}

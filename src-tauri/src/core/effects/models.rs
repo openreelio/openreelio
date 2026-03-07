@@ -486,11 +486,20 @@ impl Effect {
                 params.insert("fade_in".to_string(), ParamValue::Bool(true));
             }
             EffectType::NoiseReduction => {
-                // anlmdn filter params (non-local means denoise)
-                params.insert("strength".to_string(), ParamValue::Float(0.00001)); // s parameter
-                params.insert("patch_size".to_string(), ParamValue::Float(7.0)); // p parameter (odd 1-99)
+                // Algorithm: "anlmdn" (Non-Local Means), "afftdn" (FFT), "arnndn" (RNN)
+                params.insert(
+                    "algorithm".to_string(),
+                    ParamValue::String("anlmdn".to_string()),
+                );
+                // Normalized strength 0.0-1.0 (mapped per algorithm)
+                params.insert("strength".to_string(), ParamValue::Float(0.3));
+                // anlmdn: patch_size (odd 1-99), research_size (odd 1-99)
+                params.insert("patch_size".to_string(), ParamValue::Float(7.0));
                 params.insert("research_size".to_string(), ParamValue::Float(15.0));
-                // r parameter (odd 1-99)
+                // afftdn: noise_floor in dB (optional)
+                params.insert("noise_floor".to_string(), ParamValue::Float(-40.0));
+                // arnndn: model file path (optional, required for arnndn)
+                params.insert("model_path".to_string(), ParamValue::String(String::new()));
             }
             EffectType::ChromaKey => {
                 // chromakey filter params
@@ -596,10 +605,12 @@ impl Effect {
                 ParamDef::float("gain_b", "Gain Blue", 0.0, -1.0, 1.0),
             ],
             EffectType::NoiseReduction => vec![
-                // anlmdn (non-local means denoise) parameters
-                ParamDef::float("strength", "Strength", 0.00001, 0.00001, 0.0001),
+                ParamDef::string("algorithm", "Algorithm", "anlmdn"),
+                ParamDef::float("strength", "Strength", 0.3, 0.0, 1.0),
                 ParamDef::float("patch_size", "Patch Size", 7.0, 1.0, 99.0),
                 ParamDef::float("research_size", "Research Size", 15.0, 1.0, 99.0),
+                ParamDef::float("noise_floor", "Noise Floor (dB)", -40.0, -80.0, 0.0),
+                ParamDef::string("model_path", "Model Path", ""),
             ],
             EffectType::ChromaKey => vec![
                 // chromakey parameters

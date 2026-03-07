@@ -275,7 +275,7 @@ pub enum TrackKind {
     Overlay,
 }
 
-/// Blend mode for video tracks
+/// Blend mode for video tracks and clips
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum BlendMode {
@@ -285,6 +285,20 @@ pub enum BlendMode {
     Screen,
     Overlay,
     Add,
+    Subtract,
+    Darken,
+    Lighten,
+    ColorBurn,
+    ColorDodge,
+    LinearBurn,
+    LinearDodge,
+    SoftLight,
+    HardLight,
+    VividLight,
+    LinearLight,
+    PinLight,
+    Difference,
+    Exclusion,
 }
 
 /// Track (contains clips directly for denormalized storage)
@@ -548,6 +562,9 @@ pub struct Clip {
     pub transform: Transform,
     /// Opacity (0.0 - 1.0)
     pub opacity: f32,
+    /// Blend mode for compositing (default: Normal)
+    #[serde(default)]
+    pub blend_mode: BlendMode,
     /// Playback speed (1.0 = normal)
     pub speed: f32,
     /// Playback direction (true = reverse)
@@ -579,6 +596,7 @@ impl Clip {
             place: ClipPlace::default(),
             transform: Transform::default(),
             opacity: 1.0,
+            blend_mode: BlendMode::Normal,
             speed: 1.0,
             reverse: false,
             effects: vec![],
@@ -620,6 +638,7 @@ impl Clip {
             place: ClipPlace::new(0.0, duration),
             transform: Transform::default(),
             opacity: 1.0,
+            blend_mode: BlendMode::Normal,
             speed: 1.0,
             reverse: false,
             effects: vec![],

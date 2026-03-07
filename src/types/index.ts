@@ -348,7 +348,26 @@ export interface Sequence {
 
 export type TrackKind = 'video' | 'audio' | 'caption' | 'overlay';
 
-export type BlendMode = 'normal' | 'multiply' | 'screen' | 'overlay' | 'add';
+export type BlendMode =
+  | 'normal'
+  | 'multiply'
+  | 'screen'
+  | 'overlay'
+  | 'add'
+  | 'subtract'
+  | 'darken'
+  | 'lighten'
+  | 'colorBurn'
+  | 'colorDodge'
+  | 'linearBurn'
+  | 'linearDodge'
+  | 'softLight'
+  | 'hardLight'
+  | 'vividLight'
+  | 'linearLight'
+  | 'pinLight'
+  | 'difference'
+  | 'exclusion';
 
 export interface Track {
   id: TrackId;
@@ -404,6 +423,8 @@ export interface Clip {
   place: ClipPlace;
   transform: Transform;
   opacity: number;
+  /** Blend mode for compositing (default: 'normal') */
+  blendMode?: BlendMode;
   speed: number;
   reverse?: boolean;
   effects: EffectId[];
@@ -752,6 +773,7 @@ export type CommandType =
   | 'SetClipSpeed'
   | 'SetClipMute'
   | 'SetClipAudio'
+  | 'SetClipBlendMode'
   | 'SplitClip'
   | 'TrimClip'
   | 'MoveClip'

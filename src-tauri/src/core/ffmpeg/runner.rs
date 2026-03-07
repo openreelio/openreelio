@@ -124,6 +124,12 @@ pub struct VideoStreamInfo {
     pub pixel_format: String,
     /// Bitrate in bits/s (if available)
     pub bitrate: Option<u64>,
+    /// Whether the source stream advertises HDR transfer characteristics.
+    #[serde(default)]
+    pub is_hdr: bool,
+    /// FFprobe color transfer string (e.g. `smpte2084`, `arib-std-b67`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_transfer: Option<String>,
 }
 
 /// Audio stream information.
@@ -322,6 +328,83 @@ impl FFmpegRunner {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(FFmpegError::ExecutionFailed(format!(
                 "Frame extraction failed: {}",
+                stderr
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Extract a single frame from a video file with optional tonemapping.
+    ///
+    /// When `tonemap_filter` is provided, it is applied as a video filter to
+    /// convert HDR content to SDR for preview on standard displays.
+    ///
+    /// # Arguments
+    /// * `input` - Path to the input video file
+    /// * `time_sec` - Time position in seconds
+    /// * `output` - Path to save the output image
+    /// * `tonemap_filter` - Optional FFmpeg video filter string for HDR→SDR conversion
+    pub async fn extract_frame_with_tonemap(
+        &self,
+        input: &Path,
+        time_sec: f64,
+        output: &Path,
+        tonemap_filter: Option<&str>,
+    ) -> FFmpegResult<()> {
+        if !input.exists() {
+            return Err(FFmpegError::InvalidInput(format!(
+                "Input file does not exist: {}",
+                input.display()
+            )));
+        }
+
+        if is_nonempty_file(output) {
+            return Ok(());
+        }
+
+        if let Some(parent) = output.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                FFmpegError::OutputError(format!("Failed to create output directory: {}", e))
+            })?;
+        }
+
+        let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
+        configure_tokio_command(&mut cmd);
+
+        let time_str = format!("{:.3}", time_sec);
+        let input_str = input.to_string_lossy().to_string();
+        let output_str = output.to_string_lossy().to_string();
+
+        let mut args: Vec<&str> = vec![
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-ss",
+            &time_str,
+            "-i",
+            &input_str,
+        ];
+
+        // Apply tonemapping filter if provided (HDR → SDR conversion)
+        if let Some(filter) = tonemap_filter {
+            args.push("-vf");
+            args.push(filter);
+        }
+
+        args.extend_from_slice(&["-frames:v", "1", "-q:v", "2", "-y", &output_str]);
+
+        let output = cmd
+            .args(&args)
+            .output()
+            .await
+            .map_err(FFmpegError::ProcessError)?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(FFmpegError::ExecutionFailed(format!(
+                "Frame extraction with tonemapping failed: {}",
                 stderr
             )));
         }
@@ -1101,6 +1184,15 @@ fn parse_video_stream(stream: &serde_json::Value) -> FFmpegResult<VideoStreamInf
         .and_then(|b| b.as_str())
         .and_then(|s| s.parse::<u64>().ok());
 
+    let color_transfer = stream
+        .get("color_transfer")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let is_hdr = matches!(
+        color_transfer.as_deref(),
+        Some("smpte2084") | Some("arib-std-b67") | Some("hlg") | Some("pq")
+    );
+
     Ok(VideoStreamInfo {
         width,
         height,
@@ -1108,6 +1200,8 @@ fn parse_video_stream(stream: &serde_json::Value) -> FFmpegResult<VideoStreamInf
         codec,
         pixel_format,
         bitrate,
+        is_hdr,
+        color_transfer,
     })
 }
 
@@ -1346,6 +1440,8 @@ mod tests {
         assert_eq!(video.height, 1080);
         assert_eq!(video.fps, 30.0);
         assert_eq!(video.codec, "h264");
+        assert!(!video.is_hdr);
+        assert_eq!(video.color_transfer, None);
 
         let audio = info.audio.unwrap();
         assert_eq!(audio.sample_rate, 48000);
@@ -1377,5 +1473,32 @@ mod tests {
         let video = info.video.unwrap();
         // 30000/1001 ≈ 29.97
         assert!((video.fps - 29.97).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_parse_probe_output_preserves_hdr_transfer_metadata() {
+        let json = r#"{
+            "format": {
+                "duration": "5.0",
+                "size": "2048",
+                "format_name": "mp4"
+            },
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "hevc",
+                    "width": 3840,
+                    "height": 2160,
+                    "r_frame_rate": "24000/1001",
+                    "pix_fmt": "yuv420p10le",
+                    "color_transfer": "smpte2084"
+                }
+            ]
+        }"#;
+
+        let info = parse_probe_output(json).unwrap();
+        let video = info.video.unwrap();
+        assert!(video.is_hdr);
+        assert_eq!(video.color_transfer.as_deref(), Some("smpte2084"));
     }
 }

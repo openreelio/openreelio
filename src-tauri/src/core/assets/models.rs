@@ -78,6 +78,12 @@ pub struct VideoInfo {
     pub bitrate: Option<u64>,
     /// Whether the video has alpha channel
     pub has_alpha: bool,
+    /// Whether the video contains HDR content (PQ or HLG transfer)
+    #[serde(default)]
+    pub is_hdr: bool,
+    /// Color transfer function (e.g., "smpte2084" for HDR10, "arib-std-b67" for HLG)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color_transfer: Option<String>,
 }
 
 impl Default for VideoInfo {
@@ -89,6 +95,8 @@ impl Default for VideoInfo {
             codec: "h264".to_string(),
             bitrate: None,
             has_alpha: false,
+            is_hdr: false,
+            color_transfer: None,
         }
     }
 }
@@ -335,6 +343,8 @@ impl Asset {
                 codec: String::new(),
                 bitrate: None,
                 has_alpha: false,
+                is_hdr: false,
+                color_transfer: None,
             }),
             audio: None,
             license: LicenseInfo::default(),

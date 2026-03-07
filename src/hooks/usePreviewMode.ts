@@ -9,6 +9,7 @@ import { useMemo, useRef } from 'react';
 import { isTextClip, type Sequence, type Asset, type Clip, type Track } from '@/types';
 import { isClipActiveAtTime } from '@/utils/clipTiming';
 import { isCaptionLikeClip } from '@/utils/captionClip';
+import { getEffectiveBlendMode } from '@/utils/blendModes';
 
 // =============================================================================
 // Types
@@ -140,6 +141,8 @@ function hasIdentityTransform(clip: Clip): boolean {
  * unsupported by proxy video mode.
  */
 function getCanvasFallbackReason({ clip, track, asset }: ActiveClipInfo): string | null {
+  const effectiveBlendMode = getEffectiveBlendMode(clip.blendMode, track.blendMode);
+
   // Audio tracks do not affect visual mode selection.
   if (track.kind === 'audio') {
     return null;
@@ -153,8 +156,8 @@ function getCanvasFallbackReason({ clip, track, asset }: ActiveClipInfo): string
   // Text clips (virtual assets) are rendered as HTML overlays in video mode.
   // Keep blend mode guard because proxy text overlays do not support blend compositing.
   if (isTextClip(clip.assetId)) {
-    if (track.blendMode !== 'normal') {
-      return 'Track blend mode requires canvas compositing';
+    if (effectiveBlendMode !== 'normal') {
+      return 'blend mode requires canvas compositing';
     }
     return null;
   }
@@ -171,8 +174,8 @@ function getCanvasFallbackReason({ clip, track, asset }: ActiveClipInfo): string
     return 'Active non-video clip requires canvas compositing';
   }
 
-  if (track.blendMode !== 'normal') {
-    return 'Track blend mode requires canvas compositing';
+  if (effectiveBlendMode !== 'normal') {
+    return 'blend mode requires canvas compositing';
   }
 
   if (!hasIdentityTransform(clip)) {

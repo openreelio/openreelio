@@ -4,6 +4,7 @@
  * Caption-related tools for creating, updating, and deleting caption clips.
  */
 
+import { invoke } from '@tauri-apps/api/core';
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
 import { executeAgentCommand } from './commandExecutor';
@@ -11,6 +12,17 @@ import { useProjectStore } from '@/stores/projectStore';
 import type { CaptionColor, CaptionPosition, Sequence } from '@/types';
 
 const logger = createLogger('CaptionTools');
+
+interface TranscriptionSegmentInput {
+  startTime: number;
+  endTime: number;
+  text: string;
+}
+
+interface NormalizedTranscriptionSegments {
+  segments: TranscriptionSegmentInput[];
+  skippedCount: number;
+}
 
 function getSequence(sequenceId: string): Sequence | undefined {
   return useProjectStore.getState().sequences.get(sequenceId);
@@ -126,6 +138,61 @@ async function ensureCaptionTrack(sequenceId: string, explicitTrackId?: string):
   }
 
   return createdTrackId;
+}
+
+function normalizeTranscriptionSegments(
+  segments: TranscriptionSegmentInput[],
+): NormalizedTranscriptionSegments {
+  const normalized: TranscriptionSegmentInput[] = [];
+  let skippedCount = 0;
+
+  for (const segment of segments) {
+    const trimmedText = segment.text?.trim();
+    if (
+      !trimmedText ||
+      !Number.isFinite(segment.startTime) ||
+      !Number.isFinite(segment.endTime) ||
+      segment.startTime < 0 ||
+      segment.endTime <= segment.startTime
+    ) {
+      skippedCount += 1;
+      continue;
+    }
+
+    normalized.push({
+      startTime: segment.startTime,
+      endTime: segment.endTime,
+      text: trimmedText,
+    });
+  }
+
+  normalized.sort((left, right) => left.startTime - right.startTime);
+  return {
+    segments: normalized,
+    skippedCount,
+  };
+}
+
+async function rollbackCreatedCaptions(
+  sequenceId: string,
+  trackId: string,
+  captions: Array<{ captionId: string; text: string }>,
+): Promise<string[]> {
+  const rollbackFailures: string[] = [];
+
+  for (const caption of [...captions].reverse()) {
+    try {
+      await executeAgentCommand('DeleteCaption', {
+        sequenceId,
+        trackId,
+        captionId: caption.captionId,
+      });
+    } catch (error) {
+      rollbackFailures.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return rollbackFailures;
 }
 
 const CAPTION_TOOLS: ToolDefinition[] = [
@@ -451,6 +518,222 @@ const CAPTION_TOOLS: ToolDefinition[] = [
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('style_caption failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+  {
+    name: 'auto_transcribe',
+    description:
+      'Transcribe an asset using speech-to-text (Whisper). Returns timed text segments. Use submit mode for long videos to avoid blocking.',
+    category: 'utility',
+    parameters: {
+      type: 'object',
+      properties: {
+        assetId: {
+          type: 'string',
+          description: 'The ID of the video or audio asset to transcribe',
+        },
+        language: {
+          type: 'string',
+          description: 'Language code (e.g., "en", "ko"). Auto-detected if omitted.',
+        },
+        model: {
+          type: 'string',
+          enum: ['tiny', 'base', 'small', 'medium', 'large'],
+          description: 'Whisper model size (default: base)',
+        },
+        async: {
+          type: 'boolean',
+          description:
+            'If true, submits to job queue and returns jobId instead of blocking (default: false)',
+        },
+      },
+      required: ['assetId'],
+    },
+    handler: async (args) => {
+      try {
+        const assetId = args.assetId as string;
+        const options: Record<string, unknown> = {};
+        if (args.language) options.language = args.language;
+        if (args.model) options.model = args.model;
+
+        if (args.async) {
+          const jobId = await invoke<string>('submit_transcription_job', {
+            assetId,
+            options: Object.keys(options).length > 0 ? options : null,
+          });
+          logger.info('Transcription job submitted', { assetId, jobId });
+          return {
+            success: true,
+            result: {
+              mode: 'async',
+              jobId,
+              message: `Transcription job submitted. Monitor job "${jobId}" for progress.`,
+            },
+          };
+        }
+
+        const result = await invoke<{
+          language: string;
+          segments: Array<{ startTime: number; endTime: number; text: string }>;
+          duration: number;
+          fullText: string;
+        }>('transcribe_asset', {
+          assetId,
+          options: Object.keys(options).length > 0 ? options : null,
+        });
+
+        logger.info('Transcription completed', {
+          assetId,
+          segmentCount: result.segments.length,
+          duration: result.duration,
+        });
+
+        return {
+          success: true,
+          result: {
+            mode: 'sync',
+            language: result.language,
+            segments: result.segments,
+            segmentCount: result.segments.length,
+            duration: result.duration,
+            fullText: result.fullText,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('auto_transcribe failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+  {
+    name: 'add_captions_from_transcription',
+    description:
+      'Create caption clips from transcription segments. Takes an array of timed text segments and adds them as captions on a caption track.',
+    category: 'utility',
+    parameters: {
+      type: 'object',
+      properties: {
+        sequenceId: {
+          type: 'string',
+          description: 'The ID of the sequence',
+        },
+        trackId: {
+          type: 'string',
+          description: 'Optional caption track ID (auto-created when omitted)',
+        },
+        segments: {
+          type: 'array',
+          description: 'Array of { startTime, endTime, text } segments from transcription',
+          items: {
+            type: 'object',
+            properties: {
+              startTime: { type: 'number' },
+              endTime: { type: 'number' },
+              text: { type: 'string' },
+            },
+            required: ['startTime', 'endTime', 'text'],
+          },
+        },
+      },
+      required: ['sequenceId', 'segments'],
+    },
+    handler: async (args) => {
+      try {
+        const sequenceId = args.sequenceId as string;
+        const segments = args.segments as Array<{
+          startTime: number;
+          endTime: number;
+          text: string;
+        }>;
+
+        if (!Array.isArray(segments) || segments.length === 0) {
+          return { success: false, error: 'No segments provided' };
+        }
+
+        const normalizedSegments = normalizeTranscriptionSegments(segments);
+        if (normalizedSegments.segments.length === 0) {
+          return { success: false, error: 'No valid segments provided' };
+        }
+
+        const trackId = await ensureCaptionTrack(sequenceId, args.trackId as string | undefined);
+
+        const createdCaptions: Array<{ captionId: string; text: string }> = [];
+
+        for (const segment of normalizedSegments.segments) {
+          try {
+            const result = await executeAgentCommand('CreateCaption', {
+              sequenceId,
+              trackId,
+              text: segment.text,
+              startSec: segment.startTime,
+              endSec: segment.endTime,
+            });
+
+            const captionId = result.createdIds[0];
+            if (!captionId) {
+              throw new Error('CreateCaption did not return a caption id');
+            }
+
+            createdCaptions.push({
+              captionId,
+              text: segment.text,
+            });
+          } catch (error) {
+            const rollbackFailures = await rollbackCreatedCaptions(
+              sequenceId,
+              trackId,
+              createdCaptions,
+            );
+
+            const message = error instanceof Error ? error.message : String(error);
+            if (rollbackFailures.length > 0) {
+              logger.error('add_captions_from_transcription rollback failed', {
+                error: message,
+                rollbackFailures,
+                sequenceId,
+                trackId,
+              });
+              return {
+                success: false,
+                error: `Failed to create captions from transcription: ${message}. Rollback failed for ${rollbackFailures.length} caption(s).`,
+              };
+            }
+
+            logger.warn('add_captions_from_transcription rolled back partial batch', {
+              error: message,
+              rolledBackCount: createdCaptions.length,
+              sequenceId,
+              trackId,
+            });
+            return {
+              success: false,
+              error: `Failed to create captions from transcription: ${message}. Rolled back ${createdCaptions.length} caption(s).`,
+            };
+          }
+        }
+
+        logger.info('Captions created from transcription', {
+          sequenceId,
+          trackId,
+          count: createdCaptions.length,
+          skippedCount: normalizedSegments.skippedCount,
+        });
+
+        return {
+          success: true,
+          result: {
+            trackId,
+            captionCount: createdCaptions.length,
+            captions: createdCaptions,
+            skippedSegmentCount: normalizedSegments.skippedCount,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('add_captions_from_transcription failed', { error: message });
         return { success: false, error: message };
       }
     },

@@ -26,6 +26,7 @@ import { videoFrameBuffer } from '@/services/videoFrameBuffer';
 import { extractTextDataFromClipWithMap, renderTextToCanvas } from '@/utils/textRenderer';
 import { getClipSourceTimeAtTimelineTime, isClipActiveAtTime } from '@/utils/clipTiming';
 import { isCaptionLikeClip } from '@/utils/captionClip';
+import { getEffectiveBlendMode } from '@/utils/blendModes';
 import { SeekBar } from './SeekBar';
 import { TransformOverlay } from './TransformOverlay';
 import { isTextClip } from '@/types';
@@ -84,13 +85,29 @@ const DEFAULT_ASPECT_RATIO = 16 / 9;
 const DEFAULT_WIDTH = 640;
 const DEFAULT_HEIGHT = 360;
 
-/** Map BlendMode to Canvas globalCompositeOperation */
+/** Map BlendMode to Canvas globalCompositeOperation.
+ * Canvas 2D only supports a subset of blend modes natively.
+ * Unsupported modes fall back to 'source-over' (normal). */
 const BLEND_MODE_MAP: Record<BlendMode, GlobalCompositeOperation> = {
   normal: 'source-over',
   multiply: 'multiply',
   screen: 'screen',
   overlay: 'overlay',
   add: 'lighter',
+  subtract: 'source-over',
+  darken: 'darken',
+  lighten: 'lighten',
+  colorBurn: 'color-burn',
+  colorDodge: 'color-dodge',
+  linearBurn: 'source-over',
+  linearDodge: 'lighter',
+  softLight: 'source-over',
+  hardLight: 'hard-light',
+  vividLight: 'source-over',
+  linearLight: 'source-over',
+  pinLight: 'source-over',
+  difference: 'difference',
+  exclusion: 'exclusion',
 };
 
 const DEFAULT_CLIP_TRANSFORM: Transform = {
@@ -453,6 +470,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
       // Render each clip in z-order (back to front) regardless of clip type.
       for (const clipInfo of activeClips) {
         const { clip, track, asset } = clipInfo;
+        const blendMode = getEffectiveBlendMode(clip.blendMode, track.blendMode);
 
         if (isCaptionLikeClip(track, clip, asset)) {
           const text = clip.label?.trim();
@@ -473,7 +491,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
           const transformedTextData = applyClipTransformToTextData(textData, clip.transform);
 
           ctx.save();
-          ctx.globalCompositeOperation = BLEND_MODE_MAP[track.blendMode] || 'source-over';
+          ctx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] || 'source-over';
           renderTextToCanvas(ctx, transformedTextData, canvas.width, canvas.height, clip.opacity);
           ctx.restore();
           continue;
@@ -488,7 +506,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
 
         ctx.save();
         ctx.globalAlpha = clip.opacity;
-        ctx.globalCompositeOperation = BLEND_MODE_MAP[track.blendMode] || 'source-over';
+        ctx.globalCompositeOperation = BLEND_MODE_MAP[blendMode] || 'source-over';
 
         const baseScaleX = canvas.width / img.width;
         const baseScaleY = canvas.height / img.height;

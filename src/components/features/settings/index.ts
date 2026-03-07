@@ -12,3 +12,4 @@ export { ShortcutSettingsPanel, type ShortcutSettingsPanelProps } from './Shortc
 export { GeneralSettings } from './sections/GeneralSettings';
 export { AppearanceSettings } from './sections/AppearanceSettings';
 export { ShortcutsSettings } from './sections/ShortcutsSettings';
+export { DeveloperSettings } from './sections/DeveloperSettings';

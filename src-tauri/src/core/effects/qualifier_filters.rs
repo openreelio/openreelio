@@ -160,6 +160,76 @@ impl QualifierParams {
         }
     }
 
+    /// Creates a qualifier for autumn foliage (shifts green toward orange)
+    pub fn foliage_autumn() -> Self {
+        Self {
+            hue_center: 80.0,
+            hue_width: 70.0,
+            sat_min: 0.2,
+            sat_max: 1.0,
+            lum_min: 0.15,
+            lum_max: 0.8,
+            softness: 0.1,
+            invert: false,
+        }
+    }
+
+    /// Creates a qualifier for spring foliage (bright, vibrant green)
+    pub fn foliage_spring() -> Self {
+        Self {
+            hue_center: 110.0,
+            hue_width: 60.0,
+            sat_min: 0.25,
+            sat_max: 1.0,
+            lum_min: 0.2,
+            lum_max: 0.9,
+            softness: 0.08,
+            invert: false,
+        }
+    }
+
+    /// Creates a qualifier for water/teal
+    pub fn water() -> Self {
+        Self {
+            hue_center: 190.0,
+            hue_width: 50.0,
+            sat_min: 0.15,
+            sat_max: 0.9,
+            lum_min: 0.1,
+            lum_max: 0.8,
+            softness: 0.12,
+            invert: false,
+        }
+    }
+
+    /// Creates a qualifier for sunset tones (warm oranges/reds)
+    pub fn sunset() -> Self {
+        Self {
+            hue_center: 30.0,
+            hue_width: 70.0,
+            sat_min: 0.3,
+            sat_max: 1.0,
+            lum_min: 0.15,
+            lum_max: 0.7,
+            softness: 0.15,
+            invert: false,
+        }
+    }
+
+    /// Creates a qualifier for neutral desaturation (selects all colors)
+    pub fn neutral_desaturate() -> Self {
+        Self {
+            hue_center: 0.0,
+            hue_width: 180.0,
+            sat_min: 0.1,
+            sat_max: 1.0,
+            lum_min: 0.0,
+            lum_max: 1.0,
+            softness: 0.2,
+            invert: false,
+        }
+    }
+
     /// Validates the qualifier parameters
     pub fn validate(&self) -> Result<(), String> {
         if self.hue_width < 1.0 || self.hue_width > 180.0 {
@@ -794,5 +864,53 @@ mod tests {
             filter.contains("b=-0.1"),
             "Should have brightness reduction"
         );
+    }
+
+    #[test]
+    fn test_qualifier_params_foliage_autumn() {
+        let params = QualifierParams::foliage_autumn();
+        assert_eq!(params.hue_center, 80.0);
+        assert_eq!(params.hue_width, 70.0);
+        assert_eq!(params.sat_min, 0.2);
+        assert!(!params.invert);
+        assert!(params.validate().is_ok());
+    }
+
+    #[test]
+    fn test_qualifier_params_foliage_spring() {
+        let params = QualifierParams::foliage_spring();
+        assert_eq!(params.hue_center, 110.0);
+        assert_eq!(params.hue_width, 60.0);
+        assert_eq!(params.softness, 0.08);
+        assert!(params.validate().is_ok());
+    }
+
+    #[test]
+    fn test_qualifier_params_water() {
+        let params = QualifierParams::water();
+        assert_eq!(params.hue_center, 190.0);
+        assert_eq!(params.hue_width, 50.0);
+        assert_eq!(params.softness, 0.12);
+        assert!(params.validate().is_ok());
+    }
+
+    #[test]
+    fn test_qualifier_params_sunset() {
+        let params = QualifierParams::sunset();
+        assert_eq!(params.hue_center, 30.0);
+        assert_eq!(params.hue_width, 70.0);
+        assert_eq!(params.sat_min, 0.3);
+        assert!(params.validate().is_ok());
+    }
+
+    #[test]
+    fn test_qualifier_params_neutral_desaturate() {
+        let params = QualifierParams::neutral_desaturate();
+        assert_eq!(params.hue_center, 0.0);
+        assert_eq!(params.hue_width, 180.0);
+        assert_eq!(params.softness, 0.2);
+        assert_eq!(params.lum_min, 0.0);
+        assert_eq!(params.lum_max, 1.0);
+        assert!(params.validate().is_ok());
     }
 }

@@ -83,9 +83,9 @@ describe('QualifierPanel', () => {
         <QualifierPanel values={DEFAULT_QUALIFIER_VALUES} onChange={onChange} />
       );
 
-      expect(screen.getByRole('button', { name: /Skin Tones/i })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /Sky Blue/i })).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /Foliage/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^Skin$/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^Sky$/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^Foliage$/i })).toBeInTheDocument();
     });
 
     it('renders reset button', () => {
@@ -188,7 +188,7 @@ describe('QualifierPanel', () => {
         <QualifierPanel values={DEFAULT_QUALIFIER_VALUES} onChange={onChange} />
       );
 
-      const presetBtn = screen.getByRole('button', { name: /Skin Tones/i });
+      const presetBtn = screen.getByRole('button', { name: /^Skin$/i });
       await user.click(presetBtn);
 
       expect(onChange).toHaveBeenCalledWith(QUALIFIER_PRESETS.skin_tones);
@@ -202,7 +202,7 @@ describe('QualifierPanel', () => {
         <QualifierPanel values={DEFAULT_QUALIFIER_VALUES} onChange={onChange} />
       );
 
-      const presetBtn = screen.getByRole('button', { name: /Sky Blue/i });
+      const presetBtn = screen.getByRole('button', { name: /^Sky$/i });
       await user.click(presetBtn);
 
       expect(onChange).toHaveBeenCalledWith(QUALIFIER_PRESETS.sky_blue);
@@ -216,7 +216,7 @@ describe('QualifierPanel', () => {
         <QualifierPanel values={DEFAULT_QUALIFIER_VALUES} onChange={onChange} />
       );
 
-      const presetBtn = screen.getByRole('button', { name: /Foliage/i });
+      const presetBtn = screen.getByRole('button', { name: /^Foliage$/i });
       await user.click(presetBtn);
 
       expect(onChange).toHaveBeenCalledWith(QUALIFIER_PRESETS.foliage);

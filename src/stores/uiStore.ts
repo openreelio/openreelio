@@ -12,7 +12,7 @@ import { create } from 'zustand';
 // =============================================================================
 
 /** Settings dialog tab identifier */
-export type SettingsTab = 'general' | 'appearance' | 'shortcuts' | 'ai' | 'permissions';
+export type SettingsTab = 'general' | 'appearance' | 'shortcuts' | 'ai' | 'permissions' | 'developer';
 
 /** UI Store State */
 interface UIState {

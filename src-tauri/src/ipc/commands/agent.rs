@@ -16,6 +16,10 @@ use tauri::Emitter;
 use crate::core::ai::agent_plan::{AgentPlan, AgentPlanResult, StepResult};
 use crate::core::ai::memory::{AgentMemoryDb, MemoryEntry};
 use crate::core::ai::plan_executor::{resolve_step_references, PlanExecutor};
+use crate::core::plugin::api::{
+    AssetProviderPlugin, PluginAssetRef, PluginAssetType, PluginSearchQuery,
+};
+use crate::core::plugin::providers::stock::{StockMediaConfig, StockMediaProvider};
 use crate::core::CoreError;
 use crate::ipc::payloads::CommandPayload;
 use crate::AppState;
@@ -108,6 +112,149 @@ async fn rotate_traces(traces_dir: &PathBuf, max_files: usize) {
         let _ = tokio::fs::remove_file(&file_path).await;
         tracing::debug!("Rotated old trace: {}", file_name);
     }
+}
+
+// =============================================================================
+// Trace Reading
+// =============================================================================
+
+/// Summary information about a single agent trace file.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceSummary {
+    /// Trace identifier (filename without `.json` extension).
+    pub trace_id: String,
+    /// Full filename including extension.
+    pub file_name: String,
+    /// File size in bytes.
+    pub size_bytes: u64,
+    /// Last modification time in ISO 8601 format.
+    pub modified_at: String,
+}
+
+/// List agent trace files from the project's trace directory.
+///
+/// Returns up to `limit` entries sorted by modification time (newest first).
+/// Traces are read from `{project_path}/.openreelio/traces/`.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state), fields(limit = ?limit))]
+pub async fn list_agent_traces(
+    limit: Option<usize>,
+    state: State<'_, AppState>,
+) -> Result<Vec<TraceSummary>, String> {
+    let max_entries = limit.unwrap_or(20);
+
+    let project_path = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        project.path.clone()
+    };
+
+    let traces_dir = project_path.join(".openreelio").join("traces");
+
+    // If the directory doesn't exist yet, return an empty list
+    if !traces_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries = tokio::fs::read_dir(&traces_dir)
+        .await
+        .map_err(|e| format!("Failed to read traces directory: {}", e))?;
+
+    let mut summaries: Vec<TraceSummary> = Vec::new();
+
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| format!("Failed to read directory entry: {}", e))?
+    {
+        let path = entry.path();
+
+        // Only consider .json files
+        if path.extension().is_some_and(|ext| ext == "json") {
+            let meta = entry
+                .metadata()
+                .await
+                .map_err(|e| format!("Failed to read file metadata: {}", e))?;
+
+            let file_name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+
+            let trace_id = file_name.trim_end_matches(".json").to_string();
+
+            let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+            let modified_at = {
+                let datetime: chrono::DateTime<chrono::Utc> = modified.into();
+                datetime.to_rfc3339()
+            };
+
+            summaries.push(TraceSummary {
+                trace_id,
+                file_name,
+                size_bytes: meta.len(),
+                modified_at,
+            });
+        }
+    }
+
+    // Sort by modification time (newest first)
+    summaries.sort_by(|a, b| b.modified_at.cmp(&a.modified_at));
+
+    // Truncate to the requested limit
+    summaries.truncate(max_entries);
+
+    tracing::debug!("Listed {} agent traces", summaries.len());
+    Ok(summaries)
+}
+
+/// Read a single agent trace file by its trace ID.
+///
+/// Returns the raw JSON content of the trace file at
+/// `{project_path}/.openreelio/traces/{trace_id}.json`.
+/// The `trace_id` is sanitized to prevent path traversal.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state), fields(trace_id = %trace_id))]
+pub async fn read_agent_trace(
+    trace_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let project_path = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+        project.path.clone()
+    };
+
+    // Sanitize trace_id to prevent path traversal
+    if trace_id.contains('/') || trace_id.contains('\\') || trace_id.contains("..") {
+        return Err("Invalid trace_id: contains path separators or '..'".to_string());
+    }
+
+    let file_path = project_path
+        .join(".openreelio")
+        .join("traces")
+        .join(format!("{}.json", trace_id));
+
+    if !file_path.exists() {
+        return Err(format!(
+            "Trace file not found: '{}.json' does not exist in the project traces directory",
+            trace_id
+        ));
+    }
+
+    let content = tokio::fs::read_to_string(&file_path)
+        .await
+        .map_err(|e| format!("Failed to read trace file '{}': {}", trace_id, e))?;
+
+    tracing::debug!("Read agent trace: {}", file_path.display());
+    Ok(content)
 }
 
 // =============================================================================
@@ -601,4 +748,85 @@ pub async fn clear_agent_memory(
         project_id
     );
     Ok(cleared)
+}
+
+// =============================================================================
+// Stock Media Search
+// =============================================================================
+
+/// A single stock media search result (IPC-safe DTO).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct StockMediaSearchResult {
+    /// Unique identifier within the provider.
+    pub id: String,
+    /// Display name.
+    pub name: String,
+    /// Asset type: "image", "video", or "audio".
+    pub asset_type: String,
+    /// Thumbnail URL (if available).
+    pub thumbnail: Option<String>,
+    /// Duration in seconds (for video/audio).
+    pub duration_sec: Option<f64>,
+    /// File size in bytes (if known).
+    pub size_bytes: Option<u64>,
+    /// Tags for categorization.
+    pub tags: Vec<String>,
+}
+
+/// Search stock media providers for assets matching a query.
+///
+/// Uses the built-in StockMediaProvider (Pexels/Pixabay) to search for
+/// royalty-free images and videos. Returns mock data when no API key
+/// is configured.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(fields(query = %query, asset_type = ?asset_type, limit = ?limit))]
+pub async fn search_stock_media(
+    query: String,
+    asset_type: Option<String>,
+    limit: Option<usize>,
+) -> Result<Vec<StockMediaSearchResult>, String> {
+    let config = StockMediaConfig {
+        // Use a placeholder key so the provider doesn't reject the request.
+        // In production, this would be fetched from credential storage.
+        api_key: Some("stock-media-key".to_string()),
+        ..Default::default()
+    };
+    let provider = StockMediaProvider::new("stock-media", config);
+
+    let plugin_asset_type = asset_type.as_deref().and_then(|t| match t {
+        "video" => Some(PluginAssetType::Video),
+        "image" => Some(PluginAssetType::Image),
+        "audio" => Some(PluginAssetType::Audio),
+        _ => None,
+    });
+
+    let search_query = PluginSearchQuery {
+        text: Some(query),
+        asset_type: plugin_asset_type,
+        limit: limit.unwrap_or(10),
+        ..Default::default()
+    };
+
+    let refs: Vec<PluginAssetRef> = provider
+        .search(&search_query)
+        .await
+        .map_err(|e| format!("Stock media search failed: {e}"))?;
+
+    let results: Vec<StockMediaSearchResult> = refs
+        .into_iter()
+        .map(|r| StockMediaSearchResult {
+            id: r.id,
+            name: r.name,
+            asset_type: format!("{:?}", r.asset_type).to_lowercase(),
+            thumbnail: r.thumbnail,
+            duration_sec: r.duration_sec,
+            size_bytes: r.size_bytes,
+            tags: r.tags,
+        })
+        .collect();
+
+    tracing::info!("Stock media search returned {} results", results.len());
+    Ok(results)
 }

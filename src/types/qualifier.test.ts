@@ -63,6 +63,20 @@ describe('qualifier types', () => {
       expect(QUALIFIER_PRESETS.foliage.hue_center).toBe(100);
     });
 
+    it('should have all 12 presets defined', () => {
+      const presetKeys = Object.keys(QUALIFIER_PRESETS);
+      expect(presetKeys).toHaveLength(12);
+      expect(presetKeys).toContain('skin_warm');
+      expect(presetKeys).toContain('skin_cool');
+      expect(presetKeys).toContain('sky_warm');
+      expect(presetKeys).toContain('sky_cool');
+      expect(presetKeys).toContain('foliage_autumn');
+      expect(presetKeys).toContain('foliage_spring');
+      expect(presetKeys).toContain('water');
+      expect(presetKeys).toContain('sunset');
+      expect(presetKeys).toContain('neutral_desaturate');
+    });
+
     it('should have valid values for all presets', () => {
       for (const preset of Object.values(QUALIFIER_PRESETS)) {
         expect(preset.hue_center).toBeGreaterThanOrEqual(0);

@@ -20,9 +20,11 @@ import {
 // Direct import instead of barrel to avoid bundling all utilities
 import { formatDuration } from '@/utils/formatters';
 import { EffectsList } from '../effects';
+import { BlendModePicker } from '../effects/BlendModePicker';
 import { TextInspector } from './TextInspector';
 import type { SelectedTextClip } from './TextInspector';
 import type {
+  BlendMode,
   Effect,
   EffectId,
   CaptionStyle,
@@ -50,6 +52,8 @@ export interface SelectedClip {
   };
   /** Effects applied to this clip */
   effects?: Effect[];
+  /** Clip blend mode (default: 'normal') */
+  blendMode?: BlendMode;
 }
 
 /** Asset selection data */
@@ -87,6 +91,8 @@ export interface InspectorProps {
   selectedCaption?: SelectedCaption;
   /** Callback when clip property changes */
   onClipChange?: (clipId: string, property: string, value: unknown) => void;
+  /** Callback when clip blend mode changes */
+  onClipBlendModeChange?: (clipId: string, trackId: string, blendMode: BlendMode) => void;
   /** Callback when text clip data changes */
   onTextDataChange?: (clipId: ClipId, textData: TextClipData) => void;
   /** Callback when caption property changes */
@@ -185,6 +191,7 @@ export function Inspector({
   selectedAsset,
   selectedCaption,
   // onClipChange is reserved for future clip property editing
+  onClipBlendModeChange,
   onTextDataChange,
   onCaptionChange,
   onEffectToggle,
@@ -242,6 +249,15 @@ export function Inspector({
       onAddEffect(selectedClip.id);
     }
   }, [selectedClip, onAddEffect]);
+
+  const handleBlendModeChange = useCallback(
+    (mode: BlendMode) => {
+      if (selectedClip && onClipBlendModeChange) {
+        onClipBlendModeChange(selectedClip.id, selectedClip.place.trackId, mode);
+      }
+    },
+    [selectedClip, onClipBlendModeChange],
+  );
 
   // ===========================================================================
   // Render Empty State
@@ -317,6 +333,18 @@ export function Inspector({
             label="Timeline Position"
             value={formatDuration(selectedClip.place.timelineInSec)}
             testId="clip-timeline-position"
+          />
+        </div>
+
+        {/* Blend Mode Section */}
+        <div className="mt-4 pt-4 border-t border-editor-border">
+          <BlendModePicker
+            value={selectedClip.blendMode ?? 'normal'}
+            onChange={handleBlendModeChange}
+            disabled={readOnly || !onClipBlendModeChange}
+            label="Blend Mode"
+            grouped
+            compact
           />
         </div>
 

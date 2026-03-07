@@ -721,6 +721,8 @@ mod tauri_app {
                 $crate::ipc::generate_asset_thumbnail,
                 $crate::ipc::generate_proxy_for_asset,
                 $crate::ipc::update_asset_proxy,
+                $crate::ipc::get_waveform_data,
+                $crate::ipc::generate_waveform_for_asset,
                 // Timeline commands
                 $crate::ipc::get_sequences,
                 $crate::ipc::create_sequence,
@@ -784,6 +786,12 @@ mod tauri_app {
                 $crate::ipc::is_transcription_available,
                 $crate::ipc::transcribe_asset,
                 $crate::ipc::submit_transcription_job,
+                $crate::ipc::export_captions,
+                $crate::ipc::get_captions_as_string,
+                $crate::ipc::detect_shots,
+                $crate::ipc::get_asset_shots,
+                $crate::ipc::delete_asset_shots,
+                $crate::ipc::is_shot_detection_available,
                 // Search commands
                 $crate::ipc::search_assets,
                 $crate::ipc::is_meilisearch_available,
@@ -832,7 +840,10 @@ mod tauri_app {
                 $crate::ipc::write_workspace_document,
                 // Agent commands
                 $crate::ipc::write_agent_trace,
+                $crate::ipc::list_agent_traces,
+                $crate::ipc::read_agent_trace,
                 $crate::ipc::execute_agent_plan,
+                $crate::ipc::search_stock_media,
                 // Agent memory commands
                 $crate::ipc::save_agent_memory,
                 $crate::ipc::get_agent_memory,
@@ -1055,6 +1066,8 @@ mod tauri_app {
             ipc::generate_asset_thumbnail,
             ipc::generate_proxy_for_asset,
             ipc::update_asset_proxy,
+            ipc::get_waveform_data,
+            ipc::generate_waveform_for_asset,
             // Timeline commands
             ipc::get_sequences,
             ipc::create_sequence,
@@ -1118,6 +1131,8 @@ mod tauri_app {
             ipc::is_transcription_available,
             ipc::transcribe_asset,
             ipc::submit_transcription_job,
+            ipc::export_captions,
+            ipc::get_captions_as_string,
             // Search commands
             ipc::search_assets,
             ipc::is_meilisearch_available,
@@ -1171,7 +1186,10 @@ mod tauri_app {
             ipc::write_workspace_document,
             // Agent commands
             ipc::write_agent_trace,
+            ipc::list_agent_traces,
+            ipc::read_agent_trace,
             ipc::execute_agent_plan,
+            ipc::search_stock_media,
             // Agent memory commands
             ipc::save_agent_memory,
             ipc::get_agent_memory,
