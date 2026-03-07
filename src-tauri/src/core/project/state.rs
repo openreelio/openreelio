@@ -836,11 +836,9 @@ impl ProjectState {
                                     clip_id
                                 )));
                             }
-                            Some(
-                                serde_json::from_value(blend_value.clone()).map_err(|e| {
-                                    CoreError::InvalidCommand(format!("Invalid blendMode: {}", e))
-                                })?,
-                            )
+                            Some(serde_json::from_value(blend_value.clone()).map_err(|e| {
+                                CoreError::InvalidCommand(format!("Invalid blendMode: {}", e))
+                            })?)
                         }
                     } else {
                         None
