@@ -204,4 +204,95 @@ describe('captionTools', () => {
     expect(result.error).toContain('not a caption track');
     expect(executeCommandMock).not.toHaveBeenCalled();
   });
+
+  it('should skip invalid transcription segments and report skipped count', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        segments: [
+          { startTime: 0, endTime: 2, text: 'Hello world' },
+          { startTime: 3, endTime: 3, text: 'bad segment' },
+          { startTime: 4, endTime: 5, text: '   ' },
+        ],
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(true);
+    expect(executeCommandMock).toHaveBeenCalledTimes(1);
+    expect(result.result).toMatchObject({
+      captionCount: 1,
+      skippedSegmentCount: 2,
+    });
+  });
+
+  it('should reject transcription batches when all segments are invalid', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        segments: [
+          { startTime: 2, endTime: 1, text: 'bad timing' },
+          { startTime: Number.NaN, endTime: 3, text: 'NaN start' },
+        ],
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('No valid segments provided');
+    expect(executeCommandMock).not.toHaveBeenCalled();
+  });
+
+  it('should roll back previously created captions when a later segment fails', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    executeCommandMock
+      .mockResolvedValueOnce({
+        opId: 'op-caption-1',
+        success: true,
+        createdIds: ['cap-rolled-back'],
+        deletedIds: [],
+        changes: [],
+      })
+      .mockRejectedValueOnce(new Error('Caption overlap detected'))
+      .mockResolvedValueOnce({
+        opId: 'op-caption-delete',
+        success: true,
+        createdIds: [],
+        deletedIds: ['cap-rolled-back'],
+        changes: [],
+      });
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        segments: [
+          { startTime: 0, endTime: 2, text: 'Intro' },
+          { startTime: 2, endTime: 4, text: 'Outro' },
+        ],
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Rolled back 1 caption');
+    expect(executeCommandMock).toHaveBeenCalledTimes(3);
+    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({ type: 'CreateCaption' });
+    expect(executeCommandMock.mock.calls[1][0]).toMatchObject({ type: 'CreateCaption' });
+    expect(executeCommandMock.mock.calls[2][0]).toMatchObject({
+      type: 'DeleteCaption',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'track-caption-1',
+        captionId: 'cap-rolled-back',
+      },
+    });
+  });
 });

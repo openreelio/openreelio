@@ -20,6 +20,76 @@ const logger = createLogger('GenerationTools');
 
 const GENERATION_TOOLS: ToolDefinition[] = [
   // -------------------------------------------------------------------------
+  // Search Stock Media
+  // -------------------------------------------------------------------------
+  {
+    name: 'search_stock_media',
+    description:
+      'Search stock media providers (Pexels, Pixabay) for royalty-free images, videos, and audio clips. Returns provider asset references that must be imported before timeline insertion.',
+    category: 'generation',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'Search query (e.g., "nature landscape", "city skyline")',
+        },
+        type: {
+          type: 'string',
+          enum: ['video', 'image', 'audio'],
+          description: 'Asset type to search for (default: video)',
+        },
+        count: {
+          type: 'number',
+          description: 'Maximum number of results (1-50, default: 10)',
+        },
+      },
+      required: ['query'],
+    },
+    handler: async (args) => {
+      try {
+        const query = (args.query as string)?.trim();
+        if (!query) {
+          return { success: false, error: 'Query cannot be empty' };
+        }
+
+        const assetType = (args.type as string) ?? 'video';
+        const limit = Math.min(Math.max((args.count as number) ?? 10, 1), 50);
+
+        const results = await invoke<
+          Array<{
+            id: string;
+            name: string;
+            assetType: string;
+            thumbnail: string | null;
+            durationSec: number | null;
+            sizeBytes: number | null;
+            tags: string[];
+          }>
+        >('search_stock_media', {
+          query,
+          assetType,
+          limit,
+        });
+
+        return {
+          success: true,
+          result: {
+            count: results.length,
+            query,
+            requiresImport: true,
+            assets: results,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('search_stock_media failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // -------------------------------------------------------------------------
   // Generate Video
   // -------------------------------------------------------------------------
   {
@@ -217,8 +287,7 @@ const GENERATION_TOOLS: ToolDefinition[] = [
   // -------------------------------------------------------------------------
   {
     name: 'estimate_generation_cost',
-    description:
-      'Estimate the cost of a video generation request without submitting it.',
+    description: 'Estimate the cost of a video generation request without submitting it.',
     category: 'generation',
     parameters: {
       type: 'object',

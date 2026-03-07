@@ -2,7 +2,12 @@ import type { IToolExecutor } from '../ports/IToolExecutor';
 import type { AgentContext, Plan, PlanStep, Thought } from './types';
 import type { StepValueReference } from './stepReferences';
 
-export type OrchestrationPlaybookId = 'broll_music_subtitles' | 'generate_and_place';
+export type OrchestrationPlaybookId =
+  | 'broll_music_subtitles'
+  | 'generate_and_place'
+  | 'stock_media_search'
+  | 'auto_caption'
+  | 'music_bed';
 
 export interface OrchestrationPlaybookMatch {
   id: OrchestrationPlaybookId;
@@ -55,6 +60,48 @@ const PLACE_KEYWORDS = [
   /배치/i,
 ];
 
+const STOCK_KEYWORDS = [
+  /\bstock\b/i,
+  /\bfootage\b/i,
+  /\broyalty[-\s]?free\b/i,
+  /\bpexels\b/i,
+  /\bpixabay\b/i,
+  /스톡/i,
+  /무료\s*영상/i,
+];
+
+const SEARCH_KEYWORDS = [
+  /\bfind\b/i,
+  /\bsearch\b/i,
+  /\bbrowse\b/i,
+  /\blook\s+for\b/i,
+  /찾/i,
+  /검색/i,
+];
+
+const MUSIC_BED_KEYWORDS = [
+  /\bbackground\s+music\b/i,
+  /\bmusic\s+bed\b/i,
+  /\baudio\s+bed\b/i,
+  /\badd\s+music\b/i,
+  /\binsert\s+music\b/i,
+  /\badd\s+background\s+audio\b/i,
+  /\badd\s+bgm\b/i,
+  /배경\s*음악\s*(?:추가|삽입)/i,
+  /음악\s*(?:추가|넣|삽입)/i,
+];
+
+const AUTO_CAPTION_KEYWORDS = [
+  /\bauto[-\s]?caption/i,
+  /\bauto[-\s]?subtitle/i,
+  /\btranscri(?:be|ption)/i,
+  /\bspeech[-\s]?to[-\s]?text\b/i,
+  /\bgenerate\s+(?:captions?|subtitles?)\b/i,
+  /\badd\s+(?:captions?|subtitles?)\b/i,
+  /자동\s*자막/i,
+  /음성\s*인식/i,
+];
+
 export function buildOrchestrationPlaybook(
   thought: Thought,
   context: AgentContext,
@@ -77,7 +124,226 @@ export function buildOrchestrationPlaybook(
     return generateAndPlace;
   }
 
-  return buildBrollMusicSubtitlesPlaybook(playbookContext);
+  const brollMusicSubtitles = buildBrollMusicSubtitlesPlaybook(playbookContext);
+  if (brollMusicSubtitles) {
+    return brollMusicSubtitles;
+  }
+
+  const autoCaption = buildAutoCaptionPlaybook(playbookContext);
+  if (autoCaption) {
+    return autoCaption;
+  }
+
+  const musicBed = buildMusicBedPlaybook(playbookContext);
+  if (musicBed) {
+    return musicBed;
+  }
+
+  const stockMediaSearch = buildStockMediaSearchPlaybook(playbookContext);
+  if (stockMediaSearch) {
+    return stockMediaSearch;
+  }
+
+  return null;
+}
+
+function buildMusicBedPlaybook(
+  playbookContext: PlaybookContext,
+): OrchestrationPlaybookMatch | null {
+  const { text, context, toolExecutor } = playbookContext;
+
+  if (!matchesAny(text, MUSIC_BED_KEYWORDS)) {
+    return null;
+  }
+
+  // Defer to the full broll_music_subtitles playbook if all three keywords present
+  if (matchesAll(text, [BROLL_KEYWORDS, MUSIC_KEYWORDS, SUBTITLE_KEYWORDS])) {
+    return null;
+  }
+
+  if (!hasTools(toolExecutor, ['get_unused_assets', 'insert_clip', 'adjust_volume'])) {
+    return null;
+  }
+
+  const sequenceId = context.sequenceId;
+  const audioTrackId = pickTrackId(context, 'audio');
+  const fallbackAudioAsset = pickAssetId(context, 'audio');
+
+  if (!sequenceId || !audioTrackId || !fallbackAudioAsset) {
+    return null;
+  }
+
+  // Background music level: ~25% (-12dB equivalent)
+  const BACKGROUND_VOLUME = 25;
+
+  const steps: PlanStep[] = [
+    {
+      id: 'playbook_find_music',
+      tool: 'get_unused_assets',
+      args: { kind: 'audio' },
+      description: 'Discover available audio assets for music bed',
+      riskLevel: 'low',
+      estimatedDuration: 120,
+    },
+    {
+      id: 'playbook_insert_music',
+      tool: 'insert_clip',
+      args: {
+        sequenceId,
+        trackId: audioTrackId,
+        assetId: makeReference('playbook_find_music', 'data[0].id', fallbackAudioAsset),
+        timelineStart: 0,
+      },
+      description: 'Insert music bed at the start of the timeline',
+      riskLevel: 'low',
+      estimatedDuration: 250,
+      dependsOn: ['playbook_find_music'],
+    },
+    {
+      id: 'playbook_set_volume',
+      tool: 'adjust_volume',
+      args: {
+        sequenceId,
+        trackId: audioTrackId,
+        clipId: makeReference('playbook_insert_music', 'data.clipId'),
+        volume: BACKGROUND_VOLUME,
+      },
+      description: 'Lower music bed volume to background level (-12dB)',
+      riskLevel: 'low',
+      estimatedDuration: 120,
+      dependsOn: ['playbook_insert_music'],
+    },
+  ];
+
+  return {
+    id: 'music_bed',
+    confidence: 0.89,
+    plan: {
+      goal: 'Add background music bed at reduced volume',
+      steps,
+      estimatedTotalDuration: estimateTotalDuration(steps),
+      requiresApproval: false,
+      rollbackStrategy: 'Remove inserted music clip and restore previous volume level.',
+    },
+  };
+}
+
+function buildAutoCaptionPlaybook(
+  playbookContext: PlaybookContext,
+): OrchestrationPlaybookMatch | null {
+  const { text, context, toolExecutor } = playbookContext;
+
+  if (!matchesAny(text, AUTO_CAPTION_KEYWORDS)) {
+    return null;
+  }
+
+  if (!hasTools(toolExecutor, ['auto_transcribe', 'add_captions_from_transcription'])) {
+    return null;
+  }
+
+  const sequenceId = context.sequenceId;
+  if (!sequenceId) {
+    return null;
+  }
+
+  // Find a target asset to transcribe: prefer selected clips' assets, then any video asset
+  const targetAssetId = pickAssetId(context, 'video') ?? pickAssetId(context, 'audio');
+  if (!targetAssetId) {
+    return null;
+  }
+
+  const steps: PlanStep[] = [
+    {
+      id: 'playbook_auto_transcribe',
+      tool: 'auto_transcribe',
+      args: {
+        assetId: targetAssetId,
+      },
+      description: 'Transcribe audio from asset using speech-to-text',
+      riskLevel: 'low',
+      estimatedDuration: 5000,
+    },
+    {
+      id: 'playbook_add_captions',
+      tool: 'add_captions_from_transcription',
+      args: {
+        sequenceId,
+        segments: makeReference('playbook_auto_transcribe', 'data.segments'),
+      },
+      description: 'Create caption clips from transcription segments',
+      riskLevel: 'low',
+      estimatedDuration: 500,
+      dependsOn: ['playbook_auto_transcribe'],
+    },
+  ];
+
+  return {
+    id: 'auto_caption',
+    confidence: 0.91,
+    plan: {
+      goal: 'Automatically transcribe audio and add captions to timeline',
+      steps,
+      estimatedTotalDuration: estimateTotalDuration(steps),
+      requiresApproval: false,
+      rollbackStrategy: 'Remove all added caption clips in reverse order.',
+    },
+  };
+}
+
+function buildStockMediaSearchPlaybook(
+  playbookContext: PlaybookContext,
+): OrchestrationPlaybookMatch | null {
+  const { text, thought, toolExecutor } = playbookContext;
+  const explicitIntent = thought.understanding.toLowerCase();
+
+  // Match: (stock/footage keywords OR b-roll keywords) + explicit search keywords
+  // But NOT when all three b-roll+music+subtitle keywords match (defer to broll_music_subtitles)
+  const hasStockIntent = matchesAny(text, STOCK_KEYWORDS) || matchesAny(text, BROLL_KEYWORDS);
+  const hasSearchIntent = matchesAny(explicitIntent, SEARCH_KEYWORDS);
+
+  if (!hasStockIntent || !hasSearchIntent) {
+    return null;
+  }
+
+  // If all three b-roll+music+subtitles match, let the more specific playbook handle it
+  if (matchesAll(text, [BROLL_KEYWORDS, MUSIC_KEYWORDS, SUBTITLE_KEYWORDS])) {
+    return null;
+  }
+
+  if (!hasTools(toolExecutor, ['search_stock_media'])) {
+    return null;
+  }
+
+  // Extract search query from user intent
+  const searchQuery = extractSearchQuery(thought) || 'cinematic footage';
+  const assetType = text.match(/\bimage\b|\bphoto\b|\b사진\b/i) ? 'image' : 'video';
+
+  const steps: PlanStep[] = [
+    {
+      id: 'playbook_search_stock',
+      tool: 'search_stock_media',
+      args: {
+        query: searchQuery,
+        type: assetType,
+        count: 5,
+      },
+      description: `Search stock media for "${searchQuery}"`,
+      riskLevel: 'low',
+      estimatedDuration: 200,
+    },
+  ];
+
+  return {
+    id: 'stock_media_search',
+    confidence: 0.84,
+    plan: {
+      goal: `Find stock ${assetType} references matching "${searchQuery}"`,
+      steps,
+      estimatedTotalDuration: estimateTotalDuration(steps),
+      requiresApproval: false,
+      rollbackStrategy: 'No timeline changes are applied during stock search.',
+    },
+  };
 }
 
 function buildBrollMusicSubtitlesPlaybook(
@@ -162,6 +428,7 @@ function buildBrollMusicSubtitlesPlaybook(
         args: {
           sequenceId,
           trackId: primaryAudioTrack,
+          clipId: makeReference('playbook_insert_music_bed', 'data.clipId'),
           volume: 55,
         },
         description: 'Lower music bed volume for dialog-safe mix',
@@ -282,6 +549,10 @@ function matchesAll(text: string, groups: RegExp[][]): boolean {
   return groups.every((group) => group.some((pattern) => pattern.test(text)));
 }
 
+function matchesAny(text: string, patterns: RegExp[]): boolean {
+  return patterns.some((pattern) => pattern.test(text));
+}
+
 function hasTools(toolExecutor: IToolExecutor, toolNames: string[]): boolean {
   return toolNames.every((name) => toolExecutor.hasTool(name));
 }
@@ -398,6 +669,31 @@ function buildSearchText(thought: Thought): string {
 
 function estimateTotalDuration(steps: PlanStep[]): number {
   return steps.reduce((acc, step) => acc + step.estimatedDuration, 0);
+}
+
+function extractSearchQuery(thought: Thought): string | null {
+  // Try quoted text first
+  const quoted = extractQuotedText(thought);
+  if (quoted) return quoted;
+
+  // Try to extract topic from "find [topic] b-roll/footage/stock" patterns
+  const source = `${thought.understanding} ${thought.approach}`;
+  const topicMatch = source.match(
+    /(?:find|search|add|get|browse|look\s+for)\s+(.+?)\s+(?:b-?roll|footage|stock|clip|video)/i,
+  );
+  if (topicMatch) {
+    return topicMatch[1].trim();
+  }
+
+  // Try "b-roll/footage of/about [topic]" patterns
+  const ofMatch = source.match(
+    /(?:b-?roll|footage|stock|clip)\s+(?:of|about|for|with)\s+(.+?)(?:\.|$)/i,
+  );
+  if (ofMatch) {
+    return ofMatch[1].trim();
+  }
+
+  return null;
 }
 
 function extractQuotedText(thought: Thought): string | null {

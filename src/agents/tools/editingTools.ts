@@ -705,6 +705,16 @@ const EDITING_TOOLS: ToolDefinition[] = [
           assetId,
           timelineStart,
         });
+        const clipId = result.createdIds[0];
+
+        if (!clipId) {
+          logger.error('insert_clip failed to produce a clip id', {
+            sequenceId,
+            trackId,
+            assetId,
+          });
+          return { success: false, error: 'InsertClip did not return a created clip id' };
+        }
 
         const project = useProjectStore.getState();
         const asset = project.assets.get(assetId);
@@ -715,13 +725,7 @@ const EDITING_TOOLS: ToolDefinition[] = [
 
         if (asset && shouldAutoExtractLinkedAudio) {
           try {
-            await handleLinkedAudio(
-              asset,
-              sequenceId,
-              trackId,
-              result.createdIds[0],
-              timelineStart,
-            );
+            await handleLinkedAudio(asset, sequenceId, trackId, clipId, timelineStart);
           } catch (linkedAudioError) {
             const msg =
               linkedAudioError instanceof Error
@@ -733,7 +737,17 @@ const EDITING_TOOLS: ToolDefinition[] = [
         }
 
         logger.debug('insert_clip executed', { opId: result.opId });
-        return { success: true, result };
+        return {
+          success: true,
+          result: {
+            ...result,
+            assetId,
+            clipId,
+            sequenceId,
+            timelineStart,
+            trackId,
+          },
+        };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('insert_clip failed', { error: message });
