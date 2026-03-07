@@ -18,8 +18,37 @@ use crate::core::{
     ffmpeg::FFmpegRunner,
     fs::validate_local_input_path,
     process::configure_tokio_command,
-    timeline::{Clip, Sequence, Track, TrackKind},
+    render::hdr::{build_tonemap_filter, HdrMetadata, TonemapMode, TonemapParams},
+    timeline::{BlendMode, Clip, Sequence, Track, TrackKind},
 };
+
+fn hdr_metadata_for_asset(asset: &Asset) -> HdrMetadata {
+    let Some(video_info) = asset.video.as_ref() else {
+        return HdrMetadata::sdr();
+    };
+
+    if !video_info.is_hdr {
+        return HdrMetadata::sdr();
+    }
+
+    match video_info.color_transfer.as_deref() {
+        Some("arib-std-b67") | Some("hlg") => HdrMetadata::hlg_default(),
+        Some("smpte2084") | Some("pq") | None => HdrMetadata::hdr10_default(),
+        Some(_) => HdrMetadata::hdr10_default(),
+    }
+}
+
+fn effective_blend_mode_for_clip(clip: &Clip, track: &Track) -> BlendMode {
+    if clip.blend_mode != BlendMode::Normal {
+        return clip.blend_mode.clone();
+    }
+
+    track.blend_mode.clone()
+}
+
+fn uses_non_normal_blend_mode(clip: &Clip, track: &Track) -> bool {
+    effective_blend_mode_for_clip(clip, track) != BlendMode::Normal
+}
 
 // =============================================================================
 // Types
@@ -125,6 +154,9 @@ pub struct ExportSettings {
     pub max_fall: Option<u32>,
     /// Color bit depth (8, 10, or 12)
     pub bit_depth: Option<u8>,
+    /// Tonemapping mode for HDR→SDR conversion (applied when source is HDR and output is SDR)
+    #[serde(default)]
+    pub tonemap_mode: Option<TonemapMode>,
 }
 
 impl Default for ExportSettings {
@@ -147,6 +179,7 @@ impl Default for ExportSettings {
             max_cll: None,
             max_fall: None,
             bit_depth: None,
+            tonemap_mode: None,
         }
     }
 }
@@ -173,6 +206,7 @@ impl ExportSettings {
                 max_cll: None,
                 max_fall: None,
                 bit_depth: None,
+                tonemap_mode: None,
             },
             ExportPreset::Youtube4k => Self {
                 preset: ExportPreset::Youtube4k,
@@ -192,6 +226,7 @@ impl ExportSettings {
                 max_cll: None,
                 max_fall: None,
                 bit_depth: None,
+                tonemap_mode: None,
             },
             ExportPreset::YoutubeShorts => Self {
                 preset: ExportPreset::YoutubeShorts,
@@ -211,6 +246,7 @@ impl ExportSettings {
                 max_cll: None,
                 max_fall: None,
                 bit_depth: None,
+                tonemap_mode: None,
             },
             ExportPreset::Twitter => Self {
                 preset: ExportPreset::Twitter,
@@ -230,6 +266,7 @@ impl ExportSettings {
                 max_cll: None,
                 max_fall: None,
                 bit_depth: None,
+                tonemap_mode: None,
             },
             ExportPreset::Instagram => Self {
                 preset: ExportPreset::Instagram,
@@ -249,6 +286,7 @@ impl ExportSettings {
                 max_cll: None,
                 max_fall: None,
                 bit_depth: None,
+                tonemap_mode: None,
             },
             ExportPreset::WebmVp9 => Self {
                 preset: ExportPreset::WebmVp9,
@@ -268,6 +306,7 @@ impl ExportSettings {
                 max_cll: None,
                 max_fall: None,
                 bit_depth: None,
+                tonemap_mode: None,
             },
             ExportPreset::ProRes => Self {
                 preset: ExportPreset::ProRes,
@@ -287,6 +326,7 @@ impl ExportSettings {
                 max_cll: None,
                 max_fall: None,
                 bit_depth: None,
+                tonemap_mode: None,
             },
             ExportPreset::Custom => Self {
                 preset: ExportPreset::Custom,
@@ -328,6 +368,7 @@ impl ExportSettings {
             max_cll: None,
             max_fall: None,
             bit_depth: None,
+            tonemap_mode: None,
         }
     }
 
@@ -454,6 +495,51 @@ impl ExportSettings {
             self.video_codec = VideoCodec::H265;
         }
         self
+    }
+
+    /// Builds the tonemapping FFmpeg video filter string for HDR→SDR conversion.
+    ///
+    /// Returns `Some(filter)` when a tonemap mode is configured and the source
+    /// metadata indicates HDR content. Returns `None` if tonemapping is not needed.
+    pub fn build_tonemap_video_filter(&self, source_metadata: &HdrMetadata) -> Option<String> {
+        // Only tonemap if we have a mode set and the source is actually HDR
+        let mode = self.tonemap_mode?;
+        if !source_metadata.is_hdr() {
+            return None;
+        }
+
+        let params = TonemapParams {
+            mode,
+            target_peak: 100.0,
+            desat: 0.75,
+            desat_exp: 1.5,
+            gamut: "relative".to_string(),
+        };
+
+        let filter = build_tonemap_filter(&params, source_metadata);
+        if filter.is_empty() {
+            None
+        } else {
+            Some(filter)
+        }
+    }
+
+    /// Constructs `HdrMetadata` from the export settings for HDR passthrough.
+    pub fn to_hdr_metadata(&self) -> HdrMetadata {
+        match self.hdr_mode {
+            HdrMode::Sdr => HdrMetadata::sdr(),
+            HdrMode::Hdr10 => {
+                let mut meta = HdrMetadata::hdr10_default();
+                if let Some(cll) = self.max_cll {
+                    meta = meta.with_max_cll(cll);
+                }
+                if let Some(fall) = self.max_fall {
+                    meta = meta.with_max_fall(fall);
+                }
+                meta
+            }
+            HdrMode::Hlg => HdrMetadata::hlg_default(),
+        }
     }
 }
 
@@ -1305,12 +1391,23 @@ impl ExportEngine {
             // Build FilterGraph for this clip's effects
             let clip_filter_graph = self.build_clip_filter_graph(clip, effects);
 
+            // Build tonemapping filter if needed (HDR source → SDR output)
+            let source_hdr_metadata = hdr_metadata_for_asset(asset);
+            let tonemap_filter = settings.build_tonemap_video_filter(&source_hdr_metadata);
+
             // Build filters based on track type
             match track.kind {
                 TrackKind::Video => {
-                    // Video processing: trim -> effects -> output
+                    // Video processing: trim -> effects -> [tonemap] -> output
                     let trim_label = format!("trim{}", input_index);
                     let video_out_label = format!("v{}", input_index);
+
+                    // Use an intermediate label when tonemapping is needed
+                    let effects_out_label = if tonemap_filter.is_some() {
+                        format!("vfx{}", input_index)
+                    } else {
+                        video_out_label.clone()
+                    };
 
                     // Step 1: Trim filter
                     let trim_filter = format!(
@@ -1326,13 +1423,21 @@ impl ExportEngine {
                     // Step 2: Apply video effects if any
                     if clip_filter_graph.has_video_effects() {
                         let effects_filter = clip_filter_graph
-                            .to_video_filter_complex(&trim_label, &video_out_label);
+                            .to_video_filter_complex(&trim_label, &effects_out_label);
                         filter_complex.push_str(&effects_filter);
                         filter_complex.push(';');
                     } else {
                         // No effects - pass through with null filter
                         filter_complex
-                            .push_str(&format!("[{}]null[{}];", trim_label, video_out_label));
+                            .push_str(&format!("[{}]null[{}];", trim_label, effects_out_label));
+                    }
+
+                    // Step 3: Apply tonemapping if needed (HDR → SDR)
+                    if let Some(ref tm_filter) = tonemap_filter {
+                        filter_complex.push_str(&format!(
+                            "[{}]{}[{}];",
+                            effects_out_label, tm_filter, video_out_label
+                        ));
                     }
 
                     video_streams.push(format!("[{}]", video_out_label));
@@ -1536,6 +1641,9 @@ impl ExportEngine {
                 args.push(crf.to_string());
             }
         }
+
+        // HDR metadata (color primaries, transfer, colorspace, x265 params)
+        args.extend(settings.hdr_args());
 
         // Overwrite
         args.push("-y".to_string());
@@ -2069,6 +2177,13 @@ pub fn validate_export_settings(
         }
 
         for clip in &track.clips {
+            if track.kind == TrackKind::Video && uses_non_normal_blend_mode(clip, track) {
+                validation.add_error(format!(
+                    "Blend mode export is not supported yet for clip '{}' on track '{}'",
+                    clip.id, track.name
+                ));
+            }
+
             if is_text_clip(clip) {
                 // Ensure the clip has an enabled TextOverlay effect so rendering is deterministic.
                 let has_text_overlay = clip.effects.iter().any(|effect_id| {
@@ -2274,6 +2389,8 @@ pub fn build_complex_filter_args_with_audio_info(
 
         // Build FilterGraph for this clip's effects
         let clip_filter_graph = build_clip_filter_graph_standalone(clip, effects);
+        let source_hdr_metadata = hdr_metadata_for_asset(asset);
+        let tonemap_filter = settings.build_tonemap_video_filter(&source_hdr_metadata);
 
         // Build filters based on track type
         match track.kind {
@@ -2281,6 +2398,11 @@ pub fn build_complex_filter_args_with_audio_info(
                 // Video processing
                 let trim_label = format!("trim{}", input_index);
                 let video_out_label = format!("v{}", input_index);
+                let effects_out_label = if tonemap_filter.is_some() {
+                    format!("vfx{}", input_index)
+                } else {
+                    video_out_label.clone()
+                };
 
                 let trim_filter = format!(
                     "[{}:v]trim=start={}:end={},setpts=PTS-STARTPTS[{}]",
@@ -2291,11 +2413,19 @@ pub fn build_complex_filter_args_with_audio_info(
 
                 if clip_filter_graph.has_video_effects() {
                     let effects_filter =
-                        clip_filter_graph.to_video_filter_complex(&trim_label, &video_out_label);
+                        clip_filter_graph.to_video_filter_complex(&trim_label, &effects_out_label);
                     filter_complex.push_str(&effects_filter);
                     filter_complex.push(';');
                 } else {
-                    filter_complex.push_str(&format!("[{}]null[{}];", trim_label, video_out_label));
+                    filter_complex
+                        .push_str(&format!("[{}]null[{}];", trim_label, effects_out_label));
+                }
+
+                if let Some(ref tm_filter) = tonemap_filter {
+                    filter_complex.push_str(&format!(
+                        "[{}]{}[{}];",
+                        effects_out_label, tm_filter, video_out_label
+                    ));
                 }
 
                 video_streams.push(format!("[{}]", video_out_label));
@@ -2835,6 +2965,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_validation_rejects_non_normal_clip_blend_modes() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{BlendMode, Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.blend_mode = BlendMode::Multiply;
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_blend_mode.mp4");
+        let mut assets = std::collections::HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_blend_mode.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(!validation.is_valid);
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.to_lowercase().contains("blend mode export")));
+    }
+
     // -------------------------------------------------------------------------
     // Timeline Gap Detection Tests
     // -------------------------------------------------------------------------
@@ -3164,6 +3335,8 @@ mod tests {
                 codec: "h264".to_string(),
                 pixel_format: "yuv420p".to_string(),
                 bitrate: Some(8_000_000),
+                is_hdr: false,
+                color_transfer: None,
             }),
             audio: Some(AudioStreamInfo {
                 sample_rate: 48000,
@@ -3192,6 +3365,8 @@ mod tests {
                 codec: "h264".to_string(),
                 pixel_format: "yuv420p".to_string(),
                 bitrate: Some(8_000_000),
+                is_hdr: false,
+                color_transfer: None,
             }),
             audio: None, // No audio stream
             format: "mp4".to_string(),
@@ -4461,5 +4636,244 @@ mod tests {
                 preset
             );
         }
+    }
+
+    // =========================================================================
+    // Tonemapping Integration Tests
+    // =========================================================================
+
+    #[test]
+    fn test_tonemap_mode_defaults_to_none() {
+        let settings = ExportSettings::default();
+        assert!(settings.tonemap_mode.is_none());
+    }
+
+    #[test]
+    fn test_build_tonemap_filter_returns_none_for_sdr_source() {
+        let settings = ExportSettings {
+            tonemap_mode: Some(TonemapMode::Reinhard),
+            ..Default::default()
+        };
+        let sdr_meta = HdrMetadata::sdr();
+        assert!(settings.build_tonemap_video_filter(&sdr_meta).is_none());
+    }
+
+    #[test]
+    fn test_build_tonemap_filter_returns_none_when_mode_not_set() {
+        let settings = ExportSettings::default();
+        let hdr_meta = HdrMetadata::hdr10_default();
+        assert!(settings.build_tonemap_video_filter(&hdr_meta).is_none());
+    }
+
+    #[test]
+    fn test_build_tonemap_filter_reinhard_for_hdr_source() {
+        let settings = ExportSettings {
+            tonemap_mode: Some(TonemapMode::Reinhard),
+            ..Default::default()
+        };
+        let hdr_meta = HdrMetadata::hdr10_default();
+        let filter = settings.build_tonemap_video_filter(&hdr_meta);
+
+        assert!(filter.is_some());
+        let f = filter.unwrap();
+        assert!(
+            f.contains("zscale=t=linear"),
+            "should convert to linear light"
+        );
+        assert!(
+            f.contains("tonemap=reinhard"),
+            "should use reinhard tonemapping"
+        );
+        assert!(
+            f.contains("zscale=p=bt709:t=bt709:m=bt709"),
+            "should convert to BT.709"
+        );
+        assert!(f.contains("format=yuv420p"), "should convert to 8-bit");
+    }
+
+    #[test]
+    fn test_build_tonemap_filter_hable_mode() {
+        let settings = ExportSettings {
+            tonemap_mode: Some(TonemapMode::Hable),
+            ..Default::default()
+        };
+        let hdr_meta = HdrMetadata::hdr10_default();
+        let filter = settings.build_tonemap_video_filter(&hdr_meta).unwrap();
+        assert!(filter.contains("tonemap=hable"));
+    }
+
+    #[test]
+    fn test_build_tonemap_filter_bt2390_mode() {
+        let settings = ExportSettings {
+            tonemap_mode: Some(TonemapMode::Bt2390),
+            ..Default::default()
+        };
+        let hdr_meta = HdrMetadata::hdr10_default();
+        let filter = settings.build_tonemap_video_filter(&hdr_meta).unwrap();
+        assert!(filter.contains("tonemap=bt2390"));
+    }
+
+    #[test]
+    fn test_build_tonemap_filter_mobius_mode() {
+        let settings = ExportSettings {
+            tonemap_mode: Some(TonemapMode::Mobius),
+            ..Default::default()
+        };
+        let hdr_meta = HdrMetadata::hdr10_default();
+        let filter = settings.build_tonemap_video_filter(&hdr_meta).unwrap();
+        assert!(filter.contains("tonemap=mobius"));
+    }
+
+    #[test]
+    fn test_to_hdr_metadata_sdr() {
+        let settings = ExportSettings::default();
+        let meta = settings.to_hdr_metadata();
+        assert!(!meta.is_hdr());
+    }
+
+    #[test]
+    fn test_to_hdr_metadata_hdr10() {
+        let settings = ExportSettings {
+            hdr_mode: HdrMode::Hdr10,
+            max_cll: Some(2000),
+            max_fall: Some(800),
+            ..Default::default()
+        };
+        let meta = settings.to_hdr_metadata();
+        assert!(meta.is_hdr());
+        assert_eq!(meta.max_cll, Some(2000));
+        assert_eq!(meta.max_fall, Some(800));
+    }
+
+    #[test]
+    fn test_to_hdr_metadata_hlg() {
+        let settings = ExportSettings {
+            hdr_mode: HdrMode::Hlg,
+            ..Default::default()
+        };
+        let meta = settings.to_hdr_metadata();
+        assert!(meta.is_hdr());
+        assert!(meta.max_cll.is_none()); // HLG doesn't use static metadata
+    }
+
+    #[test]
+    fn test_hdr_metadata_for_asset_returns_sdr_for_sdr_assets() {
+        let asset = Asset::new_video(
+            "clip.mp4",
+            "/tmp/clip.mp4",
+            crate::core::assets::VideoInfo {
+                is_hdr: false,
+                color_transfer: Some("bt709".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert!(!hdr_metadata_for_asset(&asset).is_hdr());
+    }
+
+    #[test]
+    fn test_hdr_metadata_for_asset_preserves_hlg_assets() {
+        let asset = Asset::new_video(
+            "clip-hlg.mp4",
+            "/tmp/clip-hlg.mp4",
+            crate::core::assets::VideoInfo {
+                is_hdr: true,
+                color_transfer: Some("arib-std-b67".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let metadata = hdr_metadata_for_asset(&asset);
+        assert!(metadata.is_hdr());
+        assert_eq!(metadata.color_space.transfer.ffmpeg_value(), "arib-std-b67");
+    }
+
+    #[test]
+    fn test_build_filter_skips_tonemap_for_sdr_assets_even_when_enabled() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("sdr_tonemap.mp4");
+        let mut assets = std::collections::HashMap::new();
+        let mut asset = Asset::new_video(
+            "sdr_tonemap.mp4",
+            &video_path,
+            VideoInfo {
+                is_hdr: false,
+                color_transfer: Some("bt709".to_string()),
+                ..Default::default()
+            },
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), asset);
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            &ExportSettings {
+                tonemap_mode: Some(TonemapMode::Reinhard),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let filter_complex = args
+            .windows(2)
+            .find_map(|window| (window[0] == "-filter_complex").then_some(window[1].as_str()))
+            .unwrap();
+
+        assert!(!filter_complex.contains("tonemap="));
+    }
+
+    #[test]
+    fn test_complex_export_includes_hdr_args() {
+        // Verify that build_complex_filter_args_with_audio_info includes HDR metadata
+        let settings = ExportSettings {
+            hdr_mode: HdrMode::Hdr10,
+            video_codec: VideoCodec::H265,
+            max_cll: Some(1000),
+            max_fall: Some(400),
+            ..Default::default()
+        };
+        let args = settings.hdr_args();
+        assert!(args.contains(&"-color_primaries".to_string()));
+        assert!(args.contains(&"bt2020".to_string()));
+        assert!(args.contains(&"-color_trc".to_string()));
+        assert!(args.contains(&"smpte2084".to_string()));
+        assert!(args.contains(&"-x265-params".to_string()));
+    }
+
+    #[test]
+    fn test_tonemap_mode_serialization() {
+        let settings = ExportSettings {
+            tonemap_mode: Some(TonemapMode::Hable),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("\"tonemapMode\":\"hable\""));
+
+        let parsed: ExportSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.tonemap_mode, Some(TonemapMode::Hable));
+    }
+
+    #[test]
+    fn test_tonemap_mode_deserialization_null() {
+        // tonemap_mode is optional, should deserialize None from missing field
+        let json = r#"{"preset":"youtube1080p","outputPath":"out.mp4","videoCodec":"h264","audioCodec":"aac","twoPass":false,"hdrMode":"sdr"}"#;
+        let parsed: ExportSettings = serde_json::from_str(json).unwrap();
+        assert!(parsed.tonemap_mode.is_none());
     }
 }

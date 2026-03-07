@@ -61,6 +61,13 @@ struct FFprobeStream {
     sample_rate: Option<String>,
     channels: Option<u8>,
     bit_rate: Option<String>,
+    color_transfer: Option<String>,
+    #[allow(dead_code)]
+    color_space: Option<String>,
+    #[allow(dead_code)]
+    color_primaries: Option<String>,
+    #[allow(dead_code)]
+    pix_fmt: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,6 +169,13 @@ impl MetadataExtractor {
 
         let bitrate = stream.bit_rate.as_ref().and_then(|s| s.parse().ok());
 
+        // Detect HDR from color transfer function
+        let is_hdr = stream
+            .color_transfer
+            .as_deref()
+            .map(|ct| matches!(ct, "smpte2084" | "arib-std-b67"))
+            .unwrap_or(false);
+
         VideoInfo {
             width: stream.width.unwrap_or(1920),
             height: stream.height.unwrap_or(1080),
@@ -172,6 +186,8 @@ impl MetadataExtractor {
                 .unwrap_or_else(|| "unknown".to_string()),
             bitrate,
             has_alpha: false, // FFprobe doesn't easily expose this
+            is_hdr,
+            color_transfer: stream.color_transfer.clone(),
         }
     }
 
@@ -468,5 +484,116 @@ mod tests {
         // let metadata = MetadataExtractor::extract(path).unwrap();
         // assert!(metadata.video.is_some());
         // assert!(metadata.duration_sec > 0.0);
+    }
+
+    // -------------------------------------------------------------------------
+    // HDR Detection Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_hdr10_video_metadata() {
+        let json = r#"{
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "hevc",
+                    "width": 3840,
+                    "height": 2160,
+                    "r_frame_rate": "24/1",
+                    "color_transfer": "smpte2084",
+                    "color_space": "bt2020nc",
+                    "color_primaries": "bt2020",
+                    "pix_fmt": "yuv420p10le"
+                }
+            ],
+            "format": {
+                "duration": "120.0",
+                "size": "500000000"
+            }
+        }"#;
+
+        let metadata = MetadataExtractor::parse_ffprobe_output(json).unwrap();
+        let video = metadata.video.unwrap();
+
+        assert!(video.is_hdr, "HDR10 content should be detected as HDR");
+        assert_eq!(video.color_transfer.as_deref(), Some("smpte2084"));
+        assert_eq!(video.codec, "hevc");
+    }
+
+    #[test]
+    fn test_parse_hlg_video_metadata() {
+        let json = r#"{
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "hevc",
+                    "width": 1920,
+                    "height": 1080,
+                    "r_frame_rate": "50/1",
+                    "color_transfer": "arib-std-b67"
+                }
+            ],
+            "format": {
+                "duration": "60.0"
+            }
+        }"#;
+
+        let metadata = MetadataExtractor::parse_ffprobe_output(json).unwrap();
+        let video = metadata.video.unwrap();
+
+        assert!(video.is_hdr, "HLG content should be detected as HDR");
+        assert_eq!(video.color_transfer.as_deref(), Some("arib-std-b67"));
+    }
+
+    #[test]
+    fn test_parse_sdr_video_not_detected_as_hdr() {
+        let json = r#"{
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1920,
+                    "height": 1080,
+                    "r_frame_rate": "30/1",
+                    "color_transfer": "bt709"
+                }
+            ],
+            "format": {
+                "duration": "30.0"
+            }
+        }"#;
+
+        let metadata = MetadataExtractor::parse_ffprobe_output(json).unwrap();
+        let video = metadata.video.unwrap();
+
+        assert!(!video.is_hdr, "SDR content should not be detected as HDR");
+        assert_eq!(video.color_transfer.as_deref(), Some("bt709"));
+    }
+
+    #[test]
+    fn test_parse_video_without_color_transfer_defaults_to_sdr() {
+        let json = r#"{
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "h264",
+                    "width": 1280,
+                    "height": 720,
+                    "r_frame_rate": "30/1"
+                }
+            ],
+            "format": {
+                "duration": "10.0"
+            }
+        }"#;
+
+        let metadata = MetadataExtractor::parse_ffprobe_output(json).unwrap();
+        let video = metadata.video.unwrap();
+
+        assert!(
+            !video.is_hdr,
+            "Missing color_transfer should default to SDR"
+        );
+        assert!(video.color_transfer.is_none());
     }
 }
