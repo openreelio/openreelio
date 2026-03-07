@@ -311,6 +311,9 @@ pub struct Track {
     /// Clips stored directly for efficient Event Sourcing
     pub clips: Vec<Clip>,
     pub blend_mode: BlendMode,
+    /// Present for modern projects; true only for protected default timeline tracks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_base_track: Option<bool>,
     pub muted: bool,
     pub locked: bool,
     pub visible: bool,
@@ -327,11 +330,18 @@ impl Track {
             name: name.to_string(),
             clips: vec![],
             blend_mode: BlendMode::Normal,
+            is_base_track: Some(false),
             muted: false,
             locked: false,
             visible: true,
             volume: 1.0,
         }
+    }
+
+    /// Marks whether this track is a protected default/base track.
+    pub fn with_base_track(mut self, is_base_track: bool) -> Self {
+        self.is_base_track = Some(is_base_track);
+        self
     }
 
     /// Creates a new video track

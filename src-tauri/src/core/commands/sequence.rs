@@ -63,8 +63,8 @@ impl Command for CreateSequenceCommand {
 
         // Add default tracks if requested
         if self.add_default_tracks {
-            let video_track = Track::new("Video 1", TrackKind::Video);
-            let audio_track = Track::new("Audio 1", TrackKind::Audio);
+            let video_track = Track::new("Video 1", TrackKind::Video).with_base_track(true);
+            let audio_track = Track::new("Audio 1", TrackKind::Audio).with_base_track(true);
             sequence.add_track(video_track);
             sequence.add_track(audio_track);
         }

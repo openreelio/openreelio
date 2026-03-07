@@ -2,6 +2,8 @@
 //!
 //! Implements all track-related editing commands.
 
+use std::collections::{HashMap, HashSet};
+
 use serde::{Deserialize, Serialize};
 
 use crate::core::{
@@ -133,6 +135,46 @@ impl RemoveTrackCommand {
     }
 }
 
+fn is_protected_base_track(tracks: &[Track], target_track_id: &TrackId) -> bool {
+    let Some(target_track) = tracks.iter().find(|track| &track.id == target_track_id) else {
+        return false;
+    };
+
+    if target_track.is_base_track == Some(true) {
+        return true;
+    }
+
+    if !matches!(target_track.kind, TrackKind::Video | TrackKind::Audio) {
+        return false;
+    }
+
+    let same_kind_tracks: Vec<&Track> = tracks
+        .iter()
+        .filter(|track| track.kind == target_track.kind)
+        .collect();
+
+    if same_kind_tracks
+        .iter()
+        .any(|track| track.is_base_track == Some(true))
+    {
+        return false;
+    }
+
+    let legacy_candidate_tracks: Vec<&&Track> = same_kind_tracks
+        .iter()
+        .filter(|track| track.is_base_track.is_none())
+        .collect();
+
+    if legacy_candidate_tracks.is_empty() {
+        return false;
+    }
+
+    legacy_candidate_tracks
+        .iter()
+        .min_by(|left, right| left.id.cmp(&right.id))
+        .is_some_and(|track| track.id == *target_track_id)
+}
+
 impl Command for RemoveTrackCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
         let sequence = state
@@ -145,6 +187,12 @@ impl Command for RemoveTrackCommand {
             .iter()
             .position(|t| t.id == self.track_id)
             .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        if is_protected_base_track(&sequence.tracks, &self.track_id) {
+            return Err(CoreError::InvalidCommand(
+                "Base timeline tracks cannot be deleted".to_string(),
+            ));
+        }
 
         // Store track and position before removal for undo
         self.removed_track = Some(sequence.tracks[position].clone());
@@ -211,12 +259,61 @@ impl ReorderTracksCommand {
     }
 }
 
+fn validate_track_reorder(tracks: &[Track], new_order: &[TrackId]) -> CoreResult<()> {
+    if new_order.len() != tracks.len() {
+        return Err(CoreError::InvalidCommand(
+            "Track reorder must include every track exactly once".to_string(),
+        ));
+    }
+
+    let unique_track_ids: HashSet<&TrackId> = new_order.iter().collect();
+    if unique_track_ids.len() != new_order.len() {
+        return Err(CoreError::InvalidCommand(
+            "Track reorder contains duplicate track IDs".to_string(),
+        ));
+    }
+
+    let track_kind_by_id: HashMap<&TrackId, &TrackKind> = tracks
+        .iter()
+        .map(|track| (&track.id, &track.kind))
+        .collect();
+
+    for reordered_track_id in new_order {
+        if !track_kind_by_id.contains_key(reordered_track_id) {
+            return Err(CoreError::InvalidCommand(format!(
+                "Track reorder references unknown track: {}",
+                reordered_track_id
+            )));
+        }
+    }
+
+    for (index, original_track) in tracks.iter().enumerate() {
+        let reordered_track_id = &new_order[index];
+        let reordered_kind = track_kind_by_id.get(reordered_track_id).ok_or_else(|| {
+            CoreError::InvalidCommand(format!(
+                "Track reorder references unknown track: {}",
+                reordered_track_id
+            ))
+        })?;
+
+        if *reordered_kind != &original_track.kind {
+            return Err(CoreError::InvalidCommand(
+                "Track reorder must stay within the same track kind".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 impl Command for ReorderTracksCommand {
     fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
         let sequence = state
             .sequences
             .get_mut(&self.sequence_id)
             .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        validate_track_reorder(&sequence.tracks, &self.new_order)?;
 
         // Store original order before reordering for undo
         self.original_order = Some(sequence.tracks.iter().map(|t| t.id.clone()).collect());
@@ -510,6 +607,46 @@ mod tests {
     }
 
     #[test]
+    fn test_remove_track_command_rejects_base_tracks() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+
+        let base_track = Track::new("Video 1", TrackKind::Video).with_base_track(true);
+        let base_track_id = base_track.id.clone();
+        state
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .add_track(base_track);
+
+        let mut remove_cmd = RemoveTrackCommand::new(&seq_id, &base_track_id);
+        let result = remove_cmd.execute(&mut state);
+
+        assert!(matches!(result, Err(CoreError::InvalidCommand(_))));
+    }
+
+    #[test]
+    fn test_remove_track_command_rejects_legacy_base_tracks() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+
+        let mut legacy_video_track = Track::new("Video 1", TrackKind::Video);
+        legacy_video_track.is_base_track = None;
+        let legacy_video_track_id = legacy_video_track.id.clone();
+
+        let added_video_track = Track::new("Video 2", TrackKind::Video);
+
+        let sequence = state.sequences.get_mut(&seq_id).unwrap();
+        sequence.add_track(legacy_video_track);
+        sequence.add_track(added_video_track);
+
+        let mut remove_cmd = RemoveTrackCommand::new(&seq_id, &legacy_video_track_id);
+        let result = remove_cmd.execute(&mut state);
+
+        assert!(matches!(result, Err(CoreError::InvalidCommand(_))));
+    }
+
+    #[test]
     fn test_reorder_tracks_command() {
         let mut state = create_test_state();
         let seq_id = state.active_sequence_id.clone().unwrap();
@@ -538,6 +675,28 @@ mod tests {
         assert_eq!(tracks[0].name, "C");
         assert_eq!(tracks[1].name, "A");
         assert_eq!(tracks[2].name, "B");
+    }
+
+    #[test]
+    fn test_reorder_tracks_command_rejects_cross_kind_swaps() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+
+        let mut video_cmd = AddTrackCommand::new(&seq_id, "Video 1", TrackKind::Video);
+        let video_result = video_cmd.execute(&mut state).unwrap();
+
+        let mut audio_cmd = AddTrackCommand::new(&seq_id, "Audio 1", TrackKind::Audio);
+        let audio_result = audio_cmd.execute(&mut state).unwrap();
+
+        let new_order = vec![
+            audio_result.created_ids[0].clone(),
+            video_result.created_ids[0].clone(),
+        ];
+        let mut reorder_cmd = ReorderTracksCommand::new(&seq_id, new_order);
+
+        let result = reorder_cmd.execute(&mut state);
+
+        assert!(matches!(result, Err(CoreError::InvalidCommand(_))));
     }
 
     #[test]
