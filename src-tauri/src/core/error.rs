@@ -116,6 +116,15 @@ pub enum CoreError {
     ProxyGenerationFailed(String),
 
     // =========================================================================
+    // Analysis Errors
+    // =========================================================================
+    #[error("Analysis failed: {0}")]
+    AnalysisFailed(String),
+
+    #[error("Analysis bundle not found for asset: {0}")]
+    AnalysisBundleNotFound(String),
+
+    // =========================================================================
     // AI Errors
     // =========================================================================
     #[error("AI request failed: {0}")]
