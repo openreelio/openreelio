@@ -50,7 +50,8 @@ fn main() {
         .typ::<openreelio_lib::ipc::HistoryChangedEvent>()
         .typ::<openreelio_lib::ipc::JobProgressEvent>()
         .typ::<openreelio_lib::ipc::JobCompletedEvent>()
-        .typ::<openreelio_lib::ipc::JobFailedEvent>();
+        .typ::<openreelio_lib::ipc::JobFailedEvent>()
+        .typ::<openreelio_lib::core::analysis::dtw::DtwResult>();
 
     let out_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")

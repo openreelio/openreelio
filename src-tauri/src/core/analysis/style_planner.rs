@@ -4,7 +4,9 @@
 //! the editing style captured in an [`EditingStyleDocument`].
 //!
 //! Uses DTW alignment to map reference shot pacing onto the source
-//! timeline, producing `split_clip` and `add_transition` plan steps.
+//! timeline, producing executable `AddTrack`, `InsertClip`, and `SplitClip`
+//! plan steps. Non-cut reference transitions currently surface as warnings until
+//! transition execution is supported by agent plans.
 
 use std::collections::HashSet;
 
@@ -57,7 +59,7 @@ const MIN_SPLIT_EDGE_SEC: f64 = 0.1;
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct StylePlanResult {
-    /// Executable plan with split_clip and add_transition steps
+    /// Executable plan with AddTrack, InsertClip, and SplitClip steps
     pub plan: AgentPlan,
     /// Compatibility score between reference and source (0.0 - 1.0)
     pub compatibility_score: f64,

@@ -2578,6 +2578,22 @@ export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google:
  */
 export type DownloadGeneratedVideoResponse = { outputPath: string }
 /**
+ * Result of a DTW alignment between two sequences
+ */
+export type DtwResult = { 
+/**
+ * Aligned index pairs `(reference_idx, source_idx)` from start to end
+ */
+alignment: ([number, number])[]; 
+/**
+ * Total accumulated distance (lower = more similar)
+ */
+distance: number; 
+/**
+ * Full warping path for visualization/debugging (same as alignment)
+ */
+path: ([number, number])[] }
+/**
  * Edit action from AI
  */
 export type EditActionDto = { 
@@ -4214,7 +4230,7 @@ parameters: JsonValue }
  */
 export type StylePlanResult = { 
 /**
- * Executable plan with split_clip and add_transition steps
+ * Executable plan with AddTrack, InsertClip, and SplitClip steps
  */
 plan: AgentPlan; 
 /**
