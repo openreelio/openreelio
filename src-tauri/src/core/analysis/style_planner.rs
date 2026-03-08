@@ -353,9 +353,8 @@ impl StylePlanner {
             let scaled_time = scaled_cut_times.get(index).copied();
 
             let preferred = if run_end > index {
-                dtw_cut_times[run_end].and_then(|terminal| {
-                    scaled_time.map(|st| st.min(terminal - MIN_SPLIT_GAP_SEC))
-                })
+                dtw_cut_times[run_end]
+                    .and_then(|terminal| scaled_time.map(|st| st.min(terminal - MIN_SPLIT_GAP_SEC)))
             } else {
                 dtw_cut_times[index]
             };
