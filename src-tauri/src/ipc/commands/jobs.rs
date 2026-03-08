@@ -72,6 +72,10 @@ impl From<&Job> for JobInfoDto {
             JobType::PreviewRender => "preview_render",
             JobType::FinalRender => "final_render",
             JobType::AICompletion => "ai_completion",
+            JobType::AudioProfiling => "audio_profiling",
+            JobType::ContentSegmentation => "content_segmentation",
+            JobType::VisualAnalysis => "visual_analysis",
+            JobType::VideoAnalysis => "video_analysis",
         };
 
         let priority = match job.priority {

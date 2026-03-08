@@ -809,6 +809,9 @@ mod tauri_app {
                 $crate::ipc::get_available_providers,
                 $crate::ipc::configure_cloud_provider,
                 $crate::ipc::remove_cloud_provider,
+                // Analysis pipeline commands (ADR-048)
+                $crate::ipc::analyze_video_full,
+                $crate::ipc::get_analysis_bundle,
                 // Settings
                 $crate::ipc::get_settings,
                 $crate::ipc::set_settings,
@@ -1155,6 +1158,9 @@ mod tauri_app {
             ipc::get_available_providers,
             ipc::configure_cloud_provider,
             ipc::remove_cloud_provider,
+            // Analysis pipeline commands (ADR-048)
+            ipc::analyze_video_full,
+            ipc::get_analysis_bundle,
             // Settings
             ipc::get_settings,
             ipc::set_settings,

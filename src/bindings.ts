@@ -1019,6 +1019,36 @@ async removeCloudProvider() : Promise<Result<null, string>> {
 }
 },
 /**
+ * Runs the full composable analysis pipeline on a video asset.
+ * 
+ * Queues the analysis pipeline on the background worker pool and waits for the
+ * resulting `AnalysisBundle`. Failed sub-jobs are recorded in the bundle's
+ * `errors` field without blocking other enabled analyses.
+ * 
+ * The resulting bundle is cached at:
+ * `{project}/.openreelio/analysis/{asset_id}/bundle.json`
+ */
+async analyzeVideoFull(assetId: string, options: AnalysisOptions) : Promise<Result<AnalysisBundle, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("analyze_video_full", { assetId, options }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Retrieves a cached analysis bundle for an asset.
+ * 
+ * Returns the previously computed bundle from disk without re-running analysis.
+ * Returns `Ok(None)` when no cached bundle exists yet.
+ */
+async getAnalysisBundle(assetId: string) : Promise<Result<AnalysisBundle | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_analysis_bundle", { assetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Gets application settings
  */
 async getSettings() : Promise<Result<AppSettingsDto, string>> {
@@ -1562,6 +1592,77 @@ errorMessage?: string | null;
  */
 executionTimeMs: number }
 /**
+ * Aggregated results from all analysis sub-jobs for a single asset.
+ * 
+ * This is the primary output artifact of the analysis pipeline.
+ * Stored at `{project}/.openreelio/analysis/{asset_id}/bundle.json`.
+ */
+export type AnalysisBundle = { 
+/**
+ * Asset ID this bundle belongs to
+ */
+assetId: string; 
+/**
+ * Shot detection results
+ */
+shots: ShotResult[] | null; 
+/**
+ * Transcript segments
+ */
+transcript: TranscriptSegment[] | null; 
+/**
+ * Audio profiling results
+ */
+audioProfile: AudioProfile | null; 
+/**
+ * Content segmentation results
+ */
+segments: ContentSegment[] | null; 
+/**
+ * Visual frame analysis results
+ */
+frameAnalysis: FrameAnalysis[] | null; 
+/**
+ * Video file metadata
+ */
+metadata: VideoMetadata; 
+/**
+ * Errors from failed sub-jobs (key = analysis type name)
+ */
+errors?: { [key in string]: string }; 
+/**
+ * ISO 8601 timestamp when analysis was performed
+ */
+analyzedAt: string }
+/**
+ * Options controlling which analysis sub-jobs to run
+ */
+export type AnalysisOptions = { 
+/**
+ * Run shot/scene detection
+ */
+shots?: boolean; 
+/**
+ * Run speech-to-text transcription
+ */
+transcript?: boolean; 
+/**
+ * Run audio profiling (BPM, loudness, spectral)
+ */
+audio?: boolean; 
+/**
+ * Run content segmentation (talk/performance/montage)
+ */
+segments?: boolean; 
+/**
+ * Run visual frame analysis
+ */
+visual?: boolean; 
+/**
+ * Skip Vision API calls, use FFmpeg-only local analysis
+ */
+localOnly?: boolean }
+/**
  * Provider that performed the analysis
  */
 export type AnalysisProvider = 
@@ -1949,6 +2050,33 @@ codec: string;
  */
 bitrate?: number | null }
 /**
+ * Audio characteristics extracted from a video's audio track.
+ * 
+ * Contains rhythm, loudness, and spectral data used for
+ * content segmentation and style matching.
+ */
+export type AudioProfile = { 
+/**
+ * Estimated beats per minute (null if no clear rhythm detected)
+ */
+bpm: number | null; 
+/**
+ * Spectral center frequency in Hz (higher = brighter/more treble)
+ */
+spectralCentroidHz: number; 
+/**
+ * Per-second RMS loudness values in dB
+ */
+loudnessProfile: number[]; 
+/**
+ * Maximum loudness in dB
+ */
+peakDb: number; 
+/**
+ * Regions where audio is below -40 dB for > 0.5s
+ */
+silenceRegions: SilenceRegion[] }
+/**
  * Audio settings for clips
  */
 export type AudioSettings = { 
@@ -2045,6 +2173,30 @@ evictions: number;
  * Cache hit rate (0.0 - 1.0)
  */
 hitRate: number }
+/**
+ * Camera angle classification for a shot
+ */
+export type CameraAngle = 
+/**
+ * Wide/establishing shot
+ */
+"wide" | 
+/**
+ * Medium shot (waist up)
+ */
+"medium" | 
+/**
+ * Close-up shot (head/shoulders)
+ */
+"close" | 
+/**
+ * Extreme close-up (detail)
+ */
+"extreme_close" | 
+/**
+ * Unable to determine (local fallback)
+ */
+"unknown"
 /**
  * Canvas size
  */
@@ -2266,6 +2418,30 @@ errorCode: ConnectionErrorCode | null;
  */
 errorDetails: string | null }
 /**
+ * A classified time segment of video content
+ */
+export type ContentSegment = { 
+/**
+ * Start time in seconds
+ */
+startSec: number; 
+/**
+ * End time in seconds
+ */
+endSec: number; 
+/**
+ * Classification type
+ */
+segmentType: SegmentType; 
+/**
+ * Classification confidence (0.0 - 1.0)
+ */
+confidence: number; 
+/**
+ * Heuristic signals that contributed to classification
+ */
+features: JsonValue }
+/**
  * Message for conversation history
  */
 export type ConversationMessageDto = { 
@@ -2479,6 +2655,30 @@ missing?: boolean;
  * Child entries (for directories)
  */
 children: FileTreeEntryDto[] }
+/**
+ * Visual composition analysis for a single shot's keyframe
+ */
+export type FrameAnalysis = { 
+/**
+ * Index of the shot this analysis corresponds to
+ */
+shotIndex: number; 
+/**
+ * Detected camera angle
+ */
+cameraAngle: CameraAngle; 
+/**
+ * Detected subject position
+ */
+subjectPosition: SubjectPosition; 
+/**
+ * Detected motion direction
+ */
+motionDirection: MotionDirection; 
+/**
+ * Visual complexity score (0.0 = static/simple, 1.0 = complex/dynamic)
+ */
+visualComplexity: number }
 export type GeneralSettingsDto = { language: string; showWelcomeOnStartup: boolean; hasCompletedSetup: boolean; recentProjectsLimit: number; checkUpdatesOnStartup: boolean; defaultProjectLocation: string | null }
 /**
  * Response for get_annotation command
@@ -2721,6 +2921,42 @@ systemMemory: SystemMemoryDto | null }
  * A single message within a conversation session.
  */
 export type MessageDto = { id: string; sessionId: string; role: string; timestamp: number; parts: PartDto[]; usageJson: string | null; finishReason: string | null }
+/**
+ * Camera or subject motion direction
+ */
+export type MotionDirection = 
+/**
+ * No significant motion
+ */
+"static" | 
+/**
+ * Camera pans left
+ */
+"pan_left" | 
+/**
+ * Camera pans right
+ */
+"pan_right" | 
+/**
+ * Camera tilts up
+ */
+"tilt_up" | 
+/**
+ * Camera tilts down
+ */
+"tilt_down" | 
+/**
+ * Camera zooms in
+ */
+"zoom_in" | 
+/**
+ * Camera zooms out
+ */
+"zoom_out" | 
+/**
+ * Unable to determine (local fallback)
+ */
+"unknown"
 /**
  * A detected object in a frame
  */
@@ -3355,6 +3591,34 @@ transcriptTotal: number | null;
  */
 processingTimeMs: number }
 /**
+ * Classification type for a video content segment
+ */
+export type SegmentType = 
+/**
+ * Dialogue/interview/narration section
+ */
+"talk" | 
+/**
+ * Music/performance section
+ */
+"performance" | 
+/**
+ * Reaction/cutaway section
+ */
+"reaction" | 
+/**
+ * Short transitional section
+ */
+"transition" | 
+/**
+ * Establishing/wide shot section
+ */
+"establishing" | 
+/**
+ * Quick-cut montage section
+ */
+"montage"
+/**
  * Sequence (timeline container)
  * Uses denormalized structure - tracks are stored directly, not as IDs
  */
@@ -3514,6 +3778,18 @@ confidence: number;
  * Optional keyframe thumbnail path
  */
 keyframePath?: string | null }
+/**
+ * A detected region of silence in the audio track
+ */
+export type SilenceRegion = { 
+/**
+ * Start time in seconds
+ */
+startSec: number; 
+/**
+ * End time in seconds
+ */
+endSec: number }
 /**
  * State change types for event broadcasting.
  */
@@ -3729,6 +4005,34 @@ description: string;
  * JSON Schema describing tool input parameters.
  */
 parameters: JsonValue }
+/**
+ * Subject position within the frame
+ */
+export type SubjectPosition = 
+/**
+ * Subject centered in frame
+ */
+"center" | 
+/**
+ * Subject on the left
+ */
+"left" | 
+/**
+ * Subject on the right
+ */
+"right" | 
+/**
+ * Subject in upper portion
+ */
+"top" | 
+/**
+ * Subject in lower portion
+ */
+"bottom" | 
+/**
+ * Unable to determine (local fallback)
+ */
+"unknown"
 /**
  * Request for submit_video_generation
  */
@@ -3988,7 +4292,11 @@ export type Track = { id: string; kind: TrackKind; name: string;
 /**
  * Clips stored directly for efficient Event Sourcing
  */
-clips: Clip[]; blendMode: BlendMode; muted: boolean; locked: boolean; visible: boolean; 
+clips: Clip[]; blendMode: BlendMode; 
+/**
+ * Present for modern projects; true only for protected default timeline tracks.
+ */
+isBaseTrack?: boolean | null; muted: boolean; locked: boolean; visible: boolean; 
 /**
  * Volume for audio tracks (0.0 - 2.0, 1.0 = 100%)
  */
@@ -4209,6 +4517,34 @@ isHdr?: boolean;
  * Color transfer function (e.g., "smpte2084" for HDR10, "arib-std-b67" for HLG)
  */
 colorTransfer?: string | null }
+/**
+ * Basic metadata about the analyzed video file
+ */
+export type VideoMetadata = { 
+/**
+ * Duration in seconds
+ */
+durationSec: number; 
+/**
+ * Video width in pixels
+ */
+width?: number | null; 
+/**
+ * Video height in pixels
+ */
+height?: number | null; 
+/**
+ * Frame rate (fps)
+ */
+fps?: number | null; 
+/**
+ * Video codec name
+ */
+codec?: string | null; 
+/**
+ * Whether the file has an audio stream
+ */
+hasAudio: boolean }
 /**
  * Video stream information.
  */
