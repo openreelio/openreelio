@@ -1049,6 +1049,70 @@ async getAnalysisBundle(assetId: string) : Promise<Result<AnalysisBundle | null,
 }
 },
 /**
+ * Generates an Editing Style Document from an analysis bundle.
+ * 
+ * The bundle is provided directly. The generated ESD is saved to disk at
+ * `{project}/.openreelio/esds/{id}.json` and returned.
+ */
+async generateEsd(bundle: AnalysisBundle) : Promise<Result<EditingStyleDocument, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("generate_esd", { bundle }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Retrieves an ESD by its ID.
+ * 
+ * Returns `Ok(None)` if the ESD does not exist.
+ */
+async getEsd(esdId: string) : Promise<Result<EditingStyleDocument | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_esd", { esdId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Lists all ESDs in the active project.
+ * 
+ * Returns summary objects containing id, name, source_asset_id,
+ * created_at, and tempo_classification (not the full document).
+ */
+async listEsds() : Promise<Result<EsdSummary[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_esds") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Deletes an ESD by its ID.
+ * 
+ * Returns `true` if the file existed and was deleted, `false` if not found.
+ */
+async deleteEsd(esdId: string) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_esd", { esdId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Applies an ESD's editing style to source footage.
+ * 
+ * Loads the specified ESD and the source asset's analysis bundle (generating
+ * one when needed), then generates an executable [`AgentPlan`] that creates a
+ * dedicated track, inserts the source asset, and applies DTW-guided splits.
+ */
+async applyEditingStyle(esdId: string, sourceAssetId: string) : Promise<Result<StylePlanResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("apply_editing_style", { esdId, sourceAssetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Gets application settings
  */
 async getSettings() : Promise<Result<AppSettingsDto, string>> {
@@ -2030,6 +2094,18 @@ duration: number | null;
  */
 tags: string[] }
 /**
+ * Compact audio characteristics stored with the ESD for compatibility scoring.
+ */
+export type AudioFingerprint = { 
+/**
+ * Estimated tempo of the reference audio, when detectable.
+ */
+bpm?: number | null; 
+/**
+ * Average spectral centroid of the reference audio in hertz.
+ */
+spectralCentroidHz: number }
+/**
  * Audio-specific metadata
  */
 export type AudioInfo = { 
@@ -2565,7 +2641,91 @@ explanation: string;
  * Preview plan for the edit
  */
 previewPlan: PreviewPlanDto | null }
+/**
+ * Complete editing style document extracted from a reference video.
+ * 
+ * Captures the rhythm, transitions, pacing, audio-visual sync,
+ * content structure, and camera patterns of the reference.
+ * Stored at `{project}/.openreelio/esds/{id}.json`.
+ */
+export type EditingStyleDocument = 
+/**
+ * Forward-compatible extension fields preserved during round-trip I/O.
+ */
+({ [key in string]: null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue } }) & { 
+/**
+ * Unique identifier (UUID v4)
+ */
+id: string; 
+/**
+ * Display name
+ */
+name: string; 
+/**
+ * ID of the source asset this ESD was generated from
+ */
+sourceAssetId: string; 
+/**
+ * ISO 8601 timestamp of creation
+ */
+createdAt: string; 
+/**
+ * Schema version for forward compatibility
+ */
+version: string; 
+/**
+ * Statistical profile of shot durations
+ */
+rhythmProfile: RhythmProfile; 
+/**
+ * Inventory of transitions between shots
+ */
+transitionInventory: TransitionInventory; 
+/**
+ * Compact reference audio signature used for compatibility scoring.
+ */
+audioFingerprint?: AudioFingerprint | null; 
+/**
+ * Normalized pacing curve
+ */
+pacingCurve: PacingPoint[]; 
+/**
+ * Detected audio-visual sync points
+ */
+syncPoints: SyncPoint[]; 
+/**
+ * Content segment map (from analysis bundle)
+ */
+contentMap: ContentSegment[]; 
+/**
+ * Camera pattern analysis per shot (from analysis bundle)
+ */
+cameraPatterns: FrameAnalysis[] }
 export type EditorSettingsDto = { defaultTimelineZoom: number; snapToGrid: boolean; snapTolerance: number; showClipThumbnails: boolean; showAudioWaveforms: boolean; rippleEditDefault: boolean }
+/**
+ * Summary information for listing ESDs without loading full documents
+ */
+export type EsdSummary = { 
+/**
+ * Unique identifier
+ */
+id: string; 
+/**
+ * Display name
+ */
+name: string; 
+/**
+ * Source asset ID
+ */
+sourceAssetId: string; 
+/**
+ * ISO 8601 creation timestamp
+ */
+createdAt: string; 
+/**
+ * Tempo classification from rhythm profile
+ */
+tempoClassification: TempoClassification }
 /**
  * Response for estimate_generation_cost
  */
@@ -2977,6 +3137,18 @@ confidence: number;
  * Bounding box (if available)
  */
 boundingBox?: BoundingBox | null }
+/**
+ * A point on the normalized pacing curve
+ */
+export type PacingPoint = { 
+/**
+ * Normalized position in timeline (0.0-1.0, shot center / total duration)
+ */
+normalizedPosition: number; 
+/**
+ * Normalized duration (0.0-1.0, shot duration / max shot duration)
+ */
+normalizedDuration: number }
 /**
  * A content part within a message (text, tool call, tool result, etc.).
  */
@@ -3402,6 +3574,38 @@ provider: string | null;
  * Additional parameters
  */
 params: JsonValue | null }
+/**
+ * Statistical profile of shot durations in a video
+ */
+export type RhythmProfile = { 
+/**
+ * Shot durations in seconds, in original sequence order
+ */
+shotDurations: number[]; 
+/**
+ * Mean shot duration
+ */
+meanDuration: number; 
+/**
+ * Median shot duration
+ */
+medianDuration: number; 
+/**
+ * Population standard deviation of shot durations
+ */
+stdDeviation: number; 
+/**
+ * Shortest shot duration
+ */
+minDuration: number; 
+/**
+ * Longest shot duration
+ */
+maxDuration: number; 
+/**
+ * Overall tempo classification
+ */
+tempoClassification: TempoClassification }
 /**
  * Risk assessment for an AI-generated edit.
  */
@@ -4006,6 +4210,22 @@ description: string;
  */
 parameters: JsonValue }
 /**
+ * Result of applying a reference editing style to source footage
+ */
+export type StylePlanResult = { 
+/**
+ * Executable plan with split_clip and add_transition steps
+ */
+plan: AgentPlan; 
+/**
+ * Compatibility score between reference and source (0.0 - 1.0)
+ */
+compatibilityScore: number; 
+/**
+ * Warnings about potential issues (e.g., length mismatch)
+ */
+warnings: string[] }
+/**
  * Subject position within the frame
  */
 export type SubjectPosition = 
@@ -4042,6 +4262,26 @@ export type SubmitVideoGenerationRequest = { prompt: string; mode?: string; qual
  */
 export type SubmitVideoGenerationResponse = { jobId: string; providerJobId: string; estimatedCostCents: number }
 /**
+ * A detected synchronization point between audio and visual events
+ */
+export type SyncPoint = { 
+/**
+ * Time of the visual event (shot boundary) in seconds
+ */
+timeSec: number; 
+/**
+ * Type of audio event (e.g., "loudness_peak")
+ */
+audioEventType: string; 
+/**
+ * Type of visual event (e.g., "shot_boundary")
+ */
+visualEventType: string; 
+/**
+ * Offset in seconds (audio_time - visual_time; negative = audio leads)
+ */
+offsetSec: number }
+/**
  * System memory information.
  */
 export type SystemMemoryDto = { 
@@ -4061,6 +4301,22 @@ usedBytes: number;
  * Usage percentage (0-100)
  */
 usagePercent: number }
+/**
+ * Pacing tempo classification based on mean shot duration
+ */
+export type TempoClassification = 
+/**
+ * Mean shot duration < 2.0s
+ */
+"fast" | 
+/**
+ * Mean shot duration between 2.0s and 5.0s (inclusive)
+ */
+"moderate" | 
+/**
+ * Mean shot duration > 5.0s
+ */
+"slow"
 /**
  * Text alignment options for horizontal text positioning.
  */
@@ -4445,6 +4701,42 @@ rotationDeg: number;
  * Anchor point (normalized 0.0-1.0)
  */
 anchor: Point2D }
+/**
+ * A single transition between two consecutive shots
+ */
+export type TransitionEntry = { 
+/**
+ * Transition type (e.g., "cut", "dissolve", "wipe")
+ */
+type: string; 
+/**
+ * Index of the outgoing shot
+ */
+fromShotIndex: number; 
+/**
+ * Index of the incoming shot
+ */
+toShotIndex: number; 
+/**
+ * Duration of the transition in seconds (0.0 for hard cuts)
+ */
+durationSec: number }
+/**
+ * Inventory of all transitions in a video
+ */
+export type TransitionInventory = { 
+/**
+ * All transitions in sequential order
+ */
+transitions: TransitionEntry[]; 
+/**
+ * Frequency count of each transition type
+ */
+typeFrequency: { [key in string]: number }; 
+/**
+ * Most frequently used transition type
+ */
+dominantType: string }
 /**
  * Result of an undo or redo operation.
  */

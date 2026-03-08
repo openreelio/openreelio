@@ -812,6 +812,13 @@ mod tauri_app {
                 // Analysis pipeline commands (ADR-048)
                 $crate::ipc::analyze_video_full,
                 $crate::ipc::get_analysis_bundle,
+                // ESD commands (ADR-049)
+                $crate::ipc::generate_esd,
+                $crate::ipc::get_esd,
+                $crate::ipc::list_esds,
+                $crate::ipc::delete_esd,
+                // Style transfer commands (ADR-050)
+                $crate::ipc::apply_editing_style,
                 // Settings
                 $crate::ipc::get_settings,
                 $crate::ipc::set_settings,
@@ -1161,6 +1168,13 @@ mod tauri_app {
             // Analysis pipeline commands (ADR-048)
             ipc::analyze_video_full,
             ipc::get_analysis_bundle,
+            // ESD commands (ADR-049)
+            ipc::generate_esd,
+            ipc::get_esd,
+            ipc::list_esds,
+            ipc::delete_esd,
+            // Style transfer commands (ADR-050)
+            ipc::apply_editing_style,
             // Settings
             ipc::get_settings,
             ipc::set_settings,
