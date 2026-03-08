@@ -14,6 +14,7 @@ This document describes all edit commands (Command) used in OpenReelio in detail
 6. [Caption Commands](#caption-commands)
 7. [Sequence Commands](#sequence-commands)
 8. [Marker Commands](#marker-commands)
+9. [Analysis & Style Transfer Commands](#analysis--style-transfer-commands)
 
 ---
 
@@ -30,15 +31,15 @@ This document describes all edit commands (Command) used in OpenReelio in detail
 
 ```typescript
 interface Command {
-  type: CommandType;        // Command type
-  payload: CommandPayload;  // Command parameters
+  type: CommandType; // Command type
+  payload: CommandPayload; // Command parameters
 }
 
 interface CommandResult {
-  opId: OpId;               // Generated Operation ID
-  changes: StateChange[];   // List of state changes
-  createdIds: string[];     // Newly created IDs
-  deletedIds: string[];     // Deleted IDs
+  opId: OpId; // Generated Operation ID
+  changes: StateChange[]; // List of state changes
+  createdIds: string[]; // Newly created IDs
+  deletedIds: string[]; // Deleted IDs
 }
 ```
 
@@ -51,9 +52,9 @@ const result = await invoke('execute_command', {
     type: 'SplitClip',
     payload: {
       clipId: 'clip_01HZ...',
-      atTimelineSec: 5.5
-    }
-  }
+      atTimelineSec: 5.5,
+    },
+  },
 });
 
 // Handle result
@@ -73,14 +74,14 @@ Imports an external file as an asset to the project.
 ```typescript
 interface ImportAssetPayload {
   // Required
-  uri: string;                      // Source file path (absolute or URL)
+  uri: string; // Source file path (absolute or URL)
 
   // Optional
-  kind?: AssetKind;                 // Omit for auto-detection
-  name?: string;                    // Display name (default: filename)
-  copyToProject?: boolean;          // Copy to project (default: true)
-  tags?: string[];                  // Tags
-  license?: LicenseInfo;            // License info
+  kind?: AssetKind; // Omit for auto-detection
+  name?: string; // Display name (default: filename)
+  copyToProject?: boolean; // Copy to project (default: true)
+  tags?: string[]; // Tags
+  license?: LicenseInfo; // License info
 }
 ```
 
@@ -112,7 +113,7 @@ Deletes an asset from the project.
 ```typescript
 interface DeleteAssetPayload {
   assetId: AssetId;
-  force?: boolean;    // Delete even if in use (default: false)
+  force?: boolean; // Delete even if in use (default: false)
 }
 ```
 
@@ -130,11 +131,11 @@ Inserts a clip at a specific position on the timeline.
 interface InsertClipPayload {
   trackId: TrackId;
   assetId: AssetId;
-  timelineStart: number;            // Timeline start position (seconds)
-  sourceStart?: number;             // Source start (default: 0)
-  sourceEnd?: number;               // Source end (default: asset duration)
+  timelineStart: number; // Timeline start position (seconds)
+  sourceStart?: number; // Source start (default: 0)
+  sourceEnd?: number; // Source end (default: asset duration)
   transform?: Partial<Transform>;
-  volume?: number;                  // Audio volume
+  volume?: number; // Audio volume
 }
 ```
 
@@ -147,7 +148,7 @@ Moves an existing clip.
 ```typescript
 interface MoveClipPayload {
   clipId: ClipId;
-  newTrackId?: TrackId;             // Move to another track
+  newTrackId?: TrackId; // Move to another track
   newTimelineStart: number;
 }
 ```
@@ -161,7 +162,7 @@ Splits a clip at a specific point.
 ```typescript
 interface SplitClipPayload {
   clipId: ClipId;
-  atTimelineSec: number;            // Split point (seconds)
+  atTimelineSec: number; // Split point (seconds)
 }
 ```
 
@@ -180,7 +181,7 @@ Trims clip start/end points.
 interface TrimClipPayload {
   clipId: ClipId;
   side: 'start' | 'end';
-  newTimelineSec: number;           // New boundary position
+  newTimelineSec: number; // New boundary position
 }
 ```
 
@@ -193,7 +194,7 @@ Deletes a clip.
 ```typescript
 interface DeleteClipPayload {
   clipId: ClipId;
-  ripple?: boolean;                 // Adjust following clips (default: false)
+  ripple?: boolean; // Adjust following clips (default: false)
 }
 ```
 
@@ -206,8 +207,8 @@ Changes clip playback speed.
 ```typescript
 interface SetClipSpeedPayload {
   clipId: ClipId;
-  speed: number;                    // 1.0 = normal, 0.5 = half, 2.0 = double
-  maintainPitch?: boolean;          // Maintain audio pitch (default: true)
+  speed: number; // 1.0 = normal, 0.5 = half, 2.0 = double
+  maintainPitch?: boolean; // Maintain audio pitch (default: true)
 }
 ```
 
@@ -233,7 +234,7 @@ Changes clip audio volume.
 ```typescript
 interface SetClipVolumePayload {
   clipId: ClipId;
-  volume: number;                   // 0.0 ~ 2.0 (1.0 = 100%)
+  volume: number; // 0.0 ~ 2.0 (1.0 = 100%)
 }
 ```
 
@@ -246,7 +247,7 @@ Changes clip opacity.
 ```typescript
 interface SetClipOpacityPayload {
   clipId: ClipId;
-  opacity: number;                  // 0.0 ~ 1.0
+  opacity: number; // 0.0 ~ 1.0
 }
 ```
 
@@ -263,9 +264,9 @@ Creates a new track.
 ```typescript
 interface CreateTrackPayload {
   sequenceId: SequenceId;
-  kind: TrackKind;                  // 'video' | 'audio' | 'caption'
+  kind: TrackKind; // 'video' | 'audio' | 'caption'
   name?: string;
-  insertAt?: number;                // Layer position (default: top)
+  insertAt?: number; // Layer position (default: top)
 }
 ```
 
@@ -348,7 +349,7 @@ interface AddEffectPayload {
   clipId: ClipId;
   effectType: EffectType;
   params?: Record<string, any>;
-  insertAt?: number;                // Effect order (default: end)
+  insertAt?: number; // Effect order (default: end)
 }
 ```
 
@@ -399,7 +400,7 @@ Changes effect application order.
 ```typescript
 interface ReorderEffectsPayload {
   clipId: ClipId;
-  effectIds: EffectId[];            // New order
+  effectIds: EffectId[]; // New order
 }
 ```
 
@@ -412,7 +413,7 @@ Adds an effect keyframe.
 ```typescript
 interface AddKeyframePayload {
   effectId: EffectId;
-  time: number;                     // Seconds
+  time: number; // Seconds
   value: Record<string, any>;
   easing?: EasingType;
 }
@@ -427,7 +428,7 @@ Removes a keyframe.
 ```typescript
 interface RemoveKeyframePayload {
   effectId: EffectId;
-  time: number;                     // Time of keyframe to remove
+  time: number; // Time of keyframe to remove
 }
 ```
 
@@ -445,7 +446,7 @@ Creates a new caption.
 interface CreateCaptionPayload {
   trackId: TrackId;
   text: string;
-  startTime: number;                // Seconds
+  startTime: number; // Seconds
   endTime: number;
   style?: Partial<CaptionStyle>;
 }
@@ -500,8 +501,8 @@ Imports captions from subtitle file.
 ```typescript
 interface ImportCaptionsPayload {
   trackId: TrackId;
-  uri: string;                      // SRT, VTT file path
-  offset?: number;                  // Time offset (seconds)
+  uri: string; // SRT, VTT file path
+  offset?: number; // Time offset (seconds)
 }
 ```
 
@@ -560,7 +561,7 @@ Adds a marker.
 ```typescript
 interface AddMarkerPayload {
   sequenceId: SequenceId;
-  time: number;                     // Seconds
+  time: number; // Seconds
   label?: string;
   color?: string;
 }
@@ -595,6 +596,187 @@ interface DeleteMarkerPayload {
 
 ---
 
+## Analysis & Style Transfer Commands
+
+Commands for video analysis, Editing Style Document (ESD) management, and reference-based style transfer (ADR-048 through ADR-052).
+
+### analyze_video_full
+
+Runs the composable analysis pipeline on a video asset. Sub-jobs (shots, audio, transcript, segments, visual) execute in parallel and partial failures are tolerated.
+
+#### Parameters
+
+```typescript
+invoke('analyze_video_full', {
+  assetId: AssetId,
+  options?: AnalysisOptions
+})
+
+interface AnalysisOptions {
+  shots?: boolean;        // Shot detection (default: true)
+  transcript?: boolean;   // Whisper transcription (default: true)
+  audio?: boolean;        // Audio profiling (default: true)
+  segments?: boolean;     // Content segmentation (default: true)
+  visual?: boolean;       // Visual frame analysis (default: true)
+  localOnly?: boolean;    // Skip Vision API calls (default: false)
+}
+```
+
+#### Result
+
+```typescript
+AnalysisBundle;
+```
+
+Bundle is cached at `{project}/.openreelio/analysis/{asset_id}/bundle.json`.
+
+#### Example
+
+```typescript
+const bundle = await invoke('analyze_video_full', {
+  assetId: 'asset_01HZ...',
+  options: { shots: true, audio: true, segments: true, visual: false },
+});
+console.log('Shots detected:', bundle.shots?.length);
+```
+
+### get_analysis_bundle
+
+Retrieves a previously cached analysis bundle without re-running analysis.
+
+#### Parameters
+
+```typescript
+invoke('get_analysis_bundle', { assetId: AssetId });
+```
+
+#### Result
+
+```typescript
+AnalysisBundle | null; // null if no cached bundle exists
+```
+
+### generate_esd
+
+Generates an Editing Style Document from an analysis bundle. Extracts rhythm profile, pacing curve, transition inventory, sync points, and content map.
+
+#### Parameters
+
+```typescript
+invoke('generate_esd', { bundle: AnalysisBundle });
+```
+
+#### Result
+
+```typescript
+EditingStyleDocument;
+```
+
+ESD is persisted at `{project}/.openreelio/esds/{id}.json`.
+
+#### Example
+
+```typescript
+const esd = await invoke('generate_esd', { bundle });
+console.log('Tempo:', esd.rhythmProfile.tempoClassification);
+console.log('Pacing points:', esd.pacingCurve.length);
+```
+
+### get_esd
+
+Retrieves an ESD by its ID.
+
+#### Parameters
+
+```typescript
+invoke('get_esd', { esdId: string });
+```
+
+#### Result
+
+```typescript
+EditingStyleDocument | null; // null if not found
+```
+
+### list_esds
+
+Lists all ESDs in the active project.
+
+#### Parameters
+
+```typescript
+invoke('list_esds');
+```
+
+#### Result
+
+```typescript
+EsdSummary[]
+
+interface EsdSummary {
+  id: string;
+  name: string;
+  sourceAssetId: string;
+  createdAt: string;                    // ISO 8601
+  tempoClassification: TempoClassification;
+}
+```
+
+### delete_esd
+
+Deletes an ESD by its ID.
+
+#### Parameters
+
+```typescript
+invoke('delete_esd', { esdId: string });
+```
+
+#### Result
+
+```typescript
+boolean; // true if deleted, false if not found
+```
+
+### apply_editing_style
+
+Applies a reference editing style to source footage. Generates the source analysis bundle if needed, computes DTW alignment, and produces an executable agent plan with split points.
+
+#### Parameters
+
+```typescript
+invoke('apply_editing_style', {
+  esdId: string,
+  sourceAssetId: AssetId,
+});
+```
+
+#### Result
+
+```typescript
+interface StylePlanResult {
+  plan: AgentPlan; // Executable plan (AddTrack + InsertClip + SplitClip steps)
+  compatibilityScore: number; // 0.0 - 1.0
+  warnings: string[]; // Diagnostic messages
+}
+```
+
+#### Example
+
+```typescript
+const result = await invoke('apply_editing_style', {
+  esdId: 'esd-uuid-1',
+  sourceAssetId: 'asset_02HZ...',
+});
+console.log('Compatibility:', result.compatibilityScore);
+console.log('Plan steps:', result.plan.steps.length);
+if (result.warnings.length > 0) {
+  console.warn('Warnings:', result.warnings);
+}
+```
+
+---
+
 ## Command Batching
 
 ### Batch Execution
@@ -606,9 +788,9 @@ const result = await invoke('execute_batch', {
   commands: [
     { type: 'SplitClip', payload: { clipId: 'clip_01', atTimelineSec: 5 } },
     { type: 'DeleteClip', payload: { clipId: 'clip_01_right' } },
-    { type: 'AddEffect', payload: { clipId: 'clip_01_left', effectType: 'fade' } }
+    { type: 'AddEffect', payload: { clipId: 'clip_01_left', effectType: 'fade' } },
   ],
-  atomic: true  // All or nothing
+  atomic: true, // All or nothing
 });
 ```
 

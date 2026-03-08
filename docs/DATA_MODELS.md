@@ -14,6 +14,8 @@ This document defines all data model schemas used in OpenReelio.
 6. [Caption Model](#caption-model)
 7. [AI Model](#ai-model)
 8. [Index Model](#index-model)
+9. [Analysis Model](#analysis-model)
+10. [Editing Style Document](#editing-style-document)
 
 ---
 
@@ -25,7 +27,7 @@ All IDs use ULID (Universally Unique Lexicographically Sortable Identifier) form
 
 ```typescript
 // TypeScript
-type AssetId = string;    // "01HZ8N3QJGK5M7RX2P4V6W9YBC"
+type AssetId = string; // "01HZ8N3QJGK5M7RX2P4V6W9YBC"
 type ClipId = string;
 type TrackId = string;
 type EffectId = string;
@@ -52,12 +54,12 @@ pub type PluginId = String;
 ### Time Types
 
 ```typescript
-type TimeSec = number;    // Seconds (floating point)
-type Frame = number;      // Frames (integer)
+type TimeSec = number; // Seconds (floating point)
+type Frame = number; // Frames (integer)
 
 interface Ratio {
-  num: number;   // Numerator
-  den: number;   // Denominator
+  num: number; // Numerator
+  den: number; // Denominator
 }
 
 // Example: 30fps = { num: 30, den: 1 }
@@ -68,7 +70,7 @@ interface Ratio {
 
 ```typescript
 interface Point2D {
-  x: number;   // normalized (0.0 ~ 1.0) or pixel
+  x: number; // normalized (0.0 ~ 1.0) or pixel
   y: number;
 }
 
@@ -85,10 +87,10 @@ interface Rect {
 }
 
 interface Transform {
-  position: Point2D;      // Center position (normalized)
-  scale: Point2D;         // Scale (1.0 = 100%)
-  rotation: number;       // Degrees
-  anchor: Point2D;        // Anchor point (normalized)
+  position: Point2D; // Center position (normalized)
+  scale: Point2D; // Scale (1.0 = 100%)
+  rotation: number; // Degrees
+  anchor: Point2D; // Anchor point (normalized)
 }
 ```
 
@@ -96,10 +98,10 @@ interface Transform {
 
 ```typescript
 interface Color {
-  r: number;   // 0.0 ~ 1.0
+  r: number; // 0.0 ~ 1.0
   g: number;
   b: number;
-  a?: number;  // Optional alpha
+  a?: number; // Optional alpha
 }
 ```
 
@@ -114,9 +116,9 @@ interface Project {
   id: string;
   name: string;
   path: string;
-  createdAt: string;              // ISO 8601
+  createdAt: string; // ISO 8601
   modifiedAt: string;
-  version: string;                // Schema version
+  version: string; // Schema version
   defaultSequenceId: SequenceId;
   settings: ProjectSettings;
 }
@@ -124,8 +126,8 @@ interface Project {
 interface ProjectSettings {
   defaultFormat: SequenceFormat;
   proxyEnabled: boolean;
-  proxyHeight: number;            // Default: 720
-  autosaveInterval: number;       // Seconds, 0 = disabled
+  proxyHeight: number; // Default: 720
+  autosaveInterval: number; // Seconds, 0 = disabled
   aiProvider?: AIProviderConfig;
 }
 ```
@@ -134,10 +136,10 @@ interface ProjectSettings {
 
 ```typescript
 interface SequenceFormat {
-  canvas: Size2D;                 // e.g., { width: 1080, height: 1920 }
-  fps: Ratio;                     // e.g., { num: 30, den: 1 }
-  audioSampleRate: number;        // e.g., 48000
-  audioChannels: number;          // e.g., 2
+  canvas: Size2D; // e.g., { width: 1080, height: 1920 }
+  fps: Ratio; // e.g., { num: 30, den: 1 }
+  audioSampleRate: number; // e.g., 48000
+  audioChannels: number; // e.g., 2
 }
 ```
 
@@ -153,10 +155,10 @@ interface Asset {
   kind: AssetKind;
   name: string;
   originalUri: string;
-  projectUri?: string;            // Path within project
+  projectUri?: string; // Path within project
   meta: AssetMeta;
   proxyStatus: ProxyStatus;
-  thumbnails: string[];           // Thumbnail paths
+  thumbnails: string[]; // Thumbnail paths
   tags: string[];
   license?: LicenseInfo;
   createdAt: string;
@@ -166,15 +168,15 @@ interface Asset {
 type AssetKind = 'video' | 'audio' | 'image' | 'caption';
 
 interface AssetMeta {
-  duration?: number;              // Seconds (video/audio)
-  width?: number;                 // Pixels (video/image)
+  duration?: number; // Seconds (video/audio)
+  width?: number; // Pixels (video/image)
   height?: number;
-  fps?: Ratio;                    // Video only
+  fps?: Ratio; // Video only
   codec?: string;
-  bitrate?: number;               // bps
-  sampleRate?: number;            // Hz (audio)
-  channels?: number;              // Audio channels
-  fileSize: number;               // Bytes
+  bitrate?: number; // bps
+  sampleRate?: number; // Hz (audio)
+  channels?: number; // Audio channels
+  fileSize: number; // Bytes
   mimeType: string;
 }
 
@@ -192,8 +194,8 @@ interface Sequence {
   id: SequenceId;
   name: string;
   format: SequenceFormat;
-  duration: number;               // Calculated from clips
-  tracks: TrackId[];              // Ordered track IDs
+  duration: number; // Calculated from clips
+  tracks: TrackId[]; // Ordered track IDs
   markers: Marker[];
   createdAt: string;
   modifiedAt: string;
@@ -208,11 +210,11 @@ interface Track {
   kind: TrackKind;
   name: string;
   sequenceId: SequenceId;
-  index: number;                  // Layer order (0 = bottom)
+  index: number; // Layer order (0 = bottom)
   locked: boolean;
-  visible: boolean;               // Video track visibility
-  muted: boolean;                 // Audio track mute
-  volume: number;                 // Audio volume (0.0 ~ 2.0)
+  visible: boolean; // Video track visibility
+  muted: boolean; // Audio track mute
+  volume: number; // Audio volume (0.0 ~ 2.0)
   clips: ClipId[];
 }
 
@@ -225,22 +227,22 @@ type TrackKind = 'video' | 'audio' | 'caption';
 interface Clip {
   id: ClipId;
   trackId: TrackId;
-  assetId?: AssetId;              // Generator clips have no asset
+  assetId?: AssetId; // Generator clips have no asset
   type: ClipType;
 
   // Timeline position
-  timelineStart: number;          // Seconds on timeline
+  timelineStart: number; // Seconds on timeline
   timelineEnd: number;
 
   // Source range
-  sourceStart: number;            // Seconds in source
+  sourceStart: number; // Seconds in source
   sourceEnd: number;
 
   // Properties
-  speed: number;                  // Playback speed (1.0 = normal)
-  volume: number;                 // Audio volume
+  speed: number; // Playback speed (1.0 = normal)
+  volume: number; // Audio volume
   transform: Transform;
-  opacity: number;                // 0.0 ~ 1.0
+  opacity: number; // 0.0 ~ 1.0
 
   // Effects and transitions
   effects: EffectId[];
@@ -249,7 +251,7 @@ interface Clip {
 
   // Metadata
   label?: string;
-  color?: string;                 // Clip color for UI
+  color?: string; // Clip color for UI
 }
 
 type ClipType = 'video' | 'audio' | 'image' | 'generator' | 'compound';
@@ -289,34 +291,23 @@ type EffectType =
 ```typescript
 interface Transition {
   type: TransitionType;
-  duration: number;               // Seconds
+  duration: number; // Seconds
   params?: Record<string, any>;
 }
 
-type TransitionType =
-  | 'fade'
-  | 'dissolve'
-  | 'wipe'
-  | 'slide'
-  | 'zoom'
-  | 'custom';
+type TransitionType = 'fade' | 'dissolve' | 'wipe' | 'slide' | 'zoom' | 'custom';
 ```
 
 ### Keyframe
 
 ```typescript
 interface Keyframe<T> {
-  time: number;                   // Seconds
+  time: number; // Seconds
   value: T;
   easing: EasingType;
 }
 
-type EasingType =
-  | 'linear'
-  | 'ease_in'
-  | 'ease_out'
-  | 'ease_in_out'
-  | 'bezier';
+type EasingType = 'linear' | 'ease_in' | 'ease_out' | 'ease_in_out' | 'bezier';
 ```
 
 ---
@@ -330,17 +321,17 @@ interface Caption {
   id: CaptionId;
   trackId: TrackId;
   text: string;
-  startTime: number;              // Seconds
+  startTime: number; // Seconds
   endTime: number;
   style: CaptionStyle;
-  position?: Point2D;             // Override default position
+  position?: Point2D; // Override default position
   animation?: CaptionAnimation;
 }
 
 interface CaptionStyle {
   fontFamily: string;
-  fontSize: number;               // Points
-  fontWeight: number;             // 100 ~ 900
+  fontSize: number; // Points
+  fontWeight: number; // 100 ~ 900
   color: Color;
   backgroundColor?: Color;
   outlineColor?: Color;
@@ -348,7 +339,7 @@ interface CaptionStyle {
   shadowColor?: Color;
   shadowOffset?: Point2D;
   alignment: TextAlignment;
-  verticalPosition: number;       // 0.0 (top) ~ 1.0 (bottom)
+  verticalPosition: number; // 0.0 (top) ~ 1.0 (bottom)
 }
 
 type TextAlignment = 'left' | 'center' | 'right';
@@ -373,7 +364,7 @@ interface Proposal {
   status: ProposalStatus;
   editScript: EditScript;
   preview?: PreviewInfo;
-  reasoning?: string;             // AI reasoning explanation
+  reasoning?: string; // AI reasoning explanation
   createdAt: string;
   appliedAt?: string;
 }
@@ -390,7 +381,7 @@ interface EditScript {
 
 ```typescript
 interface SearchQuery {
-  text?: string;                  // Semantic search
+  text?: string; // Semantic search
   kind?: AssetKind[];
   tags?: string[];
   duration?: { min?: number; max?: number };
@@ -402,7 +393,7 @@ interface SearchQuery {
 
 interface SearchResult {
   assetId: AssetId;
-  score: number;                  // Relevance score
+  score: number; // Relevance score
   highlights?: SearchHighlight[];
 }
 ```
@@ -420,7 +411,7 @@ interface AssetIndex {
   shots?: Shot[];
   faces?: FaceOccurrence[];
   objects?: ObjectOccurrence[];
-  embedding?: number[];           // Vector embedding
+  embedding?: number[]; // Vector embedding
   keywords?: string[];
   indexedAt: string;
 }
@@ -430,17 +421,17 @@ interface AssetIndex {
 
 ```typescript
 interface Transcript {
-  language: string;               // ISO 639-1 code
+  language: string; // ISO 639-1 code
   segments: TranscriptSegment[];
   fullText: string;
 }
 
 interface TranscriptSegment {
-  start: number;                  // Seconds
+  start: number; // Seconds
   end: number;
   text: string;
-  confidence: number;             // 0.0 ~ 1.0
-  speaker?: string;               // Speaker ID
+  confidence: number; // 0.0 ~ 1.0
+  speaker?: string; // Speaker ID
   words?: Word[];
 }
 
@@ -456,11 +447,298 @@ interface Word {
 
 ```typescript
 interface Shot {
-  start: number;                  // Seconds
+  start: number; // Seconds
   end: number;
   type: ShotType;
   thumbnail?: string;
 }
 
 type ShotType = 'cut' | 'dissolve' | 'fade' | 'unknown';
+```
+
+---
+
+## Analysis Model
+
+Types used by the video analysis pipeline (ADR-048, ADR-051, ADR-052).
+
+### AnalysisBundle
+
+Aggregated result from the composable analysis pipeline. Stored at `{project}/.openreelio/analysis/{asset_id}/bundle.json`.
+
+```typescript
+interface AnalysisBundle {
+  assetId: string;
+  shots: ShotResult[] | null;
+  transcript: TranscriptSegment[] | null;
+  audioProfile: AudioProfile | null;
+  segments: ContentSegment[] | null;
+  frameAnalysis: FrameAnalysis[] | null;
+  metadata: VideoMetadata;
+  errors?: Record<string, string>; // Failed sub-job error messages
+  analyzedAt: string; // ISO 8601
+}
+```
+
+```rust
+pub struct AnalysisBundle {
+    pub asset_id: String,
+    pub shots: Option<Vec<ShotResult>>,
+    pub transcript: Option<Vec<TranscriptSegment>>,
+    pub audio_profile: Option<AudioProfile>,
+    pub segments: Option<Vec<ContentSegment>>,
+    pub frame_analysis: Option<Vec<FrameAnalysis>>,
+    pub metadata: VideoMetadata,
+    pub errors: HashMap<String, String>,
+    pub analyzed_at: String,
+}
+```
+
+### AnalysisOptions
+
+```typescript
+interface AnalysisOptions {
+  shots?: boolean;
+  transcript?: boolean;
+  audio?: boolean;
+  segments?: boolean;
+  visual?: boolean;
+  localOnly?: boolean;
+}
+```
+
+### AudioProfile
+
+```typescript
+interface AudioProfile {
+  bpm: number | null;
+  spectralCentroidHz: number;
+  loudnessProfile: number[]; // Per-second RMS dB values
+  peakDb: number;
+  silenceRegions: SilenceRegion[];
+}
+
+interface SilenceRegion {
+  startSec: number;
+  endSec: number;
+}
+```
+
+### ContentSegment
+
+```typescript
+interface ContentSegment {
+  startSec: number;
+  endSec: number;
+  segmentType: SegmentType;
+  confidence: number; // 0.0 - 1.0
+  features: JsonValue; // Heuristic signals
+}
+
+type SegmentType = 'talk' | 'performance' | 'reaction' | 'transition' | 'establishing' | 'montage';
+```
+
+### FrameAnalysis
+
+```typescript
+interface FrameAnalysis {
+  shotIndex: number;
+  cameraAngle: CameraAngle;
+  subjectPosition: SubjectPosition;
+  motionDirection: MotionDirection;
+  visualComplexity: number; // 0.0 - 1.0
+}
+
+type CameraAngle = 'wide' | 'medium' | 'close' | 'extreme_close' | 'unknown';
+type SubjectPosition = 'center' | 'left' | 'right' | 'top' | 'bottom' | 'unknown';
+type MotionDirection =
+  | 'static'
+  | 'pan_left'
+  | 'pan_right'
+  | 'tilt_up'
+  | 'tilt_down'
+  | 'zoom_in'
+  | 'zoom_out'
+  | 'unknown';
+```
+
+### VideoMetadata
+
+```typescript
+interface VideoMetadata {
+  durationSec: number;
+  width: number;
+  height: number;
+  fps: number;
+  hasAudio: boolean;
+  codec?: string;
+  bitrate?: number;
+}
+```
+
+---
+
+## Editing Style Document
+
+The ESD captures the "editing DNA" of a reference video (ADR-049, ADR-050). Stored at `{project}/.openreelio/esds/{id}.json`.
+
+### EditingStyleDocument
+
+```typescript
+interface EditingStyleDocument {
+  id: string; // UUID v4
+  name: string;
+  sourceAssetId: string;
+  createdAt: string; // ISO 8601
+  version: string; // "1.0.0"
+  rhythmProfile: RhythmProfile;
+  transitionInventory: TransitionInventory;
+  audioFingerprint?: AudioFingerprint | null;
+  pacingCurve: PacingPoint[];
+  syncPoints: SyncPoint[];
+  contentMap: ContentSegment[];
+  cameraPatterns: FrameAnalysis[];
+  extraFields?: Record<string, JsonValue>;
+}
+```
+
+```rust
+pub struct EditingStyleDocument {
+    pub id: String,
+    pub name: String,
+    pub source_asset_id: String,
+    pub created_at: String,
+    pub version: String,
+    pub rhythm_profile: RhythmProfile,
+    pub transition_inventory: TransitionInventory,
+    pub audio_fingerprint: Option<AudioFingerprint>,
+    pub pacing_curve: Vec<PacingPoint>,
+    pub sync_points: Vec<SyncPoint>,
+    pub content_map: Vec<ContentSegment>,
+    pub camera_patterns: Vec<FrameAnalysis>,
+    pub extra_fields: HashMap<String, serde_json::Value>,
+}
+```
+
+### RhythmProfile
+
+```typescript
+interface RhythmProfile {
+  shotDurations: number[];
+  meanDuration: number;
+  medianDuration: number;
+  stdDeviation: number;
+  minDuration: number;
+  maxDuration: number;
+  tempoClassification: TempoClassification;
+}
+
+type TempoClassification = 'fast' | 'moderate' | 'slow';
+```
+
+### TransitionInventory
+
+```typescript
+interface TransitionInventory {
+  transitions: TransitionEntry[];
+  typeFrequency: Record<string, number>;
+  dominantType: string;
+}
+
+interface TransitionEntry {
+  transitionType: string;
+  fromShotIndex: number;
+  toShotIndex: number;
+  durationSec: number;
+}
+```
+
+### PacingPoint
+
+Normalized shot position and duration for pacing curve visualization.
+
+```typescript
+interface PacingPoint {
+  normalizedPosition: number; // 0.0-1.0 (shot center / total duration)
+  normalizedDuration: number; // 0.0-1.0 (shot duration / max shot duration)
+}
+```
+
+### SyncPoint
+
+Audio-visual alignment point.
+
+```typescript
+interface SyncPoint {
+  timeSec: number;
+  audioEventType: string;
+  visualEventType: string;
+  offsetSec: number; // Negative = audio leads visual
+}
+```
+
+### AudioFingerprint
+
+```typescript
+interface AudioFingerprint {
+  bpm: number | null;
+  spectralCentroidHz: number;
+}
+```
+
+### EsdSummary
+
+Lightweight summary for list views.
+
+```typescript
+interface EsdSummary {
+  id: string;
+  name: string;
+  sourceAssetId: string;
+  createdAt: string;
+  tempoClassification: TempoClassification;
+}
+```
+
+### StylePlanResult
+
+Result of applying a reference editing style to source footage.
+
+```typescript
+interface StylePlanResult {
+  plan: AgentPlan;
+  compatibilityScore: number; // 0.0 - 1.0
+  warnings: string[];
+}
+```
+
+### DtwResult
+
+Exported for diagnostics and visualization helpers.
+
+```typescript
+interface DtwResult {
+  alignment: Array<[number, number]>;
+  distance: number;
+  path: Array<[number, number]>;
+}
+```
+
+### Relationship Diagram
+
+```
+AnalysisBundle ─── (generate_esd) ───▸ EditingStyleDocument
+     │                                        │
+     ├── shots: ShotResult[]                  ├── rhythmProfile: RhythmProfile
+     ├── audioProfile: AudioProfile           ├── transitionInventory: TransitionInventory
+     ├── segments: ContentSegment[]           ├── pacingCurve: PacingPoint[]
+     ├── frameAnalysis: FrameAnalysis[]       ├── syncPoints: SyncPoint[]
+     └── metadata: VideoMetadata              ├── contentMap: ContentSegment[]
+                                              └── cameraPatterns: FrameAnalysis[]
+
+EditingStyleDocument + AnalysisBundle ─── (apply_editing_style) ───▸ StylePlanResult
+                                                                          │
+                                                                          ├── plan: AgentPlan
+                                                                          ├── compatibilityScore
+                                                                          └── warnings
 ```
