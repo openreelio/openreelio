@@ -36,6 +36,14 @@ pub enum JobType {
     FinalRender,
     /// AI completion task
     AICompletion,
+    /// Audio profiling analysis
+    AudioProfiling,
+    /// Content segmentation analysis
+    ContentSegmentation,
+    /// Visual frame analysis
+    VisualAnalysis,
+    /// Full video analysis (orchestrator)
+    VideoAnalysis,
 }
 
 /// Job priority levels

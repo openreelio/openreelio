@@ -418,6 +418,14 @@ impl ValidatedJobPayload {
                 p.validate()?;
                 Ok(Self::AICompletion(p))
             }
+            // Analysis pipeline jobs are orchestrated directly by AnalysisJobRunner
+            crate::core::jobs::JobType::AudioProfiling
+            | crate::core::jobs::JobType::ContentSegmentation
+            | crate::core::jobs::JobType::VisualAnalysis
+            | crate::core::jobs::JobType::VideoAnalysis => Err(format!(
+                "Analysis job type {:?} is not submitted via job queue",
+                job_type
+            )),
         }
     }
 
