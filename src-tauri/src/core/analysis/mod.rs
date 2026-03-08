@@ -23,6 +23,7 @@
 //! ```
 
 pub mod audio;
+pub mod dtw;
 pub mod segmentation;
 pub mod types;
 pub mod visual;
