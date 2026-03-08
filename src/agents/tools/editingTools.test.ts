@@ -35,6 +35,7 @@ vi.mock('./storeAccessor', () => ({
 
 import { useProjectStore } from '@/stores/projectStore';
 import { getTimelineSnapshot } from './storeAccessor';
+import { invoke } from '@tauri-apps/api/core';
 
 const CTX: AgentContext = { projectId: 'project-1', sequenceId: 'seq-1' };
 
@@ -1245,6 +1246,135 @@ describe('editingTools — extended tools', () => {
       const result = await tool!.handler({ time: -1 }, CTX);
       expect(result.success).toBe(false);
       expect(result.error).toContain('non-negative');
+    });
+  });
+
+  // ===========================================================================
+  // Apply Editing Style
+  // ===========================================================================
+
+  describe('apply_editing_style', () => {
+    it('should be registered with category clip', () => {
+      const tool = globalToolRegistry.get('apply_editing_style');
+      expect(tool).toBeDefined();
+      expect(tool!.category).toBe('clip');
+    });
+
+    it('should return style plan result with compatibility score', async () => {
+      const mockPlanResult = {
+        plan: {
+          id: 'plan-1',
+          goal: 'Apply style',
+          steps: [{ id: 's1' }, { id: 's2' }, { id: 's3' }],
+          approvalGranted: true,
+        },
+        compatibilityScore: 0.85,
+        warnings: [],
+      };
+      const mockExecution = {
+        planId: 'plan-1',
+        success: true,
+        totalSteps: 3,
+        stepsCompleted: 3,
+        stepResults: [],
+        operationIds: ['op-1'],
+        executionTimeMs: 42,
+      };
+      vi.mocked(invoke).mockResolvedValueOnce(mockPlanResult).mockResolvedValueOnce(mockExecution);
+
+      const tool = globalToolRegistry.get('apply_editing_style');
+      const result = await tool!.handler({ esdId: 'esd-1', sourceAssetId: 'source-1' }, CTX);
+
+      expect(result.success).toBe(true);
+      const data = result.result as Record<string, unknown>;
+      expect(data.compatibilityScore).toBe(0.85);
+      expect(data.planStepCount).toBe(3);
+      expect(data.stepsCompleted).toBe(3);
+      expect(data.esdId).toBe('esd-1');
+      expect(data.sourceAssetId).toBe('source-1');
+      expect(data.plan).toEqual(mockPlanResult.plan);
+    });
+
+    it('should include warnings in result when source is shorter', async () => {
+      const mockPlanResult = {
+        plan: {
+          id: 'plan-2',
+          goal: 'Apply style',
+          steps: [],
+          approvalGranted: true,
+        },
+        compatibilityScore: 0.3,
+        warnings: ['Source is much shorter than reference'],
+      };
+      const mockExecution = {
+        planId: 'plan-2',
+        success: true,
+        totalSteps: 0,
+        stepsCompleted: 0,
+        stepResults: [],
+        operationIds: [],
+        executionTimeMs: 12,
+      };
+      vi.mocked(invoke).mockResolvedValueOnce(mockPlanResult).mockResolvedValueOnce(mockExecution);
+
+      const tool = globalToolRegistry.get('apply_editing_style');
+      const result = await tool!.handler({ esdId: 'esd-1', sourceAssetId: 'source-1' }, CTX);
+
+      expect(result.success).toBe(true);
+      const data = result.result as Record<string, unknown>;
+      expect(data.warnings).toHaveLength(1);
+      expect(data.summary).toContain('Warnings');
+    });
+
+    it('should fail when esdId is missing', async () => {
+      const tool = globalToolRegistry.get('apply_editing_style');
+      const result = await tool!.handler({ sourceAssetId: 'source-1' }, CTX);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('required');
+    });
+
+    it('should fail when sourceAssetId is missing', async () => {
+      const tool = globalToolRegistry.get('apply_editing_style');
+      const result = await tool!.handler({ esdId: 'esd-1' }, CTX);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('required');
+    });
+
+    it('should handle IPC error gracefully', async () => {
+      vi.mocked(invoke).mockRejectedValue(new Error('ESD not found'));
+
+      const tool = globalToolRegistry.get('apply_editing_style');
+      const result = await tool!.handler({ esdId: 'bad', sourceAssetId: 'src-1' }, CTX);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('ESD not found');
+    });
+
+    it('should fail when backend plan execution rolls back', async () => {
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          plan: { id: 'plan-3', goal: 'Apply style', steps: [{ id: 's1' }], approvalGranted: true },
+          compatibilityScore: 0.6,
+          warnings: [],
+        })
+        .mockResolvedValueOnce({
+          planId: 'plan-3',
+          success: false,
+          totalSteps: 1,
+          stepsCompleted: 0,
+          stepResults: [],
+          operationIds: [],
+          errorMessage: 'Atomic execution failed',
+          executionTimeMs: 8,
+        });
+
+      const tool = globalToolRegistry.get('apply_editing_style');
+      const result = await tool!.handler({ esdId: 'bad', sourceAssetId: 'src-1' }, CTX);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Atomic execution failed');
     });
   });
 });
