@@ -70,14 +70,14 @@ pub fn dtw_align(reference: &[f64], source: &[f64]) -> DtwResult {
     }
 
     // Fill first row
-    for j in 1..m {
-        dp[0][j] = dp[0][j - 1] + (normalized_reference[0] - normalized_source[j]).abs();
+    for (j, src_val) in normalized_source.iter().enumerate().skip(1) {
+        dp[0][j] = dp[0][j - 1] + (normalized_reference[0] - src_val).abs();
     }
 
     // Fill rest of the matrix
     for i in 1..n {
-        for j in 1..m {
-            let cost = (normalized_reference[i] - normalized_source[j]).abs();
+        for (j, src_val) in normalized_source.iter().enumerate().skip(1) {
+            let cost = (normalized_reference[i] - src_val).abs();
             dp[i][j] = cost + dp[i - 1][j - 1].min(dp[i - 1][j]).min(dp[i][j - 1]);
         }
     }
