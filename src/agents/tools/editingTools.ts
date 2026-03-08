@@ -1714,6 +1714,7 @@ const EDITING_TOOLS: ToolDefinition[] = [
             error: execution.errorMessage ?? 'Generated style plan failed during execution',
           };
         }
+        let syncWarning: string | undefined;
         if (typeof useProjectStore.setState === 'function') {
           try {
             const freshState = await refreshProjectState();
@@ -1721,8 +1722,11 @@ const EDITING_TOOLS: ToolDefinition[] = [
               applyProjectState(draft, freshState);
             });
           } catch (syncError) {
+            const syncMessage =
+              syncError instanceof Error ? syncError.message : String(syncError);
+            syncWarning = syncMessage;
             logger.warn('apply_editing_style executed but state refresh failed', {
-              error: syncError instanceof Error ? syncError.message : String(syncError),
+              error: syncMessage,
             });
           }
         }
@@ -1746,6 +1750,7 @@ const EDITING_TOOLS: ToolDefinition[] = [
             stepsCompleted: execution.stepsCompleted,
             operationIds: execution.operationIds,
             warnings,
+            ...(syncWarning ? { syncWarning } : {}),
             summary: `Style applied with ${(result.compatibilityScore * 100).toFixed(0)}% compatibility. Executed ${execution.stepsCompleted}/${execution.totalSteps} planned steps.${warnings.length > 0 ? ` Warnings: ${warnings.join('; ')}` : ''}`,
           },
         };

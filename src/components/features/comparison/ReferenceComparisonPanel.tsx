@@ -64,15 +64,15 @@ const StructureBar = memo(function StructureBar({
   return (
     <div className="flex items-center gap-2">
       <span className="w-12 shrink-0 text-[10px] text-editor-text-muted">{label}</span>
-      <div className="flex h-4 flex-1 overflow-hidden rounded">
+      <div className="relative h-4 flex-1 overflow-hidden rounded">
         {segments.map((segment, index) => {
           const widthPercent = ((segment.endSec - segment.startSec) / totalDuration) * 100;
-          if (widthPercent < 0.5) return null;
+          const leftPercent = (segment.startSec / totalDuration) * 100;
           return (
             <div
               key={`${segment.segmentType}-${index}`}
-              className={`${SEG_COLORS[segment.segmentType]} opacity-80 transition-opacity hover:opacity-100`}
-              style={{ width: `${widthPercent}%` }}
+              className={`absolute inset-y-0 ${SEG_COLORS[segment.segmentType]} opacity-80 transition-opacity hover:opacity-100`}
+              style={{ left: `${leftPercent}%`, width: `${Math.max(widthPercent, 0.5)}%` }}
               title={`${SEG_LABELS[segment.segmentType]}: ${(segment.endSec - segment.startSec).toFixed(1)}s`}
             />
           );

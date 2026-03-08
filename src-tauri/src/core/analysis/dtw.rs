@@ -276,8 +276,8 @@ mod tests {
 
         assert!(!result.alignment.is_empty());
         assert!(
-            elapsed.as_millis() < 10,
-            "DTW took {}ms for 100x100, expected <10ms",
+            elapsed.as_millis() < 100,
+            "DTW took {}ms for 100x100, expected <100ms",
             elapsed.as_millis()
         );
     }

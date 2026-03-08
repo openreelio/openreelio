@@ -30,8 +30,8 @@ struct WindowFeatures {
     spectral_centroid: f64,
     /// Estimated spoken words per second in this window
     speech_density: f64,
-    /// Whether this window overlaps with a silence region
-    is_silent: bool,
+    /// Fraction of this window covered by silence regions (0.0 - 1.0)
+    silence_ratio: f64,
     /// Whether this window sits at the start or end boundary of the video
     is_boundary_window: bool,
     /// Whether all overlapping shots are shorter than montage threshold
@@ -120,6 +120,18 @@ impl ContentSegmenter {
             ));
         }
 
+        if !self.window_sec.is_finite() || self.window_sec <= 0.0 {
+            return Err(CoreError::ValidationError(
+                "window_sec must be a positive finite number".to_string(),
+            ));
+        }
+
+        if !self.min_segment_sec.is_finite() || self.min_segment_sec < 0.0 {
+            return Err(CoreError::ValidationError(
+                "min_segment_sec must be a non-negative finite number".to_string(),
+            ));
+        }
+
         let loudness_stats = Self::compute_loudness_stats(&audio.loudness_profile);
 
         // Step a: Divide video into windows
@@ -136,7 +148,7 @@ impl ContentSegmenter {
                     "cutFrequency": w.cut_frequency,
                     "spectralCentroid": w.spectral_centroid,
                     "speechDensity": w.speech_density,
-                    "isSilent": w.is_silent,
+                    "silenceRatio": w.silence_ratio,
                     "isBoundaryWindow": w.is_boundary_window,
                     "allShortShots": w.all_short_shots,
                     "longestShotDuration": w.longest_shot_duration,
@@ -178,7 +190,7 @@ impl ContentSegmenter {
             let cut_frequency = Self::compute_cut_frequency(start, end, shots);
             let spectral_centroid = audio.spectral_centroid_hz;
             let speech_density = Self::compute_speech_density(start, end, transcript);
-            let is_silent = Self::check_silence_overlap(start, end, &audio.silence_regions);
+            let silence_ratio = Self::compute_silence_ratio(start, end, &audio.silence_regions);
             let (all_short_shots, longest_shot_duration) =
                 Self::compute_shot_shape(start, end, shots);
             let is_boundary_window = start <= f64::EPSILON || (duration_sec - end) <= f64::EPSILON;
@@ -191,7 +203,7 @@ impl ContentSegmenter {
                 cut_frequency,
                 spectral_centroid,
                 speech_density,
-                is_silent,
+                silence_ratio,
                 is_boundary_window,
                 all_short_shots,
                 longest_shot_duration,
@@ -269,16 +281,30 @@ impl ContentSegmenter {
         boundary_count as f64 / window_duration
     }
 
-    /// Checks whether a time window overlaps with any silence region.
-    fn check_silence_overlap(
+    /// Computes the fraction of a time window covered by silence regions.
+    ///
+    /// Returns a ratio in `[0.0, 1.0]`: total overlapping silence duration
+    /// divided by window length.
+    fn compute_silence_ratio(
         start_sec: f64,
         end_sec: f64,
         silence_regions: &[SilenceRegion],
-    ) -> bool {
-        silence_regions.iter().any(|sr| {
-            // Overlap exists when neither region is entirely before or after the other
-            sr.start_sec < end_sec && sr.end_sec > start_sec
-        })
+    ) -> f64 {
+        let window_len = end_sec - start_sec;
+        if window_len <= 0.0 {
+            return 0.0;
+        }
+
+        let total_silence: f64 = silence_regions
+            .iter()
+            .map(|sr| {
+                let overlap_start = sr.start_sec.max(start_sec);
+                let overlap_end = sr.end_sec.min(end_sec);
+                (overlap_end - overlap_start).max(0.0)
+            })
+            .sum();
+
+        (total_silence / window_len).min(1.0)
     }
 
     /// Computes transcript speech density as overlapping words per second.
@@ -384,8 +410,8 @@ impl ContentSegmenter {
         features: &WindowFeatures,
         loudness_stats: &LoudnessStats,
     ) -> (SegmentType, f64) {
-        // Rule 1: Silent => Transition
-        if features.is_silent {
+        // Rule 1: Predominantly silent (>=70% of window) => Transition
+        if features.silence_ratio >= 0.7 {
             return (SegmentType::Transition, 0.9);
         }
 
@@ -850,5 +876,54 @@ mod tests {
         let segmenter = ContentSegmenter::default();
         assert!((segmenter.window_sec - 5.0).abs() < 0.001);
         assert!((segmenter.min_segment_sec - 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_return_error_for_zero_window_sec() {
+        let segmenter = ContentSegmenter::new().with_window(0.0);
+        let audio = make_audio_profile(10, -20.0, 1500.0);
+        let result = segmenter.segment(10.0, &[], &audio);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_return_error_for_negative_window_sec() {
+        let segmenter = ContentSegmenter::new().with_window(-1.0);
+        let audio = make_audio_profile(10, -20.0, 1500.0);
+        let result = segmenter.segment(10.0, &[], &audio);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_return_error_for_nan_window_sec() {
+        let segmenter = ContentSegmenter::new().with_window(f64::NAN);
+        let audio = make_audio_profile(10, -20.0, 1500.0);
+        let result = segmenter.segment(10.0, &[], &audio);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_return_error_for_negative_min_segment_sec() {
+        let segmenter = ContentSegmenter::new().with_min_segment(-1.0);
+        let audio = make_audio_profile(10, -20.0, 1500.0);
+        let result = segmenter.segment(10.0, &[], &audio);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_compute_silence_ratio_correctly() {
+        // Full silence
+        let regions = vec![SilenceRegion::new(0.0, 10.0)];
+        let ratio = ContentSegmenter::compute_silence_ratio(0.0, 10.0, &regions);
+        assert!((ratio - 1.0).abs() < 0.001);
+
+        // Partial silence (50%)
+        let regions = vec![SilenceRegion::new(0.0, 5.0)];
+        let ratio = ContentSegmenter::compute_silence_ratio(0.0, 10.0, &regions);
+        assert!((ratio - 0.5).abs() < 0.001);
+
+        // No silence
+        let ratio = ContentSegmenter::compute_silence_ratio(0.0, 10.0, &[]);
+        assert!((ratio - 0.0).abs() < 0.001);
     }
 }

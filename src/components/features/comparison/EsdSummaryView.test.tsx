@@ -5,7 +5,7 @@
  * a mini pacing sparkline, and an "Apply Style" action.
  */
 
-import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { EsdSummaryView } from './EsdSummaryView';
 import type { EditingStyleDocument } from '@/bindings';
@@ -13,6 +13,8 @@ import type { EditingStyleDocument } from '@/bindings';
 // =============================================================================
 // Canvas Mock (PacingSparkline uses ctx.scale, strokeStyle, etc.)
 // =============================================================================
+
+const originalGetContext = HTMLCanvasElement.prototype.getContext;
 
 beforeAll(() => {
   const mockContext = {
@@ -40,6 +42,10 @@ beforeAll(() => {
   HTMLCanvasElement.prototype.getContext = vi.fn(
     () => mockContext,
   ) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+});
+
+afterAll(() => {
+  HTMLCanvasElement.prototype.getContext = originalGetContext;
 });
 
 // =============================================================================

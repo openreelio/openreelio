@@ -476,6 +476,31 @@ impl JobProcessor {
         validate_path_id_component(&payload.asset_id, "assetId")?;
         let input_path = validate_local_input_path_async(&payload.asset_path, "assetPath").await?;
 
+        // Defense-in-depth: validate project_path even though the IPC layer
+        // already resolves it from state. The worker must not blindly trust
+        // the payload since it could be deserialized from a persisted job queue.
+        {
+            let pp = payload.project_path.trim();
+            if pp.is_empty() {
+                return Err("project_path is empty".to_string());
+            }
+            let project_pb = std::path::PathBuf::from(pp);
+            if !project_pb.is_absolute() {
+                return Err(format!(
+                    "project_path must be an absolute path: {}",
+                    project_pb.display()
+                ));
+            }
+            if project_pb.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            }) {
+                return Err("project_path must not contain '.' or '..' segments".to_string());
+            }
+        }
+
         let ffmpeg_path = {
             let ffmpeg_state = self.ffmpeg_state.read().await;
             let runner = ffmpeg_state.runner().ok_or("FFmpeg not available")?;

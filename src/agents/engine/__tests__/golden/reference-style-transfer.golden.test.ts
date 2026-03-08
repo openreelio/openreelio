@@ -192,17 +192,22 @@ describe('Golden: reference-style-transfer', () => {
    * Helper: mock LLM for playbook flow (2 calls: Think + Observe).
    * The Planner skips the LLM call because the orchestration playbook matches.
    */
-  function mockLLMForPlaybook(): void {
+  function mockLLMForPlaybook(): { assertCallCount: (n: number) => void } {
     let callCount = 0;
     vi.spyOn(mockLLM, 'generateStructured').mockImplementation(async () => {
       callCount++;
       if (callCount === 1) return thought;
       return observation;
     });
+    return {
+      assertCallCount: (n: number): void => {
+        expect(callCount).toBe(n);
+      },
+    };
   }
 
   it('should execute reference style transfer playbook with 3 chained steps', async () => {
-    mockLLMForPlaybook();
+    const llmTracker = mockLLMForPlaybook();
 
     const engine = createAgenticEngine(mockLLM, mockToolExecutor, {
       enableFastPath: false,
@@ -252,6 +257,9 @@ describe('Golden: reference-style-transfer', () => {
     // Verify step references resolved: apply_editing_style got esdId='esd-uuid-1'
     expect(executions[2].args.esdId).toBe('esd-uuid-1');
     expect(executions[2].args.sourceAssetId).toBe('source-asset-1');
+
+    // Verify LLM was called exactly twice (Think + Observe; Planner uses playbook)
+    llmTracker.assertCallCount(2);
 
     // Verify trace shows non-fast-path execution
     if (result.trace) {

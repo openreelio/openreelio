@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 import { PacingCurveChart } from './PacingCurveChart';
 
@@ -25,6 +25,8 @@ const mockContext = {
   textAlign: 'left' as CanvasTextAlign,
 };
 
+const originalGetContext = HTMLCanvasElement.prototype.getContext;
+
 describe('PacingCurveChart', () => {
   beforeAll(() => {
     HTMLCanvasElement.prototype.getContext = vi.fn(
@@ -37,6 +39,11 @@ describe('PacingCurveChart', () => {
       },
     );
     vi.spyOn(window, 'cancelAnimationFrame').mockImplementation(() => undefined);
+  });
+
+  afterAll(() => {
+    HTMLCanvasElement.prototype.getContext = originalGetContext;
+    vi.restoreAllMocks();
   });
 
   beforeEach(() => {

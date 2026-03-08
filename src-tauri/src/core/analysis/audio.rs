@@ -163,11 +163,8 @@ impl AudioProfiler {
             Ok(stderr) => Ok(parse_spectral_centroid(&stderr)),
             Err(err) => {
                 let msg = err.to_string();
-                // If the filter is not available in this FFmpeg build, return 0.0
-                if msg.contains("No such filter")
-                    || msg.contains("Unknown filter")
-                    || msg.contains("aspectralstats")
-                {
+                // Only swallow explicit missing-filter errors; other failures propagate.
+                if msg.contains("No such filter") || msg.contains("Unknown filter") {
                     tracing::debug!("aspectralstats filter unavailable, returning 0.0 Hz");
                     Ok(0.0)
                 } else {

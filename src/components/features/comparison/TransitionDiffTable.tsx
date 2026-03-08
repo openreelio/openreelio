@@ -37,11 +37,11 @@ export interface TransitionDiffTableProps {
 // =============================================================================
 
 function getMatchStatus(row: TransitionDiffRow): MatchStatus {
-  if (row.outputCount === 0 && row.referenceCount > 0) {
-    return 'missing';
-  }
   if (row.referenceCount === row.outputCount) {
     return 'exact';
+  }
+  if (row.referenceCount === 0 || row.outputCount === 0) {
+    return 'missing';
   }
   if (Math.abs(row.referenceCount - row.outputCount) <= 2) {
     return 'close';

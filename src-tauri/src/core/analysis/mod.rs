@@ -84,17 +84,47 @@ impl AnalysisJobRunner {
         self
     }
 
-    /// Returns the directory for an asset's analysis artifacts
-    fn asset_analysis_dir(&self, asset_id: &str) -> PathBuf {
-        self.project_dir
+    /// Returns the directory for an asset's analysis artifacts.
+    ///
+    /// Validates `asset_id` to prevent path traversal before joining.
+    fn asset_analysis_dir(&self, asset_id: &str) -> CoreResult<PathBuf> {
+        Self::validate_asset_id(asset_id)?;
+        Ok(self
+            .project_dir
             .join(".openreelio")
             .join(ANALYSIS_DIR)
-            .join(asset_id)
+            .join(asset_id))
+    }
+
+    /// Validates that an asset ID is safe to embed in file paths.
+    fn validate_asset_id(asset_id: &str) -> CoreResult<()> {
+        if asset_id.is_empty() {
+            return Err(CoreError::ValidationError(
+                "Asset ID must not be empty".to_string(),
+            ));
+        }
+        if asset_id.contains('/')
+            || asset_id.contains('\\')
+            || asset_id.contains("..")
+            || asset_id.contains(':')
+        {
+            return Err(CoreError::ValidationError(format!(
+                "Asset ID contains unsafe path characters: {}",
+                asset_id
+            )));
+        }
+        if asset_id.bytes().any(|b| b == 0) || asset_id.chars().any(|c| c.is_control()) {
+            return Err(CoreError::ValidationError(format!(
+                "Asset ID contains null bytes or control characters: {}",
+                asset_id
+            )));
+        }
+        Ok(())
     }
 
     /// Returns the path to an asset's bundle JSON file
-    fn bundle_path(&self, asset_id: &str) -> PathBuf {
-        self.asset_analysis_dir(asset_id).join(BUNDLE_FILENAME)
+    fn bundle_path(&self, asset_id: &str) -> CoreResult<PathBuf> {
+        Ok(self.asset_analysis_dir(asset_id)?.join(BUNDLE_FILENAME))
     }
 
     /// Runs the full analysis pipeline with the given options.
@@ -292,7 +322,11 @@ impl AnalysisJobRunner {
         emit_progress(
             "bundle",
             "saved",
-            Some(self.bundle_path(asset_id).display().to_string()),
+            Some(
+                self.bundle_path(asset_id)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|_| "unknown".to_string()),
+            ),
         );
 
         Ok(bundle)
@@ -306,7 +340,7 @@ impl AnalysisJobRunner {
 
     /// Loads a cached analysis bundle from disk when it exists.
     pub fn load_bundle_optional(&self, asset_id: &str) -> CoreResult<Option<AnalysisBundle>> {
-        let path = self.bundle_path(asset_id);
+        let path = self.bundle_path(asset_id)?;
         if !path.exists() {
             return Ok(None);
         }
@@ -317,22 +351,13 @@ impl AnalysisJobRunner {
     }
 
     /// Saves an analysis bundle to disk using atomic write.
+    ///
+    /// Uses `atomic_write_json_pretty` from `crate::core::fs` which handles
+    /// Windows rename-over-existing semantics correctly.
     fn save_bundle(&self, bundle: &AnalysisBundle) -> CoreResult<()> {
-        let dir = self.asset_analysis_dir(&bundle.asset_id);
-        std::fs::create_dir_all(&dir)?;
+        let path = self.bundle_path(&bundle.asset_id)?;
 
-        let path = dir.join(BUNDLE_FILENAME);
-        let temp_path = dir.join(format!(".{}.tmp.{}", BUNDLE_FILENAME, std::process::id()));
-
-        let content = serde_json::to_string_pretty(bundle)
-            .map_err(|e| CoreError::Internal(format!("Failed to serialize bundle: {}", e)))?;
-
-        // Atomic write: temp file → rename
-        std::fs::write(&temp_path, &content)?;
-        std::fs::rename(&temp_path, &path).map_err(|e| {
-            let _ = std::fs::remove_file(&temp_path);
-            CoreError::Internal(format!("Failed to rename bundle file: {}", e))
-        })?;
+        crate::core::fs::atomic_write_json_pretty(&path, bundle)?;
 
         tracing::debug!(
             "Analysis bundle saved for asset {} at {}",
@@ -385,7 +410,7 @@ impl AnalysisJobRunner {
         }
 
         let analyzer = VisualAnalyzer::new(self.ffmpeg_path.clone());
-        let keyframe_dir = self.asset_analysis_dir(asset_id).join("keyframes");
+        let keyframe_dir = self.asset_analysis_dir(asset_id)?.join("keyframes");
         let keyframe_paths = analyzer
             .extract_keyframes(video_path, &results, &keyframe_dir)
             .await?;
@@ -428,7 +453,7 @@ impl AnalysisJobRunner {
             )));
         }
 
-        let analysis_dir = self.asset_analysis_dir(asset_id);
+        let analysis_dir = self.asset_analysis_dir(asset_id)?;
         tokio::fs::create_dir_all(&analysis_dir).await?;
 
         let temp_audio_path = analysis_dir.join("transcript.wav");
@@ -578,7 +603,7 @@ impl AnalysisJobRunner {
         // For non-local-only mode, extract keyframes for potential vision API use.
         // The actual vision API call is handled at a higher layer (agent tools).
         // Here we provide local fallback as the default.
-        let keyframe_dir = self.asset_analysis_dir(asset_id).join("keyframes");
+        let keyframe_dir = self.asset_analysis_dir(asset_id)?.join("keyframes");
         let _keyframe_paths = analyzer
             .extract_keyframes(video_path, shots_ref, &keyframe_dir)
             .await?;
@@ -603,7 +628,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let runner = AnalysisJobRunner::new(temp_dir.path());
 
-        let path = runner.bundle_path("asset_001");
+        let path = runner.bundle_path("asset_001").unwrap();
         assert!(path.ends_with(".openreelio/analysis/asset_001/bundle.json"));
     }
 
@@ -759,5 +784,21 @@ mod tests {
 
         assert!(bundle.transcript.is_none());
         assert!(bundle.errors.contains_key("transcript"));
+    }
+
+    #[test]
+    fn should_reject_path_traversal_in_asset_id() {
+        let temp_dir = TempDir::new().unwrap();
+        let runner = AnalysisJobRunner::new(temp_dir.path());
+
+        assert!(runner.bundle_path("../escape").is_err());
+        assert!(runner.bundle_path("").is_err());
+        assert!(runner.bundle_path("foo/bar").is_err());
+        assert!(runner.bundle_path("foo\\bar").is_err());
+        assert!(runner.bundle_path("foo\0bar").is_err());
+        assert!(runner.bundle_path("C:").is_err());
+        // Valid asset IDs should work
+        assert!(runner.bundle_path("asset_001").is_ok());
+        assert!(runner.bundle_path("01HXYZ123ABC").is_ok());
     }
 }

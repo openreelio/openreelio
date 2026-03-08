@@ -54,7 +54,10 @@ pub struct AudioProfile {
     pub bpm: Option<f64>,
     /// Spectral center frequency in Hz (higher = brighter/more treble)
     pub spectral_centroid_hz: f64,
-    /// Per-second RMS loudness values in dB
+    /// Per-second RMS loudness values in dB.
+    ///
+    /// Sampled at 1 Hz (one value per second), so `loudness_profile[i]`
+    /// represents the average loudness during the i-th second of audio.
     pub loudness_profile: Vec<f64>,
     /// Maximum loudness in dB
     pub peak_db: f64,

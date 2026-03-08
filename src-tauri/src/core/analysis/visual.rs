@@ -351,7 +351,9 @@ impl VisualAnalyzer {
             .ok_or_else(|| CoreError::Internal("Failed to capture FFmpeg stderr".to_string()))?;
 
         let mut reader = BufReader::new(stderr_handle).lines();
-        let mut scene_changes: usize = 0;
+        // Count frames retained by mpdecimate (not scene changes — mpdecimate
+        // drops near-duplicate frames, so retained frames indicate visual change).
+        let mut retained_frames: usize = 0;
         let mut tail_lines: Vec<String> = Vec::new();
 
         while let Some(line) = reader
@@ -360,7 +362,7 @@ impl VisualAnalyzer {
             .map_err(|e| CoreError::Internal(format!("Failed reading FFmpeg stderr: {}", e)))?
         {
             if is_showinfo_frame_line(&line) {
-                scene_changes += 1;
+                retained_frames += 1;
             }
             // Keep a rolling window of tail lines for error reporting
             tail_lines.push(line);
@@ -383,14 +385,14 @@ impl VisualAnalyzer {
             )));
         }
 
-        // visual_complexity = min(scene_changes / (duration * 2), 1.0)
-        let complexity = (scene_changes as f64 / (duration * 2.0)).min(1.0);
+        // visual_complexity = min(retained_frames / (duration * 2), 1.0)
+        let complexity = (retained_frames as f64 / (duration * 2.0)).min(1.0);
 
         tracing::debug!(
             "Shot {:.3}-{:.3}s: {} retained frames, complexity={:.3}",
             shot.start_sec,
             shot.end_sec,
-            scene_changes,
+            retained_frames,
             complexity
         );
 

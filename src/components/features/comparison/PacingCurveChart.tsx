@@ -97,9 +97,12 @@ export const PacingCurveChart = memo(function PacingCurveChart({
       return;
     }
 
-    // Normalize to shared max
-    const allVals = [...referenceCurve.map((p) => p.value), ...outputCurve.map((p) => p.value)];
-    const maxVal = Math.max(...allVals, 0.001);
+    // Normalize each curve independently to 0..1 range so both use the same visual scale
+    const refMax = Math.max(...referenceCurve.map((p) => p.value), 0.001);
+    const outMax = Math.max(...outputCurve.map((p) => p.value), 0.001);
+    const normalizedRef = referenceCurve.map((p) => ({ ...p, value: p.value / refMax }));
+    const normalizedOut = outputCurve.map((p) => ({ ...p, value: p.value / outMax }));
+    const maxVal = 1;
 
     // Grid
     ctx.strokeStyle = GRID_COLOR;
@@ -137,8 +140,8 @@ export const PacingCurveChart = memo(function PacingCurveChart({
     ctx.restore();
 
     // Curves
-    drawCurve(ctx, referenceCurve, px, py, pw, ph, maxVal, REF_COLOR, false);
-    drawCurve(ctx, outputCurve, px, py, pw, ph, maxVal, OUT_COLOR, true);
+    drawCurve(ctx, normalizedRef, px, py, pw, ph, maxVal, REF_COLOR, false);
+    drawCurve(ctx, normalizedOut, px, py, pw, ph, maxVal, OUT_COLOR, true);
 
     // Correlation badge
     const pct = Math.round(correlation * 100);

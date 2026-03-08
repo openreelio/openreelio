@@ -350,13 +350,16 @@ impl StylePlanner {
 
         for index in 0..boundary_count {
             let run_end = duplicate_run_end[index];
+            let scaled_time = scaled_cut_times.get(index).copied();
+
             let preferred = if run_end > index {
-                dtw_cut_times[run_end]
-                    .map(|terminal| scaled_cut_times[index].min(terminal - MIN_SPLIT_GAP_SEC))
+                dtw_cut_times[run_end].and_then(|terminal| {
+                    scaled_time.map(|st| st.min(terminal - MIN_SPLIT_GAP_SEC))
+                })
             } else {
                 dtw_cut_times[index]
             };
-            let fallback = Some(scaled_cut_times[index]);
+            let fallback = scaled_time;
 
             if let Some(selected) = Self::select_cut_time(preferred, fallback, src_total, last_cut)
             {

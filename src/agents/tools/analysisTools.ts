@@ -89,35 +89,28 @@ async function findExistingEsdForAsset(assetId: string): Promise<EditingStyleDoc
 function buildStyleDocumentResult(
   esd: EditingStyleDocument,
   analysisSource: 'cached' | 'generated' | 'existing_esd',
-  requestedName?: string,
 ): {
   esdId: string;
   name: string;
   assetId: string;
   analysisSource: 'cached' | 'generated' | 'existing_esd';
-  requestedName?: string;
   tempoClassification: string;
   shotCount: number;
   pacingPointCount: number;
   summary: string;
 } {
-  const reusedExistingEsd = analysisSource === 'existing_esd';
-  const requestedNameNotice =
-    requestedName && requestedName !== esd.name
-      ? ` Requested name "${requestedName}" is not yet persisted by the backend.`
-      : '';
-  const reuseNotice = reusedExistingEsd ? ' Reused the latest existing ESD for this asset.' : '';
+  const reuseNotice =
+    analysisSource === 'existing_esd' ? ' Reused the latest existing ESD for this asset.' : '';
 
   return {
     esdId: esd.id,
     name: esd.name,
     assetId: esd.sourceAssetId,
     analysisSource,
-    requestedName,
     tempoClassification: esd.rhythmProfile.tempoClassification,
     shotCount: esd.rhythmProfile.shotDurations.length,
     pacingPointCount: esd.pacingCurve.length,
-    summary: `Created ESD "${esd.name}" - ${esd.rhythmProfile.tempoClassification} tempo, ${esd.rhythmProfile.shotDurations.length} shots.${reuseNotice}${requestedNameNotice}`,
+    summary: `Created ESD "${esd.name}" - ${esd.rhythmProfile.tempoClassification} tempo, ${esd.rhythmProfile.shotDurations.length} shots.${reuseNotice}`,
   };
 }
 
@@ -782,7 +775,6 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
       type: 'object',
       properties: {
         assetId: { type: 'string', description: 'Asset ID of the analyzed reference video' },
-        name: { type: 'string', description: 'Optional display name for the ESD' },
       },
       required: ['assetId'],
     },
@@ -792,20 +784,16 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
         if (!assetId) {
           return { success: false, error: 'assetId is required' };
         }
-        const requestedName =
-          typeof args.name === 'string' && args.name.trim() ? args.name.trim() : undefined;
-        if (!requestedName) {
-          const existingEsd = await findExistingEsdForAsset(assetId);
-          if (existingEsd) {
-            logger.debug('generate_style_document reused existing ESD', {
-              assetId,
-              esdId: existingEsd.id,
-            });
-            return {
-              success: true,
-              result: buildStyleDocumentResult(existingEsd, 'existing_esd'),
-            };
-          }
+        const existingEsd = await findExistingEsdForAsset(assetId);
+        if (existingEsd) {
+          logger.debug('generate_style_document reused existing ESD', {
+            assetId,
+            esdId: existingEsd.id,
+          });
+          return {
+            success: true,
+            result: buildStyleDocumentResult(existingEsd, 'existing_esd'),
+          };
         }
         const cachedBundle = await invoke<AnalysisBundle | null>('get_analysis_bundle', {
           assetId,
@@ -823,7 +811,6 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
           result: buildStyleDocumentResult(
             esd,
             cachedBundle ? 'cached' : 'generated',
-            requestedName,
           ),
         };
       } catch (error) {

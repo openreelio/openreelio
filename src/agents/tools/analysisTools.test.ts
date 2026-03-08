@@ -737,6 +737,7 @@ describe('analysisTools', () => {
 
 describe('reference style transfer analysis tools', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     globalToolRegistry.clear();
     registerAnalysisTools();
 
@@ -1026,7 +1027,7 @@ describe('reference style transfer analysis tools', () => {
       expect(vi.mocked(invoke)).toHaveBeenCalledTimes(2);
     });
 
-    it('should keep requested name in the response metadata', async () => {
+    it('should use backend-generated name (ESD names are auto-generated)', async () => {
       const mockBundle = {
         assetId: 'ref-1',
         shots: [],
@@ -1059,20 +1060,23 @@ describe('reference style transfer analysis tools', () => {
         contentStructure: [],
         cameraPatterns: [],
       };
-      vi.mocked(invoke).mockResolvedValueOnce(mockBundle).mockResolvedValueOnce(mockEsd);
+      // list_esds returns empty (no existing ESD), then bundle + esd generation
+      vi.mocked(invoke)
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce(mockBundle)
+        .mockResolvedValueOnce(mockEsd);
 
       const result = await globalToolRegistry.execute('generate_style_document', {
         assetId: 'ref-1',
-        name: 'Custom Name',
       });
       const data = getToolResult<Record<string, unknown>>(result);
       expect(data.name).toBe('ESD-ref-1');
-      expect(data.requestedName).toBe('Custom Name');
-      expect(String(data.summary)).toContain('Requested name "Custom Name"');
-      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(1, 'get_analysis_bundle', {
+      expect(data).not.toHaveProperty('requestedName');
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(1, 'list_esds');
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(2, 'get_analysis_bundle', {
         assetId: 'ref-1',
       });
-      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(2, 'generate_esd', {
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(3, 'generate_esd', {
         bundle: mockBundle,
       });
     });
