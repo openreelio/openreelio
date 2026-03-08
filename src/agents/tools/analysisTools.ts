@@ -12,7 +12,7 @@
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
 import { invoke } from '@tauri-apps/api/core';
-import type { AnalysisBundle, AnalysisOptions, EditingStyleDocument } from '@/bindings';
+import type { AnalysisBundle, AnalysisOptions, EditingStyleDocument, EsdSummary } from '@/bindings';
 import {
   getAssetCatalogSnapshot,
   getAssetSnapshotById,
@@ -51,6 +51,73 @@ function resolveAnalysisOptions(args: Record<string, unknown>): AnalysisOptions 
     segments: readFlag('segments', true),
     visual: readFlag('visual', true),
     localOnly: readFlag('localOnly', false),
+  };
+}
+
+async function findExistingEsdForAsset(assetId: string): Promise<EditingStyleDocument | null> {
+  try {
+    const summaries = await invoke<EsdSummary[]>('list_esds');
+    const latestSummary = summaries
+      .filter((summary) => summary.sourceAssetId === assetId)
+      .sort((left, right) => {
+        const leftTime = Date.parse(left.createdAt);
+        const rightTime = Date.parse(right.createdAt);
+
+        if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) {
+          return right.createdAt.localeCompare(left.createdAt);
+        }
+
+        return rightTime - leftTime;
+      })[0];
+
+    if (!latestSummary) {
+      return null;
+    }
+
+    return await invoke<EditingStyleDocument | null>('get_esd', {
+      esdId: latestSummary.id,
+    });
+  } catch (error) {
+    logger.warn('Unable to reuse existing style document; falling back to regeneration', {
+      assetId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+function buildStyleDocumentResult(
+  esd: EditingStyleDocument,
+  analysisSource: 'cached' | 'generated' | 'existing_esd',
+  requestedName?: string,
+): {
+  esdId: string;
+  name: string;
+  assetId: string;
+  analysisSource: 'cached' | 'generated' | 'existing_esd';
+  requestedName?: string;
+  tempoClassification: string;
+  shotCount: number;
+  pacingPointCount: number;
+  summary: string;
+} {
+  const reusedExistingEsd = analysisSource === 'existing_esd';
+  const requestedNameNotice =
+    requestedName && requestedName !== esd.name
+      ? ` Requested name "${requestedName}" is not yet persisted by the backend.`
+      : '';
+  const reuseNotice = reusedExistingEsd ? ' Reused the latest existing ESD for this asset.' : '';
+
+  return {
+    esdId: esd.id,
+    name: esd.name,
+    assetId: esd.sourceAssetId,
+    analysisSource,
+    requestedName,
+    tempoClassification: esd.rhythmProfile.tempoClassification,
+    shotCount: esd.rhythmProfile.shotDurations.length,
+    pacingPointCount: esd.pacingCurve.length,
+    summary: `Created ESD "${esd.name}" - ${esd.rhythmProfile.tempoClassification} tempo, ${esd.rhythmProfile.shotDurations.length} shots.${reuseNotice}${requestedNameNotice}`,
   };
 }
 
@@ -727,6 +794,19 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
         }
         const requestedName =
           typeof args.name === 'string' && args.name.trim() ? args.name.trim() : undefined;
+        if (!requestedName) {
+          const existingEsd = await findExistingEsdForAsset(assetId);
+          if (existingEsd) {
+            logger.debug('generate_style_document reused existing ESD', {
+              assetId,
+              esdId: existingEsd.id,
+            });
+            return {
+              success: true,
+              result: buildStyleDocumentResult(existingEsd, 'existing_esd'),
+            };
+          }
+        }
         const cachedBundle = await invoke<AnalysisBundle | null>('get_analysis_bundle', {
           assetId,
         });
@@ -740,17 +820,11 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
         logger.debug('generate_style_document completed', { assetId, esdId: esd.id });
         return {
           success: true,
-          result: {
-            esdId: esd.id,
-            name: esd.name,
-            assetId: esd.sourceAssetId,
-            analysisSource: cachedBundle ? 'cached' : 'generated',
+          result: buildStyleDocumentResult(
+            esd,
+            cachedBundle ? 'cached' : 'generated',
             requestedName,
-            tempoClassification: esd.rhythmProfile.tempoClassification,
-            shotCount: esd.rhythmProfile.shotDurations.length,
-            pacingPointCount: esd.pacingCurve.length,
-            summary: `Created ESD "${esd.name}" — ${esd.rhythmProfile.tempoClassification} tempo, ${esd.rhythmProfile.shotDurations.length} shots.${requestedName && requestedName !== esd.name ? ` Requested name "${requestedName}" is not yet persisted by the backend.` : ''}`,
-          },
+          ),
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

@@ -856,6 +856,8 @@ describe('reference style transfer analysis tools', () => {
 
   describe('generate_style_document', () => {
     it('should return ESD summary when given valid assetId', async () => {
+      const existingEsdSummaries: Array<{ id: string; sourceAssetId: string; createdAt: string }> =
+        [];
       const mockBundle = {
         assetId: 'ref-1',
         shots: [],
@@ -891,7 +893,10 @@ describe('reference style transfer analysis tools', () => {
         contentStructure: [],
         cameraPatterns: [],
       };
-      vi.mocked(invoke).mockResolvedValueOnce(mockBundle).mockResolvedValueOnce(mockEsd);
+      vi.mocked(invoke)
+        .mockResolvedValueOnce(existingEsdSummaries)
+        .mockResolvedValueOnce(mockBundle)
+        .mockResolvedValueOnce(mockEsd);
 
       const result = await globalToolRegistry.execute('generate_style_document', {
         assetId: 'ref-1',
@@ -907,6 +912,8 @@ describe('reference style transfer analysis tools', () => {
     });
 
     it('should analyze first when no cached bundle exists', async () => {
+      const existingEsdSummaries: Array<{ id: string; sourceAssetId: string; createdAt: string }> =
+        [];
       const mockBundle = {
         assetId: 'ref-1',
         shots: [],
@@ -940,6 +947,7 @@ describe('reference style transfer analysis tools', () => {
         cameraPatterns: [],
       };
       vi.mocked(invoke)
+        .mockResolvedValueOnce(existingEsdSummaries)
         .mockResolvedValueOnce(null)
         .mockResolvedValueOnce(mockBundle)
         .mockResolvedValueOnce(mockEsd);
@@ -949,10 +957,11 @@ describe('reference style transfer analysis tools', () => {
       });
       const data = getToolResult<Record<string, unknown>>(result);
       expect(data.analysisSource).toBe('generated');
-      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(1, 'get_analysis_bundle', {
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(1, 'list_esds');
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(2, 'get_analysis_bundle', {
         assetId: 'ref-1',
       });
-      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(2, 'analyze_video_full', {
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(3, 'analyze_video_full', {
         assetId: 'ref-1',
         options: {
           shots: true,
@@ -963,9 +972,58 @@ describe('reference style transfer analysis tools', () => {
           localOnly: false,
         },
       });
-      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(3, 'generate_esd', {
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(4, 'generate_esd', {
         bundle: mockBundle,
       });
+    });
+
+    it('should reuse the latest existing ESD for the same asset when available', async () => {
+      const existingSummary = {
+        id: 'esd-existing',
+        name: 'Existing ESD',
+        sourceAssetId: 'ref-1',
+        createdAt: '2026-03-08T00:00:00Z',
+        tempoClassification: 'moderate',
+      };
+      const existingEsd = {
+        id: 'esd-existing',
+        name: 'Existing ESD',
+        sourceAssetId: 'ref-1',
+        createdAt: '2026-03-08T00:00:00Z',
+        version: '1.0.0',
+        rhythmProfile: {
+          shotDurations: [2, 3, 1],
+          meanDuration: 2,
+          medianDuration: 2,
+          stdDeviation: 0.82,
+          minDuration: 1,
+          maxDuration: 3,
+          tempoClassification: 'moderate',
+        },
+        pacingCurve: [
+          { normalizedPosition: 0.2, normalizedDuration: 0.67 },
+          { normalizedPosition: 0.7, normalizedDuration: 1 },
+        ],
+        transitionInventory: [],
+        syncPoints: [],
+        contentMap: [],
+        cameraPatterns: [],
+      };
+      vi.mocked(invoke).mockResolvedValueOnce([existingSummary]).mockResolvedValueOnce(existingEsd);
+
+      const result = await globalToolRegistry.execute('generate_style_document', {
+        assetId: 'ref-1',
+      });
+
+      const data = getToolResult<Record<string, unknown>>(result);
+      expect(data.esdId).toBe('esd-existing');
+      expect(data.analysisSource).toBe('existing_esd');
+      expect(String(data.summary)).toContain('Reused the latest existing ESD');
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(1, 'list_esds');
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(2, 'get_esd', {
+        esdId: 'esd-existing',
+      });
+      expect(vi.mocked(invoke)).toHaveBeenCalledTimes(2);
     });
 
     it('should keep requested name in the response metadata', async () => {
