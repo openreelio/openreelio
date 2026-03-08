@@ -7,7 +7,8 @@ export type OrchestrationPlaybookId =
   | 'generate_and_place'
   | 'stock_media_search'
   | 'auto_caption'
-  | 'music_bed';
+  | 'music_bed'
+  | 'reference_style_transfer';
 
 export interface OrchestrationPlaybookMatch {
   id: OrchestrationPlaybookId;
@@ -102,6 +103,18 @@ const AUTO_CAPTION_KEYWORDS = [
   /음성\s*인식/i,
 ];
 
+const REFERENCE_STYLE_KEYWORDS = [
+  /\bedit\s+like\b/i,
+  /\bmatch\s+the\s+style\b/i,
+  /\bsame\s+editing\s+as\b/i,
+  /\bapply\s+editing\s+from\b/i,
+  /\breference\s+style\b/i,
+  /\bstyle\s+transfer\b/i,
+  /\bediting\s+style\b/i,
+  /참조\s*편집/i,
+  /편집\s*스타일/i,
+];
+
 export function buildOrchestrationPlaybook(
   thought: Thought,
   context: AgentContext,
@@ -137,6 +150,11 @@ export function buildOrchestrationPlaybook(
   const musicBed = buildMusicBedPlaybook(playbookContext);
   if (musicBed) {
     return musicBed;
+  }
+
+  const referenceStyleTransfer = buildReferenceStyleTransferPlaybook(playbookContext);
+  if (referenceStyleTransfer) {
+    return referenceStyleTransfer;
   }
 
   const stockMediaSearch = buildStockMediaSearchPlaybook(playbookContext);
@@ -224,6 +242,95 @@ function buildMusicBedPlaybook(
       estimatedTotalDuration: estimateTotalDuration(steps),
       requiresApproval: false,
       rollbackStrategy: 'Remove inserted music clip and restore previous volume level.',
+    },
+  };
+}
+
+function matchesReferenceStyleKeywords(text: string): boolean {
+  return REFERENCE_STYLE_KEYWORDS.some((re) => re.test(text));
+}
+
+function buildReferenceStyleTransferPlaybook(
+  playbookContext: PlaybookContext,
+): OrchestrationPlaybookMatch | null {
+  const { text, context, toolExecutor } = playbookContext;
+
+  if (!matchesReferenceStyleKeywords(text)) {
+    return null;
+  }
+
+  if (
+    !hasTools(toolExecutor, [
+      'analyze_reference_video',
+      'generate_style_document',
+      'apply_editing_style',
+    ])
+  ) {
+    return null;
+  }
+
+  const sequenceId = context.sequenceId;
+  if (!sequenceId) {
+    return null;
+  }
+
+  // Reference asset: prefer first video asset as the style reference
+  const referenceAssetId = pickAssetId(context, 'video');
+  if (!referenceAssetId) {
+    return null;
+  }
+
+  // Source asset: prefer a second video asset, fall back to the same reference asset
+  const sourceAssetId =
+    context.availableAssets.find((asset) => asset.type === 'video' && asset.id !== referenceAssetId)
+      ?.id ?? referenceAssetId;
+
+  const steps: PlanStep[] = [
+    {
+      id: 'playbook_analyze_reference',
+      tool: 'analyze_reference_video',
+      args: {
+        assetId: referenceAssetId,
+      },
+      description: 'Analyze reference video for editing style patterns',
+      riskLevel: 'low',
+      estimatedDuration: 5000,
+    },
+    {
+      id: 'playbook_generate_esd',
+      tool: 'generate_style_document',
+      args: {
+        assetId: makeReference('playbook_analyze_reference', 'data.assetId', referenceAssetId),
+      },
+      description: 'Generate Editing Style Document from analysis results',
+      riskLevel: 'low',
+      estimatedDuration: 3000,
+      dependsOn: ['playbook_analyze_reference'],
+    },
+    {
+      id: 'playbook_apply_style',
+      tool: 'apply_editing_style',
+      args: {
+        esdId: makeReference('playbook_generate_esd', 'data.esdId', ''),
+        sourceAssetId,
+      },
+      description: 'Apply reference editing style to source footage with DTW-aligned cuts',
+      riskLevel: 'medium',
+      estimatedDuration: 2000,
+      dependsOn: ['playbook_generate_esd'],
+    },
+  ];
+
+  return {
+    id: 'reference_style_transfer',
+    confidence: 0.88,
+    plan: {
+      goal: 'Analyze reference video style and apply it to source footage',
+      steps,
+      estimatedTotalDuration: estimateTotalDuration(steps),
+      requiresApproval: false,
+      rollbackStrategy:
+        'Undo applied style edits in reverse order; ESD and analysis artifacts are retained for reuse.',
     },
   };
 }
