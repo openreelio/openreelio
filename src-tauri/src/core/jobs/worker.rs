@@ -13,6 +13,8 @@ use std::sync::{
 };
 
 #[cfg(feature = "gui")]
+use serde::Deserialize;
+#[cfg(feature = "gui")]
 use tauri::Emitter;
 #[cfg(all(not(test), feature = "gui"))]
 use tauri::Manager;
@@ -24,6 +26,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::core::jobs::JobType;
 #[cfg(feature = "gui")]
 use crate::core::{
+    analysis::{AnalysisJobRunner, AnalysisOptions, VideoMetadata},
     ffmpeg::{FFmpegProgress, SharedFFmpegState},
     fs::{validate_local_input_path_async, validate_path_id_component},
 };
@@ -35,6 +38,17 @@ use crate::core::{
 // =============================================================================
 // Mutex Helpers
 // =============================================================================
+
+#[cfg(feature = "gui")]
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct VideoAnalysisJobPayload {
+    asset_id: String,
+    project_path: String,
+    asset_path: String,
+    metadata: VideoMetadata,
+    options: AnalysisOptions,
+}
 
 /// Acquires a mutex lock, recovering from poisoning if necessary.
 ///
@@ -409,6 +423,10 @@ impl JobProcessor {
             JobType::PreviewRender => self.process_preview_render(job).await,
             JobType::FinalRender => self.process_final_render(job).await,
             JobType::AICompletion => self.process_ai_completion(job).await,
+            JobType::VideoAnalysis => self.process_video_analysis(job).await,
+            JobType::AudioProfiling | JobType::ContentSegmentation | JobType::VisualAnalysis => {
+                Err("Analysis sub-jobs are not submitted directly to the worker pool".to_string())
+            }
         }
     }
 
@@ -448,6 +466,93 @@ impl JobProcessor {
         });
         emit_or_warn(&self.app_handle, "job:failed", payload.clone());
         emit_or_warn(&self.app_handle, "job-failed", payload);
+    }
+
+    /// Process full video analysis on the worker pool.
+    async fn process_video_analysis(&self, job: &Job) -> Result<serde_json::Value, String> {
+        let payload: VideoAnalysisJobPayload = serde_json::from_value(job.payload.clone())
+            .map_err(|error| format!("Invalid video_analysis payload: {}", error))?;
+
+        validate_path_id_component(&payload.asset_id, "assetId")?;
+        let input_path = validate_local_input_path_async(&payload.asset_path, "assetPath").await?;
+
+        // Defense-in-depth: validate project_path even though the IPC layer
+        // already resolves it from state. The worker must not blindly trust
+        // the payload since it could be deserialized from a persisted job queue.
+        {
+            let pp = payload.project_path.trim();
+            if pp.is_empty() {
+                return Err("project_path is empty".to_string());
+            }
+            let project_pb = std::path::PathBuf::from(pp);
+            if !project_pb.is_absolute() {
+                return Err(format!(
+                    "project_path must be an absolute path: {}",
+                    project_pb.display()
+                ));
+            }
+            if project_pb.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::CurDir | std::path::Component::ParentDir
+                )
+            }) {
+                return Err("project_path must not contain '.' or '..' segments".to_string());
+            }
+        }
+
+        let ffmpeg_path = {
+            let ffmpeg_state = self.ffmpeg_state.read().await;
+            let runner = ffmpeg_state.runner().ok_or("FFmpeg not available")?;
+            runner.info().ffmpeg_path.clone()
+        };
+
+        self.emit_progress(&job.id, 0.05, Some("Queued analysis pipeline"));
+
+        let runner = AnalysisJobRunner::new(std::path::Path::new(&payload.project_path))
+            .with_ffmpeg_path(ffmpeg_path);
+        let input_path_string = input_path.to_string_lossy().to_string();
+        let app_handle = self.app_handle.clone();
+        let asset_id = payload.asset_id.clone();
+        let job_id = job.id.clone();
+
+        let bundle = runner
+            .analyze_full_with_metadata(
+                &payload.asset_id,
+                &input_path_string,
+                payload.metadata,
+                &payload.options,
+                move |stage, status, message| {
+                    let progress = match stage {
+                        "shots" => 0.2,
+                        "audio" => 0.35,
+                        "transcript" => 0.5,
+                        "segments" => 0.7,
+                        "visual" => 0.9,
+                        "bundle" => 1.0,
+                        _ => 0.1,
+                    };
+
+                    emit_or_warn(
+                        &app_handle,
+                        "analysis:progress",
+                        serde_json::json!({
+                            "jobId": job_id.clone(),
+                            "assetId": asset_id.clone(),
+                            "stage": stage,
+                            "status": status,
+                            "progress": progress,
+                            "message": message,
+                        }),
+                    );
+                },
+            )
+            .await
+            .map_err(|error| format!("Video analysis failed: {}", error))?;
+
+        self.emit_progress(&job.id, 1.0, Some("Analysis pipeline complete"));
+        serde_json::to_value(bundle)
+            .map_err(|error| format!("Failed to serialize analysis bundle: {}", error))
     }
 
     /// Process thumbnail generation job

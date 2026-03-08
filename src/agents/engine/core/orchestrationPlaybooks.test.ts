@@ -398,3 +398,242 @@ describe('buildOrchestrationPlaybook', () => {
     expect(match?.id).toBe('broll_music_subtitles');
   });
 });
+
+describe('reference_style_transfer playbook', () => {
+  it('should match "edit like" trigger phrase', () => {
+    const thought: Thought = {
+      understanding: 'Edit like this reference video',
+      requirements: ['style transfer'],
+      uncertainties: [],
+      approach: 'Analyze reference and apply editing style',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor([
+      'analyze_reference_video',
+      'generate_style_document',
+      'apply_editing_style',
+    ]);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match).not.toBeNull();
+    expect(match?.id).toBe('reference_style_transfer');
+    expect(match?.confidence).toBe(0.88);
+  });
+
+  it('should match "match the style" trigger phrase', () => {
+    const thought: Thought = {
+      understanding: 'Match the style of the concert video',
+      requirements: ['style matching'],
+      uncertainties: [],
+      approach: 'Apply reference editing style',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor([
+      'analyze_reference_video',
+      'generate_style_document',
+      'apply_editing_style',
+    ]);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match).not.toBeNull();
+    expect(match?.id).toBe('reference_style_transfer');
+    expect(match?.confidence).toBe(0.88);
+  });
+
+  it('should match Korean trigger "편집 스타일"', () => {
+    const thought: Thought = {
+      understanding: '이 영상의 편집 스타일을 적용해 주세요',
+      requirements: ['편집 스타일'],
+      uncertainties: [],
+      approach: '참조 영상 분석 후 스타일 적용',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor([
+      'analyze_reference_video',
+      'generate_style_document',
+      'apply_editing_style',
+    ]);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match).not.toBeNull();
+    expect(match?.id).toBe('reference_style_transfer');
+  });
+
+  it('should create 3-step chain with correct dependencies', () => {
+    const thought: Thought = {
+      understanding: 'Apply editing style from the reference clip',
+      requirements: ['style transfer'],
+      uncertainties: [],
+      approach: 'Analyze and transfer editing style',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor([
+      'analyze_reference_video',
+      'generate_style_document',
+      'apply_editing_style',
+    ]);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match).not.toBeNull();
+    expect(match?.plan.steps).toHaveLength(3);
+
+    // Step 1: analyze_reference_video (no dependencies)
+    const analyzeStep = match?.plan.steps[0];
+    expect(analyzeStep?.id).toBe('playbook_analyze_reference');
+    expect(analyzeStep?.tool).toBe('analyze_reference_video');
+    expect(analyzeStep?.dependsOn).toBeUndefined();
+
+    // Step 2: generate_style_document (depends on step 1)
+    const generateStep = match?.plan.steps[1];
+    expect(generateStep?.id).toBe('playbook_generate_esd');
+    expect(generateStep?.tool).toBe('generate_style_document');
+    expect(generateStep?.dependsOn).toContain('playbook_analyze_reference');
+    expect(generateStep?.args.assetId).toMatchObject({
+      $fromStep: 'playbook_analyze_reference',
+      $path: 'data.assetId',
+      $default: 'asset-video-fallback',
+    });
+
+    // Step 3: apply_editing_style (depends on step 2)
+    const applyStep = match?.plan.steps[2];
+    expect(applyStep?.id).toBe('playbook_apply_style');
+    expect(applyStep?.tool).toBe('apply_editing_style');
+    expect(applyStep?.dependsOn).toContain('playbook_generate_esd');
+    expect(applyStep?.args.esdId).toMatchObject({
+      $fromStep: 'playbook_generate_esd',
+      $path: 'data.esdId',
+      $default: '',
+    });
+  });
+
+  it('should choose reference and source assets from prompt mentions when both are named', () => {
+    const thought: Thought = {
+      understanding: 'Apply editing from Source Montage.mp4 to Summer Concert.mp4',
+      requirements: ['style transfer'],
+      uncertainties: [],
+      approach: 'Transfer the pacing from Source Montage.mp4 onto Summer Concert.mp4',
+      needsMoreInfo: false,
+    };
+
+    const context = createContext({
+      availableAssets: [
+        { id: 'asset-source', name: 'Summer Concert.mp4', type: 'video', duration: 180 },
+        { id: 'asset-reference', name: 'Source Montage.mp4', type: 'video', duration: 45 },
+      ],
+    });
+    const toolExecutor = createToolExecutor([
+      'analyze_reference_video',
+      'generate_style_document',
+      'apply_editing_style',
+    ]);
+
+    const match = buildOrchestrationPlaybook(thought, context, toolExecutor);
+
+    expect(match).not.toBeNull();
+    const analyzeStep = match?.plan.steps[0];
+    const applyStep = match?.plan.steps.at(-1);
+    expect(analyzeStep?.args.assetId).toBe('asset-reference');
+    expect(applyStep?.args.sourceAssetId).toBe('asset-source');
+  });
+
+  it('should reuse the latest style document for last-analysis prompts', () => {
+    const thought: Thought = {
+      understanding: 'Apply the editing style from my last analysis to My Footage.mp4',
+      requirements: ['style transfer', 'last analysis'],
+      uncertainties: [],
+      approach: 'Reuse the previous ESD and apply it to the source footage',
+      needsMoreInfo: false,
+    };
+
+    const context = createContext({
+      availableAssets: [
+        { id: 'asset-reference', name: 'Reference Cut.mp4', type: 'video', duration: 60 },
+        { id: 'asset-source', name: 'My Footage.mp4', type: 'video', duration: 90 },
+      ],
+    });
+    const toolExecutor = createToolExecutor([
+      'analyze_reference_video',
+      'generate_style_document',
+      'apply_editing_style',
+    ]);
+
+    const match = buildOrchestrationPlaybook(thought, context, toolExecutor);
+
+    expect(match).not.toBeNull();
+    expect(match?.id).toBe('reference_style_transfer');
+    expect(match?.plan.steps).toHaveLength(2);
+    expect(match?.plan.steps[0].tool).toBe('generate_style_document');
+    expect(match?.plan.steps[0].id).toBe('playbook_generate_esd');
+    expect(match?.plan.steps[1].tool).toBe('apply_editing_style');
+    expect(match?.plan.steps[1].dependsOn).toContain('playbook_generate_esd');
+    expect(match?.plan.steps.some((step) => step.tool === 'analyze_reference_video')).toBe(false);
+  });
+
+  it('should match "same editing as" and "apply editing from" trigger phrases', () => {
+    const toolExecutor = createToolExecutor([
+      'analyze_reference_video',
+      'generate_style_document',
+      'apply_editing_style',
+    ]);
+
+    const sameEditingThought: Thought = {
+      understanding: 'Use the same editing as the trailer reference',
+      requirements: ['style transfer'],
+      uncertainties: [],
+      approach: 'Transfer the reference pacing and transitions',
+      needsMoreInfo: false,
+    };
+    const applyEditingThought: Thought = {
+      understanding: 'Apply editing from the concert reference to my footage',
+      requirements: ['style transfer'],
+      uncertainties: [],
+      approach: 'Analyze the reference and apply it',
+      needsMoreInfo: false,
+    };
+
+    expect(buildOrchestrationPlaybook(sameEditingThought, createContext(), toolExecutor)?.id).toBe(
+      'reference_style_transfer',
+    );
+    expect(buildOrchestrationPlaybook(applyEditingThought, createContext(), toolExecutor)?.id).toBe(
+      'reference_style_transfer',
+    );
+  });
+
+  it('should not match unrelated queries', () => {
+    const thought: Thought = {
+      understanding: 'Trim the clip at 5 seconds',
+      requirements: ['trim'],
+      uncertainties: [],
+      approach: 'Split and remove',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor([
+      'analyze_reference_video',
+      'generate_style_document',
+      'apply_editing_style',
+    ]);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match).toBeNull();
+  });
+
+  it('should not match when required tools are unavailable', () => {
+    const thought: Thought = {
+      understanding: 'Edit like this reference video',
+      requirements: ['style transfer'],
+      uncertainties: [],
+      approach: 'Analyze reference and apply editing style',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor(['insert_clip', 'adjust_volume']);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match).toBeNull();
+  });
+});

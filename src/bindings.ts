@@ -1019,6 +1019,100 @@ async removeCloudProvider() : Promise<Result<null, string>> {
 }
 },
 /**
+ * Runs the full composable analysis pipeline on a video asset.
+ * 
+ * Queues the analysis pipeline on the background worker pool and waits for the
+ * resulting `AnalysisBundle`. Failed sub-jobs are recorded in the bundle's
+ * `errors` field without blocking other enabled analyses.
+ * 
+ * The resulting bundle is cached at:
+ * `{project}/.openreelio/analysis/{asset_id}/bundle.json`
+ */
+async analyzeVideoFull(assetId: string, options: AnalysisOptions) : Promise<Result<AnalysisBundle, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("analyze_video_full", { assetId, options }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Retrieves a cached analysis bundle for an asset.
+ * 
+ * Returns the previously computed bundle from disk without re-running analysis.
+ * Returns `Ok(None)` when no cached bundle exists yet.
+ */
+async getAnalysisBundle(assetId: string) : Promise<Result<AnalysisBundle | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_analysis_bundle", { assetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Generates an Editing Style Document from an analysis bundle.
+ * 
+ * The bundle is provided directly. The generated ESD is saved to disk at
+ * `{project}/.openreelio/esds/{id}.json` and returned.
+ */
+async generateEsd(bundle: AnalysisBundle) : Promise<Result<EditingStyleDocument, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("generate_esd", { bundle }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Retrieves an ESD by its ID.
+ * 
+ * Returns `Ok(None)` if the ESD does not exist.
+ */
+async getEsd(esdId: string) : Promise<Result<EditingStyleDocument | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_esd", { esdId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Lists all ESDs in the active project.
+ * 
+ * Returns summary objects containing id, name, source_asset_id,
+ * created_at, and tempo_classification (not the full document).
+ */
+async listEsds() : Promise<Result<EsdSummary[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_esds") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Deletes an ESD by its ID.
+ * 
+ * Returns `true` if the file existed and was deleted, `false` if not found.
+ */
+async deleteEsd(esdId: string) : Promise<Result<boolean, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_esd", { esdId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Applies an ESD's editing style to source footage.
+ * 
+ * Loads the specified ESD and the source asset's analysis bundle (generating
+ * one when needed), then generates an executable [`AgentPlan`] that creates a
+ * dedicated track, inserts the source asset, and applies DTW-guided splits.
+ */
+async applyEditingStyle(esdId: string, sourceAssetId: string) : Promise<Result<StylePlanResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("apply_editing_style", { esdId, sourceAssetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Gets application settings
  */
 async getSettings() : Promise<Result<AppSettingsDto, string>> {
@@ -1562,6 +1656,77 @@ errorMessage?: string | null;
  */
 executionTimeMs: number }
 /**
+ * Aggregated results from all analysis sub-jobs for a single asset.
+ * 
+ * This is the primary output artifact of the analysis pipeline.
+ * Stored at `{project}/.openreelio/analysis/{asset_id}/bundle.json`.
+ */
+export type AnalysisBundle = { 
+/**
+ * Asset ID this bundle belongs to
+ */
+assetId: string; 
+/**
+ * Shot detection results
+ */
+shots: ShotResult[] | null; 
+/**
+ * Transcript segments
+ */
+transcript: TranscriptSegment[] | null; 
+/**
+ * Audio profiling results
+ */
+audioProfile: AudioProfile | null; 
+/**
+ * Content segmentation results
+ */
+segments: ContentSegment[] | null; 
+/**
+ * Visual frame analysis results
+ */
+frameAnalysis: FrameAnalysis[] | null; 
+/**
+ * Video file metadata
+ */
+metadata: VideoMetadata; 
+/**
+ * Errors from failed sub-jobs (key = analysis type name)
+ */
+errors?: { [key in string]: string }; 
+/**
+ * ISO 8601 timestamp when analysis was performed
+ */
+analyzedAt: string }
+/**
+ * Options controlling which analysis sub-jobs to run
+ */
+export type AnalysisOptions = { 
+/**
+ * Run shot/scene detection
+ */
+shots?: boolean; 
+/**
+ * Run speech-to-text transcription
+ */
+transcript?: boolean; 
+/**
+ * Run audio profiling (BPM, loudness, spectral)
+ */
+audio?: boolean; 
+/**
+ * Run content segmentation (talk/performance/montage)
+ */
+segments?: boolean; 
+/**
+ * Run visual frame analysis
+ */
+visual?: boolean; 
+/**
+ * Skip Vision API calls, use FFmpeg-only local analysis
+ */
+localOnly?: boolean }
+/**
  * Provider that performed the analysis
  */
 export type AnalysisProvider = 
@@ -1929,6 +2094,18 @@ duration: number | null;
  */
 tags: string[] }
 /**
+ * Compact audio characteristics stored with the ESD for compatibility scoring.
+ */
+export type AudioFingerprint = { 
+/**
+ * Estimated tempo of the reference audio, when detectable.
+ */
+bpm?: number | null; 
+/**
+ * Average spectral centroid of the reference audio in hertz.
+ */
+spectralCentroidHz: number }
+/**
  * Audio-specific metadata
  */
 export type AudioInfo = { 
@@ -1948,6 +2125,33 @@ codec: string;
  * Bitrate in bps (optional)
  */
 bitrate?: number | null }
+/**
+ * Audio characteristics extracted from a video's audio track.
+ * 
+ * Contains rhythm, loudness, and spectral data used for
+ * content segmentation and style matching.
+ */
+export type AudioProfile = { 
+/**
+ * Estimated beats per minute (null if no clear rhythm detected)
+ */
+bpm: number | null; 
+/**
+ * Spectral center frequency in Hz (higher = brighter/more treble)
+ */
+spectralCentroidHz: number; 
+/**
+ * Per-second RMS loudness values in dB
+ */
+loudnessProfile: number[]; 
+/**
+ * Maximum loudness in dB
+ */
+peakDb: number; 
+/**
+ * Regions where audio is below -40 dB for > 0.5s
+ */
+silenceRegions: SilenceRegion[] }
 /**
  * Audio settings for clips
  */
@@ -2045,6 +2249,30 @@ evictions: number;
  * Cache hit rate (0.0 - 1.0)
  */
 hitRate: number }
+/**
+ * Camera angle classification for a shot
+ */
+export type CameraAngle = 
+/**
+ * Wide/establishing shot
+ */
+"wide" | 
+/**
+ * Medium shot (waist up)
+ */
+"medium" | 
+/**
+ * Close-up shot (head/shoulders)
+ */
+"close" | 
+/**
+ * Extreme close-up (detail)
+ */
+"extreme_close" | 
+/**
+ * Unable to determine (local fallback)
+ */
+"unknown"
 /**
  * Canvas size
  */
@@ -2266,6 +2494,30 @@ errorCode: ConnectionErrorCode | null;
  */
 errorDetails: string | null }
 /**
+ * A classified time segment of video content
+ */
+export type ContentSegment = { 
+/**
+ * Start time in seconds
+ */
+startSec: number; 
+/**
+ * End time in seconds
+ */
+endSec: number; 
+/**
+ * Classification type
+ */
+segmentType: SegmentType; 
+/**
+ * Classification confidence (0.0 - 1.0)
+ */
+confidence: number; 
+/**
+ * Heuristic signals that contributed to classification
+ */
+features: JsonValue }
+/**
  * Message for conversation history
  */
 export type ConversationMessageDto = { 
@@ -2325,6 +2577,22 @@ export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google:
  * Response for download_generated_video
  */
 export type DownloadGeneratedVideoResponse = { outputPath: string }
+/**
+ * Result of a DTW alignment between two sequences
+ */
+export type DtwResult = { 
+/**
+ * Aligned index pairs `(reference_idx, source_idx)` from start to end
+ */
+alignment: ([number, number])[]; 
+/**
+ * Total accumulated distance (lower = more similar)
+ */
+distance: number; 
+/**
+ * Full warping path for visualization/debugging (same as alignment)
+ */
+path: ([number, number])[] }
 /**
  * Edit action from AI
  */
@@ -2389,7 +2657,91 @@ explanation: string;
  * Preview plan for the edit
  */
 previewPlan: PreviewPlanDto | null }
+/**
+ * Complete editing style document extracted from a reference video.
+ * 
+ * Captures the rhythm, transitions, pacing, audio-visual sync,
+ * content structure, and camera patterns of the reference.
+ * Stored at `{project}/.openreelio/esds/{id}.json`.
+ */
+export type EditingStyleDocument = 
+/**
+ * Forward-compatible extension fields preserved during round-trip I/O.
+ */
+({ [key in string]: null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue } }) & { 
+/**
+ * Unique identifier (UUID v4)
+ */
+id: string; 
+/**
+ * Display name
+ */
+name: string; 
+/**
+ * ID of the source asset this ESD was generated from
+ */
+sourceAssetId: string; 
+/**
+ * ISO 8601 timestamp of creation
+ */
+createdAt: string; 
+/**
+ * Schema version for forward compatibility
+ */
+version: string; 
+/**
+ * Statistical profile of shot durations
+ */
+rhythmProfile: RhythmProfile; 
+/**
+ * Inventory of transitions between shots
+ */
+transitionInventory: TransitionInventory; 
+/**
+ * Compact reference audio signature used for compatibility scoring.
+ */
+audioFingerprint?: AudioFingerprint | null; 
+/**
+ * Normalized pacing curve
+ */
+pacingCurve: PacingPoint[]; 
+/**
+ * Detected audio-visual sync points
+ */
+syncPoints: SyncPoint[]; 
+/**
+ * Content segment map (from analysis bundle)
+ */
+contentMap: ContentSegment[]; 
+/**
+ * Camera pattern analysis per shot (from analysis bundle)
+ */
+cameraPatterns: FrameAnalysis[] }
 export type EditorSettingsDto = { defaultTimelineZoom: number; snapToGrid: boolean; snapTolerance: number; showClipThumbnails: boolean; showAudioWaveforms: boolean; rippleEditDefault: boolean }
+/**
+ * Summary information for listing ESDs without loading full documents
+ */
+export type EsdSummary = { 
+/**
+ * Unique identifier
+ */
+id: string; 
+/**
+ * Display name
+ */
+name: string; 
+/**
+ * Source asset ID
+ */
+sourceAssetId: string; 
+/**
+ * ISO 8601 creation timestamp
+ */
+createdAt: string; 
+/**
+ * Tempo classification from rhythm profile
+ */
+tempoClassification: TempoClassification }
 /**
  * Response for estimate_generation_cost
  */
@@ -2479,6 +2831,30 @@ missing?: boolean;
  * Child entries (for directories)
  */
 children: FileTreeEntryDto[] }
+/**
+ * Visual composition analysis for a single shot's keyframe
+ */
+export type FrameAnalysis = { 
+/**
+ * Index of the shot this analysis corresponds to
+ */
+shotIndex: number; 
+/**
+ * Detected camera angle
+ */
+cameraAngle: CameraAngle; 
+/**
+ * Detected subject position
+ */
+subjectPosition: SubjectPosition; 
+/**
+ * Detected motion direction
+ */
+motionDirection: MotionDirection; 
+/**
+ * Visual complexity score (0.0 = static/simple, 1.0 = complex/dynamic)
+ */
+visualComplexity: number }
 export type GeneralSettingsDto = { language: string; showWelcomeOnStartup: boolean; hasCompletedSetup: boolean; recentProjectsLimit: number; checkUpdatesOnStartup: boolean; defaultProjectLocation: string | null }
 /**
  * Response for get_annotation command
@@ -2722,6 +3098,42 @@ systemMemory: SystemMemoryDto | null }
  */
 export type MessageDto = { id: string; sessionId: string; role: string; timestamp: number; parts: PartDto[]; usageJson: string | null; finishReason: string | null }
 /**
+ * Camera or subject motion direction
+ */
+export type MotionDirection = 
+/**
+ * No significant motion
+ */
+"static" | 
+/**
+ * Camera pans left
+ */
+"pan_left" | 
+/**
+ * Camera pans right
+ */
+"pan_right" | 
+/**
+ * Camera tilts up
+ */
+"tilt_up" | 
+/**
+ * Camera tilts down
+ */
+"tilt_down" | 
+/**
+ * Camera zooms in
+ */
+"zoom_in" | 
+/**
+ * Camera zooms out
+ */
+"zoom_out" | 
+/**
+ * Unable to determine (local fallback)
+ */
+"unknown"
+/**
  * A detected object in a frame
  */
 export type ObjectDetection = { 
@@ -2741,6 +3153,18 @@ confidence: number;
  * Bounding box (if available)
  */
 boundingBox?: BoundingBox | null }
+/**
+ * A point on the normalized pacing curve
+ */
+export type PacingPoint = { 
+/**
+ * Normalized position in timeline (0.0-1.0, shot center / total duration)
+ */
+normalizedPosition: number; 
+/**
+ * Normalized duration (0.0-1.0, shot duration / max shot duration)
+ */
+normalizedDuration: number }
 /**
  * A content part within a message (text, tool call, tool result, etc.).
  */
@@ -3167,6 +3591,38 @@ provider: string | null;
  */
 params: JsonValue | null }
 /**
+ * Statistical profile of shot durations in a video
+ */
+export type RhythmProfile = { 
+/**
+ * Shot durations in seconds, in original sequence order
+ */
+shotDurations: number[]; 
+/**
+ * Mean shot duration
+ */
+meanDuration: number; 
+/**
+ * Median shot duration
+ */
+medianDuration: number; 
+/**
+ * Population standard deviation of shot durations
+ */
+stdDeviation: number; 
+/**
+ * Shortest shot duration
+ */
+minDuration: number; 
+/**
+ * Longest shot duration
+ */
+maxDuration: number; 
+/**
+ * Overall tempo classification
+ */
+tempoClassification: TempoClassification }
+/**
  * Risk assessment for an AI-generated edit.
  */
 export type RiskAssessmentDto = { 
@@ -3355,6 +3811,34 @@ transcriptTotal: number | null;
  */
 processingTimeMs: number }
 /**
+ * Classification type for a video content segment
+ */
+export type SegmentType = 
+/**
+ * Dialogue/interview/narration section
+ */
+"talk" | 
+/**
+ * Music/performance section
+ */
+"performance" | 
+/**
+ * Reaction/cutaway section
+ */
+"reaction" | 
+/**
+ * Short transitional section
+ */
+"transition" | 
+/**
+ * Establishing/wide shot section
+ */
+"establishing" | 
+/**
+ * Quick-cut montage section
+ */
+"montage"
+/**
  * Sequence (timeline container)
  * Uses denormalized structure - tracks are stored directly, not as IDs
  */
@@ -3514,6 +3998,18 @@ confidence: number;
  * Optional keyframe thumbnail path
  */
 keyframePath?: string | null }
+/**
+ * A detected region of silence in the audio track
+ */
+export type SilenceRegion = { 
+/**
+ * Start time in seconds
+ */
+startSec: number; 
+/**
+ * End time in seconds
+ */
+endSec: number }
 /**
  * State change types for event broadcasting.
  */
@@ -3730,6 +4226,50 @@ description: string;
  */
 parameters: JsonValue }
 /**
+ * Result of applying a reference editing style to source footage
+ */
+export type StylePlanResult = { 
+/**
+ * Executable plan with AddTrack, InsertClip, and SplitClip steps
+ */
+plan: AgentPlan; 
+/**
+ * Compatibility score between reference and source (0.0 - 1.0)
+ */
+compatibilityScore: number; 
+/**
+ * Warnings about potential issues (e.g., length mismatch)
+ */
+warnings: string[] }
+/**
+ * Subject position within the frame
+ */
+export type SubjectPosition = 
+/**
+ * Subject centered in frame
+ */
+"center" | 
+/**
+ * Subject on the left
+ */
+"left" | 
+/**
+ * Subject on the right
+ */
+"right" | 
+/**
+ * Subject in upper portion
+ */
+"top" | 
+/**
+ * Subject in lower portion
+ */
+"bottom" | 
+/**
+ * Unable to determine (local fallback)
+ */
+"unknown"
+/**
  * Request for submit_video_generation
  */
 export type SubmitVideoGenerationRequest = { prompt: string; mode?: string; quality?: string; durationSec?: number; negativePrompt: string | null; referenceImages?: string[]; referenceVideos?: string[]; referenceAudio?: string[]; aspectRatio?: string; seed: number | null; lipSyncLanguage: string | null }
@@ -3737,6 +4277,26 @@ export type SubmitVideoGenerationRequest = { prompt: string; mode?: string; qual
  * Response for submit_video_generation
  */
 export type SubmitVideoGenerationResponse = { jobId: string; providerJobId: string; estimatedCostCents: number }
+/**
+ * A detected synchronization point between audio and visual events
+ */
+export type SyncPoint = { 
+/**
+ * Time of the visual event (shot boundary) in seconds
+ */
+timeSec: number; 
+/**
+ * Type of audio event (e.g., "loudness_peak")
+ */
+audioEventType: string; 
+/**
+ * Type of visual event (e.g., "shot_boundary")
+ */
+visualEventType: string; 
+/**
+ * Offset in seconds (audio_time - visual_time; negative = audio leads)
+ */
+offsetSec: number }
 /**
  * System memory information.
  */
@@ -3757,6 +4317,22 @@ usedBytes: number;
  * Usage percentage (0-100)
  */
 usagePercent: number }
+/**
+ * Pacing tempo classification based on mean shot duration
+ */
+export type TempoClassification = 
+/**
+ * Mean shot duration < 2.0s
+ */
+"fast" | 
+/**
+ * Mean shot duration between 2.0s and 5.0s (inclusive)
+ */
+"moderate" | 
+/**
+ * Mean shot duration > 5.0s
+ */
+"slow"
 /**
  * Text alignment options for horizontal text positioning.
  */
@@ -3988,7 +4564,11 @@ export type Track = { id: string; kind: TrackKind; name: string;
 /**
  * Clips stored directly for efficient Event Sourcing
  */
-clips: Clip[]; blendMode: BlendMode; muted: boolean; locked: boolean; visible: boolean; 
+clips: Clip[]; blendMode: BlendMode; 
+/**
+ * Present for modern projects; true only for protected default timeline tracks.
+ */
+isBaseTrack?: boolean | null; muted: boolean; locked: boolean; visible: boolean; 
 /**
  * Volume for audio tracks (0.0 - 2.0, 1.0 = 100%)
  */
@@ -4138,6 +4718,42 @@ rotationDeg: number;
  */
 anchor: Point2D }
 /**
+ * A single transition between two consecutive shots
+ */
+export type TransitionEntry = { 
+/**
+ * Transition type (e.g., "cut", "dissolve", "wipe")
+ */
+type: string; 
+/**
+ * Index of the outgoing shot
+ */
+fromShotIndex: number; 
+/**
+ * Index of the incoming shot
+ */
+toShotIndex: number; 
+/**
+ * Duration of the transition in seconds (0.0 for hard cuts)
+ */
+durationSec: number }
+/**
+ * Inventory of all transitions in a video
+ */
+export type TransitionInventory = { 
+/**
+ * All transitions in sequential order
+ */
+transitions: TransitionEntry[]; 
+/**
+ * Frequency count of each transition type
+ */
+typeFrequency: { [key in string]: number }; 
+/**
+ * Most frequently used transition type
+ */
+dominantType: string }
+/**
  * Result of an undo or redo operation.
  */
 export type UndoRedoResult = { 
@@ -4209,6 +4825,34 @@ isHdr?: boolean;
  * Color transfer function (e.g., "smpte2084" for HDR10, "arib-std-b67" for HLG)
  */
 colorTransfer?: string | null }
+/**
+ * Basic metadata about the analyzed video file
+ */
+export type VideoMetadata = { 
+/**
+ * Duration in seconds
+ */
+durationSec: number; 
+/**
+ * Video width in pixels
+ */
+width?: number | null; 
+/**
+ * Video height in pixels
+ */
+height?: number | null; 
+/**
+ * Frame rate (fps)
+ */
+fps?: number | null; 
+/**
+ * Video codec name
+ */
+codec?: string | null; 
+/**
+ * Whether the file has an audio stream
+ */
+hasAudio: boolean }
 /**
  * Video stream information.
  */

@@ -11,6 +11,8 @@
 
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
+import { invoke } from '@tauri-apps/api/core';
+import type { AnalysisBundle, AnalysisOptions, EditingStyleDocument, EsdSummary } from '@/bindings';
 import {
   getAssetCatalogSnapshot,
   getAssetSnapshotById,
@@ -27,8 +29,90 @@ import {
   getUnregisteredWorkspaceFiles,
   findWorkspaceFile,
 } from './storeAccessor';
+import { calculatePearsonCorrelation, getPrimaryTrackClips } from '@/utils/referenceComparison';
 
 const logger = createLogger('AnalysisTools');
+
+function resolveAnalysisOptions(args: Record<string, unknown>): AnalysisOptions {
+  const nestedOptions =
+    args.options && typeof args.options === 'object' && !Array.isArray(args.options)
+      ? (args.options as Record<string, unknown>)
+      : {};
+
+  const readFlag = (key: keyof AnalysisOptions, fallback: boolean): boolean => {
+    const value = nestedOptions[key] ?? args[key];
+    return typeof value === 'boolean' ? value : fallback;
+  };
+
+  return {
+    shots: readFlag('shots', true),
+    transcript: readFlag('transcript', true),
+    audio: readFlag('audio', true),
+    segments: readFlag('segments', true),
+    visual: readFlag('visual', true),
+    localOnly: readFlag('localOnly', false),
+  };
+}
+
+async function findExistingEsdForAsset(assetId: string): Promise<EditingStyleDocument | null> {
+  try {
+    const summaries = await invoke<EsdSummary[]>('list_esds');
+    const latestSummary = summaries
+      .filter((summary) => summary.sourceAssetId === assetId)
+      .sort((left, right) => {
+        const leftTime = Date.parse(left.createdAt);
+        const rightTime = Date.parse(right.createdAt);
+
+        if (!Number.isFinite(leftTime) || !Number.isFinite(rightTime)) {
+          return right.createdAt.localeCompare(left.createdAt);
+        }
+
+        return rightTime - leftTime;
+      })[0];
+
+    if (!latestSummary) {
+      return null;
+    }
+
+    return await invoke<EditingStyleDocument | null>('get_esd', {
+      esdId: latestSummary.id,
+    });
+  } catch (error) {
+    logger.warn('Unable to reuse existing style document; falling back to regeneration', {
+      assetId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
+function buildStyleDocumentResult(
+  esd: EditingStyleDocument,
+  analysisSource: 'cached' | 'generated' | 'existing_esd',
+): {
+  esdId: string;
+  name: string;
+  assetId: string;
+  analysisSource: 'cached' | 'generated' | 'existing_esd';
+  tempoClassification: string;
+  shotCount: number;
+  pacingPointCount: number;
+  summary: string;
+} {
+  const reuseNotice =
+    analysisSource === 'existing_esd' ? ' Reused the latest existing ESD for this asset.' : '';
+
+  return {
+    esdId: esd.id,
+    name: esd.name,
+    assetId: esd.sourceAssetId,
+    analysisSource,
+    tempoClassification: esd.rhythmProfile.tempoClassification,
+    shotCount: esd.rhythmProfile.shotDurations.length,
+    pacingPointCount: esd.pacingCurve.length,
+    summary: `Created ESD "${esd.name}" - ${esd.rhythmProfile.tempoClassification} tempo, ${esd.rhythmProfile.shotDurations.length} shots.${reuseNotice}`,
+  };
+}
 
 // =============================================================================
 // Tool Definitions
@@ -527,9 +611,8 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
       try {
         const kind = args.kind as string | undefined;
         const validKinds = ['video', 'audio', 'image'];
-        const filterKind = kind && validKinds.includes(kind)
-          ? (kind as 'video' | 'audio' | 'image')
-          : undefined;
+        const filterKind =
+          kind && validKinds.includes(kind) ? (kind as 'video' | 'audio' | 'image') : undefined;
 
         const files = getWorkspaceFiles(filterKind);
         logger.debug('get_workspace_files executed', { count: files.length });
@@ -603,9 +686,8 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
       try {
         const kind = args.kind as string | undefined;
         const validKinds = ['video', 'audio', 'image'];
-        const filterKind = kind && validKinds.includes(kind)
-          ? (kind as 'video' | 'audio' | 'image')
-          : undefined;
+        const filterKind =
+          kind && validKinds.includes(kind) ? (kind as 'video' | 'audio' | 'image') : undefined;
 
         const files = getUnregisteredWorkspaceFiles(filterKind);
         logger.debug('get_unregistered_files executed', { count: files.length });
@@ -613,6 +695,199 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('get_unregistered_files failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // Analyze Reference Video
+  // ---------------------------------------------------------------------------
+  {
+    name: 'analyze_reference_video',
+    description:
+      'Run full analysis on a reference video (shots, audio, segments, visual) and return a summary bundle',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {
+        assetId: { type: 'string', description: 'Asset ID of the reference video to analyze' },
+        options: {
+          type: 'object',
+          description: 'Optional analysis flags passed to the backend pipeline',
+        },
+        shots: { type: 'boolean', description: 'Include shot detection (default: true)' },
+        transcript: { type: 'boolean', description: 'Include transcript (default: true)' },
+        audio: { type: 'boolean', description: 'Include audio profiling (default: true)' },
+        segments: { type: 'boolean', description: 'Include content segmentation (default: true)' },
+        visual: { type: 'boolean', description: 'Include visual frame analysis (default: true)' },
+        localOnly: {
+          type: 'boolean',
+          description: 'Skip Vision API work and use local analysis where supported',
+        },
+      },
+      required: ['assetId'],
+    },
+    handler: async (args) => {
+      try {
+        const assetId = args.assetId as string;
+        if (!assetId) {
+          return { success: false, error: 'assetId is required' };
+        }
+        const options = resolveAnalysisOptions(args as Record<string, unknown>);
+        const bundle = await invoke<AnalysisBundle>('analyze_video_full', { assetId, options });
+        const shotCount = bundle.shots?.length ?? 0;
+        const segmentCount = bundle.segments?.length ?? 0;
+        const hasAudio = bundle.audioProfile !== null;
+        const hasTranscript = bundle.transcript !== null;
+        const errorCount = Object.keys(bundle.errors ?? {}).length;
+        logger.debug('analyze_reference_video completed', { assetId, shotCount });
+        return {
+          success: true,
+          result: {
+            assetId,
+            shotCount,
+            segmentCount,
+            hasAudioProfile: hasAudio,
+            hasTranscript,
+            errorCount,
+            analyzedAt: bundle.analyzedAt,
+            summary: `Analyzed ${shotCount} shots, ${segmentCount} segments. Audio: ${hasAudio ? 'yes' : 'no'}, Transcript: ${hasTranscript ? 'yes' : 'no'}.${errorCount > 0 ? ` Partial failures: ${errorCount}.` : ''}`,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('analyze_reference_video failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // Generate Style Document
+  // ---------------------------------------------------------------------------
+  {
+    name: 'generate_style_document',
+    description:
+      'Generate an Editing Style Document (ESD) from a previously analyzed reference video',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {
+        assetId: { type: 'string', description: 'Asset ID of the analyzed reference video' },
+      },
+      required: ['assetId'],
+    },
+    handler: async (args) => {
+      try {
+        const assetId = args.assetId as string;
+        if (!assetId) {
+          return { success: false, error: 'assetId is required' };
+        }
+        const existingEsd = await findExistingEsdForAsset(assetId);
+        if (existingEsd) {
+          logger.debug('generate_style_document reused existing ESD', {
+            assetId,
+            esdId: existingEsd.id,
+          });
+          return {
+            success: true,
+            result: buildStyleDocumentResult(existingEsd, 'existing_esd'),
+          };
+        }
+        const cachedBundle = await invoke<AnalysisBundle | null>('get_analysis_bundle', {
+          assetId,
+        });
+        const bundle =
+          cachedBundle ??
+          (await invoke<AnalysisBundle>('analyze_video_full', {
+            assetId,
+            options: resolveAnalysisOptions({}),
+          }));
+        const esd = await invoke<EditingStyleDocument>('generate_esd', { bundle });
+        logger.debug('generate_style_document completed', { assetId, esdId: esd.id });
+        return {
+          success: true,
+          result: buildStyleDocumentResult(
+            esd,
+            cachedBundle ? 'cached' : 'generated',
+          ),
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('generate_style_document failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // Compare Edit Structure
+  // ---------------------------------------------------------------------------
+  {
+    name: 'compare_edit_structure',
+    description:
+      'Compare an ESD pacing curve with the current timeline to show structural similarity and differences',
+    category: 'analysis',
+    parameters: {
+      type: 'object',
+      properties: {
+        esdId: {
+          type: 'string',
+          description: 'ID of the Editing Style Document to compare against',
+        },
+      },
+      required: ['esdId'],
+    },
+    handler: async (args) => {
+      try {
+        const esdId = args.esdId as string;
+        if (!esdId) {
+          return { success: false, error: 'esdId is required' };
+        }
+        const esd = await invoke<EditingStyleDocument | null>('get_esd', { esdId });
+        if (!esd) {
+          return { success: false, error: `ESD not found: ${esdId}` };
+        }
+        const snapshot = getTimelineSnapshot();
+        if (!snapshot.sequenceId) {
+          return { success: false, error: 'No active timeline found' };
+        }
+
+        const primaryTrackClips = getPrimaryTrackClips(
+          snapshot.tracks.map((track) => ({
+            id: track.id,
+            kind: track.kind,
+            visible: track.visible,
+          })),
+          snapshot.clips.map((clip) => ({
+            trackId: clip.trackId,
+            timelineInSec: clip.timelineIn,
+            durationSec: clip.duration,
+          })),
+        );
+        const outputDurations = primaryTrackClips.map((clip) => clip.durationSec);
+        const refDurations = esd.rhythmProfile.shotDurations;
+        const correlation = calculatePearsonCorrelation(refDurations, outputDurations);
+
+        logger.debug('compare_edit_structure completed', { esdId, correlation });
+        return {
+          success: true,
+          result: {
+            esdId,
+            esdName: esd.name,
+            referenceShots: refDurations.length,
+            outputShots: outputDurations.length,
+            primaryTrackId: primaryTrackClips[0]?.trackId ?? null,
+            correlation: Math.round(correlation * 1000) / 1000,
+            correlationPercent: `${Math.round(correlation * 100)}%`,
+            shotCountDiff: outputDurations.length - refDurations.length,
+            summary: `Pacing correlation: ${Math.round(correlation * 100)}% — Reference: ${refDurations.length} shots, Output: ${outputDurations.length} shots on the primary video track.`,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('compare_edit_structure failed', { error: message });
         return { success: false, error: message };
       }
     },

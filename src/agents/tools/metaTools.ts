@@ -117,6 +117,15 @@ const META_TOOLS: ToolDefinition[] = [
         trackId: { type: 'string', description: 'Track ID' },
         clipId: { type: 'string', description: 'Clip ID' },
         assetId: { type: 'string', description: 'Asset ID' },
+        esdId: { type: 'string', description: 'Editing Style Document ID' },
+        name: { type: 'string', description: 'Optional display name or label' },
+        options: { type: 'object', description: 'Optional nested tool-specific options' },
+        shots: { type: 'boolean', description: 'Run shot detection' },
+        transcript: { type: 'boolean', description: 'Run transcript analysis' },
+        audio: { type: 'boolean', description: 'Run audio profiling' },
+        segments: { type: 'boolean', description: 'Run content segmentation' },
+        visual: { type: 'boolean', description: 'Run visual analysis' },
+        localOnly: { type: 'boolean', description: 'Use local-only analysis where supported' },
         time: { type: 'number', description: 'Timeline position in seconds' },
         path: { type: 'string', description: 'File path or search pattern' },
       },
@@ -153,11 +162,13 @@ const META_TOOLS: ToolDefinition[] = [
         newTrackId: { type: 'string', description: 'Target track for cross-track moves' },
         kind: { type: 'string', description: 'Track type: video, audio, caption, overlay' },
         name: { type: 'string', description: 'Track or marker name' },
+        esdId: { type: 'string', description: 'Editing Style Document ID' },
+        sourceAssetId: { type: 'string', description: 'Source asset ID for style transfer' },
         time: { type: 'number', description: 'Timeline position in seconds' },
         color: { type: 'string', description: 'Marker color' },
         filePath: { type: 'string', description: 'File path for insert_clip_from_file' },
       },
-      required: ['action', 'sequenceId'],
+      required: ['action'],
     },
     handler: async (args) => dispatchToTool('edit', args, EDIT_ACTIONS),
   },
@@ -301,7 +312,8 @@ const META_TOOLS: ToolDefinition[] = [
         return { success: false, error: 'steps must be a non-empty array' };
       }
 
-      const results: Array<{ stepId: string; success: boolean; result?: unknown; error?: string }> = [];
+      const results: Array<{ stepId: string; success: boolean; result?: unknown; error?: string }> =
+        [];
       const completed = new Set<string>();
 
       for (const step of steps) {

@@ -54,6 +54,9 @@ pub mod video_generation;
 // Workspace commands (workspace scanning, file tree, registration)
 pub mod workspace;
 
+// Analysis pipeline commands (reference video analysis - ADR-048)
+pub mod analysis;
+
 // Agent commands (trace writing, plan execution, memory persistence)
 pub mod agent;
 
@@ -76,6 +79,9 @@ pub use video_generation::*;
 
 // Re-export workspace commands
 pub use workspace::*;
+
+// Re-export analysis pipeline commands
+pub use analysis::*;
 
 // Re-export agent commands
 pub use agent::*;

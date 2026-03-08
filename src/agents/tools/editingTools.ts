@@ -7,12 +7,13 @@
 
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
 import { createLogger } from '@/services/logger';
+import { invoke } from '@tauri-apps/api/core';
 import { getTimelineSnapshot, findWorkspaceFile } from './storeAccessor';
 import { executeAgentCommand } from './commandExecutor';
 import { useProjectStore } from '@/stores/projectStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { probeMedia } from '@/utils/ffmpeg';
-import { refreshProjectState } from '@/utils/stateRefreshHelper';
+import { applyProjectState, refreshProjectState } from '@/utils/stateRefreshHelper';
 import {
   buildRippleEditPlan,
   buildRollEditPlan,
@@ -21,6 +22,7 @@ import {
   type PlannedCommandStep,
 } from './compoundEditPlanning';
 import type { Asset, Color, Sequence, Track, CommandResult } from '@/types';
+import type { AgentPlanResult, StylePlanResult } from '@/bindings';
 
 const logger = createLogger('EditingTools');
 const DEFAULT_INSERT_CLIP_DURATION_SEC = 10;
@@ -1668,6 +1670,93 @@ const EDITING_TOOLS: ToolDefinition[] = [
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('navigate_to_marker failed', { error: message });
+        return { success: false, error: message };
+      }
+    },
+  },
+
+  // ---------------------------------------------------------------------------
+  // Apply Editing Style
+  // ---------------------------------------------------------------------------
+  {
+    name: 'apply_editing_style',
+    description:
+      'Apply an editing style from an ESD to source footage, generating an edit plan with DTW-aligned cuts and transitions',
+    category: 'clip',
+    parameters: {
+      type: 'object',
+      properties: {
+        esdId: { type: 'string', description: 'ID of the Editing Style Document to apply' },
+        sourceAssetId: {
+          type: 'string',
+          description: 'Asset ID of the source footage to edit',
+        },
+      },
+      required: ['esdId', 'sourceAssetId'],
+    },
+    handler: async (args) => {
+      try {
+        const esdId = args.esdId as string;
+        const sourceAssetId = args.sourceAssetId as string;
+        if (!esdId || !sourceAssetId) {
+          return { success: false, error: 'Both esdId and sourceAssetId are required' };
+        }
+        const result = await invoke<StylePlanResult>('apply_editing_style', {
+          esdId,
+          sourceAssetId,
+        });
+        const execution = await invoke<AgentPlanResult>('execute_agent_plan', {
+          plan: result.plan,
+        });
+        if (!execution.success) {
+          return {
+            success: false,
+            error: execution.errorMessage ?? 'Generated style plan failed during execution',
+          };
+        }
+        let syncWarning: string | undefined;
+        if (typeof useProjectStore.setState === 'function') {
+          try {
+            const freshState = await refreshProjectState();
+            useProjectStore.setState((draft) => {
+              applyProjectState(draft, freshState);
+            });
+          } catch (syncError) {
+            const syncMessage =
+              syncError instanceof Error ? syncError.message : String(syncError);
+            syncWarning = syncMessage;
+            logger.warn('apply_editing_style executed but state refresh failed', {
+              error: syncMessage,
+            });
+          }
+        }
+        const stepCount = result.plan.steps?.length ?? 0;
+        const warnings = result.warnings ?? [];
+        logger.debug('apply_editing_style completed', {
+          esdId,
+          sourceAssetId,
+          compatibility: result.compatibilityScore,
+          steps: stepCount,
+          stepsCompleted: execution.stepsCompleted,
+        });
+        return {
+          success: true,
+          result: {
+            esdId,
+            sourceAssetId,
+            compatibilityScore: result.compatibilityScore,
+            plan: result.plan,
+            planStepCount: stepCount,
+            stepsCompleted: execution.stepsCompleted,
+            operationIds: execution.operationIds,
+            warnings,
+            ...(syncWarning ? { syncWarning } : {}),
+            summary: `Style applied with ${(result.compatibilityScore * 100).toFixed(0)}% compatibility. Executed ${execution.stepsCompleted}/${execution.totalSteps} planned steps.${warnings.length > 0 ? ` Warnings: ${warnings.join('; ')}` : ''}`,
+          },
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error('apply_editing_style failed', { error: message });
         return { success: false, error: message };
       }
     },

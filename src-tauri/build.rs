@@ -26,7 +26,11 @@ fn main() {
     //
     // We only enable this when explicitly requested (CI) to avoid any risk of
     // manifest/resource duplication for normal builds.
+    // Only emit the custom test manifest when the GUI feature is NOT active.
+    // When `gui` is enabled, `tauri_build::build()` already embeds a manifest
+    // via `resource.lib`, so adding another one causes CVT1100 duplicate resource.
     #[cfg(target_os = "windows")]
+    #[cfg(not(feature = "gui"))]
     emit_windows_test_manifest_if_requested();
 
     // Download FFmpeg binaries if needed
@@ -52,6 +56,7 @@ fn main() {
 }
 
 #[cfg(target_os = "windows")]
+#[cfg(not(feature = "gui"))]
 fn emit_windows_test_manifest_if_requested() {
     if env::var("OPENREELIO_WINDOWS_TEST_MANIFEST").ok().as_deref() != Some("1") {
         return;

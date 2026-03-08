@@ -7,7 +7,8 @@ export type OrchestrationPlaybookId =
   | 'generate_and_place'
   | 'stock_media_search'
   | 'auto_caption'
-  | 'music_bed';
+  | 'music_bed'
+  | 'reference_style_transfer';
 
 export interface OrchestrationPlaybookMatch {
   id: OrchestrationPlaybookId;
@@ -102,6 +103,30 @@ const AUTO_CAPTION_KEYWORDS = [
   /음성\s*인식/i,
 ];
 
+const REFERENCE_STYLE_KEYWORDS = [
+  /\bedit\s+like\b/i,
+  /\bmatch\s+the\s+style\b/i,
+  /\bsame\s+editing\s+as\b/i,
+  /\bapply\s+editing\s+from\b/i,
+  /\breference\s+style\b/i,
+  /\bstyle\s+transfer\b/i,
+  /\bediting\s+style\b/i,
+  /참조\s*편집/i,
+  /편집\s*스타일/i,
+];
+
+const REUSE_REFERENCE_STYLE_KEYWORDS = [
+  /\blast\s+analysis\b/i,
+  /\bexisting\s+esd\b/i,
+  /\bexisting\s+style\b/i,
+  /\bprevious\s+analysis\b/i,
+  /\breuse\s+(?:the\s+)?(?:existing\s+)?(?:style|esd)\b/i,
+  /마지막\s*분석/i,
+  /기존\s*esd/i,
+  /기존\s*스타일/i,
+  /이전\s*분석/i,
+];
+
 export function buildOrchestrationPlaybook(
   thought: Thought,
   context: AgentContext,
@@ -137,6 +162,11 @@ export function buildOrchestrationPlaybook(
   const musicBed = buildMusicBedPlaybook(playbookContext);
   if (musicBed) {
     return musicBed;
+  }
+
+  const referenceStyleTransfer = buildReferenceStyleTransferPlaybook(playbookContext);
+  if (referenceStyleTransfer) {
+    return referenceStyleTransfer;
   }
 
   const stockMediaSearch = buildStockMediaSearchPlaybook(playbookContext);
@@ -224,6 +254,117 @@ function buildMusicBedPlaybook(
       estimatedTotalDuration: estimateTotalDuration(steps),
       requiresApproval: false,
       rollbackStrategy: 'Remove inserted music clip and restore previous volume level.',
+    },
+  };
+}
+
+function matchesReferenceStyleKeywords(text: string): boolean {
+  return REFERENCE_STYLE_KEYWORDS.some((re) => re.test(text));
+}
+
+function buildReferenceStyleTransferPlaybook(
+  playbookContext: PlaybookContext,
+): OrchestrationPlaybookMatch | null {
+  const { text, context, toolExecutor } = playbookContext;
+
+  if (!matchesReferenceStyleKeywords(text)) {
+    return null;
+  }
+
+  if (
+    !hasTools(toolExecutor, [
+      'analyze_reference_video',
+      'generate_style_document',
+      'apply_editing_style',
+    ])
+  ) {
+    return null;
+  }
+
+  const sequenceId = context.sequenceId;
+  if (!sequenceId) {
+    return null;
+  }
+
+  const selectedAssets = pickReferenceStyleAssets(text, context);
+  if (!selectedAssets) {
+    return null;
+  }
+
+  const { referenceAssetId, sourceAssetId } = selectedAssets;
+  const shouldReuseExistingStyle = matchesAny(text, REUSE_REFERENCE_STYLE_KEYWORDS);
+
+  const steps: PlanStep[] = shouldReuseExistingStyle
+    ? [
+        {
+          id: 'playbook_generate_esd',
+          tool: 'generate_style_document',
+          args: {
+            assetId: referenceAssetId,
+          },
+          description: 'Reuse the latest existing style document for the reference video',
+          riskLevel: 'low',
+          estimatedDuration: 1200,
+        },
+        {
+          id: 'playbook_apply_style',
+          tool: 'apply_editing_style',
+          args: {
+            esdId: makeReference('playbook_generate_esd', 'data.esdId', ''),
+            sourceAssetId,
+          },
+          description: 'Apply the reused reference editing style to source footage',
+          riskLevel: 'medium',
+          estimatedDuration: 2000,
+          dependsOn: ['playbook_generate_esd'],
+        },
+      ]
+    : [
+        {
+          id: 'playbook_analyze_reference',
+          tool: 'analyze_reference_video',
+          args: {
+            assetId: referenceAssetId,
+          },
+          description: 'Analyze reference video for editing style patterns',
+          riskLevel: 'low',
+          estimatedDuration: 5000,
+        },
+        {
+          id: 'playbook_generate_esd',
+          tool: 'generate_style_document',
+          args: {
+            assetId: makeReference('playbook_analyze_reference', 'data.assetId', referenceAssetId),
+          },
+          description: 'Generate Editing Style Document from analysis results',
+          riskLevel: 'low',
+          estimatedDuration: 3000,
+          dependsOn: ['playbook_analyze_reference'],
+        },
+        {
+          id: 'playbook_apply_style',
+          tool: 'apply_editing_style',
+          args: {
+            esdId: makeReference('playbook_generate_esd', 'data.esdId', ''),
+            sourceAssetId,
+          },
+          description: 'Apply reference editing style to source footage with DTW-aligned cuts',
+          riskLevel: 'medium',
+          estimatedDuration: 2000,
+          dependsOn: ['playbook_generate_esd'],
+        },
+      ];
+
+  return {
+    id: 'reference_style_transfer',
+    confidence: 0.88,
+    plan: {
+      goal: 'Analyze reference video style and apply it to source footage',
+      steps,
+      estimatedTotalDuration: estimateTotalDuration(steps),
+      requiresApproval: false,
+      rollbackStrategy:
+        'Undo applied style edits in reverse order; ESD and analysis artifacts are retained for reuse.',
     },
   };
 }
@@ -572,6 +713,57 @@ function pickTrackId(context: AgentContext, type: 'video' | 'audio'): string | n
 function pickAssetId(context: AgentContext, type: 'video' | 'audio'): string | null {
   const firstAsset = context.availableAssets.find((asset) => asset.type === type);
   return firstAsset?.id ?? null;
+}
+
+function pickReferenceStyleAssets(
+  text: string,
+  context: AgentContext,
+): { referenceAssetId: string; sourceAssetId: string } | null {
+  const videoAssets = context.availableAssets.filter((asset) => asset.type === 'video');
+  if (videoAssets.length === 0) {
+    return null;
+  }
+
+  const mentionedAssets = videoAssets
+    .map((asset) => ({
+      asset,
+      matchIndex: getAssetMentionIndex(text, asset.name),
+    }))
+    .filter(
+      (entry): entry is { asset: (typeof videoAssets)[number]; matchIndex: number } =>
+        entry.matchIndex !== null,
+    )
+    .sort((left, right) => left.matchIndex - right.matchIndex)
+    .map((entry) => entry.asset);
+
+  const referenceAsset = mentionedAssets[0] ?? videoAssets[0];
+  const sourceAsset =
+    mentionedAssets.find((asset) => asset.id !== referenceAsset.id) ??
+    videoAssets.find((asset) => asset.id !== referenceAsset.id) ??
+    referenceAsset;
+
+  return {
+    referenceAssetId: referenceAsset.id,
+    sourceAssetId: sourceAsset.id,
+  };
+}
+
+function getAssetMentionIndex(text: string, assetName: string): number | null {
+  const normalizedAssetName = assetName.trim().toLowerCase();
+  if (!normalizedAssetName) {
+    return null;
+  }
+
+  const candidates = [normalizedAssetName, normalizedAssetName.replace(/\.[a-z0-9]+$/i, '')].filter(
+    (candidate, index, all) => candidate.length >= 3 && all.indexOf(candidate) === index,
+  );
+
+  const matches = candidates
+    .map((candidate) => text.indexOf(candidate))
+    .filter((matchIndex) => matchIndex >= 0)
+    .sort((left, right) => left - right);
+
+  return matches[0] ?? null;
 }
 
 function clampTimelineStart(playhead: number, timelineDuration: number): number {

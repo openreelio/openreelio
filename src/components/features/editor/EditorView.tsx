@@ -49,7 +49,7 @@ import { createLogger } from '@/services/logger';
 import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { getSplitTargetsAtTime } from '@/utils/clipLinking';
-import { Terminal, Sliders, Sparkles } from 'lucide-react';
+import { Terminal, Sliders, Sparkles, GitCompareArrows } from 'lucide-react';
 import type { BlendMode, Sequence, CaptionPosition, ClipId, TextClipData } from '@/types';
 import type { AddTextPayload } from '@/components/features/text';
 import type { ChannelLevels } from '@/components/features/mixer';
@@ -82,6 +82,11 @@ const AudioMixerPanel = lazy(async () => {
 const VideoGenerationPanel = lazy(async () => {
   const module = await import('@/components/features/generation');
   return { default: module.VideoGenerationPanel };
+});
+
+const ReferenceComparisonPanel = lazy(async () => {
+  const module = await import('@/components/features/comparison/ReferenceComparisonPanel');
+  return { default: module.ReferenceComparisonPanel };
 });
 
 // =============================================================================
@@ -673,6 +678,17 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
         ),
       },
     ];
+
+    tabs.push({
+      id: 'comparison',
+      label: 'Reference',
+      icon: <GitCompareArrows className="w-3 h-3" />,
+      content: (
+        <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+          <ReferenceComparisonPanel />
+        </Suspense>
+      ),
+    });
 
     if (videoGenEnabled) {
       tabs.push({
