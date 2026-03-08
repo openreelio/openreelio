@@ -26,6 +26,7 @@ pub mod audio;
 pub mod dtw;
 pub mod esd;
 pub mod segmentation;
+pub mod style_planner;
 pub mod types;
 pub mod visual;
 
