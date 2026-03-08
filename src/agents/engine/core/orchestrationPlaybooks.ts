@@ -115,6 +115,18 @@ const REFERENCE_STYLE_KEYWORDS = [
   /편집\s*스타일/i,
 ];
 
+const REUSE_REFERENCE_STYLE_KEYWORDS = [
+  /\blast\s+analysis\b/i,
+  /\bexisting\s+esd\b/i,
+  /\bexisting\s+style\b/i,
+  /\bprevious\s+analysis\b/i,
+  /\breuse\s+(?:the\s+)?(?:existing\s+)?(?:style|esd)\b/i,
+  /마지막\s*분석/i,
+  /기존\s*esd/i,
+  /기존\s*스타일/i,
+  /이전\s*분석/i,
+];
+
 export function buildOrchestrationPlaybook(
   thought: Thought,
   context: AgentContext,
@@ -274,52 +286,74 @@ function buildReferenceStyleTransferPlaybook(
     return null;
   }
 
-  // Reference asset: prefer first video asset as the style reference
-  const referenceAssetId = pickAssetId(context, 'video');
-  if (!referenceAssetId) {
+  const selectedAssets = pickReferenceStyleAssets(text, context);
+  if (!selectedAssets) {
     return null;
   }
 
-  // Source asset: prefer a second video asset, fall back to the same reference asset
-  const sourceAssetId =
-    context.availableAssets.find((asset) => asset.type === 'video' && asset.id !== referenceAssetId)
-      ?.id ?? referenceAssetId;
+  const { referenceAssetId, sourceAssetId } = selectedAssets;
+  const shouldReuseExistingStyle = matchesAny(text, REUSE_REFERENCE_STYLE_KEYWORDS);
 
-  const steps: PlanStep[] = [
-    {
-      id: 'playbook_analyze_reference',
-      tool: 'analyze_reference_video',
-      args: {
-        assetId: referenceAssetId,
-      },
-      description: 'Analyze reference video for editing style patterns',
-      riskLevel: 'low',
-      estimatedDuration: 5000,
-    },
-    {
-      id: 'playbook_generate_esd',
-      tool: 'generate_style_document',
-      args: {
-        assetId: makeReference('playbook_analyze_reference', 'data.assetId', referenceAssetId),
-      },
-      description: 'Generate Editing Style Document from analysis results',
-      riskLevel: 'low',
-      estimatedDuration: 3000,
-      dependsOn: ['playbook_analyze_reference'],
-    },
-    {
-      id: 'playbook_apply_style',
-      tool: 'apply_editing_style',
-      args: {
-        esdId: makeReference('playbook_generate_esd', 'data.esdId', ''),
-        sourceAssetId,
-      },
-      description: 'Apply reference editing style to source footage with DTW-aligned cuts',
-      riskLevel: 'medium',
-      estimatedDuration: 2000,
-      dependsOn: ['playbook_generate_esd'],
-    },
-  ];
+  const steps: PlanStep[] = shouldReuseExistingStyle
+    ? [
+        {
+          id: 'playbook_generate_esd',
+          tool: 'generate_style_document',
+          args: {
+            assetId: referenceAssetId,
+          },
+          description: 'Reuse the latest existing style document for the reference video',
+          riskLevel: 'low',
+          estimatedDuration: 1200,
+        },
+        {
+          id: 'playbook_apply_style',
+          tool: 'apply_editing_style',
+          args: {
+            esdId: makeReference('playbook_generate_esd', 'data.esdId', ''),
+            sourceAssetId,
+          },
+          description: 'Apply the reused reference editing style to source footage',
+          riskLevel: 'medium',
+          estimatedDuration: 2000,
+          dependsOn: ['playbook_generate_esd'],
+        },
+      ]
+    : [
+        {
+          id: 'playbook_analyze_reference',
+          tool: 'analyze_reference_video',
+          args: {
+            assetId: referenceAssetId,
+          },
+          description: 'Analyze reference video for editing style patterns',
+          riskLevel: 'low',
+          estimatedDuration: 5000,
+        },
+        {
+          id: 'playbook_generate_esd',
+          tool: 'generate_style_document',
+          args: {
+            assetId: makeReference('playbook_analyze_reference', 'data.assetId', referenceAssetId),
+          },
+          description: 'Generate Editing Style Document from analysis results',
+          riskLevel: 'low',
+          estimatedDuration: 3000,
+          dependsOn: ['playbook_analyze_reference'],
+        },
+        {
+          id: 'playbook_apply_style',
+          tool: 'apply_editing_style',
+          args: {
+            esdId: makeReference('playbook_generate_esd', 'data.esdId', ''),
+            sourceAssetId,
+          },
+          description: 'Apply reference editing style to source footage with DTW-aligned cuts',
+          riskLevel: 'medium',
+          estimatedDuration: 2000,
+          dependsOn: ['playbook_generate_esd'],
+        },
+      ];
 
   return {
     id: 'reference_style_transfer',
@@ -679,6 +713,57 @@ function pickTrackId(context: AgentContext, type: 'video' | 'audio'): string | n
 function pickAssetId(context: AgentContext, type: 'video' | 'audio'): string | null {
   const firstAsset = context.availableAssets.find((asset) => asset.type === type);
   return firstAsset?.id ?? null;
+}
+
+function pickReferenceStyleAssets(
+  text: string,
+  context: AgentContext,
+): { referenceAssetId: string; sourceAssetId: string } | null {
+  const videoAssets = context.availableAssets.filter((asset) => asset.type === 'video');
+  if (videoAssets.length === 0) {
+    return null;
+  }
+
+  const mentionedAssets = videoAssets
+    .map((asset) => ({
+      asset,
+      matchIndex: getAssetMentionIndex(text, asset.name),
+    }))
+    .filter(
+      (entry): entry is { asset: (typeof videoAssets)[number]; matchIndex: number } =>
+        entry.matchIndex !== null,
+    )
+    .sort((left, right) => left.matchIndex - right.matchIndex)
+    .map((entry) => entry.asset);
+
+  const referenceAsset = mentionedAssets[0] ?? videoAssets[0];
+  const sourceAsset =
+    mentionedAssets.find((asset) => asset.id !== referenceAsset.id) ??
+    videoAssets.find((asset) => asset.id !== referenceAsset.id) ??
+    referenceAsset;
+
+  return {
+    referenceAssetId: referenceAsset.id,
+    sourceAssetId: sourceAsset.id,
+  };
+}
+
+function getAssetMentionIndex(text: string, assetName: string): number | null {
+  const normalizedAssetName = assetName.trim().toLowerCase();
+  if (!normalizedAssetName) {
+    return null;
+  }
+
+  const candidates = [normalizedAssetName, normalizedAssetName.replace(/\.[a-z0-9]+$/i, '')].filter(
+    (candidate, index, all) => candidate.length >= 3 && all.indexOf(candidate) === index,
+  );
+
+  const matches = candidates
+    .map((candidate) => text.indexOf(candidate))
+    .filter((matchIndex) => matchIndex >= 0)
+    .sort((left, right) => left - right);
+
+  return matches[0] ?? null;
 }
 
 function clampTimelineStart(playhead: number, timelineDuration: number): number {

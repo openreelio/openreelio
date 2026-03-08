@@ -510,6 +510,69 @@ describe('reference_style_transfer playbook', () => {
     });
   });
 
+  it('should choose reference and source assets from prompt mentions when both are named', () => {
+    const thought: Thought = {
+      understanding: 'Apply editing from Source Montage.mp4 to Summer Concert.mp4',
+      requirements: ['style transfer'],
+      uncertainties: [],
+      approach: 'Transfer the pacing from Source Montage.mp4 onto Summer Concert.mp4',
+      needsMoreInfo: false,
+    };
+
+    const context = createContext({
+      availableAssets: [
+        { id: 'asset-source', name: 'Summer Concert.mp4', type: 'video', duration: 180 },
+        { id: 'asset-reference', name: 'Source Montage.mp4', type: 'video', duration: 45 },
+      ],
+    });
+    const toolExecutor = createToolExecutor([
+      'analyze_reference_video',
+      'generate_style_document',
+      'apply_editing_style',
+    ]);
+
+    const match = buildOrchestrationPlaybook(thought, context, toolExecutor);
+
+    expect(match).not.toBeNull();
+    const analyzeStep = match?.plan.steps[0];
+    const applyStep = match?.plan.steps.at(-1);
+    expect(analyzeStep?.args.assetId).toBe('asset-reference');
+    expect(applyStep?.args.sourceAssetId).toBe('asset-source');
+  });
+
+  it('should reuse the latest style document for last-analysis prompts', () => {
+    const thought: Thought = {
+      understanding: 'Apply the editing style from my last analysis to My Footage.mp4',
+      requirements: ['style transfer', 'last analysis'],
+      uncertainties: [],
+      approach: 'Reuse the previous ESD and apply it to the source footage',
+      needsMoreInfo: false,
+    };
+
+    const context = createContext({
+      availableAssets: [
+        { id: 'asset-reference', name: 'Reference Cut.mp4', type: 'video', duration: 60 },
+        { id: 'asset-source', name: 'My Footage.mp4', type: 'video', duration: 90 },
+      ],
+    });
+    const toolExecutor = createToolExecutor([
+      'analyze_reference_video',
+      'generate_style_document',
+      'apply_editing_style',
+    ]);
+
+    const match = buildOrchestrationPlaybook(thought, context, toolExecutor);
+
+    expect(match).not.toBeNull();
+    expect(match?.id).toBe('reference_style_transfer');
+    expect(match?.plan.steps).toHaveLength(2);
+    expect(match?.plan.steps[0].tool).toBe('generate_style_document');
+    expect(match?.plan.steps[0].id).toBe('playbook_generate_esd');
+    expect(match?.plan.steps[1].tool).toBe('apply_editing_style');
+    expect(match?.plan.steps[1].dependsOn).toContain('playbook_generate_esd');
+    expect(match?.plan.steps.some((step) => step.tool === 'analyze_reference_video')).toBe(false);
+  });
+
   it('should match "same editing as" and "apply editing from" trigger phrases', () => {
     const toolExecutor = createToolExecutor([
       'analyze_reference_video',
