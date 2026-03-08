@@ -5,7 +5,7 @@
  * Tools now read from Zustand stores instead of calling backend IPC.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { globalToolRegistry, type ToolExecutionResult } from '../ToolRegistry';
 import {
   registerAnalysisTools,
@@ -17,6 +17,7 @@ import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import type { Track, Clip, Asset } from '@/types';
 import { createMockAsset, createMockClip, createMockTrack, createMockSequence } from '@/test/mocks';
+import { invoke } from '@tauri-apps/api/core';
 
 // =============================================================================
 // Test Helpers
@@ -91,6 +92,7 @@ function getToolResult<T>(result: ToolExecutionResult): T {
 
 describe('analysisTools', () => {
   beforeEach(() => {
+    vi.clearAllMocks();
     globalToolRegistry.clear();
     registerAnalysisTools();
 
@@ -138,7 +140,7 @@ describe('analysisTools', () => {
 
     it('should register tools in analysis category', () => {
       const analysisTools = globalToolRegistry.listByCategory('analysis');
-      expect(analysisTools.length).toBe(17);
+      expect(analysisTools.length).toBe(20);
     });
 
     it('should return correct tool names', () => {
@@ -152,7 +154,7 @@ describe('analysisTools', () => {
       expect(names).toContain('get_workspace_files');
       expect(names).toContain('find_workspace_file');
       expect(names).toContain('get_unregistered_files');
-      expect(names).toHaveLength(17);
+      expect(names).toHaveLength(20);
     });
 
     it('should unregister all tools', () => {
@@ -725,6 +727,432 @@ describe('analysisTools', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('not found');
+    });
+  });
+});
+
+// =============================================================================
+// Reference Style Transfer Analysis Tools
+// =============================================================================
+
+describe('reference style transfer analysis tools', () => {
+  beforeEach(() => {
+    globalToolRegistry.clear();
+    registerAnalysisTools();
+
+    // Reset stores
+    useProjectStore.setState({
+      activeSequenceId: null,
+      sequences: new Map(),
+      assets: new Map(),
+    });
+    useTimelineStore.setState({
+      selectedClipIds: [],
+      selectedTrackIds: [],
+    });
+    usePlaybackStore.setState({
+      currentTime: 0,
+      duration: 0,
+    });
+  });
+
+  afterEach(() => {
+    unregisterAnalysisTools();
+  });
+
+  // ===========================================================================
+  // analyze_reference_video
+  // ===========================================================================
+
+  describe('analyze_reference_video', () => {
+    it('should return analysis summary when given valid assetId', async () => {
+      const mockBundle = {
+        assetId: 'ref-1',
+        shots: [
+          { startSec: 0, endSec: 2, confidence: 0.9 },
+          { startSec: 2, endSec: 5, confidence: 0.85 },
+        ],
+        transcript: null,
+        audioProfile: { tempo: 120, loudnessLufs: -14, dynamicRange: 12 },
+        segments: [{ segmentType: 'talk', startSec: 0, endSec: 5 }],
+        frameAnalysis: null,
+        metadata: { durationSec: 10, width: 1920, height: 1080, fps: 30 },
+        analyzedAt: '2026-03-07T00:00:00Z',
+        errors: {},
+      };
+      vi.mocked(invoke).mockResolvedValue(mockBundle);
+
+      const result = await globalToolRegistry.execute('analyze_reference_video', {
+        assetId: 'ref-1',
+      });
+      expect(result.success).toBe(true);
+      expect(result.result).toMatchObject({
+        assetId: 'ref-1',
+        shotCount: 2,
+        segmentCount: 1,
+        hasAudioProfile: true,
+        hasTranscript: false,
+      });
+    });
+
+    it('should fail when assetId is missing', async () => {
+      const result = await globalToolRegistry.execute('analyze_reference_video', {});
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('assetId');
+    });
+
+    it('should handle IPC error gracefully', async () => {
+      vi.mocked(invoke).mockRejectedValue(new Error('Asset not found'));
+      const result = await globalToolRegistry.execute('analyze_reference_video', {
+        assetId: 'bad-id',
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Asset not found');
+    });
+
+    it('should pass analysis options to IPC', async () => {
+      const mockBundle = {
+        assetId: 'ref-1',
+        shots: [],
+        transcript: null,
+        audioProfile: null,
+        segments: null,
+        frameAnalysis: null,
+        metadata: { durationSec: 5, width: 1280, height: 720, fps: 24 },
+        analyzedAt: '2026-03-07T00:00:00Z',
+        errors: {},
+      };
+      vi.mocked(invoke).mockResolvedValue(mockBundle);
+
+      const result = await globalToolRegistry.execute('analyze_reference_video', {
+        assetId: 'ref-1',
+        options: {
+          shots: true,
+          transcript: false,
+          audio: false,
+          segments: false,
+          visual: false,
+          localOnly: true,
+        },
+      });
+      expect(result.success).toBe(true);
+      expect(vi.mocked(invoke)).toHaveBeenCalledWith('analyze_video_full', {
+        assetId: 'ref-1',
+        options: {
+          shots: true,
+          transcript: false,
+          audio: false,
+          segments: false,
+          visual: false,
+          localOnly: true,
+        },
+      });
+    });
+  });
+
+  // ===========================================================================
+  // generate_style_document
+  // ===========================================================================
+
+  describe('generate_style_document', () => {
+    it('should return ESD summary when given valid assetId', async () => {
+      const mockBundle = {
+        assetId: 'ref-1',
+        shots: [],
+        transcript: null,
+        audioProfile: null,
+        segments: [],
+        frameAnalysis: null,
+        metadata: { durationSec: 10, width: 1920, height: 1080, fps: 30 },
+        analyzedAt: '2026-03-07T00:00:00Z',
+        errors: {},
+      };
+      const mockEsd = {
+        id: 'esd-1',
+        name: 'Test ESD',
+        sourceAssetId: 'ref-1',
+        createdAt: '2026-03-07T00:00:00Z',
+        version: '1.0',
+        rhythmProfile: {
+          shotDurations: [2, 3, 1],
+          meanDuration: 2,
+          medianDuration: 2,
+          stdDeviation: 0.82,
+          minDuration: 1,
+          maxDuration: 3,
+          tempoClassification: 'moderate',
+        },
+        pacingCurve: [
+          { time: 0, value: 2 },
+          { time: 1, value: 3 },
+        ],
+        transitionInventory: [],
+        audioSyncPatterns: [],
+        contentStructure: [],
+        cameraPatterns: [],
+      };
+      vi.mocked(invoke).mockResolvedValueOnce(mockBundle).mockResolvedValueOnce(mockEsd);
+
+      const result = await globalToolRegistry.execute('generate_style_document', {
+        assetId: 'ref-1',
+      });
+      expect(result.success).toBe(true);
+      expect(result.result).toMatchObject({
+        esdId: 'esd-1',
+        name: 'Test ESD',
+        tempoClassification: 'moderate',
+        shotCount: 3,
+        analysisSource: 'cached',
+      });
+    });
+
+    it('should analyze first when no cached bundle exists', async () => {
+      const mockBundle = {
+        assetId: 'ref-1',
+        shots: [],
+        transcript: null,
+        audioProfile: null,
+        segments: [],
+        frameAnalysis: null,
+        metadata: { durationSec: 5, width: 1280, height: 720, fps: 24 },
+        analyzedAt: '2026-03-07T00:00:00Z',
+        errors: {},
+      };
+      const mockEsd = {
+        id: 'esd-2',
+        name: 'ESD-ref-1',
+        sourceAssetId: 'ref-1',
+        createdAt: '2026-03-07T00:00:00Z',
+        version: '1.0',
+        rhythmProfile: {
+          shotDurations: [1],
+          meanDuration: 1,
+          medianDuration: 1,
+          stdDeviation: 0,
+          minDuration: 1,
+          maxDuration: 1,
+          tempoClassification: 'fast',
+        },
+        pacingCurve: [],
+        transitionInventory: [],
+        audioSyncPatterns: [],
+        contentStructure: [],
+        cameraPatterns: [],
+      };
+      vi.mocked(invoke)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(mockBundle)
+        .mockResolvedValueOnce(mockEsd);
+
+      const result = await globalToolRegistry.execute('generate_style_document', {
+        assetId: 'ref-1',
+      });
+      const data = getToolResult<Record<string, unknown>>(result);
+      expect(data.analysisSource).toBe('generated');
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(1, 'get_analysis_bundle', {
+        assetId: 'ref-1',
+      });
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(2, 'analyze_video_full', {
+        assetId: 'ref-1',
+        options: {
+          shots: true,
+          transcript: true,
+          audio: true,
+          segments: true,
+          visual: true,
+          localOnly: false,
+        },
+      });
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(3, 'generate_esd', {
+        bundle: mockBundle,
+      });
+    });
+
+    it('should keep requested name in the response metadata', async () => {
+      const mockBundle = {
+        assetId: 'ref-1',
+        shots: [],
+        transcript: null,
+        audioProfile: null,
+        segments: [],
+        frameAnalysis: null,
+        metadata: { durationSec: 5, width: 1280, height: 720, fps: 24 },
+        analyzedAt: '2026-03-07T00:00:00Z',
+        errors: {},
+      };
+      const mockEsd = {
+        id: 'esd-2',
+        name: 'ESD-ref-1',
+        sourceAssetId: 'ref-1',
+        createdAt: '2026-03-07T00:00:00Z',
+        version: '1.0',
+        rhythmProfile: {
+          shotDurations: [1],
+          meanDuration: 1,
+          medianDuration: 1,
+          stdDeviation: 0,
+          minDuration: 1,
+          maxDuration: 1,
+          tempoClassification: 'fast',
+        },
+        pacingCurve: [],
+        transitionInventory: [],
+        audioSyncPatterns: [],
+        contentStructure: [],
+        cameraPatterns: [],
+      };
+      vi.mocked(invoke).mockResolvedValueOnce(mockBundle).mockResolvedValueOnce(mockEsd);
+
+      const result = await globalToolRegistry.execute('generate_style_document', {
+        assetId: 'ref-1',
+        name: 'Custom Name',
+      });
+      const data = getToolResult<Record<string, unknown>>(result);
+      expect(data.name).toBe('ESD-ref-1');
+      expect(data.requestedName).toBe('Custom Name');
+      expect(String(data.summary)).toContain('Requested name "Custom Name"');
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(1, 'get_analysis_bundle', {
+        assetId: 'ref-1',
+      });
+      expect(vi.mocked(invoke)).toHaveBeenNthCalledWith(2, 'generate_esd', {
+        bundle: mockBundle,
+      });
+    });
+
+    it('should fail when assetId is missing', async () => {
+      const result = await globalToolRegistry.execute('generate_style_document', {});
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('assetId');
+    });
+
+    it('should handle IPC error', async () => {
+      vi.mocked(invoke).mockRejectedValue(new Error('Analysis not found'));
+      const result = await globalToolRegistry.execute('generate_style_document', {
+        assetId: 'no-analysis',
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Analysis not found');
+    });
+  });
+
+  // ===========================================================================
+  // compare_edit_structure
+  // ===========================================================================
+
+  describe('compare_edit_structure', () => {
+    it('should compute correlation when ESD and timeline clips match perfectly', async () => {
+      const mockEsd = {
+        id: 'esd-1',
+        name: 'Test',
+        sourceAssetId: 'ref-1',
+        createdAt: '2026-03-07T00:00:00Z',
+        version: '1.0',
+        rhythmProfile: {
+          shotDurations: [2, 3, 5],
+          meanDuration: 3.33,
+          medianDuration: 3,
+          stdDeviation: 1.25,
+          minDuration: 2,
+          maxDuration: 5,
+          tempoClassification: 'moderate',
+        },
+        pacingCurve: [],
+        transitionInventory: [],
+        audioSyncPatterns: [],
+        contentStructure: [],
+        cameraPatterns: [],
+      };
+      vi.mocked(invoke).mockResolvedValue(mockEsd);
+
+      // Setup store with clips whose durations match the ESD shot durations [2, 3, 5]
+      setupStores({
+        tracks: [
+          createTrack({
+            id: 'V1',
+            clips: [
+              createClip({
+                id: 'c1',
+                assetId: 'a1',
+                place: { timelineInSec: 0, durationSec: 2 },
+              }),
+              createClip({
+                id: 'c2',
+                assetId: 'a2',
+                place: { timelineInSec: 2, durationSec: 3 },
+              }),
+              createClip({
+                id: 'c3',
+                assetId: 'a3',
+                place: { timelineInSec: 5, durationSec: 5 },
+              }),
+            ],
+          }),
+        ],
+      });
+
+      const result = await globalToolRegistry.execute('compare_edit_structure', {
+        esdId: 'esd-1',
+      });
+      const data = getToolResult<Record<string, unknown>>(result);
+      expect(data.referenceShots).toBe(3);
+      expect(data.outputShots).toBe(3);
+      expect(data.correlation).toBe(1); // Perfect match
+    });
+
+    it('should fail when esdId is missing', async () => {
+      const result = await globalToolRegistry.execute('compare_edit_structure', {});
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('esdId');
+    });
+
+    it('should return a clear error when the ESD does not exist', async () => {
+      vi.mocked(invoke).mockResolvedValue(null);
+      setupStores({
+        tracks: [createTrack({ id: 'V1' })],
+      });
+
+      const result = await globalToolRegistry.execute('compare_edit_structure', {
+        esdId: 'nonexistent',
+      });
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('ESD not found');
+    });
+
+    it('should return zero correlation when timeline has no clips', async () => {
+      const mockEsd = {
+        id: 'esd-1',
+        name: 'Test',
+        sourceAssetId: 'ref-1',
+        createdAt: '2026-03-07T00:00:00Z',
+        version: '1.0',
+        rhythmProfile: {
+          shotDurations: [2, 3],
+          meanDuration: 2.5,
+          medianDuration: 2.5,
+          stdDeviation: 0.5,
+          minDuration: 2,
+          maxDuration: 3,
+          tempoClassification: 'moderate',
+        },
+        pacingCurve: [],
+        transitionInventory: [],
+        audioSyncPatterns: [],
+        contentStructure: [],
+        cameraPatterns: [],
+      };
+      vi.mocked(invoke).mockResolvedValue(mockEsd);
+
+      // Empty timeline - no clips
+      setupStores({
+        tracks: [createTrack({ id: 'V1', clips: [] })],
+      });
+
+      const result = await globalToolRegistry.execute('compare_edit_structure', {
+        esdId: 'esd-1',
+      });
+      const data = getToolResult<Record<string, unknown>>(result);
+      expect(data.outputShots).toBe(0);
+      expect(data.correlation).toBe(0);
     });
   });
 });
