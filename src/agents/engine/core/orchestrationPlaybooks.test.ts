@@ -217,6 +217,71 @@ describe('buildOrchestrationPlaybook', () => {
     expect(match?.id).not.toBe('stock_media_search');
   });
 
+  it('should not match generate_and_place when intent is captioning (English)', () => {
+    const thought: Thought = {
+      understanding: 'Create captions for the video on the timeline',
+      requirements: ['captions', 'transcription'],
+      uncertainties: [],
+      approach: 'Transcribe audio and add subtitle clips',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor([
+      'generate_video',
+      'check_generation_status',
+      'insert_clip',
+      'auto_transcribe',
+      'add_captions_from_transcription',
+    ]);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    // "Create" + "video" + "timeline" triggers generate_and_place keywords,
+    // but requirements are within caption scope → should yield to auto_caption
+    expect(match?.id).not.toBe('generate_and_place');
+    expect(match?.id).toBe('auto_caption');
+  });
+
+  it('should not match generate_and_place when intent is captioning (Korean)', () => {
+    const thought: Thought = {
+      understanding: '이 영상에 자막을 만들어서 추가해줘',
+      requirements: ['자막 생성', '음성 인식'],
+      uncertainties: [],
+      approach: '음성 인식 후 자막 추가',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor([
+      'generate_video',
+      'check_generation_status',
+      'insert_clip',
+      'auto_transcribe',
+      'add_captions_from_transcription',
+    ]);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match?.id).not.toBe('generate_and_place');
+    expect(match?.id).toBe('auto_caption');
+  });
+
+  it('should still match generate_and_place when requirements indicate generation', () => {
+    const thought: Thought = {
+      understanding: 'Create an AI-generated video clip and place it on the timeline',
+      requirements: ['ai video generation', 'timeline insertion'],
+      uncertainties: [],
+      approach: 'Generate then place',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor([
+      'generate_video',
+      'check_generation_status',
+      'insert_clip',
+    ]);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    expect(match?.id).toBe('generate_and_place');
+  });
+
   it('should match auto-caption playbook for "add captions"', () => {
     const thought: Thought = {
       understanding: 'Add captions to the timeline',
@@ -288,6 +353,55 @@ describe('buildOrchestrationPlaybook', () => {
     const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
 
     expect(match?.id).not.toBe('auto_caption');
+  });
+
+  it('should not match auto-caption when requirements go beyond captioning scope', () => {
+    const thought: Thought = {
+      understanding: 'Analyze lyrics from audio and visual content on the timeline',
+      requirements: ['transcription', 'visual frame analysis', 'on-screen text detection'],
+      uncertainties: [],
+      approach: 'Transcribe audio via speech-to-text and detect on-screen text via OCR',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor(['auto_transcribe', 'add_captions_from_transcription']);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    // "visual frame analysis" and "on-screen text detection" are outside caption
+    // scope, so the playbook should yield to let the LLM plan a multi-modal approach
+    expect(match?.id).not.toBe('auto_caption');
+  });
+
+  it('should not match auto-caption when requirements include non-captioning analysis', () => {
+    const thought: Thought = {
+      understanding: 'Identify what is being said and shown in this video',
+      requirements: ['speech-to-text transcription', 'shot boundary detection', 'object recognition'],
+      uncertainties: [],
+      approach: 'Run multi-modal analysis pipeline',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor(['auto_transcribe', 'add_captions_from_transcription']);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    // "shot boundary detection" and "object recognition" are beyond caption scope
+    expect(match?.id).not.toBe('auto_caption');
+  });
+
+  it('should still match auto-caption when all requirements are within caption scope', () => {
+    const thought: Thought = {
+      understanding: 'Transcribe the audio and add subtitles',
+      requirements: ['audio transcription', 'subtitle creation'],
+      uncertainties: [],
+      approach: 'Speech-to-text then add caption clips',
+      needsMoreInfo: false,
+    };
+
+    const toolExecutor = createToolExecutor(['auto_transcribe', 'add_captions_from_transcription']);
+    const match = buildOrchestrationPlaybook(thought, createContext(), toolExecutor);
+
+    // Both requirements match caption scope patterns, so playbook should match
+    expect(match?.id).toBe('auto_caption');
   });
 
   it('should match music bed playbook for "add background music"', () => {

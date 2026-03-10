@@ -238,7 +238,7 @@ const META_TOOLS: ToolDefinition[] = [
   // ---------------------------------------------------------------------------
   {
     name: 'text',
-    description: `Caption and text operations. Actions: ${TEXT_ACTIONS.join(', ')}`,
+    description: `Caption and text operations. Actions: ${TEXT_ACTIONS.join(', ')}. Note: auto_transcribe requires the whisper feature; if unavailable, use the query meta-tool with analyze_asset action and analysisTypes ["transcript"] or ["textOcr"] instead.`,
     category: 'clip',
     parameters: {
       type: 'object',

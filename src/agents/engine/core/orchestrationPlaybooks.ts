@@ -103,6 +103,39 @@ const AUTO_CAPTION_KEYWORDS = [
   /음성\s*인식/i,
 ];
 
+/**
+ * Patterns that fall within the scope of the auto_caption playbook
+ * (audio transcription + adding caption clips to the timeline).
+ * When a Thought has requirements that match NONE of these patterns,
+ * the request is broader than what the 2-step playbook can handle.
+ */
+const CAPTION_SCOPE_PATTERNS = [
+  /caption/i,
+  /subtitle/i,
+  /transcri/i,
+  /speech/i,
+  /audio/i,
+  /자막/i,
+  /음성/i,
+];
+
+/**
+ * Returns true when the Thought contains requirements beyond audio
+ * transcription + captioning — e.g., visual analysis, OCR, content
+ * identification, multi-modal extraction. In such cases the narrow
+ * auto_caption playbook would leave requirements unmet, so we let the
+ * LLM plan freely instead.
+ */
+function hasRequirementsBeyondCaptioning(thought: Thought): boolean {
+  if (thought.requirements.length <= 1) {
+    return false;
+  }
+
+  return thought.requirements.some(
+    (req) => !CAPTION_SCOPE_PATTERNS.some((pattern) => pattern.test(req)),
+  );
+}
+
 const REFERENCE_STYLE_KEYWORDS = [
   /\bedit\s+like\b/i,
   /\bmatch\s+the\s+style\b/i,
@@ -372,9 +405,17 @@ function buildReferenceStyleTransferPlaybook(
 function buildAutoCaptionPlaybook(
   playbookContext: PlaybookContext,
 ): OrchestrationPlaybookMatch | null {
-  const { text, context, toolExecutor } = playbookContext;
+  const { text, thought, context, toolExecutor } = playbookContext;
 
   if (!matchesAny(text, AUTO_CAPTION_KEYWORDS)) {
+    return null;
+  }
+
+  // The auto_caption playbook only covers 2 steps: audio transcription + caption
+  // creation. If the Thought has requirements that fall outside this scope
+  // (e.g., visual analysis, OCR, content identification, multi-modal tasks),
+  // the playbook would leave those requirements unmet. Let the LLM plan freely.
+  if (hasRequirementsBeyondCaptioning(thought)) {
     return null;
   }
 
@@ -619,6 +660,14 @@ function buildGenerateAndPlacePlaybook(
     !matchesAll(text, [GENERATE_KEYWORDS, VIDEO_KEYWORDS, PLACE_KEYWORDS]) ||
     !hasTools(toolExecutor, ['generate_video', 'check_generation_status', 'insert_clip'])
   ) {
+    return null;
+  }
+
+  // Disambiguation: words like "create"/"만들", "video"/"영상", "timeline"/"추가"
+  // appear naturally in caption/subtitle requests. When the Thought's requirements
+  // are entirely within caption scope and caption keywords are present, yield to
+  // the auto_caption playbook instead.
+  if (matchesAny(text, AUTO_CAPTION_KEYWORDS) && !hasRequirementsBeyondCaptioning(thought)) {
     return null;
   }
 
