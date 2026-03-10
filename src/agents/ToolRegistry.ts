@@ -77,6 +77,12 @@ export interface ToolDefinition {
   parameters: JsonSchema;
   /** The handler function to execute the tool */
   handler: ToolHandler;
+  /**
+   * Optional async check for runtime availability.
+   * When provided, tools reporting unavailable can be filtered from LLM context
+   * or annotated in descriptions. Returns true if the tool is functional.
+   */
+  isAvailable?: () => Promise<boolean>;
 }
 
 /** Result of executing a tool */
