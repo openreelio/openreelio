@@ -525,7 +525,9 @@ const CAPTION_TOOLS: ToolDefinition[] = [
   {
     name: 'auto_transcribe',
     description:
-      'Transcribe an asset using speech-to-text (Whisper). Returns timed text segments. Use submit mode for long videos to avoid blocking.',
+      'Transcribe an asset using local speech-to-text (Whisper). Requires the whisper feature to be enabled at build time. ' +
+      'If unavailable, use the query meta-tool with action "analyze_asset" and analysisTypes ["transcript"] with an external provider instead. ' +
+      'For on-screen text/lyrics, use action "analyze_asset" with analysisTypes ["textOcr"].',
     category: 'utility',
     parameters: {
       type: 'object',
@@ -554,6 +556,28 @@ const CAPTION_TOOLS: ToolDefinition[] = [
     handler: async (args) => {
       try {
         const assetId = args.assetId as string;
+
+        // Check whisper availability before attempting transcription
+        let whisperAvailable = false;
+        try {
+          whisperAvailable = await invoke<boolean>('is_transcription_available');
+        } catch {
+          // IPC call failed — treat as unavailable
+        }
+
+        if (!whisperAvailable) {
+          logger.warn('auto_transcribe: whisper not available, returning alternatives', { assetId });
+          return {
+            success: false,
+            error:
+              'Local transcription (Whisper) is not available in this build. ' +
+              'Use these alternatives instead: ' +
+              '(1) Use the query meta-tool with action "analyze_asset", assetId, and analysisTypes ["transcript"] with an external provider (e.g., provider: "google_cloud") for speech-to-text. ' +
+              '(2) For on-screen text or lyrics, use the query meta-tool with action "analyze_asset", assetId, and analysisTypes ["textOcr"]. ' +
+              '(3) To enable local transcription, rebuild with --features whisper.',
+          };
+        }
+
         const options: Record<string, unknown> = {};
         if (args.language) options.language = args.language;
         if (args.model) options.model = args.model;
