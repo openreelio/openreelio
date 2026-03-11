@@ -58,6 +58,8 @@ export interface EnhancedTimelineToolbarProps {
   onDelete?: () => void;
   /** Whether there's an active sequence */
   hasActiveSequence?: boolean;
+  /** Whether there are selected clips to edit */
+  hasSelectedClips?: boolean;
   /** Current FPS for timecode display */
   fps?: number;
   /** Total duration in seconds */
@@ -136,6 +138,7 @@ function EnhancedTimelineToolbarComponent({
   onDuplicate,
   onDelete,
   hasActiveSequence = false,
+  hasSelectedClips = false,
   fps = 30,
   duration = 0,
 }: EnhancedTimelineToolbarProps) {
@@ -312,7 +315,7 @@ function EnhancedTimelineToolbarComponent({
           type="button"
           className="p-1.5 rounded text-editor-text-muted hover:bg-editor-border hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
           onClick={handleSplit}
-          disabled={!hasActiveSequence}
+          disabled={!hasActiveSequence || !hasSelectedClips}
           title="Split at Playhead (S)"
         >
           <Scissors className="w-4 h-4" />
@@ -322,7 +325,7 @@ function EnhancedTimelineToolbarComponent({
           type="button"
           className="p-1.5 rounded text-editor-text-muted hover:bg-editor-border hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
           onClick={handleDuplicate}
-          disabled={!hasActiveSequence}
+          disabled={!hasActiveSequence || !hasSelectedClips}
           title="Duplicate (Ctrl+D)"
         >
           <Copy className="w-4 h-4" />
@@ -332,7 +335,7 @@ function EnhancedTimelineToolbarComponent({
           type="button"
           className="p-1.5 rounded text-editor-text-muted hover:bg-editor-border hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
           onClick={handleDelete}
-          disabled={!hasActiveSequence}
+          disabled={!hasActiveSequence || !hasSelectedClips}
           title="Delete (Delete)"
         >
           <Trash2 className="w-4 h-4" />

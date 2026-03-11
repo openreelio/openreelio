@@ -64,7 +64,12 @@ import {
 } from './constants';
 import { resolveTrackDropTarget } from '@/utils/trackDropTarget';
 import { getTrackSwapTargets, isProtectedBaseTrack } from '@/utils/trackReorder';
-import { expandClipIdsWithLinkedCompanions, getSplitTargetsAtTime } from '@/utils/clipLinking';
+import {
+  expandClipIdsWithLinkedCompanions,
+  findClipReference,
+  getSplitTargetsAtTime,
+} from '@/utils/clipLinking';
+import { getClipTimelineDuration } from '@/hooks/timelineActions/helpers';
 import { getPlayheadRazorSplitTarget } from '@/utils/playheadRazor';
 import type { PendingAssetDrop } from './types';
 
@@ -214,6 +219,7 @@ export function Timeline({
   onTrackCreate,
   onAddText,
   onTrackReorder,
+  getTextClipData,
 }: TimelineProps) {
   // ===========================================================================
   // Store State - Using targeted selectors to minimize re-renders
@@ -649,30 +655,53 @@ export function Timeline({
   // ===========================================================================
   // Clipboard Operations
   // ===========================================================================
+  const duplicateClipGroup = useCallback(
+    (clipIds: string[], targetStartTime: number) => {
+      if (!sequence || !onClipDuplicate || clipIds.length === 0) {
+        return;
+      }
+
+      const resolvedClipIds = linkedSelectionEnabled
+        ? expandClipIdsWithLinkedCompanions(sequence, clipIds)
+        : clipIds;
+
+      const sourceRefs = resolvedClipIds
+        .map((clipId) => findClipReference(sequence, clipId))
+        .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null)
+        .sort((left, right) => {
+          if (left.clip.place.timelineInSec !== right.clip.place.timelineInSec) {
+            return left.clip.place.timelineInSec - right.clip.place.timelineInSec;
+          }
+
+          return left.trackIndex - right.trackIndex;
+        });
+
+      if (sourceRefs.length === 0) {
+        return;
+      }
+
+      const earliestStart = Math.min(
+        ...sourceRefs.map((sourceRef) => sourceRef.clip.place.timelineInSec),
+      );
+
+      for (const sourceRef of sourceRefs) {
+        onClipDuplicate({
+          sequenceId: sequence.id,
+          trackId: sourceRef.track.id,
+          clipId: sourceRef.clip.id,
+          newTimelineIn: targetStartTime + (sourceRef.clip.place.timelineInSec - earliestStart),
+          ignoreLinkedSelection: true,
+        });
+      }
+    },
+    [sequence, onClipDuplicate, linkedSelectionEnabled],
+  );
+
   const { copy, cut, paste, duplicate, canCopy, canPaste } = useClipboard({
     sequence,
     selectedClipIds,
-    onDuplicate: onClipDuplicate
-      ? (clipIds: string[], targetTime: number) => {
-          if (sequence) {
-            // Duplicate each clip
-            for (const clipId of clipIds) {
-              for (const track of sequence.tracks) {
-                const clip = track.clips.find((c) => c.id === clipId);
-                if (clip) {
-                  onClipDuplicate({
-                    sequenceId: sequence.id,
-                    trackId: track.id,
-                    clipId,
-                    newTimelineIn: targetTime,
-                  });
-                  break;
-                }
-              }
-            }
-          }
-        }
-      : undefined,
+    getTextClipData,
+    onDuplicate: onClipDuplicate ? duplicateClipGroup : undefined,
     onPaste: onClipPaste
       ? (clips, targetTime, targetTrackId) => {
           if (sequence && clips.length > 0) {
@@ -1674,25 +1703,30 @@ export function Timeline({
   }, [selectedClipIds, sequence, playhead, onClipSplit, linkedSelectionEnabled]);
 
   const handleToolbarDuplicate = useCallback(() => {
-    if (selectedClipIds.length > 0 && sequence && onClipDuplicate) {
-      for (const clipId of selectedClipIds) {
-        for (const track of sequence.tracks) {
-          const clip = track.clips.find((c) => c.id === clipId);
-          if (clip) {
-            const safeSpeed = clip.speed > 0 ? clip.speed : 1;
-            const clipDuration = (clip.range.sourceOutSec - clip.range.sourceInSec) / safeSpeed;
-            onClipDuplicate({
-              sequenceId: sequence.id,
-              trackId: track.id,
-              clipId,
-              newTimelineIn: clip.place.timelineInSec + clipDuration,
-            });
-            break;
-          }
-        }
-      }
+    if (!sequence || !onClipDuplicate || selectedClipIds.length === 0) {
+      return;
     }
-  }, [selectedClipIds, sequence, onClipDuplicate]);
+
+    const resolvedClipIds = linkedSelectionEnabled
+      ? expandClipIdsWithLinkedCompanions(sequence, selectedClipIds)
+      : selectedClipIds;
+
+    const sourceRefs = resolvedClipIds
+      .map((clipId) => findClipReference(sequence, clipId))
+      .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null);
+
+    if (sourceRefs.length === 0) {
+      return;
+    }
+
+    const blockEnd = Math.max(
+      ...sourceRefs.map(
+        (sourceRef) => sourceRef.clip.place.timelineInSec + getClipTimelineDuration(sourceRef.clip),
+      ),
+    );
+
+    duplicateClipGroup(selectedClipIds, blockEnd);
+  }, [selectedClipIds, sequence, onClipDuplicate, linkedSelectionEnabled, duplicateClipGroup]);
 
   const handleToolbarDelete = useCallback(() => {
     handleRippleDelete(selectedClipIds);
@@ -1852,6 +1886,7 @@ export function Timeline({
           onDuplicate={handleToolbarDuplicate}
           onDelete={handleToolbarDelete}
           hasActiveSequence={sequence !== null}
+          hasSelectedClips={selectedClipIds.length > 0}
           fps={DEFAULT_FPS}
           duration={duration}
         />

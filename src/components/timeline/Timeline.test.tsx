@@ -1219,6 +1219,85 @@ describe('Timeline', () => {
       expect(screen.getByTestId('enhanced-timeline-toolbar')).toBeInTheDocument();
     });
 
+    it('should disable split, duplicate, and delete buttons when no clips are selected', () => {
+      render(<Timeline sequence={mockSequence} />);
+
+      expect(screen.getByTitle('Split at Playhead (S)')).toBeDisabled();
+      expect(screen.getByTitle('Duplicate (Ctrl+D)')).toBeDisabled();
+      expect(screen.getByTitle('Delete (Delete)')).toBeDisabled();
+    });
+
+    it('should duplicate selected clips as a grouped block after the selection end', () => {
+      const onClipDuplicate = vi.fn();
+      const sequenceWithClips: Sequence = {
+        ...mockSequence,
+        tracks: [
+          {
+            ...mockSequence.tracks[0],
+            clips: [
+              {
+                id: 'clip_dup_001',
+                assetId: 'asset_001',
+                range: { sourceInSec: 0, sourceOutSec: 4 },
+                place: { timelineInSec: 0, durationSec: 4 },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+              {
+                id: 'clip_dup_002',
+                assetId: 'asset_002',
+                range: { sourceInSec: 0, sourceOutSec: 2 },
+                place: { timelineInSec: 8, durationSec: 2 },
+                transform: {
+                  position: { x: 0.5, y: 0.5 },
+                  scale: { x: 1, y: 1 },
+                  rotationDeg: 0,
+                  anchor: { x: 0.5, y: 0.5 },
+                },
+                opacity: 1,
+                speed: 1,
+                effects: [],
+                audio: { volumeDb: 0, pan: 0, muted: false },
+              },
+            ],
+          },
+          mockSequence.tracks[1],
+        ],
+      };
+
+      useTimelineStore.setState({ selectedClipIds: ['clip_dup_001', 'clip_dup_002'] });
+
+      render(<Timeline sequence={sequenceWithClips} onClipDuplicate={onClipDuplicate} />);
+
+      fireEvent.click(screen.getByTitle('Duplicate (Ctrl+D)'));
+
+      expect(onClipDuplicate).toHaveBeenCalledTimes(2);
+      expect(onClipDuplicate).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          clipId: 'clip_dup_001',
+          newTimelineIn: 10,
+          ignoreLinkedSelection: true,
+        }),
+      );
+      expect(onClipDuplicate).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          clipId: 'clip_dup_002',
+          newTimelineIn: 18,
+          ignoreLinkedSelection: true,
+        }),
+      );
+    });
+
     it('should not scroll horizontally on wheel without Shift when there is no vertical overflow', () => {
       render(<Timeline sequence={mockSequence} />);
 
