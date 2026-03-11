@@ -11,6 +11,8 @@ const TIMELINE_TIME_EPSILON_SEC = 1e-6;
 const TRACK_KIND_LABEL: Record<TrackCreateData['kind'], string> = {
   video: 'Video',
   audio: 'Audio',
+  caption: 'Caption',
+  overlay: 'Overlay',
 };
 
 interface WarnLogger {
@@ -189,13 +191,45 @@ export function getNextTrackName(sequence: Sequence, kind: TrackCreateData['kind
 
 /**
  * Calculates insertion index that matches common NLE lane layout.
+ * - New overlay tracks are inserted above existing visual tracks.
  * - New video tracks are inserted above existing video tracks (below overlays).
+ * - New caption tracks are inserted above audio tracks.
  * - New audio tracks are appended below existing audio tracks.
  */
 export function getDefaultTrackInsertPosition(
   sequence: Sequence,
   kind: TrackCreateData['kind'],
 ): number {
+  if (kind === 'overlay') {
+    let firstOverlayIndex = -1;
+    let firstLowerLaneIndex = -1;
+
+    for (let index = 0; index < sequence.tracks.length; index += 1) {
+      const track = sequence.tracks[index];
+
+      if (firstOverlayIndex === -1 && track.kind === 'overlay') {
+        firstOverlayIndex = index;
+      }
+
+      if (
+        firstLowerLaneIndex === -1 &&
+        (track.kind === 'video' || track.kind === 'caption' || track.kind === 'audio')
+      ) {
+        firstLowerLaneIndex = index;
+      }
+    }
+
+    if (firstOverlayIndex !== -1) {
+      return firstOverlayIndex;
+    }
+
+    if (firstLowerLaneIndex !== -1) {
+      return firstLowerLaneIndex;
+    }
+
+    return sequence.tracks.length;
+  }
+
   if (kind === 'video') {
     let firstVideoIndex = -1;
     let firstLowerLaneIndex = -1;
@@ -218,6 +252,33 @@ export function getDefaultTrackInsertPosition(
 
     if (firstLowerLaneIndex !== -1) {
       return firstLowerLaneIndex;
+    }
+
+    return sequence.tracks.length;
+  }
+
+  if (kind === 'caption') {
+    let lastCaptionIndex = -1;
+    let firstAudioIndex = -1;
+
+    for (let index = 0; index < sequence.tracks.length; index += 1) {
+      const track = sequence.tracks[index];
+
+      if (track.kind === 'caption') {
+        lastCaptionIndex = index;
+      }
+
+      if (firstAudioIndex === -1 && track.kind === 'audio') {
+        firstAudioIndex = index;
+      }
+    }
+
+    if (lastCaptionIndex !== -1) {
+      return lastCaptionIndex + 1;
+    }
+
+    if (firstAudioIndex !== -1) {
+      return firstAudioIndex;
     }
 
     return sequence.tracks.length;

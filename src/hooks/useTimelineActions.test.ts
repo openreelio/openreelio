@@ -2464,6 +2464,544 @@ describe('useTimelineActions', () => {
   });
 
   // ===========================================================================
+  // Duplicate / Paste Tests
+  // ===========================================================================
+
+  describe('duplicate and paste', () => {
+    it('should restore clip state when pasting a media clip', async () => {
+      const track = createMockTrack({ id: 'track_v1', kind: 'video' });
+      const asset = createMockAsset({
+        id: 'asset_media_001',
+        kind: 'video',
+        durationSec: 30,
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [track],
+      });
+
+      useProjectStore.setState({
+        assets: new Map([[asset.id, asset]]),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          const call = args as { commandType: string; payload: Record<string, unknown> };
+          executeCalls.push(call);
+
+          if (call.commandType === 'InsertClip') {
+            return Promise.resolve({
+              opId: 'op_insert',
+              createdIds: ['clip_pasted_001'],
+              deletedIds: [],
+            });
+          }
+
+          return Promise.resolve({
+            opId: `op_${call.commandType.toLowerCase()}`,
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [asset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleClipPaste({
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          pasteTime: 12,
+          clipData: {
+            sourceClipId: 'clip_source_001',
+            trackKind: 'video',
+            assetId: 'asset_media_001',
+            timelineIn: 12,
+            durationSec: 3,
+            sourceIn: 2,
+            sourceOut: 8,
+            speed: 2,
+            reverse: true,
+            opacity: 1,
+            transform: {
+              position: { x: 0.25, y: 0.4 },
+              scale: { x: 1.2, y: 1.1 },
+              rotationDeg: 12,
+              anchor: { x: 0.5, y: 0.5 },
+            },
+            blendMode: 'screen',
+            audio: {
+              volumeDb: -3,
+              pan: 0.25,
+              muted: true,
+              fadeInSec: 0.5,
+              fadeOutSec: 0.75,
+            },
+          },
+        });
+      });
+
+      expect(executeCalls).toEqual(
+        expect.arrayContaining([
+          {
+            commandType: 'InsertClip',
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_v1',
+              assetId: 'asset_media_001',
+              timelineIn: 12,
+            },
+          },
+          {
+            commandType: 'TrimClip',
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_v1',
+              clipId: 'clip_pasted_001',
+              newSourceIn: 2,
+              newSourceOut: 8,
+              newTimelineIn: 12,
+            },
+          },
+          {
+            commandType: 'SetClipSpeed',
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_v1',
+              clipId: 'clip_pasted_001',
+              speed: 2,
+              reverse: true,
+            },
+          },
+          {
+            commandType: 'SetClipAudio',
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_v1',
+              clipId: 'clip_pasted_001',
+              volumeDb: -3,
+              pan: 0.25,
+              muted: true,
+              fadeInSec: 0.5,
+              fadeOutSec: 0.75,
+            },
+          },
+          {
+            commandType: 'SetClipBlendMode',
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_v1',
+              clipId: 'clip_pasted_001',
+              blendMode: 'screen',
+            },
+          },
+          {
+            commandType: 'SetClipTransform',
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_v1',
+              clipId: 'clip_pasted_001',
+              transform: {
+                position: { x: 0.25, y: 0.4 },
+                scale: { x: 1.2, y: 1.1 },
+                rotationDeg: 12,
+                anchor: { x: 0.5, y: 0.5 },
+              },
+            },
+          },
+        ]),
+      );
+    });
+
+    it('should create a caption track when pasting a caption clip without an available caption lane', async () => {
+      const baseTrack = createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' });
+      const createdCaptionTrack = createMockTrack({
+        id: 'track_c1',
+        kind: 'caption',
+        name: 'Caption 1',
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [baseTrack],
+      });
+
+      let currentSequence = sequence;
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      useProjectStore.setState({
+        assets: new Map(),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          const call = args as { commandType: string; payload: Record<string, unknown> };
+          executeCalls.push(call);
+
+          if (call.commandType === 'CreateTrack') {
+            currentSequence = {
+              ...currentSequence,
+              tracks: [...currentSequence.tracks, createdCaptionTrack],
+            };
+
+            return Promise.resolve({
+              opId: 'op_create_caption_track',
+              createdIds: [createdCaptionTrack.id],
+              deletedIds: [],
+            });
+          }
+
+          if (call.commandType === 'CreateCaption') {
+            return Promise.resolve({
+              opId: 'op_create_caption',
+              createdIds: ['caption_clip_001'],
+              deletedIds: [],
+            });
+          }
+
+          return Promise.resolve({
+            opId: `op_${call.commandType.toLowerCase()}`,
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [currentSequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleClipPaste({
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          pasteTime: 6,
+          clipData: {
+            sourceClipId: 'caption_source_001',
+            trackKind: 'caption',
+            assetId: 'caption_virtual_001',
+            label: 'Hello caption',
+            timelineIn: 6,
+            durationSec: 2,
+            sourceIn: 0,
+            sourceOut: 2,
+            speed: 1,
+            opacity: 1,
+            caption: {
+              text: 'Hello caption',
+              startSec: 6,
+              endSec: 8,
+              style: {
+                fontFamily: 'Arial',
+                fontSize: 48,
+                fontWeight: 'normal',
+                color: { r: 255, g: 255, b: 255, a: 255 },
+                outlineWidth: 2,
+                shadowOffset: 2,
+                alignment: 'center',
+                italic: false,
+                underline: false,
+              },
+              position: { type: 'preset', vertical: 'bottom', marginPercent: 5 },
+            },
+          },
+        });
+      });
+
+      expect(executeCalls).toEqual(
+        expect.arrayContaining([
+          {
+            commandType: 'CreateTrack',
+            payload: {
+              sequenceId: 'seq_001',
+              kind: 'caption',
+              name: 'Caption 1',
+              position: 1,
+            },
+          },
+          {
+            commandType: 'CreateCaption',
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_c1',
+              text: 'Hello caption',
+              startSec: 6,
+              endSec: 8,
+            },
+          },
+          {
+            commandType: 'UpdateCaption',
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_c1',
+              captionId: 'caption_clip_001',
+              text: 'Hello caption',
+              startSec: 6,
+              endSec: 8,
+              style: {
+                fontFamily: 'Arial',
+                fontSize: 48,
+                fontWeight: 'normal',
+                color: { r: 255, g: 255, b: 255, a: 255 },
+                outlineWidth: 2,
+                shadowOffset: 2,
+                alignment: 'center',
+                italic: false,
+                underline: false,
+              },
+              position: { type: 'preset', vertical: 'bottom', marginPercent: 5 },
+            },
+          },
+        ]),
+      );
+    });
+
+    it('should create an overlay track when pasting an overlay clip without an available overlay lane', async () => {
+      const baseVideoTrack = createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' });
+      const baseAudioTrack = createMockTrack({ id: 'track_a1', kind: 'audio', name: 'Audio 1' });
+      const createdOverlayTrack = createMockTrack({
+        id: 'track_o1',
+        kind: 'overlay',
+        name: 'Overlay 1',
+      });
+      const asset = createMockAsset({
+        id: 'asset_overlay_001',
+        kind: 'image',
+        durationSec: 10,
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [baseVideoTrack, baseAudioTrack],
+      });
+
+      let currentSequence = sequence;
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      useProjectStore.setState({
+        assets: new Map([[asset.id, asset]]),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          const call = args as { commandType: string; payload: Record<string, unknown> };
+          executeCalls.push(call);
+
+          if (call.commandType === 'CreateTrack') {
+            currentSequence = {
+              ...currentSequence,
+              tracks: [createdOverlayTrack, ...currentSequence.tracks],
+            };
+
+            return Promise.resolve({
+              opId: 'op_create_overlay_track',
+              createdIds: [createdOverlayTrack.id],
+              deletedIds: [],
+            });
+          }
+
+          if (call.commandType === 'InsertClip') {
+            return Promise.resolve({
+              opId: 'op_insert_overlay',
+              createdIds: ['clip_overlay_001'],
+              deletedIds: [],
+            });
+          }
+
+          return Promise.resolve({
+            opId: `op_${call.commandType.toLowerCase()}`,
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [asset],
+            sequences: [currentSequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleClipPaste({
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          pasteTime: 9,
+          clipData: {
+            sourceClipId: 'overlay_source_001',
+            trackKind: 'overlay',
+            assetId: 'asset_overlay_001',
+            timelineIn: 9,
+            durationSec: 3,
+            sourceIn: 0,
+            sourceOut: 3,
+            speed: 1,
+            opacity: 1,
+          },
+        });
+      });
+
+      expect(executeCalls).toEqual(
+        expect.arrayContaining([
+          {
+            commandType: 'CreateTrack',
+            payload: {
+              sequenceId: 'seq_001',
+              kind: 'overlay',
+              name: 'Overlay 1',
+              position: 0,
+            },
+          },
+          {
+            commandType: 'InsertClip',
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_o1',
+              assetId: 'asset_overlay_001',
+              timelineIn: 9,
+            },
+          },
+        ]),
+      );
+    });
+
+    it('should duplicate linked companion clips together', async () => {
+      useTimelineStore.setState({ linkedSelectionEnabled: true });
+
+      const videoClip = createMockClip({
+        id: 'clip_video_001',
+        assetId: 'asset_linked_001',
+        place: { timelineInSec: 5, durationSec: 6 },
+      });
+      const audioClip = createMockClip({
+        id: 'clip_audio_001',
+        assetId: 'asset_linked_001',
+        place: { timelineInSec: 5, durationSec: 6 },
+      });
+      const videoTrack = createMockTrack({
+        id: 'track_v1',
+        kind: 'video',
+        clips: [videoClip],
+      });
+      const audioTrack = createMockTrack({
+        id: 'track_a1',
+        kind: 'audio',
+        clips: [audioClip],
+      });
+      const asset = createMockAsset({
+        id: 'asset_linked_001',
+        kind: 'video',
+        durationSec: 20,
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [videoTrack, audioTrack],
+      });
+
+      useProjectStore.setState({
+        assets: new Map([[asset.id, asset]]),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          const call = args as { commandType: string; payload: Record<string, unknown> };
+          executeCalls.push(call);
+
+          if (call.commandType === 'InsertClip') {
+            return Promise.resolve({
+              opId: `op_insert_${executeCalls.length}`,
+              createdIds: [`clip_dup_${executeCalls.length}`],
+              deletedIds: [],
+            });
+          }
+
+          return Promise.resolve({
+            opId: `op_${call.commandType.toLowerCase()}`,
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [asset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleClipDuplicate({
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          clipId: 'clip_video_001',
+          newTimelineIn: 20,
+        });
+      });
+
+      const insertCalls = executeCalls.filter((call) => call.commandType === 'InsertClip');
+      expect(insertCalls).toHaveLength(2);
+      expect(insertCalls).toEqual(
+        expect.arrayContaining([
+          {
+            commandType: 'InsertClip',
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_v1',
+              assetId: 'asset_linked_001',
+              timelineIn: 20,
+            },
+          },
+          {
+            commandType: 'InsertClip',
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_a1',
+              assetId: 'asset_linked_001',
+              timelineIn: 20,
+            },
+          },
+        ]),
+      );
+    });
+  });
+
+  // ===========================================================================
   // Error Handling Tests
   // ===========================================================================
 

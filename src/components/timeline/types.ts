@@ -5,7 +5,8 @@
  * Centralized to avoid duplication and improve maintainability.
  */
 
-import type { Sequence, AssetKind } from '@/types';
+import type { Sequence, AssetKind, TextClipData } from '@/types';
+import type { ClipboardClipData } from '@/stores/editorToolStore';
 
 // =============================================================================
 // Asset Drop Types
@@ -137,16 +138,7 @@ export interface ClipPasteData {
   /** ID of the target track */
   trackId: string;
   /** Serialized clip data */
-  clipData: {
-    assetId: string;
-    label?: string;
-    timelineIn: number;
-    sourceIn: number;
-    sourceOut: number;
-    speed: number;
-    volume: number;
-    opacity: number;
-  };
+  clipData: ClipboardClipData;
   /** Timeline position to paste at */
   pasteTime: number;
 }
@@ -217,7 +209,7 @@ export interface TrackCreateData {
   /** ID of the sequence where the track should be created */
   sequenceId: string;
   /** Track kind to create */
-  kind: 'video' | 'audio';
+  kind: 'video' | 'audio' | 'caption' | 'overlay';
   /** Optional custom track name */
   name?: string;
   /** Optional insertion position (0-based) */
@@ -283,6 +275,8 @@ export interface TimelineProps {
   onAddText?: () => void;
   /** Callback when a track should be moved to a new index */
   onTrackReorder?: (data: TrackReorderData) => void | Promise<void>;
+  /** Optional resolver for hydrated text clip payloads */
+  getTextClipData?: (clipId: string) => TextClipData | undefined;
 }
 
 // =============================================================================

@@ -306,6 +306,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     handleClipMove,
     handleClipTrim,
     handleClipSplit,
+    handleClipDuplicate,
+    handleClipPaste,
     handleClipAudioUpdate,
     handleAssetDrop,
     pendingWorkspaceDrops,
@@ -787,6 +789,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                   onClipMove={handleClipMove}
                   onClipTrim={handleClipTrim}
                   onClipSplit={handleClipSplit}
+                  onClipDuplicate={handleClipDuplicate}
+                  onClipPaste={handleClipPaste}
                   onClipAudioUpdate={handleClipAudioUpdate}
                   onAssetDrop={handleAssetDrop}
                   pendingAssetDrops={pendingWorkspaceDrops}
@@ -798,6 +802,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                   onTrackVisibilityToggle={handleTrackVisibilityToggle}
                   onTrackReorder={handleTrackReorder}
                   onAddText={handleOpenAddText}
+                  getTextClipData={(clipId) => textClipDataById.get(clipId)}
                 />
               </TimelineErrorBoundary>
             </Panel>

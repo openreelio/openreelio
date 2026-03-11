@@ -10,7 +10,7 @@
 import { useCallback, useMemo } from 'react';
 import { useEditorToolStore, type ClipboardItem } from '@/stores/editorToolStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
-import type { Sequence, Clip, Track } from '@/types';
+import type { Sequence, Clip, Track, TextClipData } from '@/types';
 import { MAX_CLIPBOARD_ITEMS } from '@/constants/editing';
 
 // =============================================================================
@@ -28,6 +28,8 @@ export interface UseClipboardOptions {
   sequence: Sequence | null;
   /** Currently selected clip IDs */
   selectedClipIds: string[];
+  /** Optional text clip payload resolver */
+  getTextClipData?: (clipId: string) => TextClipData | undefined;
   /** Callback for copy operation */
   onCopy?: (clips: ClipboardItem[]) => void;
   /** Callback for cut operation */
@@ -74,10 +76,10 @@ export interface UseClipboardReturn {
  */
 function findClipInSequence(
   sequence: Sequence,
-  clipId: string
+  clipId: string,
 ): { clip: Clip; track: Track } | null {
   for (const track of sequence.tracks) {
-    const clip = track.clips.find(c => c.id === clipId);
+    const clip = track.clips.find((candidate) => candidate.id === clipId);
     if (clip) {
       return { clip, track };
     }
@@ -96,20 +98,39 @@ function getClipDuration(clip: Clip): number {
 /**
  * Convert a Clip to ClipboardItem
  */
-function clipToClipboardItem(clip: Clip, trackId: string): ClipboardItem {
+function clipToClipboardItem(clip: Clip, track: Track, textData?: TextClipData): ClipboardItem {
+  const durationSec = getClipDuration(clip);
+
   return {
     type: 'clip',
     clipId: clip.id,
-    trackId,
+    trackId: track.id,
     clipData: {
+      sourceClipId: clip.id,
+      trackKind: track.kind,
       assetId: clip.assetId,
       label: clip.label,
       timelineIn: clip.place.timelineInSec,
+      durationSec,
       sourceIn: clip.range.sourceInSec,
       sourceOut: clip.range.sourceOutSec,
       speed: clip.speed,
-      volume: clip.audio.volumeDb,
+      reverse: clip.reverse,
       opacity: clip.opacity,
+      transform: clip.transform,
+      blendMode: clip.blendMode,
+      audio: { ...clip.audio },
+      textData,
+      caption:
+        track.kind === 'caption'
+          ? {
+              text: clip.label || '',
+              startSec: clip.place.timelineInSec,
+              endSec: clip.place.timelineInSec + durationSec,
+              style: clip.captionStyle,
+              position: clip.captionPosition,
+            }
+          : undefined,
     },
   };
 }
@@ -141,6 +162,7 @@ export function useClipboard(options: UseClipboardOptions): UseClipboardReturn {
   const {
     sequence,
     selectedClipIds,
+    getTextClipData,
     onCopy,
     onCut,
     onPaste,
@@ -195,7 +217,9 @@ export function useClipboard(options: UseClipboardOptions): UseClipboardReturn {
     for (const clipId of selectedClipIds) {
       const found = findClipInSequence(sequence, clipId);
       if (found) {
-        clipboardItems.push(clipToClipboardItem(found.clip, found.track.id));
+        clipboardItems.push(
+          clipToClipboardItem(found.clip, found.track, getTextClipData?.(found.clip.id)),
+        );
       }
     }
 
@@ -209,9 +233,9 @@ export function useClipboard(options: UseClipboardOptions): UseClipboardReturn {
     return {
       success: true,
       message: `Copied ${clipboardItems.length} clip(s)`,
-      clipIds: clipboardItems.map(c => c.clipId),
+      clipIds: clipboardItems.map((item) => item.clipId),
     };
-  }, [sequence, selectedClipIds, copyToClipboard, onCopy]);
+  }, [sequence, selectedClipIds, copyToClipboard, getTextClipData, onCopy]);
 
   /**
    * Cut selected clips (copy + delete)
@@ -237,40 +261,41 @@ export function useClipboard(options: UseClipboardOptions): UseClipboardReturn {
   /**
    * Paste clips at playhead position
    */
-  const paste = useCallback((targetTrackId?: string): ClipboardOperationResult => {
-    if (!sequence) {
-      return { success: false, message: 'No sequence available' };
-    }
-
-    if (!clipboard || clipboard.length === 0) {
-      return { success: false, message: 'Clipboard is empty' };
-    }
-
-    // Calculate offset from the earliest clip in clipboard
-    let earliestTime = Infinity;
-    for (const item of clipboard) {
-      if (item.clipData.timelineIn < earliestTime) {
-        earliestTime = item.clipData.timelineIn;
+  const paste = useCallback(
+    (targetTrackId?: string): ClipboardOperationResult => {
+      if (!sequence) {
+        return { success: false, message: 'No sequence available' };
       }
-    }
 
-    // Offset all clips to paste at playhead
-    const offsetClips: ClipboardItem[] = clipboard.map(item => ({
-      ...item,
-      clipData: {
-        ...item.clipData,
-        timelineIn: item.clipData.timelineIn - earliestTime + currentTime,
-      },
-    }));
+      if (!clipboard || clipboard.length === 0) {
+        return { success: false, message: 'Clipboard is empty' };
+      }
 
-    onPaste?.(offsetClips, currentTime, targetTrackId);
+      let earliestTime = Infinity;
+      for (const item of clipboard) {
+        if (item.clipData.timelineIn < earliestTime) {
+          earliestTime = item.clipData.timelineIn;
+        }
+      }
 
-    return {
-      success: true,
-      message: `Pasted ${clipboard.length} clip(s)`,
-      clipIds: clipboard.map(c => c.clipId),
-    };
-  }, [sequence, clipboard, currentTime, onPaste]);
+      const offsetClips: ClipboardItem[] = clipboard.map((item) => ({
+        ...item,
+        clipData: {
+          ...item.clipData,
+          timelineIn: item.clipData.timelineIn - earliestTime + currentTime,
+        },
+      }));
+
+      onPaste?.(offsetClips, currentTime, targetTrackId);
+
+      return {
+        success: true,
+        message: `Pasted ${clipboard.length} clip(s)`,
+        clipIds: clipboard.map((item) => item.clipId),
+      };
+    },
+    [sequence, clipboard, currentTime, onPaste],
+  );
 
   /**
    * Duplicate selected clips immediately after
