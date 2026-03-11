@@ -13,7 +13,9 @@ import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores/projectStore';
 import { useEditorToolStore, type EditorTool, type ClipboardItem } from '@/stores/editorToolStore';
 import { PLAYBACK } from '@/constants/preview';
-import type { Sequence, Clip } from '@/types';
+import type { Sequence, Clip, Track } from '@/types';
+import { isTextClip } from '@/types';
+import { extractTextDataFromClip } from '@/utils/textRenderer';
 
 // =============================================================================
 // Types
@@ -106,13 +108,13 @@ function isInputElement(target: EventTarget | null): boolean {
 
 function findClipInSequence(
   sequence: Sequence | null,
-  clipId: string
-): { clip: Clip; trackId: string } | null {
+  clipId: string,
+): { clip: Clip; track: Track } | null {
   if (!sequence) return null;
   for (const track of sequence.tracks) {
     const clip = track.clips.find((c) => c.id === clipId);
     if (clip) {
-      return { clip, trackId: track.id };
+      return { clip, track };
     }
   }
   return null;
@@ -139,9 +141,7 @@ function getClipDuration(clip: Clip): number {
  * - Split left/right
  * - Select all
  */
-export function useEnhancedKeyboardShortcuts(
-  options: UseEnhancedKeyboardShortcutsOptions
-): void {
+export function useEnhancedKeyboardShortcuts(options: UseEnhancedKeyboardShortcutsOptions): void {
   const {
     sequence,
     onUndo,
@@ -180,29 +180,13 @@ export function useEnhancedKeyboardShortcuts(
     seekBackward,
   } = usePlaybackStore();
 
-  const {
-    zoomIn,
-    zoomOut,
-    selectedClipIds,
-    clearClipSelection,
-    selectClips,
-    scrollToPlayhead,
-  } = useTimelineStore();
+  const { zoomIn, zoomOut, selectedClipIds, clearClipSelection, selectClips, scrollToPlayhead } =
+    useTimelineStore();
 
-  const {
-    undo,
-    redo,
-    saveProject,
-    isLoaded,
-  } = useProjectStore();
+  const { undo, redo, saveProject, isLoaded } = useProjectStore();
 
-  const {
-    setActiveTool,
-    toggleRipple,
-    toggleAutoScroll,
-    copyToClipboard,
-    getClipboard,
-  } = useEditorToolStore();
+  const { setActiveTool, toggleRipple, toggleAutoScroll, copyToClipboard, getClipboard } =
+    useEditorToolStore();
 
   // Track held keys for temporary tool switching
   const heldKeysRef = useRef<Set<string>>(new Set());
@@ -224,20 +208,39 @@ export function useEnhancedKeyboardShortcuts(
     for (const clipId of selectedClipIds) {
       const result = findClipInSequence(sequenceRef.current, clipId);
       if (result) {
-        const { clip, trackId } = result;
+        const { clip, track } = result;
         items.push({
           type: 'clip',
           clipId: clip.id,
-          trackId,
+          trackId: track.id,
           clipData: {
+            sourceClipId: clip.id,
             assetId: clip.assetId,
+            trackKind: track.kind,
             label: clip.label,
             timelineIn: clip.place.timelineInSec,
+            durationSec: getClipDuration(clip),
             sourceIn: clip.range.sourceInSec,
             sourceOut: clip.range.sourceOutSec,
             speed: clip.speed,
-            volume: clip.audio.volumeDb,
+            reverse: clip.reverse,
             opacity: clip.opacity,
+            transform: clip.transform,
+            blendMode: clip.blendMode,
+            audio: { ...clip.audio },
+            textData: isTextClip(clip.assetId)
+              ? (extractTextDataFromClip(clip) ?? undefined)
+              : undefined,
+            caption:
+              track.kind === 'caption'
+                ? {
+                    text: clip.label || '',
+                    startSec: clip.place.timelineInSec,
+                    endSec: clip.place.timelineInSec + getClipDuration(clip),
+                    style: clip.captionStyle,
+                    position: clip.captionPosition,
+                  }
+                : undefined,
           },
         });
       }
@@ -256,11 +259,19 @@ export function useEnhancedKeyboardShortcuts(
     if (!clipboard || clipboard.length === 0 || !sequenceRef.current) return;
     if (!onClipPaste) return;
 
+    const earliestTimelineIn = clipboard.reduce(
+      (earliest, item) => Math.min(earliest, item.clipData.timelineIn),
+      Number.POSITIVE_INFINITY,
+    );
+
     for (const item of clipboard) {
       onClipPaste({
         sequenceId: sequenceRef.current.id,
         trackId: item.trackId,
-        clipData: item.clipData,
+        clipData: {
+          ...item.clipData,
+          timelineIn: item.clipData.timelineIn - earliestTimelineIn + currentTime,
+        },
         pasteTime: currentTime,
       });
     }
@@ -272,20 +283,26 @@ export function useEnhancedKeyboardShortcuts(
   const handleDuplicate = useCallback(() => {
     if (selectedClipIds.length === 0 || !sequenceRef.current || !onClipDuplicate) return;
 
-    for (const clipId of selectedClipIds) {
-      const result = findClipInSequence(sequenceRef.current, clipId);
-      if (result) {
-        const { clip, trackId } = result;
-        const clipDuration = getClipDuration(clip);
-        const newTimelineIn = clip.place.timelineInSec + clipDuration;
+    const sourceClips = selectedClipIds
+      .map((clipId) => findClipInSequence(sequenceRef.current, clipId))
+      .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null);
 
-        onClipDuplicate({
-          sequenceId: sequenceRef.current.id,
-          trackId,
-          clipId,
-          newTimelineIn,
-        });
-      }
+    if (sourceClips.length === 0) {
+      return;
+    }
+
+    const earliestStart = Math.min(...sourceClips.map(({ clip }) => clip.place.timelineInSec));
+    const latestEnd = Math.max(
+      ...sourceClips.map(({ clip }) => clip.place.timelineInSec + getClipDuration(clip)),
+    );
+
+    for (const { clip, track } of sourceClips) {
+      onClipDuplicate({
+        sequenceId: sequenceRef.current.id,
+        trackId: track.id,
+        clipId: clip.id,
+        newTimelineIn: latestEnd + (clip.place.timelineInSec - earliestStart),
+      });
     }
   }, [selectedClipIds, onClipDuplicate]);
 
@@ -300,14 +317,14 @@ export function useEnhancedKeyboardShortcuts(
         const result = findClipInSequence(sequenceRef.current, clipId);
         if (!result) continue;
 
-        const { clip, trackId } = result;
+        const { clip, track } = result;
         const clipEnd = clip.place.timelineInSec + getClipDuration(clip);
 
         // Only split if playhead is within the clip
         if (currentTime > clip.place.timelineInSec && currentTime < clipEnd) {
           onClipSplit({
             sequenceId: sequenceRef.current.id,
-            trackId,
+            trackId: track.id,
             clipId,
             splitTime: currentTime,
             keepLeft,
@@ -316,7 +333,7 @@ export function useEnhancedKeyboardShortcuts(
         }
       }
     },
-    [selectedClipIds, onClipSplit, currentTime]
+    [selectedClipIds, onClipSplit, currentTime],
   );
 
   /**
@@ -325,7 +342,7 @@ export function useEnhancedKeyboardShortcuts(
   const handleSelectAll = useCallback(() => {
     if (!sequenceRef.current) return;
     const allClipIds = sequenceRef.current.tracks.flatMap((track) =>
-      track.clips.map((clip) => clip.id)
+      track.clips.map((clip) => clip.id),
     );
     selectClips(allClipIds);
   }, [selectClips]);
@@ -651,25 +668,22 @@ export function useEnhancedKeyboardShortcuts(
       onSave,
       onDeleteClips,
       onExport,
-    ]
+    ],
   );
 
   /**
    * Keyup handler for temporary tool switching
    */
-  const handleKeyUp = useCallback(
-    (e: KeyboardEvent) => {
-      const keyLower = e.key.toLowerCase();
-      heldKeysRef.current.delete(keyLower);
+  const handleKeyUp = useCallback((e: KeyboardEvent) => {
+    const keyLower = e.key.toLowerCase();
+    heldKeysRef.current.delete(keyLower);
 
-      // If a tool key was released, check if we should pop back to previous tool
-      if (TOOL_KEYS[keyLower]) {
-        // This would be for temporary tool switching (hold key behavior)
-        // Currently not implemented - reserved for future use
-      }
-    },
-    []
-  );
+    // If a tool key was released, check if we should pop back to previous tool
+    if (TOOL_KEYS[keyLower]) {
+      // This would be for temporary tool switching (hold key behavior)
+      // Currently not implemented - reserved for future use
+    }
+  }, []);
 
   // Register event listeners
   useEffect(() => {
@@ -745,9 +759,7 @@ export const ENHANCED_KEYBOARD_SHORTCUTS = [
   },
   {
     category: 'Export',
-    shortcuts: [
-      { key: 'Ctrl+Shift+E', description: 'Export' },
-    ],
+    shortcuts: [{ key: 'Ctrl+Shift+E', description: 'Export' }],
   },
 ];
 
