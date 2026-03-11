@@ -10,6 +10,15 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { devtools } from 'zustand/middleware';
+import type {
+  AudioSettings,
+  BlendMode,
+  CaptionPosition,
+  CaptionStyle,
+  TextClipData,
+  TrackKind,
+  Transform,
+} from '@/types';
 
 export const RAZOR_CURSOR =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='%23f8fafc' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='6' cy='6' r='3.25' fill='%230f172a'/%3E%3Ccircle cx='6' cy='18' r='3.25' fill='%230f172a'/%3E%3Cpath d='M20 4 8.6 15.4'/%3E%3Cpath d='M8.6 8.6 20 20'/%3E%3Cpath d='m13.4 4-4 4'/%3E%3Cpath d='m9.9 14.1-1.3 1.3'/%3E%3C/svg%3E\") 6 6, crosshair";
@@ -44,21 +53,38 @@ export interface ToolConfig {
 /**
  * Clipboard item for copy/paste operations
  */
+export interface ClipboardClipData {
+  sourceClipId?: string;
+  trackKind?: TrackKind;
+  assetId: string;
+  label?: string;
+  timelineIn: number;
+  durationSec?: number;
+  sourceIn: number;
+  sourceOut: number;
+  speed: number;
+  reverse?: boolean;
+  opacity: number;
+  transform?: Transform;
+  blendMode?: BlendMode;
+  audio?: AudioSettings;
+  textData?: TextClipData;
+  caption?: {
+    text: string;
+    startSec: number;
+    endSec: number;
+    style?: CaptionStyle;
+    position?: CaptionPosition;
+    speaker?: string;
+  };
+}
+
 export interface ClipboardItem {
   type: 'clip';
   clipId: string;
   trackId: string;
   /** Serialized clip data for paste */
-  clipData: {
-    assetId: string;
-    label?: string;
-    timelineIn: number;
-    sourceIn: number;
-    sourceOut: number;
-    speed: number;
-    volume: number;
-    opacity: number;
-  };
+  clipData: ClipboardClipData;
 }
 
 /**
