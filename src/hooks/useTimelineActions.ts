@@ -12,17 +12,21 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { useProjectStore } from '@/stores';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { useToastStore } from '@/hooks/useToast';
 import { createLogger } from '@/services/logger';
+import { isTauriRuntime } from '@/services/framePaths';
 import { refreshProjectState } from '@/utils/stateRefreshHelper';
 import { probeMedia } from '@/utils/ffmpeg';
 import type {
   AssetDropData,
   ClipAudioUpdateData,
+  ClipDuplicateData,
   ClipMoveData,
+  ClipPasteData,
   ClipTrimData,
   ClipSplitData,
   TrackControlData,
@@ -30,7 +34,8 @@ import type {
   TrackReorderData,
   CaptionUpdateData,
 } from '@/components/timeline/Timeline';
-import type { Asset, Command, CommandResult, Sequence, Track } from '@/types';
+import type { Asset, Command, CommandResult, Sequence, TextClipData, Track } from '@/types';
+import { isTextClip } from '@/types';
 import {
   buildLinkedMoveTargets,
   buildLinkedTrimTargets,
@@ -38,6 +43,7 @@ import {
   findClipReference,
   getLinkedSplitTargets,
 } from '@/utils/clipLinking';
+import { extractTextDataFromClip } from '@/utils/textRenderer';
 import {
   buildClipAudioPayload,
   buildClipDeletionMap,
@@ -79,6 +85,8 @@ interface TimelineActions {
   handleClipMove: (data: ClipMoveData) => Promise<void>;
   handleClipTrim: (data: ClipTrimData) => Promise<void>;
   handleClipSplit: (data: ClipSplitData) => Promise<void>;
+  handleClipDuplicate: (data: ClipDuplicateData) => Promise<void>;
+  handleClipPaste: (data: ClipPasteData) => Promise<void>;
   handleClipAudioUpdate: (data: ClipAudioUpdateData) => Promise<void>;
   handleAssetDrop: (data: AssetDropData) => Promise<void>;
   pendingWorkspaceDrops: PendingWorkspaceDropState[];
@@ -113,6 +121,11 @@ interface QueuedWorkspaceDrop {
   enqueuedAt: number;
   resolvedDurationSec?: number;
   resolveCompletion: (inserted: boolean) => void;
+}
+
+interface SequenceTextClipDataEntry {
+  clipId: string;
+  textData: TextClipData;
 }
 
 export interface PendingWorkspaceDropState {
@@ -440,6 +453,28 @@ interface ResolveOrCreateTrackOptions {
   missingTrackMessage: string;
 }
 
+function selectTrackByExactKind(
+  sequenceSnapshot: Sequence,
+  preferredTrack: Track | undefined,
+  kind: TrackCreateData['kind'],
+  timelineIn: number,
+  durationSec: number,
+): Track | undefined {
+  const canUseTrack = (track: Track | undefined): track is Track =>
+    Boolean(
+      track &&
+      track.kind === kind &&
+      !track.locked &&
+      !trackHasOverlap(track, timelineIn, durationSec),
+    );
+
+  if (canUseTrack(preferredTrack)) {
+    return preferredTrack;
+  }
+
+  return sequenceSnapshot.tracks.find((track) => canUseTrack(track));
+}
+
 async function resolveOrCreateTrack({
   kind,
   sequence,
@@ -457,7 +492,9 @@ async function resolveOrCreateTrack({
   const selectedTrack =
     kind === 'video'
       ? selectPreferredVisualTrack(sequenceSnapshot, preferredTrack, timelineIn, durationSec)
-      : selectPreferredAudioTrack(sequenceSnapshot, preferredTrack, timelineIn, durationSec);
+      : kind === 'audio'
+        ? selectPreferredAudioTrack(sequenceSnapshot, preferredTrack, timelineIn, durationSec)
+        : selectTrackByExactKind(sequenceSnapshot, preferredTrack, kind, timelineIn, durationSec);
 
   if (selectedTrack) {
     return selectedTrack;
@@ -501,6 +538,114 @@ async function resolveOrCreateTrack({
   }
 
   return createdTrack;
+}
+
+function isIdentityTransform(transform: ClipPasteData['clipData']['transform']): boolean {
+  if (!transform) {
+    return true;
+  }
+
+  return (
+    transform.position.x === 0 &&
+    transform.position.y === 0 &&
+    transform.scale.x === 1 &&
+    transform.scale.y === 1 &&
+    transform.rotationDeg === 0 &&
+    transform.anchor.x === 0.5 &&
+    transform.anchor.y === 0.5
+  );
+}
+
+function hasMeaningfulAudioSettings(audio: ClipPasteData['clipData']['audio']): boolean {
+  if (!audio) {
+    return false;
+  }
+
+  return (
+    audio.volumeDb !== 0 ||
+    audio.pan !== 0 ||
+    audio.muted ||
+    (typeof audio.fadeInSec === 'number' && audio.fadeInSec > 0) ||
+    (typeof audio.fadeOutSec === 'number' && audio.fadeOutSec > 0)
+  );
+}
+
+function createFallbackTextData(label?: string): TextClipData {
+  const rawLabel = (label || 'Text').trim();
+  const content = rawLabel.startsWith('Text: ') ? rawLabel.slice(6) : rawLabel;
+
+  return {
+    content: content.length > 0 ? content : 'Text',
+    style: {
+      fontFamily: 'Arial',
+      fontSize: 48,
+      color: '#FFFFFF',
+      backgroundPadding: 10,
+      alignment: 'center',
+      bold: false,
+      italic: false,
+      underline: false,
+      lineHeight: 1.2,
+      letterSpacing: 0,
+    },
+    position: { x: 0.5, y: 0.5 },
+    rotation: 0,
+    opacity: 1,
+  };
+}
+
+async function resolveTextClipDataFromSource(
+  sequenceId: string,
+  clipData: ClipPasteData['clipData'],
+  sourceClip: import('@/types').Clip | undefined,
+): Promise<TextClipData> {
+  if (clipData.textData) {
+    return clipData.textData;
+  }
+
+  if (sourceClip) {
+    const fallback = extractTextDataFromClip(sourceClip) ?? createFallbackTextData(clipData.label);
+
+    if (!isTauriRuntime()) {
+      return fallback;
+    }
+
+    try {
+      const entries = await invoke<SequenceTextClipDataEntry[]>('get_sequence_text_clip_data', {
+        sequenceId,
+      });
+      const matchedEntry = entries.find((entry) => entry.clipId === sourceClip.id);
+      return matchedEntry?.textData ?? fallback;
+    } catch (error) {
+      logger.warn('Failed to resolve text clip payload for duplicate/paste', {
+        sequenceId,
+        clipId: sourceClip.id,
+        error,
+      });
+      return fallback;
+    }
+  }
+
+  return createFallbackTextData(clipData.label);
+}
+
+function getClipboardClipDurationSec(clipData: ClipPasteData['clipData']): number {
+  if (
+    typeof clipData.durationSec === 'number' &&
+    Number.isFinite(clipData.durationSec) &&
+    clipData.durationSec > 0
+  ) {
+    return clipData.durationSec;
+  }
+
+  const safeSpeed = clipData.speed > 0 ? clipData.speed : 1;
+  const sourceDuration = clipData.sourceOut - clipData.sourceIn;
+
+  if (!Number.isFinite(sourceDuration) || sourceDuration <= 0) {
+    return DEFAULT_INSERT_CLIP_DURATION_SEC;
+  }
+
+  return sourceDuration / safeSpeed;
 }
 
 // =============================================================================
@@ -932,6 +1077,465 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
       }
     },
     [sequence, executeCommand, linkedSelectionEnabled, getCurrentSequence],
+  );
+
+  const handleClipPaste = useCallback(
+    async (data: ClipPasteData): Promise<void> => {
+      const sequenceSnapshot = getSequenceSnapshotOrWarn({
+        sequence,
+        getCurrentSequence,
+        logger,
+        missingSequenceMessage: 'Cannot paste clip: no sequence',
+        missingSnapshotMessage: 'Cannot paste clip: sequence snapshot unavailable',
+        missingSnapshotContext: {
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+          sourceClipId: data.clipData.sourceClipId,
+        },
+      });
+      if (!sequenceSnapshot) {
+        return;
+      }
+
+      const activeSequence = sequenceSnapshot;
+      const latestAssets = useProjectStore.getState().assets;
+      const preferredTrack = sequenceSnapshot.tracks.find((track) => track.id === data.trackId);
+      const sourceClipRef = data.clipData.sourceClipId
+        ? findClipReference(sequenceSnapshot, data.clipData.sourceClipId)
+        : null;
+      const timelineIn = Number.isFinite(data.clipData.timelineIn)
+        ? data.clipData.timelineIn
+        : data.pasteTime;
+      const durationSec = getClipboardClipDurationSec(data.clipData);
+      const trackKindHint = data.clipData.trackKind ?? preferredTrack?.kind;
+
+      if (trackKindHint === 'caption') {
+        const captionTrack = await resolveOrCreateTrack({
+          kind: 'caption',
+          sequence: activeSequence,
+          sequenceSnapshot,
+          preferredTrack: preferredTrack?.kind === 'caption' ? preferredTrack : undefined,
+          timelineIn,
+          durationSec,
+          assetId: data.clipData.assetId,
+          executeCommand,
+          getCurrentSequence,
+          createTrackFailureMessage: 'Unable to create track for pasted caption clip',
+          snapshotUnavailableMessage:
+            'Created caption track cannot be resolved: sequence snapshot unavailable',
+          missingTrackMessage: 'Created caption track not found after state refresh',
+        });
+
+        if (!captionTrack) {
+          useToastStore.getState().addToast({
+            message: 'Cannot paste caption: no available caption track could be resolved.',
+            variant: 'warning',
+            duration: 3200,
+          });
+          logger.warn('Cannot paste caption: unable to resolve caption track', {
+            sequenceId: data.sequenceId,
+            preferredTrackId: data.trackId,
+            timelineIn,
+            durationSec,
+          });
+          return;
+        }
+
+        const captionText = data.clipData.caption?.text ?? data.clipData.label ?? '';
+
+        try {
+          const createResult = await executeCommand({
+            type: 'CreateCaption',
+            payload: {
+              sequenceId: data.sequenceId,
+              trackId: captionTrack.id,
+              text: captionText,
+              startSec: timelineIn,
+              endSec: timelineIn + durationSec,
+            },
+          });
+
+          const createdCaptionId = createResult.createdIds[0];
+          if (
+            createdCaptionId &&
+            (data.clipData.caption?.style !== undefined ||
+              data.clipData.caption?.position !== undefined)
+          ) {
+            await executeCommand({
+              type: 'UpdateCaption',
+              payload: {
+                sequenceId: data.sequenceId,
+                trackId: captionTrack.id,
+                captionId: createdCaptionId,
+                text: captionText,
+                startSec: timelineIn,
+                endSec: timelineIn + durationSec,
+                style: data.clipData.caption?.style,
+                position: data.clipData.caption?.position,
+              },
+            });
+          }
+        } catch (error) {
+          logger.error('Failed to paste caption clip', {
+            error,
+            sequenceId: data.sequenceId,
+            trackId: captionTrack.id,
+            timelineIn,
+          });
+        }
+        return;
+      }
+
+      if (isTextClip(data.clipData.assetId)) {
+        const textTrackKind: TrackCreateData['kind'] =
+          trackKindHint === 'overlay' || preferredTrack?.kind === 'overlay' ? 'overlay' : 'video';
+
+        const textTrack = await resolveOrCreateTrack({
+          kind: textTrackKind,
+          sequence: activeSequence,
+          sequenceSnapshot,
+          preferredTrack:
+            preferredTrack &&
+            (preferredTrack.kind === 'video' || preferredTrack.kind === 'overlay') &&
+            !preferredTrack.locked
+              ? preferredTrack
+              : undefined,
+          timelineIn,
+          durationSec,
+          assetId: data.clipData.assetId,
+          executeCommand,
+          getCurrentSequence,
+          createTrackFailureMessage: 'Unable to create track for pasted text clip',
+          snapshotUnavailableMessage:
+            'Created text track cannot be resolved: sequence snapshot unavailable',
+          missingTrackMessage: 'Created text track not found after state refresh',
+        });
+
+        if (!textTrack) {
+          return;
+        }
+
+        try {
+          const textData = await resolveTextClipDataFromSource(
+            data.sequenceId,
+            data.clipData,
+            sourceClipRef?.clip,
+          );
+
+          const createResult = await executeCommand({
+            type: 'AddTextClip',
+            payload: {
+              sequenceId: data.sequenceId,
+              trackId: textTrack.id,
+              timelineIn,
+              duration: durationSec,
+              textData,
+            },
+          });
+
+          const createdClipId = createResult.createdIds[0];
+          if (!createdClipId) {
+            return;
+          }
+
+          if (data.clipData.blendMode && data.clipData.blendMode !== 'normal') {
+            await executeCommand({
+              type: 'SetClipBlendMode',
+              payload: {
+                sequenceId: data.sequenceId,
+                trackId: textTrack.id,
+                clipId: createdClipId,
+                blendMode: data.clipData.blendMode,
+              },
+            });
+          }
+
+          if (!isIdentityTransform(data.clipData.transform)) {
+            await executeCommand({
+              type: 'SetClipTransform',
+              payload: {
+                sequenceId: data.sequenceId,
+                trackId: textTrack.id,
+                clipId: createdClipId,
+                transform: data.clipData.transform,
+              },
+            });
+          }
+        } catch (error) {
+          logger.error('Failed to paste text clip', {
+            error,
+            sequenceId: data.sequenceId,
+            trackId: textTrack.id,
+            timelineIn,
+          });
+        }
+        return;
+      }
+
+      const asset = latestAssets.get(data.clipData.assetId);
+      if (!asset) {
+        useToastStore.getState().addToast({
+          message: 'Cannot paste clip: source asset is missing from the project.',
+          variant: 'warning',
+          duration: 3200,
+        });
+        logger.warn('Cannot paste clip: asset missing', {
+          sequenceId: data.sequenceId,
+          assetId: data.clipData.assetId,
+        });
+        return;
+      }
+
+      const insertTrackKind: TrackCreateData['kind'] =
+        trackKindHint === 'audio' || asset.kind === 'audio'
+          ? 'audio'
+          : trackKindHint === 'overlay'
+            ? 'overlay'
+            : 'video';
+
+      const insertTrack = await resolveOrCreateTrack({
+        kind: insertTrackKind,
+        sequence: activeSequence,
+        sequenceSnapshot,
+        preferredTrack,
+        timelineIn,
+        durationSec,
+        assetId: data.clipData.assetId,
+        executeCommand,
+        getCurrentSequence,
+        createTrackFailureMessage: 'Unable to create track for pasted clip',
+        snapshotUnavailableMessage:
+          'Created paste target track cannot be resolved: sequence snapshot unavailable',
+        missingTrackMessage: 'Created paste target track not found after state refresh',
+      });
+
+      if (!insertTrack) {
+        return;
+      }
+
+      try {
+        const insertResult = await executeCommand({
+          type: 'InsertClip',
+          payload: {
+            sequenceId: data.sequenceId,
+            trackId: insertTrack.id,
+            assetId: data.clipData.assetId,
+            timelineIn,
+          },
+        });
+
+        let insertedClipId: string | undefined = insertResult.createdIds[0];
+        if (!insertedClipId) {
+          const latestSequence = getCurrentSequence();
+          const latestTrack = latestSequence?.tracks.find((track) => track.id === insertTrack.id);
+          insertedClipId = findClipByAssetAtTimeline(
+            latestTrack,
+            data.clipData.assetId,
+            timelineIn,
+          )?.id;
+        }
+
+        if (!insertedClipId) {
+          logger.warn('Pasted clip but failed to resolve created clip ID', {
+            sequenceId: data.sequenceId,
+            trackId: insertTrack.id,
+            assetId: data.clipData.assetId,
+            timelineIn,
+          });
+          return;
+        }
+
+        const assetDurationSec = getAssetInsertDurationSec(asset);
+        const shouldTrim =
+          data.clipData.sourceIn > 0 ||
+          Math.abs(data.clipData.sourceOut - assetDurationSec) > 0.001;
+
+        if (shouldTrim) {
+          await executeCommand({
+            type: 'TrimClip',
+            payload: {
+              sequenceId: data.sequenceId,
+              trackId: insertTrack.id,
+              clipId: insertedClipId,
+              newSourceIn: data.clipData.sourceIn,
+              newSourceOut: data.clipData.sourceOut,
+              newTimelineIn: timelineIn,
+            },
+          });
+        }
+
+        const clipSpeed = data.clipData.speed > 0 ? data.clipData.speed : 1;
+        const shouldRestoreSpeed =
+          Math.abs(clipSpeed - 1) > 0.0001 || Boolean(data.clipData.reverse);
+
+        if (shouldRestoreSpeed) {
+          await executeCommand({
+            type: 'SetClipSpeed',
+            payload: {
+              sequenceId: data.sequenceId,
+              trackId: insertTrack.id,
+              clipId: insertedClipId,
+              speed: clipSpeed,
+              reverse: Boolean(data.clipData.reverse),
+            },
+          });
+        }
+
+        if (hasMeaningfulAudioSettings(data.clipData.audio)) {
+          await executeCommand({
+            type: 'SetClipAudio',
+            payload: {
+              sequenceId: data.sequenceId,
+              trackId: insertTrack.id,
+              clipId: insertedClipId,
+              volumeDb: data.clipData.audio?.volumeDb,
+              pan: data.clipData.audio?.pan,
+              muted: data.clipData.audio?.muted,
+              fadeInSec: data.clipData.audio?.fadeInSec,
+              fadeOutSec: data.clipData.audio?.fadeOutSec,
+            },
+          });
+        }
+
+        if (data.clipData.blendMode && data.clipData.blendMode !== 'normal') {
+          await executeCommand({
+            type: 'SetClipBlendMode',
+            payload: {
+              sequenceId: data.sequenceId,
+              trackId: insertTrack.id,
+              clipId: insertedClipId,
+              blendMode: data.clipData.blendMode,
+            },
+          });
+        }
+
+        if (!isIdentityTransform(data.clipData.transform)) {
+          await executeCommand({
+            type: 'SetClipTransform',
+            payload: {
+              sequenceId: data.sequenceId,
+              trackId: insertTrack.id,
+              clipId: insertedClipId,
+              transform: data.clipData.transform,
+            },
+          });
+        }
+      } catch (error) {
+        logger.error('Failed to paste clip', {
+          error,
+          sequenceId: data.sequenceId,
+          assetId: data.clipData.assetId,
+          timelineIn,
+        });
+      }
+    },
+    [sequence, executeCommand, getCurrentSequence],
+  );
+
+  const handleClipDuplicate = useCallback(
+    async (data: ClipDuplicateData): Promise<void> => {
+      const sequenceSnapshot = getSequenceSnapshotOrWarn({
+        sequence,
+        getCurrentSequence,
+        logger,
+        missingSequenceMessage: 'Cannot duplicate clip: no sequence',
+        missingSnapshotMessage: 'Cannot duplicate clip: sequence snapshot unavailable',
+        missingSnapshotContext: {
+          sequenceId: data.sequenceId,
+          clipId: data.clipId,
+        },
+      });
+      if (!sequenceSnapshot) {
+        return;
+      }
+
+      const sourceClipIds =
+        linkedSelectionEnabled && !data.ignoreLinkedSelection
+          ? expandClipIdsWithLinkedCompanions(sequenceSnapshot, [data.clipId])
+          : [data.clipId];
+
+      const sourceRefs = sourceClipIds
+        .map((clipId) => findClipReference(sequenceSnapshot, clipId))
+        .filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null)
+        .sort((left, right) => {
+          if (left.clip.place.timelineInSec !== right.clip.place.timelineInSec) {
+            return left.clip.place.timelineInSec - right.clip.place.timelineInSec;
+          }
+
+          return left.trackIndex - right.trackIndex;
+        });
+
+      if (sourceRefs.length === 0) {
+        logger.warn('Cannot duplicate clip: source clip no longer exists', {
+          sequenceId: data.sequenceId,
+          clipId: data.clipId,
+        });
+        return;
+      }
+
+      const anchorClipRef = sourceRefs.find((ref) => ref.clip.id === data.clipId) ?? sourceRefs[0];
+      const anchorTimelineIn = anchorClipRef.clip.place.timelineInSec;
+
+      for (const sourceRef of sourceRefs) {
+        const durationSec = getClipTimelineDuration(sourceRef.clip);
+        const sourceTimelineIn = sourceRef.clip.place.timelineInSec;
+        const duplicateTimelineIn = data.newTimelineIn + (sourceTimelineIn - anchorTimelineIn);
+
+        let textData: TextClipData | undefined;
+        if (isTextClip(sourceRef.clip.assetId)) {
+          textData = await resolveTextClipDataFromSource(
+            data.sequenceId,
+            {
+              sourceClipId: sourceRef.clip.id,
+              assetId: sourceRef.clip.assetId,
+              label: sourceRef.clip.label,
+              timelineIn: sourceTimelineIn,
+              durationSec,
+              sourceIn: sourceRef.clip.range.sourceInSec,
+              sourceOut: sourceRef.clip.range.sourceOutSec,
+              speed: sourceRef.clip.speed,
+              reverse: sourceRef.clip.reverse,
+              opacity: sourceRef.clip.opacity,
+            },
+            sourceRef.clip,
+          );
+        }
+
+        await handleClipPaste({
+          sequenceId: data.sequenceId,
+          trackId: sourceRef.track.id,
+          pasteTime: duplicateTimelineIn,
+          clipData: {
+            sourceClipId: sourceRef.clip.id,
+            trackKind: sourceRef.track.kind,
+            assetId: sourceRef.clip.assetId,
+            label: sourceRef.clip.label,
+            timelineIn: duplicateTimelineIn,
+            durationSec,
+            sourceIn: sourceRef.clip.range.sourceInSec,
+            sourceOut: sourceRef.clip.range.sourceOutSec,
+            speed: sourceRef.clip.speed,
+            reverse: sourceRef.clip.reverse,
+            opacity: sourceRef.clip.opacity,
+            transform: sourceRef.clip.transform,
+            blendMode: sourceRef.clip.blendMode,
+            audio: { ...sourceRef.clip.audio },
+            textData,
+            caption:
+              sourceRef.track.kind === 'caption'
+                ? {
+                    text: sourceRef.clip.label || '',
+                    startSec: duplicateTimelineIn,
+                    endSec: duplicateTimelineIn + durationSec,
+                    style: sourceRef.clip.captionStyle,
+                    position: sourceRef.clip.captionPosition,
+                  }
+                : undefined,
+          },
+        });
+      }
+    },
+    [sequence, getCurrentSequence, linkedSelectionEnabled, handleClipPaste],
   );
 
   /**
@@ -1900,6 +2504,8 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleClipMove,
     handleClipTrim,
     handleClipSplit,
+    handleClipDuplicate,
+    handleClipPaste,
     handleClipAudioUpdate,
     handleAssetDrop,
     pendingWorkspaceDrops,
