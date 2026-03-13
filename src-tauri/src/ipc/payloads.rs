@@ -182,6 +182,30 @@ pub struct ReorderTracksPayload {
     pub new_order: Vec<TrackId>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToggleTrackMutePayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub muted: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToggleTrackLockPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub locked: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ToggleTrackVisibilityPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub visible: bool,
+}
+
 // =============================================================================
 // Marker Payloads
 // =============================================================================
@@ -610,6 +634,15 @@ pub enum CommandPayload {
     #[serde(alias = "reorderTracks", alias = "ReorderTracks")]
     ReorderTracks(ReorderTracksPayload),
 
+    #[serde(alias = "toggleTrackMute", alias = "ToggleTrackMute")]
+    ToggleTrackMute(ToggleTrackMutePayload),
+
+    #[serde(alias = "toggleTrackLock", alias = "ToggleTrackLock")]
+    ToggleTrackLock(ToggleTrackLockPayload),
+
+    #[serde(alias = "toggleTrackVisibility", alias = "ToggleTrackVisibility")]
+    ToggleTrackVisibility(ToggleTrackVisibilityPayload),
+
     // Marker commands
     #[serde(alias = "addMarker", alias = "AddMarker")]
     AddMarker(AddMarkerPayload),
@@ -747,8 +780,9 @@ impl CommandPayload {
             RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
             RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, ReorderTracksCommand,
             SetClipAudioCommand, SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand,
-            SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand, TrimClipCommand,
-            UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
+            SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand,
+            ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
+            TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
         };
 
         match self {
@@ -848,6 +882,19 @@ impl CommandPayload {
             CommandPayload::ReorderTracks(p) => {
                 Box::new(ReorderTracksCommand::new(&p.sequence_id, p.new_order))
             }
+            CommandPayload::ToggleTrackMute(p) => Box::new(ToggleTrackMuteCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.muted,
+            )),
+            CommandPayload::ToggleTrackLock(p) => Box::new(ToggleTrackLockCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.locked,
+            )),
+            CommandPayload::ToggleTrackVisibility(p) => Box::new(
+                ToggleTrackVisibilityCommand::new(&p.sequence_id, &p.track_id, p.visible),
+            ),
             CommandPayload::AddMarker(p) => {
                 let mut cmd = AddMarkerCommand::new(&p.sequence_id, p.time_sec, &p.label);
                 if let Some(color) = p.color {
@@ -1200,6 +1247,51 @@ mod tests {
 
         let parsed = CommandPayload::parse("SetTrackBlendMode".to_string(), payload);
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn parse_toggle_track_mute_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "muted": true,
+        });
+
+        let parsed = CommandPayload::parse("ToggleTrackMute".to_string(), payload);
+        assert!(
+            matches!(parsed, Ok(CommandPayload::ToggleTrackMute(_))),
+            "expected ToggleTrackMute to parse, got: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_toggle_track_lock_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "locked": true,
+        });
+
+        let parsed = CommandPayload::parse("ToggleTrackLock".to_string(), payload);
+        assert!(
+            matches!(parsed, Ok(CommandPayload::ToggleTrackLock(_))),
+            "expected ToggleTrackLock to parse, got: {parsed:?}"
+        );
+    }
+
+    #[test]
+    fn parse_toggle_track_visibility_payload_is_supported() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "visible": false,
+        });
+
+        let parsed = CommandPayload::parse("ToggleTrackVisibility".to_string(), payload);
+        assert!(
+            matches!(parsed, Ok(CommandPayload::ToggleTrackVisibility(_))),
+            "expected ToggleTrackVisibility to parse, got: {parsed:?}"
+        );
     }
 
     #[test]

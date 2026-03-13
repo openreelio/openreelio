@@ -140,7 +140,7 @@ describe('Track', () => {
     });
 
     it('should show muted indicator when track is muted', () => {
-      const mutedTrack = { ...mockTrack, muted: true };
+      const mutedTrack = { ...mockTrack, kind: 'audio' as const, name: 'Audio 1', muted: true };
       render(<Track track={mutedTrack} clips={[]} zoom={100} />);
       expect(screen.getByTestId('muted-indicator')).toBeInTheDocument();
     });
@@ -211,7 +211,8 @@ describe('Track', () => {
 
     it('should call onMuteToggle when mute button is clicked', () => {
       const onMuteToggle = vi.fn();
-      render(<Track track={mockTrack} clips={[]} zoom={100} onMuteToggle={onMuteToggle} />);
+      const audioTrack = { ...mockTrack, kind: 'audio' as const, name: 'Audio 1' };
+      render(<Track track={audioTrack} clips={[]} zoom={100} onMuteToggle={onMuteToggle} />);
 
       fireEvent.click(screen.getByTestId('mute-button'));
       expect(onMuteToggle).toHaveBeenCalledWith('track_001');
@@ -233,6 +234,23 @@ describe('Track', () => {
 
       fireEvent.click(screen.getByTestId('visibility-button'));
       expect(onVisibilityToggle).toHaveBeenCalledWith('track_001');
+    });
+
+    it('should hide mute control for video tracks', () => {
+      render(<Track track={mockTrack} clips={[]} zoom={100} />);
+
+      expect(screen.queryByTestId('mute-button')).not.toBeInTheDocument();
+      expect(screen.getByTestId('visibility-button')).toBeInTheDocument();
+      expect(screen.getByTestId('lock-button')).toBeInTheDocument();
+    });
+
+    it('should hide visibility control for audio tracks', () => {
+      const audioTrack = { ...mockTrack, kind: 'audio' as const, name: 'Audio 1' };
+      render(<Track track={audioTrack} clips={[]} zoom={100} />);
+
+      expect(screen.getByTestId('mute-button')).toBeInTheDocument();
+      expect(screen.queryByTestId('visibility-button')).not.toBeInTheDocument();
+      expect(screen.getByTestId('lock-button')).toBeInTheDocument();
     });
   });
 

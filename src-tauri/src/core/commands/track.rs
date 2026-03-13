@@ -534,6 +534,243 @@ impl Command for SetTrackBlendModeCommand {
 }
 
 // =============================================================================
+// ToggleTrackMuteCommand
+// =============================================================================
+
+/// Command to set a track's muted state.
+///
+/// The explicit target state is stored on the command so the persisted
+/// operation payload remains replayable.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToggleTrackMuteCommand {
+    /// Target sequence ID
+    pub sequence_id: SequenceId,
+    /// Target track ID
+    pub track_id: TrackId,
+    /// Desired muted state after execution
+    pub muted: bool,
+    /// Original muted state (for undo)
+    #[serde(skip)]
+    original_muted: Option<bool>,
+}
+
+impl ToggleTrackMuteCommand {
+    /// Creates a new track mute toggle command.
+    pub fn new(sequence_id: &str, track_id: &str, muted: bool) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            muted,
+            original_muted: None,
+        }
+    }
+}
+
+impl Command for ToggleTrackMuteCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        self.original_muted = Some(track.muted);
+        track.muted = self.muted;
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::TrackModified {
+                track_id: self.track_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(original_muted) = self.original_muted else {
+            return Ok(());
+        };
+
+        if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) {
+                track.muted = original_muted;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "ToggleTrackMute"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
+// ToggleTrackLockCommand
+// =============================================================================
+
+/// Command to set a track's locked state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToggleTrackLockCommand {
+    /// Target sequence ID
+    pub sequence_id: SequenceId,
+    /// Target track ID
+    pub track_id: TrackId,
+    /// Desired locked state after execution
+    pub locked: bool,
+    /// Original locked state (for undo)
+    #[serde(skip)]
+    original_locked: Option<bool>,
+}
+
+impl ToggleTrackLockCommand {
+    /// Creates a new track lock toggle command.
+    pub fn new(sequence_id: &str, track_id: &str, locked: bool) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            locked,
+            original_locked: None,
+        }
+    }
+}
+
+impl Command for ToggleTrackLockCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        self.original_locked = Some(track.locked);
+        track.locked = self.locked;
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::TrackModified {
+                track_id: self.track_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(original_locked) = self.original_locked else {
+            return Ok(());
+        };
+
+        if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) {
+                track.locked = original_locked;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "ToggleTrackLock"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
+// ToggleTrackVisibilityCommand
+// =============================================================================
+
+/// Command to set a track's visible state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToggleTrackVisibilityCommand {
+    /// Target sequence ID
+    pub sequence_id: SequenceId,
+    /// Target track ID
+    pub track_id: TrackId,
+    /// Desired visible state after execution
+    pub visible: bool,
+    /// Original visible state (for undo)
+    #[serde(skip)]
+    original_visible: Option<bool>,
+}
+
+impl ToggleTrackVisibilityCommand {
+    /// Creates a new track visibility toggle command.
+    pub fn new(sequence_id: &str, track_id: &str, visible: bool) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            visible,
+            original_visible: None,
+        }
+    }
+}
+
+impl Command for ToggleTrackVisibilityCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        self.original_visible = Some(track.visible);
+        track.visible = self.visible;
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::TrackModified {
+                track_id: self.track_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(original_visible) = self.original_visible else {
+            return Ok(());
+        };
+
+        if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) {
+                track.visible = original_visible;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "ToggleTrackVisibility"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -765,5 +1002,65 @@ mod tests {
         let mut set_cmd = SetTrackBlendModeCommand::new(&seq_id, track_id, BlendMode::Multiply);
         let result = set_cmd.execute(&mut state);
         assert!(matches!(result, Err(CoreError::NotSupported(_))));
+    }
+
+    #[test]
+    fn test_toggle_track_mute_command() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+
+        let mut add_cmd = AddTrackCommand::new(&seq_id, "Audio 1", TrackKind::Audio);
+        let result = add_cmd.execute(&mut state).unwrap();
+        let track_id = &result.created_ids[0];
+
+        let mut toggle_cmd = ToggleTrackMuteCommand::new(&seq_id, track_id, true);
+        toggle_cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert!(track.muted);
+
+        toggle_cmd.undo(&mut state).unwrap();
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert!(!track.muted);
+    }
+
+    #[test]
+    fn test_toggle_track_lock_command() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+
+        let mut add_cmd = AddTrackCommand::new(&seq_id, "Video 1", TrackKind::Video);
+        let result = add_cmd.execute(&mut state).unwrap();
+        let track_id = &result.created_ids[0];
+
+        let mut toggle_cmd = ToggleTrackLockCommand::new(&seq_id, track_id, true);
+        toggle_cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert!(track.locked);
+
+        toggle_cmd.undo(&mut state).unwrap();
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert!(!track.locked);
+    }
+
+    #[test]
+    fn test_toggle_track_visibility_command() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+
+        let mut add_cmd = AddTrackCommand::new(&seq_id, "Video 1", TrackKind::Video);
+        let result = add_cmd.execute(&mut state).unwrap();
+        let track_id = &result.created_ids[0];
+
+        let mut toggle_cmd = ToggleTrackVisibilityCommand::new(&seq_id, track_id, false);
+        toggle_cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert!(!track.visible);
+
+        toggle_cmd.undo(&mut state).unwrap();
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert!(track.visible);
     }
 }

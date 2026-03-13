@@ -1467,6 +1467,177 @@ describe('useTimelineActions', () => {
   });
 
   // ===========================================================================
+  // Track Toggle Tests
+  // ===========================================================================
+
+  describe('track control toggles', () => {
+    it('should execute ToggleTrackMute with the next muted state', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [createMockTrack({ id: 'track_001', muted: false })],
+      });
+
+      useProjectStore.setState({ sequences: new Map([[sequence.id, sequence]]) });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          executeCalls.push(args as { commandType: string; payload: Record<string, unknown> });
+          return Promise.resolve({
+            opId: 'op_toggle_track_mute',
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [
+              {
+                ...sequence,
+                tracks: [{ ...sequence.tracks[0], muted: true }],
+              },
+            ],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleTrackMuteToggle({
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+        });
+      });
+
+      expect(executeCalls).toEqual([
+        {
+          commandType: 'ToggleTrackMute',
+          payload: {
+            sequenceId: 'seq_001',
+            trackId: 'track_001',
+            muted: true,
+          },
+        },
+      ]);
+    });
+
+    it('should execute ToggleTrackLock with the next locked state', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [createMockTrack({ id: 'track_001', locked: false })],
+      });
+
+      useProjectStore.setState({ sequences: new Map([[sequence.id, sequence]]) });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          executeCalls.push(args as { commandType: string; payload: Record<string, unknown> });
+          return Promise.resolve({
+            opId: 'op_toggle_track_lock',
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [
+              {
+                ...sequence,
+                tracks: [{ ...sequence.tracks[0], locked: true }],
+              },
+            ],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleTrackLockToggle({
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+        });
+      });
+
+      expect(executeCalls).toEqual([
+        {
+          commandType: 'ToggleTrackLock',
+          payload: {
+            sequenceId: 'seq_001',
+            trackId: 'track_001',
+            locked: true,
+          },
+        },
+      ]);
+    });
+
+    it('should execute ToggleTrackVisibility with the next visible state', async () => {
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [createMockTrack({ id: 'track_001', visible: true })],
+      });
+
+      useProjectStore.setState({ sequences: new Map([[sequence.id, sequence]]) });
+
+      const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+      mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+        if (cmd === 'execute_command') {
+          executeCalls.push(args as { commandType: string; payload: Record<string, unknown> });
+          return Promise.resolve({
+            opId: 'op_toggle_track_visibility',
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [
+              {
+                ...sequence,
+                tracks: [{ ...sequence.tracks[0], visible: false }],
+              },
+            ],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleTrackVisibilityToggle({
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+        });
+      });
+
+      expect(executeCalls).toEqual([
+        {
+          commandType: 'ToggleTrackVisibility',
+          payload: {
+            sequenceId: 'seq_001',
+            trackId: 'track_001',
+            visible: false,
+          },
+        },
+      ]);
+    });
+  });
+
+  // ===========================================================================
   // Track Delete Tests
   // ===========================================================================
 
