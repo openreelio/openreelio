@@ -727,6 +727,7 @@ pub async fn apply_edit_script(
         RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand, RenameTrackCommand,
         ReorderTracksCommand, SetClipAudioCommand, SetClipBlendModeCommand, SetClipMuteCommand,
         SetClipSpeedCommand, SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand,
+        ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
         TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
     };
 
@@ -790,6 +791,12 @@ pub async fn apply_edit_script(
                 | "DeleteTrack"
                 | "RenameTrack"
                 | "renameTrack"
+                | "ToggleTrackMute"
+                | "toggleTrackMute"
+                | "ToggleTrackLock"
+                | "toggleTrackLock"
+                | "ToggleTrackVisibility"
+                | "toggleTrackVisibility"
                 | "UpdateCaption"
                 | "CreateCaption"
                 | "DeleteCaption"
@@ -990,6 +997,19 @@ pub async fn apply_edit_script(
                 &p.track_id,
                 &p.new_name,
             )),
+            CommandPayload::ToggleTrackMute(p) => Box::new(ToggleTrackMuteCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.muted,
+            )),
+            CommandPayload::ToggleTrackLock(p) => Box::new(ToggleTrackLockCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.locked,
+            )),
+            CommandPayload::ToggleTrackVisibility(p) => Box::new(
+                ToggleTrackVisibilityCommand::new(&p.sequence_id, &p.track_id, p.visible),
+            ),
             CommandPayload::CreateCaption(p) => Box::new(
                 CreateCaptionCommand::new(&p.sequence_id, &p.track_id, p.start_sec, p.end_sec)
                     .with_text(p.text)
@@ -1280,6 +1300,36 @@ pub async fn validate_edit_script(
                 }
                 if cmd.params.get("newName").is_none() {
                     issues.push(format!("RenameTrack command {} missing newName", i));
+                }
+            }
+            "ToggleTrackMute" | "toggleTrackMute" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("ToggleTrackMute command {} missing trackId", i));
+                }
+                if cmd.params.get("muted").is_none() {
+                    issues.push(format!("ToggleTrackMute command {} missing muted", i));
+                }
+            }
+            "ToggleTrackLock" | "toggleTrackLock" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("ToggleTrackLock command {} missing trackId", i));
+                }
+                if cmd.params.get("locked").is_none() {
+                    issues.push(format!("ToggleTrackLock command {} missing locked", i));
+                }
+            }
+            "ToggleTrackVisibility" | "toggleTrackVisibility" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!(
+                        "ToggleTrackVisibility command {} missing trackId",
+                        i
+                    ));
+                }
+                if cmd.params.get("visible").is_none() {
+                    issues.push(format!(
+                        "ToggleTrackVisibility command {} missing visible",
+                        i
+                    ));
                 }
             }
             "AddMarker" | "addMarker" => {

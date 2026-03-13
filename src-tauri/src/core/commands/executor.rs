@@ -693,7 +693,12 @@ impl CommandExecutor {
             "AddTrack" | "InsertTrack" => OpKind::TrackAdd,
             "RemoveTrack" | "DeleteTrack" => OpKind::TrackRemove,
             "ReorderTracks" => OpKind::TrackReorder,
-            "RenameTrack" | "SetTrackBlendMode" | "UpdateTrack" => OpKind::TrackUpdate,
+            "RenameTrack"
+            | "SetTrackBlendMode"
+            | "ToggleTrackMute"
+            | "ToggleTrackLock"
+            | "ToggleTrackVisibility"
+            | "UpdateTrack" => OpKind::TrackUpdate,
             "ImportAsset" | "AddAsset" => OpKind::AssetImport,
             "RemoveAsset" | "DeleteAsset" => OpKind::AssetRemove,
             "UpdateAsset" => OpKind::AssetUpdate,
