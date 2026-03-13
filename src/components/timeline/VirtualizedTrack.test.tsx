@@ -200,7 +200,13 @@ describe('VirtualizedTrack', () => {
   describe('track controls', () => {
     it('should call onMuteToggle when mute button clicked', () => {
       const onMuteToggle = vi.fn();
-      render(<VirtualizedTrack {...defaultProps} onMuteToggle={onMuteToggle} />);
+      render(
+        <VirtualizedTrack
+          {...defaultProps}
+          track={createMockTrack({ kind: 'audio', name: 'Audio Track 1' })}
+          onMuteToggle={onMuteToggle}
+        />,
+      );
 
       fireEvent.click(screen.getByTestId('mute-button'));
 
@@ -226,7 +232,12 @@ describe('VirtualizedTrack', () => {
     });
 
     it('should show muted indicator when track is muted', () => {
-      render(<VirtualizedTrack {...defaultProps} track={createMockTrack({ muted: true })} />);
+      render(
+        <VirtualizedTrack
+          {...defaultProps}
+          track={createMockTrack({ kind: 'audio', name: 'Audio Track 1', muted: true })}
+        />,
+      );
 
       expect(screen.getByTestId('muted-indicator')).toBeInTheDocument();
     });
@@ -242,6 +253,27 @@ describe('VirtualizedTrack', () => {
 
       const trackContent = screen.getByTestId('track-content');
       expect(trackContent).toHaveClass('opacity-50');
+    });
+
+    it('should hide mute control for video tracks', () => {
+      render(<VirtualizedTrack {...defaultProps} />);
+
+      expect(screen.queryByTestId('mute-button')).not.toBeInTheDocument();
+      expect(screen.getByTestId('visibility-button')).toBeInTheDocument();
+      expect(screen.getByTestId('lock-button')).toBeInTheDocument();
+    });
+
+    it('should hide visibility control for audio tracks', () => {
+      render(
+        <VirtualizedTrack
+          {...defaultProps}
+          track={createMockTrack({ kind: 'audio', name: 'Audio Track 1' })}
+        />,
+      );
+
+      expect(screen.getByTestId('mute-button')).toBeInTheDocument();
+      expect(screen.queryByTestId('visibility-button')).not.toBeInTheDocument();
+      expect(screen.getByTestId('lock-button')).toBeInTheDocument();
     });
   });
 

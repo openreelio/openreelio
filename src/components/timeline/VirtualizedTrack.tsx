@@ -39,6 +39,7 @@ import {
 // Direct import instead of barrel to avoid bundling all hooks
 import { useVirtualizedClips, type VirtualizationConfig } from '@/hooks/useVirtualizedClips';
 import { TRACK_HEIGHT } from './constants';
+import { getTrackHeaderControls } from './trackHeaderControls';
 
 // =============================================================================
 // Types
@@ -176,6 +177,7 @@ export const VirtualizedTrack = memo(function VirtualizedTrack({
   // Calculate track content width based on duration and zoom
   const contentWidth = duration * zoom;
   const TrackIcon = TrackIcons[track.kind] || Video;
+  const { showMute, showVisibility } = getTrackHeaderControls(track.kind);
 
   // Handlers
   const handleClipDragStart = useCallback(
@@ -211,7 +213,7 @@ export const VirtualizedTrack = memo(function VirtualizedTrack({
         <TrackIcon className="w-4 h-4 text-editor-text-muted" />
 
         {/* Track name */}
-        <span className="flex-1 text-sm text-editor-text truncate">
+        <span className="flex-1 min-w-0 text-sm text-editor-text truncate">
           {track.name}
           {/* Debug info */}
           {debug && isVirtualized && (
@@ -222,25 +224,41 @@ export const VirtualizedTrack = memo(function VirtualizedTrack({
         </span>
 
         {/* Track controls */}
-        <div className="flex items-center gap-1">
-          {/* Mute button */}
-          <button
-            data-testid="mute-button"
-            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
-            onClick={() => onMuteToggle?.(track.id)}
-            title={track.muted ? 'Unmute' : 'Mute'}
-          >
-            {track.muted ? (
-              <>
-                <VolumeX className="w-3.5 h-3.5" />
-                <span data-testid="muted-indicator" className="sr-only">
-                  Muted
-                </span>
-              </>
-            ) : (
-              <Volume2 className="w-3.5 h-3.5" />
-            )}
-          </button>
+        <div className="flex shrink-0 items-center justify-end gap-1">
+          {showMute && (
+            <button
+              data-testid="mute-button"
+              className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
+              onClick={() => onMuteToggle?.(track.id)}
+              title={track.muted ? 'Unmute' : 'Mute'}
+            >
+              {track.muted ? (
+                <>
+                  <VolumeX className="w-3.5 h-3.5" />
+                  <span data-testid="muted-indicator" className="sr-only">
+                    Muted
+                  </span>
+                </>
+              ) : (
+                <Volume2 className="w-3.5 h-3.5" />
+              )}
+            </button>
+          )}
+
+          {showVisibility && (
+            <button
+              data-testid="visibility-button"
+              className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
+              onClick={() => onVisibilityToggle?.(track.id)}
+              title={track.visible ? 'Hide' : 'Show'}
+            >
+              {track.visible ? (
+                <Eye className="w-3.5 h-3.5" />
+              ) : (
+                <EyeOff className="w-3.5 h-3.5" />
+              )}
+            </button>
+          )}
 
           {/* Lock button */}
           <button
@@ -259,16 +277,6 @@ export const VirtualizedTrack = memo(function VirtualizedTrack({
             ) : (
               <Unlock className="w-3.5 h-3.5" />
             )}
-          </button>
-
-          {/* Visibility button */}
-          <button
-            data-testid="visibility-button"
-            className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
-            onClick={() => onVisibilityToggle?.(track.id)}
-            title={track.visible ? 'Hide' : 'Show'}
-          >
-            {track.visible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
           </button>
         </div>
       </div>

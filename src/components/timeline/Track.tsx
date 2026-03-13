@@ -35,6 +35,7 @@ import {
 import { TransitionZone } from './TransitionZone';
 import type { DropValidity } from '@/utils/dropValidity';
 import { TRACK_HEIGHT } from './constants';
+import { getTrackHeaderControls } from './trackHeaderControls';
 
 // =============================================================================
 // Types
@@ -212,6 +213,7 @@ export function Track({
   // Calculate track content width based on duration and zoom
   const contentWidth = duration * zoom;
   const TrackIcon = TrackIcons[track.kind] || Video;
+  const { showMute, showVisibility } = getTrackHeaderControls(track.kind);
   const contextMenuItems = useMemo<MenuItemOrDivider[]>(() => {
     const items: MenuItemOrDivider[] =
       swapTargets.length === 0
@@ -265,31 +267,50 @@ export function Track({
           <TrackIcon className="w-4 h-4 text-editor-text-muted" />
 
           {/* Track name */}
-          <span className="flex-1 text-sm text-editor-text truncate">{track.name}</span>
+          <span className="flex-1 min-w-0 text-sm text-editor-text truncate">{track.name}</span>
 
           {/* Track controls */}
-          <div className="flex items-center gap-1">
-            {/* Mute button */}
-            <button
-              data-testid="mute-button"
-              className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
-              onClick={(event) => {
-                event.stopPropagation();
-                onMuteToggle?.(track.id);
-              }}
-              title={track.muted ? 'Unmute' : 'Mute'}
-            >
-              {track.muted ? (
-                <>
-                  <VolumeX className="w-3.5 h-3.5" />
-                  <span data-testid="muted-indicator" className="sr-only">
-                    Muted
-                  </span>
-                </>
-              ) : (
-                <Volume2 className="w-3.5 h-3.5" />
-              )}
-            </button>
+          <div className="flex shrink-0 items-center justify-end gap-1">
+            {showMute && (
+              <button
+                data-testid="mute-button"
+                className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onMuteToggle?.(track.id);
+                }}
+                title={track.muted ? 'Unmute' : 'Mute'}
+              >
+                {track.muted ? (
+                  <>
+                    <VolumeX className="w-3.5 h-3.5" />
+                    <span data-testid="muted-indicator" className="sr-only">
+                      Muted
+                    </span>
+                  </>
+                ) : (
+                  <Volume2 className="w-3.5 h-3.5" />
+                )}
+              </button>
+            )}
+
+            {showVisibility && (
+              <button
+                data-testid="visibility-button"
+                className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onVisibilityToggle?.(track.id);
+                }}
+                title={track.visible ? 'Hide' : 'Show'}
+              >
+                {track.visible ? (
+                  <Eye className="w-3.5 h-3.5" />
+                ) : (
+                  <EyeOff className="w-3.5 h-3.5" />
+                )}
+              </button>
+            )}
 
             {/* Lock button */}
             <button
@@ -311,19 +332,6 @@ export function Track({
               ) : (
                 <Unlock className="w-3.5 h-3.5" />
               )}
-            </button>
-
-            {/* Visibility button */}
-            <button
-              data-testid="visibility-button"
-              className="p-1 rounded hover:bg-editor-border text-editor-text-muted hover:text-editor-text"
-              onClick={(event) => {
-                event.stopPropagation();
-                onVisibilityToggle?.(track.id);
-              }}
-              title={track.visible ? 'Hide' : 'Show'}
-            >
-              {track.visible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
             </button>
           </div>
         </div>
