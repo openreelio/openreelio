@@ -101,6 +101,8 @@ interface TimelineActions {
 }
 
 type ExecuteTimelineCommand = (command: Command) => Promise<CommandResult>;
+type TrackToggleCommandType = 'ToggleTrackMute' | 'ToggleTrackLock' | 'ToggleTrackVisibility';
+type TrackToggleField = 'muted' | 'locked' | 'visible';
 
 interface ResolvedDroppedAssetContext {
   droppedAssetId: string;
@@ -204,6 +206,12 @@ function isClipOverlapError(errorMessage: string): boolean {
 function shouldProbePendingDuration(assetKind: Asset['kind'] | undefined): boolean {
   return assetKind === 'video' || assetKind === 'audio';
 }
+
+const TRACK_TOGGLE_FIELD_BY_COMMAND: Record<TrackToggleCommandType, TrackToggleField> = {
+  ToggleTrackMute: 'muted',
+  ToggleTrackLock: 'locked',
+  ToggleTrackVisibility: 'visible',
+};
 
 function shouldQueueWorkspaceDropInBackground(
   data: AssetDropData,
@@ -780,7 +788,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
   const executeTrackToggle = useCallback(
     async (
       data: TrackControlData,
-      commandType: 'ToggleTrackMute' | 'ToggleTrackLock' | 'ToggleTrackVisibility',
+      commandType: TrackToggleCommandType,
       missingSequenceMessage: string,
       failureMessage: string,
     ): Promise<void> => {
@@ -789,19 +797,43 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         return;
       }
 
+      const sequenceSnapshot = getCurrentSequence();
+      if (!sequenceSnapshot) {
+        logger.warn('Cannot toggle track state: sequence snapshot unavailable', {
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+          commandType,
+        });
+        return;
+      }
+
+      const track = sequenceSnapshot.tracks.find((candidate) => candidate.id === data.trackId);
+      if (!track) {
+        logger.warn('Cannot toggle track state: track not found', {
+          sequenceId: data.sequenceId,
+          trackId: data.trackId,
+          commandType,
+        });
+        return;
+      }
+
+      const toggleField = TRACK_TOGGLE_FIELD_BY_COMMAND[commandType];
+      const nextValue = !track[toggleField];
+
       try {
         await executeCommand({
           type: commandType,
           payload: {
             sequenceId: data.sequenceId,
             trackId: data.trackId,
+            [toggleField]: nextValue,
           },
         });
       } catch (error) {
         logger.error(failureMessage, { error, trackId: data.trackId });
       }
     },
-    [sequence, executeCommand],
+    [sequence, executeCommand, getCurrentSequence],
   );
 
   /**
