@@ -1,7 +1,8 @@
 /**
  * Header Component
  *
- * Application header with branding, project info, menu bar, and toolbar.
+ * Application header with branding, project info, menu bar, toolbar,
+ * and optional utility actions.
  */
 
 import { X, Save, FolderOpen, Download, Search, Settings, Loader2 } from 'lucide-react';
@@ -10,7 +11,7 @@ import { SearchPanel } from '@/components/features/search';
 import { SettingsDialog } from '@/components/features/settings';
 import { ShortcutsDialog } from '@/components/features/help';
 import { useProjectStore, useUIStore } from '@/stores';
-import { useCallback, useState, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useState, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { createLogger } from '@/services/logger';
 import { SaveStatusBadge, type SaveStatus } from './SaveStatusBadge';
 import { UnsavedChangesDialog } from './UnsavedChangesDialog';
@@ -33,6 +34,8 @@ interface HeaderProps {
   onExport?: () => void;
   /** Callback when a search result is selected */
   onSearchResultSelect?: (result: AssetSearchResultItem) => void;
+  /** Optional utility actions rendered in the header */
+  utilityActions?: ReactNode;
 }
 
 // =============================================================================
@@ -45,6 +48,7 @@ export function Header({
   showToolbar = true,
   onExport,
   onSearchResultSelect,
+  utilityActions,
 }: HeaderProps) {
   const { meta, isDirty, closeProject, saveProject } = useProjectStore();
   const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
@@ -220,6 +224,8 @@ export function Header({
               {searchShortcutLabel}
             </kbd>
           </button>
+
+          {utilityActions}
 
           {/* Toolbar */}
           {showToolbar && (

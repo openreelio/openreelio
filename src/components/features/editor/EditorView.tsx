@@ -10,9 +10,9 @@ import { lazy, Suspense, useCallback, useState, useEffect, useMemo } from 'react
 import {
   MainLayout,
   Header,
+  HeaderPopoverAction,
   Sidebar,
   TabbedBottomPanel,
-  Panel,
   type BottomPanelTab,
 } from '@/components/layout';
 import { AISidebar } from '@/components/features/ai';
@@ -641,45 +641,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   // Bottom panel tabs
   const videoGenEnabled = isVideoGenerationEnabled();
   const bottomPanelTabs: BottomPanelTab[] = useMemo(() => {
-    const tabs: BottomPanelTab[] = [
-      {
-        id: 'console',
-        label: 'Console',
-        icon: <Terminal className="w-3 h-3" />,
-        content: (
-          <div className="h-full p-2 font-mono text-xs text-editor-text-muted overflow-auto">
-            <p>OpenReelio initialized.</p>
-            <p>Ready to edit.</p>
-          </div>
-        ),
-      },
-      {
-        id: 'mixer',
-        label: 'Mixer',
-        icon: <Sliders className="w-3 h-3" />,
-        content: (
-          <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
-            <AudioMixerPanel
-              tracks={sequence?.tracks ?? []}
-              trackLevels={trackLevels}
-              trackPans={trackPans}
-              soloedTrackIds={soloedTrackIds}
-              masterVolume={masterVolume}
-              masterMuted={masterMuted}
-              masterLevels={masterLevels}
-              onVolumeChange={handleMixerVolumeChange}
-              onPanChange={handleMixerPanChange}
-              onMuteToggle={handleMixerMuteToggle}
-              onSoloToggle={handleMixerSoloToggle}
-              onMasterVolumeChange={handleMasterVolumeChange}
-              onMasterMuteToggle={handleMasterMuteToggle}
-              compact
-              className="h-full"
-            />
-          </Suspense>
-        ),
-      },
-    ];
+    const tabs: BottomPanelTab[] = [];
 
     tabs.push({
       id: 'comparison',
@@ -706,27 +668,38 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     }
 
     return tabs;
-  }, [
-    videoGenEnabled,
-    sequence?.tracks,
-    trackLevels,
-    trackPans,
-    soloedTrackIds,
-    masterVolume,
-    masterMuted,
-    masterLevels,
-    handleMixerVolumeChange,
-    handleMixerPanChange,
-    handleMixerMuteToggle,
-    handleMixerSoloToggle,
-    handleMasterVolumeChange,
-    handleMasterMuteToggle,
-  ]);
+  }, [videoGenEnabled]);
 
   return (
     <>
       <MainLayout
-        header={<Header onExport={handleOpenExport} version={appVersion} />}
+        header={
+          <Header
+            onExport={handleOpenExport}
+            version={appVersion}
+            utilityActions={
+              <HeaderPopoverAction
+                label="Console"
+                icon={<Terminal className="h-4 w-4" />}
+                panelClassName="w-[340px] max-w-[90vw] p-0"
+              >
+                <div className="border-b border-editor-border px-3 py-2">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-editor-text-muted">
+                    Console
+                  </div>
+                  <p className="mt-1 text-xs text-editor-text-muted">
+                    Hidden by default to keep the editing workspace focused.
+                  </p>
+                </div>
+                <div className="max-h-48 overflow-auto bg-editor-bg px-3 py-2 font-mono text-[11px] text-editor-text-muted">
+                  <p>[ready] OpenReelio initialized.</p>
+                  <p>[layout] Timeline and mixer stay inside the main workspace.</p>
+                  <p>[sequence] {sequence?.name ?? 'No active sequence'}</p>
+                </div>
+              </HeaderPopoverAction>
+            }
+          />
+        }
         leftSidebar={
           <Sidebar title="Project Explorer" position="left" autoCollapseBreakpoint={1280}>
             <ExplorerErrorBoundary
@@ -764,11 +737,16 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
           </>
         }
         footer={
-          <TabbedBottomPanel tabs={bottomPanelTabs} defaultTab="console" defaultHeight={160} />
+          <TabbedBottomPanel
+            tabs={bottomPanelTabs}
+            defaultTab="comparison"
+            defaultHeight={144}
+            defaultCollapsed
+          />
         }
       >
         {/* Center content split between preview and timeline */}
-        <div className="flex flex-col h-full">
+        <div className="flex h-full flex-col">
           <div className="flex-1 border-b border-editor-border">
             <PreviewErrorBoundary
               onError={(error) => logger.error('UnifiedPreviewPlayer error', { error })}
@@ -782,30 +760,71 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
             </PreviewErrorBoundary>
           </div>
           <div className="flex-1 overflow-hidden">
-            <Panel title="Timeline" variant="default" className="h-full" noPadding>
-              <TimelineErrorBoundary onError={(error) => logger.error('Timeline error', { error })}>
-                <Timeline
-                  sequence={sequence}
-                  onClipMove={handleClipMove}
-                  onClipTrim={handleClipTrim}
-                  onClipSplit={handleClipSplit}
-                  onClipDuplicate={handleClipDuplicate}
-                  onClipPaste={handleClipPaste}
-                  onClipAudioUpdate={handleClipAudioUpdate}
-                  onAssetDrop={handleAssetDrop}
-                  pendingAssetDrops={pendingWorkspaceDrops}
-                  onDeleteClips={handleDeleteClips}
-                  onTrackCreate={handleTrackCreate}
-                  onTrackDelete={handleTrackDelete}
-                  onTrackMuteToggle={handleTrackMuteToggle}
-                  onTrackLockToggle={handleTrackLockToggle}
-                  onTrackVisibilityToggle={handleTrackVisibilityToggle}
-                  onTrackReorder={handleTrackReorder}
-                  onAddText={handleOpenAddText}
-                  getTextClipData={(clipId) => textClipDataById.get(clipId)}
-                />
-              </TimelineErrorBoundary>
-            </Panel>
+            <div className="flex h-full min-h-0 gap-3 p-3">
+              <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-editor-border bg-editor-panel">
+                <div className="border-b border-editor-border px-3 py-2">
+                  <h2 className="text-xs font-semibold uppercase tracking-wider text-editor-text-muted">
+                    Timeline
+                  </h2>
+                </div>
+                <div className="min-h-0 flex-1">
+                  <TimelineErrorBoundary
+                    onError={(error) => logger.error('Timeline error', { error })}
+                  >
+                    <Timeline
+                      sequence={sequence}
+                      onClipMove={handleClipMove}
+                      onClipTrim={handleClipTrim}
+                      onClipSplit={handleClipSplit}
+                      onClipDuplicate={handleClipDuplicate}
+                      onClipPaste={handleClipPaste}
+                      onClipAudioUpdate={handleClipAudioUpdate}
+                      onAssetDrop={handleAssetDrop}
+                      pendingAssetDrops={pendingWorkspaceDrops}
+                      onDeleteClips={handleDeleteClips}
+                      onTrackCreate={handleTrackCreate}
+                      onTrackDelete={handleTrackDelete}
+                      onTrackMuteToggle={handleTrackMuteToggle}
+                      onTrackLockToggle={handleTrackLockToggle}
+                      onTrackVisibilityToggle={handleTrackVisibilityToggle}
+                      onTrackReorder={handleTrackReorder}
+                      onAddText={handleOpenAddText}
+                      getTextClipData={(clipId) => textClipDataById.get(clipId)}
+                    />
+                  </TimelineErrorBoundary>
+                </div>
+              </section>
+
+              <aside className="hidden w-64 shrink-0 flex-col overflow-hidden rounded-xl border border-editor-border bg-editor-sidebar lg:flex">
+                <div className="flex items-center gap-2 border-b border-editor-border px-3 py-2">
+                  <Sliders className="h-4 w-4 text-editor-text-muted" />
+                  <h2 className="text-xs font-semibold uppercase tracking-wider text-editor-text-muted">
+                    Mixer
+                  </h2>
+                </div>
+                <div className="min-h-0 flex-1 overflow-hidden">
+                  <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+                    <AudioMixerPanel
+                      tracks={sequence?.tracks ?? []}
+                      trackLevels={trackLevels}
+                      trackPans={trackPans}
+                      soloedTrackIds={soloedTrackIds}
+                      masterVolume={masterVolume}
+                      masterMuted={masterMuted}
+                      masterLevels={masterLevels}
+                      onVolumeChange={handleMixerVolumeChange}
+                      onPanChange={handleMixerPanChange}
+                      onMuteToggle={handleMixerMuteToggle}
+                      onSoloToggle={handleMixerSoloToggle}
+                      onMasterVolumeChange={handleMasterVolumeChange}
+                      onMasterMuteToggle={handleMasterMuteToggle}
+                      compact
+                      className="h-full"
+                    />
+                  </Suspense>
+                </div>
+              </aside>
+            </div>
           </div>
         </div>
       </MainLayout>
