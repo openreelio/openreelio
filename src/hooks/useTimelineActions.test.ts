@@ -389,6 +389,117 @@ describe('useTimelineActions', () => {
       });
     });
 
+    it('should forward source monitor In/Out points into the InsertClip payload', async () => {
+      const track = createMockTrack({ id: 'track_001' });
+      const asset = createMockAsset({ id: 'asset_001', durationSec: 30 });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [track],
+      });
+
+      useProjectStore.setState({
+        assets: new Map([[asset.id, asset]]),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_001',
+            createdIds: ['clip_001'],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [asset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          assetId: 'asset_001',
+          trackId: 'track_001',
+          timelinePosition: 5.0,
+          sourceIn: 2.0,
+          sourceOut: 8.0,
+        });
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'InsertClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          assetId: 'asset_001',
+          timelineIn: 5.0,
+          sourceIn: 2.0,
+          sourceOut: 8.0,
+        },
+      });
+    });
+
+    it('should resolve an open-ended source In point against the asset duration', async () => {
+      const track = createMockTrack({ id: 'track_001' });
+      const asset = createMockAsset({ id: 'asset_001', durationSec: 24 });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [track],
+      });
+
+      useProjectStore.setState({
+        assets: new Map([[asset.id, asset]]),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_001',
+            createdIds: ['clip_001'],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [asset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          assetId: 'asset_001',
+          trackId: 'track_001',
+          timelinePosition: 10,
+          sourceIn: 6,
+        });
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'InsertClip',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          assetId: 'asset_001',
+          timelineIn: 10,
+          sourceIn: 6,
+          sourceOut: 24,
+        },
+      });
+    });
+
     it('should probe and apply full duration when dropped video asset lacks duration metadata', async () => {
       const track = createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' });
       const sequence = createMockSequence({
