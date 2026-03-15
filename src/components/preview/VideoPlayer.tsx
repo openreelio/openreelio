@@ -28,6 +28,8 @@ export interface VideoPlayerProps {
   volume?: number;
   /** Playback rate */
   playbackRate?: number;
+  /** Whether playback is active (controlled) */
+  isPlaying?: boolean;
   /** Current time in seconds (controlled) */
   currentTime?: number;
   /** Object fit mode */
@@ -63,6 +65,7 @@ export function VideoPlayer({
   muted = false,
   volume = 1,
   playbackRate = 1,
+  isPlaying,
   currentTime,
   objectFit = 'contain',
   onPlayStateChange,
@@ -87,16 +90,20 @@ export function VideoPlayer({
     setLoadingState('ready');
     setIsBuffering(false);
 
-    if (autoPlay && videoRef.current) {
-      const playPromise = videoRef.current.play();
-      // Handle browsers that return a promise vs those that don't
-      if (playPromise !== undefined) {
-        playPromise.catch(() => {
-          // Autoplay was prevented, ignore
-        });
+    if (autoPlay && isPlaying === undefined && videoRef.current) {
+      try {
+        const playPromise = videoRef.current.play();
+        // Handle browsers that return a promise vs those that don't
+        if (playPromise !== undefined) {
+          playPromise.catch(() => {
+            // Autoplay was prevented, ignore
+          });
+        }
+      } catch {
+        // Some test environments do not implement media playback.
       }
     }
-  }, [autoPlay]);
+  }, [autoPlay, isPlaying]);
 
   const handlePlay = useCallback(() => {
     onPlayStateChange?.(true);
@@ -172,6 +179,36 @@ export function VideoPlayer({
       videoRef.current.playbackRate = playbackRate;
     }
   }, [playbackRate]);
+
+  // Sync play state (controlled)
+  useEffect(() => {
+    if (videoRef.current == null || isPlaying === undefined) {
+      return;
+    }
+
+    const video = videoRef.current;
+    if (isPlaying) {
+      if (!video.paused) {
+        return;
+      }
+
+      try {
+        const playPromise = video.play();
+        if (playPromise !== undefined) {
+          playPromise.catch(() => {
+            // Playback may be blocked until a user gesture is received.
+          });
+        }
+      } catch {
+        // Some test environments do not implement media playback.
+      }
+      return;
+    }
+
+    if (!video.paused) {
+      video.pause();
+    }
+  }, [isPlaying, src]);
 
   // Sync currentTime (controlled)
   useEffect(() => {

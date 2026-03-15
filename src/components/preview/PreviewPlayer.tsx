@@ -278,6 +278,7 @@ export function PreviewPlayer({
         src={src}
         poster={poster}
         currentTime={playhead}
+        isPlaying={isPlaying}
         playbackRate={playbackRate}
         onTimeUpdate={handleTimeUpdate}
         onPlayStateChange={handlePlayStateChange}
