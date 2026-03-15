@@ -411,10 +411,10 @@ pub async fn reverse_match_frame(
 
 /// Helper: finds the first visible, unmuted clip at the given timeline time.
 /// Returns the clip reference and its track ID.
-fn find_clip_at_time<'a>(
-    sequence: &'a crate::core::timeline::Sequence,
+fn find_clip_at_time(
+    sequence: &crate::core::timeline::Sequence,
     time_sec: f64,
-) -> Option<(&'a crate::core::timeline::Clip, &'a str)> {
+) -> Option<(&crate::core::timeline::Clip, &str)> {
     use crate::core::timeline::TrackKind;
 
     for track in &sequence.tracks {
