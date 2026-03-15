@@ -505,6 +505,84 @@ pub struct AppState {
     /// It provides a stable backend anchor for playhead/time synchronization,
     /// diagnostics, and cross-service coordination.
     pub playback_sync: Mutex<PlaybackSyncState>,
+
+    /// Runtime source monitor state for dual-viewer 3-point editing workflow.
+    ///
+    /// This is runtime-only UI state (not persisted in project files).
+    /// Tracks which asset is loaded, In/Out points, and source playhead position.
+    pub source_monitor: Mutex<SourceMonitorState>,
+}
+
+/// Runtime source monitor state for dual-viewer workflow.
+///
+/// This is runtime-only UI state (not persisted in project files).
+/// Tracks which asset is loaded in the source monitor and any In/Out points
+/// set by the user for 3-point editing.
+///
+/// Note: This struct is unconditionally compiled (no feature gate) because it
+/// is a pure data type with no Tauri dependencies, used in both GUI and tests.
+#[derive(Clone, Debug)]
+pub struct SourceMonitorState {
+    /// Asset currently loaded in the source monitor.
+    pub asset_id: Option<String>,
+    /// In point for source clip (seconds). None means "start of asset".
+    pub in_point: Option<f64>,
+    /// Out point for source clip (seconds). None means "end of asset".
+    pub out_point: Option<f64>,
+    /// Current playhead position within the source asset (seconds).
+    pub playhead_sec: f64,
+}
+
+impl Default for SourceMonitorState {
+    fn default() -> Self {
+        Self {
+            asset_id: None,
+            in_point: None,
+            out_point: None,
+            playhead_sec: 0.0,
+        }
+    }
+}
+
+impl SourceMonitorState {
+    /// Loads an asset into the source monitor and resets transient marks/playhead.
+    pub fn set_asset(&mut self, asset_id: Option<String>) {
+        self.asset_id = asset_id;
+        self.in_point = None;
+        self.out_point = None;
+        self.playhead_sec = 0.0;
+    }
+
+    /// Clears the source monitor runtime state.
+    pub fn clear(&mut self) {
+        self.set_asset(None);
+    }
+
+    /// Updates the source monitor In point and keeps the playhead aligned.
+    pub fn set_in_point(&mut self, time_sec: f64) {
+        self.in_point = Some(time_sec);
+        self.playhead_sec = time_sec;
+    }
+
+    /// Updates the source monitor Out point and keeps the playhead aligned.
+    pub fn set_out_point(&mut self, time_sec: f64) {
+        self.out_point = Some(time_sec);
+        self.playhead_sec = time_sec;
+    }
+
+    /// Clears source monitor In/Out points while preserving the current playhead.
+    pub fn clear_in_out(&mut self) {
+        self.in_point = None;
+        self.out_point = None;
+    }
+
+    /// Returns the marked duration (out - in), or None if either point is unset.
+    pub fn marked_duration(&self) -> Option<f64> {
+        match (self.in_point, self.out_point) {
+            (Some(i), Some(o)) => Some(o - i),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(all(not(test), feature = "gui"))]
@@ -552,6 +630,7 @@ impl AppState {
             app_handle: OnceLock::new(),
             credential_vault: Mutex::new(None),
             playback_sync: Mutex::new(PlaybackSyncState::default()),
+            source_monitor: Mutex::new(SourceMonitorState::default()),
         }
     }
 
@@ -848,6 +927,12 @@ mod tauri_app {
                 $crate::ipc::list_workspace_documents,
                 $crate::ipc::read_workspace_document,
                 $crate::ipc::write_workspace_document,
+                // Source monitor commands (S23 — 3-point editing)
+                $crate::ipc::set_source_asset,
+                $crate::ipc::set_source_in,
+                $crate::ipc::set_source_out,
+                $crate::ipc::clear_source_in_out,
+                $crate::ipc::get_source_state,
                 // Agent commands
                 $crate::ipc::write_agent_trace,
                 $crate::ipc::list_agent_traces,
@@ -1204,6 +1289,12 @@ mod tauri_app {
             ipc::list_workspace_documents,
             ipc::read_workspace_document,
             ipc::write_workspace_document,
+            // Source monitor commands (S23 — 3-point editing)
+            ipc::set_source_asset,
+            ipc::set_source_in,
+            ipc::set_source_out,
+            ipc::clear_source_in_out,
+            ipc::get_source_state,
             // Agent commands
             ipc::write_agent_trace,
             ipc::list_agent_traces,
@@ -1472,5 +1563,133 @@ mod tests {
         assert!(!project_path.join("ops.jsonl").exists());
         assert!(!project_path.join("project.json").exists());
         assert!(!project_path.join("snapshot.json").exists());
+    }
+
+    // =========================================================================
+    // SourceMonitorState Tests (S23-001)
+    // =========================================================================
+
+    #[test]
+    fn test_source_monitor_default_is_empty() {
+        let state = SourceMonitorState::default();
+        assert!(state.asset_id.is_none());
+        assert!(state.in_point.is_none());
+        assert!(state.out_point.is_none());
+        assert_eq!(state.playhead_sec, 0.0);
+        assert!(state.marked_duration().is_none());
+    }
+
+    #[test]
+    fn test_source_monitor_set_asset_resets_state() {
+        let mut state = SourceMonitorState {
+            asset_id: Some("asset_001".to_string()),
+            in_point: Some(2.0),
+            out_point: Some(8.0),
+            playhead_sec: 5.0,
+        };
+
+        // Loading a new asset should reset In/Out and playhead
+        state.set_asset(Some("asset_002".to_string()));
+
+        assert_eq!(state.asset_id.as_deref(), Some("asset_002"));
+        assert!(state.in_point.is_none());
+        assert!(state.out_point.is_none());
+        assert_eq!(state.playhead_sec, 0.0);
+    }
+
+    #[test]
+    fn test_source_monitor_clear_resets_state() {
+        let mut state = SourceMonitorState {
+            asset_id: Some("asset_001".to_string()),
+            in_point: Some(2.0),
+            out_point: Some(8.0),
+            playhead_sec: 5.0,
+        };
+
+        state.clear();
+
+        assert!(state.asset_id.is_none());
+        assert!(state.in_point.is_none());
+        assert!(state.out_point.is_none());
+        assert_eq!(state.playhead_sec, 0.0);
+    }
+
+    #[test]
+    fn test_source_monitor_marked_duration_both_points_set() {
+        let state = SourceMonitorState {
+            asset_id: Some("asset_001".to_string()),
+            in_point: Some(1.5),
+            out_point: Some(10.0),
+            playhead_sec: 0.0,
+        };
+        assert_eq!(state.marked_duration(), Some(8.5));
+    }
+
+    #[test]
+    fn test_source_monitor_marked_duration_only_in() {
+        let state = SourceMonitorState {
+            asset_id: Some("asset_001".to_string()),
+            in_point: Some(1.5),
+            out_point: None,
+            playhead_sec: 0.0,
+        };
+        assert!(state.marked_duration().is_none());
+    }
+
+    #[test]
+    fn test_source_monitor_marked_duration_only_out() {
+        let state = SourceMonitorState {
+            asset_id: Some("asset_001".to_string()),
+            in_point: None,
+            out_point: Some(10.0),
+            playhead_sec: 0.0,
+        };
+        assert!(state.marked_duration().is_none());
+    }
+
+    #[test]
+    fn test_source_monitor_clear_preserves_playhead() {
+        let mut state = SourceMonitorState {
+            asset_id: Some("asset_001".to_string()),
+            in_point: Some(2.0),
+            out_point: Some(8.0),
+            playhead_sec: 4.0,
+        };
+        state.clear_in_out();
+
+        assert!(state.in_point.is_none());
+        assert!(state.out_point.is_none());
+        assert_eq!(state.playhead_sec, 4.0);
+        assert!(state.marked_duration().is_none());
+    }
+
+    #[test]
+    fn test_source_monitor_set_in_updates_playhead() {
+        let mut state = SourceMonitorState {
+            asset_id: Some("asset_001".to_string()),
+            in_point: None,
+            out_point: Some(8.0),
+            playhead_sec: 0.0,
+        };
+
+        state.set_in_point(2.5);
+
+        assert_eq!(state.in_point, Some(2.5));
+        assert_eq!(state.playhead_sec, 2.5);
+    }
+
+    #[test]
+    fn test_source_monitor_set_out_updates_playhead() {
+        let mut state = SourceMonitorState {
+            asset_id: Some("asset_001".to_string()),
+            in_point: Some(2.0),
+            out_point: None,
+            playhead_sec: 0.0,
+        };
+
+        state.set_out_point(8.5);
+
+        assert_eq!(state.out_point, Some(8.5));
+        assert_eq!(state.playhead_sec, 8.5);
     }
 }

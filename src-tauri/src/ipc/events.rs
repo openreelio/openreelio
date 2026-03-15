@@ -65,6 +65,8 @@ pub mod event_names {
     pub const WORKSPACE_FILE_MODIFIED: &str = "workspace:file-modified";
     /// Workspace scan complete event
     pub const WORKSPACE_SCAN_COMPLETE: &str = "workspace:scan-complete";
+    /// Source monitor state changed event
+    pub const SOURCE_MONITOR_CHANGED: &str = "source_monitor:changed";
 }
 
 // =============================================================================
