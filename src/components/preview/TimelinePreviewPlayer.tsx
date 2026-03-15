@@ -746,7 +746,7 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
     <div
       ref={containerRef}
       data-testid="timeline-preview-player"
-      className={`relative bg-black overflow-hidden ${className}`}
+      className={`relative isolate bg-black overflow-hidden ${className}`}
       style={{ aspectRatio }}
       tabIndex={0}
       role="region"
