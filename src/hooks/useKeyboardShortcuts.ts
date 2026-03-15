@@ -31,6 +31,8 @@ export interface UseKeyboardShortcutsOptions {
   onDeleteClips?: () => void;
   onSplitAtPlayhead?: () => void;
   onExport?: () => void;
+  onMatchFrame?: () => void;
+  onReverseMatchFrame?: () => void;
   enabled?: boolean;
 }
 
@@ -67,6 +69,8 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
     onDeleteClips,
     onSplitAtPlayhead,
     onExport,
+    onMatchFrame,
+    onReverseMatchFrame,
     enabled = true,
   } = options;
 
@@ -290,6 +294,17 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
         return;
       }
 
+      // Match Frame (F) / Reverse Match Frame (Shift+F)
+      if (key.toLowerCase() === 'f' && !ctrl && !e.altKey) {
+        e.preventDefault();
+        if (shiftKey) {
+          if (onReverseMatchFrame) onReverseMatchFrame();
+        } else {
+          if (onMatchFrame) onMatchFrame();
+        }
+        return;
+      }
+
       // Export
       if (key.toLowerCase() === 'e' && ctrl && shiftKey) {
         e.preventDefault();
@@ -318,6 +333,8 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       onDeleteClips,
       onSplitAtPlayhead,
       onExport,
+      onMatchFrame,
+      onReverseMatchFrame,
       undo,
       redo,
       saveProject,
@@ -342,6 +359,16 @@ export const KEYBOARD_SHORTCUTS = [
       { key: 'L', description: 'Shuttle Forward (Speed 1x, 2x, 4x...)' },
       { key: 'Left', description: 'Previous Frame' },
       { key: 'Right', description: 'Next Frame' },
+    ],
+  },
+  {
+    category: 'Source Monitor',
+    shortcuts: [
+      { key: 'I', description: 'Set In Point' },
+      { key: 'O', description: 'Set Out Point' },
+      { key: 'Esc', description: 'Clear In/Out Points' },
+      { key: 'F', description: 'Match Frame (Timeline → Source)' },
+      { key: 'Shift+F', description: 'Reverse Match Frame (Source → Timeline)' },
     ],
   },
   {

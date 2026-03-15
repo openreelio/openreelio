@@ -31,6 +31,7 @@ import {
 } from '@/components/features/inspector';
 import { ProjectExplorer } from '@/components/explorer';
 import { UnifiedPreviewPlayer } from '@/components/preview';
+import { SourceMonitor } from '@/components/features/preview/SourceMonitor';
 import { Timeline } from '@/components/timeline';
 import { useProjectStore, usePlaybackStore, useTimelineStore, useAudioMixerStore } from '@/stores';
 // Direct imports instead of barrel to avoid bundling all 100+ hooks
@@ -45,6 +46,7 @@ import { useBlendMode } from '@/hooks/useBlendMode';
 import { useResponsiveSidebarState } from './hooks/useResponsiveSidebarState';
 import { dbToLinear, linearToDb } from '@/utils/audioMeter';
 import { extractTextDataFromClipWithMap } from '@/utils/textRenderer';
+import { commands } from '@/bindings';
 import { createLogger } from '@/services/logger';
 import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
@@ -352,6 +354,20 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     }
   }, [sequence, selectedClipIds, linkedSelectionEnabled, currentTime, handleClipSplit]);
 
+  // Match Frame: F key — timeline clip → source monitor
+  const handleMatchFrame = useCallback(() => {
+    void commands.matchFrame({ timeSec: currentTime });
+  }, [currentTime]);
+
+  // Reverse Match Frame: Shift+F — source monitor → timeline seek
+  const handleReverseMatchFrame = useCallback(() => {
+    void commands.reverseMatchFrame().then((result) => {
+      if (result.status === 'ok') {
+        usePlaybackStore.getState().seek(result.data.timelineSec);
+      }
+    });
+  }, []);
+
   // Global keyboard shortcuts
   useKeyboardShortcuts({
     enabled: true,
@@ -362,6 +378,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     },
     onSplitAtPlayhead: handleSplitAtPlayhead,
     onExport: () => setShowExportDialog(true),
+    onMatchFrame: handleMatchFrame,
+    onReverseMatchFrame: handleReverseMatchFrame,
   });
 
   // Get selected asset for inspector (memoized to prevent unnecessary re-renders)
@@ -751,17 +769,28 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       >
         {/* Center content split between preview and timeline */}
         <div className="flex h-full flex-col">
-          <div className="flex-1 border-b border-editor-border">
-            <PreviewErrorBoundary
-              onError={(error) => logger.error('UnifiedPreviewPlayer error', { error })}
-            >
-              <UnifiedPreviewPlayer
-                className="h-full w-full"
-                showControls
-                showTimecode
-                showStats={import.meta.env.DEV}
-              />
-            </PreviewErrorBoundary>
+          <div className="flex flex-1 border-b border-editor-border">
+            {/* Source Monitor (left) */}
+            <div className="flex-1 border-r border-editor-border">
+              <PreviewErrorBoundary
+                onError={(error) => logger.error('SourceMonitor error', { error })}
+              >
+                <SourceMonitor className="h-full w-full" />
+              </PreviewErrorBoundary>
+            </div>
+            {/* Program Monitor (right) */}
+            <div className="flex-1">
+              <PreviewErrorBoundary
+                onError={(error) => logger.error('UnifiedPreviewPlayer error', { error })}
+              >
+                <UnifiedPreviewPlayer
+                  className="h-full w-full"
+                  showControls
+                  showTimecode
+                  showStats={import.meta.env.DEV}
+                />
+              </PreviewErrorBoundary>
+            </div>
           </div>
           <div className="flex-1 overflow-hidden">
             <div className="h-full min-h-0 p-3">
