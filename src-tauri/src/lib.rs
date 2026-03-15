@@ -570,6 +570,11 @@ impl SourceMonitorState {
         self.playhead_sec = time_sec;
     }
 
+    /// Updates the source monitor playhead without mutating In/Out points.
+    pub fn set_playhead(&mut self, time_sec: f64) {
+        self.playhead_sec = time_sec;
+    }
+
     /// Clears source monitor In/Out points while preserving the current playhead.
     pub fn clear_in_out(&mut self) {
         self.in_point = None;
@@ -931,8 +936,11 @@ mod tauri_app {
                 $crate::ipc::set_source_asset,
                 $crate::ipc::set_source_in,
                 $crate::ipc::set_source_out,
+                $crate::ipc::set_source_playhead,
                 $crate::ipc::clear_source_in_out,
                 $crate::ipc::get_source_state,
+                $crate::ipc::match_frame,
+                $crate::ipc::reverse_match_frame,
                 // Agent commands
                 $crate::ipc::write_agent_trace,
                 $crate::ipc::list_agent_traces,
@@ -1293,8 +1301,11 @@ mod tauri_app {
             ipc::set_source_asset,
             ipc::set_source_in,
             ipc::set_source_out,
+            ipc::set_source_playhead,
             ipc::clear_source_in_out,
             ipc::get_source_state,
+            ipc::match_frame,
+            ipc::reverse_match_frame,
             // Agent commands
             ipc::write_agent_trace,
             ipc::list_agent_traces,
@@ -1691,5 +1702,21 @@ mod tests {
 
         assert_eq!(state.out_point, Some(8.5));
         assert_eq!(state.playhead_sec, 8.5);
+    }
+
+    #[test]
+    fn test_source_monitor_set_playhead_preserves_marks() {
+        let mut state = SourceMonitorState {
+            asset_id: Some("asset_001".to_string()),
+            in_point: Some(1.0),
+            out_point: Some(6.0),
+            playhead_sec: 0.0,
+        };
+
+        state.set_playhead(4.25);
+
+        assert_eq!(state.in_point, Some(1.0));
+        assert_eq!(state.out_point, Some(6.0));
+        assert_eq!(state.playhead_sec, 4.25);
     }
 }
