@@ -151,6 +151,10 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   // Add Text dialog state
   const [showAddTextDialog, setShowAddTextDialog] = useState(false);
 
+  // Mixer visibility state (toggled from timeline header)
+  const [showMixer, setShowMixer] = useState(false);
+  const handleToggleMixer = useCallback(() => setShowMixer((prev) => !prev), []);
+
   // AI Sidebar state
   const {
     collapsed: aiSidebarCollapsed,
@@ -693,7 +697,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                 </div>
                 <div className="max-h-48 overflow-auto bg-editor-bg px-3 py-2 font-mono text-[11px] text-editor-text-muted">
                   <p>[ready] OpenReelio initialized.</p>
-                  <p>[layout] Timeline and mixer stay inside the main workspace.</p>
+                  <p>[layout] Workspace ready.</p>
                   <p>[sequence] {sequence?.name ?? 'No active sequence'}</p>
                 </div>
               </HeaderPopoverAction>
@@ -760,12 +764,26 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
             </PreviewErrorBoundary>
           </div>
           <div className="flex-1 overflow-hidden">
-            <div className="flex h-full min-h-0 gap-3 p-3">
-              <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-editor-border bg-editor-panel">
-                <div className="border-b border-editor-border px-3 py-2">
+            <div className="h-full min-h-0 p-3">
+              <section className="flex h-full flex-col overflow-hidden rounded-xl border border-editor-border bg-editor-panel">
+                <div className="flex items-center justify-between border-b border-editor-border px-3 py-2">
                   <h2 className="text-xs font-semibold uppercase tracking-wider text-editor-text-muted">
                     Timeline
                   </h2>
+                  <button
+                    type="button"
+                    onClick={handleToggleMixer}
+                    className={`rounded p-1 transition-colors ${
+                      showMixer
+                        ? 'bg-editor-border text-editor-text'
+                        : 'text-editor-text-muted hover:text-editor-text hover:bg-editor-border/50'
+                    }`}
+                    title={showMixer ? 'Hide Mixer' : 'Show Mixer'}
+                    aria-label={showMixer ? 'Hide Mixer' : 'Show Mixer'}
+                    aria-pressed={showMixer}
+                  >
+                    <Sliders className="h-3.5 w-3.5" />
+                  </button>
                 </div>
                 <div className="min-h-0 flex-1">
                   <TimelineErrorBoundary
@@ -793,37 +811,30 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                     />
                   </TimelineErrorBoundary>
                 </div>
+                {showMixer && (
+                  <div className="shrink-0 border-t border-editor-border bg-editor-sidebar" style={{ height: '220px' }}>
+                    <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+                      <AudioMixerPanel
+                        tracks={sequence?.tracks ?? []}
+                        trackLevels={trackLevels}
+                        trackPans={trackPans}
+                        soloedTrackIds={soloedTrackIds}
+                        masterVolume={masterVolume}
+                        masterMuted={masterMuted}
+                        masterLevels={masterLevels}
+                        onVolumeChange={handleMixerVolumeChange}
+                        onPanChange={handleMixerPanChange}
+                        onMuteToggle={handleMixerMuteToggle}
+                        onSoloToggle={handleMixerSoloToggle}
+                        onMasterVolumeChange={handleMasterVolumeChange}
+                        onMasterMuteToggle={handleMasterMuteToggle}
+                        compact
+                        className="h-full"
+                      />
+                    </Suspense>
+                  </div>
+                )}
               </section>
-
-              <aside className="hidden w-64 shrink-0 flex-col overflow-hidden rounded-xl border border-editor-border bg-editor-sidebar lg:flex">
-                <div className="flex items-center gap-2 border-b border-editor-border px-3 py-2">
-                  <Sliders className="h-4 w-4 text-editor-text-muted" />
-                  <h2 className="text-xs font-semibold uppercase tracking-wider text-editor-text-muted">
-                    Mixer
-                  </h2>
-                </div>
-                <div className="min-h-0 flex-1 overflow-hidden">
-                  <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
-                    <AudioMixerPanel
-                      tracks={sequence?.tracks ?? []}
-                      trackLevels={trackLevels}
-                      trackPans={trackPans}
-                      soloedTrackIds={soloedTrackIds}
-                      masterVolume={masterVolume}
-                      masterMuted={masterMuted}
-                      masterLevels={masterLevels}
-                      onVolumeChange={handleMixerVolumeChange}
-                      onPanChange={handleMixerPanChange}
-                      onMuteToggle={handleMixerMuteToggle}
-                      onSoloToggle={handleMixerSoloToggle}
-                      onMasterVolumeChange={handleMasterVolumeChange}
-                      onMasterMuteToggle={handleMasterMuteToggle}
-                      compact
-                      className="h-full"
-                    />
-                  </Suspense>
-                </div>
-              </aside>
             </div>
           </div>
         </div>
