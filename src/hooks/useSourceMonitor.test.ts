@@ -243,6 +243,10 @@ describe('useSourceMonitor', () => {
   it('should reset local playback state when asset changes', async () => {
     const { result } = renderHook(() => useSourceMonitor());
 
+    await waitFor(() => {
+      expect(listen).toHaveBeenCalled();
+    });
+
     // Simulate playback in progress
     act(() => {
       result.current.setCurrentTime(10.0);

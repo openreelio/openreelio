@@ -390,7 +390,11 @@ pub async fn reverse_match_frame(
                 } else {
                     1.0
                 };
-                let source_offset = source_playhead - clip.range.source_in_sec;
+                let source_offset = if clip.reverse {
+                    clip.range.source_out_sec - source_playhead
+                } else {
+                    source_playhead - clip.range.source_in_sec
+                };
                 let timeline_sec = clip.place.timeline_in_sec + (source_offset / safe_speed);
 
                 return Ok(ReverseMatchFrameResult {
@@ -431,10 +435,7 @@ fn find_clip_at_time<'a>(
 
 /// Helper: checks whether a source time falls inside a clip's source range.
 /// Uses half-open interval [start, end) to match timeline containment semantics.
-fn clip_contains_source_time(
-    clip: &crate::core::timeline::Clip,
-    source_time_sec: f64,
-) -> bool {
+fn clip_contains_source_time(clip: &crate::core::timeline::Clip, source_time_sec: f64) -> bool {
     source_time_sec >= clip.range.source_in_sec && source_time_sec < clip.range.source_out_sec
 }
 
@@ -664,18 +665,33 @@ mod tests {
     // Match Frame helper tests
     // =========================================================================
 
-    fn make_clip(asset_id: &str, source_in: f64, source_out: f64, timeline_in: f64) -> crate::core::timeline::Clip {
+    fn make_clip(
+        asset_id: &str,
+        source_in: f64,
+        source_out: f64,
+        timeline_in: f64,
+    ) -> crate::core::timeline::Clip {
         crate::core::timeline::Clip::with_range(asset_id, source_in, source_out)
             .place_at(timeline_in)
     }
 
-    fn make_sequence_with_clip(clip: crate::core::timeline::Clip) -> crate::core::timeline::Sequence {
-        use crate::core::timeline::{Sequence, SequenceFormat, Track, TrackKind, CanvasFormat, FpsFormat};
-        let mut seq = Sequence::new("test", SequenceFormat {
-            canvas: CanvasFormat { width: 1920, height: 1080 },
-            fps: FpsFormat { num: 30, den: 1 },
-            audio_sample_rate: 48000,
-        });
+    fn make_sequence_with_clip(
+        clip: crate::core::timeline::Clip,
+    ) -> crate::core::timeline::Sequence {
+        use crate::core::timeline::{
+            CanvasFormat, FpsFormat, Sequence, SequenceFormat, Track, TrackKind,
+        };
+        let mut seq = Sequence::new(
+            "test",
+            SequenceFormat {
+                canvas: CanvasFormat {
+                    width: 1920,
+                    height: 1080,
+                },
+                fps: FpsFormat { num: 30, den: 1 },
+                audio_sample_rate: 48000,
+            },
+        );
         let mut track = Track::new("Video 1", TrackKind::Video);
         track.clips.push(clip);
         seq.tracks.push(track);

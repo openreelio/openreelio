@@ -296,13 +296,16 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
 
       // Match Frame (F) / Reverse Match Frame (Shift+F)
       if (key.toLowerCase() === 'f' && !ctrl && !e.altKey) {
-        e.preventDefault();
-        if (shiftKey) {
-          if (onReverseMatchFrame) onReverseMatchFrame();
-        } else {
-          if (onMatchFrame) onMatchFrame();
+        if (shiftKey && onReverseMatchFrame) {
+          e.preventDefault();
+          onReverseMatchFrame();
+          return;
         }
-        return;
+        if (!shiftKey && onMatchFrame) {
+          e.preventDefault();
+          onMatchFrame();
+          return;
+        }
       }
 
       // Export

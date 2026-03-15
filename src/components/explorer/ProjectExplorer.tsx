@@ -146,7 +146,9 @@ export function ProjectExplorer() {
         const assetKind = assets.get(entry.assetId)?.kind ?? entry.kind;
         if (canLoadIntoSourceMonitor(assetKind)) {
           // Load previewable source assets into the source monitor on selection.
-          void commands.setSourceAsset({ assetId: entry.assetId });
+          void commands.setSourceAsset({ assetId: entry.assetId }).catch(() => {
+            // IPC failure is non-critical; asset selection still works.
+          });
         }
       }
     },

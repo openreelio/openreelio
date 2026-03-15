@@ -63,6 +63,7 @@ export interface UseSourceMonitorReturn {
 export function useSourceMonitor(): UseSourceMonitorReturn {
   const [monitorState, setMonitorState] = useState<SourceMonitorStateDto>(EMPTY_STATE);
   const backendPlayheadRef = useRef(EMPTY_STATE.playheadSec);
+  const latestRequestedPlayheadRef = useRef<number | null>(null);
 
   // Local playback state (not persisted to backend)
   const [currentTime, setCurrentTimeState] = useState(0);
@@ -75,16 +76,25 @@ export function useSourceMonitor(): UseSourceMonitorReturn {
     let unlistenFn: UnlistenFn | null = null;
 
     const setup = async (): Promise<void> => {
-      unlistenFn = await listen<SourceMonitorStateDto>(
-        'source_monitor:changed',
-        (event) => {
-          if (!cancelled) setMonitorState(event.payload);
-        },
-      );
+      try {
+        const nextUnlisten = await listen<SourceMonitorStateDto>(
+          'source_monitor:changed',
+          (event) => {
+            if (!cancelled) setMonitorState(event.payload);
+          },
+        );
+        if (cancelled) {
+          nextUnlisten();
+          return;
+        }
+        unlistenFn = nextUnlisten;
 
-      const result = await commands.getSourceState();
-      if (!cancelled && result.status === 'ok') {
-        setMonitorState(result.data);
+        const result = await commands.getSourceState();
+        if (!cancelled && result.status === 'ok') {
+          setMonitorState(result.data);
+        }
+      } catch {
+        // Initialization failure is non-fatal; component will retry on remount.
       }
     };
 
@@ -117,9 +127,15 @@ export function useSourceMonitor(): UseSourceMonitorReturn {
         return;
       }
 
+      latestRequestedPlayheadRef.current = time;
       const result = await commands.setSourcePlayhead({ timeSec: time });
       if (result.status === 'error') {
         logger.warn('Failed to sync source playhead', { error: result.error, time });
+        return;
+      }
+
+      // Drop stale responses — a newer seek may have been issued while awaiting.
+      if (latestRequestedPlayheadRef.current !== time) {
         return;
       }
 

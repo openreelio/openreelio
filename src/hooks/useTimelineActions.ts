@@ -195,7 +195,7 @@ interface ResolvedAssetDropSourceRange {
 function resolveAssetDropSourceRange(
   data: AssetDropData,
   fullDurationSec?: number,
-): ResolvedAssetDropSourceRange {
+): ResolvedAssetDropSourceRange | undefined {
   const sourceIn = normalizeOptionalTimeSec(data.sourceIn);
   const sourceOut = normalizeOptionalTimeSec(data.sourceOut);
 
@@ -209,7 +209,8 @@ function resolveAssetDropSourceRange(
 
   if (effectiveSourceOut !== undefined) {
     if (effectiveSourceOut <= effectiveSourceIn) {
-      return {};
+      // Invalid range: out <= in — reject the drop.
+      return undefined;
     }
 
     return {
@@ -217,6 +218,12 @@ function resolveAssetDropSourceRange(
       sourceOut: effectiveSourceOut,
       durationSec: effectiveSourceOut - effectiveSourceIn,
     };
+  }
+
+  // Open-ended range: sourceIn only, no sourceOut resolved.
+  // If sourceIn is at or past the asset duration, the range is invalid.
+  if (sourceIn !== undefined && fullDurationSec !== undefined && sourceIn >= fullDurationSec) {
+    return undefined;
   }
 
   return {
@@ -1682,6 +1689,13 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         data,
         normalizedDurationSecHint ?? normalizedAssetDurationSec,
       );
+      if (resolvedSourceRange === undefined) {
+        logger.warn('Invalid source range in drop — ignoring', {
+          sourceIn: data.sourceIn,
+          sourceOut: data.sourceOut,
+        });
+        return false;
+      }
       const hasExplicitSourceRange =
         resolvedSourceRange.sourceIn !== undefined || resolvedSourceRange.sourceOut !== undefined;
       const shouldApplyDurationHint =

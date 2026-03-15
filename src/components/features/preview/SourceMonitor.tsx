@@ -77,6 +77,8 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
         e.stopPropagation();
         void setOutPoint();
       } else if (key === 'escape') {
+        e.preventDefault();
+        e.stopPropagation();
         void clearInOut();
       } else if (key === ' ') {
         e.preventDefault();
