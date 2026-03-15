@@ -118,6 +118,10 @@ pub(crate) fn forbid_project_asset_protocol(
     }
 }
 
+async fn reset_runtime_state_for_project_change(state: &AppState) {
+    super::source_monitor::reset_source_monitor_state(state).await;
+}
+
 // =============================================================================
 // DTOs
 // =============================================================================
@@ -367,10 +371,12 @@ pub async fn create_project(
     }
 
     *guard = Some(project);
+    drop(guard);
 
     // Allowlist the project-managed workspace for previews/thumbnails.
     // Asset files themselves are allowlisted on import.
     allow_project_asset_protocol(&state, &project_path_canon, &[]);
+    reset_runtime_state_for_project_change(&state).await;
 
     Ok(info)
 }
@@ -424,9 +430,11 @@ pub async fn open_project(path: String, state: State<'_, AppState>) -> Result<Pr
     }
 
     *guard = Some(project);
+    drop(guard);
 
     // Restrict asset protocol to exactly what the opened project needs.
     allow_project_asset_protocol(&state, &project_path_for_scope, &assets_for_scope);
+    reset_runtime_state_for_project_change(&state).await;
 
     Ok(info)
 }
@@ -548,9 +556,11 @@ pub async fn open_or_init_project(
     }
 
     *guard = Some(project);
+    drop(guard);
 
     // Allowlist the project directory for asset protocol.
     allow_project_asset_protocol(&state, &project_path_canon, &assets_for_scope);
+    reset_runtime_state_for_project_change(&state).await;
 
     Ok(info)
 }
@@ -581,6 +591,7 @@ pub async fn close_project(
     };
 
     forbid_project_asset_protocol(&state, &previous_scope.0, &previous_scope.1);
+    reset_runtime_state_for_project_change(&state).await;
     Ok(true)
 }
 

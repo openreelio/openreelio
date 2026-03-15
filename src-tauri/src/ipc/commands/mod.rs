@@ -57,6 +57,9 @@ pub mod workspace;
 // Analysis pipeline commands (reference video analysis - ADR-048)
 pub mod analysis;
 
+// Source monitor commands (dual-viewer, In/Out points, 3-point editing)
+pub mod source_monitor;
+
 // Agent commands (trace writing, plan execution, memory persistence)
 pub mod agent;
 
@@ -82,6 +85,9 @@ pub use workspace::*;
 
 // Re-export analysis pipeline commands
 pub use analysis::*;
+
+// Re-export source monitor commands
+pub use source_monitor::*;
 
 // Re-export agent commands
 pub use agent::*;
