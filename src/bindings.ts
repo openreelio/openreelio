@@ -1355,6 +1355,98 @@ async writeWorkspaceDocument(relativePath: string, content: string, createIfMiss
 }
 },
 /**
+ * Loads an asset into the source monitor, resetting In/Out points and playhead.
+ * 
+ * Passing a null or empty asset_id clears the source monitor.
+ */
+async setSourceAsset(payload: SetSourceAssetPayload) : Promise<Result<SourceMonitorStateDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_source_asset", { payload }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Sets the In point for the source monitor.
+ * 
+ * Validates that the In point is before the current Out point (if set).
+ */
+async setSourceIn(payload: SetSourcePointPayload) : Promise<Result<SourceMonitorStateDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_source_in", { payload }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Sets the Out point for the source monitor.
+ * 
+ * Validates that the Out point is after the current In point (if set).
+ */
+async setSourceOut(payload: SetSourcePointPayload) : Promise<Result<SourceMonitorStateDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_source_out", { payload }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Updates the source monitor playhead without modifying In/Out points.
+ */
+async setSourcePlayhead(payload: SetSourcePointPayload) : Promise<Result<SourceMonitorStateDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("set_source_playhead", { payload }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Clears both In and Out points from the source monitor.
+ */
+async clearSourceInOut() : Promise<Result<SourceMonitorStateDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("clear_source_in_out") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Returns the current source monitor state.
+ */
+async getSourceState() : Promise<Result<SourceMonitorStateDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_source_state") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Finds the clip at the given timeline position, computes the corresponding
+ * source time, and loads it into the source monitor.
+ * 
+ * This is the standard "Match Frame" operation (F key in Premiere/Avid).
+ */
+async matchFrame(payload: SetSourcePointPayload) : Promise<Result<MatchFrameResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("match_frame", { payload }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Reverse Match Frame: from the current source monitor state, finds the
+ * corresponding clip and timeline position in the active sequence.
+ * 
+ * This is the "Reverse Match Frame" operation (Shift+F in Premiere).
+ */
+async reverseMatchFrame() : Promise<Result<ReverseMatchFrameResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reverse_match_frame") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Write an agent trace JSON file to the project's trace directory.
  * 
  * Traces are stored at `{project_path}/.openreelio/traces/{trace_id}.json`.
@@ -2141,7 +2233,10 @@ bpm: number | null;
  */
 spectralCentroidHz: number; 
 /**
- * Per-second RMS loudness values in dB
+ * Per-second RMS loudness values in dB.
+ * 
+ * Sampled at 1 Hz (one value per second), so `loudness_profile[i]`
+ * represents the average loudness during the i-th second of audio.
  */
 loudnessProfile: number[]; 
 /**
@@ -3030,6 +3125,18 @@ export type Marker = { id: string; timeSec: number; label: string; color: Color;
  */
 export type MarkerType = "generic" | "chapter" | "hook" | "cta" | "todo"
 /**
+ * Result of a match frame operation.
+ */
+export type MatchFrameResult = { 
+/**
+ * Asset ID of the clip under the playhead.
+ */
+assetId: string; 
+/**
+ * Corresponding source time within the asset (seconds).
+ */
+sourceTimeSec: number }
+/**
  * Media information extracted by FFprobe.
  */
 export type MediaInfo = { 
@@ -3591,6 +3698,22 @@ provider: string | null;
  */
 params: JsonValue | null }
 /**
+ * Result of a reverse match frame operation.
+ */
+export type ReverseMatchFrameResult = { 
+/**
+ * Clip ID that contains the matching source position.
+ */
+clipId: string; 
+/**
+ * Track ID containing the matched clip.
+ */
+trackId: string; 
+/**
+ * Timeline position corresponding to the source monitor's playhead.
+ */
+timelineSec: number }
+/**
  * Statistical profile of shot durations in a video
  */
 export type RhythmProfile = { 
@@ -3899,6 +4022,22 @@ isPlaying: boolean | null;
  * Timeline duration in seconds (if known).
  */
 durationSec: number | null }
+/**
+ * Input payload for loading an asset into the source monitor.
+ */
+export type SetSourceAssetPayload = { 
+/**
+ * Asset ID to load. Pass null/empty to clear the source monitor.
+ */
+assetId: string | null }
+/**
+ * Input payload for setting an In or Out point.
+ */
+export type SetSourcePointPayload = { 
+/**
+ * Time in seconds for the In or Out point.
+ */
+timeSec: number }
 export type ShortcutSettingsDto = { customShortcuts: { [key in string]: string } }
 /**
  * Configuration for shot detection
@@ -4010,6 +4149,30 @@ startSec: number;
  * End time in seconds
  */
 endSec: number }
+/**
+ * Response DTO for source monitor state.
+ */
+export type SourceMonitorStateDto = { 
+/**
+ * Currently loaded asset ID, or null if none.
+ */
+assetId: string | null; 
+/**
+ * In point in seconds, or null if unset.
+ */
+inPoint: number | null; 
+/**
+ * Out point in seconds, or null if unset.
+ */
+outPoint: number | null; 
+/**
+ * Current playhead position in the source asset (seconds).
+ */
+playheadSec: number; 
+/**
+ * Marked duration (out - in) if both points are set, otherwise null.
+ */
+markedDuration: number | null }
 /**
  * State change types for event broadcasting.
  */
