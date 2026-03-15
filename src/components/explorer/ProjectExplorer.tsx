@@ -19,10 +19,11 @@ import { Search, X, FolderPlus, RefreshCw } from 'lucide-react';
 import { useProjectStore, useWorkspaceStore } from '@/stores';
 import { useTranscriptionWithIndexing } from '@/hooks';
 import { useFileOperations } from '@/hooks/useFileOperations';
+import { commands } from '@/bindings';
 import { createLogger } from '@/services/logger';
 import { FileTree } from './FileTree';
 import { FileTreeContextMenu } from './FileTreeContextMenu';
-import type { FileTreeEntry } from '@/types';
+import type { FileTreeEntry, AssetKind } from '@/types';
 import { ConfirmDialog } from '@/components/ui';
 import {
   TranscriptionDialog,
@@ -31,6 +32,11 @@ import {
 } from '@/components/features/transcription';
 
 const logger = createLogger('ProjectExplorer');
+const SOURCE_MONITOR_SUPPORTED_KINDS = new Set<AssetKind>(['video', 'audio']);
+
+function canLoadIntoSourceMonitor(kind: AssetKind | undefined): boolean {
+  return kind !== undefined && SOURCE_MONITOR_SUPPORTED_KINDS.has(kind);
+}
 
 interface CaptionSegmentPayload {
   startSec: number;
@@ -137,9 +143,16 @@ export function ProjectExplorer() {
     (entry: FileTreeEntry) => {
       if (!entry.isDirectory && entry.assetId) {
         selectAsset(entry.assetId);
+        const assetKind = assets.get(entry.assetId)?.kind ?? entry.kind;
+        if (canLoadIntoSourceMonitor(assetKind)) {
+          // Load previewable source assets into the source monitor on selection.
+          void commands.setSourceAsset({ assetId: entry.assetId }).catch(() => {
+            // IPC failure is non-critical; asset selection still works.
+          });
+        }
       }
     },
-    [selectAsset],
+    [assets, selectAsset],
   );
 
   const handleFileDoubleClick = useCallback(

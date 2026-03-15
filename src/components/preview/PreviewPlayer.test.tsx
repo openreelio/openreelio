@@ -15,7 +15,9 @@ import { PreviewPlayer } from './PreviewPlayer';
 
 describe('PreviewPlayer', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.restoreAllMocks();
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined);
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
   });
 
   // ===========================================================================
@@ -222,6 +224,40 @@ describe('PreviewPlayer', () => {
       });
 
       expect(onPlayheadChange).toHaveBeenCalled();
+    });
+
+    it('should drive the underlying video element from the controlled play state', async () => {
+      const { rerender } = render(
+        <PreviewPlayer src="/test-video.mp4" isPlaying={false} />
+      );
+
+      const video = screen.getByTestId('video-element') as HTMLVideoElement;
+      let paused = true;
+
+      Object.defineProperty(video, 'paused', {
+        configurable: true,
+        get: () => paused,
+      });
+
+      video.play = vi.fn().mockImplementation(() => {
+        paused = false;
+        return Promise.resolve();
+      });
+      video.pause = vi.fn().mockImplementation(() => {
+        paused = true;
+      });
+
+      await act(async () => {
+        rerender(<PreviewPlayer src="/test-video.mp4" isPlaying={true} />);
+      });
+
+      expect(video.play).toHaveBeenCalledOnce();
+
+      await act(async () => {
+        rerender(<PreviewPlayer src="/test-video.mp4" isPlaying={false} />);
+      });
+
+      expect(video.pause).toHaveBeenCalledOnce();
     });
 
     it('should call onPlayStateChange when play state changes', async () => {

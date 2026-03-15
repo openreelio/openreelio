@@ -11,6 +11,8 @@ import type { Sequence, Track, TrackKind } from '@/types';
 // Test Fixtures
 // =============================================================================
 
+const SOURCE_MONITOR_DRAG_TYPE = 'application/x-openreelio-source';
+
 const createMockTrack = (id: string, locked = false, kind: TrackKind = 'video'): Track => ({
   id,
   kind,
@@ -181,6 +183,26 @@ describe('useAssetDrop', () => {
       expect(result.current.isDraggingOver).toBe(true);
     });
 
+    it('should set isDraggingOver to true for source monitor drags', () => {
+      const { result } = renderHook(() => useAssetDrop(defaultOptions));
+      const event = createMockDragEvent('dragenter', {
+        dataTransferTypes: [SOURCE_MONITOR_DRAG_TYPE],
+        dataTransferData: {
+          [SOURCE_MONITOR_DRAG_TYPE]: JSON.stringify({
+            assetId: 'asset-1',
+            sourceIn: 1.25,
+            sourceOut: 4.5,
+          }),
+        },
+      });
+
+      act(() => {
+        result.current.handleDragEnter(event);
+      });
+
+      expect(result.current.isDraggingOver).toBe(true);
+    });
+
     it('should not set isDraggingOver for unsupported data types', () => {
       const { result } = renderHook(() => useAssetDrop(defaultOptions));
       const event = createMockDragEvent('dragenter', {
@@ -305,6 +327,35 @@ describe('useAssetDrop', () => {
         assetId: 'asset-1',
         trackId: 'track-0',
         timelinePosition: 1, // 100px / 100 zoom
+      });
+    });
+
+    it('should preserve source monitor ranges when dropping onto the timeline', () => {
+      const onAssetDrop = vi.fn();
+      const { result } = renderHook(() => useAssetDrop({ ...defaultOptions, onAssetDrop }));
+
+      const event = createMockDragEvent('drop', {
+        dataTransferTypes: [SOURCE_MONITOR_DRAG_TYPE],
+        dataTransferData: {
+          [SOURCE_MONITOR_DRAG_TYPE]: JSON.stringify({
+            assetId: 'asset-1',
+            sourceIn: 2.5,
+            sourceOut: 7.75,
+          }),
+        },
+        currentTarget: createTrackRowContainer([{ trackId: 'track-0', top: 0, height: 60 }]),
+      });
+
+      act(() => {
+        result.current.handleDrop(event);
+      });
+
+      expect(onAssetDrop).toHaveBeenCalledWith({
+        assetId: 'asset-1',
+        trackId: 'track-0',
+        timelinePosition: 1,
+        sourceIn: 2.5,
+        sourceOut: 7.75,
       });
     });
 

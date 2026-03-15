@@ -21,6 +21,10 @@ pub struct InsertClipPayload {
     /// Accepts both `timelineStart` and legacy `timelineIn`.
     #[serde(alias = "timelineIn")]
     pub timeline_start: TimeSec,
+    /// Optional source start time for partial-range inserts.
+    pub source_in: Option<TimeSec>,
+    /// Optional source end time for partial-range inserts.
+    pub source_out: Option<TimeSec>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -786,12 +790,17 @@ impl CommandPayload {
         };
 
         match self {
-            CommandPayload::InsertClip(p) => Box::new(InsertClipCommand::new(
-                &p.sequence_id,
-                &p.track_id,
-                &p.asset_id,
-                p.timeline_start,
-            )),
+            CommandPayload::InsertClip(p) => {
+                let mut command = InsertClipCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.asset_id,
+                    p.timeline_start,
+                );
+                command.source_start = p.source_in;
+                command.source_end = p.source_out;
+                Box::new(command)
+            }
             CommandPayload::RemoveClip(p) => Box::new(RemoveClipCommand::new(
                 &p.sequence_id,
                 &p.track_id,
@@ -1361,6 +1370,30 @@ mod tests {
 
         let parsed = CommandPayload::parse("CreateTrack".to_string(), payload);
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn parse_insert_clip_accepts_source_range() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "assetId": "asset_001",
+            "timelineIn": 10.0,
+            "sourceIn": 2.5,
+            "sourceOut": 8.0,
+        });
+
+        let parsed = CommandPayload::parse("InsertClip".to_string(), payload);
+        assert!(
+            parsed.is_ok(),
+            "expected InsertClip source range to parse, got: {parsed:?}"
+        );
+
+        if let Ok(CommandPayload::InsertClip(p)) = parsed {
+            assert!((p.timeline_start - 10.0).abs() < 0.001);
+            assert_eq!(p.source_in, Some(2.5));
+            assert_eq!(p.source_out, Some(8.0));
+        }
     }
 
     #[test]

@@ -425,3 +425,7 @@ export type {
   UseChromaKeyOptions,
   UseChromaKeyReturn,
 } from './useChromaKey';
+
+// Source Monitor hook
+export { useSourceMonitor } from './useSourceMonitor';
+export type { UseSourceMonitorReturn } from './useSourceMonitor';

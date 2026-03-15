@@ -30,6 +30,28 @@ pub struct SetSourcePointPayload {
     pub time_sec: f64,
 }
 
+/// Result of a match frame operation.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchFrameResult {
+    /// Asset ID of the clip under the playhead.
+    pub asset_id: String,
+    /// Corresponding source time within the asset (seconds).
+    pub source_time_sec: f64,
+}
+
+/// Result of a reverse match frame operation.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReverseMatchFrameResult {
+    /// Clip ID that contains the matching source position.
+    pub clip_id: String,
+    /// Track ID containing the matched clip.
+    pub track_id: String,
+    /// Timeline position corresponding to the source monitor's playhead.
+    pub timeline_sec: f64,
+}
+
 /// Response DTO for source monitor state.
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -200,6 +222,33 @@ pub async fn set_source_out(
     Ok(dto)
 }
 
+/// Updates the source monitor playhead without modifying In/Out points.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state, app), fields(time_sec = payload.time_sec))]
+pub async fn set_source_playhead(
+    payload: SetSourcePointPayload,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<SourceMonitorStateDto, String> {
+    let time_sec = validate_time_sec("timeSec", payload.time_sec)?;
+
+    let dto = {
+        let mut source = state.source_monitor.lock().await;
+
+        if source.asset_id.is_none() {
+            return Err("No asset loaded in source monitor".to_string());
+        }
+
+        source.set_playhead(time_sec);
+        SourceMonitorStateDto::from_runtime(&source)
+    };
+
+    emit_source_monitor_changed(&app, &dto);
+
+    Ok(dto)
+}
+
 /// Clears both In and Out points from the source monitor.
 #[tauri::command]
 #[specta::specta]
@@ -226,6 +275,168 @@ pub async fn clear_source_in_out(
 pub async fn get_source_state(state: State<'_, AppState>) -> Result<SourceMonitorStateDto, String> {
     let source = state.source_monitor.lock().await;
     Ok(SourceMonitorStateDto::from_runtime(&source))
+}
+
+// =============================================================================
+// Match Frame Commands
+// =============================================================================
+
+/// Finds the clip at the given timeline position, computes the corresponding
+/// source time, and loads it into the source monitor.
+///
+/// This is the standard "Match Frame" operation (F key in Premiere/Avid).
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state, app), fields(time_sec = payload.time_sec))]
+pub async fn match_frame(
+    payload: SetSourcePointPayload,
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<MatchFrameResult, String> {
+    let time_sec = validate_time_sec("timeSec", payload.time_sec)?;
+
+    // 1. Find clip at playhead in active sequence
+    let (asset_id, source_time) = {
+        let project_guard = state.project.lock().await;
+        let project = project_guard
+            .as_ref()
+            .ok_or_else(|| "No project open".to_string())?;
+
+        let seq_id = project
+            .state
+            .active_sequence_id
+            .as_ref()
+            .ok_or_else(|| "No active sequence".to_string())?;
+
+        let sequence = project
+            .state
+            .sequences
+            .get(seq_id)
+            .ok_or_else(|| "Active sequence not found".to_string())?;
+
+        let (clip, _track_id) = find_clip_at_time(sequence, time_sec)
+            .ok_or_else(|| "No clip at playhead position".to_string())?;
+
+        (clip.asset_id.clone(), clip.timeline_to_source(time_sec))
+    };
+
+    // 2. Update source monitor (project lock dropped above)
+    let dto = {
+        let mut source = state.source_monitor.lock().await;
+        source.set_asset(Some(asset_id.clone()));
+        source.playhead_sec = source_time;
+        SourceMonitorStateDto::from_runtime(&source)
+    };
+
+    emit_source_monitor_changed(&app, &dto);
+
+    Ok(MatchFrameResult {
+        asset_id,
+        source_time_sec: source_time,
+    })
+}
+
+/// Reverse Match Frame: from the current source monitor state, finds the
+/// corresponding clip and timeline position in the active sequence.
+///
+/// This is the "Reverse Match Frame" operation (Shift+F in Premiere).
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state))]
+pub async fn reverse_match_frame(
+    state: State<'_, AppState>,
+) -> Result<ReverseMatchFrameResult, String> {
+    // 1. Get source monitor state
+    let (asset_id, source_playhead) = {
+        let source = state.source_monitor.lock().await;
+        let id = source
+            .asset_id
+            .clone()
+            .ok_or_else(|| "No asset loaded in source monitor".to_string())?;
+        (id, source.playhead_sec)
+    };
+
+    // 2. Find matching clip in active sequence
+    let project_guard = state.project.lock().await;
+    let project = project_guard
+        .as_ref()
+        .ok_or_else(|| "No project open".to_string())?;
+
+    let seq_id = project
+        .state
+        .active_sequence_id
+        .as_ref()
+        .ok_or_else(|| "No active sequence".to_string())?;
+
+    let sequence = project
+        .state
+        .sequences
+        .get(seq_id)
+        .ok_or_else(|| "Active sequence not found".to_string())?;
+
+    // Search all tracks for a clip with matching asset_id where the source
+    // playhead falls within the clip's source range.
+    for track in &sequence.tracks {
+        if track.muted || !track.visible {
+            continue;
+        }
+        for clip in &track.clips {
+            if clip.asset_id != asset_id {
+                continue;
+            }
+            if clip_contains_source_time(clip, source_playhead) {
+                let safe_speed = if clip.speed > 0.0 {
+                    clip.speed as f64
+                } else {
+                    1.0
+                };
+                let source_offset = if clip.reverse {
+                    clip.range.source_out_sec - source_playhead
+                } else {
+                    source_playhead - clip.range.source_in_sec
+                };
+                let timeline_sec = clip.place.timeline_in_sec + (source_offset / safe_speed);
+
+                return Ok(ReverseMatchFrameResult {
+                    clip_id: clip.id.clone(),
+                    track_id: track.id.clone(),
+                    timeline_sec,
+                });
+            }
+        }
+    }
+
+    Err("No matching clip found on timeline for current source position".to_string())
+}
+
+/// Helper: finds the first visible, unmuted clip at the given timeline time.
+/// Returns the clip reference and its track ID.
+fn find_clip_at_time(
+    sequence: &crate::core::timeline::Sequence,
+    time_sec: f64,
+) -> Option<(&crate::core::timeline::Clip, &str)> {
+    use crate::core::timeline::TrackKind;
+
+    for track in &sequence.tracks {
+        if track.kind != TrackKind::Video && track.kind != TrackKind::Audio {
+            continue;
+        }
+        if track.muted || !track.visible {
+            continue;
+        }
+        for clip in &track.clips {
+            if clip.contains_time(time_sec) {
+                return Some((clip, &track.id));
+            }
+        }
+    }
+    None
+}
+
+/// Helper: checks whether a source time falls inside a clip's source range.
+/// Uses half-open interval [start, end) to match timeline containment semantics.
+fn clip_contains_source_time(clip: &crate::core::timeline::Clip, source_time_sec: f64) -> bool {
+    source_time_sec >= clip.range.source_in_sec && source_time_sec < clip.range.source_out_sec
 }
 
 // =============================================================================
@@ -448,5 +659,119 @@ mod tests {
         let parsed: SourceMonitorStateDto = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.asset_id.as_deref(), Some("asset_001"));
         assert_eq!(parsed.in_point, Some(2.5));
+    }
+
+    // =========================================================================
+    // Match Frame helper tests
+    // =========================================================================
+
+    fn make_clip(
+        asset_id: &str,
+        source_in: f64,
+        source_out: f64,
+        timeline_in: f64,
+    ) -> crate::core::timeline::Clip {
+        crate::core::timeline::Clip::with_range(asset_id, source_in, source_out)
+            .place_at(timeline_in)
+    }
+
+    fn make_sequence_with_clip(
+        clip: crate::core::timeline::Clip,
+    ) -> crate::core::timeline::Sequence {
+        use crate::core::timeline::{
+            CanvasFormat, FpsFormat, Sequence, SequenceFormat, Track, TrackKind,
+        };
+        let mut seq = Sequence::new(
+            "test",
+            SequenceFormat {
+                canvas: CanvasFormat {
+                    width: 1920,
+                    height: 1080,
+                },
+                fps: FpsFormat { num: 30, den: 1 },
+                audio_sample_rate: 48000,
+            },
+        );
+        let mut track = Track::new("Video 1", TrackKind::Video);
+        track.clips.push(clip);
+        seq.tracks.push(track);
+        seq
+    }
+
+    #[test]
+    fn test_find_clip_at_time_returns_clip_when_position_inside() {
+        let clip = make_clip("asset-1", 10.0, 20.0, 5.0);
+        let seq = make_sequence_with_clip(clip);
+
+        let result = find_clip_at_time(&seq, 8.0);
+        assert!(result.is_some());
+        let (found_clip, track_id) = result.unwrap();
+        assert_eq!(found_clip.asset_id, "asset-1");
+        assert!(!track_id.is_empty());
+    }
+
+    #[test]
+    fn test_find_clip_at_time_returns_none_when_outside() {
+        let clip = make_clip("asset-1", 10.0, 20.0, 5.0);
+        let seq = make_sequence_with_clip(clip);
+
+        // Clip is at timeline [5.0, 15.0), so time 20.0 is outside
+        assert!(find_clip_at_time(&seq, 20.0).is_none());
+    }
+
+    #[test]
+    fn test_find_clip_at_time_skips_muted_tracks() {
+        let clip = make_clip("asset-1", 0.0, 10.0, 0.0);
+        let mut seq = make_sequence_with_clip(clip);
+        seq.tracks[0].muted = true;
+
+        assert!(find_clip_at_time(&seq, 5.0).is_none());
+    }
+
+    #[test]
+    fn test_clip_contains_source_time_excludes_exact_out_point() {
+        let clip = make_clip("asset-1", 10.0, 20.0, 5.0);
+
+        assert!(clip_contains_source_time(&clip, 10.0));
+        assert!(clip_contains_source_time(&clip, 19.999));
+        assert!(!clip_contains_source_time(&clip, 20.0));
+    }
+
+    #[test]
+    fn test_match_frame_result_serialization() {
+        let result = MatchFrameResult {
+            asset_id: "asset-42".to_string(),
+            source_time_sec: 12.5,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("assetId"));
+        assert!(json.contains("sourceTimeSec"));
+        let parsed: MatchFrameResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.asset_id, "asset-42");
+        assert_eq!(parsed.source_time_sec, 12.5);
+    }
+
+    #[test]
+    fn test_reverse_match_frame_result_serialization() {
+        let result = ReverseMatchFrameResult {
+            clip_id: "clip-1".to_string(),
+            track_id: "track-v1".to_string(),
+            timeline_sec: 7.25,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("clipId"));
+        assert!(json.contains("trackId"));
+        assert!(json.contains("timelineSec"));
+        let parsed: ReverseMatchFrameResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.timeline_sec, 7.25);
+    }
+
+    #[test]
+    fn test_timeline_to_source_with_trim_offset() {
+        // Clip: source range [10, 20], placed at timeline [5, 15]
+        let clip = make_clip("asset-1", 10.0, 20.0, 5.0);
+        // At timeline 8.0: offset=3.0, source_time = 10.0 + 3.0 = 13.0
+        let source_time = clip.timeline_to_source(8.0);
+        assert!((source_time - 13.0).abs() < 0.001);
     }
 }

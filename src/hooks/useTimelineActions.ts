@@ -178,6 +178,59 @@ function normalizeDurationSec(value: unknown): number | undefined {
   return value;
 }
 
+function normalizeOptionalTimeSec(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+
+  return value;
+}
+
+interface ResolvedAssetDropSourceRange {
+  sourceIn?: number;
+  sourceOut?: number;
+  durationSec?: number;
+}
+
+function resolveAssetDropSourceRange(
+  data: AssetDropData,
+  fullDurationSec?: number,
+): ResolvedAssetDropSourceRange | undefined {
+  const sourceIn = normalizeOptionalTimeSec(data.sourceIn);
+  const sourceOut = normalizeOptionalTimeSec(data.sourceOut);
+
+  if (sourceIn === undefined && sourceOut === undefined) {
+    return {};
+  }
+
+  const effectiveSourceIn = sourceIn ?? 0;
+  const effectiveSourceOut =
+    sourceOut ?? (sourceIn !== undefined ? normalizeDurationSec(fullDurationSec) : undefined);
+
+  if (effectiveSourceOut !== undefined) {
+    if (effectiveSourceOut <= effectiveSourceIn) {
+      // Invalid range: out <= in — reject the drop.
+      return undefined;
+    }
+
+    return {
+      ...(sourceIn !== undefined ? { sourceIn } : {}),
+      sourceOut: effectiveSourceOut,
+      durationSec: effectiveSourceOut - effectiveSourceIn,
+    };
+  }
+
+  // Open-ended range: sourceIn only, no sourceOut resolved.
+  // If sourceIn is at or past the asset duration, the range is invalid.
+  if (sourceIn !== undefined && fullDurationSec !== undefined && sourceIn >= fullDurationSec) {
+    return undefined;
+  }
+
+  return {
+    sourceIn,
+  };
+}
+
 function normalizeProgressPercent(value: number): number {
   if (!Number.isFinite(value)) {
     return 0;
@@ -1632,11 +1685,26 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
       const targetTrack = sequenceSnapshot.tracks.find((track) => track.id === data.trackId);
       const normalizedDurationSecHint = normalizeDurationSec(durationSecHint);
       const normalizedAssetDurationSec = normalizeDurationSec(effectiveDroppedAsset?.durationSec);
+      const resolvedSourceRange = resolveAssetDropSourceRange(
+        data,
+        normalizedDurationSecHint ?? normalizedAssetDurationSec,
+      );
+      if (resolvedSourceRange === undefined) {
+        logger.warn('Invalid source range in drop — ignoring', {
+          sourceIn: data.sourceIn,
+          sourceOut: data.sourceOut,
+        });
+        return false;
+      }
+      const hasExplicitSourceRange =
+        resolvedSourceRange.sourceIn !== undefined || resolvedSourceRange.sourceOut !== undefined;
       const shouldApplyDurationHint =
+        !hasExplicitSourceRange &&
         normalizedDurationSecHint !== undefined &&
         (normalizedAssetDurationSec === undefined ||
           Math.abs(normalizedAssetDurationSec - normalizedDurationSecHint) > 0.001);
       const fallbackClipDurationSec =
+        resolvedSourceRange.durationSec ??
         normalizedDurationSecHint ??
         normalizedAssetDurationSec ??
         (effectiveDroppedAsset
@@ -1682,6 +1750,12 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
               trackId: insertTrack.id,
               assetId: droppedAssetId,
               timelineIn: data.timelinePosition,
+              ...(resolvedSourceRange.sourceIn !== undefined
+                ? { sourceIn: resolvedSourceRange.sourceIn }
+                : {}),
+              ...(resolvedSourceRange.sourceOut !== undefined
+                ? { sourceOut: resolvedSourceRange.sourceOut }
+                : {}),
             },
           });
 
@@ -1753,6 +1827,12 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             trackId: visualTrack.id,
             assetId: droppedAssetId,
             timelineIn: data.timelinePosition,
+            ...(resolvedSourceRange.sourceIn !== undefined
+              ? { sourceIn: resolvedSourceRange.sourceIn }
+              : {}),
+            ...(resolvedSourceRange.sourceOut !== undefined
+              ? { sourceOut: resolvedSourceRange.sourceOut }
+              : {}),
           },
         });
         insertedPrimaryClip = true;
@@ -1847,6 +1927,12 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
               trackId: audioTrack.id,
               assetId: droppedAssetId,
               timelineIn: data.timelinePosition,
+              ...(resolvedSourceRange.sourceIn !== undefined
+                ? { sourceIn: resolvedSourceRange.sourceIn }
+                : {}),
+              ...(resolvedSourceRange.sourceOut !== undefined
+                ? { sourceOut: resolvedSourceRange.sourceOut }
+                : {}),
             },
           });
 

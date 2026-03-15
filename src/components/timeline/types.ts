@@ -36,6 +36,10 @@ export type AssetDropData = AssetDropSource & {
   timelinePosition: number;
   /** Asset kind hint for workspace file drops before registration */
   assetKind?: AssetKind;
+  /** Optional source start time from Source Monitor drags */
+  sourceIn?: number;
+  /** Optional source end time from Source Monitor drags */
+  sourceOut?: number;
 };
 
 export interface PendingAssetDrop {

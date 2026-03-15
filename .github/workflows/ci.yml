@@ -135,6 +135,11 @@ jobs:
         working-directory: src-tauri
         run: cargo fmt --all -- --check
 
+      - name: Check generated bindings are in sync
+        run: |
+          cargo run --locked --manifest-path src-tauri/Cargo.toml --bin export_bindings
+          git diff --exit-code -- src/bindings.ts
+
       - name: Run clippy
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets --all-features -- -D warnings

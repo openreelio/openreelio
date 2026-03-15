@@ -13,6 +13,7 @@ import { resolveTrackDropTarget } from '@/utils/trackDropTarget';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('useAssetDrop');
+const SOURCE_MONITOR_DRAG_TYPE = 'application/x-openreelio-source';
 
 // Re-export for convenience
 export type { AssetDropData } from '@/components/timeline/types';
@@ -63,10 +64,13 @@ interface ParsedAssetDragData {
   assetId?: string;
   workspaceRelativePath?: string;
   kind?: AssetKind;
+  sourceIn?: number;
+  sourceOut?: number;
 }
 
 function hasSupportedDataType(dataTransfer: DataTransfer): boolean {
   return (
+    dataTransfer.types.includes(SOURCE_MONITOR_DRAG_TYPE) ||
     dataTransfer.types.includes('application/json') ||
     dataTransfer.types.includes('text/plain') ||
     dataTransfer.types.includes('application/x-workspace-file')
@@ -77,8 +81,19 @@ function isAssetKind(value: unknown): value is AssetKind {
   return typeof value === 'string' && SUPPORTED_ASSET_KINDS.has(value as AssetKind);
 }
 
+function normalizeOptionalTimeSec(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    return undefined;
+  }
+
+  return value;
+}
+
 function parseDraggedAssetData(dataTransfer: DataTransfer): ParsedAssetDragData | null {
-  let jsonData = dataTransfer.getData('application/json');
+  let jsonData = dataTransfer.getData(SOURCE_MONITOR_DRAG_TYPE);
+  if (!jsonData) {
+    jsonData = dataTransfer.getData('application/json');
+  }
   const textData = dataTransfer.getData('text/plain');
   const workspaceFileData = dataTransfer.getData('application/x-workspace-file');
 
@@ -100,6 +115,10 @@ function parseDraggedAssetData(dataTransfer: DataTransfer): ParsedAssetDragData 
       assetId?: unknown;
       workspaceRelativePath?: unknown;
       kind?: unknown;
+      sourceIn?: unknown;
+      sourceOut?: unknown;
+      inPoint?: unknown;
+      outPoint?: unknown;
     };
 
     const normalizedAssetIdValue =
@@ -122,10 +141,17 @@ function parseDraggedAssetData(dataTransfer: DataTransfer): ParsedAssetDragData 
       return null;
     }
 
+    const sourceIn = normalizeOptionalTimeSec(parsed.sourceIn ?? parsed.inPoint);
+    const sourceOut = normalizeOptionalTimeSec(parsed.sourceOut ?? parsed.outPoint);
+    const hasInvalidBoundedRange =
+      sourceIn !== undefined && sourceOut !== undefined && sourceOut <= sourceIn;
+
     return {
       ...(assetId ? { assetId } : {}),
       ...(workspaceRelativePath ? { workspaceRelativePath } : {}),
       kind: isAssetKind(parsed.kind) ? parsed.kind : undefined,
+      ...(sourceIn !== undefined && !hasInvalidBoundedRange ? { sourceIn } : {}),
+      ...(sourceOut !== undefined && !hasInvalidBoundedRange ? { sourceOut } : {}),
     };
   } catch {
     if (workspaceFileData.trim().length > 0) {
@@ -364,6 +390,8 @@ export function useAssetDrop({
           workspaceRelativePath: parsedData.workspaceRelativePath,
           trackId: track.id,
           timelinePosition,
+          ...(parsedData.sourceIn !== undefined ? { sourceIn: parsedData.sourceIn } : {}),
+          ...(parsedData.sourceOut !== undefined ? { sourceOut: parsedData.sourceOut } : {}),
         });
         return;
       }
@@ -378,6 +406,8 @@ export function useAssetDrop({
         assetId: parsedData.assetId,
         trackId: track.id,
         timelinePosition,
+        ...(parsedData.sourceIn !== undefined ? { sourceIn: parsedData.sourceIn } : {}),
+        ...(parsedData.sourceOut !== undefined ? { sourceOut: parsedData.sourceOut } : {}),
       });
     },
     [sequence, onAssetDrop, scrollX, scrollY, zoom, trackHeaderWidth, trackHeight, assets],
