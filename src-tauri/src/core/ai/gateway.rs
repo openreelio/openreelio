@@ -676,9 +676,7 @@ Return JSON array of edit scripts."#;
                     } else {
                         "timelinePosition"
                     };
-                    if cmd.command_type != "InsertClip"
-                        && cmd.params.get("sequenceId").is_none()
-                    {
+                    if cmd.command_type != "InsertClip" && cmd.params.get("sequenceId").is_none() {
                         issues.push(format!(
                             "{} command {} missing sequenceId",
                             cmd.command_type, i

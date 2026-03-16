@@ -532,7 +532,8 @@ impl EditScriptExecutor {
                 if let Some(so) = source_out {
                     if !so.is_finite() || so < 0.0 {
                         return Err(CoreError::ValidationError(
-                            "InsertEdit sourceOut must be a finite, non-negative number".to_string(),
+                            "InsertEdit sourceOut must be a finite, non-negative number"
+                                .to_string(),
                         ));
                     }
                 }

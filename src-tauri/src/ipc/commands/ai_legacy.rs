@@ -1429,10 +1429,16 @@ pub async fn validate_edit_script(
             // InsertEdit / OverwriteEdit: same as InsertClip but with timelinePosition
             "InsertEdit" | "OverwriteEdit" => {
                 if cmd.params.get("trackId").is_none() {
-                    issues.push(format!("{} command {} missing trackId", cmd.command_type, i));
+                    issues.push(format!(
+                        "{} command {} missing trackId",
+                        cmd.command_type, i
+                    ));
                 }
                 if cmd.params.get("assetId").is_none() {
-                    issues.push(format!("{} command {} missing assetId", cmd.command_type, i));
+                    issues.push(format!(
+                        "{} command {} missing assetId",
+                        cmd.command_type, i
+                    ));
                 }
                 match cmd.params.get("timelinePosition") {
                     None => issues.push(format!(
@@ -1449,13 +1455,16 @@ pub async fn validate_edit_script(
             }
             // RippleDelete / Lift: require clipIds array
             "RippleDelete" | "Lift" => {
-                let has_clip_ids = cmd.params.get("clipIds")
+                let has_clip_ids = cmd
+                    .params
+                    .get("clipIds")
                     .map(|v| v.is_array())
                     .unwrap_or(false);
                 let has_clip_id = cmd.params.get("clipId").is_some();
                 if !has_clip_ids && !has_clip_id {
                     issues.push(format!(
-                        "{} command {} missing clipIds (or legacy clipId)", cmd.command_type, i
+                        "{} command {} missing clipIds (or legacy clipId)",
+                        cmd.command_type, i
                     ));
                 }
             }
