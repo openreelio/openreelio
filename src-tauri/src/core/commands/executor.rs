@@ -3,12 +3,13 @@
 //! Handles command execution, undo/redo, and operation logging.
 //! This is the central hub for all state-changing operations.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use crate::core::{
-    commands::{Command, CommandResult},
+    commands::{Command, CommandResult, StateChange},
     project::{OpKind, Operation, OpsLog, ProjectState},
+    timeline::Clip,
     CoreError, CoreResult, OpId,
 };
 
@@ -150,8 +151,13 @@ impl CommandExecutor {
         // Many commands generate IDs at runtime (clips/tracks/sequences), so the operation
         // payload must include the realized entities/fields.
         let op_kind = Self::type_name_to_op_kind(&type_name);
-        let op_payload =
-            Self::build_operation_payload(op_kind.clone(), command_json, &result, state)?;
+        let op_payload = Self::build_operation_payload(
+            &type_name,
+            op_kind.clone(),
+            command_json,
+            &result,
+            state,
+        )?;
 
         tracing::debug!(
             command_type = %type_name,
@@ -200,7 +206,756 @@ impl CommandExecutor {
         Ok(result)
     }
 
+    fn approx_time_eq(lhs: f64, rhs: f64) -> bool {
+        (lhs - rhs).abs() <= 1e-9
+    }
+
+    fn find_clip_in_sequence<'a>(
+        sequence: &'a crate::core::timeline::Sequence,
+        clip_id: &str,
+    ) -> Option<(&'a str, &'a Clip)> {
+        sequence.tracks.iter().find_map(|track| {
+            track
+                .get_clip(clip_id)
+                .map(|clip| (track.id.as_str(), clip))
+        })
+    }
+
+    fn collect_clip_change_ids(result: &CommandResult) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let mut created = Vec::new();
+        let mut modified = Vec::new();
+        let mut deleted = Vec::new();
+        let mut seen_created = HashSet::new();
+        let mut seen_modified = HashSet::new();
+        let mut seen_deleted = HashSet::new();
+
+        for change in &result.changes {
+            match change {
+                StateChange::ClipCreated { clip_id } => {
+                    if seen_created.insert(clip_id.clone()) {
+                        created.push(clip_id.clone());
+                    }
+                }
+                StateChange::ClipModified { clip_id } => {
+                    if seen_modified.insert(clip_id.clone()) {
+                        modified.push(clip_id.clone());
+                    }
+                }
+                StateChange::ClipDeleted { clip_id } => {
+                    if seen_deleted.insert(clip_id.clone()) {
+                        deleted.push(clip_id.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        (created, modified, deleted)
+    }
+
+    fn build_insert_edit_batch_payload(
+        command_json: &serde_json::Value,
+        result: &CommandResult,
+        state: &ProjectState,
+    ) -> CoreResult<serde_json::Value> {
+        fn get_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+            value.get(key).and_then(|v| v.as_str())
+        }
+
+        fn get_f64(value: &serde_json::Value, key: &str) -> Option<f64> {
+            value.get(key).and_then(|v| v.as_f64())
+        }
+
+        fn to_value<T: serde::Serialize>(value: &T) -> CoreResult<serde_json::Value> {
+            serde_json::to_value(value).map_err(|e| {
+                CoreError::Internal(format!("Failed to serialize operation payload: {e}"))
+            })
+        }
+
+        let seq_id = get_str(command_json, "sequenceId").ok_or_else(|| {
+            CoreError::Internal("InsertEdit payload missing sequenceId".to_string())
+        })?;
+        let timeline_position = get_f64(command_json, "timelinePosition").ok_or_else(|| {
+            CoreError::Internal("InsertEdit payload missing timelinePosition".to_string())
+        })?;
+        let inserted_clip_id = result
+            .created_ids
+            .first()
+            .ok_or_else(|| CoreError::Internal("InsertEdit missing createdId".to_string()))?;
+
+        let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+            CoreError::Internal(format!("InsertEdit could not find sequence: {seq_id}"))
+        })?;
+        let (insert_track_id, inserted_clip) =
+            Self::find_clip_in_sequence(sequence, inserted_clip_id).ok_or_else(|| {
+                CoreError::Internal(format!(
+                    "InsertEdit could not find inserted clip: {inserted_clip_id}"
+                ))
+            })?;
+        let insert_duration = inserted_clip.place.duration_sec;
+
+        let (created_clip_ids, modified_clip_ids, _) = Self::collect_clip_change_ids(result);
+        let split_fragment_ids: Vec<_> = created_clip_ids
+            .into_iter()
+            .filter(|clip_id| clip_id != inserted_clip_id)
+            .collect();
+
+        let mut split_original_ids = HashSet::new();
+        let mut split_ops = Vec::new();
+
+        for fragment_id in split_fragment_ids {
+            let (fragment_track_id, fragment) = Self::find_clip_in_sequence(sequence, &fragment_id)
+                .ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "InsertEdit could not find split fragment: {fragment_id}"
+                    ))
+                })?;
+
+            let original_id = modified_clip_ids
+                .iter()
+                .find(|clip_id| {
+                    Self::find_clip_in_sequence(sequence, clip_id).is_some_and(
+                        |(track_id, original)| {
+                            track_id == fragment_track_id
+                                && Self::approx_time_eq(
+                                    original.place.timeline_out_sec(),
+                                    timeline_position,
+                                )
+                                && Self::approx_time_eq(
+                                    fragment.place.timeline_in_sec,
+                                    timeline_position + insert_duration,
+                                )
+                                && Self::approx_time_eq(
+                                    original.range.source_out_sec,
+                                    fragment.range.source_in_sec,
+                                )
+                        },
+                    )
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "InsertEdit could not match split original for fragment: {fragment_id}"
+                    ))
+                })?;
+
+            let (_, original) =
+                Self::find_clip_in_sequence(sequence, &original_id).ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "InsertEdit could not find split original clip: {original_id}"
+                    ))
+                })?;
+
+            split_original_ids.insert(original_id.clone());
+            split_ops.push(Operation::new(
+                OpKind::ClipSplit,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": fragment_track_id,
+                    "originalClip": to_value(original)?,
+                    "newClip": to_value(fragment)?,
+                }),
+            ));
+        }
+
+        let mut move_targets: Vec<_> = modified_clip_ids
+            .into_iter()
+            .filter(|clip_id| !split_original_ids.contains(clip_id))
+            .map(|clip_id| {
+                let (track_id, clip) =
+                    Self::find_clip_in_sequence(sequence, &clip_id).ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "InsertEdit could not find shifted clip: {clip_id}"
+                        ))
+                    })?;
+                Ok::<_, CoreError>((track_id.to_string(), clip.clone()))
+            })
+            .collect::<Result<_, _>>()?;
+
+        move_targets.sort_by(|(lhs_track_id, lhs_clip), (rhs_track_id, rhs_clip)| {
+            rhs_clip
+                .place
+                .timeline_in_sec
+                .total_cmp(&lhs_clip.place.timeline_in_sec)
+                .then_with(|| rhs_track_id.cmp(lhs_track_id))
+                .then_with(|| rhs_clip.id.cmp(&lhs_clip.id))
+        });
+
+        let mut operations = Vec::new();
+        for (track_id, clip) in move_targets {
+            operations.push(Operation::new(
+                OpKind::ClipMove,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": clip.id,
+                    "trackId": track_id,
+                    "timelineIn": clip.place.timeline_in_sec,
+                }),
+            ));
+        }
+        operations.extend(split_ops);
+        operations.push(Operation::new(
+            OpKind::ClipAdd,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "trackId": insert_track_id,
+                "clip": to_value(inserted_clip)?,
+            }),
+        ));
+
+        Ok(serde_json::json!({
+            "operations": operations,
+        }))
+    }
+
+    fn build_overwrite_edit_batch_payload(
+        command_json: &serde_json::Value,
+        result: &CommandResult,
+        state: &ProjectState,
+    ) -> CoreResult<serde_json::Value> {
+        fn get_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+            value.get(key).and_then(|v| v.as_str())
+        }
+
+        fn get_f64(value: &serde_json::Value, key: &str) -> Option<f64> {
+            value.get(key).and_then(|v| v.as_f64())
+        }
+
+        fn to_value<T: serde::Serialize>(value: &T) -> CoreResult<serde_json::Value> {
+            serde_json::to_value(value).map_err(|e| {
+                CoreError::Internal(format!("Failed to serialize operation payload: {e}"))
+            })
+        }
+
+        let seq_id = get_str(command_json, "sequenceId").ok_or_else(|| {
+            CoreError::Internal("OverwriteEdit payload missing sequenceId".to_string())
+        })?;
+        let track_id = get_str(command_json, "trackId").ok_or_else(|| {
+            CoreError::Internal("OverwriteEdit payload missing trackId".to_string())
+        })?;
+        let timeline_position = get_f64(command_json, "timelinePosition").ok_or_else(|| {
+            CoreError::Internal("OverwriteEdit payload missing timelinePosition".to_string())
+        })?;
+        let inserted_clip_id = result
+            .created_ids
+            .first()
+            .ok_or_else(|| CoreError::Internal("OverwriteEdit missing createdId".to_string()))?;
+
+        let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+            CoreError::Internal(format!("OverwriteEdit could not find sequence: {seq_id}"))
+        })?;
+        let (_, inserted_clip) = Self::find_clip_in_sequence(sequence, inserted_clip_id)
+            .ok_or_else(|| {
+                CoreError::Internal(format!(
+                    "OverwriteEdit could not find inserted clip: {inserted_clip_id}"
+                ))
+            })?;
+        let overwrite_end = timeline_position + inserted_clip.place.duration_sec;
+
+        let (created_clip_ids, modified_clip_ids, deleted_clip_ids) =
+            Self::collect_clip_change_ids(result);
+        let split_fragment_ids: Vec<_> = created_clip_ids
+            .into_iter()
+            .filter(|clip_id| clip_id != inserted_clip_id)
+            .collect();
+
+        let mut split_original_ids = HashSet::new();
+        let mut operations = Vec::new();
+
+        for clip_id in deleted_clip_ids {
+            operations.push(Operation::new(
+                OpKind::ClipRemove,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clipId": clip_id,
+                }),
+            ));
+        }
+
+        for fragment_id in split_fragment_ids {
+            let (fragment_track_id, fragment) = Self::find_clip_in_sequence(sequence, &fragment_id)
+                .ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "OverwriteEdit could not find split fragment: {fragment_id}"
+                    ))
+                })?;
+
+            let original_id = modified_clip_ids
+                .iter()
+                .find(|clip_id| {
+                    Self::find_clip_in_sequence(sequence, clip_id).is_some_and(
+                        |(modified_track_id, original)| {
+                            modified_track_id == fragment_track_id
+                                && Self::approx_time_eq(
+                                    original.place.timeline_out_sec(),
+                                    timeline_position,
+                                )
+                                && Self::approx_time_eq(
+                                    fragment.place.timeline_in_sec,
+                                    overwrite_end,
+                                )
+                                && Self::approx_time_eq(
+                                    original.range.source_out_sec,
+                                    fragment.range.source_in_sec,
+                                )
+                        },
+                    )
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "OverwriteEdit could not match split original for fragment: {fragment_id}"
+                    ))
+                })?;
+
+            let (_, original) =
+                Self::find_clip_in_sequence(sequence, &original_id).ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "OverwriteEdit could not find split original clip: {original_id}"
+                    ))
+                })?;
+
+            split_original_ids.insert(original_id.clone());
+            operations.push(Operation::new(
+                OpKind::ClipSplit,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": fragment_track_id,
+                    "originalClip": to_value(original)?,
+                    "newClip": to_value(fragment)?,
+                }),
+            ));
+        }
+
+        for clip_id in modified_clip_ids
+            .into_iter()
+            .filter(|clip_id| !split_original_ids.contains(clip_id))
+        {
+            let (_, clip) = Self::find_clip_in_sequence(sequence, &clip_id).ok_or_else(|| {
+                CoreError::Internal(format!(
+                    "OverwriteEdit could not find trimmed clip: {clip_id}"
+                ))
+            })?;
+
+            operations.push(Operation::new(
+                OpKind::ClipTrim,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": clip.id,
+                    "sourceIn": clip.range.source_in_sec,
+                    "sourceOut": clip.range.source_out_sec,
+                    "timelineIn": clip.place.timeline_in_sec,
+                    "duration": clip.place.duration_sec,
+                }),
+            ));
+        }
+
+        operations.push(Operation::new(
+            OpKind::ClipAdd,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "trackId": track_id,
+                "clip": to_value(inserted_clip)?,
+            }),
+        ));
+
+        Ok(serde_json::json!({
+            "operations": operations,
+        }))
+    }
+
+    fn build_ripple_delete_batch_payload(
+        command_json: &serde_json::Value,
+        result: &CommandResult,
+        state: &ProjectState,
+    ) -> CoreResult<serde_json::Value> {
+        fn get_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+            value.get(key).and_then(|v| v.as_str())
+        }
+
+        let seq_id = get_str(command_json, "sequenceId").ok_or_else(|| {
+            CoreError::Internal("RippleDelete payload missing sequenceId".to_string())
+        })?;
+        let track_id = get_str(command_json, "trackId").ok_or_else(|| {
+            CoreError::Internal("RippleDelete payload missing trackId".to_string())
+        })?;
+
+        let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+            CoreError::Internal(format!("RippleDelete could not find sequence: {seq_id}"))
+        })?;
+        let (_, modified_clip_ids, deleted_clip_ids) = Self::collect_clip_change_ids(result);
+
+        let mut move_targets = modified_clip_ids
+            .into_iter()
+            .map(|clip_id| {
+                let (move_track_id, clip) = Self::find_clip_in_sequence(sequence, &clip_id)
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "RippleDelete could not find shifted clip: {clip_id}"
+                        ))
+                    })?;
+                Ok::<_, CoreError>((move_track_id.to_string(), clip.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        move_targets.sort_by(|(lhs_track_id, lhs_clip), (rhs_track_id, rhs_clip)| {
+            lhs_track_id
+                .cmp(rhs_track_id)
+                .then_with(|| {
+                    lhs_clip
+                        .place
+                        .timeline_in_sec
+                        .total_cmp(&rhs_clip.place.timeline_in_sec)
+                })
+                .then_with(|| lhs_clip.id.cmp(&rhs_clip.id))
+        });
+
+        let mut operations = Vec::new();
+        for clip_id in deleted_clip_ids {
+            operations.push(Operation::new(
+                OpKind::ClipRemove,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clipId": clip_id,
+                }),
+            ));
+        }
+        for (move_track_id, clip) in move_targets {
+            operations.push(Operation::new(
+                OpKind::ClipMove,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": move_track_id,
+                    "clipId": clip.id,
+                    "timelineIn": clip.place.timeline_in_sec,
+                }),
+            ));
+        }
+
+        Ok(serde_json::json!({
+            "operations": operations,
+        }))
+    }
+
+    fn build_clip_move_batch_payload(
+        command_name: &str,
+        seq_id: &str,
+        result: &CommandResult,
+        state: &ProjectState,
+    ) -> CoreResult<serde_json::Value> {
+        let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+            CoreError::Internal(format!("{command_name} could not find sequence: {seq_id}"))
+        })?;
+        let (_, modified_clip_ids, _) = Self::collect_clip_change_ids(result);
+
+        let mut move_targets = modified_clip_ids
+            .into_iter()
+            .map(|clip_id| {
+                let (track_id, clip) =
+                    Self::find_clip_in_sequence(sequence, &clip_id).ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "{command_name} could not find shifted clip: {clip_id}"
+                        ))
+                    })?;
+                Ok::<_, CoreError>((track_id.to_string(), clip.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        move_targets.sort_by(|(lhs_track_id, lhs_clip), (rhs_track_id, rhs_clip)| {
+            lhs_track_id
+                .cmp(rhs_track_id)
+                .then_with(|| {
+                    lhs_clip
+                        .place
+                        .timeline_in_sec
+                        .total_cmp(&rhs_clip.place.timeline_in_sec)
+                })
+                .then_with(|| lhs_clip.id.cmp(&rhs_clip.id))
+        });
+
+        let operations = move_targets
+            .into_iter()
+            .map(|(track_id, clip)| {
+                Operation::new(
+                    OpKind::ClipMove,
+                    serde_json::json!({
+                        "sequenceId": seq_id,
+                        "trackId": track_id,
+                        "clipId": clip.id,
+                        "timelineIn": clip.place.timeline_in_sec,
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        Ok(serde_json::json!({
+            "operations": operations,
+        }))
+    }
+
+    fn build_close_gap_batch_payload(
+        command_json: &serde_json::Value,
+        result: &CommandResult,
+        state: &ProjectState,
+    ) -> CoreResult<serde_json::Value> {
+        fn get_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+            value.get(key).and_then(|v| v.as_str())
+        }
+
+        let seq_id = get_str(command_json, "sequenceId").ok_or_else(|| {
+            CoreError::Internal("CloseGap payload missing sequenceId".to_string())
+        })?;
+
+        Self::build_clip_move_batch_payload("CloseGap", seq_id, result, state)
+    }
+
+    fn build_close_all_gaps_batch_payload(
+        command_json: &serde_json::Value,
+        result: &CommandResult,
+        state: &ProjectState,
+    ) -> CoreResult<serde_json::Value> {
+        fn get_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+            value.get(key).and_then(|v| v.as_str())
+        }
+
+        let seq_id = get_str(command_json, "sequenceId").ok_or_else(|| {
+            CoreError::Internal("CloseAllGaps payload missing sequenceId".to_string())
+        })?;
+
+        Self::build_clip_move_batch_payload("CloseAllGaps", seq_id, result, state)
+    }
+
+    fn build_lift_batch_payload(
+        command_json: &serde_json::Value,
+        result: &CommandResult,
+    ) -> CoreResult<serde_json::Value> {
+        fn get_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+            value.get(key).and_then(|v| v.as_str())
+        }
+
+        let seq_id = get_str(command_json, "sequenceId")
+            .ok_or_else(|| CoreError::Internal("Lift payload missing sequenceId".to_string()))?;
+        let track_id = get_str(command_json, "trackId")
+            .ok_or_else(|| CoreError::Internal("Lift payload missing trackId".to_string()))?;
+        let (_, _, deleted_clip_ids) = Self::collect_clip_change_ids(result);
+
+        let operations = deleted_clip_ids
+            .into_iter()
+            .map(|clip_id| {
+                Operation::new(
+                    OpKind::ClipRemove,
+                    serde_json::json!({
+                        "sequenceId": seq_id,
+                        "trackId": track_id,
+                        "clipId": clip_id,
+                    }),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        Ok(serde_json::json!({
+            "operations": operations,
+        }))
+    }
+
+    fn build_extract_edit_batch_payload(
+        command_json: &serde_json::Value,
+        result: &CommandResult,
+        state: &ProjectState,
+    ) -> CoreResult<serde_json::Value> {
+        fn get_str<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+            value.get(key).and_then(|v| v.as_str())
+        }
+
+        fn get_f64(value: &serde_json::Value, key: &str) -> Option<f64> {
+            value.get(key).and_then(|v| v.as_f64())
+        }
+
+        fn to_value<T: serde::Serialize>(value: &T) -> CoreResult<serde_json::Value> {
+            serde_json::to_value(value).map_err(|e| {
+                CoreError::Internal(format!("Failed to serialize operation payload: {e}"))
+            })
+        }
+
+        let seq_id = get_str(command_json, "sequenceId").ok_or_else(|| {
+            CoreError::Internal("ExtractEdit payload missing sequenceId".to_string())
+        })?;
+        let track_id = get_str(command_json, "trackId").ok_or_else(|| {
+            CoreError::Internal("ExtractEdit payload missing trackId".to_string())
+        })?;
+        let in_point = get_f64(command_json, "inPoint").ok_or_else(|| {
+            CoreError::Internal("ExtractEdit payload missing inPoint".to_string())
+        })?;
+        let out_point = get_f64(command_json, "outPoint").ok_or_else(|| {
+            CoreError::Internal("ExtractEdit payload missing outPoint".to_string())
+        })?;
+        let extract_duration = out_point - in_point;
+
+        let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+            CoreError::Internal(format!("ExtractEdit could not find sequence: {seq_id}"))
+        })?;
+        let (created_clip_ids, modified_clip_ids, deleted_clip_ids) =
+            Self::collect_clip_change_ids(result);
+
+        let mut split_original_ids = HashSet::new();
+        let mut split_fragment_ids = HashSet::new();
+        let mut split_ops = Vec::new();
+
+        for fragment_id in created_clip_ids {
+            let (fragment_track_id, fragment) = Self::find_clip_in_sequence(sequence, &fragment_id)
+                .ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "ExtractEdit could not find split fragment: {fragment_id}"
+                    ))
+                })?;
+
+            let original_id = modified_clip_ids
+                .iter()
+                .find(|clip_id| {
+                    Self::find_clip_in_sequence(sequence, clip_id).is_some_and(
+                        |(modified_track_id, original)| {
+                            let safe_speed = if original.speed > 0.0 {
+                                original.speed as f64
+                            } else {
+                                1.0
+                            };
+                            modified_track_id == fragment_track_id
+                                && modified_track_id == track_id
+                                && Self::approx_time_eq(original.place.timeline_out_sec(), in_point)
+                                && Self::approx_time_eq(fragment.place.timeline_in_sec, in_point)
+                                && Self::approx_time_eq(
+                                    original.range.source_out_sec + extract_duration * safe_speed,
+                                    fragment.range.source_in_sec,
+                                )
+                        },
+                    )
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "ExtractEdit could not match split original for fragment: {fragment_id}"
+                    ))
+                })?;
+
+            let (_, original) =
+                Self::find_clip_in_sequence(sequence, &original_id).ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "ExtractEdit could not find split original clip: {original_id}"
+                    ))
+                })?;
+
+            split_original_ids.insert(original_id.clone());
+            split_fragment_ids.insert(fragment_id.clone());
+            split_ops.push((
+                fragment.place.timeline_in_sec,
+                fragment.id.clone(),
+                Operation::new(
+                    OpKind::ClipSplit,
+                    serde_json::json!({
+                        "sequenceId": seq_id,
+                        "trackId": fragment_track_id,
+                        "originalClip": to_value(original)?,
+                        "newClip": to_value(fragment)?,
+                    }),
+                ),
+            ));
+        }
+
+        split_ops.sort_by(
+            |(lhs_timeline_in, lhs_id, _), (rhs_timeline_in, rhs_id, _)| {
+                lhs_timeline_in
+                    .total_cmp(rhs_timeline_in)
+                    .then_with(|| lhs_id.cmp(rhs_id))
+            },
+        );
+
+        let mut target_trim_targets = Vec::new();
+        let mut move_targets = Vec::new();
+
+        for clip_id in modified_clip_ids.into_iter().filter(|clip_id| {
+            !split_original_ids.contains(clip_id) && !split_fragment_ids.contains(clip_id)
+        }) {
+            let (modified_track_id, clip) = Self::find_clip_in_sequence(sequence, &clip_id)
+                .ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "ExtractEdit could not find modified clip: {clip_id}"
+                    ))
+                })?;
+
+            if modified_track_id == track_id {
+                target_trim_targets.push(clip.clone());
+            } else {
+                move_targets.push((modified_track_id.to_string(), clip.clone()));
+            }
+        }
+
+        target_trim_targets.sort_by(|lhs_clip, rhs_clip| {
+            lhs_clip
+                .place
+                .timeline_in_sec
+                .total_cmp(&rhs_clip.place.timeline_in_sec)
+                .then_with(|| lhs_clip.id.cmp(&rhs_clip.id))
+        });
+        move_targets.sort_by(|(lhs_track_id, lhs_clip), (rhs_track_id, rhs_clip)| {
+            lhs_track_id
+                .cmp(rhs_track_id)
+                .then_with(|| {
+                    lhs_clip
+                        .place
+                        .timeline_in_sec
+                        .total_cmp(&rhs_clip.place.timeline_in_sec)
+                })
+                .then_with(|| lhs_clip.id.cmp(&rhs_clip.id))
+        });
+
+        let mut operations = Vec::new();
+        for clip_id in deleted_clip_ids {
+            operations.push(Operation::new(
+                OpKind::ClipRemove,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clipId": clip_id,
+                }),
+            ));
+        }
+        for (_, _, op) in split_ops {
+            operations.push(op);
+        }
+        for clip in target_trim_targets {
+            operations.push(Operation::new(
+                OpKind::ClipTrim,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "clipId": clip.id,
+                    "sourceIn": clip.range.source_in_sec,
+                    "sourceOut": clip.range.source_out_sec,
+                    "timelineIn": clip.place.timeline_in_sec,
+                    "duration": clip.place.duration_sec,
+                }),
+            ));
+        }
+        for (move_track_id, clip) in move_targets {
+            operations.push(Operation::new(
+                OpKind::ClipMove,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": move_track_id,
+                    "clipId": clip.id,
+                    "timelineIn": clip.place.timeline_in_sec,
+                }),
+            ));
+        }
+
+        Ok(serde_json::json!({
+            "operations": operations,
+        }))
+    }
+
     fn build_operation_payload(
+        type_name: &str,
         op_kind: OpKind,
         command_json: serde_json::Value,
         result: &CommandResult,
@@ -571,6 +1326,25 @@ impl CommandExecutor {
                 }))
             }
 
+            OpKind::Batch => match type_name {
+                "InsertEdit" => Self::build_insert_edit_batch_payload(&command_json, result, state),
+                "OverwriteEdit" => {
+                    Self::build_overwrite_edit_batch_payload(&command_json, result, state)
+                }
+                "RippleDelete" => {
+                    Self::build_ripple_delete_batch_payload(&command_json, result, state)
+                }
+                "CloseGap" => Self::build_close_gap_batch_payload(&command_json, result, state),
+                "CloseAllGaps" => {
+                    Self::build_close_all_gaps_batch_payload(&command_json, result, state)
+                }
+                "Lift" => Self::build_lift_batch_payload(&command_json, result),
+                "ExtractEdit" => {
+                    Self::build_extract_edit_batch_payload(&command_json, result, state)
+                }
+                _ => Ok(command_json),
+            },
+
             // Bin operations (deprecated - pass through command JSON for backward compatibility)
             OpKind::BinCreate
             | OpKind::BinRemove
@@ -684,6 +1458,8 @@ impl CommandExecutor {
     fn type_name_to_op_kind(type_name: &str) -> OpKind {
         match type_name {
             "InsertClip" | "AddClip" => OpKind::ClipAdd,
+            "InsertEdit" | "OverwriteEdit" | "RippleDelete" | "CloseGap" | "CloseAllGaps"
+            | "Lift" | "ExtractEdit" => OpKind::Batch,
             "RemoveClip" | "DeleteClip" => OpKind::ClipRemove,
             "MoveClip" => OpKind::ClipMove,
             "TrimClip" => OpKind::ClipTrim,
@@ -746,9 +1522,10 @@ mod tests {
     use super::*;
     use crate::core::assets::{Asset, VideoInfo};
     use crate::core::commands::{
-        AddEffectCommand, CreateSequenceCommand, ImportAssetCommand, InsertClipCommand,
-        MoveClipCommand, SetClipBlendModeCommand, SetTrackBlendModeCommand, SplitClipCommand,
-        StateChange, TrimClipCommand,
+        AddEffectCommand, CloseAllGapsCommand, CloseGapCommand, CreateSequenceCommand,
+        ExtractEditCommand, ImportAssetCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
+        MoveClipCommand, OverwriteEditCommand, RippleDeleteCommand, SetClipBlendModeCommand,
+        SetTrackBlendModeCommand, SplitClipCommand, StateChange, TrimClipCommand,
     };
     use crate::core::effects::{EffectType, ParamValue};
     use crate::core::project::{OpKind, Operation, OpsLog, ProjectMeta, ProjectState};
@@ -834,6 +1611,17 @@ mod tests {
 
         fn to_json(&self) -> serde_json::Value {
             serde_json::json!({ "assetId": self.asset_id })
+        }
+    }
+
+    fn assert_track_has_no_overlap(track: &Track) {
+        for clips in track.clips.windows(2) {
+            assert!(
+                clips[0].place.timeline_out_sec() <= clips[1].place.timeline_in_sec,
+                "Clips {} and {} overlap",
+                clips[0].id,
+                clips[1].id
+            );
         }
     }
 
@@ -1060,6 +1848,692 @@ mod tests {
     }
 
     #[test]
+    fn test_executor_persists_insert_edit_as_replayable_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let asset_path = temp_dir.path().join("test.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+
+        let import_cmd = ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(30.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+        let asset_id = import_cmd.asset_id().to_string();
+
+        let base_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)
+                        .with_source_range(0.0, 20.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let base_clip_id = base_result.created_ids[0].clone();
+
+        let downstream_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 21.0)
+                        .with_source_range(0.0, 4.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let downstream_clip_id = downstream_result.created_ids[0].clone();
+
+        let insert_edit_result = executor
+            .execute(
+                Box::new(
+                    InsertEditCommand::new(&seq_id, &track_id, &asset_id, 8.0)
+                        .with_source_range(0.0, 3.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let inserted_clip_id = insert_edit_result.created_ids[0].clone();
+
+        let persisted = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted.kind, OpKind::Batch);
+
+        let sub_ops: Vec<Operation> = persisted.payload["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()).unwrap())
+            .collect();
+        assert_eq!(sub_ops.len(), 3);
+        assert_eq!(sub_ops[0].kind, OpKind::ClipMove);
+        assert_eq!(sub_ops[1].kind, OpKind::ClipSplit);
+        assert_eq!(sub_ops[2].kind, OpKind::ClipAdd);
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_track = replayed.sequences[&seq_id].get_track(&track_id).unwrap();
+        assert_track_has_no_overlap(replayed_track);
+        assert_eq!(replayed_track.clips.len(), 4);
+
+        let left = replayed_track.get_clip(&base_clip_id).unwrap();
+        assert_eq!(left.place.timeline_in_sec, 0.0);
+        assert_eq!(left.place.duration_sec, 8.0);
+        assert_eq!(left.range.source_out_sec, 8.0);
+
+        let inserted = replayed_track.get_clip(&inserted_clip_id).unwrap();
+        assert_eq!(inserted.place.timeline_in_sec, 8.0);
+        assert_eq!(inserted.place.duration_sec, 3.0);
+
+        let right_fragment = replayed_track
+            .clips
+            .iter()
+            .find(|clip| {
+                clip.id != base_clip_id
+                    && clip.id != inserted_clip_id
+                    && clip.id != downstream_clip_id
+            })
+            .unwrap();
+        assert_eq!(right_fragment.place.timeline_in_sec, 11.0);
+        assert_eq!(right_fragment.place.duration_sec, 12.0);
+        assert_eq!(right_fragment.range.source_in_sec, 8.0);
+        assert_eq!(right_fragment.range.source_out_sec, 20.0);
+
+        let downstream = replayed_track.get_clip(&downstream_clip_id).unwrap();
+        assert_eq!(downstream.place.timeline_in_sec, 24.0);
+        assert_eq!(downstream.place.duration_sec, 4.0);
+    }
+
+    #[test]
+    fn test_executor_persists_overwrite_edit_as_replayable_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let asset_path = temp_dir.path().join("test.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+
+        let import_cmd = ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(30.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+        let asset_id = import_cmd.asset_id().to_string();
+
+        let left_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)
+                        .with_source_range(0.0, 6.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let left_clip_id = left_result.created_ids[0].clone();
+
+        let removed_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 6.0)
+                        .with_source_range(0.0, 3.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let removed_clip_id = removed_result.created_ids[0].clone();
+
+        let right_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 9.0)
+                        .with_source_range(0.0, 6.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let right_clip_id = right_result.created_ids[0].clone();
+
+        let overwrite_result = executor
+            .execute(
+                Box::new(
+                    OverwriteEditCommand::new(&seq_id, &track_id, &asset_id, 4.0)
+                        .with_source_range(0.0, 6.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let inserted_clip_id = overwrite_result.created_ids[0].clone();
+
+        let persisted = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted.kind, OpKind::Batch);
+
+        let sub_ops: Vec<Operation> = persisted.payload["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()).unwrap())
+            .collect();
+        assert_eq!(sub_ops.len(), 4);
+        assert_eq!(sub_ops[0].kind, OpKind::ClipRemove);
+        assert_eq!(sub_ops[1].kind, OpKind::ClipTrim);
+        assert_eq!(sub_ops[2].kind, OpKind::ClipTrim);
+        assert_eq!(sub_ops[3].kind, OpKind::ClipAdd);
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_track = replayed.sequences[&seq_id].get_track(&track_id).unwrap();
+        assert_track_has_no_overlap(replayed_track);
+        assert_eq!(replayed_track.clips.len(), 3);
+        assert!(replayed_track.get_clip(&removed_clip_id).is_none());
+
+        let left = replayed_track.get_clip(&left_clip_id).unwrap();
+        assert_eq!(left.place.timeline_in_sec, 0.0);
+        assert_eq!(left.place.duration_sec, 4.0);
+        assert_eq!(left.range.source_out_sec, 4.0);
+
+        let inserted = replayed_track.get_clip(&inserted_clip_id).unwrap();
+        assert_eq!(inserted.place.timeline_in_sec, 4.0);
+        assert_eq!(inserted.place.duration_sec, 6.0);
+
+        let right = replayed_track.get_clip(&right_clip_id).unwrap();
+        assert_eq!(right.place.timeline_in_sec, 10.0);
+        assert_eq!(right.place.duration_sec, 5.0);
+        assert_eq!(right.range.source_in_sec, 1.0);
+    }
+
+    #[test]
+    fn test_executor_persists_ripple_delete_as_replayable_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let asset_path = temp_dir.path().join("test.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+
+        let import_cmd = ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(30.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+        let asset_id = import_cmd.asset_id().to_string();
+
+        let left_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)
+                        .with_source_range(0.0, 5.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let left_clip_id = left_result.created_ids[0].clone();
+
+        let removed_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 5.0)
+                        .with_source_range(5.0, 10.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let removed_clip_id = removed_result.created_ids[0].clone();
+
+        let downstream_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 10.0)
+                        .with_source_range(10.0, 15.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let downstream_clip_id = downstream_result.created_ids[0].clone();
+
+        executor
+            .execute(
+                Box::new(RippleDeleteCommand::new(
+                    &seq_id,
+                    &track_id,
+                    vec![removed_clip_id.clone()],
+                )),
+                &mut state,
+            )
+            .unwrap();
+
+        let persisted = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted.kind, OpKind::Batch);
+
+        let sub_ops: Vec<Operation> = persisted.payload["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()).unwrap())
+            .collect();
+        assert_eq!(sub_ops.len(), 2);
+        assert_eq!(sub_ops[0].kind, OpKind::ClipRemove);
+        assert_eq!(sub_ops[1].kind, OpKind::ClipMove);
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_track = replayed.sequences[&seq_id].get_track(&track_id).unwrap();
+        assert_track_has_no_overlap(replayed_track);
+        assert_eq!(replayed_track.clips.len(), 2);
+        assert!(replayed_track.get_clip(&removed_clip_id).is_none());
+
+        let left = replayed_track.get_clip(&left_clip_id).unwrap();
+        assert_eq!(left.place.timeline_in_sec, 0.0);
+        assert_eq!(left.place.duration_sec, 5.0);
+
+        let downstream = replayed_track.get_clip(&downstream_clip_id).unwrap();
+        assert_eq!(downstream.place.timeline_in_sec, 5.0);
+        assert_eq!(downstream.place.duration_sec, 5.0);
+    }
+
+    #[test]
+    fn test_executor_persists_close_gap_as_replayable_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let asset_path = temp_dir.path().join("test.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+
+        let import_cmd = ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(30.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+        let asset_id = import_cmd.asset_id().to_string();
+
+        let left_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)
+                        .with_source_range(0.0, 5.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let left_clip_id = left_result.created_ids[0].clone();
+
+        let right_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 8.0)
+                        .with_source_range(8.0, 12.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let right_clip_id = right_result.created_ids[0].clone();
+
+        executor
+            .execute(
+                Box::new(CloseGapCommand::new(&seq_id, &track_id, 5.0, 8.0)),
+                &mut state,
+            )
+            .unwrap();
+
+        let persisted = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted.kind, OpKind::Batch);
+
+        let sub_ops: Vec<Operation> = persisted.payload["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()).unwrap())
+            .collect();
+        assert_eq!(sub_ops.len(), 1);
+        assert_eq!(sub_ops[0].kind, OpKind::ClipMove);
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_track = replayed.sequences[&seq_id].get_track(&track_id).unwrap();
+        assert_track_has_no_overlap(replayed_track);
+        assert_eq!(replayed_track.clips.len(), 2);
+
+        let left = replayed_track.get_clip(&left_clip_id).unwrap();
+        assert_eq!(left.place.timeline_in_sec, 0.0);
+        assert_eq!(left.place.duration_sec, 5.0);
+
+        let right = replayed_track.get_clip(&right_clip_id).unwrap();
+        assert_eq!(right.place.timeline_in_sec, 5.0);
+        assert_eq!(right.place.duration_sec, 4.0);
+    }
+
+    #[test]
+    fn test_executor_persists_close_all_gaps_as_replayable_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let asset_path = temp_dir.path().join("test.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+
+        let import_cmd = ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(30.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+        let asset_id = import_cmd.asset_id().to_string();
+
+        let first_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 5.0)
+                        .with_source_range(0.0, 3.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let first_clip_id = first_result.created_ids[0].clone();
+
+        let second_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 10.0)
+                        .with_source_range(10.0, 13.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let second_clip_id = second_result.created_ids[0].clone();
+
+        executor
+            .execute(
+                Box::new(CloseAllGapsCommand::new(&seq_id, &track_id)),
+                &mut state,
+            )
+            .unwrap();
+
+        let persisted = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted.kind, OpKind::Batch);
+
+        let sub_ops: Vec<Operation> = persisted.payload["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()).unwrap())
+            .collect();
+        assert_eq!(sub_ops.len(), 2);
+        assert_eq!(sub_ops[0].kind, OpKind::ClipMove);
+        assert_eq!(sub_ops[1].kind, OpKind::ClipMove);
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_track = replayed.sequences[&seq_id].get_track(&track_id).unwrap();
+        assert_track_has_no_overlap(replayed_track);
+        assert_eq!(replayed_track.clips.len(), 2);
+
+        let first = replayed_track.get_clip(&first_clip_id).unwrap();
+        assert_eq!(first.place.timeline_in_sec, 0.0);
+        assert_eq!(first.place.duration_sec, 3.0);
+
+        let second = replayed_track.get_clip(&second_clip_id).unwrap();
+        assert_eq!(second.place.timeline_in_sec, 3.0);
+        assert_eq!(second.place.duration_sec, 3.0);
+    }
+
+    #[test]
+    fn test_executor_persists_lift_as_replayable_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let asset_path = temp_dir.path().join("test.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+
+        let import_cmd = ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(30.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+        let asset_id = import_cmd.asset_id().to_string();
+
+        let left_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)
+                        .with_source_range(0.0, 5.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let left_clip_id = left_result.created_ids[0].clone();
+
+        let removed_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 10.0)
+                        .with_source_range(10.0, 15.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let removed_clip_id = removed_result.created_ids[0].clone();
+
+        let right_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 20.0)
+                        .with_source_range(20.0, 25.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let right_clip_id = right_result.created_ids[0].clone();
+
+        executor
+            .execute(
+                Box::new(LiftCommand::new(
+                    &seq_id,
+                    &track_id,
+                    vec![removed_clip_id.clone()],
+                )),
+                &mut state,
+            )
+            .unwrap();
+
+        let persisted = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted.kind, OpKind::Batch);
+
+        let sub_ops: Vec<Operation> = persisted.payload["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()).unwrap())
+            .collect();
+        assert_eq!(sub_ops.len(), 1);
+        assert_eq!(sub_ops[0].kind, OpKind::ClipRemove);
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_track = replayed.sequences[&seq_id].get_track(&track_id).unwrap();
+        assert_track_has_no_overlap(replayed_track);
+        assert_eq!(replayed_track.clips.len(), 2);
+        assert!(replayed_track.get_clip(&removed_clip_id).is_none());
+
+        let left = replayed_track.get_clip(&left_clip_id).unwrap();
+        assert_eq!(left.place.timeline_in_sec, 0.0);
+        assert_eq!(left.place.duration_sec, 5.0);
+
+        let right = replayed_track.get_clip(&right_clip_id).unwrap();
+        assert_eq!(right.place.timeline_in_sec, 20.0);
+        assert_eq!(right.place.duration_sec, 5.0);
+    }
+
+    #[test]
+    fn test_executor_persists_extract_edit_as_replayable_batch() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let seq_result = executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Sequence", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+        let seq_id = seq_result.created_ids[0].clone();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let asset_path = temp_dir.path().join("test.mp4");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+
+        let import_cmd = ImportAssetCommand::new("test.mp4", &asset_uri).with_duration(60.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+        let asset_id = import_cmd.asset_id().to_string();
+
+        let original_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0)
+                        .with_source_range(0.0, 30.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let original_clip_id = original_result.created_ids[0].clone();
+
+        let downstream_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &track_id, &asset_id, 30.0)
+                        .with_source_range(30.0, 40.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let downstream_clip_id = downstream_result.created_ids[0].clone();
+
+        executor
+            .execute(
+                Box::new(ExtractEditCommand::new(&seq_id, &track_id, 10.0, 20.0)),
+                &mut state,
+            )
+            .unwrap();
+
+        let persisted = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted.kind, OpKind::Batch);
+
+        let sub_ops: Vec<Operation> = persisted.payload["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| serde_json::from_value(value.clone()).unwrap())
+            .collect();
+        assert_eq!(sub_ops.len(), 2);
+        assert_eq!(sub_ops[0].kind, OpKind::ClipSplit);
+        assert_eq!(sub_ops[1].kind, OpKind::ClipTrim);
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_track = replayed.sequences[&seq_id].get_track(&track_id).unwrap();
+        assert_track_has_no_overlap(replayed_track);
+        assert_eq!(replayed_track.clips.len(), 3);
+
+        let left = replayed_track.get_clip(&original_clip_id).unwrap();
+        assert_eq!(left.place.timeline_in_sec, 0.0);
+        assert_eq!(left.place.duration_sec, 10.0);
+        assert_eq!(left.range.source_out_sec, 10.0);
+
+        let right_fragment = replayed_track
+            .clips
+            .iter()
+            .find(|clip| clip.id != original_clip_id && clip.id != downstream_clip_id)
+            .unwrap();
+        assert_eq!(right_fragment.place.timeline_in_sec, 10.0);
+        assert_eq!(right_fragment.place.duration_sec, 10.0);
+        assert_eq!(right_fragment.range.source_in_sec, 20.0);
+        assert_eq!(right_fragment.range.source_out_sec, 30.0);
+
+        let downstream = replayed_track.get_clip(&downstream_clip_id).unwrap();
+        assert_eq!(downstream.place.timeline_in_sec, 20.0);
+        assert_eq!(downstream.place.duration_sec, 10.0);
+        assert_eq!(downstream.range.source_in_sec, 30.0);
+        assert_eq!(downstream.range.source_out_sec, 40.0);
+    }
+
+    #[test]
     fn test_executor_undo() {
         let mut executor = CommandExecutor::new();
         let mut state = ProjectState::new("Test");
@@ -1265,6 +2739,31 @@ mod tests {
         assert_eq!(
             CommandExecutor::type_name_to_op_kind("InsertClip"),
             OpKind::ClipAdd
+        );
+        assert_eq!(
+            CommandExecutor::type_name_to_op_kind("InsertEdit"),
+            OpKind::Batch
+        );
+        assert_eq!(
+            CommandExecutor::type_name_to_op_kind("OverwriteEdit"),
+            OpKind::Batch
+        );
+        assert_eq!(
+            CommandExecutor::type_name_to_op_kind("RippleDelete"),
+            OpKind::Batch
+        );
+        assert_eq!(
+            CommandExecutor::type_name_to_op_kind("CloseGap"),
+            OpKind::Batch
+        );
+        assert_eq!(
+            CommandExecutor::type_name_to_op_kind("CloseAllGaps"),
+            OpKind::Batch
+        );
+        assert_eq!(CommandExecutor::type_name_to_op_kind("Lift"), OpKind::Batch);
+        assert_eq!(
+            CommandExecutor::type_name_to_op_kind("ExtractEdit"),
+            OpKind::Batch
         );
         assert_eq!(
             CommandExecutor::type_name_to_op_kind("SplitClip"),
