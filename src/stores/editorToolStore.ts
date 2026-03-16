@@ -40,6 +40,13 @@ export type EditorTool =
   | 'hand'; // Pan/navigate timeline (H)
 
 /**
+ * Edit modes for Insert/Overwrite behaviour.
+ * - 'insert': new clips push downstream content right (ripple insert)
+ * - 'overwrite': new clips replace content in the target range
+ */
+export type EditMode = 'insert' | 'overwrite';
+
+/**
  * Tool configuration and metadata
  */
 export interface ToolConfig {
@@ -95,6 +102,8 @@ interface EditorToolState {
   activeTool: EditorTool;
   /** Previous tool (for temporary tool switch) */
   previousTool: EditorTool | null;
+  /** Current edit mode (insert or overwrite) */
+  editMode: EditMode;
   /** Whether ripple editing is enabled */
   rippleEnabled: boolean;
   /** Whether auto-scroll (follow playhead) is enabled */
@@ -113,6 +122,10 @@ interface EditorToolActions {
   pushTool: (tool: EditorTool) => void;
   /** Return to previous tool after temporary switch */
   popTool: () => void;
+  /** Set the edit mode (insert or overwrite) */
+  setEditMode: (mode: EditMode) => void;
+  /** Toggle between insert and overwrite edit modes */
+  toggleEditMode: () => void;
   /** Toggle ripple editing mode */
   toggleRipple: () => void;
   /** Set ripple editing mode */
@@ -196,6 +209,7 @@ export const TOOL_CONFIGS: Record<EditorTool, ToolConfig> = {
 const initialState: EditorToolState = {
   activeTool: 'select',
   previousTool: null,
+  editMode: 'overwrite',
   rippleEnabled: false,
   autoScrollEnabled: true,
   clipboard: null,
@@ -232,6 +246,18 @@ export const useEditorToolStore = create<EditorToolStore>()(
             state.activeTool = state.previousTool;
             state.previousTool = null;
           }
+        });
+      },
+
+      setEditMode: (mode: EditMode) => {
+        set((state) => {
+          state.editMode = mode;
+        });
+      },
+
+      toggleEditMode: () => {
+        set((state) => {
+          state.editMode = state.editMode === 'insert' ? 'overwrite' : 'insert';
         });
       },
 
