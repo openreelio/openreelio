@@ -7,8 +7,9 @@ use specta::Type;
 use tauri::State;
 
 use crate::core::CoreError;
-use crate::ipc::payloads::CommandPayload;
-use crate::ipc::serialize_to_json_string;
+use crate::ipc::{
+    command_needs_track_id, ensure_sequence_id, payloads::CommandPayload, serialize_to_json_string,
+};
 use crate::AppState;
 
 // =============================================================================
@@ -554,6 +555,44 @@ fn find_track_for_clip(
     Err(format!("Clip {} not found in sequence", clip_id))
 }
 
+fn normalize_ripple_delete_params(
+    project: &crate::ActiveProject,
+    sequence_id: &str,
+    params: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<(), String> {
+    let legacy_clip_id = params
+        .get("clipId")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+
+    if !params.contains_key("clipIds") {
+        if let Some(clip_id) = legacy_clip_id.as_ref() {
+            params.insert("clipIds".to_string(), serde_json::json!([clip_id]));
+        }
+    }
+
+    if !params.contains_key("trackId") {
+        let clip_id_for_lookup = legacy_clip_id.as_deref().or_else(|| {
+            params
+                .get("clipIds")
+                .and_then(|value| value.as_array())
+                .and_then(|ids| ids.first())
+                .and_then(|value| value.as_str())
+        });
+
+        if let Some(clip_id) = clip_id_for_lookup {
+            let track_id = find_track_for_clip(project, sequence_id, clip_id)?;
+            params.insert("trackId".to_string(), serde_json::json!(track_id));
+        }
+    }
+
+    // Legacy AI prompts emitted this flag, but the core command contract now
+    // encodes the concrete target clips directly.
+    params.remove("affectAllTracks");
+
+    Ok(())
+}
+
 /// Categorize error message into an error code
 fn categorize_error(error: &str) -> ConnectionErrorCode {
     let error_lower = error.to_lowercase();
@@ -721,12 +760,14 @@ pub async fn apply_edit_script(
 ) -> Result<ApplyEditScriptResult, String> {
     use crate::core::commands::{
         AddEffectCommand, AddMarkerCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand,
-        CreateCaptionCommand, CreateFolderCommand, CreateSequenceCommand, DeleteCaptionCommand,
-        DeleteFileCommand, InsertClipCommand, MoveClipCommand, MoveFileCommand, RemoveAssetCommand,
-        RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand,
-        RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand, RenameTrackCommand,
-        ReorderTracksCommand, SetClipAudioCommand, SetClipBlendModeCommand, SetClipMuteCommand,
-        SetClipSpeedCommand, SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand,
+        CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand, CreateFolderCommand,
+        CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand, ExtractEditCommand,
+        InsertClipCommand, InsertEditCommand, LiftCommand, MoveClipCommand, MoveFileCommand,
+        OverwriteEditCommand, RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand,
+        RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand,
+        RenameFileCommand, RenameTrackCommand, ReorderTracksCommand, RippleDeleteCommand,
+        SetClipAudioCommand, SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand,
+        SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand,
         ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
         TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
     };
@@ -769,52 +810,7 @@ pub async fn apply_edit_script(
             continue;
         };
 
-        let needs_sequence_id = matches!(
-            cmd.command_type.as_str(),
-            "InsertClip"
-                | "SplitClip"
-                | "DeleteClip"
-                | "RemoveClip"
-                | "TrimClip"
-                | "MoveClip"
-                | "SetClipMute"
-                | "SetClipAudio"
-                | "SetClipSpeed"
-                | "setClipSpeed"
-                | "CreateTrack"
-                | "createTrack"
-                | "AddTrack"
-                | "addTrack"
-                | "RemoveTrack"
-                | "removeTrack"
-                | "deleteTrack"
-                | "DeleteTrack"
-                | "RenameTrack"
-                | "renameTrack"
-                | "ToggleTrackMute"
-                | "toggleTrackMute"
-                | "ToggleTrackLock"
-                | "toggleTrackLock"
-                | "ToggleTrackVisibility"
-                | "toggleTrackVisibility"
-                | "UpdateCaption"
-                | "CreateCaption"
-                | "DeleteCaption"
-                | "AddMarker"
-                | "addMarker"
-                | "RemoveMarker"
-                | "removeMarker"
-                | "DeleteMarker"
-                | "deleteMarker"
-                | "ReorderTracks"
-                | "reorderTracks"
-        );
-        if needs_sequence_id && !obj.contains_key("sequenceId") {
-            obj.insert(
-                "sequenceId".to_string(),
-                serde_json::json!(sequence_id.clone()),
-            );
-        }
+        ensure_sequence_id(obj, cmd.command_type.as_str(), &sequence_id);
 
         let sequence_id_for_cmd = obj
             .get("sequenceId")
@@ -822,24 +818,15 @@ pub async fn apply_edit_script(
             .unwrap_or(sequence_id.as_str())
             .to_string();
 
+        if cmd.command_type == "RippleDelete" {
+            if let Err(e) = normalize_ripple_delete_params(project, &sequence_id_for_cmd, obj) {
+                errors.push(format!("Command normalization failed (RippleDelete): {e}"));
+                continue;
+            }
+        }
+
         // Some AI scripts omit trackId (they identify clips only). Inject it from current state.
-        let needs_track_id = matches!(
-            cmd.command_type.as_str(),
-            "SplitClip"
-                | "SetClipTransform"
-                | "SetClipMute"
-                | "SetClipAudio"
-                | "SetClipSpeed"
-                | "setClipSpeed"
-                | "DeleteClip"
-                | "RemoveClip"
-                | "TrimClip"
-                | "MoveClip"
-                | "UpdateCaption"
-                | "CreateCaption"
-                | "DeleteCaption"
-        );
-        if needs_track_id && !obj.contains_key("trackId") {
+        if command_needs_track_id(cmd.command_type.as_str()) && !obj.contains_key("trackId") {
             if let Some(clip_id) = obj.get("clipId").and_then(|v| v.as_str()) {
                 let track_id = match find_track_for_clip(project, &sequence_id_for_cmd, clip_id) {
                     Ok(id) => id,
@@ -875,6 +862,79 @@ pub async fn apply_edit_script(
                     &p.asset_id,
                     p.timeline_start,
                 ))
+            }
+            CommandPayload::InsertEdit(p) => {
+                if let Err(e) = validate_time_sec("timelinePosition", p.timeline_position) {
+                    errors.push(format!("Command validation failed (InsertEdit): {e}"));
+                    continue;
+                }
+                let mut cmd = InsertEditCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.asset_id,
+                    p.timeline_position,
+                );
+                cmd.source_start = p.source_in;
+                cmd.source_end = p.source_out;
+                Box::new(cmd)
+            }
+            CommandPayload::OverwriteEdit(p) => {
+                if let Err(e) = validate_time_sec("timelinePosition", p.timeline_position) {
+                    errors.push(format!("Command validation failed (OverwriteEdit): {e}"));
+                    continue;
+                }
+                let mut cmd = OverwriteEditCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.asset_id,
+                    p.timeline_position,
+                );
+                cmd.source_start = p.source_in;
+                cmd.source_end = p.source_out;
+                Box::new(cmd)
+            }
+            CommandPayload::RippleDelete(p) => Box::new(RippleDeleteCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.clip_ids,
+            )),
+            CommandPayload::Lift(p) => {
+                Box::new(LiftCommand::new(&p.sequence_id, &p.track_id, p.clip_ids))
+            }
+            CommandPayload::ExtractEdit(p) => {
+                if let Err(e) = validate_time_sec("inPoint", p.in_point) {
+                    errors.push(format!("Command validation failed (ExtractEdit): {e}"));
+                    continue;
+                }
+                if let Err(e) = validate_time_sec("outPoint", p.out_point) {
+                    errors.push(format!("Command validation failed (ExtractEdit): {e}"));
+                    continue;
+                }
+                Box::new(ExtractEditCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    p.in_point,
+                    p.out_point,
+                ))
+            }
+            CommandPayload::CloseGap(p) => {
+                if let Err(e) = validate_time_sec("gapStart", p.gap_start) {
+                    errors.push(format!("Command validation failed (CloseGap): {e}"));
+                    continue;
+                }
+                if let Err(e) = validate_time_sec("gapEnd", p.gap_end) {
+                    errors.push(format!("Command validation failed (CloseGap): {e}"));
+                    continue;
+                }
+                Box::new(CloseGapCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    p.gap_start,
+                    p.gap_end,
+                ))
+            }
+            CommandPayload::CloseAllGaps(p) => {
+                Box::new(CloseAllGapsCommand::new(&p.sequence_id, &p.track_id))
             }
             CommandPayload::RemoveClip(p) => Box::new(RemoveClipCommand::new(
                 &p.sequence_id,

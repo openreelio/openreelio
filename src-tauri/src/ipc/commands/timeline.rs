@@ -208,6 +208,38 @@ pub async fn can_undo(state: State<'_, AppState>) -> Result<bool, String> {
         .unwrap_or(false))
 }
 
+/// Finds all gaps between clips on a specific track.
+///
+/// Returns an ordered list of gaps (empty regions) between clips.
+/// This is a read-only query — no state mutation occurs.
+#[tauri::command]
+#[specta::specta]
+pub async fn find_gaps(
+    sequence_id: String,
+    track_id: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<crate::core::commands::GapInfo>, String> {
+    let guard = state.project.lock().await;
+
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let sequence = project
+        .state
+        .sequences
+        .get(&sequence_id)
+        .ok_or_else(|| CoreError::SequenceNotFound(sequence_id).to_ipc_error())?;
+
+    let track = sequence
+        .tracks
+        .iter()
+        .find(|t| t.id == track_id)
+        .ok_or_else(|| CoreError::TrackNotFound(track_id).to_ipc_error())?;
+
+    Ok(crate::core::commands::find_gaps(track))
+}
+
 /// Checks if redo is available
 #[tauri::command]
 #[specta::specta]

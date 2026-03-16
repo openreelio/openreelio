@@ -3,6 +3,7 @@
 //! Handles communication between Tauri backend and React frontend.
 //! All Tauri commands and events are defined here.
 
+mod ai_command_defaults;
 #[cfg(not(test))]
 mod commands;
 mod dto;
@@ -10,6 +11,8 @@ mod dto;
 mod events;
 mod payloads;
 
+#[allow(unused_imports)]
+pub(crate) use ai_command_defaults::*;
 #[cfg(not(test))]
 pub use commands::*;
 #[allow(unused_imports)]
