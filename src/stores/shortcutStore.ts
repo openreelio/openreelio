@@ -149,6 +149,10 @@ export const DEFAULT_SHORTCUTS: Omit<ShortcutBinding, 'customized' | 'enabled'>[
   { id: 'undo', label: 'Undo', description: 'Undo last action', key: 'KeyZ', modifiers: ['ctrl'], action: 'edit.undo', category: 'editing' },
   { id: 'redo', label: 'Redo', description: 'Redo last undone action', key: 'KeyY', modifiers: ['ctrl'], action: 'edit.redo', category: 'editing' },
   { id: 'redo-alt', label: 'Redo (Alt)', description: 'Redo last undone action', key: 'KeyZ', modifiers: ['ctrl', 'shift'], action: 'edit.redo', category: 'editing' },
+  { id: 'insert-edit', label: 'Insert Edit', description: 'Insert edit from Source Monitor at playhead', key: 'Comma', modifiers: [], action: 'edit.insertEdit', category: 'editing' },
+  { id: 'overwrite-edit', label: 'Overwrite Edit', description: 'Overwrite edit from Source Monitor at playhead', key: 'Period', modifiers: [], action: 'edit.overwriteEdit', category: 'editing' },
+  { id: 'lift-edit', label: 'Lift', description: 'Remove selected clips leaving gap', key: 'Semicolon', modifiers: [], action: 'edit.lift', category: 'editing' },
+  { id: 'extract-edit', label: 'Extract', description: 'Remove In/Out range and close gap', key: 'Quote', modifiers: [], action: 'edit.extract', category: 'editing' },
 
   // Selection
   { id: 'select-all', label: 'Select All', description: 'Select all clips', key: 'KeyA', modifiers: ['ctrl'], action: 'selection.selectAll', category: 'selection' },
@@ -433,6 +437,14 @@ export function formatShortcut(binding: ShortcutBinding): string {
     keyDisplay = '/';
   } else if (keyDisplay === 'Backslash') {
     keyDisplay = '\\';
+  } else if (keyDisplay === 'Comma') {
+    keyDisplay = ',';
+  } else if (keyDisplay === 'Period') {
+    keyDisplay = '.';
+  } else if (keyDisplay === 'Semicolon') {
+    keyDisplay = ';';
+  } else if (keyDisplay === 'Quote') {
+    keyDisplay = "'";
   }
 
   parts.push(keyDisplay);
