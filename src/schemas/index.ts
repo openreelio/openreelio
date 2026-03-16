@@ -7,6 +7,8 @@
 export {
   // Timeline command schemas
   InsertClipSchema,
+  InsertEditSchema,
+  OverwriteEditSchema,
   SplitClipSchema,
   TrimClipSchema,
   MoveClipSchema,
@@ -50,6 +52,8 @@ export {
   getCommandSchema,
   // Types
   type InsertClipCommand,
+  type InsertEditCommand,
+  type OverwriteEditCommand,
   type SplitClipCommand,
   type TrimClipCommand,
   type MoveClipCommand,
