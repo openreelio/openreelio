@@ -325,6 +325,12 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     handleTrackVisibilityToggle,
     handleTrackReorder,
     handleUpdateCaption,
+    handleCloseGap,
+    handleCloseAllGaps,
+    handleRippleDeleteClips,
+    handleLiftClips,
+    handleInsertEditFromSource,
+    handleOverwriteEditFromSource,
   } = useTimelineActions({ sequence });
 
   // Text clip operations
@@ -837,6 +843,12 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                       onTrackReorder={handleTrackReorder}
                       onAddText={handleOpenAddText}
                       getTextClipData={(clipId) => textClipDataById.get(clipId)}
+                      onCloseGap={handleCloseGap}
+                      onCloseAllGaps={handleCloseAllGaps}
+                      onRippleDeleteClips={handleRippleDeleteClips}
+                      onLiftClips={handleLiftClips}
+                      onInsertEditFromSource={handleInsertEditFromSource}
+                      onOverwriteEditFromSource={handleOverwriteEditFromSource}
                     />
                   </TimelineErrorBoundary>
                 </div>

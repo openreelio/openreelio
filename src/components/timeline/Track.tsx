@@ -33,6 +33,7 @@ import {
   type ClipThumbnailConfig,
 } from './Clip';
 import { TransitionZone } from './TransitionZone';
+import { useTimelineOperations } from './TimelineOperationsContext';
 import type { DropValidity } from '@/utils/dropValidity';
 import { TRACK_HEIGHT } from './constants';
 import { getTrackHeaderControls } from './trackHeaderControls';
@@ -44,6 +45,8 @@ import { getTrackHeaderControls } from './trackHeaderControls';
 interface TrackProps {
   /** Track data */
   track: TrackType;
+  /** Sequence ID (needed for gap management commands) */
+  sequenceId?: string;
   /** Clips in this track */
   clips: ClipType[];
   /** Zoom level (pixels per second) */
@@ -143,6 +146,7 @@ const EMPTY_SNAP_POINTS: SnapPoint[] = [];
 
 export function Track({
   track,
+  sequenceId,
   clips,
   zoom,
   scrollX = 0,
@@ -245,6 +249,92 @@ export function Track({
     event.stopPropagation();
     setContextMenuPosition({ x: event.clientX, y: event.clientY });
   }, []);
+
+  // Gap context menu state and operations
+  const { onCloseGap, onCloseAllGaps } = useTimelineOperations();
+  const [gapContextMenu, setGapContextMenu] = useState<{
+    x: number;
+    y: number;
+    gapStart: number;
+    gapEnd: number;
+  } | null>(null);
+
+  const handleContentContextMenu = useCallback(
+    (event: ReactMouseEvent<HTMLDivElement>) => {
+      if (track.locked || !sequenceId) return;
+
+      // Calculate the time position from mouse position
+      const rect = (event.currentTarget as HTMLElement).getBoundingClientRect();
+      const mouseX = event.clientX - rect.left + scrollX;
+      const timeSec = mouseX / zoom;
+
+      // Check if the click falls in a gap between clips
+      const sortedClips = [...clips].sort(
+        (a, b) => a.place.timelineInSec - b.place.timelineInSec,
+      );
+
+      for (let i = 0; i < sortedClips.length - 1; i++) {
+        const currentEnd =
+          sortedClips[i].place.timelineInSec + sortedClips[i].place.durationSec;
+        const nextStart = sortedClips[i + 1].place.timelineInSec;
+
+        if (nextStart > currentEnd && timeSec >= currentEnd && timeSec < nextStart) {
+          event.preventDefault();
+          event.stopPropagation();
+          setGapContextMenu({
+            x: event.clientX,
+            y: event.clientY,
+            gapStart: currentEnd,
+            gapEnd: nextStart,
+          });
+          return;
+        }
+      }
+
+      // Check leading gap (before first clip)
+      if (sortedClips.length > 0 && sortedClips[0].place.timelineInSec > 0 && timeSec < sortedClips[0].place.timelineInSec) {
+        event.preventDefault();
+        event.stopPropagation();
+        setGapContextMenu({
+          x: event.clientX,
+          y: event.clientY,
+          gapStart: 0,
+          gapEnd: sortedClips[0].place.timelineInSec,
+        });
+        return;
+      }
+    },
+    [track.locked, sequenceId, clips, scrollX, zoom],
+  );
+
+  const gapContextMenuItems = useMemo<MenuItemOrDivider[]>(() => {
+    if (!gapContextMenu || !sequenceId) return [];
+    const gapDuration = gapContextMenu.gapEnd - gapContextMenu.gapStart;
+    return [
+      {
+        label: `Close Gap (${gapDuration.toFixed(2)}s)`,
+        onClick: () => {
+          onCloseGap?.({
+            sequenceId,
+            trackId: track.id,
+            gapStart: gapContextMenu.gapStart,
+            gapEnd: gapContextMenu.gapEnd,
+          });
+          setGapContextMenu(null);
+        },
+      },
+      {
+        label: 'Close All Gaps on Track',
+        onClick: () => {
+          onCloseAllGaps?.({
+            sequenceId,
+            trackId: track.id,
+          });
+          setGapContextMenu(null);
+        },
+      },
+    ];
+  }, [gapContextMenu, sequenceId, track.id, onCloseGap, onCloseAllGaps]);
 
   return (
     <>
@@ -350,6 +440,7 @@ export function Track({
             ${track.locked ? 'cursor-not-allowed' : ''}
           `}
           style={{ height: TRACK_HEIGHT }}
+          onContextMenu={handleContentContextMenu}
         >
           {/* Scrollable clips container */}
           <div
@@ -425,6 +516,15 @@ export function Track({
           y={contextMenuPosition.y}
           items={contextMenuItems}
           onClose={() => setContextMenuPosition(null)}
+        />
+      )}
+
+      {gapContextMenu && (
+        <ContextMenu
+          x={gapContextMenu.x}
+          y={gapContextMenu.y}
+          items={gapContextMenuItems}
+          onClose={() => setGapContextMenu(null)}
         />
       )}
     </>

@@ -86,6 +86,7 @@ export type {
   TrackCreateData,
   TrackReorderData,
   CaptionUpdateData,
+  GapClickData,
 } from './types';
 import type { Track as TrackType } from '@/types';
 
@@ -220,6 +221,12 @@ export function Timeline({
   onAddText,
   onTrackReorder,
   getTextClipData,
+  onCloseGap,
+  onCloseAllGaps,
+  onRippleDeleteClips,
+  onLiftClips,
+  onInsertEditFromSource,
+  onOverwriteEditFromSource,
 }: TimelineProps) {
   // ===========================================================================
   // Store State - Using targeted selectors to minimize re-renders
@@ -776,6 +783,10 @@ export function Timeline({
     selectClips,
     onDeleteClips: handleRippleDelete, // Use ripple-aware delete
     onClipSplit,
+    onInsertEdit: onInsertEditFromSource,
+    onOverwriteEdit: onOverwriteEditFromSource,
+    onRippleDelete: onRippleDeleteClips,
+    onLiftEdit: onLiftClips,
   });
 
   // Enhanced keyboard handler with clipboard operations and tool switching
@@ -1782,6 +1793,8 @@ export function Timeline({
       onTrackLockToggle,
       onTrackVisibilityToggle,
       onAddText,
+      onCloseGap,
+      onCloseAllGaps,
     }),
     [
       onDeleteClips,
@@ -1796,6 +1809,8 @@ export function Timeline({
       onTrackLockToggle,
       onTrackVisibilityToggle,
       onAddText,
+      onCloseGap,
+      onCloseAllGaps,
     ],
   );
 
@@ -1885,6 +1900,7 @@ export function Timeline({
           onSplit={handleToolbarSplit}
           onDuplicate={handleToolbarDuplicate}
           onDelete={handleToolbarDelete}
+          onRippleDelete={() => onRippleDeleteClips?.(selectedClipIds)}
           hasActiveSequence={sequence !== null}
           hasSelectedClips={selectedClipIds.length > 0}
           fps={DEFAULT_FPS}
@@ -1967,6 +1983,7 @@ export function Timeline({
                   <Track
                     key={track.id}
                     track={track}
+                    sequenceId={sequence.id}
                     clips={getTrackClips(track.id)}
                     zoom={zoom}
                     scrollX={scrollX}

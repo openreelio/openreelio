@@ -27,6 +27,7 @@ import type {
   ClipPasteData,
   ClipAudioUpdateData,
   TrackControlData,
+  GapClickData,
 } from './types';
 
 // =============================================================================
@@ -62,6 +63,10 @@ export interface TimelineOperations {
   onTrackVisibilityToggle?: (data: TrackControlData) => void;
   /** Callback when Add Text button is clicked */
   onAddText?: () => void;
+  /** Callback when a specific gap should be closed */
+  onCloseGap?: (data: GapClickData) => void;
+  /** Callback when all gaps on a track should be closed */
+  onCloseAllGaps?: (data: { sequenceId: string; trackId: string }) => void;
 }
 
 // =============================================================================

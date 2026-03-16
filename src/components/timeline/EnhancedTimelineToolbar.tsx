@@ -30,10 +30,13 @@ import {
   Video,
   Music,
   Link2,
+  ArrowRightToLine,
+  SquarePen,
+  ListX,
 } from 'lucide-react';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
-import { useEditorToolStore, TOOL_CONFIGS, type EditorTool } from '@/stores/editorToolStore';
+import { useEditorToolStore, TOOL_CONFIGS, type EditorTool, type EditMode } from '@/stores/editorToolStore';
 import { formatTimecode } from '@/utils/formatters';
 import { MIN_ZOOM, MAX_ZOOM } from './constants';
 
@@ -56,6 +59,8 @@ export interface EnhancedTimelineToolbarProps {
   onDuplicate?: () => void;
   /** Callback when delete is clicked */
   onDelete?: () => void;
+  /** Callback when ripple delete is clicked */
+  onRippleDelete?: () => void;
   /** Whether there's an active sequence */
   hasActiveSequence?: boolean;
   /** Whether there are selected clips to edit */
@@ -137,6 +142,7 @@ function EnhancedTimelineToolbarComponent({
   onSplit,
   onDuplicate,
   onDelete,
+  onRippleDelete,
   hasActiveSequence = false,
   hasSelectedClips = false,
   fps = 30,
@@ -158,6 +164,8 @@ function EnhancedTimelineToolbarComponent({
   const {
     activeTool,
     setActiveTool,
+    editMode,
+    setEditMode,
     rippleEnabled,
     autoScrollEnabled,
     toggleRipple,
@@ -233,6 +241,17 @@ function EnhancedTimelineToolbarComponent({
   const handleDelete = useCallback(() => {
     onDelete?.();
   }, [onDelete]);
+
+  const handleRippleDelete = useCallback(() => {
+    onRippleDelete?.();
+  }, [onRippleDelete]);
+
+  const handleEditModeChange = useCallback(
+    (mode: EditMode) => {
+      setEditMode(mode);
+    },
+    [setEditMode],
+  );
 
   const handlePlayPause = useCallback(() => {
     togglePlayback();
@@ -310,6 +329,50 @@ function EnhancedTimelineToolbarComponent({
         {/* Divider */}
         <div className="w-px h-4 bg-editor-border" />
 
+        {/* Edit Mode Toggle (Insert / Overwrite) */}
+        <div
+          data-testid="edit-mode-toggle"
+          className="flex items-center gap-0.5 bg-editor-panel/50 rounded p-0.5"
+        >
+          <button
+            data-testid="insert-mode-button"
+            type="button"
+            aria-pressed={editMode === 'insert'}
+            className={`
+              p-1.5 rounded transition-colors text-xs font-medium
+              ${
+                editMode === 'insert'
+                  ? 'bg-cyan-500/30 text-cyan-400'
+                  : 'text-editor-text-muted hover:bg-editor-border hover:text-editor-text'
+              }
+            `}
+            onClick={() => handleEditModeChange('insert')}
+            title="Insert Edit Mode"
+          >
+            <ArrowRightToLine className="w-4 h-4" />
+          </button>
+          <button
+            data-testid="overwrite-mode-button"
+            type="button"
+            aria-pressed={editMode === 'overwrite'}
+            className={`
+              p-1.5 rounded transition-colors text-xs font-medium
+              ${
+                editMode === 'overwrite'
+                  ? 'bg-orange-500/30 text-orange-400'
+                  : 'text-editor-text-muted hover:bg-editor-border hover:text-editor-text'
+              }
+            `}
+            onClick={() => handleEditModeChange('overwrite')}
+            title="Overwrite Edit Mode"
+          >
+            <SquarePen className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Divider */}
+        <div className="w-px h-4 bg-editor-border" />
+
         {/* Editing Actions */}
         <button
           type="button"
@@ -339,6 +402,17 @@ function EnhancedTimelineToolbarComponent({
           title="Delete (Delete)"
         >
           <Trash2 className="w-4 h-4" />
+        </button>
+
+        <button
+          data-testid="ripple-delete-button"
+          type="button"
+          className="p-1.5 rounded text-editor-text-muted hover:bg-editor-border hover:text-editor-text disabled:opacity-50 disabled:cursor-not-allowed"
+          onClick={handleRippleDelete}
+          disabled={!hasActiveSequence || !hasSelectedClips}
+          title="Ripple Delete (Shift+Delete)"
+        >
+          <ListX className="w-4 h-4" />
         </button>
 
         {/* Divider */}
