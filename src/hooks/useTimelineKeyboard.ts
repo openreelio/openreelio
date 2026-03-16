@@ -134,9 +134,9 @@ const KEYBOARD_COMMANDS: KeyboardCommand[] = [
       }
     },
   },
-  // Ripple Delete: Shift+Delete to remove selected clips and close gap
+  // Ripple Delete: Shift+Delete/Backspace to remove selected clips and close gap
   {
-    keys: ['Delete'],
+    keys: ['Delete', 'Backspace'],
     requiresShift: true,
     execute: (ctx) => {
       if (ctx.selectedClipIds.length > 0 && ctx.onRippleDelete) {

@@ -1743,6 +1743,10 @@ export function Timeline({
     handleRippleDelete(selectedClipIds);
   }, [selectedClipIds, handleRippleDelete]);
 
+  const handleToolbarRippleDelete = useCallback(() => {
+    onRippleDeleteClips?.(selectedClipIds);
+  }, [onRippleDeleteClips, selectedClipIds]);
+
   const handleToolbarTrackCreate = useCallback(
     (kind: 'video' | 'audio') => {
       if (!sequence || !onTrackCreate) return;
@@ -1900,7 +1904,7 @@ export function Timeline({
           onSplit={handleToolbarSplit}
           onDuplicate={handleToolbarDuplicate}
           onDelete={handleToolbarDelete}
-          onRippleDelete={() => onRippleDeleteClips?.(selectedClipIds)}
+          onRippleDelete={handleToolbarRippleDelete}
           hasActiveSequence={sequence !== null}
           hasSelectedClips={selectedClipIds.length > 0}
           fps={DEFAULT_FPS}

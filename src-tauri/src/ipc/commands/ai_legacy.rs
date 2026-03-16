@@ -910,6 +910,10 @@ pub async fn apply_edit_script(
                     errors.push(format!("Command validation failed (ExtractEdit): {e}"));
                     continue;
                 }
+                if p.out_point <= p.in_point {
+                    errors.push(format!("Command validation failed (ExtractEdit): outPoint must be greater than inPoint"));
+                    continue;
+                }
                 Box::new(ExtractEditCommand::new(
                     &p.sequence_id,
                     &p.track_id,
@@ -924,6 +928,10 @@ pub async fn apply_edit_script(
                 }
                 if let Err(e) = validate_time_sec("gapEnd", p.gap_end) {
                     errors.push(format!("Command validation failed (CloseGap): {e}"));
+                    continue;
+                }
+                if p.gap_end <= p.gap_start {
+                    errors.push(format!("Command validation failed (CloseGap): gapEnd must be greater than gapStart"));
                     continue;
                 }
                 Box::new(CloseGapCommand::new(
@@ -1418,6 +1426,83 @@ pub async fn validate_edit_script(
                     issues.push(format!("RemoveMarker command {} missing markerId", i));
                 }
             }
+            // InsertEdit / OverwriteEdit: same as InsertClip but with timelinePosition
+            "InsertEdit" | "OverwriteEdit" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("{} command {} missing trackId", cmd.command_type, i));
+                }
+                if cmd.params.get("assetId").is_none() {
+                    issues.push(format!("{} command {} missing assetId", cmd.command_type, i));
+                }
+                match cmd.params.get("timelinePosition") {
+                    None => issues.push(format!(
+                        "{} command {} missing timelinePosition", cmd.command_type, i
+                    )),
+                    Some(v) => match v.as_f64() {
+                        Some(t) if t.is_finite() && t >= 0.0 => {}
+                        _ => issues.push(format!(
+                            "{} command {} invalid timelinePosition (must be finite, non-negative number)",
+                            cmd.command_type, i
+                        )),
+                    },
+                }
+            }
+            // RippleDelete / Lift: require clipIds array
+            "RippleDelete" | "Lift" => {
+                let has_clip_ids = cmd.params.get("clipIds")
+                    .map(|v| v.is_array())
+                    .unwrap_or(false);
+                let has_clip_id = cmd.params.get("clipId").is_some();
+                if !has_clip_ids && !has_clip_id {
+                    issues.push(format!(
+                        "{} command {} missing clipIds (or legacy clipId)", cmd.command_type, i
+                    ));
+                }
+            }
+            // ExtractEdit: require inPoint and outPoint
+            "ExtractEdit" => {
+                match cmd.params.get("inPoint") {
+                    None => issues.push(format!("ExtractEdit command {} missing inPoint", i)),
+                    Some(v) => match v.as_f64() {
+                        Some(t) if t.is_finite() && t >= 0.0 => {}
+                        _ => issues.push(format!(
+                            "ExtractEdit command {} invalid inPoint (must be finite, non-negative number)", i
+                        )),
+                    },
+                }
+                match cmd.params.get("outPoint") {
+                    None => issues.push(format!("ExtractEdit command {} missing outPoint", i)),
+                    Some(v) => match v.as_f64() {
+                        Some(t) if t.is_finite() && t >= 0.0 => {}
+                        _ => issues.push(format!(
+                            "ExtractEdit command {} invalid outPoint (must be finite, non-negative number)", i
+                        )),
+                    },
+                }
+            }
+            // CloseGap: require gapStart and gapEnd
+            "CloseGap" => {
+                match cmd.params.get("gapStart") {
+                    None => issues.push(format!("CloseGap command {} missing gapStart", i)),
+                    Some(v) => match v.as_f64() {
+                        Some(t) if t.is_finite() && t >= 0.0 => {}
+                        _ => issues.push(format!(
+                            "CloseGap command {} invalid gapStart (must be finite, non-negative number)", i
+                        )),
+                    },
+                }
+                match cmd.params.get("gapEnd") {
+                    None => issues.push(format!("CloseGap command {} missing gapEnd", i)),
+                    Some(v) => match v.as_f64() {
+                        Some(t) if t.is_finite() && t >= 0.0 => {}
+                        _ => issues.push(format!(
+                            "CloseGap command {} invalid gapEnd (must be finite, non-negative number)", i
+                        )),
+                    },
+                }
+            }
+            // CloseAllGaps: no special params beyond trackId (injected by defaults)
+            "CloseAllGaps" => {}
             _ => {
                 issues.push(format!("Unknown command type: {}", cmd.command_type));
             }

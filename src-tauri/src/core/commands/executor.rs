@@ -1342,7 +1342,9 @@ impl CommandExecutor {
                 "ExtractEdit" => {
                     Self::build_extract_edit_batch_payload(&command_json, result, state)
                 }
-                _ => Ok(command_json),
+                unknown => Err(CoreError::Internal(format!(
+                    "Unregistered batch command type: {unknown}"
+                ))),
             },
 
             // Bin operations (deprecated - pass through command JSON for backward compatibility)

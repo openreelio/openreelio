@@ -519,12 +519,37 @@ impl EditScriptExecutor {
                     ));
                 }
 
+                let source_in = cmd.params.get("sourceIn").and_then(|v| v.as_f64());
+                let source_out = cmd.params.get("sourceOut").and_then(|v| v.as_f64());
+
+                if let Some(si) = source_in {
+                    if !si.is_finite() || si < 0.0 {
+                        return Err(CoreError::ValidationError(
+                            "InsertEdit sourceIn must be a finite, non-negative number".to_string(),
+                        ));
+                    }
+                }
+                if let Some(so) = source_out {
+                    if !so.is_finite() || so < 0.0 {
+                        return Err(CoreError::ValidationError(
+                            "InsertEdit sourceOut must be a finite, non-negative number".to_string(),
+                        ));
+                    }
+                }
+                if let (Some(si), Some(so)) = (source_in, source_out) {
+                    if so <= si {
+                        return Err(CoreError::ValidationError(
+                            "InsertEdit sourceOut must be greater than sourceIn".to_string(),
+                        ));
+                    }
+                }
+
                 Ok(Box::new(InsertEditInfo {
                     track_id: track_id.to_string(),
                     asset_id: asset_id.to_string(),
                     timeline_position,
-                    source_in: cmd.params.get("sourceIn").and_then(|v| v.as_f64()),
-                    source_out: cmd.params.get("sourceOut").and_then(|v| v.as_f64()),
+                    source_in,
+                    source_out,
                 }))
             }
             "OverwriteEdit" => {
@@ -559,12 +584,39 @@ impl EditScriptExecutor {
                     ));
                 }
 
+                let source_in = cmd.params.get("sourceIn").and_then(|v| v.as_f64());
+                let source_out = cmd.params.get("sourceOut").and_then(|v| v.as_f64());
+
+                if let Some(si) = source_in {
+                    if !si.is_finite() || si < 0.0 {
+                        return Err(CoreError::ValidationError(
+                            "OverwriteEdit sourceIn must be a finite, non-negative number"
+                                .to_string(),
+                        ));
+                    }
+                }
+                if let Some(so) = source_out {
+                    if !so.is_finite() || so < 0.0 {
+                        return Err(CoreError::ValidationError(
+                            "OverwriteEdit sourceOut must be a finite, non-negative number"
+                                .to_string(),
+                        ));
+                    }
+                }
+                if let (Some(si), Some(so)) = (source_in, source_out) {
+                    if so <= si {
+                        return Err(CoreError::ValidationError(
+                            "OverwriteEdit sourceOut must be greater than sourceIn".to_string(),
+                        ));
+                    }
+                }
+
                 Ok(Box::new(OverwriteEditInfo {
                     track_id: track_id.to_string(),
                     asset_id: asset_id.to_string(),
                     timeline_position,
-                    source_in: cmd.params.get("sourceIn").and_then(|v| v.as_f64()),
-                    source_out: cmd.params.get("sourceOut").and_then(|v| v.as_f64()),
+                    source_in,
+                    source_out,
                 }))
             }
             "SplitClip" => {

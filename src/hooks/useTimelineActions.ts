@@ -2763,7 +2763,13 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     if (!sequence) return;
     const playhead = usePlaybackStore.getState().currentTime;
 
-    const result = await commands.getSourceState();
+    let result;
+    try {
+      result = await commands.getSourceState();
+    } catch (error) {
+      logger.error('Insert edit: failed to query source state', { error });
+      return;
+    }
     if (result.status !== 'ok' || !result.data.assetId) {
       logger.warn('Insert edit: no source asset loaded');
       return;
@@ -2797,7 +2803,13 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     if (!sequence) return;
     const playhead = usePlaybackStore.getState().currentTime;
 
-    const result = await commands.getSourceState();
+    let result;
+    try {
+      result = await commands.getSourceState();
+    } catch (error) {
+      logger.error('Overwrite edit: failed to query source state', { error });
+      return;
+    }
     if (result.status !== 'ok' || !result.data.assetId) {
       logger.warn('Overwrite edit: no source asset loaded');
       return;
