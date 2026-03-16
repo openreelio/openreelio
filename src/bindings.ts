@@ -4733,6 +4733,10 @@ clips: Clip[]; blendMode: BlendMode;
  */
 isBaseTrack?: boolean | null; muted: boolean; locked: boolean; visible: boolean; 
 /**
+ * When true, this track shifts in sync during insert/ripple edits on other tracks.
+ */
+syncLock?: boolean; 
+/**
  * Volume for audio tracks (0.0 - 2.0, 1.0 = 100%)
  */
 volume: number }

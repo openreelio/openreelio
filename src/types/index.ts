@@ -380,6 +380,8 @@ export interface Track {
   muted: boolean;
   locked: boolean;
   visible: boolean;
+  /** When true, insert/ripple edits on other tracks also shift this track. */
+  syncLock?: boolean;
   /** Volume as linear multiplier (0.0 - 2.0, where 1.0 = 100%) */
   volume: number;
 }
@@ -771,6 +773,8 @@ export type CommandType =
   | 'MoveFile'
   | 'DeleteFile'
   | 'InsertClip'
+  | 'InsertEdit'
+  | 'OverwriteEdit'
   | 'SetClipTransform'
   | 'SetClipSpeed'
   | 'SetClipMute'
@@ -803,7 +807,14 @@ export type CommandType =
   | 'AddMask'
   | 'UpdateMask'
   | 'RemoveMask'
-  | 'ReorderMask';
+  | 'ReorderMask'
+  // Edit mode commands (S24)
+  | 'RippleDelete'
+  | 'Lift'
+  | 'ExtractEdit'
+  // Gap management commands (S24-004)
+  | 'CloseGap'
+  | 'CloseAllGaps';
 
 export interface Command {
   type: CommandType;
