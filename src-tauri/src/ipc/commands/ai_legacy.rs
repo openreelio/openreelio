@@ -911,7 +911,7 @@ pub async fn apply_edit_script(
                     continue;
                 }
                 if p.out_point <= p.in_point {
-                    errors.push(format!("Command validation failed (ExtractEdit): outPoint must be greater than inPoint"));
+                    errors.push("Command validation failed (ExtractEdit): outPoint must be greater than inPoint".to_string());
                     continue;
                 }
                 Box::new(ExtractEditCommand::new(
@@ -931,7 +931,7 @@ pub async fn apply_edit_script(
                     continue;
                 }
                 if p.gap_end <= p.gap_start {
-                    errors.push(format!("Command validation failed (CloseGap): gapEnd must be greater than gapStart"));
+                    errors.push("Command validation failed (CloseGap): gapEnd must be greater than gapStart".to_string());
                     continue;
                 }
                 Box::new(CloseGapCommand::new(
