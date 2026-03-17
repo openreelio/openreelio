@@ -217,6 +217,8 @@ impl Command for AddTextClipCommand {
             blend_mode: crate::core::timeline::BlendMode::Normal,
             speed: 1.0,
             reverse: false,
+            freeze_frame: false,
+            time_remap: None,
             effects: vec![], // Will add effect below
             audio: crate::core::timeline::AudioSettings::default(),
             label: Some(format!(
