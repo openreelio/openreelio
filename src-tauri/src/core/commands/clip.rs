@@ -8,9 +8,14 @@ use std::collections::HashSet;
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
     project::ProjectState,
-    timeline::{AudioSettings, BlendMode, Clip, ClipPlace, ClipRange, Track, Transform},
+    timeline::{
+        AudioSettings, BlendMode, Clip, ClipPlace, ClipRange, KeyframeInterpolation,
+        TimeRemapCurve, TimeRemapKeyframe, Track, Transform,
+    },
     AssetId, ClipId, CoreError, CoreResult, SequenceId, TimeSec, TrackId,
 };
+
+const TIME_REMAP_EPSILON: TimeSec = 1e-6;
 
 fn is_valid_time_sec(value: TimeSec) -> bool {
     value.is_finite() && value >= 0.0
@@ -74,6 +79,235 @@ fn insert_clip_sorted(track: &mut Track, clip: Clip) {
     sort_track_clips(track);
 }
 
+fn validate_track_unlocked(track: &Track) -> CoreResult<()> {
+    if track.locked {
+        return Err(CoreError::ValidationError(format!(
+            "Track '{}' is locked",
+            track.id
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct BezierPoint {
+    x: f64,
+    y: f64,
+}
+
+fn lerp_bezier_point(a: BezierPoint, b: BezierPoint, t: f64) -> BezierPoint {
+    BezierPoint {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+    }
+}
+
+fn split_bezier_curve(curve: [BezierPoint; 4], t: f64) -> ([BezierPoint; 4], [BezierPoint; 4]) {
+    let p01 = lerp_bezier_point(curve[0], curve[1], t);
+    let p12 = lerp_bezier_point(curve[1], curve[2], t);
+    let p23 = lerp_bezier_point(curve[2], curve[3], t);
+    let p012 = lerp_bezier_point(p01, p12, t);
+    let p123 = lerp_bezier_point(p12, p23, t);
+    let p0123 = lerp_bezier_point(p012, p123, t);
+
+    ([curve[0], p01, p012, p0123], [p0123, p123, p23, curve[3]])
+}
+
+fn build_fragment_bezier_interpolation(
+    cp1x: f64,
+    cp1y: f64,
+    cp2x: f64,
+    cp2y: f64,
+    start_norm: f64,
+    end_norm: f64,
+) -> KeyframeInterpolation {
+    let start_norm = start_norm.clamp(0.0, 1.0);
+    let end_norm = end_norm.clamp(start_norm, 1.0);
+    if end_norm - start_norm <= TIME_REMAP_EPSILON {
+        return KeyframeInterpolation::Linear;
+    }
+
+    let curve = [
+        BezierPoint { x: 0.0, y: 0.0 },
+        BezierPoint { x: cp1x, y: cp1y },
+        BezierPoint { x: cp2x, y: cp2y },
+        BezierPoint { x: 1.0, y: 1.0 },
+    ];
+
+    let (_, curve_after_start) = if start_norm <= TIME_REMAP_EPSILON {
+        (curve, curve)
+    } else {
+        split_bezier_curve(curve, start_norm)
+    };
+
+    let relative_end = if end_norm >= 1.0 - TIME_REMAP_EPSILON {
+        1.0
+    } else {
+        (end_norm - start_norm) / (1.0 - start_norm)
+    };
+
+    let (segment, _) = if relative_end >= 1.0 - TIME_REMAP_EPSILON {
+        (curve_after_start, curve_after_start)
+    } else {
+        split_bezier_curve(curve_after_start, relative_end)
+    };
+
+    let p0 = segment[0];
+    let p1 = segment[1];
+    let p2 = segment[2];
+    let p3 = segment[3];
+
+    let dx = p3.x - p0.x;
+    let dy = p3.y - p0.y;
+    if dx.abs() <= TIME_REMAP_EPSILON {
+        return KeyframeInterpolation::Linear;
+    }
+    if dy.abs() <= TIME_REMAP_EPSILON {
+        return KeyframeInterpolation::Hold;
+    }
+
+    KeyframeInterpolation::Bezier {
+        cp1x: ((p1.x - p0.x) / dx).clamp(0.0, 1.0),
+        cp1y: ((p1.y - p0.y) / dy).clamp(0.0, 1.0),
+        cp2x: ((p2.x - p0.x) / dx).clamp(0.0, 1.0),
+        cp2y: ((p2.y - p0.y) / dy).clamp(0.0, 1.0),
+    }
+}
+
+fn build_time_remap_fragment_interpolation(
+    interpolation: &KeyframeInterpolation,
+    start_norm: f64,
+    end_norm: f64,
+) -> KeyframeInterpolation {
+    match interpolation {
+        KeyframeInterpolation::Linear => KeyframeInterpolation::Linear,
+        KeyframeInterpolation::Hold => KeyframeInterpolation::Hold,
+        KeyframeInterpolation::Bezier {
+            cp1x,
+            cp1y,
+            cp2x,
+            cp2y,
+        } => build_fragment_bezier_interpolation(*cp1x, *cp1y, *cp2x, *cp2y, start_norm, end_norm),
+    }
+}
+
+fn find_time_remap_segment_index(curve: &TimeRemapCurve, timeline_time: TimeSec) -> usize {
+    for i in 0..curve.keyframes.len().saturating_sub(1) {
+        if timeline_time < curve.keyframes[i + 1].timeline_time - TIME_REMAP_EPSILON {
+            return i;
+        }
+    }
+    curve.keyframes.len().saturating_sub(2)
+}
+
+fn rebase_time_remap_curve(
+    curve: &TimeRemapCurve,
+    fragment_start_sec: TimeSec,
+    fragment_duration_sec: TimeSec,
+) -> TimeRemapCurve {
+    if !curve.is_valid()
+        || (fragment_start_sec.abs() <= TIME_REMAP_EPSILON
+            && (fragment_duration_sec - curve.timeline_duration()).abs() <= TIME_REMAP_EPSILON)
+    {
+        return curve.clone();
+    }
+
+    let fragment_end_sec = fragment_start_sec + fragment_duration_sec;
+    let first_timeline_sec = curve.keyframes[0].timeline_time;
+    let last_timeline_sec = curve.keyframes[curve.keyframes.len() - 1].timeline_time;
+
+    let mut segment_points = vec![fragment_start_sec];
+    for kf in &curve.keyframes {
+        if kf.timeline_time > fragment_start_sec + TIME_REMAP_EPSILON
+            && kf.timeline_time < fragment_end_sec - TIME_REMAP_EPSILON
+        {
+            segment_points.push(kf.timeline_time);
+        }
+    }
+    segment_points.push(fragment_end_sec);
+
+    let mut keyframes = Vec::with_capacity(segment_points.len());
+    for (idx, point_sec) in segment_points.iter().enumerate() {
+        let interpolation = if idx + 1 < segment_points.len() {
+            let next_point_sec = segment_points[idx + 1];
+            if *point_sec < first_timeline_sec - TIME_REMAP_EPSILON
+                || next_point_sec <= first_timeline_sec + TIME_REMAP_EPSILON
+                || *point_sec >= last_timeline_sec - TIME_REMAP_EPSILON
+            {
+                KeyframeInterpolation::Hold
+            } else {
+                let segment_idx = find_time_remap_segment_index(curve, *point_sec);
+                let segment_start = &curve.keyframes[segment_idx];
+                let segment_end = &curve.keyframes[segment_idx + 1];
+                let segment_duration = segment_end.timeline_time - segment_start.timeline_time;
+
+                if segment_duration <= TIME_REMAP_EPSILON {
+                    KeyframeInterpolation::Hold
+                } else {
+                    let start_norm = ((*point_sec - segment_start.timeline_time)
+                        / segment_duration)
+                        .clamp(0.0, 1.0);
+                    let end_norm = ((next_point_sec - segment_start.timeline_time)
+                        / segment_duration)
+                        .clamp(0.0, 1.0);
+                    build_time_remap_fragment_interpolation(
+                        &segment_start.interpolation,
+                        start_norm,
+                        end_norm,
+                    )
+                }
+            }
+        } else {
+            KeyframeInterpolation::Linear
+        };
+
+        keyframes.push(TimeRemapKeyframe {
+            timeline_time: if idx + 1 == segment_points.len() {
+                fragment_duration_sec
+            } else {
+                (*point_sec - fragment_start_sec).max(0.0)
+            },
+            source_time: curve.evaluate(*point_sec),
+            interpolation,
+        });
+    }
+
+    TimeRemapCurve::new(keyframes)
+}
+
+fn rebase_clip_time_remap_for_fragment(
+    clip: &mut Clip,
+    fragment_start_sec: TimeSec,
+    fragment_duration_sec: TimeSec,
+) {
+    clip.time_remap = clip.time_remap.clone().map(|curve| {
+        if curve.is_valid() {
+            rebase_time_remap_curve(&curve, fragment_start_sec, fragment_duration_sec)
+        } else {
+            curve
+        }
+    });
+}
+
+fn clone_clip_fragment_with_rebased_time_remap(
+    template: &Clip,
+    source_in_sec: TimeSec,
+    source_out_sec: TimeSec,
+    timeline_in_sec: TimeSec,
+    duration_sec: TimeSec,
+    fragment_start_sec: TimeSec,
+) -> Clip {
+    let mut clip = clone_clip_fragment(
+        template,
+        source_in_sec,
+        source_out_sec,
+        timeline_in_sec,
+        duration_sec,
+    );
+    rebase_clip_time_remap_for_fragment(&mut clip, fragment_start_sec, duration_sec);
+    clip
+}
+
 fn clone_clip_fragment(
     template: &Clip,
     source_in_sec: TimeSec,
@@ -81,7 +315,8 @@ fn clone_clip_fragment(
     timeline_in_sec: TimeSec,
     duration_sec: TimeSec,
 ) -> Clip {
-    let mut clip = Clip::new(&template.asset_id);
+    let mut clip = template.clone();
+    clip.id = ulid::Ulid::new().to_string();
     clip.range = ClipRange {
         source_in_sec,
         source_out_sec,
@@ -90,18 +325,66 @@ fn clone_clip_fragment(
         timeline_in_sec,
         duration_sec,
     };
-    clip.transform = template.transform.clone();
-    clip.opacity = template.opacity;
-    clip.blend_mode = template.blend_mode.clone();
-    clip.speed = template.speed;
-    clip.reverse = template.reverse;
-    clip.effects = template.effects.clone();
-    clip.audio = template.audio.clone();
-    clip.label = template.label.clone();
-    clip.color = template.color.clone();
-    clip.caption_style = template.caption_style.clone();
-    clip.caption_position = template.caption_position.clone();
     clip
+}
+
+fn split_clip_ranges_at(
+    clip: &Clip,
+    split_at: TimeSec,
+) -> ((TimeSec, TimeSec), (TimeSec, TimeSec)) {
+    let source_split = clip
+        .timeline_to_source(split_at)
+        .clamp(clip.range.source_in_sec, clip.range.source_out_sec);
+
+    if clip.reverse {
+        (
+            (source_split, clip.range.source_out_sec),
+            (clip.range.source_in_sec, source_split),
+        )
+    } else {
+        (
+            (clip.range.source_in_sec, source_split),
+            (source_split, clip.range.source_out_sec),
+        )
+    }
+}
+
+fn freeze_frame_sample_time(clip: &Clip, playhead_sec: TimeSec, frame_window: TimeSec) -> TimeSec {
+    let clip_start = clip.place.timeline_in_sec;
+    let clip_end = clip.place.timeline_out_sec();
+    if playhead_sec < clip_end {
+        return playhead_sec;
+    }
+
+    let timeline_frame = (frame_window * 0.5).min(clip.place.duration_sec * 0.5);
+    (clip_end - timeline_frame).max(clip_start)
+}
+
+fn freeze_frame_source_range(
+    clip: &Clip,
+    playhead_sec: TimeSec,
+    frame_window: TimeSec,
+) -> ClipRange {
+    let sample_time = freeze_frame_sample_time(clip, playhead_sec, frame_window);
+    let source_time = clip
+        .timeline_to_source(sample_time)
+        .clamp(clip.range.source_in_sec, clip.range.source_out_sec);
+    let available_duration =
+        (clip.range.source_out_sec - clip.range.source_in_sec).max(TIME_REMAP_EPSILON);
+    let sample_window = (frame_window * 0.5).min(available_duration);
+    let frame_start_sec = if clip.reverse {
+        (((source_time / frame_window).ceil() - 1.0) * frame_window).max(0.0)
+    } else {
+        ((source_time / frame_window).floor() * frame_window).max(0.0)
+    };
+    let max_source_in_sec =
+        (clip.range.source_out_sec - sample_window).max(clip.range.source_in_sec);
+    let source_in_sec = frame_start_sec
+        .clamp(clip.range.source_in_sec, clip.range.source_out_sec)
+        .min(max_source_in_sec);
+    let source_out_sec = (source_in_sec + sample_window).min(clip.range.source_out_sec);
+
+    ClipRange::new(source_in_sec, source_out_sec)
 }
 
 // =============================================================================
@@ -392,12 +675,7 @@ impl Command for InsertEditCommand {
             .find(|t| t.id == self.track_id)
             .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
 
-        if target_track.locked {
-            return Err(CoreError::ValidationError(format!(
-                "Track '{}' is locked",
-                self.track_id
-            )));
-        }
+        validate_track_unlocked(target_track)?;
 
         // --- Collect split + shift records before mutation ---
         let mut shift_records: Vec<ShiftedClipRecord> = Vec::new();
@@ -450,13 +728,9 @@ impl Command for InsertEditCommand {
         let mut result_changes: Vec<StateChange> = Vec::new();
 
         for (track_id, original_clip) in split_candidates {
-            let safe_speed = if original_clip.speed > 0.0 {
-                original_clip.speed as f64
-            } else {
-                1.0
-            };
             let relative_split = self.timeline_position - original_clip.place.timeline_in_sec;
-            let source_split = original_clip.range.source_in_sec + (relative_split * safe_speed);
+            let ((first_source_in, first_source_out), (second_source_in, second_source_out)) =
+                split_clip_ranges_at(&original_clip, self.timeline_position);
             let right_duration = original_clip.place.timeline_out_sec() - self.timeline_position;
 
             if !relative_split.is_finite()
@@ -469,12 +743,13 @@ impl Command for InsertEditCommand {
                 ));
             }
 
-            let fragment = clone_clip_fragment(
+            let fragment = clone_clip_fragment_with_rebased_time_remap(
                 &original_clip,
-                source_split,
-                original_clip.range.source_out_sec,
+                second_source_in,
+                second_source_out,
                 self.timeline_position + clip_duration,
                 right_duration,
+                relative_split,
             );
             let fragment_id = fragment.id.clone();
 
@@ -489,7 +764,8 @@ impl Command for InsertEditCommand {
                 .find(|c| c.id == original_clip.id)
                 .ok_or_else(|| CoreError::ClipNotFound(original_clip.id.clone()))?;
 
-            clip.range.source_out_sec = source_split;
+            clip.range.source_in_sec = first_source_in;
+            clip.range.source_out_sec = first_source_out;
             clip.place.duration_sec = relative_split;
             insert_clip_sorted(track, fragment);
 
@@ -810,11 +1086,7 @@ impl Command for OverwriteEditCommand {
                 continue;
             }
 
-            let safe_speed = if existing.speed > 0.0 {
-                existing.speed as f64
-            } else {
-                1.0
-            };
+            let safe_speed = existing.safe_speed();
 
             if ex_start >= overwrite_start && ex_end <= overwrite_end {
                 // Fully covered → remove
@@ -1547,11 +1819,7 @@ impl Command for ExtractEditCommand {
                 continue;
             }
 
-            let safe_speed = if existing.speed > 0.0 {
-                existing.speed as f64
-            } else {
-                1.0
-            };
+            let safe_speed = existing.safe_speed();
 
             if ex_start >= self.in_point && ex_end <= self.out_point {
                 plans.push(ExtractPlan {
@@ -2809,12 +3077,6 @@ impl Command for SetClipSpeedCommand {
             ));
         }
 
-        if self.reverse {
-            return Err(CoreError::ValidationError(
-                "Reverse playback is not yet supported by the playback/render pipeline".to_string(),
-            ));
-        }
-
         let sequence = state
             .sequences
             .get_mut(&self.sequence_id)
@@ -2826,35 +3088,37 @@ impl Command for SetClipSpeedCommand {
             .position(|track| track.id == self.track_id)
             .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
 
+        validate_track_unlocked(&sequence.tracks[track_idx])?;
+
         let clip_idx = sequence.tracks[track_idx]
             .clips
             .iter()
             .position(|c| c.id == self.clip_id)
             .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
 
-        let original = sequence.tracks[track_idx].clips[clip_idx].clone();
-        self.previous_speed = Some(original.speed);
-        self.previous_reverse = Some(original.reverse);
-        self.previous_duration_sec = Some(original.place.duration_sec);
+        {
+            let clip = &sequence.tracks[track_idx].clips[clip_idx];
+            self.previous_speed = Some(clip.speed);
+            self.previous_reverse = Some(clip.reverse);
+            self.previous_duration_sec = Some(clip.place.duration_sec);
+        }
 
-        let mut candidate = original;
-        candidate.speed = self.speed;
-        // Preserve existing reverse state; toggling is gated until pipeline supports it.
-        candidate.place.duration_sec = candidate.range.duration() / self.speed as f64;
+        let clip = &mut sequence.tracks[track_idx].clips[clip_idx];
+        clip.speed = self.speed;
+        clip.reverse = self.reverse;
+        clip.place.duration_sec = clip.range.duration() / self.speed as f64;
 
-        if !candidate.place.duration_sec.is_finite() || candidate.place.duration_sec <= 0.0 {
+        if !clip.place.duration_sec.is_finite() || clip.place.duration_sec <= 0.0 {
             return Err(CoreError::ValidationError(
                 "Clip duration must be finite and > 0 after speed change".to_string(),
             ));
         }
 
         {
+            let clip_ref = &sequence.tracks[track_idx].clips[clip_idx];
             let track = &sequence.tracks[track_idx];
-            validate_no_overlap(track, &candidate.place, Some(&candidate.id))?;
+            validate_no_overlap(track, &clip_ref.place, Some(&clip_ref.id))?;
         }
-
-        sequence.tracks[track_idx].clips[clip_idx] = candidate;
-        sort_track_clips(&mut sequence.tracks[track_idx]);
 
         let op_id = ulid::Ulid::new().to_string();
         Ok(
@@ -2902,6 +3166,651 @@ impl Command for SetClipSpeedCommand {
             "clipId": self.clip_id,
             "speed": self.speed,
             "reverse": self.reverse,
+        })
+    }
+}
+
+// =============================================================================
+// ReverseClipCommand
+// =============================================================================
+
+/// Command to toggle a clip's reverse playback state.
+///
+/// When reversed, video and audio play backward. Reverse is applied in the
+/// FFmpeg render pipeline via `reverse` and `areverse` filters.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReverseClipCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    #[serde(skip)]
+    previous_reverse: Option<bool>,
+}
+
+impl ReverseClipCommand {
+    pub fn new(sequence_id: &str, track_id: &str, clip_id: &str) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            previous_reverse: None,
+        }
+    }
+}
+
+impl Command for ReverseClipCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        validate_track_unlocked(track)?;
+
+        let clip = track
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        self.previous_reverse = Some(clip.reverse);
+        clip.reverse = !clip.reverse;
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(previous_reverse) = self.previous_reverse else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) else {
+            return Ok(());
+        };
+
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.reverse = previous_reverse;
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "ReverseClip"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+        })
+    }
+}
+
+// =============================================================================
+// CreateFreezeFrameCommand
+// =============================================================================
+
+/// Command to create a freeze frame from a clip at the playhead position.
+///
+/// Extracts a single frame from the source clip at the given timeline position
+/// and inserts a new still clip of the specified duration. The freeze frame clip
+/// uses `freeze_frame = true` so the render pipeline loops the single frame.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateFreezeFrameCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub playhead_sec: f64,
+    #[serde(default = "default_freeze_frame_duration")]
+    pub duration_sec: f64,
+    #[serde(skip)]
+    created_clip_id: Option<ClipId>,
+    #[serde(skip)]
+    shifted_clips: Vec<ShiftedClipRecord>,
+    #[serde(skip)]
+    split_clips: Vec<SplitClipRecord>,
+}
+
+pub const DEFAULT_FREEZE_FRAME_DURATION: f64 = 2.0;
+
+fn default_freeze_frame_duration() -> f64 {
+    DEFAULT_FREEZE_FRAME_DURATION
+}
+
+impl CreateFreezeFrameCommand {
+    pub fn new(
+        sequence_id: &str,
+        track_id: &str,
+        clip_id: &str,
+        playhead_sec: f64,
+        duration_sec: f64,
+    ) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            playhead_sec,
+            duration_sec,
+            created_clip_id: None,
+            shifted_clips: Vec::new(),
+            split_clips: Vec::new(),
+        }
+    }
+}
+
+impl Command for CreateFreezeFrameCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !self.playhead_sec.is_finite() || self.playhead_sec < 0.0 {
+            return Err(CoreError::InvalidCommand(
+                "playhead_sec must be a finite non-negative number".to_string(),
+            ));
+        }
+        if !self.duration_sec.is_finite() || self.duration_sec <= 0.0 {
+            return Err(CoreError::InvalidCommand(
+                "duration_sec must be a finite number > 0".to_string(),
+            ));
+        }
+
+        let (source_clip_template, freeze_range, shift_records, split_candidates) = {
+            let sequence = state
+                .sequences
+                .get(&self.sequence_id)
+                .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+            let track = sequence
+                .tracks
+                .iter()
+                .find(|t| t.id == self.track_id)
+                .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+            validate_track_unlocked(track)?;
+
+            let source_clip = track
+                .clips
+                .iter()
+                .find(|c| c.id == self.clip_id)
+                .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+            let clip_start = source_clip.place.timeline_in_sec;
+            let clip_end = source_clip.place.timeline_out_sec();
+            if self.playhead_sec < clip_start || self.playhead_sec > clip_end {
+                return Err(CoreError::ValidationError(format!(
+                    "Playhead ({:.3}s) is outside clip range [{:.3}s, {:.3}s]",
+                    self.playhead_sec, clip_start, clip_end
+                )));
+            }
+
+            let fps = sequence.format.fps.as_f64();
+            let frame_window = if fps > 0.0 { 1.0 / fps } else { 1.0 / 25.0 };
+            let freeze_range =
+                freeze_frame_source_range(source_clip, self.playhead_sec, frame_window);
+            let mut shift_records = Vec::new();
+            let mut split_candidates = Vec::new();
+
+            for clip in &track.clips {
+                let clip_start = clip.place.timeline_in_sec;
+                let clip_end = clip.place.timeline_out_sec();
+
+                if clip_start < self.playhead_sec && clip_end > self.playhead_sec {
+                    split_candidates.push(clip.clone());
+                } else if clip_start >= self.playhead_sec {
+                    shift_records.push(ShiftedClipRecord {
+                        track_id: self.track_id.clone(),
+                        clip_id: clip.id.clone(),
+                        original_timeline_in: clip_start,
+                    });
+                }
+            }
+
+            (
+                source_clip.clone(),
+                freeze_range,
+                shift_records,
+                split_candidates,
+            )
+        };
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        let mut split_records = Vec::new();
+
+        for original_clip in split_candidates {
+            let relative_split = self.playhead_sec - original_clip.place.timeline_in_sec;
+            let right_duration = original_clip.place.timeline_out_sec() - self.playhead_sec;
+            if !relative_split.is_finite()
+                || !right_duration.is_finite()
+                || relative_split <= 0.0
+                || right_duration <= 0.0
+            {
+                return Err(CoreError::ValidationError(
+                    "Freeze frame split produced an invalid clip duration".to_string(),
+                ));
+            }
+
+            let ((first_source_in, first_source_out), (second_source_in, second_source_out)) =
+                split_clip_ranges_at(&original_clip, self.playhead_sec);
+            let fragment = clone_clip_fragment_with_rebased_time_remap(
+                &original_clip,
+                second_source_in,
+                second_source_out,
+                self.playhead_sec + self.duration_sec,
+                right_duration,
+                relative_split,
+            );
+            let fragment_id = fragment.id.clone();
+
+            let clip = track
+                .clips
+                .iter_mut()
+                .find(|c| c.id == original_clip.id)
+                .ok_or_else(|| CoreError::ClipNotFound(original_clip.id.clone()))?;
+            clip.range.source_in_sec = first_source_in;
+            clip.range.source_out_sec = first_source_out;
+            clip.place.duration_sec = relative_split;
+            rebase_clip_time_remap_for_fragment(clip, 0.0, relative_split);
+            insert_clip_sorted(track, fragment);
+
+            split_records.push(SplitClipRecord {
+                track_id: self.track_id.clone(),
+                original_clip: Box::new(original_clip),
+                fragment_clip_id: fragment_id,
+            });
+        }
+
+        for record in &shift_records {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                clip.place.timeline_in_sec += self.duration_sec;
+            }
+        }
+        sort_track_clips(track);
+
+        let mut freeze_clip = source_clip_template;
+        freeze_clip.id = ulid::Ulid::new().to_string();
+        freeze_clip.range = freeze_range;
+        freeze_clip.place = ClipPlace {
+            timeline_in_sec: self.playhead_sec,
+            duration_sec: self.duration_sec,
+        };
+        freeze_clip.freeze_frame = true;
+        freeze_clip.speed = 1.0;
+        freeze_clip.reverse = false;
+        freeze_clip.time_remap = None;
+        freeze_clip.audio.muted = true;
+
+        let clip_id = freeze_clip.id.clone();
+        insert_clip_sorted(track, freeze_clip);
+
+        self.created_clip_id = Some(clip_id.clone());
+        self.shifted_clips = shift_records;
+        self.split_clips = split_records;
+
+        let op_id = ulid::Ulid::new().to_string();
+        let mut result = CommandResult::new(&op_id)
+            .with_change(StateChange::ClipCreated {
+                clip_id: clip_id.clone(),
+            })
+            .with_created_id(&clip_id);
+
+        for record in &self.shifted_clips {
+            result = result.with_change(StateChange::ClipModified {
+                clip_id: record.clip_id.clone(),
+            });
+        }
+
+        for record in &self.split_clips {
+            result = result.with_change(StateChange::ClipModified {
+                clip_id: record.original_clip.id.clone(),
+            });
+            result = result.with_change(StateChange::ClipCreated {
+                clip_id: record.fragment_clip_id.clone(),
+            });
+        }
+
+        Ok(result)
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) else {
+            return Ok(());
+        };
+
+        if let Some(ref created_id) = self.created_clip_id {
+            track.clips.retain(|c| c.id != *created_id);
+        }
+
+        for record in &self.split_clips {
+            track.clips.retain(|c| c.id != record.fragment_clip_id);
+
+            if let Some(clip) = track
+                .clips
+                .iter_mut()
+                .find(|c| c.id == record.original_clip.id)
+            {
+                *clip = (*record.original_clip).clone();
+            } else {
+                insert_clip_sorted(track, (*record.original_clip).clone());
+            }
+        }
+
+        for record in &self.shifted_clips {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                clip.place.timeline_in_sec = record.original_timeline_in;
+            }
+        }
+        sort_track_clips(track);
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "CreateFreezeFrame"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "playheadSec": self.playhead_sec,
+            "durationSec": self.duration_sec,
+        })
+    }
+}
+
+// =============================================================================
+// SetTimeRemapCommand
+// =============================================================================
+
+/// Command to set a time remap curve on a clip for variable-speed playback.
+///
+/// When a valid time remap curve is active, it overrides the constant `speed`
+/// field. The clip's timeline duration is recalculated from the curve.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTimeRemapCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub time_remap: TimeRemapCurve,
+    #[serde(skip)]
+    previous_time_remap: Option<Option<TimeRemapCurve>>,
+    #[serde(skip)]
+    previous_duration_sec: Option<TimeSec>,
+}
+
+impl SetTimeRemapCommand {
+    pub fn new(
+        sequence_id: &str,
+        track_id: &str,
+        clip_id: &str,
+        time_remap: TimeRemapCurve,
+    ) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            time_remap,
+            previous_time_remap: None,
+            previous_duration_sec: None,
+        }
+    }
+}
+
+impl Command for SetTimeRemapCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !self.time_remap.is_valid() {
+            return Err(CoreError::InvalidCommand(
+                "Time remap curve must have at least 2 keyframes".to_string(),
+            ));
+        }
+
+        // Validate all keyframe values are finite and non-negative
+        for (i, kf) in self.time_remap.keyframes.iter().enumerate() {
+            if !kf.timeline_time.is_finite() || kf.timeline_time < 0.0 {
+                return Err(CoreError::InvalidCommand(format!(
+                    "Keyframe {} has invalid timeline_time: {}",
+                    i, kf.timeline_time
+                )));
+            }
+            if !kf.source_time.is_finite() || kf.source_time < 0.0 {
+                return Err(CoreError::InvalidCommand(format!(
+                    "Keyframe {} has invalid source_time: {}",
+                    i, kf.source_time
+                )));
+            }
+        }
+
+        let new_duration = self.time_remap.timeline_duration();
+        if !new_duration.is_finite() || new_duration <= 0.0 {
+            return Err(CoreError::ValidationError(
+                "Time remap curve must produce a positive timeline duration".to_string(),
+            ));
+        }
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track_idx = sequence
+            .tracks
+            .iter()
+            .position(|track| track.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        validate_track_unlocked(&sequence.tracks[track_idx])?;
+
+        let clip_idx = sequence.tracks[track_idx]
+            .clips
+            .iter()
+            .position(|c| c.id == self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        {
+            let clip = &sequence.tracks[track_idx].clips[clip_idx];
+            self.previous_time_remap = Some(clip.time_remap.clone());
+            self.previous_duration_sec = Some(clip.place.duration_sec);
+        }
+
+        let clip = &mut sequence.tracks[track_idx].clips[clip_idx];
+        clip.time_remap = Some(self.time_remap.clone());
+        clip.place.duration_sec = new_duration;
+
+        {
+            let clip_ref = &sequence.tracks[track_idx].clips[clip_idx];
+            let track = &sequence.tracks[track_idx];
+            validate_no_overlap(track, &clip_ref.place, Some(&clip_ref.id))?;
+        }
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let (Some(ref previous_time_remap), Some(previous_duration_sec)) =
+            (&self.previous_time_remap, self.previous_duration_sec)
+        else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) else {
+            return Ok(());
+        };
+
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.time_remap = previous_time_remap.clone();
+            clip.place.duration_sec = previous_duration_sec;
+            sort_track_clips(track);
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetTimeRemap"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "timeRemap": self.time_remap,
+        })
+    }
+}
+
+// =============================================================================
+// ClearTimeRemapCommand
+// =============================================================================
+
+/// Command to remove a time remap curve from a clip.
+///
+/// Restores the clip to constant-speed mode using the `speed` field.
+/// The clip's duration is recalculated from source range and constant speed.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearTimeRemapCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    #[serde(skip)]
+    previous_time_remap: Option<Option<TimeRemapCurve>>,
+    #[serde(skip)]
+    previous_duration_sec: Option<TimeSec>,
+}
+
+impl ClearTimeRemapCommand {
+    pub fn new(sequence_id: &str, track_id: &str, clip_id: &str) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            previous_time_remap: None,
+            previous_duration_sec: None,
+        }
+    }
+}
+
+impl Command for ClearTimeRemapCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track_idx = sequence
+            .tracks
+            .iter()
+            .position(|track| track.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        validate_track_unlocked(&sequence.tracks[track_idx])?;
+
+        let clip_idx = sequence.tracks[track_idx]
+            .clips
+            .iter()
+            .position(|c| c.id == self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        let original = &sequence.tracks[track_idx].clips[clip_idx];
+        self.previous_time_remap = Some(original.time_remap.clone());
+        self.previous_duration_sec = Some(original.place.duration_sec);
+
+        let clip = &mut sequence.tracks[track_idx].clips[clip_idx];
+        clip.time_remap = None;
+        // Restore duration from source range and constant speed
+        clip.place.duration_sec = clip.range.duration() / clip.safe_speed();
+
+        {
+            let clip_ref = &sequence.tracks[track_idx].clips[clip_idx];
+            let track = &sequence.tracks[track_idx];
+            validate_no_overlap(track, &clip_ref.place, Some(&clip_ref.id))?;
+        }
+
+        sort_track_clips(&mut sequence.tracks[track_idx]);
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let (Some(ref previous_time_remap), Some(previous_duration_sec)) =
+            (&self.previous_time_remap, self.previous_duration_sec)
+        else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) else {
+            return Ok(());
+        };
+
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.time_remap = previous_time_remap.clone();
+            clip.place.duration_sec = previous_duration_sec;
+            sort_track_clips(track);
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "ClearTimeRemap"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
         })
     }
 }
@@ -3156,39 +4065,19 @@ impl Command for SplitClipCommand {
             return Err(CoreError::InvalidSplitPoint(self.split_at));
         }
 
-        // Calculate source time at split point (accounting for speed)
         let relative_split = self.split_at - clip_start;
-        let safe_speed = if original.speed > 0.0 {
-            original.speed as f64
-        } else {
-            1.0
-        };
-        // When speed is applied, the source time advances at a different rate
-        // relative_split is in timeline seconds, multiply by speed to get source seconds
-        let source_split = original.range.source_in_sec + (relative_split * safe_speed);
+        let ((first_source_in, first_source_out), (second_source_in, second_source_out)) =
+            split_clip_ranges_at(&original, self.split_at);
+        let second_timeline_duration = clip_end - self.split_at;
 
-        // Create second clip (after split) with ALL properties copied
-        let second_source_duration = original.range.source_out_sec - source_split;
-        let second_timeline_duration = second_source_duration / safe_speed;
-
-        let mut second_clip = Clip::new(&original.asset_id);
-        second_clip.range = ClipRange {
-            source_in_sec: source_split,
-            source_out_sec: original.range.source_out_sec,
-        };
-        second_clip.place = ClipPlace {
-            timeline_in_sec: self.split_at,
-            duration_sec: second_timeline_duration,
-        };
-        // Copy all properties from original clip
-        second_clip.transform = original.transform.clone();
-        second_clip.audio = original.audio.clone();
-        second_clip.speed = original.speed;
-        second_clip.opacity = original.opacity;
-        second_clip.blend_mode = original.blend_mode.clone();
-        second_clip.effects = original.effects.clone();
-        second_clip.label = original.label.clone();
-        second_clip.color = original.color.clone();
+        let second_clip = clone_clip_fragment_with_rebased_time_remap(
+            &original,
+            second_source_in,
+            second_source_out,
+            self.split_at,
+            second_timeline_duration,
+            relative_split,
+        );
 
         let second_clip_id = second_clip.id.clone();
 
@@ -3197,8 +4086,10 @@ impl Command for SplitClipCommand {
 
         // Prepare modified first clip without mutating track until validations pass.
         let mut first_clip = original.clone();
-        first_clip.range.source_out_sec = source_split;
+        first_clip.range.source_in_sec = first_source_in;
+        first_clip.range.source_out_sec = first_source_out;
         first_clip.place.duration_sec = relative_split;
+        rebase_clip_time_remap_for_fragment(&mut first_clip, 0.0, relative_split);
 
         if !first_clip.place.duration_sec.is_finite() || first_clip.place.duration_sec <= 0.0 {
             return Err(CoreError::ValidationError(
@@ -3694,8 +4585,11 @@ mod tests {
     use super::*;
     use crate::core::{
         assets::{Asset, VideoInfo},
-        timeline::{Sequence, SequenceFormat, Track, TrackKind},
-        Point2D,
+        timeline::{
+            BlendMode, KeyframeInterpolation, Sequence, SequenceFormat, TimeRemapCurve,
+            TimeRemapKeyframe, Track, TrackKind,
+        },
+        Color, Point2D,
     };
 
     fn create_test_state() -> ProjectState {
@@ -3714,6 +4608,19 @@ mod tests {
         state.sequences.insert(sequence.id.clone(), sequence);
 
         state
+    }
+
+    fn linear_time_remap_curve(points: &[(f64, f64)]) -> TimeRemapCurve {
+        TimeRemapCurve::new(
+            points
+                .iter()
+                .map(|(timeline_time, source_time)| TimeRemapKeyframe {
+                    timeline_time: *timeline_time,
+                    source_time: *source_time,
+                    interpolation: KeyframeInterpolation::Linear,
+                })
+                .collect(),
+        )
     }
 
     #[test]
@@ -3818,6 +4725,73 @@ mod tests {
         assert_eq!(second.range.source_in_sec, 5.0);
         assert_eq!(second.range.source_out_sec, 10.0);
         assert_eq!(second.place.timeline_in_sec, 5.0);
+    }
+
+    #[test]
+    fn test_split_clip_command_preserves_reverse_ranges() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        let clip = &mut state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0];
+        clip.reverse = true;
+        let clip_id = clip.id.clone();
+
+        let mut split_cmd = SplitClipCommand::new(&seq_id, &track_id, &clip_id, 4.0);
+        split_cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        let first = track.clips.iter().find(|clip| clip.id == clip_id).unwrap();
+        let second = track.clips.iter().find(|clip| clip.id != clip_id).unwrap();
+
+        assert!(first.reverse);
+        assert!(second.reverse);
+        assert_eq!(first.range.source_in_sec, 6.0);
+        assert_eq!(first.range.source_out_sec, 10.0);
+        assert_eq!(second.range.source_in_sec, 0.0);
+        assert_eq!(second.range.source_out_sec, 6.0);
+        assert_eq!(second.place.timeline_in_sec, 4.0);
+        assert_eq!(second.place.duration_sec, 6.0);
+    }
+
+    #[test]
+    fn test_split_clip_command_rebases_time_remap_fragments() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 4.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        {
+            let clip = &mut state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0];
+            clip.time_remap = Some(linear_time_remap_curve(&[(0.0, 0.0), (2.0, 4.0)]));
+            clip.place.duration_sec = 2.0;
+        }
+
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let mut split_cmd = SplitClipCommand::new(&seq_id, &track_id, &clip_id, 1.0);
+        split_cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        let left = track.clips.iter().find(|clip| clip.id == clip_id).unwrap();
+        let right = track.clips.iter().find(|clip| clip.id != clip_id).unwrap();
+
+        let left_remap = left.time_remap.as_ref().unwrap();
+        let right_remap = right.time_remap.as_ref().unwrap();
+        assert!((left.duration() - 1.0).abs() < 1e-6);
+        assert!((right.duration() - 1.0).abs() < 1e-6);
+        assert!((left_remap.evaluate(0.0) - 0.0).abs() < 1e-6);
+        assert!((left_remap.evaluate(1.0) - 2.0).abs() < 1e-6);
+        assert!((right_remap.evaluate(0.0) - 2.0).abs() < 1e-6);
+        assert!((right_remap.evaluate(1.0) - 4.0).abs() < 1e-6);
     }
 
     #[test]
@@ -4268,7 +5242,7 @@ mod tests {
     }
 
     #[test]
-    fn test_set_clip_speed_rejects_reverse_until_pipeline_supports_it() {
+    fn test_set_clip_speed_with_reverse_sets_both() {
         let mut state = create_test_state();
         let seq_id = state.active_sequence_id.clone().unwrap();
         let track_id = state.sequences[&seq_id].tracks[0].id.clone();
@@ -4279,17 +5253,25 @@ mod tests {
         insert_cmd.execute(&mut state).unwrap();
 
         let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
-        let original_reverse = state.sequences[&seq_id].tracks[0].clips[0].reverse;
-        let original_speed = state.sequences[&seq_id].tracks[0].clips[0].speed;
 
-        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, &track_id, &clip_id, 1.0, true);
-        let err = speed_cmd.execute(&mut state).unwrap_err();
+        // Given a clip with normal speed and not reversed
+        assert!(!state.sequences[&seq_id].tracks[0].clips[0].reverse);
 
-        assert!(matches!(err, CoreError::ValidationError(_)));
+        // When setting speed with reverse=true
+        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, &track_id, &clip_id, 2.0, true);
+        speed_cmd.execute(&mut state).unwrap();
 
+        // Then both speed and reverse are set
         let updated = &state.sequences[&seq_id].tracks[0].clips[0];
-        assert_eq!(updated.reverse, original_reverse);
-        assert_eq!(updated.speed, original_speed);
+        assert_eq!(updated.speed, 2.0);
+        assert!(updated.reverse);
+        assert_eq!(updated.place.duration_sec, 5.0);
+
+        // And undo restores both
+        speed_cmd.undo(&mut state).unwrap();
+        let restored = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert!(!restored.reverse);
+        assert_eq!(restored.speed, 1.0);
     }
 
     #[test]
@@ -4324,6 +5306,26 @@ mod tests {
 
         let err = speed_cmd.execute(&mut state).unwrap_err();
         assert!(matches!(err, CoreError::TrackNotFound(_)));
+    }
+
+    #[test]
+    fn test_set_clip_speed_rejects_locked_track() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].locked = true;
+
+        let mut speed_cmd = SetClipSpeedCommand::new(&seq_id, &track_id, &clip_id, 2.0, false);
+        let err = speed_cmd.execute(&mut state).unwrap_err();
+        assert!(matches!(err, CoreError::ValidationError(_)));
+        assert!(err.to_string().contains("locked"));
     }
 
     #[test]
@@ -5096,6 +6098,45 @@ mod tests {
         assert_eq!(right.place.duration_sec, 12.0);
         assert_eq!(right.range.source_in_sec, 8.0);
         assert_eq!(right.range.source_out_sec, 20.0);
+    }
+
+    #[test]
+    fn insert_edit_should_rebase_time_remap_on_split_fragments() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 4.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let original_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        {
+            let clip = &mut state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0];
+            clip.time_remap = Some(linear_time_remap_curve(&[(0.0, 0.0), (2.0, 4.0)]));
+            clip.place.duration_sec = 2.0;
+        }
+
+        let mut cmd =
+            InsertEditCommand::new(&seq_id, &track_id, &asset_id, 1.0).with_source_range(0.0, 0.5);
+        let result = cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        let left = track
+            .clips
+            .iter()
+            .find(|c| c.id == original_clip_id)
+            .unwrap();
+        let right = track
+            .clips
+            .iter()
+            .find(|c| c.id != original_clip_id && !result.created_ids.contains(&c.id))
+            .unwrap();
+
+        assert!((left.time_remap.as_ref().unwrap().evaluate(1.0) - 2.0).abs() < 1e-6);
+        assert!((right.time_remap.as_ref().unwrap().evaluate(0.0) - 2.0).abs() < 1e-6);
+        assert!((right.time_remap.as_ref().unwrap().evaluate(1.0) - 4.0).abs() < 1e-6);
     }
 
     // Scenario: Undo after splitting at the insert point restores the original clip
@@ -6309,5 +7350,358 @@ mod tests {
         let mut cmd = CloseGapCommand::new(&seq_id, &track_id, 5.0, 8.0);
         let result = cmd.execute(&mut state);
         assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // ReverseClipCommand Tests (BDD-style)
+    // =========================================================================
+
+    #[test]
+    fn should_toggle_reverse_flag_on_clip() {
+        // Given a clip that is not reversed
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        assert!(!state.sequences[&seq_id].tracks[0].clips[0].reverse);
+
+        // When toggling reverse
+        let mut cmd = ReverseClipCommand::new(&seq_id, &track_id, &clip_id);
+        cmd.execute(&mut state).unwrap();
+
+        // Then the clip is reversed
+        assert!(state.sequences[&seq_id].tracks[0].clips[0].reverse);
+    }
+
+    #[test]
+    fn should_toggle_reverse_back_on_second_execute() {
+        // Given a reversed clip
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        let mut cmd1 = ReverseClipCommand::new(&seq_id, &track_id, &clip_id);
+        cmd1.execute(&mut state).unwrap();
+        assert!(state.sequences[&seq_id].tracks[0].clips[0].reverse);
+
+        // When toggling again
+        let mut cmd2 = ReverseClipCommand::new(&seq_id, &track_id, &clip_id);
+        cmd2.execute(&mut state).unwrap();
+
+        // Then the clip is back to normal
+        assert!(!state.sequences[&seq_id].tracks[0].clips[0].reverse);
+    }
+
+    #[test]
+    fn should_undo_reverse_clip() {
+        // Given a clip that was reversed
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        let mut cmd = ReverseClipCommand::new(&seq_id, &track_id, &clip_id);
+        cmd.execute(&mut state).unwrap();
+        assert!(state.sequences[&seq_id].tracks[0].clips[0].reverse);
+
+        // When undoing
+        cmd.undo(&mut state).unwrap();
+
+        // Then reverse is restored to original
+        assert!(!state.sequences[&seq_id].tracks[0].clips[0].reverse);
+    }
+
+    #[test]
+    fn should_reject_reverse_clip_on_locked_track() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].locked = true;
+
+        let mut cmd = ReverseClipCommand::new(&seq_id, &track_id, &clip_id);
+        let err = cmd.execute(&mut state).unwrap_err();
+        assert!(matches!(err, CoreError::ValidationError(_)));
+        assert!(err.to_string().contains("locked"));
+    }
+
+    // =========================================================================
+    // CreateFreezeFrameCommand Tests (BDD-style)
+    // =========================================================================
+
+    #[test]
+    fn should_create_freeze_frame_at_playhead() {
+        // Given a clip at 0-10s on the timeline
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        // When creating a freeze frame inside the clip
+        let mut cmd = CreateFreezeFrameCommand::new(&seq_id, &track_id, &clip_id, 5.0, 2.0);
+        let result = cmd.execute(&mut state).unwrap();
+
+        // Then the source clip is split and the freeze frame is inserted at the playhead
+        assert_eq!(result.created_ids.len(), 1);
+        let freeze_id = &result.created_ids[0];
+        let clips = &state.sequences[&seq_id].tracks[0].clips;
+        assert_eq!(clips.len(), 3);
+
+        let left_clip = clips.iter().find(|c| c.id == clip_id).unwrap();
+        let freeze_clip = clips.iter().find(|c| c.id == *freeze_id).unwrap();
+        let right_clip = clips
+            .iter()
+            .find(|c| c.id != clip_id && c.id != *freeze_id)
+            .unwrap();
+
+        assert_eq!(left_clip.range.source_in_sec, 0.0);
+        assert_eq!(left_clip.range.source_out_sec, 5.0);
+        assert_eq!(left_clip.place.timeline_in_sec, 0.0);
+        assert_eq!(left_clip.place.duration_sec, 5.0);
+        assert!(freeze_clip.freeze_frame);
+        assert_eq!(freeze_clip.place.duration_sec, 2.0);
+        assert_eq!(freeze_clip.place.timeline_in_sec, 5.0);
+        assert!(freeze_clip.audio.muted);
+        assert!((freeze_clip.range.source_in_sec - 5.0).abs() < 1e-6);
+        assert!((freeze_clip.range.source_out_sec - 5.016_667).abs() < 1e-5);
+
+        assert_eq!(right_clip.range.source_in_sec, 5.0);
+        assert_eq!(right_clip.range.source_out_sec, 10.0);
+        assert_eq!(right_clip.place.timeline_in_sec, 7.0);
+        assert_eq!(right_clip.place.duration_sec, 5.0);
+    }
+
+    #[test]
+    fn should_undo_freeze_frame_creation() {
+        // Given a clip at 0-10s with freeze frame inserted at 5-7s
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        let mut cmd = CreateFreezeFrameCommand::new(&seq_id, &track_id, &clip_id, 5.0, 2.0);
+        cmd.execute(&mut state).unwrap();
+        assert_eq!(state.sequences[&seq_id].tracks[0].clips.len(), 3);
+
+        // When undoing
+        cmd.undo(&mut state).unwrap();
+
+        // Then the freeze frame clip is removed and the source clip is restored
+        assert_eq!(state.sequences[&seq_id].tracks[0].clips.len(), 1);
+        let restored = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert_eq!(restored.id, clip_id);
+        assert_eq!(restored.range.source_in_sec, 0.0);
+        assert_eq!(restored.range.source_out_sec, 10.0);
+        assert_eq!(restored.place.timeline_in_sec, 0.0);
+        assert_eq!(restored.place.duration_sec, 10.0);
+    }
+
+    #[test]
+    fn should_clamp_freeze_frame_to_last_visible_frame_at_clip_end() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        let mut cmd = CreateFreezeFrameCommand::new(&seq_id, &track_id, &clip_id, 10.0, 2.0);
+        let result = cmd.execute(&mut state).unwrap();
+
+        let freeze_id = &result.created_ids[0];
+        let freeze_clip = state.sequences[&seq_id].tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.id == *freeze_id)
+            .unwrap();
+
+        assert!((freeze_clip.range.source_in_sec - 9.966_667).abs() < 1e-5);
+        assert!((freeze_clip.range.source_out_sec - 9.983_333).abs() < 1e-5);
+    }
+
+    #[test]
+    fn should_clone_source_styling_when_creating_freeze_frame() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        {
+            let clip = &mut state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0];
+            clip.transform.position = Point2D::new(0.25, 0.75);
+            clip.transform.scale = Point2D::new(1.5, 0.8);
+            clip.opacity = 0.6;
+            clip.blend_mode = BlendMode::Screen;
+            clip.effects = vec!["effect_1".to_string(), "effect_2".to_string()];
+            clip.color = Some(Color::rgb(0.1, 0.2, 0.3));
+            clip.time_remap = Some(linear_time_remap_curve(&[(0.0, 0.0), (10.0, 10.0)]));
+        }
+
+        let mut cmd = CreateFreezeFrameCommand::new(&seq_id, &track_id, &clip_id, 5.0, 2.0);
+        let result = cmd.execute(&mut state).unwrap();
+        let freeze_id = &result.created_ids[0];
+        let freeze_clip = state.sequences[&seq_id].tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.id == *freeze_id)
+            .unwrap();
+
+        assert_eq!(freeze_clip.transform.position, Point2D::new(0.25, 0.75));
+        assert_eq!(freeze_clip.transform.scale, Point2D::new(1.5, 0.8));
+        assert_eq!(freeze_clip.opacity, 0.6);
+        assert_eq!(freeze_clip.blend_mode, BlendMode::Screen);
+        assert_eq!(
+            freeze_clip.effects,
+            vec!["effect_1".to_string(), "effect_2".to_string()]
+        );
+        assert_eq!(freeze_clip.color, Some(Color::rgb(0.1, 0.2, 0.3)));
+        assert!(freeze_clip.time_remap.is_none());
+    }
+
+    #[test]
+    fn should_reject_freeze_frame_on_locked_track() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].locked = true;
+
+        let mut cmd = CreateFreezeFrameCommand::new(&seq_id, &track_id, &clip_id, 5.0, 2.0);
+        let err = cmd.execute(&mut state).unwrap_err();
+        assert!(matches!(err, CoreError::ValidationError(_)));
+        assert!(err.to_string().contains("locked"));
+    }
+
+    #[test]
+    fn should_reject_freeze_frame_outside_clip_range() {
+        // Given a clip from 0-10s
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        // When creating freeze frame at 15.0 (outside clip range 0-10)
+        let mut cmd = CreateFreezeFrameCommand::new(&seq_id, &track_id, &clip_id, 15.0, 2.0);
+        let result = cmd.execute(&mut state);
+
+        // Then it should fail
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_reject_freeze_frame_with_invalid_duration() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        // When creating freeze frame with zero duration
+        let mut cmd = CreateFreezeFrameCommand::new(&seq_id, &track_id, &clip_id, 5.0, 0.0);
+        let result = cmd.execute(&mut state);
+
+        // Then it should fail
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn should_reject_set_time_remap_on_locked_track() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 4.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].locked = true;
+
+        let mut cmd = SetTimeRemapCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            linear_time_remap_curve(&[(0.0, 0.0), (2.0, 4.0)]),
+        );
+        let err = cmd.execute(&mut state).unwrap_err();
+        assert!(matches!(err, CoreError::ValidationError(_)));
+        assert!(err.to_string().contains("locked"));
+    }
+
+    #[test]
+    fn should_reject_clear_time_remap_on_locked_track() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut insert_cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 4.0);
+        insert_cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        {
+            let clip = &mut state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0];
+            clip.time_remap = Some(linear_time_remap_curve(&[(0.0, 0.0), (2.0, 4.0)]));
+            clip.place.duration_sec = 2.0;
+        }
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].locked = true;
+
+        let mut cmd = ClearTimeRemapCommand::new(&seq_id, &track_id, &clip_id);
+        let err = cmd.execute(&mut state).unwrap_err();
+        assert!(matches!(err, CoreError::ValidationError(_)));
+        assert!(err.to_string().contains("locked"));
     }
 }
