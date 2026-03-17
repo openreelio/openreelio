@@ -27,6 +27,132 @@ pub struct InsertClipPayload {
     pub source_out: Option<TimeSec>,
 }
 
+/// Payload for Insert Edit (ripple insert — pushes downstream clips).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct InsertEditPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub asset_id: AssetId,
+    /// Playhead / timeline position to insert at.
+    pub timeline_position: TimeSec,
+    /// Optional source start time for partial-range inserts.
+    pub source_in: Option<TimeSec>,
+    /// Optional source end time for partial-range inserts.
+    pub source_out: Option<TimeSec>,
+}
+
+/// Payload for Overwrite Edit (replaces content in time range — trims/removes overlapping clips).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OverwriteEditPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub asset_id: AssetId,
+    /// Playhead / timeline position to place the clip.
+    pub timeline_position: TimeSec,
+    /// Optional source start time for partial-range overwrites.
+    pub source_in: Option<TimeSec>,
+    /// Optional source end time for partial-range overwrites.
+    pub source_out: Option<TimeSec>,
+}
+
+/// Payload for Ripple Delete (remove clips + close gaps).
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct RippleDeletePayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    /// One or more clip IDs to remove.
+    pub clip_ids: Vec<ClipId>,
+}
+
+impl<'de> Deserialize<'de> for RippleDeletePayload {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct RippleDeletePayloadCompat {
+            sequence_id: SequenceId,
+            track_id: TrackId,
+            #[serde(default)]
+            clip_ids: Vec<ClipId>,
+            clip_id: Option<ClipId>,
+            #[serde(default)]
+            affect_all_tracks: Option<bool>,
+        }
+
+        let compat = RippleDeletePayloadCompat::deserialize(deserializer)?;
+        let _ = compat.affect_all_tracks;
+
+        let clip_ids = if !compat.clip_ids.is_empty() {
+            compat.clip_ids
+        } else if let Some(clip_id) = compat.clip_id {
+            vec![clip_id]
+        } else {
+            return Err(serde::de::Error::missing_field("clipIds"));
+        };
+
+        Ok(Self {
+            sequence_id: compat.sequence_id,
+            track_id: compat.track_id,
+            clip_ids,
+        })
+    }
+}
+
+/// Payload for Lift (remove clips, leave gaps).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LiftPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    /// One or more clip IDs to remove.
+    pub clip_ids: Vec<ClipId>,
+}
+
+/// Payload for Extract Edit (remove In/Out range + close gap).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtractEditPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    /// In point (start of extraction range).
+    pub in_point: TimeSec,
+    /// Out point (end of extraction range).
+    pub out_point: TimeSec,
+}
+
+/// Payload for Find Gaps (query — returns gap info without mutating state).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FindGapsPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+}
+
+/// Payload for Close Gap (close a specific gap by shifting downstream clips).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloseGapPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    /// Start of the gap to close.
+    pub gap_start: TimeSec,
+    /// End of the gap to close.
+    pub gap_end: TimeSec,
+}
+
+/// Payload for Close All Gaps (remove all gaps on a track).
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CloseAllGapsPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RemoveClipPayload {
@@ -568,6 +694,32 @@ pub enum CommandPayload {
     #[serde(alias = "insertClip", alias = "InsertClip")]
     InsertClip(InsertClipPayload),
 
+    #[serde(alias = "insertEdit", alias = "InsertEdit")]
+    InsertEdit(InsertEditPayload),
+
+    #[serde(alias = "overwriteEdit", alias = "OverwriteEdit")]
+    OverwriteEdit(OverwriteEditPayload),
+
+    #[serde(alias = "rippleDelete", alias = "RippleDelete")]
+    RippleDelete(RippleDeletePayload),
+
+    #[serde(alias = "lift", alias = "Lift", alias = "liftEdit", alias = "LiftEdit")]
+    Lift(LiftPayload),
+
+    #[serde(
+        alias = "extractEdit",
+        alias = "ExtractEdit",
+        alias = "extract",
+        alias = "Extract"
+    )]
+    ExtractEdit(ExtractEditPayload),
+
+    #[serde(alias = "closeGap", alias = "CloseGap")]
+    CloseGap(CloseGapPayload),
+
+    #[serde(alias = "closeAllGaps", alias = "CloseAllGaps")]
+    CloseAllGaps(CloseAllGapsPayload),
+
     #[serde(
         alias = "removeClip",
         alias = "RemoveClip",
@@ -778,12 +930,14 @@ impl CommandPayload {
     ) -> Box<dyn crate::core::commands::Command> {
         use crate::core::commands::{
             AddEffectCommand, AddMarkerCommand, AddMaskCommand, AddTextClipCommand,
-            AddTrackCommand, CreateCaptionCommand, CreateFolderCommand, CreateSequenceCommand,
-            DeleteCaptionCommand, DeleteFileCommand, ImportAssetCommand, InsertClipCommand,
-            MoveClipCommand, MoveFileCommand, RemoveAssetCommand, RemoveClipCommand,
-            RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
-            RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, ReorderTracksCommand,
-            SetClipAudioCommand, SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand,
+            AddTrackCommand, CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand,
+            CreateFolderCommand, CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand,
+            ExtractEditCommand, ImportAssetCommand, InsertClipCommand, InsertEditCommand,
+            LiftCommand, MoveClipCommand, MoveFileCommand, OverwriteEditCommand,
+            RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand,
+            RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
+            RenameTrackCommand, ReorderTracksCommand, RippleDeleteCommand, SetClipAudioCommand,
+            SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand,
             SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand,
             ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
             TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
@@ -800,6 +954,51 @@ impl CommandPayload {
                 command.source_start = p.source_in;
                 command.source_end = p.source_out;
                 Box::new(command)
+            }
+            CommandPayload::InsertEdit(p) => {
+                let mut command = InsertEditCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.asset_id,
+                    p.timeline_position,
+                );
+                command.source_start = p.source_in;
+                command.source_end = p.source_out;
+                Box::new(command)
+            }
+            CommandPayload::OverwriteEdit(p) => {
+                let mut command = OverwriteEditCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.asset_id,
+                    p.timeline_position,
+                );
+                command.source_start = p.source_in;
+                command.source_end = p.source_out;
+                Box::new(command)
+            }
+            CommandPayload::RippleDelete(p) => Box::new(RippleDeleteCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.clip_ids,
+            )),
+            CommandPayload::Lift(p) => {
+                Box::new(LiftCommand::new(&p.sequence_id, &p.track_id, p.clip_ids))
+            }
+            CommandPayload::ExtractEdit(p) => Box::new(ExtractEditCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.in_point,
+                p.out_point,
+            )),
+            CommandPayload::CloseGap(p) => Box::new(CloseGapCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                p.gap_start,
+                p.gap_end,
+            )),
+            CommandPayload::CloseAllGaps(p) => {
+                Box::new(CloseAllGapsCommand::new(&p.sequence_id, &p.track_id))
             }
             CommandPayload::RemoveClip(p) => Box::new(RemoveClipCommand::new(
                 &p.sequence_id,
@@ -1131,6 +1330,28 @@ mod tests {
             matches!(parsed, Ok(CommandPayload::AddEffect(_))),
             "expected AddEffect with parameters alias to parse, got: {parsed:?}"
         );
+    }
+
+    #[test]
+    fn parse_ripple_delete_payload_supports_legacy_ai_shape() {
+        let payload = serde_json::json!({
+            "sequenceId": "seq_001",
+            "trackId": "track_001",
+            "clipId": "clip_001",
+            "affectAllTracks": true,
+        });
+
+        let parsed = CommandPayload::parse("RippleDelete".to_string(), payload)
+            .expect("expected legacy RippleDelete payload to parse");
+
+        match parsed {
+            CommandPayload::RippleDelete(inner) => {
+                assert_eq!(inner.sequence_id, "seq_001");
+                assert_eq!(inner.track_id, "track_001");
+                assert_eq!(inner.clip_ids, vec!["clip_001".to_string()]);
+            }
+            other => panic!("expected RippleDelete payload, got: {other:?}"),
+        }
     }
 
     #[test]

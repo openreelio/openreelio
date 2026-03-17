@@ -553,6 +553,157 @@ describe('useTimelineKeyboard', () => {
     });
   });
 
+  describe('ripple delete', () => {
+    it('should call onRippleDelete on Shift+Delete when clips are selected', () => {
+      const options = {
+        ...createDefaultOptions(),
+        selectedClipIds: ['clip-1', 'clip-2'],
+        onRippleDelete: vi.fn(),
+      };
+      const { result } = renderHook(() => useTimelineKeyboard(options));
+
+      const event = createKeyboardEvent('Delete', { shiftKey: true });
+      act(() => {
+        result.current.handleKeyDown(event);
+      });
+
+      expect(options.onRippleDelete).toHaveBeenCalledWith(['clip-1', 'clip-2']);
+      expect(options.onDeleteClips).not.toHaveBeenCalled();
+    });
+
+    it('should not call onRippleDelete when no clips are selected', () => {
+      const options = {
+        ...createDefaultOptions(),
+        selectedClipIds: [],
+        onRippleDelete: vi.fn(),
+      };
+      const { result } = renderHook(() => useTimelineKeyboard(options));
+
+      const event = createKeyboardEvent('Delete', { shiftKey: true });
+      act(() => {
+        result.current.handleKeyDown(event);
+      });
+
+      expect(options.onRippleDelete).not.toHaveBeenCalled();
+    });
+
+    it('should call regular delete (not ripple) when Delete is pressed without Shift', () => {
+      const options = {
+        ...createDefaultOptions(),
+        selectedClipIds: ['clip-1'],
+        onRippleDelete: vi.fn(),
+      };
+      const { result } = renderHook(() => useTimelineKeyboard(options));
+
+      const event = createKeyboardEvent('Delete');
+      act(() => {
+        result.current.handleKeyDown(event);
+      });
+
+      expect(options.onDeleteClips).toHaveBeenCalledWith(['clip-1']);
+      expect(options.onRippleDelete).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('insert and overwrite edit shortcuts', () => {
+    it('should call onInsertEdit on comma key', () => {
+      const options = {
+        ...createDefaultOptions(),
+        onInsertEdit: vi.fn(),
+      };
+      const { result } = renderHook(() => useTimelineKeyboard(options));
+
+      const event = createKeyboardEvent(',');
+      act(() => {
+        result.current.handleKeyDown(event);
+      });
+
+      expect(options.onInsertEdit).toHaveBeenCalled();
+      expect(event.preventDefault).toHaveBeenCalled();
+    });
+
+    it('should call onOverwriteEdit on period key', () => {
+      const options = {
+        ...createDefaultOptions(),
+        onOverwriteEdit: vi.fn(),
+      };
+      const { result } = renderHook(() => useTimelineKeyboard(options));
+
+      const event = createKeyboardEvent('.');
+      act(() => {
+        result.current.handleKeyDown(event);
+      });
+
+      expect(options.onOverwriteEdit).toHaveBeenCalled();
+      expect(event.preventDefault).toHaveBeenCalled();
+    });
+
+    it('should not call onInsertEdit when callback is undefined', () => {
+      const options = {
+        ...createDefaultOptions(),
+        onInsertEdit: undefined,
+      };
+      const { result } = renderHook(() => useTimelineKeyboard(options));
+
+      const event = createKeyboardEvent(',');
+      act(() => {
+        result.current.handleKeyDown(event);
+      });
+
+      // Should not throw
+      expect(true).toBe(true);
+    });
+  });
+
+  describe('lift and extract shortcuts', () => {
+    it('should call onLiftEdit on semicolon key when clips are selected', () => {
+      const options = {
+        ...createDefaultOptions(),
+        selectedClipIds: ['clip-1'],
+        onLiftEdit: vi.fn(),
+      };
+      const { result } = renderHook(() => useTimelineKeyboard(options));
+
+      const event = createKeyboardEvent(';');
+      act(() => {
+        result.current.handleKeyDown(event);
+      });
+
+      expect(options.onLiftEdit).toHaveBeenCalledWith(['clip-1']);
+    });
+
+    it('should not call onLiftEdit when no clips are selected', () => {
+      const options = {
+        ...createDefaultOptions(),
+        selectedClipIds: [],
+        onLiftEdit: vi.fn(),
+      };
+      const { result } = renderHook(() => useTimelineKeyboard(options));
+
+      const event = createKeyboardEvent(';');
+      act(() => {
+        result.current.handleKeyDown(event);
+      });
+
+      expect(options.onLiftEdit).not.toHaveBeenCalled();
+    });
+
+    it('should call onExtractEdit on quote key', () => {
+      const options = {
+        ...createDefaultOptions(),
+        onExtractEdit: vi.fn(),
+      };
+      const { result } = renderHook(() => useTimelineKeyboard(options));
+
+      const event = createKeyboardEvent("'");
+      act(() => {
+        result.current.handleKeyDown(event);
+      });
+
+      expect(options.onExtractEdit).toHaveBeenCalled();
+    });
+  });
+
   describe('unhandled keys', () => {
     it('should not call preventDefault for unhandled keys', () => {
       const options = createDefaultOptions();

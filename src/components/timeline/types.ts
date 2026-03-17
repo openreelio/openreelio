@@ -36,6 +36,8 @@ export type AssetDropData = AssetDropSource & {
   timelinePosition: number;
   /** Asset kind hint for workspace file drops before registration */
   assetKind?: AssetKind;
+  /** Requested drop operation mode */
+  editMode?: 'insert' | 'overwrite';
   /** Optional source start time from Source Monitor drags */
   sourceIn?: number;
   /** Optional source end time from Source Monitor drags */
@@ -192,6 +194,24 @@ export interface CaptionUpdateData {
 }
 
 // =============================================================================
+// Gap Management Types
+// =============================================================================
+
+/**
+ * Data for a gap context menu action (close gap / close all gaps).
+ */
+export interface GapClickData {
+  /** ID of the sequence containing the track */
+  sequenceId: string;
+  /** ID of the track where the gap was right-clicked */
+  trackId: string;
+  /** Start time of the gap in seconds */
+  gapStart: number;
+  /** End time of the gap in seconds */
+  gapEnd: number;
+}
+
+// =============================================================================
 // Track Control Types
 
 // =============================================================================
@@ -281,6 +301,18 @@ export interface TimelineProps {
   onTrackReorder?: (data: TrackReorderData) => void | Promise<void>;
   /** Optional resolver for hydrated text clip payloads */
   getTextClipData?: (clipId: string) => TextClipData | undefined;
+  /** Callback when a specific gap should be closed */
+  onCloseGap?: (data: GapClickData) => void;
+  /** Callback when all gaps on a track should be closed */
+  onCloseAllGaps?: (data: { sequenceId: string; trackId: string }) => void;
+  /** Callback to ripple-delete clips (remove + close gap) */
+  onRippleDeleteClips?: (clipIds: string[]) => void | Promise<void>;
+  /** Callback to lift clips (remove, leave gap) */
+  onLiftClips?: (clipIds: string[]) => void | Promise<void>;
+  /** Callback to insert edit from Source Monitor at playhead */
+  onInsertEditFromSource?: () => void | Promise<void>;
+  /** Callback to overwrite edit from Source Monitor at playhead */
+  onOverwriteEditFromSource?: () => void | Promise<void>;
 }
 
 // =============================================================================

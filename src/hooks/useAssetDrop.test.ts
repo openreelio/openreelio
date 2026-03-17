@@ -190,6 +190,7 @@ describe('useAssetDrop', () => {
         dataTransferData: {
           [SOURCE_MONITOR_DRAG_TYPE]: JSON.stringify({
             assetId: 'asset-1',
+            editMode: 'insert',
             sourceIn: 1.25,
             sourceOut: 4.5,
           }),
@@ -323,10 +324,12 @@ describe('useAssetDrop', () => {
         result.current.handleDrop(event);
       });
 
+      // editMode always present — falls back to editorToolStore default ('overwrite')
       expect(onAssetDrop).toHaveBeenCalledWith({
         assetId: 'asset-1',
         trackId: 'track-0',
         timelinePosition: 1, // 100px / 100 zoom
+        editMode: 'overwrite',
       });
     });
 
@@ -339,6 +342,7 @@ describe('useAssetDrop', () => {
         dataTransferData: {
           [SOURCE_MONITOR_DRAG_TYPE]: JSON.stringify({
             assetId: 'asset-1',
+            editMode: 'insert',
             sourceIn: 2.5,
             sourceOut: 7.75,
           }),
@@ -352,6 +356,7 @@ describe('useAssetDrop', () => {
 
       expect(onAssetDrop).toHaveBeenCalledWith({
         assetId: 'asset-1',
+        editMode: 'insert',
         trackId: 'track-0',
         timelinePosition: 1,
         sourceIn: 2.5,

@@ -302,43 +302,62 @@ impl EditScriptExecutor {
         let mut errors = Vec::new();
 
         match cmd.command_type.as_str() {
-            "InsertClip" => {
+            "InsertClip" | "InsertEdit" | "OverwriteEdit" => {
+                let timeline_key = if cmd.command_type == "InsertClip" {
+                    "timelineStart"
+                } else {
+                    "timelinePosition"
+                };
+                let missing_timeline_code = if cmd.command_type == "InsertClip" {
+                    "MISSING_TIMELINE_START"
+                } else {
+                    "MISSING_TIMELINE_POSITION"
+                };
+                let invalid_timeline_code = if cmd.command_type == "InsertClip" {
+                    "INVALID_TIMELINE_START"
+                } else {
+                    "INVALID_TIMELINE_POSITION"
+                };
+
                 // Check required params
                 if cmd.params.get("trackId").is_none() {
                     errors.push(ValidationError::for_command(
                         index,
                         "MISSING_TRACK_ID",
-                        "InsertClip requires trackId",
+                        &format!("{} requires trackId", cmd.command_type),
                     ));
                 }
                 if cmd.params.get("assetId").is_none() {
                     errors.push(ValidationError::for_command(
                         index,
                         "MISSING_ASSET_ID",
-                        "InsertClip requires assetId",
+                        &format!("{} requires assetId", cmd.command_type),
                     ));
                 }
-                if cmd.params.get("timelineStart").is_none() {
+                if cmd.params.get(timeline_key).is_none() {
                     errors.push(ValidationError::for_command(
                         index,
-                        "MISSING_TIMELINE_START",
-                        "InsertClip requires timelineStart",
+                        missing_timeline_code,
+                        &format!("{} requires {}", cmd.command_type, timeline_key),
                     ));
-                } else if let Some(value) = cmd.params.get("timelineStart") {
+                } else if let Some(value) = cmd.params.get(timeline_key) {
                     match value.as_f64() {
                         Some(t) if t.is_finite() && t >= 0.0 => {}
                         Some(_) => {
                             errors.push(ValidationError::for_command(
                                 index,
-                                "INVALID_TIMELINE_START",
-                                "InsertClip timelineStart must be a finite, non-negative number",
+                                invalid_timeline_code,
+                                &format!(
+                                    "{} {} must be a finite, non-negative number",
+                                    cmd.command_type, timeline_key
+                                ),
                             ));
                         }
                         None => {
                             errors.push(ValidationError::for_command(
                                 index,
-                                "INVALID_TIMELINE_START",
-                                "InsertClip timelineStart must be a number",
+                                invalid_timeline_code,
+                                &format!("{} {} must be a number", cmd.command_type, timeline_key),
                             ));
                         }
                     }
@@ -466,6 +485,139 @@ impl EditScriptExecutor {
                     track_id: track_id.to_string(),
                     asset_id: asset_id.to_string(),
                     timeline_start,
+                }))
+            }
+            "InsertEdit" => {
+                let track_id = cmd
+                    .params
+                    .get("trackId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        CoreError::ValidationError("InsertEdit missing trackId".to_string())
+                    })?;
+                let asset_id = cmd
+                    .params
+                    .get("assetId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        CoreError::ValidationError("InsertEdit missing assetId".to_string())
+                    })?;
+                let timeline_position = cmd
+                    .params
+                    .get("timelinePosition")
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| {
+                        CoreError::ValidationError(
+                            "InsertEdit missing timelinePosition".to_string(),
+                        )
+                    })?;
+
+                if !timeline_position.is_finite() || timeline_position < 0.0 {
+                    return Err(CoreError::ValidationError(
+                        "InsertEdit timelinePosition must be a finite, non-negative number"
+                            .to_string(),
+                    ));
+                }
+
+                let source_in = cmd.params.get("sourceIn").and_then(|v| v.as_f64());
+                let source_out = cmd.params.get("sourceOut").and_then(|v| v.as_f64());
+
+                if let Some(si) = source_in {
+                    if !si.is_finite() || si < 0.0 {
+                        return Err(CoreError::ValidationError(
+                            "InsertEdit sourceIn must be a finite, non-negative number".to_string(),
+                        ));
+                    }
+                }
+                if let Some(so) = source_out {
+                    if !so.is_finite() || so < 0.0 {
+                        return Err(CoreError::ValidationError(
+                            "InsertEdit sourceOut must be a finite, non-negative number"
+                                .to_string(),
+                        ));
+                    }
+                }
+                if let (Some(si), Some(so)) = (source_in, source_out) {
+                    if so <= si {
+                        return Err(CoreError::ValidationError(
+                            "InsertEdit sourceOut must be greater than sourceIn".to_string(),
+                        ));
+                    }
+                }
+
+                Ok(Box::new(InsertEditInfo {
+                    track_id: track_id.to_string(),
+                    asset_id: asset_id.to_string(),
+                    timeline_position,
+                    source_in,
+                    source_out,
+                }))
+            }
+            "OverwriteEdit" => {
+                let track_id = cmd
+                    .params
+                    .get("trackId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        CoreError::ValidationError("OverwriteEdit missing trackId".to_string())
+                    })?;
+                let asset_id = cmd
+                    .params
+                    .get("assetId")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        CoreError::ValidationError("OverwriteEdit missing assetId".to_string())
+                    })?;
+                let timeline_position = cmd
+                    .params
+                    .get("timelinePosition")
+                    .and_then(|v| v.as_f64())
+                    .ok_or_else(|| {
+                        CoreError::ValidationError(
+                            "OverwriteEdit missing timelinePosition".to_string(),
+                        )
+                    })?;
+
+                if !timeline_position.is_finite() || timeline_position < 0.0 {
+                    return Err(CoreError::ValidationError(
+                        "OverwriteEdit timelinePosition must be a finite, non-negative number"
+                            .to_string(),
+                    ));
+                }
+
+                let source_in = cmd.params.get("sourceIn").and_then(|v| v.as_f64());
+                let source_out = cmd.params.get("sourceOut").and_then(|v| v.as_f64());
+
+                if let Some(si) = source_in {
+                    if !si.is_finite() || si < 0.0 {
+                        return Err(CoreError::ValidationError(
+                            "OverwriteEdit sourceIn must be a finite, non-negative number"
+                                .to_string(),
+                        ));
+                    }
+                }
+                if let Some(so) = source_out {
+                    if !so.is_finite() || so < 0.0 {
+                        return Err(CoreError::ValidationError(
+                            "OverwriteEdit sourceOut must be a finite, non-negative number"
+                                .to_string(),
+                        ));
+                    }
+                }
+                if let (Some(si), Some(so)) = (source_in, source_out) {
+                    if so <= si {
+                        return Err(CoreError::ValidationError(
+                            "OverwriteEdit sourceOut must be greater than sourceIn".to_string(),
+                        ));
+                    }
+                }
+
+                Ok(Box::new(OverwriteEditInfo {
+                    track_id: track_id.to_string(),
+                    asset_id: asset_id.to_string(),
+                    timeline_position,
+                    source_in,
+                    source_out,
                 }))
             }
             "SplitClip" => {
@@ -612,6 +764,26 @@ pub struct InsertClipInfo {
     pub track_id: String,
     pub asset_id: String,
     pub timeline_start: f64,
+}
+
+/// Info for InsertEdit command
+#[derive(Clone, Debug)]
+pub struct InsertEditInfo {
+    pub track_id: String,
+    pub asset_id: String,
+    pub timeline_position: f64,
+    pub source_in: Option<f64>,
+    pub source_out: Option<f64>,
+}
+
+/// Info for OverwriteEdit command
+#[derive(Clone, Debug)]
+pub struct OverwriteEditInfo {
+    pub track_id: String,
+    pub asset_id: String,
+    pub timeline_position: f64,
+    pub source_in: Option<f64>,
+    pub source_out: Option<f64>,
 }
 
 /// Info for SplitClip command
@@ -818,6 +990,36 @@ mod tests {
 
         assert_eq!(info.clip_id, "clip_1");
         assert_eq!(info.at_timeline_sec, 12.0);
+    }
+
+    #[test]
+    fn test_command_to_project_command_insert_edit() {
+        let executor = EditScriptExecutor::new();
+        let cmd = EditCommand::insert_edit("track_1", "asset_1", 12.0);
+
+        let result = executor.command_to_project_command(&cmd).unwrap();
+        let info = result.downcast::<InsertEditInfo>().unwrap();
+
+        assert_eq!(info.track_id, "track_1");
+        assert_eq!(info.asset_id, "asset_1");
+        assert_eq!(info.timeline_position, 12.0);
+        assert!(info.source_in.is_none());
+        assert!(info.source_out.is_none());
+    }
+
+    #[test]
+    fn test_command_to_project_command_overwrite_edit() {
+        let executor = EditScriptExecutor::new();
+        let cmd = EditCommand::overwrite_edit("track_1", "asset_1", 6.0);
+
+        let result = executor.command_to_project_command(&cmd).unwrap();
+        let info = result.downcast::<OverwriteEditInfo>().unwrap();
+
+        assert_eq!(info.track_id, "track_1");
+        assert_eq!(info.asset_id, "asset_1");
+        assert_eq!(info.timeline_position, 6.0);
+        assert!(info.source_in.is_none());
+        assert!(info.source_out.is_none());
     }
 
     #[test]

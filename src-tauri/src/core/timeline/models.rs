@@ -317,6 +317,9 @@ pub struct Track {
     pub muted: bool,
     pub locked: bool,
     pub visible: bool,
+    /// When true, this track shifts in sync during insert/ripple edits on other tracks.
+    #[serde(default)]
+    pub sync_lock: bool,
     /// Volume for audio tracks (0.0 - 2.0, 1.0 = 100%)
     pub volume: f32,
 }
@@ -334,6 +337,7 @@ impl Track {
             muted: false,
             locked: false,
             visible: true,
+            sync_lock: false,
             volume: 1.0,
         }
     }

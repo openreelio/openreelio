@@ -15,8 +15,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useProjectStore } from '@/stores';
 import { useTimelineStore } from '@/stores/timelineStore';
+import { usePlaybackStore } from '@/stores/playbackStore';
 import { useWorkspaceStore } from '@/stores/workspaceStore';
 import { useToastStore } from '@/hooks/useToast';
+import { commands } from '@/bindings';
 import { createLogger } from '@/services/logger';
 import { isTauriRuntime } from '@/services/framePaths';
 import { refreshProjectState } from '@/utils/stateRefreshHelper';
@@ -33,6 +35,7 @@ import type {
   TrackCreateData,
   TrackReorderData,
   CaptionUpdateData,
+  GapClickData,
 } from '@/components/timeline/Timeline';
 import type { Asset, Command, CommandResult, Sequence, TextClipData, Track } from '@/types';
 import { isTextClip } from '@/types';
@@ -98,6 +101,12 @@ interface TimelineActions {
   handleTrackVisibilityToggle: (data: TrackControlData) => Promise<void>;
   handleTrackReorder: (data: TrackReorderData) => Promise<void>;
   handleUpdateCaption: (data: CaptionUpdateData) => Promise<void>;
+  handleCloseGap: (data: GapClickData) => Promise<void>;
+  handleCloseAllGaps: (data: { sequenceId: string; trackId: string }) => Promise<void>;
+  handleRippleDeleteClips: (clipIds: string[]) => Promise<void>;
+  handleLiftClips: (clipIds: string[]) => Promise<void>;
+  handleInsertEditFromSource: () => Promise<void>;
+  handleOverwriteEditFromSource: () => Promise<void>;
 }
 
 type ExecuteTimelineCommand = (command: Command) => Promise<CommandResult>;
@@ -504,6 +513,7 @@ interface ResolveOrCreateTrackOptions {
   sequence: Sequence;
   sequenceSnapshot: Sequence;
   preferredTrack: Track | undefined;
+  allowPreferredTrackOverlap?: boolean;
   timelineIn: number;
   durationSec: number;
   assetId: string;
@@ -536,11 +546,21 @@ function selectTrackByExactKind(
   return sequenceSnapshot.tracks.find((track) => canUseTrack(track));
 }
 
+function selectUnlockedTrackByExactKind(
+  preferredTrack: Track | undefined,
+  kind: TrackCreateData['kind'],
+): Track | undefined {
+  return preferredTrack && preferredTrack.kind === kind && !preferredTrack.locked
+    ? preferredTrack
+    : undefined;
+}
+
 async function resolveOrCreateTrack({
   kind,
   sequence,
   sequenceSnapshot,
   preferredTrack,
+  allowPreferredTrackOverlap = false,
   timelineIn,
   durationSec,
   assetId,
@@ -551,11 +571,18 @@ async function resolveOrCreateTrack({
   missingTrackMessage,
 }: ResolveOrCreateTrackOptions): Promise<Track | null> {
   const selectedTrack =
-    kind === 'video'
+    (allowPreferredTrackOverlap
+      ? selectUnlockedTrackByExactKind(preferredTrack, kind)
+        // Preferred track kind doesn't match (e.g. audio on video track):
+        // find first unlocked track of the correct kind, ignoring overlap
+        // because InsertEdit/OverwriteEdit will handle overlap resolution.
+        ?? sequenceSnapshot.tracks.find((t) => t.kind === kind && !t.locked)
+      : undefined) ??
+    (kind === 'video'
       ? selectPreferredVisualTrack(sequenceSnapshot, preferredTrack, timelineIn, durationSec)
       : kind === 'audio'
         ? selectPreferredAudioTrack(sequenceSnapshot, preferredTrack, timelineIn, durationSec)
-        : selectTrackByExactKind(sequenceSnapshot, preferredTrack, kind, timelineIn, durationSec);
+        : selectTrackByExactKind(sequenceSnapshot, preferredTrack, kind, timelineIn, durationSec));
 
   if (selectedTrack) {
     return selectedTrack;
@@ -1698,13 +1725,46 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
       }
       const hasExplicitSourceRange =
         resolvedSourceRange.sourceIn !== undefined || resolvedSourceRange.sourceOut !== undefined;
-      const shouldApplyDurationHint =
+      const insertCommandType: 'InsertClip' | 'InsertEdit' | 'OverwriteEdit' =
+        data.editMode === 'overwrite'
+          ? 'OverwriteEdit'
+          : data.editMode === 'insert'
+            ? 'InsertEdit'
+            : 'InsertClip';
+      const shouldEmbedDurationHintInPayload =
+        insertCommandType !== 'InsertClip' &&
         !hasExplicitSourceRange &&
         normalizedDurationSecHint !== undefined &&
         (normalizedAssetDurationSec === undefined ||
           Math.abs(normalizedAssetDurationSec - normalizedDurationSecHint) > 0.001);
+      const effectiveSourceRange = shouldEmbedDurationHintInPayload
+        ? {
+            sourceOut: normalizedDurationSecHint,
+            durationSec: normalizedDurationSecHint,
+          }
+        : resolvedSourceRange;
+      const shouldApplyDurationHint =
+        insertCommandType === 'InsertClip' &&
+        !hasExplicitSourceRange &&
+        normalizedDurationSecHint !== undefined &&
+        (normalizedAssetDurationSec === undefined ||
+          Math.abs(normalizedAssetDurationSec - normalizedDurationSecHint) > 0.001);
+      const buildInsertPayload = (trackId: string): Record<string, unknown> => ({
+        sequenceId: sequence.id,
+        trackId,
+        assetId: droppedAssetId,
+        ...(insertCommandType === 'InsertClip'
+          ? { timelineIn: data.timelinePosition }
+          : { timelinePosition: data.timelinePosition }),
+        ...(effectiveSourceRange.sourceIn !== undefined
+          ? { sourceIn: effectiveSourceRange.sourceIn }
+          : {}),
+        ...(effectiveSourceRange.sourceOut !== undefined
+          ? { sourceOut: effectiveSourceRange.sourceOut }
+          : {}),
+      });
       const fallbackClipDurationSec =
-        resolvedSourceRange.durationSec ??
+        effectiveSourceRange.durationSec ??
         normalizedDurationSecHint ??
         normalizedAssetDurationSec ??
         (effectiveDroppedAsset
@@ -1725,6 +1785,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             sequence,
             sequenceSnapshot,
             preferredTrack: targetTrack,
+            allowPreferredTrackOverlap: insertCommandType !== 'InsertClip',
             timelineIn: data.timelinePosition,
             durationSec: fallbackClipDurationSec,
             assetId: droppedAssetId,
@@ -1744,19 +1805,8 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           }
 
           const insertResult = await executeCommand({
-            type: 'InsertClip',
-            payload: {
-              sequenceId: sequence.id,
-              trackId: insertTrack.id,
-              assetId: droppedAssetId,
-              timelineIn: data.timelinePosition,
-              ...(resolvedSourceRange.sourceIn !== undefined
-                ? { sourceIn: resolvedSourceRange.sourceIn }
-                : {}),
-              ...(resolvedSourceRange.sourceOut !== undefined
-                ? { sourceOut: resolvedSourceRange.sourceOut }
-                : {}),
-            },
+            type: insertCommandType,
+            payload: buildInsertPayload(insertTrack.id),
           });
 
           if (shouldApplyDurationHint) {
@@ -1806,6 +1856,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           sequence,
           sequenceSnapshot,
           preferredTrack: targetTrack,
+          allowPreferredTrackOverlap: insertCommandType !== 'InsertClip',
           timelineIn: data.timelinePosition,
           durationSec: clipDurationSec,
           assetId: droppedAssetId,
@@ -1821,19 +1872,8 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
         }
 
         const primaryVideoInsertResult = await executeCommand({
-          type: 'InsertClip',
-          payload: {
-            sequenceId: sequence.id,
-            trackId: visualTrack.id,
-            assetId: droppedAssetId,
-            timelineIn: data.timelinePosition,
-            ...(resolvedSourceRange.sourceIn !== undefined
-              ? { sourceIn: resolvedSourceRange.sourceIn }
-              : {}),
-            ...(resolvedSourceRange.sourceOut !== undefined
-              ? { sourceOut: resolvedSourceRange.sourceOut }
-              : {}),
-          },
+          type: insertCommandType,
+          payload: buildInsertPayload(visualTrack.id),
         });
         insertedPrimaryClip = true;
 
@@ -1905,6 +1945,7 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             sequence,
             sequenceSnapshot: postVideoInsertSequence,
             preferredTrack: latestTargetTrack,
+            allowPreferredTrackOverlap: insertCommandType !== 'InsertClip',
             timelineIn: data.timelinePosition,
             durationSec: clipDurationSec,
             assetId: droppedAssetId,
@@ -1921,19 +1962,8 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
           }
 
           const audioInsertResult = await executeCommand({
-            type: 'InsertClip',
-            payload: {
-              sequenceId: sequence.id,
-              trackId: audioTrack.id,
-              assetId: droppedAssetId,
-              timelineIn: data.timelinePosition,
-              ...(resolvedSourceRange.sourceIn !== undefined
-                ? { sourceIn: resolvedSourceRange.sourceIn }
-                : {}),
-              ...(resolvedSourceRange.sourceOut !== undefined
-                ? { sourceOut: resolvedSourceRange.sourceOut }
-                : {}),
-            },
+            type: insertCommandType,
+            payload: buildInsertPayload(audioTrack.id),
           });
 
           if (shouldApplyDurationHint) {
@@ -2618,6 +2648,197 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     [sequence, executeCommand],
   );
 
+  /**
+   * Handle closing a specific gap by shifting downstream clips left.
+   */
+  const handleCloseGap = useCallback(
+    async (data: GapClickData): Promise<void> => {
+      try {
+        await executeCommand({
+          type: 'CloseGap',
+          payload: {
+            sequenceId: data.sequenceId,
+            trackId: data.trackId,
+            gapStart: data.gapStart,
+            gapEnd: data.gapEnd,
+          },
+        });
+      } catch (error) {
+        logger.error('Failed to close gap', { error, trackId: data.trackId });
+      }
+    },
+    [executeCommand],
+  );
+
+  /**
+   * Handle closing all gaps on a track.
+   */
+  const handleCloseAllGaps = useCallback(
+    async (data: { sequenceId: string; trackId: string }): Promise<void> => {
+      try {
+        await executeCommand({
+          type: 'CloseAllGaps',
+          payload: {
+            sequenceId: data.sequenceId,
+            trackId: data.trackId,
+          },
+        });
+      } catch (error) {
+        logger.error('Failed to close all gaps', { error, trackId: data.trackId });
+      }
+    },
+    [executeCommand],
+  );
+
+  const handleRippleDeleteClips = useCallback(
+    async (clipIds: string[]): Promise<void> => {
+      if (!sequence || clipIds.length === 0) return;
+      const sequenceSnapshot = getCurrentSequence();
+      if (!sequenceSnapshot) return;
+
+      const clipIdsToDelete = linkedSelectionEnabled
+        ? expandClipIdsWithLinkedCompanions(sequenceSnapshot, clipIds)
+        : clipIds;
+
+      const deletionMap = buildClipDeletionMap(sequenceSnapshot, clipIdsToDelete);
+      if (deletionMap.length === 0) return;
+
+      // Group by track for the RippleDelete command
+      const byTrack = new Map<string, string[]>();
+      for (const { clipId, trackId } of deletionMap) {
+        const arr = byTrack.get(trackId) ?? [];
+        arr.push(clipId);
+        byTrack.set(trackId, arr);
+      }
+
+      try {
+        for (const [trackId, ids] of byTrack) {
+          await executeCommand({
+            type: 'RippleDelete',
+            payload: { sequenceId: sequence.id, trackId, clipIds: ids },
+          });
+        }
+      } catch (error) {
+        logger.error('Failed to ripple delete clips', { error, clipIds });
+      }
+    },
+    [sequence, linkedSelectionEnabled, executeCommand, getCurrentSequence],
+  );
+
+  const handleLiftClips = useCallback(
+    async (clipIds: string[]): Promise<void> => {
+      if (!sequence || clipIds.length === 0) return;
+      const sequenceSnapshot = getCurrentSequence();
+      if (!sequenceSnapshot) return;
+
+      const clipIdsToDelete = linkedSelectionEnabled
+        ? expandClipIdsWithLinkedCompanions(sequenceSnapshot, clipIds)
+        : clipIds;
+
+      const deletionMap = buildClipDeletionMap(sequenceSnapshot, clipIdsToDelete);
+      if (deletionMap.length === 0) return;
+
+      const byTrack = new Map<string, string[]>();
+      for (const { clipId, trackId } of deletionMap) {
+        const arr = byTrack.get(trackId) ?? [];
+        arr.push(clipId);
+        byTrack.set(trackId, arr);
+      }
+
+      try {
+        for (const [trackId, ids] of byTrack) {
+          await executeCommand({
+            type: 'Lift',
+            payload: { sequenceId: sequence.id, trackId, clipIds: ids },
+          });
+        }
+      } catch (error) {
+        logger.error('Failed to lift clips', { error, clipIds });
+      }
+    },
+    [sequence, linkedSelectionEnabled, executeCommand, getCurrentSequence],
+  );
+
+  const handleInsertEditFromSource = useCallback(async (): Promise<void> => {
+    if (!sequence) return;
+    const playhead = usePlaybackStore.getState().currentTime;
+
+    let result;
+    try {
+      result = await commands.getSourceState();
+    } catch (error) {
+      logger.error('Insert edit: failed to query source state', { error });
+      return;
+    }
+    if (result.status !== 'ok' || !result.data.assetId) {
+      logger.warn('Insert edit: no source asset loaded');
+      return;
+    }
+
+    const { assetId, inPoint, outPoint } = result.data;
+    const targetTrack = sequence.tracks.find((t) => t.kind === 'video' && !t.locked);
+    if (!targetTrack) {
+      logger.warn('Insert edit: no unlocked video track');
+      return;
+    }
+
+    try {
+      await executeCommand({
+        type: 'InsertEdit',
+        payload: {
+          sequenceId: sequence.id,
+          trackId: targetTrack.id,
+          assetId,
+          timelinePosition: playhead,
+          ...(inPoint !== null ? { sourceIn: inPoint } : {}),
+          ...(outPoint !== null ? { sourceOut: outPoint } : {}),
+        },
+      });
+    } catch (error) {
+      logger.error('Failed to insert edit from source', { error });
+    }
+  }, [sequence, executeCommand]);
+
+  const handleOverwriteEditFromSource = useCallback(async (): Promise<void> => {
+    if (!sequence) return;
+    const playhead = usePlaybackStore.getState().currentTime;
+
+    let result;
+    try {
+      result = await commands.getSourceState();
+    } catch (error) {
+      logger.error('Overwrite edit: failed to query source state', { error });
+      return;
+    }
+    if (result.status !== 'ok' || !result.data.assetId) {
+      logger.warn('Overwrite edit: no source asset loaded');
+      return;
+    }
+
+    const { assetId, inPoint, outPoint } = result.data;
+    const targetTrack = sequence.tracks.find((t) => t.kind === 'video' && !t.locked);
+    if (!targetTrack) {
+      logger.warn('Overwrite edit: no unlocked video track');
+      return;
+    }
+
+    try {
+      await executeCommand({
+        type: 'OverwriteEdit',
+        payload: {
+          sequenceId: sequence.id,
+          trackId: targetTrack.id,
+          assetId,
+          timelinePosition: playhead,
+          ...(inPoint !== null ? { sourceIn: inPoint } : {}),
+          ...(outPoint !== null ? { sourceOut: outPoint } : {}),
+        },
+      });
+    } catch (error) {
+      logger.error('Failed to overwrite edit from source', { error });
+    }
+  }, [sequence, executeCommand]);
+
   return {
     handleClipMove,
     handleClipTrim,
@@ -2635,5 +2856,11 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleTrackVisibilityToggle,
     handleTrackReorder,
     handleUpdateCaption,
+    handleCloseGap,
+    handleCloseAllGaps,
+    handleRippleDeleteClips,
+    handleLiftClips,
+    handleInsertEditFromSource,
+    handleOverwriteEditFromSource,
   };
 }

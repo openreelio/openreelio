@@ -134,6 +134,30 @@ impl EditCommand {
         )
     }
 
+    /// Creates an InsertEdit command
+    pub fn insert_edit(track_id: &str, asset_id: &str, timeline_position: f64) -> Self {
+        Self::new(
+            "InsertEdit",
+            serde_json::json!({
+                "trackId": track_id,
+                "assetId": asset_id,
+                "timelinePosition": timeline_position
+            }),
+        )
+    }
+
+    /// Creates an OverwriteEdit command
+    pub fn overwrite_edit(track_id: &str, asset_id: &str, timeline_position: f64) -> Self {
+        Self::new(
+            "OverwriteEdit",
+            serde_json::json!({
+                "trackId": track_id,
+                "assetId": asset_id,
+                "timelinePosition": timeline_position
+            }),
+        )
+    }
+
     /// Creates a SplitClip command
     pub fn split_clip(clip_id: &str, at_sec: f64) -> Self {
         Self::new(
@@ -549,6 +573,26 @@ mod tests {
         assert_eq!(cmd.params["trackId"], "track_1");
         assert_eq!(cmd.params["assetId"], "asset_1");
         assert_eq!(cmd.params["timelineStart"], 5.0);
+    }
+
+    #[test]
+    fn test_edit_command_insert_edit() {
+        let cmd = EditCommand::insert_edit("track_1", "asset_1", 8.0);
+
+        assert_eq!(cmd.command_type, "InsertEdit");
+        assert_eq!(cmd.params["trackId"], "track_1");
+        assert_eq!(cmd.params["assetId"], "asset_1");
+        assert_eq!(cmd.params["timelinePosition"], 8.0);
+    }
+
+    #[test]
+    fn test_edit_command_overwrite_edit() {
+        let cmd = EditCommand::overwrite_edit("track_1", "asset_1", 8.0);
+
+        assert_eq!(cmd.command_type, "OverwriteEdit");
+        assert_eq!(cmd.params["trackId"], "track_1");
+        assert_eq!(cmd.params["assetId"], "asset_1");
+        assert_eq!(cmd.params["timelinePosition"], 8.0);
     }
 
     #[test]

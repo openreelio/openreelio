@@ -15,10 +15,16 @@ import { z } from 'zod';
 // Base Type Schemas
 // =============================================================================
 
+const ENTITY_ID_PATTERN =
+  /^(?:[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}|[0-9A-HJKMNP-TV-Z]{26})$/i;
+
 /**
- * UUID string schema for identifiers
+ * Runtime identifier schema for UUIDs and ULIDs.
  */
-const UuidId = z.string().uuid().describe('Unique identifier (UUID format)');
+const EntityId = z
+  .string()
+  .regex(ENTITY_ID_PATTERN, 'Expected a UUID or ULID')
+  .describe('Unique identifier (UUID or ULID format)');
 
 /**
  * Non-negative time value in seconds
@@ -28,32 +34,32 @@ const TimeSec = z.number().nonnegative().describe('Time in seconds (non-negative
 /**
  * Clip identifier
  */
-const ClipId = UuidId.describe('Unique clip identifier');
+const ClipId = EntityId.describe('Unique clip identifier');
 
 /**
  * Track identifier
  */
-const TrackId = UuidId.describe('Unique track identifier');
+const TrackId = EntityId.describe('Unique track identifier');
 
 /**
  * Asset identifier
  */
-const AssetId = UuidId.describe('Unique asset identifier');
+const AssetId = EntityId.describe('Unique asset identifier');
 
 /**
  * Effect identifier
  */
-const EffectId = UuidId.describe('Unique effect identifier');
+const EffectId = EntityId.describe('Unique effect identifier');
 
 /**
  * Keyframe identifier
  */
-const KeyframeId = UuidId.describe('Unique keyframe identifier');
+const KeyframeId = EntityId.describe('Unique keyframe identifier');
 
 /**
  * Caption identifier
  */
-const CaptionId = UuidId.describe('Unique caption identifier');
+const CaptionId = EntityId.describe('Unique caption identifier');
 
 // =============================================================================
 // Enum Schemas
@@ -199,6 +205,44 @@ export const InsertClipSchema = z.object({
 export type InsertClipCommand = z.infer<typeof InsertClipSchema>;
 
 /**
+ * InsertEdit - Add asset to timeline and ripple downstream clips
+ */
+export const InsertEditSchema = z.object({
+  commandType: z.literal('InsertEdit'),
+  params: z
+    .object({
+      trackId: TrackId,
+      assetId: AssetId,
+      timelinePosition: TimeSec,
+      sourceIn: TimeSec.optional().default(0),
+      sourceOut: TimeSec.optional(),
+    })
+    .refine((data) => data.sourceOut === undefined || data.sourceOut > (data.sourceIn ?? 0), {
+      message: 'sourceOut must be greater than sourceIn',
+    }),
+});
+export type InsertEditCommand = z.infer<typeof InsertEditSchema>;
+
+/**
+ * OverwriteEdit - Add asset to timeline and overwrite the occupied range
+ */
+export const OverwriteEditSchema = z.object({
+  commandType: z.literal('OverwriteEdit'),
+  params: z
+    .object({
+      trackId: TrackId,
+      assetId: AssetId,
+      timelinePosition: TimeSec,
+      sourceIn: TimeSec.optional().default(0),
+      sourceOut: TimeSec.optional(),
+    })
+    .refine((data) => data.sourceOut === undefined || data.sourceOut > (data.sourceIn ?? 0), {
+      message: 'sourceOut must be greater than sourceIn',
+    }),
+});
+export type OverwriteEditCommand = z.infer<typeof OverwriteEditSchema>;
+
+/**
  * SplitClip - Split clip at specified time
  */
 export const SplitClipSchema = z.object({
@@ -212,12 +256,9 @@ export const SplitClipSchema = z.object({
     .refine((data) => data.splitTime !== undefined || data.atTimelineSec !== undefined, {
       message: 'SplitClip requires splitTime or atTimelineSec',
     })
-    .refine(
-      (data) => !(data.splitTime !== undefined && data.atTimelineSec !== undefined),
-      {
-        message: 'SplitClip accepts splitTime or atTimelineSec, not both',
-      },
-    ),
+    .refine((data) => !(data.splitTime !== undefined && data.atTimelineSec !== undefined), {
+      message: 'SplitClip accepts splitTime or atTimelineSec, not both',
+    }),
 });
 export type SplitClipCommand = z.infer<typeof SplitClipSchema>;
 
@@ -506,6 +547,8 @@ export type ExportVideoCommand = z.infer<typeof ExportVideoSchema>;
 export const EditCommandSchema = z.discriminatedUnion('commandType', [
   // Timeline commands
   InsertClipSchema,
+  InsertEditSchema,
+  OverwriteEditSchema,
   SplitClipSchema,
   TrimClipSchema,
   MoveClipSchema,
@@ -618,6 +661,8 @@ export function validateCommand(
 export function getAllCommandTypes(): string[] {
   return [
     'InsertClip',
+    'InsertEdit',
+    'OverwriteEdit',
     'SplitClip',
     'TrimClip',
     'MoveClip',
@@ -644,6 +689,8 @@ export function getAllCommandTypes(): string[] {
 export function getCommandSchema(commandType: string): z.ZodTypeAny | null {
   const schemas: Record<string, z.ZodTypeAny> = {
     InsertClip: InsertClipSchema,
+    InsertEdit: InsertEditSchema,
+    OverwriteEdit: OverwriteEditSchema,
     SplitClip: SplitClipSchema,
     TrimClip: TrimClipSchema,
     MoveClip: MoveClipSchema,

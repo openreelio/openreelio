@@ -110,9 +110,7 @@ describe('SourceMonitor', () => {
     render(<SourceMonitor />);
 
     expect(screen.getByText('No source loaded')).toBeInTheDocument();
-    expect(
-      screen.getByText('Click an asset in the Project Explorer'),
-    ).toBeInTheDocument();
+    expect(screen.getByText('Click an asset in the Project Explorer')).toBeInTheDocument();
     expect(screen.queryByTestId('preview-player')).not.toBeInTheDocument();
   });
 
@@ -204,10 +202,12 @@ describe('SourceMonitor', () => {
       },
     });
 
+    // editMode comes from editorToolStore (real store, default: 'overwrite')
     expect(setData).toHaveBeenCalledWith(
       'application/x-openreelio-source',
       JSON.stringify({
         assetId: 'test-asset',
+        editMode: 'overwrite',
         sourceIn: 1.5,
         sourceOut: 6.25,
       }),

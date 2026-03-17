@@ -43,6 +43,16 @@ export interface UseTimelineKeyboardOptions {
   onDeleteClips?: (clipIds: string[]) => void | Promise<void>;
   /** Callback to split clip */
   onClipSplit?: (data: ClipSplitData) => void;
+  /** Callback to perform insert edit from Source Monitor at playhead */
+  onInsertEdit?: () => void | Promise<void>;
+  /** Callback to perform overwrite edit from Source Monitor at playhead */
+  onOverwriteEdit?: () => void | Promise<void>;
+  /** Callback to ripple-delete selected clips (remove + close gap) */
+  onRippleDelete?: (clipIds: string[]) => void | Promise<void>;
+  /** Callback to lift selected clips (remove, leave gap) */
+  onLiftEdit?: (clipIds: string[]) => void | Promise<void>;
+  /** Callback to extract In/Out range (remove + close gap) */
+  onExtractEdit?: () => void | Promise<void>;
 }
 
 export interface UseTimelineKeyboardResult {
@@ -64,6 +74,10 @@ interface KeyboardCommand {
    * - undefined: Command works regardless of Ctrl/Cmd state
    */
   requiresCtrl?: boolean;
+  /**
+   * Shift modifier requirement (same logic as requiresCtrl).
+   */
+  requiresShift?: boolean;
   /** Command handler */
   execute: (context: CommandContext) => void;
 }
@@ -80,6 +94,11 @@ interface CommandContext {
   selectClips: (clipIds: string[]) => void;
   onDeleteClips?: (clipIds: string[]) => void | Promise<void>;
   onClipSplit?: (data: ClipSplitData) => void;
+  onInsertEdit?: () => void | Promise<void>;
+  onOverwriteEdit?: () => void | Promise<void>;
+  onRippleDelete?: (clipIds: string[]) => void | Promise<void>;
+  onLiftEdit?: (clipIds: string[]) => void | Promise<void>;
+  onExtractEdit?: () => void | Promise<void>;
 }
 
 /**
@@ -105,12 +124,63 @@ const KEYBOARD_COMMANDS: KeyboardCommand[] = [
     keys: ['Escape'],
     execute: (ctx) => ctx.clearClipSelection(),
   },
-  // Delete: Delete or Backspace to remove selected clips
+  // Delete: Delete or Backspace to remove selected clips (without Shift)
   {
     keys: ['Delete', 'Backspace'],
+    requiresShift: false,
     execute: (ctx) => {
       if (ctx.selectedClipIds.length > 0 && ctx.onDeleteClips) {
         ctx.onDeleteClips(ctx.selectedClipIds);
+      }
+    },
+  },
+  // Ripple Delete: Shift+Delete/Backspace to remove selected clips and close gap
+  {
+    keys: ['Delete', 'Backspace'],
+    requiresShift: true,
+    execute: (ctx) => {
+      if (ctx.selectedClipIds.length > 0 && ctx.onRippleDelete) {
+        ctx.onRippleDelete(ctx.selectedClipIds);
+      }
+    },
+  },
+  // Insert Edit: , (comma) to insert from Source Monitor at playhead
+  {
+    keys: [','],
+    requiresCtrl: false,
+    execute: (ctx) => {
+      if (ctx.onInsertEdit) {
+        ctx.onInsertEdit();
+      }
+    },
+  },
+  // Overwrite Edit: . (period) to overwrite from Source Monitor at playhead
+  {
+    keys: ['.'],
+    requiresCtrl: false,
+    execute: (ctx) => {
+      if (ctx.onOverwriteEdit) {
+        ctx.onOverwriteEdit();
+      }
+    },
+  },
+  // Lift: ; (semicolon) to remove selected clips leaving gap
+  {
+    keys: [';'],
+    requiresCtrl: false,
+    execute: (ctx) => {
+      if (ctx.selectedClipIds.length > 0 && ctx.onLiftEdit) {
+        ctx.onLiftEdit(ctx.selectedClipIds);
+      }
+    },
+  },
+  // Extract: ' (quote) to remove In/Out range and close gap
+  {
+    keys: ["'"],
+    requiresCtrl: false,
+    execute: (ctx) => {
+      if (ctx.onExtractEdit) {
+        ctx.onExtractEdit();
       }
     },
   },
@@ -192,6 +262,11 @@ export function useTimelineKeyboard({
   selectClips,
   onDeleteClips,
   onClipSplit,
+  onInsertEdit,
+  onOverwriteEdit,
+  onRippleDelete,
+  onLiftEdit,
+  onExtractEdit,
 }: UseTimelineKeyboardOptions): UseTimelineKeyboardResult {
   // Create command context
   const context: CommandContext = useMemo(
@@ -207,6 +282,11 @@ export function useTimelineKeyboard({
       selectClips,
       onDeleteClips,
       onClipSplit,
+      onInsertEdit,
+      onOverwriteEdit,
+      onRippleDelete,
+      onLiftEdit,
+      onExtractEdit,
     }),
     [
       sequence,
@@ -220,12 +300,18 @@ export function useTimelineKeyboard({
       selectClips,
       onDeleteClips,
       onClipSplit,
+      onInsertEdit,
+      onOverwriteEdit,
+      onRippleDelete,
+      onLiftEdit,
+      onExtractEdit,
     ],
   );
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       const hasCtrlOrMeta = e.ctrlKey || e.metaKey;
+      const hasShift = e.shiftKey;
 
       // Find matching command
       const command = KEYBOARD_COMMANDS.find((cmd) => {
@@ -234,17 +320,24 @@ export function useTimelineKeyboard({
         // Check Ctrl/Cmd modifier requirement
         let ctrlMatches: boolean;
         if (cmd.requiresCtrl === undefined) {
-          // No requirement - works with or without Ctrl
           ctrlMatches = true;
         } else if (cmd.requiresCtrl) {
-          // Requires Ctrl/Cmd to be pressed
           ctrlMatches = hasCtrlOrMeta;
         } else {
-          // Requires Ctrl/Cmd to NOT be pressed
           ctrlMatches = !hasCtrlOrMeta;
         }
 
-        return keyMatches && ctrlMatches;
+        // Check Shift modifier requirement
+        let shiftMatches: boolean;
+        if (cmd.requiresShift === undefined) {
+          shiftMatches = true;
+        } else if (cmd.requiresShift) {
+          shiftMatches = hasShift;
+        } else {
+          shiftMatches = !hasShift;
+        }
+
+        return keyMatches && ctrlMatches && shiftMatches;
       });
 
       if (command) {

@@ -8,6 +8,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   InsertClipSchema,
+  InsertEditSchema,
+  OverwriteEditSchema,
   SplitClipSchema,
   TrimClipSchema,
   MoveClipSchema,
@@ -73,6 +75,20 @@ describe('commandSchemas', () => {
       }
     });
 
+    it('should accept ULID identifiers used by the runtime', () => {
+      const command = {
+        commandType: 'InsertClip',
+        params: {
+          trackId: '01HF7YAT00K6M6P7N3Q8S1Z2X3',
+          assetId: '01HF7YAT00K6M6P7N3Q8S1Z2X4',
+          timelineStart: 0,
+        },
+      };
+
+      const result = InsertClipSchema.safeParse(command);
+      expect(result.success).toBe(true);
+    });
+
     it('should reject negative timelineStart', () => {
       const command = {
         commandType: 'InsertClip',
@@ -96,6 +112,70 @@ describe('commandSchemas', () => {
       };
 
       const result = InsertClipSchema.safeParse(command);
+      expect(result.success).toBe(false);
+    });
+  });
+
+  describe('InsertEditSchema', () => {
+    it('should validate valid InsertEdit command', () => {
+      const command = {
+        commandType: 'InsertEdit',
+        params: {
+          trackId: '550e8400-e29b-41d4-a716-446655440000',
+          assetId: '550e8400-e29b-41d4-a716-446655440001',
+          timelinePosition: 12.25,
+          sourceIn: 1.5,
+          sourceOut: 8.0,
+        },
+      };
+
+      const result = InsertEditSchema.safeParse(command);
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject invalid source ranges', () => {
+      const command = {
+        commandType: 'InsertEdit',
+        params: {
+          trackId: '550e8400-e29b-41d4-a716-446655440000',
+          assetId: '550e8400-e29b-41d4-a716-446655440001',
+          timelinePosition: 4,
+          sourceIn: 6,
+          sourceOut: 6,
+        },
+      };
+
+      const result = InsertEditSchema.safeParse(command);
+      expect(result.success).toBe(false);
+    });
+  });
+
+  describe('OverwriteEditSchema', () => {
+    it('should validate valid OverwriteEdit command', () => {
+      const command = {
+        commandType: 'OverwriteEdit',
+        params: {
+          trackId: '550e8400-e29b-41d4-a716-446655440000',
+          assetId: '550e8400-e29b-41d4-a716-446655440001',
+          timelinePosition: 7.5,
+        },
+      };
+
+      const result = OverwriteEditSchema.safeParse(command);
+      expect(result.success).toBe(true);
+    });
+
+    it('should reject negative timelinePosition', () => {
+      const command = {
+        commandType: 'OverwriteEdit',
+        params: {
+          trackId: '550e8400-e29b-41d4-a716-446655440000',
+          assetId: '550e8400-e29b-41d4-a716-446655440001',
+          timelinePosition: -1,
+        },
+      };
+
+      const result = OverwriteEditSchema.safeParse(command);
       expect(result.success).toBe(false);
     });
   });
@@ -768,6 +848,23 @@ describe('commandSchemas', () => {
       expect(result.success).toBe(true);
       if (result.success) {
         expect(result.data.commandType).toBe('InsertClip');
+      }
+    });
+
+    it('should discriminate InsertEdit command', () => {
+      const command = {
+        commandType: 'InsertEdit',
+        params: {
+          trackId: '550e8400-e29b-41d4-a716-446655440000',
+          assetId: '550e8400-e29b-41d4-a716-446655440001',
+          timelinePosition: 0,
+        },
+      };
+
+      const result = EditCommandSchema.safeParse(command);
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.commandType).toBe('InsertEdit');
       }
     });
 

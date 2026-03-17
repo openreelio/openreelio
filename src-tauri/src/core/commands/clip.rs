@@ -3,6 +3,7 @@
 //! Implements all clip-related editing commands.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 use crate::core::{
     commands::{Command, CommandResult, StateChange},
@@ -71,6 +72,36 @@ fn insert_clip_sorted(track: &mut Track, clip: Clip) {
     // Defensive: binary_search_by doesn't guarantee stable ordering when keys are equal.
     // We never allow overlaps, but keep ordering deterministic.
     sort_track_clips(track);
+}
+
+fn clone_clip_fragment(
+    template: &Clip,
+    source_in_sec: TimeSec,
+    source_out_sec: TimeSec,
+    timeline_in_sec: TimeSec,
+    duration_sec: TimeSec,
+) -> Clip {
+    let mut clip = Clip::new(&template.asset_id);
+    clip.range = ClipRange {
+        source_in_sec,
+        source_out_sec,
+    };
+    clip.place = ClipPlace {
+        timeline_in_sec,
+        duration_sec,
+    };
+    clip.transform = template.transform.clone();
+    clip.opacity = template.opacity;
+    clip.blend_mode = template.blend_mode.clone();
+    clip.speed = template.speed;
+    clip.reverse = template.reverse;
+    clip.effects = template.effects.clone();
+    clip.audio = template.audio.clone();
+    clip.label = template.label.clone();
+    clip.color = template.color.clone();
+    clip.caption_style = template.caption_style.clone();
+    clip.caption_position = template.caption_position.clone();
+    clip
 }
 
 // =============================================================================
@@ -215,6 +246,1623 @@ impl Command for InsertClipCommand {
 
     fn type_name(&self) -> &'static str {
         "InsertClip"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
+// InsertEditCommand
+// =============================================================================
+
+/// Undo record for a clip that was shifted during an insert edit.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ShiftedClipRecord {
+    track_id: TrackId,
+    clip_id: ClipId,
+    original_timeline_in: TimeSec,
+}
+
+/// Undo record for a clip that was split at the insert position.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SplitClipRecord {
+    track_id: TrackId,
+    original_clip: Box<Clip>,
+    fragment_clip_id: ClipId,
+}
+
+/// Command to insert a clip at the playhead and push all downstream clips right.
+///
+/// This is the "Insert Edit" mode used in professional NLEs (Premiere, Avid).
+/// Unlike `InsertClipCommand` which rejects overlaps, this command shifts
+/// downstream clips to make room for the new clip.
+///
+/// Sync-locked tracks (tracks with `sync_lock = true`) shift their downstream
+/// clips in tandem, keeping multi-track alignment.  Locked tracks are never
+/// modified.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InsertEditCommand {
+    /// Target sequence ID
+    pub sequence_id: SequenceId,
+    /// Target track where the new clip is placed
+    pub track_id: TrackId,
+    /// Source asset ID
+    pub asset_id: AssetId,
+    /// Timeline position (playhead) to insert at
+    pub timeline_position: TimeSec,
+    /// Optional source start time (defaults to 0)
+    pub source_start: Option<TimeSec>,
+    /// Optional source end time (defaults to asset duration)
+    pub source_end: Option<TimeSec>,
+
+    // --- Undo state (populated during execute) ---
+    /// ID of the clip created by this command
+    #[serde(skip)]
+    created_clip_id: Option<ClipId>,
+    /// All clips that were shifted, with their original positions
+    #[serde(skip)]
+    shifted_clips: Vec<ShiftedClipRecord>,
+    /// Clips that were split at the insert point, with the created fragment IDs
+    #[serde(skip)]
+    split_clips: Vec<SplitClipRecord>,
+}
+
+impl InsertEditCommand {
+    /// Creates a new insert edit command.
+    pub fn new(
+        sequence_id: &str,
+        track_id: &str,
+        asset_id: &str,
+        timeline_position: TimeSec,
+    ) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            asset_id: asset_id.to_string(),
+            timeline_position,
+            source_start: None,
+            source_end: None,
+            created_clip_id: None,
+            shifted_clips: Vec::new(),
+            split_clips: Vec::new(),
+        }
+    }
+
+    /// Sets the source range for partial-range inserts.
+    pub fn with_source_range(mut self, start: TimeSec, end: TimeSec) -> Self {
+        self.source_start = Some(start);
+        self.source_end = Some(end);
+        self
+    }
+}
+
+impl Command for InsertEditCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        // --- Validation ---
+        if !is_valid_time_sec(self.timeline_position) {
+            return Err(CoreError::ValidationError(
+                "timelinePosition must be finite and non-negative".to_string(),
+            ));
+        }
+
+        let asset = state
+            .assets
+            .get(&self.asset_id)
+            .ok_or_else(|| CoreError::AssetNotFound(self.asset_id.clone()))?;
+
+        let asset_duration = asset.duration_sec.unwrap_or(10.0);
+        let source_start = self.source_start.unwrap_or(0.0);
+        let source_end = self.source_end.unwrap_or(asset_duration);
+
+        if !source_start.is_finite()
+            || !source_end.is_finite()
+            || source_start < 0.0
+            || source_end < 0.0
+        {
+            return Err(CoreError::ValidationError(
+                "Source range must be finite and non-negative".to_string(),
+            ));
+        }
+        if source_start >= source_end {
+            return Err(CoreError::InvalidTimeRange(source_start, source_end));
+        }
+
+        let clip_duration = source_end - source_start;
+        if !clip_duration.is_finite() || clip_duration <= 0.0 {
+            return Err(CoreError::ValidationError(
+                "Clip duration must be finite and > 0".to_string(),
+            ));
+        }
+
+        // Validate sequence exists
+        let sequence = state
+            .sequences
+            .get(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        // Validate target track exists and is not locked
+        let target_track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        if target_track.locked {
+            return Err(CoreError::ValidationError(format!(
+                "Track '{}' is locked",
+                self.track_id
+            )));
+        }
+
+        // --- Collect split + shift records before mutation ---
+        let mut shift_records: Vec<ShiftedClipRecord> = Vec::new();
+        let mut split_candidates: Vec<(TrackId, Clip)> = Vec::new();
+
+        for clip in &target_track.clips {
+            let clip_start = clip.place.timeline_in_sec;
+            let clip_end = clip.place.timeline_out_sec();
+
+            if clip_start < self.timeline_position && clip_end > self.timeline_position {
+                split_candidates.push((self.track_id.clone(), clip.clone()));
+            } else if clip_start >= self.timeline_position {
+                shift_records.push(ShiftedClipRecord {
+                    track_id: self.track_id.clone(),
+                    clip_id: clip.id.clone(),
+                    original_timeline_in: clip_start,
+                });
+            }
+        }
+
+        // Sync-locked tracks: shift their downstream clips too
+        for track in &sequence.tracks {
+            if track.id == self.track_id || track.locked || !track.sync_lock {
+                continue;
+            }
+            for clip in &track.clips {
+                let clip_start = clip.place.timeline_in_sec;
+                let clip_end = clip.place.timeline_out_sec();
+
+                if clip_start < self.timeline_position && clip_end > self.timeline_position {
+                    split_candidates.push((track.id.clone(), clip.clone()));
+                } else if clip_start >= self.timeline_position {
+                    shift_records.push(ShiftedClipRecord {
+                        track_id: track.id.clone(),
+                        clip_id: clip.id.clone(),
+                        original_timeline_in: clip_start,
+                    });
+                }
+            }
+        }
+
+        // --- Mutate state ---
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        // 1) Split clips that straddle the insert position, then move the right fragments.
+        let mut split_records: Vec<SplitClipRecord> = Vec::new();
+        let mut result_changes: Vec<StateChange> = Vec::new();
+
+        for (track_id, original_clip) in split_candidates {
+            let safe_speed = if original_clip.speed > 0.0 {
+                original_clip.speed as f64
+            } else {
+                1.0
+            };
+            let relative_split = self.timeline_position - original_clip.place.timeline_in_sec;
+            let source_split = original_clip.range.source_in_sec + (relative_split * safe_speed);
+            let right_duration = original_clip.place.timeline_out_sec() - self.timeline_position;
+
+            if !relative_split.is_finite()
+                || !right_duration.is_finite()
+                || relative_split <= 0.0
+                || right_duration <= 0.0
+            {
+                return Err(CoreError::ValidationError(
+                    "Insert edit split produced an invalid clip duration".to_string(),
+                ));
+            }
+
+            let fragment = clone_clip_fragment(
+                &original_clip,
+                source_split,
+                original_clip.range.source_out_sec,
+                self.timeline_position + clip_duration,
+                right_duration,
+            );
+            let fragment_id = fragment.id.clone();
+
+            let track = sequence
+                .tracks
+                .iter_mut()
+                .find(|t| t.id == track_id)
+                .ok_or_else(|| CoreError::TrackNotFound(track_id.clone()))?;
+            let clip = track
+                .clips
+                .iter_mut()
+                .find(|c| c.id == original_clip.id)
+                .ok_or_else(|| CoreError::ClipNotFound(original_clip.id.clone()))?;
+
+            clip.range.source_out_sec = source_split;
+            clip.place.duration_sec = relative_split;
+            insert_clip_sorted(track, fragment);
+
+            split_records.push(SplitClipRecord {
+                track_id: track_id.clone(),
+                original_clip: Box::new(original_clip.clone()),
+                fragment_clip_id: fragment_id.clone(),
+            });
+            result_changes.push(StateChange::ClipModified {
+                clip_id: original_clip.id.clone(),
+            });
+            result_changes.push(StateChange::ClipCreated {
+                clip_id: fragment_id,
+            });
+        }
+
+        // 2) Shift downstream clips on all affected tracks
+        for record in &shift_records {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == record.track_id) {
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                    clip.place.timeline_in_sec += clip_duration;
+                }
+                sort_track_clips(track);
+            }
+        }
+
+        // 3) Create and insert the new clip
+        let mut new_clip = Clip::new(&self.asset_id);
+        new_clip.range = ClipRange {
+            source_in_sec: source_start,
+            source_out_sec: source_end,
+        };
+        new_clip.place = ClipPlace {
+            timeline_in_sec: self.timeline_position,
+            duration_sec: clip_duration,
+        };
+
+        let clip_id = new_clip.id.clone();
+
+        let target_track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        insert_clip_sorted(target_track, new_clip);
+
+        // --- Store undo state ---
+        self.created_clip_id = Some(clip_id.clone());
+        self.shifted_clips = shift_records;
+        self.split_clips = split_records;
+
+        // --- Build result ---
+        let op_id = ulid::Ulid::new().to_string();
+        let mut result = CommandResult::new(&op_id)
+            .with_change(StateChange::ClipCreated {
+                clip_id: clip_id.clone(),
+            })
+            .with_created_id(&clip_id);
+
+        for record in &self.shifted_clips {
+            result = result.with_change(StateChange::ClipModified {
+                clip_id: record.clip_id.clone(),
+            });
+        }
+
+        for change in result_changes {
+            result = result.with_change(change);
+        }
+
+        Ok(result)
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        // 1) Remove the inserted clip
+        if let Some(ref clip_id) = self.created_clip_id {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) {
+                track.clips.retain(|c| &c.id != clip_id);
+            }
+        }
+
+        // 2) Remove split fragments and restore the original clips
+        for record in &self.split_clips {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == record.track_id) {
+                track.clips.retain(|c| c.id != record.fragment_clip_id);
+
+                if let Some(clip) = track
+                    .clips
+                    .iter_mut()
+                    .find(|c| c.id == record.original_clip.id)
+                {
+                    *clip = (*record.original_clip).clone();
+                } else {
+                    insert_clip_sorted(track, (*record.original_clip).clone());
+                }
+            }
+        }
+
+        // 3) Restore all shifted clips to their original positions
+        for record in &self.shifted_clips {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == record.track_id) {
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                    clip.place.timeline_in_sec = record.original_timeline_in;
+                }
+                sort_track_clips(track);
+            }
+        }
+
+        for record in &self.split_clips {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == record.track_id) {
+                sort_track_clips(track);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "InsertEdit"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
+// OverwriteEditCommand
+// =============================================================================
+
+/// Describes how a clip was modified during overwrite, for undo.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum OverwriteUndoAction {
+    /// Clip was fully removed — undo restores it.
+    Removed { clip: Box<Clip> },
+    /// Clip was trimmed — undo restores original range and place.
+    Trimmed {
+        original_range: ClipRange,
+        original_place: ClipPlace,
+    },
+    /// A fragment clip was created from splitting a spanning clip — undo removes it.
+    FragmentCreated,
+}
+
+/// Per-clip undo record for the overwrite edit.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OverwriteUndoRecord {
+    track_id: TrackId,
+    clip_id: ClipId,
+    action: OverwriteUndoAction,
+}
+
+/// Command to place a clip at a position, overwriting (trimming/removing) existing content.
+///
+/// This is the "Overwrite Edit" mode used in professional NLEs.
+/// Unlike Insert Edit, this does NOT shift downstream clips — it replaces content
+/// in the time range by trimming or removing overlapping clips.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverwriteEditCommand {
+    /// Target sequence ID
+    pub sequence_id: SequenceId,
+    /// Target track ID
+    pub track_id: TrackId,
+    /// Source asset ID
+    pub asset_id: AssetId,
+    /// Timeline position (playhead) to place the clip
+    pub timeline_position: TimeSec,
+    /// Optional source start time (defaults to 0)
+    pub source_start: Option<TimeSec>,
+    /// Optional source end time (defaults to asset duration)
+    pub source_end: Option<TimeSec>,
+
+    // --- Undo state ---
+    #[serde(skip)]
+    created_clip_id: Option<ClipId>,
+    #[serde(skip)]
+    undo_records: Vec<OverwriteUndoRecord>,
+}
+
+impl OverwriteEditCommand {
+    /// Creates a new overwrite edit command.
+    pub fn new(
+        sequence_id: &str,
+        track_id: &str,
+        asset_id: &str,
+        timeline_position: TimeSec,
+    ) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            asset_id: asset_id.to_string(),
+            timeline_position,
+            source_start: None,
+            source_end: None,
+            created_clip_id: None,
+            undo_records: Vec::new(),
+        }
+    }
+
+    /// Sets the source range for partial-range inserts.
+    pub fn with_source_range(mut self, start: TimeSec, end: TimeSec) -> Self {
+        self.source_start = Some(start);
+        self.source_end = Some(end);
+        self
+    }
+}
+
+impl Command for OverwriteEditCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        // --- Validation ---
+        if !is_valid_time_sec(self.timeline_position) {
+            return Err(CoreError::ValidationError(
+                "timelinePosition must be finite and non-negative".to_string(),
+            ));
+        }
+
+        let asset = state
+            .assets
+            .get(&self.asset_id)
+            .ok_or_else(|| CoreError::AssetNotFound(self.asset_id.clone()))?;
+
+        let asset_duration = asset.duration_sec.unwrap_or(10.0);
+        let source_start = self.source_start.unwrap_or(0.0);
+        let source_end = self.source_end.unwrap_or(asset_duration);
+
+        if !source_start.is_finite()
+            || !source_end.is_finite()
+            || source_start < 0.0
+            || source_end < 0.0
+        {
+            return Err(CoreError::ValidationError(
+                "Source range must be finite and non-negative".to_string(),
+            ));
+        }
+        if source_start >= source_end {
+            return Err(CoreError::InvalidTimeRange(source_start, source_end));
+        }
+
+        let clip_duration = source_end - source_start;
+        if !clip_duration.is_finite() || clip_duration <= 0.0 {
+            return Err(CoreError::ValidationError(
+                "Clip duration must be finite and > 0".to_string(),
+            ));
+        }
+
+        let overwrite_start = self.timeline_position;
+        let overwrite_end = self.timeline_position + clip_duration;
+
+        // Validate sequence + track
+        let sequence = state
+            .sequences
+            .get(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        if track.locked {
+            return Err(CoreError::ValidationError(format!(
+                "Track '{}' is locked",
+                self.track_id
+            )));
+        }
+
+        // --- Plan: identify all overlapping clips and classify actions ---
+        // We collect actions before mutating to keep validation clean.
+        struct OverwritePlan {
+            clip_id: ClipId,
+            action: PlannedAction,
+        }
+
+        enum PlannedAction {
+            /// Clip fully covered → remove
+            Remove,
+            /// Clip extends past overwrite end → trim front
+            TrimFront {
+                new_timeline_in: TimeSec,
+                new_source_in: TimeSec,
+                new_duration: TimeSec,
+            },
+            /// Clip extends before overwrite start → trim back
+            TrimBack {
+                new_source_out: TimeSec,
+                new_duration: TimeSec,
+            },
+            /// Clip spans entire overwrite range → trim back + create right fragment
+            Split {
+                left_new_source_out: TimeSec,
+                left_new_duration: TimeSec,
+                right_source_in: TimeSec,
+                right_source_out: TimeSec,
+                right_timeline_in: TimeSec,
+                right_duration: TimeSec,
+                right_asset_id: AssetId,
+                right_clip_template: Box<Clip>,
+            },
+        }
+
+        let mut plans: Vec<OverwritePlan> = Vec::new();
+
+        for existing in &track.clips {
+            let ex_start = existing.place.timeline_in_sec;
+            let ex_end = existing.place.timeline_out_sec();
+
+            // No overlap
+            if ex_end <= overwrite_start || ex_start >= overwrite_end {
+                continue;
+            }
+
+            let safe_speed = if existing.speed > 0.0 {
+                existing.speed as f64
+            } else {
+                1.0
+            };
+
+            if ex_start >= overwrite_start && ex_end <= overwrite_end {
+                // Fully covered → remove
+                plans.push(OverwritePlan {
+                    clip_id: existing.id.clone(),
+                    action: PlannedAction::Remove,
+                });
+            } else if ex_start < overwrite_start && ex_end > overwrite_end {
+                // Spanning → split: trim left, create right fragment
+                let left_new_duration = overwrite_start - ex_start;
+                let left_new_source_out =
+                    existing.range.source_in_sec + left_new_duration * safe_speed;
+
+                let right_timeline_in = overwrite_end;
+                let right_duration = ex_end - overwrite_end;
+                let right_source_in =
+                    existing.range.source_in_sec + (overwrite_end - ex_start) * safe_speed;
+                let right_source_out = existing.range.source_out_sec;
+
+                plans.push(OverwritePlan {
+                    clip_id: existing.id.clone(),
+                    action: PlannedAction::Split {
+                        left_new_source_out,
+                        left_new_duration,
+                        right_source_in,
+                        right_source_out,
+                        right_timeline_in,
+                        right_duration,
+                        right_asset_id: existing.asset_id.clone(),
+                        right_clip_template: Box::new(existing.clone()),
+                    },
+                });
+            } else if ex_start < overwrite_start {
+                // Overlaps on the left → trim back (shorten end)
+                let new_duration = overwrite_start - ex_start;
+                let new_source_out = existing.range.source_in_sec + new_duration * safe_speed;
+                plans.push(OverwritePlan {
+                    clip_id: existing.id.clone(),
+                    action: PlannedAction::TrimBack {
+                        new_source_out,
+                        new_duration,
+                    },
+                });
+            } else {
+                // ex_start < overwrite_end && ex_end > overwrite_end
+                // Overlaps on the right → trim front (shorten start)
+                let trim_amount = overwrite_end - ex_start;
+                let new_source_in = existing.range.source_in_sec + trim_amount * safe_speed;
+                let new_duration = ex_end - overwrite_end;
+                plans.push(OverwritePlan {
+                    clip_id: existing.id.clone(),
+                    action: PlannedAction::TrimFront {
+                        new_timeline_in: overwrite_end,
+                        new_source_in,
+                        new_duration,
+                    },
+                });
+            }
+        }
+
+        // --- Mutate state ---
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        let mut undo_records: Vec<OverwriteUndoRecord> = Vec::new();
+        let mut result_changes: Vec<StateChange> = Vec::new();
+
+        for plan in plans {
+            match plan.action {
+                PlannedAction::Remove => {
+                    if let Some(pos) = track.clips.iter().position(|c| c.id == plan.clip_id) {
+                        let removed = track.clips.remove(pos);
+                        undo_records.push(OverwriteUndoRecord {
+                            track_id: self.track_id.clone(),
+                            clip_id: plan.clip_id.clone(),
+                            action: OverwriteUndoAction::Removed {
+                                clip: Box::new(removed),
+                            },
+                        });
+                        result_changes.push(StateChange::ClipDeleted {
+                            clip_id: plan.clip_id,
+                        });
+                    }
+                }
+                PlannedAction::TrimFront {
+                    new_timeline_in,
+                    new_source_in,
+                    new_duration,
+                } => {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == plan.clip_id) {
+                        undo_records.push(OverwriteUndoRecord {
+                            track_id: self.track_id.clone(),
+                            clip_id: plan.clip_id.clone(),
+                            action: OverwriteUndoAction::Trimmed {
+                                original_range: clip.range.clone(),
+                                original_place: clip.place.clone(),
+                            },
+                        });
+                        clip.range.source_in_sec = new_source_in;
+                        clip.place.timeline_in_sec = new_timeline_in;
+                        clip.place.duration_sec = new_duration;
+                        result_changes.push(StateChange::ClipModified {
+                            clip_id: plan.clip_id,
+                        });
+                    }
+                }
+                PlannedAction::TrimBack {
+                    new_source_out,
+                    new_duration,
+                } => {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == plan.clip_id) {
+                        undo_records.push(OverwriteUndoRecord {
+                            track_id: self.track_id.clone(),
+                            clip_id: plan.clip_id.clone(),
+                            action: OverwriteUndoAction::Trimmed {
+                                original_range: clip.range.clone(),
+                                original_place: clip.place.clone(),
+                            },
+                        });
+                        clip.range.source_out_sec = new_source_out;
+                        clip.place.duration_sec = new_duration;
+                        result_changes.push(StateChange::ClipModified {
+                            clip_id: plan.clip_id,
+                        });
+                    }
+                }
+                PlannedAction::Split {
+                    left_new_source_out,
+                    left_new_duration,
+                    right_source_in,
+                    right_source_out,
+                    right_timeline_in,
+                    right_duration,
+                    right_asset_id,
+                    right_clip_template,
+                } => {
+                    // Trim the left portion
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == plan.clip_id) {
+                        undo_records.push(OverwriteUndoRecord {
+                            track_id: self.track_id.clone(),
+                            clip_id: plan.clip_id.clone(),
+                            action: OverwriteUndoAction::Trimmed {
+                                original_range: clip.range.clone(),
+                                original_place: clip.place.clone(),
+                            },
+                        });
+                        clip.range.source_out_sec = left_new_source_out;
+                        clip.place.duration_sec = left_new_duration;
+                        result_changes.push(StateChange::ClipModified {
+                            clip_id: plan.clip_id,
+                        });
+                    }
+
+                    // Create right fragment with all properties from original
+                    let mut fragment = Clip::new(&right_asset_id);
+                    fragment.range = ClipRange {
+                        source_in_sec: right_source_in,
+                        source_out_sec: right_source_out,
+                    };
+                    fragment.place = ClipPlace {
+                        timeline_in_sec: right_timeline_in,
+                        duration_sec: right_duration,
+                    };
+                    // Preserve properties from the original clip
+                    fragment.transform = right_clip_template.transform.clone();
+                    fragment.opacity = right_clip_template.opacity;
+                    fragment.blend_mode = right_clip_template.blend_mode.clone();
+                    fragment.speed = right_clip_template.speed;
+                    fragment.reverse = right_clip_template.reverse;
+                    fragment.effects = right_clip_template.effects.clone();
+                    fragment.audio = right_clip_template.audio.clone();
+                    fragment.label = right_clip_template.label.clone();
+                    fragment.color = right_clip_template.color.clone();
+                    fragment.caption_style = right_clip_template.caption_style.clone();
+                    fragment.caption_position = right_clip_template.caption_position.clone();
+
+                    let fragment_id = fragment.id.clone();
+                    undo_records.push(OverwriteUndoRecord {
+                        track_id: self.track_id.clone(),
+                        clip_id: fragment_id.clone(),
+                        action: OverwriteUndoAction::FragmentCreated,
+                    });
+                    result_changes.push(StateChange::ClipCreated {
+                        clip_id: fragment_id.clone(),
+                    });
+                    insert_clip_sorted(track, fragment);
+                }
+            }
+        }
+
+        // Insert the new overwrite clip
+        let mut new_clip = Clip::new(&self.asset_id);
+        new_clip.range = ClipRange {
+            source_in_sec: source_start,
+            source_out_sec: source_end,
+        };
+        new_clip.place = ClipPlace {
+            timeline_in_sec: self.timeline_position,
+            duration_sec: clip_duration,
+        };
+        let clip_id = new_clip.id.clone();
+        insert_clip_sorted(track, new_clip);
+        sort_track_clips(track);
+
+        // Store undo state
+        self.created_clip_id = Some(clip_id.clone());
+        self.undo_records = undo_records;
+
+        // Build result
+        let op_id = ulid::Ulid::new().to_string();
+        let mut result = CommandResult::new(&op_id)
+            .with_change(StateChange::ClipCreated {
+                clip_id: clip_id.clone(),
+            })
+            .with_created_id(&clip_id);
+
+        for change in result_changes {
+            result = result.with_change(change);
+        }
+
+        Ok(result)
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        // 1) Remove the overwrite clip
+        if let Some(ref clip_id) = self.created_clip_id {
+            track.clips.retain(|c| &c.id != clip_id);
+        }
+
+        // 2) Reverse all undo records (process in reverse order for correct restoration)
+        for record in self.undo_records.iter().rev() {
+            match &record.action {
+                OverwriteUndoAction::Removed { clip } => {
+                    // Restore removed clip
+                    insert_clip_sorted(track, *clip.clone());
+                }
+                OverwriteUndoAction::Trimmed {
+                    original_range,
+                    original_place,
+                } => {
+                    // Restore original range and place
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                        clip.range = original_range.clone();
+                        clip.place = original_place.clone();
+                    }
+                }
+                OverwriteUndoAction::FragmentCreated => {
+                    // Remove the fragment that was created during split
+                    track.clips.retain(|c| c.id != record.clip_id);
+                }
+            }
+        }
+
+        sort_track_clips(track);
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "OverwriteEdit"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
+// RippleDeleteCommand
+// =============================================================================
+
+/// Command to remove clip(s) and close the resulting gaps by shifting downstream clips left.
+///
+/// Sync-locked tracks shift their clips in tandem. Locked tracks are never modified.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RippleDeleteCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    /// One or more clip IDs to remove.
+    pub clip_ids: Vec<ClipId>,
+
+    // --- Undo state ---
+    #[serde(skip)]
+    removed_clips: Vec<Clip>,
+    #[serde(skip)]
+    shifted_clips: Vec<ShiftedClipRecord>,
+}
+
+impl RippleDeleteCommand {
+    pub fn new(sequence_id: &str, track_id: &str, clip_ids: Vec<String>) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_ids,
+            removed_clips: Vec::new(),
+            shifted_clips: Vec::new(),
+        }
+    }
+}
+
+impl Command for RippleDeleteCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if self.clip_ids.is_empty() {
+            return Err(CoreError::ValidationError(
+                "No clip IDs provided for ripple delete".to_string(),
+            ));
+        }
+
+        let sequence = state
+            .sequences
+            .get(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        if track.locked {
+            return Err(CoreError::ValidationError(format!(
+                "Track '{}' is locked",
+                self.track_id
+            )));
+        }
+
+        // Validate all clip IDs exist and collect them
+        let mut clips_to_remove: Vec<Clip> = Vec::new();
+        for clip_id in &self.clip_ids {
+            let clip = track
+                .clips
+                .iter()
+                .find(|c| &c.id == clip_id)
+                .ok_or_else(|| CoreError::ClipNotFound(clip_id.clone()))?;
+            clips_to_remove.push(clip.clone());
+        }
+
+        // Sort by timeline position for deterministic shift calculation
+        clips_to_remove.sort_by(|a, b| a.place.timeline_in_sec.total_cmp(&b.place.timeline_in_sec));
+
+        let earliest_remove_pos = clips_to_remove[0].place.timeline_in_sec;
+
+        // Compute shift amount for each remaining clip:
+        // shift = sum of durations of removed clips that were before this clip's position
+        let compute_shift = |clip_start: TimeSec| -> TimeSec {
+            clips_to_remove
+                .iter()
+                .filter(|c| c.place.timeline_in_sec < clip_start)
+                .map(|c| c.place.duration_sec)
+                .sum()
+        };
+
+        // Collect shift records for target track
+        let mut shift_records: Vec<ShiftedClipRecord> = Vec::new();
+
+        for clip in &track.clips {
+            if self.clip_ids.contains(&clip.id) {
+                continue;
+            }
+            let shift = compute_shift(clip.place.timeline_in_sec);
+            if shift > 0.0 {
+                shift_records.push(ShiftedClipRecord {
+                    track_id: self.track_id.clone(),
+                    clip_id: clip.id.clone(),
+                    original_timeline_in: clip.place.timeline_in_sec,
+                });
+            }
+        }
+
+        // Sync-locked tracks: shift downstream clips by total removed duration
+        let total_removed_duration: TimeSec =
+            clips_to_remove.iter().map(|c| c.place.duration_sec).sum();
+
+        for other_track in &sequence.tracks {
+            if other_track.id == self.track_id || other_track.locked || !other_track.sync_lock {
+                continue;
+            }
+            for clip in &other_track.clips {
+                if clip.place.timeline_in_sec >= earliest_remove_pos {
+                    shift_records.push(ShiftedClipRecord {
+                        track_id: other_track.id.clone(),
+                        clip_id: clip.id.clone(),
+                        original_timeline_in: clip.place.timeline_in_sec,
+                    });
+                }
+            }
+        }
+
+        // --- Mutate state ---
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        // 1) Remove clips from target track
+        let target_track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        target_track
+            .clips
+            .retain(|c| !self.clip_ids.contains(&c.id));
+
+        // 2) Shift downstream clips on target track
+        for record in &shift_records {
+            if record.track_id != self.track_id {
+                continue;
+            }
+            if let Some(clip) = target_track
+                .clips
+                .iter_mut()
+                .find(|c| c.id == record.clip_id)
+            {
+                let shift = compute_shift(record.original_timeline_in);
+                clip.place.timeline_in_sec -= shift;
+            }
+        }
+        sort_track_clips(target_track);
+
+        // 3) Shift sync-locked tracks
+        for record in &shift_records {
+            if record.track_id == self.track_id {
+                continue;
+            }
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == record.track_id) {
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                    clip.place.timeline_in_sec -= total_removed_duration;
+                }
+                sort_track_clips(track);
+            }
+        }
+
+        // Store undo state
+        self.removed_clips = clips_to_remove;
+        self.shifted_clips = shift_records;
+
+        // Build result
+        let op_id = ulid::Ulid::new().to_string();
+        let mut result = CommandResult::new(&op_id);
+        for clip in &self.removed_clips {
+            result = result
+                .with_change(StateChange::ClipDeleted {
+                    clip_id: clip.id.clone(),
+                })
+                .with_deleted_id(&clip.id);
+        }
+        for record in &self.shifted_clips {
+            result = result.with_change(StateChange::ClipModified {
+                clip_id: record.clip_id.clone(),
+            });
+        }
+
+        Ok(result)
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        // 1) Restore shifted clips to original positions
+        for record in self.shifted_clips.iter().rev() {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == record.track_id) {
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                    clip.place.timeline_in_sec = record.original_timeline_in;
+                }
+                sort_track_clips(track);
+            }
+        }
+
+        // 2) Re-insert removed clips
+        if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) {
+            for clip in &self.removed_clips {
+                insert_clip_sorted(track, clip.clone());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "RippleDelete"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
+// LiftCommand
+// =============================================================================
+
+/// Command to remove clip(s) leaving the gap intact (no ripple shift).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LiftCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    /// One or more clip IDs to remove.
+    pub clip_ids: Vec<ClipId>,
+
+    // --- Undo state ---
+    #[serde(skip)]
+    removed_clips: Vec<Clip>,
+}
+
+impl LiftCommand {
+    pub fn new(sequence_id: &str, track_id: &str, clip_ids: Vec<String>) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_ids,
+            removed_clips: Vec::new(),
+        }
+    }
+}
+
+impl Command for LiftCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if self.clip_ids.is_empty() {
+            return Err(CoreError::ValidationError(
+                "No clip IDs provided for lift".to_string(),
+            ));
+        }
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        if track.locked {
+            return Err(CoreError::ValidationError(format!(
+                "Track '{}' is locked",
+                self.track_id
+            )));
+        }
+
+        // Validate and collect clips to remove
+        let mut removed: Vec<Clip> = Vec::new();
+        for clip_id in &self.clip_ids {
+            let clip = track
+                .clips
+                .iter()
+                .find(|c| &c.id == clip_id)
+                .ok_or_else(|| CoreError::ClipNotFound(clip_id.clone()))?
+                .clone();
+            removed.push(clip);
+        }
+
+        // Remove clips
+        track.clips.retain(|c| !self.clip_ids.contains(&c.id));
+
+        self.removed_clips = removed;
+
+        let op_id = ulid::Ulid::new().to_string();
+        let mut result = CommandResult::new(&op_id);
+        for clip in &self.removed_clips {
+            result = result
+                .with_change(StateChange::ClipDeleted {
+                    clip_id: clip.id.clone(),
+                })
+                .with_deleted_id(&clip.id);
+        }
+
+        Ok(result)
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        for clip in &self.removed_clips {
+            insert_clip_sorted(track, clip.clone());
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "Lift"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
+// ExtractEditCommand
+// =============================================================================
+
+/// Command to remove content in an In/Out range and close the resulting gap.
+///
+/// Combines overwrite-style trimming (trim/split/remove clips in range) with
+/// ripple-style gap closing (shift downstream clips left).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExtractEditCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    /// Start of the extraction range (In point).
+    pub in_point: TimeSec,
+    /// End of the extraction range (Out point).
+    pub out_point: TimeSec,
+
+    // --- Undo state ---
+    #[serde(skip)]
+    undo_records: Vec<OverwriteUndoRecord>,
+    #[serde(skip)]
+    shifted_clips: Vec<ShiftedClipRecord>,
+}
+
+impl ExtractEditCommand {
+    pub fn new(sequence_id: &str, track_id: &str, in_point: TimeSec, out_point: TimeSec) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            in_point,
+            out_point,
+            undo_records: Vec::new(),
+            shifted_clips: Vec::new(),
+        }
+    }
+}
+
+impl Command for ExtractEditCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !is_valid_time_sec(self.in_point) || !is_valid_time_sec(self.out_point) {
+            return Err(CoreError::ValidationError(
+                "In/Out points must be finite and non-negative".to_string(),
+            ));
+        }
+        if self.in_point >= self.out_point {
+            return Err(CoreError::InvalidTimeRange(self.in_point, self.out_point));
+        }
+
+        let extract_duration = self.out_point - self.in_point;
+
+        let sequence = state
+            .sequences
+            .get(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        if track.locked {
+            return Err(CoreError::ValidationError(format!(
+                "Track '{}' is locked",
+                self.track_id
+            )));
+        }
+
+        // --- Phase 1: Plan trim/split/remove for content in range ---
+        struct ExtractPlan {
+            clip_id: ClipId,
+            action: ExtractAction,
+        }
+
+        #[allow(clippy::large_enum_variant)]
+        enum ExtractAction {
+            Remove,
+            TrimFront {
+                new_timeline_in: TimeSec,
+                new_source_in: TimeSec,
+                new_duration: TimeSec,
+            },
+            TrimBack {
+                new_source_out: TimeSec,
+                new_duration: TimeSec,
+            },
+            Split {
+                left_new_source_out: TimeSec,
+                left_new_duration: TimeSec,
+                right_source_in: TimeSec,
+                right_source_out: TimeSec,
+                right_timeline_in: TimeSec,
+                right_duration: TimeSec,
+                right_clip_template: Box<Clip>,
+            },
+        }
+
+        let mut plans: Vec<ExtractPlan> = Vec::new();
+
+        for existing in &track.clips {
+            let ex_start = existing.place.timeline_in_sec;
+            let ex_end = existing.place.timeline_out_sec();
+
+            if ex_end <= self.in_point || ex_start >= self.out_point {
+                continue;
+            }
+
+            let safe_speed = if existing.speed > 0.0 {
+                existing.speed as f64
+            } else {
+                1.0
+            };
+
+            if ex_start >= self.in_point && ex_end <= self.out_point {
+                plans.push(ExtractPlan {
+                    clip_id: existing.id.clone(),
+                    action: ExtractAction::Remove,
+                });
+            } else if ex_start < self.in_point && ex_end > self.out_point {
+                let left_new_duration = self.in_point - ex_start;
+                let left_new_source_out =
+                    existing.range.source_in_sec + left_new_duration * safe_speed;
+                let right_timeline_in = self.out_point;
+                let right_duration = ex_end - self.out_point;
+                let right_source_in =
+                    existing.range.source_in_sec + (self.out_point - ex_start) * safe_speed;
+
+                plans.push(ExtractPlan {
+                    clip_id: existing.id.clone(),
+                    action: ExtractAction::Split {
+                        left_new_source_out,
+                        left_new_duration,
+                        right_source_in,
+                        right_source_out: existing.range.source_out_sec,
+                        right_timeline_in,
+                        right_duration,
+                        right_clip_template: Box::new(existing.clone()),
+                    },
+                });
+            } else if ex_start < self.in_point {
+                let new_duration = self.in_point - ex_start;
+                let new_source_out = existing.range.source_in_sec + new_duration * safe_speed;
+                plans.push(ExtractPlan {
+                    clip_id: existing.id.clone(),
+                    action: ExtractAction::TrimBack {
+                        new_source_out,
+                        new_duration,
+                    },
+                });
+            } else {
+                let trim_amount = self.out_point - ex_start;
+                let new_source_in = existing.range.source_in_sec + trim_amount * safe_speed;
+                let new_duration = ex_end - self.out_point;
+                plans.push(ExtractPlan {
+                    clip_id: existing.id.clone(),
+                    action: ExtractAction::TrimFront {
+                        new_timeline_in: self.out_point,
+                        new_source_in,
+                        new_duration,
+                    },
+                });
+            }
+        }
+
+        // --- Phase 2: Collect shift records ---
+        let plan_clip_ids: Vec<ClipId> = plans.iter().map(|p| p.clip_id.clone()).collect();
+        let mut shift_records: Vec<ShiftedClipRecord> = Vec::new();
+
+        for clip in &track.clips {
+            if clip.place.timeline_in_sec >= self.out_point && !plan_clip_ids.contains(&clip.id) {
+                shift_records.push(ShiftedClipRecord {
+                    track_id: self.track_id.clone(),
+                    clip_id: clip.id.clone(),
+                    original_timeline_in: clip.place.timeline_in_sec,
+                });
+            }
+        }
+
+        // Sync-locked tracks
+        for other_track in &sequence.tracks {
+            if other_track.id == self.track_id || other_track.locked || !other_track.sync_lock {
+                continue;
+            }
+            for clip in &other_track.clips {
+                if clip.place.timeline_in_sec >= self.in_point {
+                    shift_records.push(ShiftedClipRecord {
+                        track_id: other_track.id.clone(),
+                        clip_id: clip.id.clone(),
+                        original_timeline_in: clip.place.timeline_in_sec,
+                    });
+                }
+            }
+        }
+
+        // --- Phase 3: Mutate state ---
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        let mut undo_records: Vec<OverwriteUndoRecord> = Vec::new();
+        let mut result_changes: Vec<StateChange> = Vec::new();
+
+        for plan in plans {
+            match plan.action {
+                ExtractAction::Remove => {
+                    if let Some(pos) = track.clips.iter().position(|c| c.id == plan.clip_id) {
+                        let removed = track.clips.remove(pos);
+                        undo_records.push(OverwriteUndoRecord {
+                            track_id: self.track_id.clone(),
+                            clip_id: plan.clip_id.clone(),
+                            action: OverwriteUndoAction::Removed {
+                                clip: Box::new(removed),
+                            },
+                        });
+                        result_changes.push(StateChange::ClipDeleted {
+                            clip_id: plan.clip_id,
+                        });
+                    }
+                }
+                ExtractAction::TrimFront {
+                    new_timeline_in,
+                    new_source_in,
+                    new_duration,
+                } => {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == plan.clip_id) {
+                        undo_records.push(OverwriteUndoRecord {
+                            track_id: self.track_id.clone(),
+                            clip_id: plan.clip_id.clone(),
+                            action: OverwriteUndoAction::Trimmed {
+                                original_range: clip.range.clone(),
+                                original_place: clip.place.clone(),
+                            },
+                        });
+                        clip.range.source_in_sec = new_source_in;
+                        clip.place.timeline_in_sec = new_timeline_in;
+                        clip.place.duration_sec = new_duration;
+                        // This clip also shifts left
+                        shift_records.push(ShiftedClipRecord {
+                            track_id: self.track_id.clone(),
+                            clip_id: plan.clip_id.clone(),
+                            original_timeline_in: new_timeline_in,
+                        });
+                        result_changes.push(StateChange::ClipModified {
+                            clip_id: plan.clip_id,
+                        });
+                    }
+                }
+                ExtractAction::TrimBack {
+                    new_source_out,
+                    new_duration,
+                } => {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == plan.clip_id) {
+                        undo_records.push(OverwriteUndoRecord {
+                            track_id: self.track_id.clone(),
+                            clip_id: plan.clip_id.clone(),
+                            action: OverwriteUndoAction::Trimmed {
+                                original_range: clip.range.clone(),
+                                original_place: clip.place.clone(),
+                            },
+                        });
+                        clip.range.source_out_sec = new_source_out;
+                        clip.place.duration_sec = new_duration;
+                        result_changes.push(StateChange::ClipModified {
+                            clip_id: plan.clip_id,
+                        });
+                    }
+                }
+                ExtractAction::Split {
+                    left_new_source_out,
+                    left_new_duration,
+                    right_source_in,
+                    right_source_out,
+                    right_timeline_in,
+                    right_duration,
+                    right_clip_template,
+                } => {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == plan.clip_id) {
+                        undo_records.push(OverwriteUndoRecord {
+                            track_id: self.track_id.clone(),
+                            clip_id: plan.clip_id.clone(),
+                            action: OverwriteUndoAction::Trimmed {
+                                original_range: clip.range.clone(),
+                                original_place: clip.place.clone(),
+                            },
+                        });
+                        clip.range.source_out_sec = left_new_source_out;
+                        clip.place.duration_sec = left_new_duration;
+                        result_changes.push(StateChange::ClipModified {
+                            clip_id: plan.clip_id,
+                        });
+                    }
+
+                    let fragment = clone_clip_fragment(
+                        &right_clip_template,
+                        right_source_in,
+                        right_source_out,
+                        right_timeline_in,
+                        right_duration,
+                    );
+
+                    let fragment_id = fragment.id.clone();
+
+                    shift_records.push(ShiftedClipRecord {
+                        track_id: self.track_id.clone(),
+                        clip_id: fragment_id.clone(),
+                        original_timeline_in: right_timeline_in,
+                    });
+                    undo_records.push(OverwriteUndoRecord {
+                        track_id: self.track_id.clone(),
+                        clip_id: fragment_id.clone(),
+                        action: OverwriteUndoAction::FragmentCreated,
+                    });
+                    result_changes.push(StateChange::ClipCreated {
+                        clip_id: fragment_id,
+                    });
+                    insert_clip_sorted(track, fragment);
+                }
+            }
+        }
+
+        // Ripple: shift downstream clips left by extract_duration
+        for record in &shift_records {
+            if record.track_id == self.track_id {
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                    clip.place.timeline_in_sec -= extract_duration;
+                }
+            }
+        }
+        sort_track_clips(track);
+
+        // Shift sync-locked tracks
+        for record in &shift_records {
+            if record.track_id == self.track_id {
+                continue;
+            }
+            if let Some(other) = sequence.tracks.iter_mut().find(|t| t.id == record.track_id) {
+                if let Some(clip) = other.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                    clip.place.timeline_in_sec -= extract_duration;
+                }
+                sort_track_clips(other);
+            }
+        }
+
+        self.undo_records = undo_records;
+        self.shifted_clips = shift_records;
+
+        let op_id = ulid::Ulid::new().to_string();
+        let mut result = CommandResult::new(&op_id);
+        let mut emitted_modified_clip_ids = HashSet::new();
+        for change in result_changes {
+            if let StateChange::ClipModified { clip_id } = &change {
+                emitted_modified_clip_ids.insert(clip_id.clone());
+            }
+            result = result.with_change(change);
+        }
+        for record in &self.shifted_clips {
+            if emitted_modified_clip_ids.insert(record.clip_id.clone()) {
+                result = result.with_change(StateChange::ClipModified {
+                    clip_id: record.clip_id.clone(),
+                });
+            }
+        }
+
+        Ok(result)
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let extract_duration = self.out_point - self.in_point;
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        // 1) Restore shifted clips to original positions (reverse order)
+        for record in self.shifted_clips.iter().rev() {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == record.track_id) {
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                    clip.place.timeline_in_sec += extract_duration;
+                }
+                sort_track_clips(track);
+            }
+        }
+
+        // 2) Reverse extraction undo records
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        for record in self.undo_records.iter().rev() {
+            match &record.action {
+                OverwriteUndoAction::Removed { clip } => {
+                    insert_clip_sorted(track, *clip.clone());
+                }
+                OverwriteUndoAction::Trimmed {
+                    original_range,
+                    original_place,
+                } => {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                        clip.range = original_range.clone();
+                        clip.place = original_place.clone();
+                    }
+                }
+                OverwriteUndoAction::FragmentCreated => {
+                    track.clips.retain(|c| c.id != record.clip_id);
+                }
+            }
+        }
+        sort_track_clips(track);
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "ExtractEdit"
     }
 
     fn to_json(&self) -> serde_json::Value {
@@ -1612,6 +3260,432 @@ impl Command for SplitClipCommand {
 }
 
 // =============================================================================
+// GapInfo — data returned by find_gaps
+// =============================================================================
+
+/// Describes a gap (empty region) between clips on a track.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct GapInfo {
+    /// Start time of the gap (end of preceding clip).
+    pub start: TimeSec,
+    /// End time of the gap (start of next clip).
+    pub end: TimeSec,
+    /// Duration of the gap.
+    pub duration: TimeSec,
+}
+
+/// Scans a track for gaps between clips.
+///
+/// Returns a sorted list of gaps. Adjacent/overlapping clips produce no gap.
+/// Only gaps with positive duration (> 1 microsecond tolerance) are included.
+pub fn find_gaps(track: &Track) -> Vec<GapInfo> {
+    if track.clips.is_empty() {
+        return Vec::new();
+    }
+
+    // Clips should already be sorted, but ensure deterministic ordering.
+    let mut sorted_clips: Vec<&Clip> = track.clips.iter().collect();
+    sorted_clips.sort_by(|a, b| {
+        a.place
+            .timeline_in_sec
+            .total_cmp(&b.place.timeline_in_sec)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let mut gaps = Vec::new();
+    const EPSILON: f64 = 1e-6;
+
+    for window in sorted_clips.windows(2) {
+        let prev_end = window[0].place.timeline_out_sec();
+        let next_start = window[1].place.timeline_in_sec;
+        let gap_duration = next_start - prev_end;
+
+        if gap_duration > EPSILON {
+            gaps.push(GapInfo {
+                start: prev_end,
+                end: next_start,
+                duration: gap_duration,
+            });
+        }
+    }
+
+    gaps
+}
+
+// =============================================================================
+// CloseGapCommand
+// =============================================================================
+
+/// Command to close a specific gap by shifting all downstream clips left.
+///
+/// All clips starting at or after `gap_end` on the target track are shifted
+/// left by `gap_duration`. Sync-locked tracks shift their clips in tandem.
+/// Locked tracks are never modified.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseGapCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    /// Start of the gap to close.
+    pub gap_start: TimeSec,
+    /// End of the gap to close.
+    pub gap_end: TimeSec,
+
+    // --- Undo state ---
+    #[serde(skip)]
+    shifted_clips: Vec<ShiftedClipRecord>,
+    #[serde(skip)]
+    gap_duration: TimeSec,
+}
+
+impl CloseGapCommand {
+    pub fn new(sequence_id: &str, track_id: &str, gap_start: TimeSec, gap_end: TimeSec) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            gap_start,
+            gap_end,
+            shifted_clips: Vec::new(),
+            gap_duration: 0.0,
+        }
+    }
+}
+
+impl Command for CloseGapCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !is_valid_time_sec(self.gap_start) || !is_valid_time_sec(self.gap_end) {
+            return Err(CoreError::ValidationError(
+                "Invalid gap time range".to_string(),
+            ));
+        }
+        if self.gap_end <= self.gap_start {
+            return Err(CoreError::ValidationError(
+                "gap_end must be greater than gap_start".to_string(),
+            ));
+        }
+
+        let gap_duration = self.gap_end - self.gap_start;
+
+        let sequence = state
+            .sequences
+            .get(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        if track.locked {
+            return Err(CoreError::ValidationError(format!(
+                "Track '{}' is locked",
+                self.track_id
+            )));
+        }
+
+        // Verify there is actually a gap at the specified location:
+        // No clip should occupy the [gap_start, gap_end) region.
+        let has_clip_in_gap = track.clips.iter().any(|c| {
+            let clip_start = c.place.timeline_in_sec;
+            let clip_end = c.place.timeline_out_sec();
+            // Clip overlaps gap if clip_start < gap_end AND clip_end > gap_start
+            clip_start < self.gap_end && clip_end > self.gap_start
+        });
+        if has_clip_in_gap {
+            return Err(CoreError::ValidationError(
+                "No gap exists at the specified location — a clip occupies that region".to_string(),
+            ));
+        }
+
+        // Collect shift records for target track: all clips starting at or after gap_end
+        let mut shift_records: Vec<ShiftedClipRecord> = Vec::new();
+
+        for clip in &track.clips {
+            if clip.place.timeline_in_sec >= self.gap_end - 1e-6 {
+                shift_records.push(ShiftedClipRecord {
+                    track_id: self.track_id.clone(),
+                    clip_id: clip.id.clone(),
+                    original_timeline_in: clip.place.timeline_in_sec,
+                });
+            }
+        }
+
+        // Sync-locked tracks: shift clips at or after gap_start
+        for other_track in &sequence.tracks {
+            if other_track.id == self.track_id || other_track.locked || !other_track.sync_lock {
+                continue;
+            }
+            for clip in &other_track.clips {
+                if clip.place.timeline_in_sec >= self.gap_end - 1e-6 {
+                    shift_records.push(ShiftedClipRecord {
+                        track_id: other_track.id.clone(),
+                        clip_id: clip.id.clone(),
+                        original_timeline_in: clip.place.timeline_in_sec,
+                    });
+                }
+            }
+        }
+
+        // --- Mutate state ---
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        for record in &shift_records {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == record.track_id) {
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                    clip.place.timeline_in_sec -= gap_duration;
+                }
+                sort_track_clips(track);
+            }
+        }
+
+        // Store undo state
+        self.shifted_clips = shift_records;
+        self.gap_duration = gap_duration;
+
+        // Build result
+        let op_id = ulid::Ulid::new().to_string();
+        let mut result = CommandResult::new(&op_id);
+        for record in &self.shifted_clips {
+            result = result.with_change(StateChange::ClipModified {
+                clip_id: record.clip_id.clone(),
+            });
+        }
+
+        Ok(result)
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        for record in self.shifted_clips.iter().rev() {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == record.track_id) {
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                    clip.place.timeline_in_sec = record.original_timeline_in;
+                }
+                sort_track_clips(track);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "CloseGap"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
+// CloseAllGapsCommand
+// =============================================================================
+
+/// Command to remove all gaps on a track by ripple-shifting every clip leftward.
+///
+/// Each clip is repositioned so that `clip[i].timeline_in = clip[i-1].timeline_out`.
+/// The first clip shifts to time 0 if there is a leading gap.
+/// Sync-locked tracks shift their clips in tandem.
+/// Locked tracks are never modified.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseAllGapsCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+
+    // --- Undo state ---
+    #[serde(skip)]
+    shifted_clips: Vec<ShiftedClipRecord>,
+    /// Total shift applied to sync-locked tracks (cumulative gap duration).
+    #[serde(skip)]
+    sync_shift_amount: TimeSec,
+}
+
+impl CloseAllGapsCommand {
+    pub fn new(sequence_id: &str, track_id: &str) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            shifted_clips: Vec::new(),
+            sync_shift_amount: 0.0,
+        }
+    }
+}
+
+impl Command for CloseAllGapsCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        if track.locked {
+            return Err(CoreError::ValidationError(format!(
+                "Track '{}' is locked",
+                self.track_id
+            )));
+        }
+
+        if track.clips.is_empty() {
+            let op_id = ulid::Ulid::new().to_string();
+            return Ok(CommandResult::new(&op_id));
+        }
+
+        // Work on a sorted copy to compute new positions
+        let mut sorted_clips: Vec<&Clip> = track.clips.iter().collect();
+        sorted_clips.sort_by(|a, b| {
+            a.place
+                .timeline_in_sec
+                .total_cmp(&b.place.timeline_in_sec)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        // Calculate new positions: pack clips left-to-right with no gaps
+        let mut shift_records: Vec<ShiftedClipRecord> = Vec::new();
+        let mut next_start: TimeSec = 0.0;
+        let mut new_positions: Vec<(ClipId, TimeSec)> = Vec::new();
+
+        for clip in &sorted_clips {
+            let original_start = clip.place.timeline_in_sec;
+            if (original_start - next_start).abs() > 1e-6 {
+                shift_records.push(ShiftedClipRecord {
+                    track_id: self.track_id.clone(),
+                    clip_id: clip.id.clone(),
+                    original_timeline_in: original_start,
+                });
+                new_positions.push((clip.id.clone(), next_start));
+            }
+            next_start += clip.place.duration_sec;
+        }
+
+        // Compute total gap removed for sync-locked tracks:
+        // = original last clip end - new last clip end
+        let original_end = sorted_clips
+            .last()
+            .map(|c| c.place.timeline_out_sec())
+            .unwrap_or(0.0);
+        let new_end = next_start;
+        let total_gap_removed = original_end - new_end;
+
+        // Determine the earliest affected position for sync-lock filtering
+        let earliest_shift_pos = shift_records
+            .first()
+            .map(|r| r.original_timeline_in)
+            .unwrap_or(0.0);
+
+        // Sync-locked tracks: shift downstream clips by total_gap_removed
+        if total_gap_removed > 1e-6 {
+            for other_track in &sequence.tracks {
+                if other_track.id == self.track_id || other_track.locked || !other_track.sync_lock {
+                    continue;
+                }
+                for clip in &other_track.clips {
+                    if clip.place.timeline_in_sec >= earliest_shift_pos {
+                        shift_records.push(ShiftedClipRecord {
+                            track_id: other_track.id.clone(),
+                            clip_id: clip.id.clone(),
+                            original_timeline_in: clip.place.timeline_in_sec,
+                        });
+                    }
+                }
+            }
+        }
+
+        // --- Mutate state ---
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        // Apply new positions to target track
+        let target_track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        for (clip_id, new_pos) in &new_positions {
+            if let Some(clip) = target_track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                clip.place.timeline_in_sec = *new_pos;
+            }
+        }
+        sort_track_clips(target_track);
+
+        // Shift sync-locked tracks
+        if total_gap_removed > 1e-6 {
+            for record in &shift_records {
+                if record.track_id == self.track_id {
+                    continue;
+                }
+                if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == record.track_id) {
+                    if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                        clip.place.timeline_in_sec -= total_gap_removed;
+                    }
+                    sort_track_clips(track);
+                }
+            }
+        }
+
+        // Store undo state
+        self.shifted_clips = shift_records;
+        self.sync_shift_amount = total_gap_removed;
+
+        // Build result
+        let op_id = ulid::Ulid::new().to_string();
+        let mut result = CommandResult::new(&op_id);
+        for record in &self.shifted_clips {
+            result = result.with_change(StateChange::ClipModified {
+                clip_id: record.clip_id.clone(),
+            });
+        }
+
+        Ok(result)
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        // Restore all shifted clips to original positions (reverse order)
+        for record in self.shifted_clips.iter().rev() {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == record.track_id) {
+                if let Some(clip) = track.clips.iter_mut().find(|c| c.id == record.clip_id) {
+                    clip.place.timeline_in_sec = record.original_timeline_in;
+                }
+                sort_track_clips(track);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "CloseAllGaps"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap_or(serde_json::json!({}))
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -2845,5 +4919,1395 @@ mod tests {
             assert!(result.is_ok(), "Failed to set blend mode {:?}", mode);
             assert_eq!(state.sequences[&seq_id].tracks[0].clips[0].blend_mode, mode);
         }
+    }
+
+    // =========================================================================
+    // InsertEditCommand — BDD Tests
+    // =========================================================================
+
+    /// Helper: inserts a clip directly into a track at the given position.
+    fn place_clip(state: &mut ProjectState, seq_id: &str, track_id: &str, start: f64, dur: f64) {
+        let asset_id = state.assets.keys().next().unwrap().clone();
+        let mut cmd =
+            InsertClipCommand::new(seq_id, track_id, &asset_id, start).with_source_range(0.0, dur);
+        cmd.execute(state).unwrap();
+    }
+
+    // Scenario: Basic insert on empty track
+    //   Given an empty video track
+    //   When an insert edit is executed at position 5.0 with duration 3.0
+    //   Then a new clip is placed at [5.0, 8.0]
+    //   And no other clips exist
+    #[test]
+    fn insert_edit_should_place_clip_on_empty_track() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut cmd =
+            InsertEditCommand::new(&seq_id, &track_id, &asset_id, 5.0).with_source_range(0.0, 3.0);
+        let result = cmd.execute(&mut state).unwrap();
+
+        assert_eq!(result.created_ids.len(), 1);
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 1);
+        assert_eq!(track.clips[0].place.timeline_in_sec, 5.0);
+        assert_eq!(track.clips[0].place.duration_sec, 3.0);
+    }
+
+    // Scenario: Insert with downstream clips pushes them right
+    //   Given a track with clips at [0-10, 15-25]
+    //   When an insert edit of duration 5.0 is executed at position 10.0
+    //   Then a new clip is placed at [10.0, 15.0]
+    //   And the clip originally at 15-25 shifts to [20.0, 30.0]
+    //   But the clip at 0-10 remains unchanged
+    #[test]
+    fn insert_edit_should_shift_downstream_clips_right() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        // Place two clips: [0-10] and [15-25]
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 15.0, 10.0);
+
+        let downstream_clip_id = state.sequences[&seq_id].tracks[0].clips[1].id.clone();
+
+        // Insert edit at position 10.0 with duration 5.0
+        let mut cmd =
+            InsertEditCommand::new(&seq_id, &track_id, &asset_id, 10.0).with_source_range(0.0, 5.0);
+        let result = cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 3);
+
+        // Clip at 0-10 unchanged
+        assert_eq!(track.clips[0].place.timeline_in_sec, 0.0);
+        assert_eq!(track.clips[0].place.duration_sec, 10.0);
+
+        // New clip at 10-15
+        let new_clip = track
+            .clips
+            .iter()
+            .find(|c| result.created_ids.contains(&c.id))
+            .unwrap();
+        assert_eq!(new_clip.place.timeline_in_sec, 10.0);
+        assert_eq!(new_clip.place.duration_sec, 5.0);
+
+        // Downstream clip shifted from 15-25 to 20-30
+        let shifted = track
+            .clips
+            .iter()
+            .find(|c| c.id == downstream_clip_id)
+            .unwrap();
+        assert_eq!(shifted.place.timeline_in_sec, 20.0);
+        assert_eq!(shifted.place.duration_sec, 10.0);
+    }
+
+    // Scenario: Insert between existing clips shifts only downstream
+    //   Given a track with clips at [0-5, 10-15, 20-25]
+    //   When an insert edit of duration 3.0 is executed at position 10.0
+    //   Then clip at 0-5 remains unchanged
+    //   And clip at 10-15 shifts to [13-18]
+    //   And clip at 20-25 shifts to [23-28]
+    #[test]
+    fn insert_edit_should_shift_only_downstream_clips() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 5.0);
+        place_clip(&mut state, &seq_id, &track_id, 10.0, 5.0);
+        place_clip(&mut state, &seq_id, &track_id, 20.0, 5.0);
+
+        let clip_at_0_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let clip_at_10_id = state.sequences[&seq_id].tracks[0].clips[1].id.clone();
+        let clip_at_20_id = state.sequences[&seq_id].tracks[0].clips[2].id.clone();
+
+        let mut cmd =
+            InsertEditCommand::new(&seq_id, &track_id, &asset_id, 10.0).with_source_range(0.0, 3.0);
+        cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+
+        // clip at 0-5: unchanged
+        let c0 = track.clips.iter().find(|c| c.id == clip_at_0_id).unwrap();
+        assert_eq!(c0.place.timeline_in_sec, 0.0);
+
+        // clip at 10-15: shifted to 13-18
+        let c1 = track.clips.iter().find(|c| c.id == clip_at_10_id).unwrap();
+        assert_eq!(c1.place.timeline_in_sec, 13.0);
+
+        // clip at 20-25: shifted to 23-28
+        let c2 = track.clips.iter().find(|c| c.id == clip_at_20_id).unwrap();
+        assert_eq!(c2.place.timeline_in_sec, 23.0);
+    }
+
+    // Scenario: Insert inside an existing clip splits it at the playhead
+    //   Given a track with clip A at [0-20]
+    //   When an insert edit of duration 3.0 is executed at position 8.0
+    //   Then clip A is trimmed to [0-8]
+    //   And a right fragment exists at [11-23]
+    //   And the inserted clip occupies [8-11]
+    #[test]
+    fn insert_edit_should_split_clip_spanning_insert_point() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 20.0);
+        let original_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        let mut cmd =
+            InsertEditCommand::new(&seq_id, &track_id, &asset_id, 8.0).with_source_range(0.0, 3.0);
+        let result = cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 3);
+
+        let left = track
+            .clips
+            .iter()
+            .find(|c| c.id == original_clip_id)
+            .unwrap();
+        assert_eq!(left.place.timeline_in_sec, 0.0);
+        assert_eq!(left.place.duration_sec, 8.0);
+        assert_eq!(left.range.source_in_sec, 0.0);
+        assert_eq!(left.range.source_out_sec, 8.0);
+
+        let inserted = track
+            .clips
+            .iter()
+            .find(|c| result.created_ids.contains(&c.id))
+            .unwrap();
+        assert_eq!(inserted.place.timeline_in_sec, 8.0);
+        assert_eq!(inserted.place.duration_sec, 3.0);
+
+        let right = track
+            .clips
+            .iter()
+            .find(|c| c.id != original_clip_id && !result.created_ids.contains(&c.id))
+            .unwrap();
+        assert_eq!(right.place.timeline_in_sec, 11.0);
+        assert_eq!(right.place.duration_sec, 12.0);
+        assert_eq!(right.range.source_in_sec, 8.0);
+        assert_eq!(right.range.source_out_sec, 20.0);
+    }
+
+    // Scenario: Undo after splitting at the insert point restores the original clip
+    //   Given a track with clip A at [0-20]
+    //   When an insert edit at position 8.0 splits it
+    //   And undo is called
+    //   Then only the original clip remains at [0-20]
+    #[test]
+    fn insert_edit_undo_should_restore_split_clip() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 20.0);
+        let original_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        let mut cmd =
+            InsertEditCommand::new(&seq_id, &track_id, &asset_id, 8.0).with_source_range(0.0, 3.0);
+        cmd.execute(&mut state).unwrap();
+
+        cmd.undo(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 1);
+
+        let restored = &track.clips[0];
+        assert_eq!(restored.id, original_clip_id);
+        assert_eq!(restored.place.timeline_in_sec, 0.0);
+        assert_eq!(restored.place.duration_sec, 20.0);
+        assert_eq!(restored.range.source_in_sec, 0.0);
+        assert_eq!(restored.range.source_out_sec, 20.0);
+    }
+
+    // Scenario: Undo reverses insert and shift atomically
+    //   Given a track with clips at [0-10, 15-25]
+    //   When an insert edit is executed at position 10.0
+    //   And undo is called
+    //   Then the inserted clip is removed
+    //   And the downstream clip returns to [15-25]
+    #[test]
+    fn insert_edit_undo_should_reverse_insert_and_shift_atomically() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 15.0, 10.0);
+
+        let downstream_id = state.sequences[&seq_id].tracks[0].clips[1].id.clone();
+
+        let mut cmd =
+            InsertEditCommand::new(&seq_id, &track_id, &asset_id, 10.0).with_source_range(0.0, 5.0);
+        cmd.execute(&mut state).unwrap();
+
+        // Verify insert happened
+        assert_eq!(state.sequences[&seq_id].tracks[0].clips.len(), 3);
+
+        // Undo
+        cmd.undo(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 2);
+
+        // Original clip at 0-10 unchanged
+        assert_eq!(track.clips[0].place.timeline_in_sec, 0.0);
+
+        // Downstream clip restored to 15-25
+        let restored = track.clips.iter().find(|c| c.id == downstream_id).unwrap();
+        assert_eq!(restored.place.timeline_in_sec, 15.0);
+        assert_eq!(restored.place.duration_sec, 10.0);
+    }
+
+    // Scenario: Sync-locked tracks shift together
+    //   Given Track1 (target) and Track2 (sync_lock=true)
+    //   And Track1 has clips at [0-10, 20-30]
+    //   And Track2 has clips at [5-15, 25-35]
+    //   When an insert edit of duration 5.0 is executed on Track1 at position 10.0
+    //   Then Track1's clip at 20-30 shifts to [25-35]
+    //   And Track2's clip at 5-15 splits into [5-10] and [15-20]
+    //   And Track2's clip at 25-35 shifts to [30-40]
+    #[test]
+    fn insert_edit_should_shift_sync_locked_tracks_together() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track1_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        // Add second track with sync_lock enabled
+        let mut track2 = Track::new("Video 2", TrackKind::Video);
+        track2.sync_lock = true;
+        let track2_id = track2.id.clone();
+        state
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .tracks
+            .push(track2);
+
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        // Track1: clips at [0-10, 20-30]
+        place_clip(&mut state, &seq_id, &track1_id, 0.0, 10.0);
+        place_clip(&mut state, &seq_id, &track1_id, 20.0, 10.0);
+
+        // Track2: clips at [5-15, 25-35]
+        place_clip(&mut state, &seq_id, &track2_id, 5.0, 10.0);
+        place_clip(&mut state, &seq_id, &track2_id, 25.0, 10.0);
+
+        let t1_clip_20_id = state.sequences[&seq_id].tracks[0].clips[1].id.clone();
+        let t2_clip_5_id = state.sequences[&seq_id].tracks[1].clips[0].id.clone();
+        let t2_clip_25_id = state.sequences[&seq_id].tracks[1].clips[1].id.clone();
+
+        // Insert edit on Track1 at position 10.0, duration 5.0
+        let mut cmd = InsertEditCommand::new(&seq_id, &track1_id, &asset_id, 10.0)
+            .with_source_range(0.0, 5.0);
+        cmd.execute(&mut state).unwrap();
+
+        let seq = &state.sequences[&seq_id];
+
+        // Track1: clip at 20-30 → 25-35
+        let t1 = seq.tracks.iter().find(|t| t.id == track1_id).unwrap();
+        let c = t1.clips.iter().find(|c| c.id == t1_clip_20_id).unwrap();
+        assert_eq!(c.place.timeline_in_sec, 25.0);
+
+        // Track2: clip at 5-15 is split into [5-10] and [15-20]
+        let t2 = seq.tracks.iter().find(|t| t.id == track2_id).unwrap();
+        let c_before = t2.clips.iter().find(|c| c.id == t2_clip_5_id).unwrap();
+        assert_eq!(c_before.place.timeline_in_sec, 5.0);
+        assert_eq!(c_before.place.duration_sec, 5.0);
+        assert_eq!(c_before.range.source_in_sec, 0.0);
+        assert_eq!(c_before.range.source_out_sec, 5.0);
+
+        let c_fragment = t2
+            .clips
+            .iter()
+            .find(|c| c.id != t2_clip_5_id && c.place.timeline_in_sec == 15.0)
+            .unwrap();
+        assert_eq!(c_fragment.place.duration_sec, 5.0);
+        assert_eq!(c_fragment.range.source_in_sec, 5.0);
+        assert_eq!(c_fragment.range.source_out_sec, 10.0);
+
+        // Track2: clip at 25-35 → 30-40
+        let c_after = t2.clips.iter().find(|c| c.id == t2_clip_25_id).unwrap();
+        assert_eq!(c_after.place.timeline_in_sec, 30.0);
+    }
+
+    // Scenario: Locked tracks are never modified during insert edit
+    //   Given Track1 (target) and Track2 (locked=true, sync_lock=true)
+    //   And Track2 has clips at [10-20]
+    //   When an insert edit is executed on Track1 at position 5.0
+    //   Then Track2's clip remains at [10-20]
+    #[test]
+    fn insert_edit_should_not_shift_locked_tracks() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track1_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        // Add locked + sync-locked track
+        let mut track2 = Track::new("Video 2", TrackKind::Video);
+        track2.locked = true;
+        track2.sync_lock = true;
+        let track2_id = track2.id.clone();
+        state
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .tracks
+            .push(track2);
+
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        // Track2: clip at [10-20]
+        place_clip(&mut state, &seq_id, &track2_id, 10.0, 10.0);
+
+        let t2_clip_id = state.sequences[&seq_id].tracks[1].clips[0].id.clone();
+
+        // Insert edit on Track1 at position 5.0
+        let mut cmd =
+            InsertEditCommand::new(&seq_id, &track1_id, &asset_id, 5.0).with_source_range(0.0, 3.0);
+        cmd.execute(&mut state).unwrap();
+
+        // Track2's clip unchanged
+        let t2 = state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.id == track2_id)
+            .unwrap();
+        let c = t2.clips.iter().find(|c| c.id == t2_clip_id).unwrap();
+        assert_eq!(c.place.timeline_in_sec, 10.0);
+    }
+
+    // Scenario: Insert edit on locked target track should fail
+    //   Given a locked video track
+    //   When an insert edit is attempted
+    //   Then it should return an error
+    #[test]
+    fn insert_edit_should_reject_locked_target_track() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        // Lock the target track
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].locked = true;
+
+        let mut cmd =
+            InsertEditCommand::new(&seq_id, &track_id, &asset_id, 5.0).with_source_range(0.0, 3.0);
+        let result = cmd.execute(&mut state);
+
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("locked"),
+            "Error should mention 'locked'"
+        );
+    }
+
+    // Scenario: Undo with sync-locked tracks restores all positions
+    //   Given Track1 and Track2 (sync_lock=true)
+    //   When an insert edit shifts clips on both tracks
+    //   And undo is called
+    //   Then all clips on all tracks return to original positions
+    #[test]
+    fn insert_edit_undo_should_restore_sync_locked_tracks() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track1_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let mut track2 = Track::new("Video 2", TrackKind::Video);
+        track2.sync_lock = true;
+        let track2_id = track2.id.clone();
+        state
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .tracks
+            .push(track2);
+
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        // Track1: clip at [10-20]
+        place_clip(&mut state, &seq_id, &track1_id, 10.0, 10.0);
+        // Track2: clip at [15-25]
+        place_clip(&mut state, &seq_id, &track2_id, 15.0, 10.0);
+
+        let t1_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let t2_clip_id = state.sequences[&seq_id].tracks[1].clips[0].id.clone();
+
+        let mut cmd =
+            InsertEditCommand::new(&seq_id, &track1_id, &asset_id, 5.0).with_source_range(0.0, 5.0);
+        cmd.execute(&mut state).unwrap();
+
+        // Verify shifts happened
+        let t1_clip = state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.id == track1_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == t1_clip_id)
+            .unwrap();
+        assert_eq!(t1_clip.place.timeline_in_sec, 15.0);
+
+        let t2_clip = state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.id == track2_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == t2_clip_id)
+            .unwrap();
+        assert_eq!(t2_clip.place.timeline_in_sec, 20.0);
+
+        // Undo
+        cmd.undo(&mut state).unwrap();
+
+        // Track1: clip restored to [10-20]
+        let t1_clip = state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.id == track1_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == t1_clip_id)
+            .unwrap();
+        assert_eq!(t1_clip.place.timeline_in_sec, 10.0);
+
+        // Track2: clip restored to [15-25]
+        let t2_clip = state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.id == track2_id)
+            .unwrap()
+            .clips
+            .iter()
+            .find(|c| c.id == t2_clip_id)
+            .unwrap();
+        assert_eq!(t2_clip.place.timeline_in_sec, 15.0);
+    }
+
+    // =========================================================================
+    // OverwriteEditCommand — BDD Tests
+    // =========================================================================
+
+    // Scenario: Basic overwrite on empty track
+    //   Given an empty track
+    //   When overwrite edit places a clip at 5.0 with duration 3.0
+    //   Then a new clip exists at [5.0, 8.0]
+    #[test]
+    fn overwrite_edit_should_place_clip_on_empty_track() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut cmd = OverwriteEditCommand::new(&seq_id, &track_id, &asset_id, 5.0)
+            .with_source_range(0.0, 3.0);
+        let result = cmd.execute(&mut state).unwrap();
+
+        assert_eq!(result.created_ids.len(), 1);
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 1);
+        assert_eq!(track.clips[0].place.timeline_in_sec, 5.0);
+        assert_eq!(track.clips[0].place.duration_sec, 3.0);
+    }
+
+    // Scenario: Overwrite trims clip that overlaps on the left (existing starts before)
+    //   Given a track with clip A at [10-20]
+    //   When overwrite edit places a clip at [15-25]
+    //   Then new clip at [15-25]
+    //   And clip A is trimmed to [10-15]
+    #[test]
+    fn overwrite_edit_should_trim_back_of_left_overlapping_clip() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        // Place clip A at [10-20]
+        place_clip(&mut state, &seq_id, &track_id, 10.0, 10.0);
+        let clip_a_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        // Overwrite at [15-25]
+        let mut cmd = OverwriteEditCommand::new(&seq_id, &track_id, &asset_id, 15.0)
+            .with_source_range(0.0, 10.0);
+        cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 2);
+
+        // Clip A trimmed to [10-15]
+        let clip_a = track.clips.iter().find(|c| c.id == clip_a_id).unwrap();
+        assert_eq!(clip_a.place.timeline_in_sec, 10.0);
+        assert_eq!(clip_a.place.duration_sec, 5.0);
+        assert_eq!(clip_a.range.source_in_sec, 0.0);
+        assert_eq!(clip_a.range.source_out_sec, 5.0);
+    }
+
+    // Scenario: Overwrite trims clip that overlaps on the right (existing extends past)
+    //   Given a track with clip A at [10-20]
+    //   When overwrite edit places a clip at [5-15]
+    //   Then new clip at [5-15]
+    //   And clip A is trimmed to [15-20] (front trimmed)
+    #[test]
+    fn overwrite_edit_should_trim_front_of_right_overlapping_clip() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        // Place clip A at [10-20], source [0-10]
+        place_clip(&mut state, &seq_id, &track_id, 10.0, 10.0);
+        let clip_a_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        // Overwrite at [5-15]
+        let mut cmd = OverwriteEditCommand::new(&seq_id, &track_id, &asset_id, 5.0)
+            .with_source_range(0.0, 10.0);
+        cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 2);
+
+        // Clip A trimmed to [15-20], source_in advanced by 5
+        let clip_a = track.clips.iter().find(|c| c.id == clip_a_id).unwrap();
+        assert_eq!(clip_a.place.timeline_in_sec, 15.0);
+        assert_eq!(clip_a.place.duration_sec, 5.0);
+        assert_eq!(clip_a.range.source_in_sec, 5.0);
+        assert_eq!(clip_a.range.source_out_sec, 10.0);
+    }
+
+    // Scenario: Fully covered clip is removed
+    //   Given a track with clip A at [10-15]
+    //   When overwrite edit places a clip at [5-20]
+    //   Then clip A is removed
+    //   And new clip at [5-20]
+    #[test]
+    fn overwrite_edit_should_remove_fully_covered_clip() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 10.0, 5.0);
+        let clip_a_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        let mut cmd = OverwriteEditCommand::new(&seq_id, &track_id, &asset_id, 5.0)
+            .with_source_range(0.0, 15.0);
+        cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+
+        // Clip A removed
+        assert!(track.clips.iter().all(|c| c.id != clip_a_id));
+        // Only the new overwrite clip
+        assert_eq!(track.clips.len(), 1);
+        assert_eq!(track.clips[0].place.timeline_in_sec, 5.0);
+        assert_eq!(track.clips[0].place.duration_sec, 15.0);
+    }
+
+    // Scenario: Spanning clip is split into two fragments
+    //   Given a track with clip A at [0-30], source [0-30]
+    //   When overwrite edit places a clip at [10-20]
+    //   Then clip A is trimmed to [0-10]
+    //   And a new right fragment at [20-30] with source [20-30]
+    //   And new overwrite clip at [10-20]
+    #[test]
+    fn overwrite_edit_should_split_spanning_clip() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        // Place clip at [0-30], source [0-30]
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 30.0);
+        let original_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        // Overwrite at [10-20]
+        let mut cmd = OverwriteEditCommand::new(&seq_id, &track_id, &asset_id, 10.0)
+            .with_source_range(0.0, 10.0);
+        cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 3); // left fragment + overwrite + right fragment
+
+        // Left fragment: [0-10], source [0-10]
+        let left = track.clips.iter().find(|c| c.id == original_id).unwrap();
+        assert_eq!(left.place.timeline_in_sec, 0.0);
+        assert_eq!(left.place.duration_sec, 10.0);
+        assert_eq!(left.range.source_in_sec, 0.0);
+        assert_eq!(left.range.source_out_sec, 10.0);
+
+        // Right fragment: [20-30], source [20-30]
+        let right = track
+            .clips
+            .iter()
+            .find(|c| c.place.timeline_in_sec == 20.0)
+            .unwrap();
+        assert_eq!(right.place.duration_sec, 10.0);
+        assert_eq!(right.range.source_in_sec, 20.0);
+        assert_eq!(right.range.source_out_sec, 30.0);
+
+        // Overwrite clip: [10-20]
+        let overwrite = track
+            .clips
+            .iter()
+            .find(|c| c.place.timeline_in_sec == 10.0)
+            .unwrap();
+        assert_eq!(overwrite.place.duration_sec, 10.0);
+    }
+
+    // Scenario: Multi-clip overlap
+    //   Given clips at [5-10, 12-18, 20-25]
+    //   When overwrite edit at [8-22]
+    //   Then clip at [5-10] trimmed to [5-8]
+    //   And clip at [12-18] removed (fully covered)
+    //   And clip at [20-25] trimmed to [22-25]
+    #[test]
+    fn overwrite_edit_should_handle_multi_clip_overlap() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 5.0, 5.0); // [5-10]
+        place_clip(&mut state, &seq_id, &track_id, 12.0, 6.0); // [12-18]
+        place_clip(&mut state, &seq_id, &track_id, 20.0, 5.0); // [20-25]
+
+        let clip_5_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let clip_12_id = state.sequences[&seq_id].tracks[0].clips[1].id.clone();
+        let clip_20_id = state.sequences[&seq_id].tracks[0].clips[2].id.clone();
+
+        // Overwrite at [8-22]
+        let mut cmd = OverwriteEditCommand::new(&seq_id, &track_id, &asset_id, 8.0)
+            .with_source_range(0.0, 14.0);
+        cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+
+        // Clip at [5-10] trimmed to [5-8]
+        let c5 = track.clips.iter().find(|c| c.id == clip_5_id).unwrap();
+        assert_eq!(c5.place.timeline_in_sec, 5.0);
+        assert_eq!(c5.place.duration_sec, 3.0);
+
+        // Clip at [12-18] removed
+        assert!(track.clips.iter().all(|c| c.id != clip_12_id));
+
+        // Clip at [20-25] trimmed to [22-25]
+        let c20 = track.clips.iter().find(|c| c.id == clip_20_id).unwrap();
+        assert_eq!(c20.place.timeline_in_sec, 22.0);
+        assert_eq!(c20.place.duration_sec, 3.0);
+    }
+
+    // Scenario: Undo restores all original clips exactly
+    //   Given clips at [5-10, 12-18, 20-25]
+    //   When overwrite edit at [8-22]
+    //   And undo is called
+    //   Then all 3 clips are restored to original positions and ranges
+    #[test]
+    fn overwrite_edit_undo_should_restore_all_original_clips() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 5.0, 5.0);
+        place_clip(&mut state, &seq_id, &track_id, 12.0, 6.0);
+        place_clip(&mut state, &seq_id, &track_id, 20.0, 5.0);
+
+        let clip_5_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let clip_12_id = state.sequences[&seq_id].tracks[0].clips[1].id.clone();
+        let clip_20_id = state.sequences[&seq_id].tracks[0].clips[2].id.clone();
+
+        let mut cmd = OverwriteEditCommand::new(&seq_id, &track_id, &asset_id, 8.0)
+            .with_source_range(0.0, 14.0);
+        cmd.execute(&mut state).unwrap();
+
+        // Verify overwrite happened
+        assert_eq!(state.sequences[&seq_id].tracks[0].clips.len(), 3);
+
+        // Undo
+        cmd.undo(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 3); // Original 3 clips restored
+
+        let c5 = track.clips.iter().find(|c| c.id == clip_5_id).unwrap();
+        assert_eq!(c5.place.timeline_in_sec, 5.0);
+        assert_eq!(c5.place.duration_sec, 5.0);
+
+        let c12 = track.clips.iter().find(|c| c.id == clip_12_id).unwrap();
+        assert_eq!(c12.place.timeline_in_sec, 12.0);
+        assert_eq!(c12.place.duration_sec, 6.0);
+
+        let c20 = track.clips.iter().find(|c| c.id == clip_20_id).unwrap();
+        assert_eq!(c20.place.timeline_in_sec, 20.0);
+        assert_eq!(c20.place.duration_sec, 5.0);
+    }
+
+    // Scenario: Undo after split restores the original spanning clip
+    //   Given a clip at [0-30]
+    //   When overwrite at [10-20] splits it
+    //   And undo is called
+    //   Then the original clip is restored to [0-30]
+    //   And the right fragment is removed
+    #[test]
+    fn overwrite_edit_undo_should_restore_split_clip() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 30.0);
+        let original_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        let mut cmd = OverwriteEditCommand::new(&seq_id, &track_id, &asset_id, 10.0)
+            .with_source_range(0.0, 10.0);
+        cmd.execute(&mut state).unwrap();
+
+        assert_eq!(state.sequences[&seq_id].tracks[0].clips.len(), 3);
+
+        cmd.undo(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 1);
+
+        let restored = &track.clips[0];
+        assert_eq!(restored.id, original_id);
+        assert_eq!(restored.place.timeline_in_sec, 0.0);
+        assert_eq!(restored.place.duration_sec, 30.0);
+        assert_eq!(restored.range.source_in_sec, 0.0);
+        assert_eq!(restored.range.source_out_sec, 30.0);
+    }
+
+    // =========================================================================
+    // RippleDeleteCommand — BDD Tests
+    // =========================================================================
+
+    // Scenario: Ripple delete removes clip and closes gap
+    //   Given clips at [0-10, 15-25, 30-40]
+    //   When ripple delete is called on clip at [15-25]
+    //   Then clip at [15-25] is removed
+    //   And clip at [30-40] shifts to [20-30] (closed gap of 10)
+    //   And clip at [0-10] is unchanged
+    #[test]
+    fn ripple_delete_should_remove_clip_and_close_gap() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 15.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 30.0, 10.0);
+
+        let clip_0_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let clip_15_id = state.sequences[&seq_id].tracks[0].clips[1].id.clone();
+        let clip_30_id = state.sequences[&seq_id].tracks[0].clips[2].id.clone();
+
+        let mut cmd = RippleDeleteCommand::new(&seq_id, &track_id, vec![clip_15_id.clone()]);
+        cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 2);
+
+        // Clip at 0-10 unchanged
+        let c0 = track.clips.iter().find(|c| c.id == clip_0_id).unwrap();
+        assert_eq!(c0.place.timeline_in_sec, 0.0);
+
+        // Clip at 30-40 shifted left by 10 (removed clip's duration)
+        let c30 = track.clips.iter().find(|c| c.id == clip_30_id).unwrap();
+        assert_eq!(c30.place.timeline_in_sec, 20.0);
+    }
+
+    // Scenario: Ripple delete undo restores clip and positions
+    #[test]
+    fn ripple_delete_undo_should_restore_clip_and_positions() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 15.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 30.0, 10.0);
+
+        let clip_15_id = state.sequences[&seq_id].tracks[0].clips[1].id.clone();
+        let clip_30_id = state.sequences[&seq_id].tracks[0].clips[2].id.clone();
+
+        let mut cmd = RippleDeleteCommand::new(&seq_id, &track_id, vec![clip_15_id.clone()]);
+        cmd.execute(&mut state).unwrap();
+
+        cmd.undo(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 3);
+
+        let c15 = track.clips.iter().find(|c| c.id == clip_15_id).unwrap();
+        assert_eq!(c15.place.timeline_in_sec, 15.0);
+
+        let c30 = track.clips.iter().find(|c| c.id == clip_30_id).unwrap();
+        assert_eq!(c30.place.timeline_in_sec, 30.0);
+    }
+
+    // Scenario: Multi-clip ripple delete
+    //   Given clips at [0-10, 15-25, 30-40]
+    //   When ripple delete both [15-25] and [30-40]
+    //   Then only clip [0-10] remains, unchanged
+    #[test]
+    fn ripple_delete_should_handle_multi_clip_selection() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 15.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 30.0, 10.0);
+
+        let clip_15_id = state.sequences[&seq_id].tracks[0].clips[1].id.clone();
+        let clip_30_id = state.sequences[&seq_id].tracks[0].clips[2].id.clone();
+
+        let mut cmd = RippleDeleteCommand::new(&seq_id, &track_id, vec![clip_15_id, clip_30_id]);
+        cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 1);
+        assert_eq!(track.clips[0].place.timeline_in_sec, 0.0);
+    }
+
+    // =========================================================================
+    // LiftCommand — BDD Tests
+    // =========================================================================
+
+    // Scenario: Lift removes clip but leaves gap
+    //   Given clips at [0-10, 15-25, 30-40]
+    //   When lift is called on clip at [15-25]
+    //   Then clip at [15-25] is removed
+    //   And clip at [30-40] stays at [30-40] (gap remains)
+    #[test]
+    fn lift_should_remove_clip_and_leave_gap() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 15.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 30.0, 10.0);
+
+        let clip_15_id = state.sequences[&seq_id].tracks[0].clips[1].id.clone();
+        let clip_30_id = state.sequences[&seq_id].tracks[0].clips[2].id.clone();
+
+        let mut cmd = LiftCommand::new(&seq_id, &track_id, vec![clip_15_id.clone()]);
+        cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 2);
+
+        // Clip at 30-40 unchanged (gap remains at 15-25)
+        let c30 = track.clips.iter().find(|c| c.id == clip_30_id).unwrap();
+        assert_eq!(c30.place.timeline_in_sec, 30.0);
+    }
+
+    // Scenario: Lift undo restores removed clip
+    #[test]
+    fn lift_undo_should_restore_removed_clip() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 10.0, 10.0);
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        let mut cmd = LiftCommand::new(&seq_id, &track_id, vec![clip_id.clone()]);
+        cmd.execute(&mut state).unwrap();
+
+        assert_eq!(state.sequences[&seq_id].tracks[0].clips.len(), 0);
+
+        cmd.undo(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 1);
+        assert_eq!(track.clips[0].id, clip_id);
+        assert_eq!(track.clips[0].place.timeline_in_sec, 10.0);
+    }
+
+    // =========================================================================
+    // ExtractEditCommand — BDD Tests
+    // =========================================================================
+
+    // Scenario: Extract removes content in range and closes gap
+    //   Given clips at [0-10, 15-25, 30-40]
+    //   When extract is called on range [12-28]
+    //   Then clip at [0-10] unchanged
+    //   And clip at [15-25] removed (fully covered)
+    //   And clip at [30-40] shifts left by 16 to [14-24]
+    #[test]
+    fn extract_edit_should_remove_range_and_close_gap() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 15.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 30.0, 10.0);
+
+        let clip_0_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let clip_30_id = state.sequences[&seq_id].tracks[0].clips[2].id.clone();
+
+        let mut cmd = ExtractEditCommand::new(&seq_id, &track_id, 12.0, 28.0);
+        cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+
+        // Clip at 0-10 unchanged
+        let c0 = track.clips.iter().find(|c| c.id == clip_0_id).unwrap();
+        assert_eq!(c0.place.timeline_in_sec, 0.0);
+        assert_eq!(c0.place.duration_sec, 10.0);
+
+        // Clip at 30-40 shifted left by 16 (extract_duration)
+        let c30 = track.clips.iter().find(|c| c.id == clip_30_id).unwrap();
+        assert_eq!(c30.place.timeline_in_sec, 14.0);
+    }
+
+    // Scenario: Extract undo restores all clips
+    #[test]
+    fn extract_edit_undo_should_restore_all_clips() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 15.0, 10.0);
+        place_clip(&mut state, &seq_id, &track_id, 30.0, 10.0);
+
+        let clip_15_id = state.sequences[&seq_id].tracks[0].clips[1].id.clone();
+        let clip_30_id = state.sequences[&seq_id].tracks[0].clips[2].id.clone();
+
+        let mut cmd = ExtractEditCommand::new(&seq_id, &track_id, 12.0, 28.0);
+        cmd.execute(&mut state).unwrap();
+
+        cmd.undo(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 3);
+
+        let c15 = track.clips.iter().find(|c| c.id == clip_15_id).unwrap();
+        assert_eq!(c15.place.timeline_in_sec, 15.0);
+        assert_eq!(c15.place.duration_sec, 10.0);
+
+        let c30 = track.clips.iter().find(|c| c.id == clip_30_id).unwrap();
+        assert_eq!(c30.place.timeline_in_sec, 30.0);
+    }
+
+    // Scenario: Extract with partial overlap trims clips and closes gap
+    //   Given a clip at [0-30]
+    //   When extract at range [10-20]
+    //   Then left fragment [0-10] remains
+    //   And right fragment shifts to [10-20] (was [20-30], shifted left by 10)
+    #[test]
+    fn extract_edit_should_handle_spanning_clip_with_ripple() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 30.0);
+        let original_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        let mut cmd = ExtractEditCommand::new(&seq_id, &track_id, 10.0, 20.0);
+        cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 2);
+
+        // Left fragment: [0-10]
+        let left = track.clips.iter().find(|c| c.id == original_id).unwrap();
+        assert_eq!(left.place.timeline_in_sec, 0.0);
+        assert_eq!(left.place.duration_sec, 10.0);
+
+        // Right fragment: shifted from [20-30] to [10-20]
+        let right = track.clips.iter().find(|c| c.id != original_id).unwrap();
+        assert_eq!(right.place.timeline_in_sec, 10.0);
+        assert_eq!(right.place.duration_sec, 10.0);
+        assert_eq!(right.range.source_in_sec, 20.0);
+        assert_eq!(right.range.source_out_sec, 30.0);
+    }
+
+    #[test]
+    fn extract_edit_should_preserve_caption_overrides_on_split_fragment() {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        place_clip(&mut state, &seq_id, &track_id, 0.0, 30.0);
+        let original_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        {
+            let clip = state.sequences.get_mut(&seq_id).unwrap().tracks[0]
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == original_id)
+                .unwrap();
+            clip.caption_style = Some(serde_json::json!({
+                "fontFamily": "Open Sans",
+                "fontSize": 42,
+                "fontWeight": 700,
+            }));
+            clip.caption_position = Some(serde_json::json!({
+                "x": 0.35,
+                "y": 0.8,
+            }));
+        }
+
+        let mut cmd = ExtractEditCommand::new(&seq_id, &track_id, 10.0, 20.0);
+        cmd.execute(&mut state).unwrap();
+
+        let track = &state.sequences[&seq_id].tracks[0];
+        let fragment = track
+            .clips
+            .iter()
+            .find(|clip| clip.id != original_id)
+            .unwrap();
+
+        assert_eq!(
+            fragment.caption_style,
+            Some(serde_json::json!({
+                "fontFamily": "Open Sans",
+                "fontSize": 42,
+                "fontWeight": 700,
+            }))
+        );
+        assert_eq!(
+            fragment.caption_position,
+            Some(serde_json::json!({
+                "x": 0.35,
+                "y": 0.8,
+            }))
+        );
+    }
+
+    // =========================================================================
+    // Gap Management (S24-004)
+    // =========================================================================
+
+    /// Helper: creates a test state with 3 clips on a track with gaps between them.
+    ///
+    /// Layout: [0-5] ... [8-10] ... [15-20]
+    /// Gaps:   [5-8] and [10-15]
+    fn create_gapped_state() -> (ProjectState, String, String, Vec<String>) {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        // Insert clips at non-overlapping positions to pass validation
+        let positions = [0.0, 60.0, 120.0];
+        let mut clip_ids = Vec::new();
+        for &pos in &positions {
+            let mut cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, pos)
+                .with_source_range(0.0, 5.0);
+            let result = cmd.execute(&mut state).unwrap();
+            clip_ids.push(result.created_ids[0].clone());
+        }
+
+        // Now reposition clips directly to create the desired gap layout
+        let seq = state.sequences.get_mut(&seq_id).unwrap();
+        let track = &mut seq.tracks[0];
+
+        // Clip 0: [0-5]
+        let c0 = track
+            .clips
+            .iter_mut()
+            .find(|c| c.id == clip_ids[0])
+            .unwrap();
+        c0.place.timeline_in_sec = 0.0;
+        c0.place.duration_sec = 5.0;
+        c0.range.source_in_sec = 0.0;
+        c0.range.source_out_sec = 5.0;
+
+        // Clip 1: [8-10]
+        let c1 = track
+            .clips
+            .iter_mut()
+            .find(|c| c.id == clip_ids[1])
+            .unwrap();
+        c1.place.timeline_in_sec = 8.0;
+        c1.place.duration_sec = 2.0;
+        c1.range.source_in_sec = 0.0;
+        c1.range.source_out_sec = 2.0;
+
+        // Clip 2: [15-20]
+        let c2 = track
+            .clips
+            .iter_mut()
+            .find(|c| c.id == clip_ids[2])
+            .unwrap();
+        c2.place.timeline_in_sec = 15.0;
+        c2.place.duration_sec = 5.0;
+        c2.range.source_in_sec = 0.0;
+        c2.range.source_out_sec = 5.0;
+
+        sort_track_clips(track);
+
+        (state, seq_id, track_id, clip_ids)
+    }
+
+    // -- find_gaps --
+
+    #[test]
+    fn find_gaps_should_return_all_gaps_when_clips_have_spaces_between_them() {
+        // Given a track with clips [0-5], [8-10], [15-20]
+        let (state, seq_id, track_id, _) = create_gapped_state();
+        let track = &state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .unwrap();
+
+        // When find_gaps is called
+        let gaps = find_gaps(track);
+
+        // Then it returns 2 gaps
+        assert_eq!(gaps.len(), 2);
+        assert!((gaps[0].start - 5.0).abs() < 1e-6);
+        assert!((gaps[0].end - 8.0).abs() < 1e-6);
+        assert!((gaps[0].duration - 3.0).abs() < 1e-6);
+        assert!((gaps[1].start - 10.0).abs() < 1e-6);
+        assert!((gaps[1].end - 15.0).abs() < 1e-6);
+        assert!((gaps[1].duration - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn find_gaps_should_return_empty_when_clips_are_contiguous() {
+        // Given a track with contiguous clips [0-5], [5-10]
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut cmd1 =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 5.0);
+        cmd1.execute(&mut state).unwrap();
+        let mut cmd2 =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 60.0).with_source_range(0.0, 5.0);
+        cmd2.execute(&mut state).unwrap();
+
+        let seq = state.sequences.get_mut(&seq_id).unwrap();
+        let track = &mut seq.tracks[0];
+        track.clips[0].place.timeline_in_sec = 0.0;
+        track.clips[0].place.duration_sec = 5.0;
+        track.clips[1].place.timeline_in_sec = 5.0;
+        track.clips[1].place.duration_sec = 5.0;
+        sort_track_clips(track);
+
+        // When find_gaps is called
+        let gaps = find_gaps(track);
+
+        // Then no gaps are returned
+        assert!(gaps.is_empty());
+    }
+
+    #[test]
+    fn find_gaps_should_return_empty_when_track_has_no_clips() {
+        let state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track = &state.sequences[&seq_id].tracks[0];
+
+        let gaps = find_gaps(track);
+        assert!(gaps.is_empty());
+    }
+
+    // -- CloseGapCommand --
+
+    #[test]
+    fn close_gap_should_shift_downstream_clips_left_by_gap_duration() {
+        // Given a track with clips [0-5], [8-10], [15-20] (gaps at [5-8] and [10-15])
+        let (mut state, seq_id, track_id, clip_ids) = create_gapped_state();
+
+        // When closing the first gap [5-8] (duration 3)
+        let mut cmd = CloseGapCommand::new(&seq_id, &track_id, 5.0, 8.0);
+        cmd.execute(&mut state).unwrap();
+
+        // Then clip at [8-10] shifts to [5-7], clip at [15-20] shifts to [12-17]
+        let track = &state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .unwrap();
+        let c0 = track.clips.iter().find(|c| c.id == clip_ids[0]).unwrap();
+        let c1 = track.clips.iter().find(|c| c.id == clip_ids[1]).unwrap();
+        let c2 = track.clips.iter().find(|c| c.id == clip_ids[2]).unwrap();
+
+        assert!((c0.place.timeline_in_sec - 0.0).abs() < 1e-6); // Unchanged
+        assert!((c1.place.timeline_in_sec - 5.0).abs() < 1e-6); // Was 8, shifted by 3
+        assert!((c2.place.timeline_in_sec - 12.0).abs() < 1e-6); // Was 15, shifted by 3
+    }
+
+    #[test]
+    fn close_gap_undo_should_restore_original_positions() {
+        // Given close_gap was executed
+        let (mut state, seq_id, track_id, clip_ids) = create_gapped_state();
+        let mut cmd = CloseGapCommand::new(&seq_id, &track_id, 5.0, 8.0);
+        cmd.execute(&mut state).unwrap();
+
+        // When undo is called
+        cmd.undo(&mut state).unwrap();
+
+        // Then all clips return to original positions
+        let track = &state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .unwrap();
+        let c0 = track.clips.iter().find(|c| c.id == clip_ids[0]).unwrap();
+        let c1 = track.clips.iter().find(|c| c.id == clip_ids[1]).unwrap();
+        let c2 = track.clips.iter().find(|c| c.id == clip_ids[2]).unwrap();
+
+        assert!((c0.place.timeline_in_sec - 0.0).abs() < 1e-6);
+        assert!((c1.place.timeline_in_sec - 8.0).abs() < 1e-6);
+        assert!((c2.place.timeline_in_sec - 15.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn close_gap_should_reject_when_no_gap_exists() {
+        // Given clips at [0-5], [5-10] (contiguous, no gap)
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut cmd1 =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 5.0);
+        cmd1.execute(&mut state).unwrap();
+        let mut cmd2 =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 60.0).with_source_range(0.0, 5.0);
+        cmd2.execute(&mut state).unwrap();
+
+        let seq = state.sequences.get_mut(&seq_id).unwrap();
+        let track = &mut seq.tracks[0];
+        track.clips[0].place.timeline_in_sec = 0.0;
+        track.clips[0].place.duration_sec = 5.0;
+        track.clips[1].place.timeline_in_sec = 5.0;
+        track.clips[1].place.duration_sec = 5.0;
+        sort_track_clips(track);
+
+        // When trying to close a gap at [3-7] (occupied by clips)
+        let mut cmd = CloseGapCommand::new(&seq_id, &track_id, 3.0, 7.0);
+        let result = cmd.execute(&mut state);
+
+        // Then error is returned
+        assert!(result.is_err());
+    }
+
+    // -- CloseAllGapsCommand --
+
+    #[test]
+    fn close_all_gaps_should_pack_clips_left_maintaining_order() {
+        // Given a track with clips [0-5], [8-10], [15-20]
+        let (mut state, seq_id, track_id, clip_ids) = create_gapped_state();
+
+        // When close_all_gaps is executed
+        let mut cmd = CloseAllGapsCommand::new(&seq_id, &track_id);
+        cmd.execute(&mut state).unwrap();
+
+        // Then clips become [0-5], [5-7], [7-12]
+        let track = &state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .unwrap();
+        let c0 = track.clips.iter().find(|c| c.id == clip_ids[0]).unwrap();
+        let c1 = track.clips.iter().find(|c| c.id == clip_ids[1]).unwrap();
+        let c2 = track.clips.iter().find(|c| c.id == clip_ids[2]).unwrap();
+
+        assert!((c0.place.timeline_in_sec - 0.0).abs() < 1e-6);
+        assert!((c0.place.duration_sec - 5.0).abs() < 1e-6);
+        assert!((c1.place.timeline_in_sec - 5.0).abs() < 1e-6);
+        assert!((c1.place.duration_sec - 2.0).abs() < 1e-6);
+        assert!((c2.place.timeline_in_sec - 7.0).abs() < 1e-6);
+        assert!((c2.place.duration_sec - 5.0).abs() < 1e-6);
+
+        // Verify no gaps remain
+        let gaps = find_gaps(track);
+        assert!(gaps.is_empty());
+    }
+
+    #[test]
+    fn close_all_gaps_undo_should_restore_all_original_positions() {
+        // Given close_all_gaps was executed
+        let (mut state, seq_id, track_id, clip_ids) = create_gapped_state();
+        let mut cmd = CloseAllGapsCommand::new(&seq_id, &track_id);
+        cmd.execute(&mut state).unwrap();
+
+        // When undo is called
+        cmd.undo(&mut state).unwrap();
+
+        // Then all clips return to original positions
+        let track = &state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .unwrap();
+        let c0 = track.clips.iter().find(|c| c.id == clip_ids[0]).unwrap();
+        let c1 = track.clips.iter().find(|c| c.id == clip_ids[1]).unwrap();
+        let c2 = track.clips.iter().find(|c| c.id == clip_ids[2]).unwrap();
+
+        assert!((c0.place.timeline_in_sec - 0.0).abs() < 1e-6);
+        assert!((c1.place.timeline_in_sec - 8.0).abs() < 1e-6);
+        assert!((c2.place.timeline_in_sec - 15.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn close_all_gaps_should_be_noop_when_no_gaps_exist() {
+        // Given a track with contiguous clips [0-5], [5-10]
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut cmd1 =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 5.0);
+        cmd1.execute(&mut state).unwrap();
+        let mut cmd2 =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 60.0).with_source_range(0.0, 5.0);
+        cmd2.execute(&mut state).unwrap();
+
+        let seq = state.sequences.get_mut(&seq_id).unwrap();
+        let track = &mut seq.tracks[0];
+        track.clips[0].place.timeline_in_sec = 0.0;
+        track.clips[0].place.duration_sec = 5.0;
+        track.clips[1].place.timeline_in_sec = 5.0;
+        track.clips[1].place.duration_sec = 5.0;
+        sort_track_clips(track);
+
+        // When close_all_gaps is called
+        let mut cmd = CloseAllGapsCommand::new(&seq_id, &track_id);
+        let result = cmd.execute(&mut state).unwrap();
+
+        // Then no clips are shifted (no changes)
+        assert!(result.changes.is_empty());
+    }
+
+    #[test]
+    fn close_gap_should_reject_locked_track() {
+        let (mut state, seq_id, track_id, _) = create_gapped_state();
+
+        // Lock the track
+        let seq = state.sequences.get_mut(&seq_id).unwrap();
+        let track = seq.tracks.iter_mut().find(|t| t.id == track_id).unwrap();
+        track.locked = true;
+
+        let mut cmd = CloseGapCommand::new(&seq_id, &track_id, 5.0, 8.0);
+        let result = cmd.execute(&mut state);
+        assert!(result.is_err());
     }
 }

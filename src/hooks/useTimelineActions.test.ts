@@ -445,6 +445,135 @@ describe('useTimelineActions', () => {
       });
     });
 
+    it('should execute InsertEdit when the drop explicitly requests insert mode', async () => {
+      const track = createMockTrack({ id: 'track_001' });
+      const asset = createMockAsset({ id: 'asset_001', durationSec: 30 });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [track],
+      });
+
+      useProjectStore.setState({
+        assets: new Map([[asset.id, asset]]),
+        sequences: new Map([[sequence.id, sequence]]),
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_001',
+            createdIds: ['clip_001'],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [asset],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleAssetDrop({
+          assetId: 'asset_001',
+          trackId: 'track_001',
+          timelinePosition: 5.0,
+          editMode: 'insert',
+          sourceIn: 2.0,
+          sourceOut: 8.0,
+        });
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'InsertEdit',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_001',
+          assetId: 'asset_001',
+          timelinePosition: 5.0,
+          sourceIn: 2.0,
+          sourceOut: 8.0,
+        },
+      });
+    });
+
+    (
+      [
+        ['insert', 'InsertEdit'],
+        ['overwrite', 'OverwriteEdit'],
+      ] as const
+    ).forEach(([editMode, commandType]) => {
+      it(`should honor the dropped track for ${commandType} even when it is occupied`, async () => {
+        const targetTrack = createMockTrack({
+          id: 'track_target',
+          clips: [
+            createMockClip({
+              id: 'clip_existing_001',
+              place: {
+                timelineInSec: 0,
+                durationSec: 10,
+              },
+            }),
+          ],
+        });
+        const freeTrack = createMockTrack({ id: 'track_free' });
+        const asset = createMockAsset({ id: 'asset_001', durationSec: 6 });
+        const sequence = createMockSequence({
+          id: 'seq_001',
+          tracks: [targetTrack, freeTrack],
+        });
+
+        useProjectStore.setState({
+          assets: new Map([[asset.id, asset]]),
+          sequences: new Map([[sequence.id, sequence]]),
+        });
+
+        mockedInvoke.mockImplementation((cmd: string) => {
+          if (cmd === 'execute_command') {
+            return Promise.resolve({
+              opId: 'op_001',
+              createdIds: ['clip_001'],
+              deletedIds: [],
+            });
+          }
+          if (cmd === 'get_project_state') {
+            return Promise.resolve({
+              assets: [asset],
+              sequences: [sequence],
+              activeSequenceId: 'seq_001',
+            });
+          }
+          return Promise.reject(new Error(`Unhandled: ${cmd}`));
+        });
+
+        const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+        await act(async () => {
+          await result.current.handleAssetDrop({
+            assetId: 'asset_001',
+            trackId: 'track_target',
+            timelinePosition: 5,
+            editMode,
+          });
+        });
+
+        expect(mockedInvoke).toHaveBeenNthCalledWith(1, 'execute_command', {
+          commandType,
+          payload: {
+            sequenceId: 'seq_001',
+            trackId: 'track_target',
+            assetId: 'asset_001',
+            timelinePosition: 5,
+          },
+        });
+      });
+    });
+
     it('should resolve an open-ended source In point against the asset duration', async () => {
       const track = createMockTrack({ id: 'track_001' });
       const asset = createMockAsset({ id: 'asset_001', durationSec: 24 });
@@ -596,6 +725,92 @@ describe('useTimelineActions', () => {
           },
         ]),
       );
+    });
+
+    (
+      [
+        ['insert', 'InsertEdit'],
+        ['overwrite', 'OverwriteEdit'],
+      ] as const
+    ).forEach(([editMode, commandType]) => {
+      it(`should resolve duration before executing ${commandType} when metadata is missing`, async () => {
+        const track = createMockTrack({ id: 'track_v1', kind: 'video', name: 'Video 1' });
+        const sequence = createMockSequence({
+          id: 'seq_001',
+          tracks: [track],
+        });
+        const asset = createMockAsset({
+          id: 'asset_001',
+          kind: 'video',
+          durationSec: undefined,
+          audio: undefined,
+        });
+
+        mockedProbeMedia.mockResolvedValue({
+          durationSec: 24,
+          format: 'mov,mp4,m4a,3gp,3g2,mj2',
+          sizeBytes: 1024,
+          video: {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            pixelFormat: 'yuv420p',
+          },
+          audio: undefined,
+        });
+
+        useProjectStore.setState({
+          assets: new Map([[asset.id, asset]]),
+          sequences: new Map([[sequence.id, sequence]]),
+        });
+
+        const executeCalls: Array<{ commandType: string; payload: Record<string, unknown> }> = [];
+
+        mockedInvoke.mockImplementation((cmd: string, args?: unknown) => {
+          if (cmd === 'execute_command') {
+            executeCalls.push(args as { commandType: string; payload: Record<string, unknown> });
+            return Promise.resolve({
+              opId: 'op_insert',
+              createdIds: ['clip_1'],
+              deletedIds: [],
+            });
+          }
+          if (cmd === 'get_project_state') {
+            return Promise.resolve({
+              assets: [asset],
+              sequences: [sequence],
+              activeSequenceId: 'seq_001',
+            });
+          }
+          return Promise.reject(new Error(`Unhandled: ${cmd}`));
+        });
+
+        const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+        await act(async () => {
+          await result.current.handleAssetDrop({
+            assetId: 'asset_001',
+            trackId: 'track_v1',
+            timelinePosition: 2,
+            editMode,
+          });
+        });
+
+        expect(mockedProbeMedia).toHaveBeenCalledWith('/path/to/video.mp4');
+        expect(executeCalls).toEqual([
+          {
+            commandType,
+            payload: {
+              sequenceId: 'seq_001',
+              trackId: 'track_v1',
+              assetId: 'asset_001',
+              timelinePosition: 2,
+              sourceOut: 24,
+            },
+          },
+        ]);
+      });
     });
 
     it('should look up auto-registered asset from file tree when dropped from workspace', async () => {

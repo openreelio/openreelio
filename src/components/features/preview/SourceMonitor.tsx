@@ -3,18 +3,13 @@
  * Part of the dual-viewer (Source/Program) NLE workflow.
  */
 
-import {
-  type FC,
-  useCallback,
-  useMemo,
-  type KeyboardEvent,
-  type DragEvent,
-} from 'react';
+import { type FC, useCallback, useMemo, type KeyboardEvent, type DragEvent } from 'react';
 import { Play, Pause } from 'lucide-react';
 import { PreviewPlayer } from '@/components/preview';
 import { SeekBar } from '@/components/preview';
 import { useSourceMonitor } from '@/hooks/useSourceMonitor';
 import { useProjectStore } from '@/stores';
+import { useEditorToolStore } from '@/stores/editorToolStore';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { formatDuration } from '@/utils/formatters';
 
@@ -51,16 +46,11 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
     setIsPlaying,
   } = useSourceMonitor();
 
+  const editMode = useEditorToolStore((s) => s.editMode);
   const assets = useProjectStore((s) => s.assets);
-  const asset = useMemo(
-    () => (assetId ? assets.get(assetId) ?? null : null),
-    [assetId, assets],
-  );
+  const asset = useMemo(() => (assetId ? (assets.get(assetId) ?? null) : null), [assetId, assets]);
 
-  const src = useMemo(
-    () => (asset ? convertFileSrc(asset.uri) : undefined),
-    [asset],
-  );
+  const src = useMemo(() => (asset ? convertFileSrc(asset.uri) : undefined), [asset]);
 
   // Keyboard: I = In, O = Out, Escape = clear, Space = play/pause
   const handleKeyDown = useCallback(
@@ -97,13 +87,14 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
         SOURCE_DRAG_TYPE,
         JSON.stringify({
           assetId,
+          editMode,
           sourceIn: inPoint,
           sourceOut: outPoint,
         }),
       );
       e.dataTransfer.effectAllowed = 'copy';
     },
-    [assetId, inPoint, outPoint],
+    [assetId, editMode, inPoint, outPoint],
   );
 
   // In/Out marker percentages
@@ -118,9 +109,7 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
       >
         <div className="text-center text-sm">
           <p>No source loaded</p>
-          <p className="mt-1 text-xs text-gray-600">
-            Click an asset in the Project Explorer
-          </p>
+          <p className="mt-1 text-xs text-gray-600">Click an asset in the Project Explorer</p>
         </div>
       </div>
     );
@@ -138,9 +127,7 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
           Source: {asset.name}
         </span>
         {markedDuration !== null && (
-          <span className="text-xs text-cyan-400">
-            {formatDuration(markedDuration)}
-          </span>
+          <span className="text-xs text-cyan-400">{formatDuration(markedDuration)}</span>
         )}
       </div>
 
@@ -164,11 +151,7 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
 
       {/* Seek bar with In/Out marker overlays */}
       <div className="relative px-2 py-1">
-        <SeekBar
-          currentTime={currentTime}
-          duration={duration}
-          onSeek={seek}
-        />
+        <SeekBar currentTime={currentTime} duration={duration} onSeek={seek} />
         {/* In/Out marker overlay */}
         {duration > 0 && (
           <div className="pointer-events-none absolute inset-x-2 bottom-1 top-1">
@@ -186,9 +169,7 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
                 className="absolute top-0 h-full w-0.5 bg-cyan-400"
                 style={{ left: `${inPercent}%` }}
               >
-                <div className="absolute -left-1 -top-3 text-[9px] font-bold text-cyan-400">
-                  I
-                </div>
+                <div className="absolute -left-1 -top-3 text-[9px] font-bold text-cyan-400">I</div>
               </div>
             )}
             {outPercent !== null && (
@@ -196,9 +177,7 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
                 className="absolute top-0 h-full w-0.5 bg-cyan-400"
                 style={{ left: `${outPercent}%` }}
               >
-                <div className="absolute -right-2 -top-3 text-[9px] font-bold text-cyan-400">
-                  O
-                </div>
+                <div className="absolute -right-2 -top-3 text-[9px] font-bold text-cyan-400">O</div>
               </div>
             )}
           </div>
@@ -219,9 +198,7 @@ export const SourceMonitor: FC<SourceMonitorProps> = ({ className }) => {
           {formatDuration(currentTime)} / {formatDuration(duration)}
         </span>
         <div className="ml-auto flex gap-3 text-[10px]">
-          {inPoint !== null && (
-            <span className="text-cyan-400">IN {formatDuration(inPoint)}</span>
-          )}
+          {inPoint !== null && <span className="text-cyan-400">IN {formatDuration(inPoint)}</span>}
           {outPoint !== null && (
             <span className="text-cyan-400">OUT {formatDuration(outPoint)}</span>
           )}

@@ -8,6 +8,7 @@
 import { useState, useCallback, useRef, type DragEvent } from 'react';
 import type { Sequence, Asset, AssetKind } from '@/types';
 import type { AssetDropData } from '@/components/timeline/types';
+import { useEditorToolStore } from '@/stores/editorToolStore';
 import { isAssetCompatibleWithTrack } from '@/utils/dropValidity';
 import { resolveTrackDropTarget } from '@/utils/trackDropTarget';
 import { createLogger } from '@/services/logger';
@@ -64,6 +65,7 @@ interface ParsedAssetDragData {
   assetId?: string;
   workspaceRelativePath?: string;
   kind?: AssetKind;
+  editMode?: AssetDropData['editMode'];
   sourceIn?: number;
   sourceOut?: number;
 }
@@ -87,6 +89,10 @@ function normalizeOptionalTimeSec(value: unknown): number | undefined {
   }
 
   return value;
+}
+
+function isEditMode(value: unknown): value is NonNullable<AssetDropData['editMode']> {
+  return value === 'insert' || value === 'overwrite';
 }
 
 function parseDraggedAssetData(dataTransfer: DataTransfer): ParsedAssetDragData | null {
@@ -115,6 +121,7 @@ function parseDraggedAssetData(dataTransfer: DataTransfer): ParsedAssetDragData 
       assetId?: unknown;
       workspaceRelativePath?: unknown;
       kind?: unknown;
+      editMode?: unknown;
       sourceIn?: unknown;
       sourceOut?: unknown;
       inPoint?: unknown;
@@ -150,6 +157,7 @@ function parseDraggedAssetData(dataTransfer: DataTransfer): ParsedAssetDragData 
       ...(assetId ? { assetId } : {}),
       ...(workspaceRelativePath ? { workspaceRelativePath } : {}),
       kind: isAssetKind(parsed.kind) ? parsed.kind : undefined,
+      editMode: isEditMode(parsed.editMode) ? parsed.editMode : undefined,
       ...(sourceIn !== undefined && !hasInvalidBoundedRange ? { sourceIn } : {}),
       ...(sourceOut !== undefined && !hasInvalidBoundedRange ? { sourceOut } : {}),
     };
@@ -383,6 +391,9 @@ export function useAssetDrop({
         timelinePosition,
       });
 
+      // Use drag data editMode if present, otherwise fall back to toolbar setting
+      const effectiveEditMode = parsedData.editMode ?? useEditorToolStore.getState().editMode;
+
       if (parsedData.workspaceRelativePath) {
         onAssetDrop({
           ...(parsedData.assetId ? { assetId: parsedData.assetId } : {}),
@@ -390,6 +401,7 @@ export function useAssetDrop({
           workspaceRelativePath: parsedData.workspaceRelativePath,
           trackId: track.id,
           timelinePosition,
+          editMode: effectiveEditMode,
           ...(parsedData.sourceIn !== undefined ? { sourceIn: parsedData.sourceIn } : {}),
           ...(parsedData.sourceOut !== undefined ? { sourceOut: parsedData.sourceOut } : {}),
         });
@@ -406,6 +418,7 @@ export function useAssetDrop({
         assetId: parsedData.assetId,
         trackId: track.id,
         timelinePosition,
+        editMode: effectiveEditMode,
         ...(parsedData.sourceIn !== undefined ? { sourceIn: parsedData.sourceIn } : {}),
         ...(parsedData.sourceOut !== undefined ? { sourceOut: parsedData.sourceOut } : {}),
       });

@@ -180,6 +180,12 @@ const SYSTEM_PROMPT_BASE: &str = r#"You are an AI video editing assistant for Op
 ### InsertClip - Add asset to timeline
 { "commandType": "InsertClip", "params": { "trackId": "required", "assetId": "required", "timelineStart": number, "sourceIn"?: number, "sourceOut"?: number }}
 
+### InsertEdit - Insert asset and ripple downstream clips
+{ "commandType": "InsertEdit", "params": { "sequenceId": "required", "trackId": "required", "assetId": "required", "timelinePosition": number, "sourceIn"?: number, "sourceOut"?: number }}
+
+### OverwriteEdit - Insert asset and overwrite the occupied range
+{ "commandType": "OverwriteEdit", "params": { "sequenceId": "required", "trackId": "required", "assetId": "required", "timelinePosition": number, "sourceIn"?: number, "sourceOut"?: number }}
+
 ### SplitClip - Split clip at time (creates {id}_split)
 { "commandType": "SplitClip", "params": { "clipId": "required", "atTimelineSec": number }}
 
@@ -296,7 +302,9 @@ When actions are needed, use this format:
 - **MoveClip**: { "clipId": "required", "newTimelineIn": seconds }
 - **DeleteClip**: { "clipId": "required" }
 - **TrimClip**: { "clipId": "required", "newSourceIn"?: seconds, "newSourceOut"?: seconds }
-- **InsertClip**: { "assetId": "required", "trackId": "required", "timelineIn": seconds }
+- **InsertClip**: { "assetId": "required", "trackId": "required", "timelineStart": seconds }
+- **InsertEdit**: { "sequenceId": "required", "assetId": "required", "trackId": "required", "timelinePosition": seconds }
+- **OverwriteEdit**: { "sequenceId": "required", "assetId": "required", "trackId": "required", "timelinePosition": seconds }
 - **AddTrack**: { "type": "video|audio", "name"?: string }
 - **MuteTrack**: { "trackId": "required", "muted": boolean }
 - **AddEffect**: { "clipId": "required", "effectType": string, "params": object }
@@ -662,20 +670,40 @@ Return JSON array of edit scripts."#;
 
             // Check for required parameters based on command type
             match cmd.command_type.as_str() {
-                "InsertClip" => {
+                "InsertClip" | "InsertEdit" | "OverwriteEdit" => {
+                    let timeline_key = if cmd.command_type == "InsertClip" {
+                        "timelineStart"
+                    } else {
+                        "timelinePosition"
+                    };
+                    if cmd.command_type != "InsertClip" && cmd.params.get("sequenceId").is_none() {
+                        issues.push(format!(
+                            "{} command {} missing sequenceId",
+                            cmd.command_type, i
+                        ));
+                    }
                     if cmd.params.get("trackId").is_none() {
-                        issues.push(format!("InsertClip command {} missing trackId", i));
+                        issues.push(format!(
+                            "{} command {} missing trackId",
+                            cmd.command_type, i
+                        ));
                     }
                     if cmd.params.get("assetId").is_none() {
-                        issues.push(format!("InsertClip command {} missing assetId", i));
+                        issues.push(format!(
+                            "{} command {} missing assetId",
+                            cmd.command_type, i
+                        ));
                     }
-                    match cmd.params.get("timelineStart") {
-                        None => issues.push(format!("InsertClip command {} missing timelineStart", i)),
+                    match cmd.params.get(timeline_key) {
+                        None => issues.push(format!(
+                            "{} command {} missing {}",
+                            cmd.command_type, i, timeline_key
+                        )),
                         Some(v) => match v.as_f64() {
                             Some(t) if t.is_finite() && t >= 0.0 => {}
                             _ => issues.push(format!(
-                                "InsertClip command {} invalid timelineStart (must be finite, non-negative number)",
-                                i
+                                "{} command {} invalid {} (must be finite, non-negative number)",
+                                cmd.command_type, i, timeline_key
                             )),
                         },
                     }
@@ -703,7 +731,46 @@ Return JSON array of edit scripts."#;
                         )),
                     }
                 }
-                "DeleteClip" | "RippleDelete" | "DuplicateClip" => {
+                "RippleDelete" => {
+                    let has_clip_id = cmd.params.get("clipId").and_then(|v| v.as_str()).is_some();
+                    let has_clip_ids = match cmd.params.get("clipIds") {
+                        Some(value) => match value.as_array() {
+                            Some(ids) if !ids.is_empty() => {
+                                let all_strings = ids.iter().all(|id| id.as_str().is_some());
+                                if !all_strings {
+                                    issues.push(format!(
+                                        "RippleDelete command {} invalid clipIds (must be an array of clip ID strings)",
+                                        i
+                                    ));
+                                }
+                                all_strings
+                            }
+                            Some(_) => {
+                                issues.push(format!(
+                                    "RippleDelete command {} invalid clipIds (must not be empty)",
+                                    i
+                                ));
+                                false
+                            }
+                            None => {
+                                issues.push(format!(
+                                    "RippleDelete command {} invalid clipIds (must be an array)",
+                                    i
+                                ));
+                                false
+                            }
+                        },
+                        None => false,
+                    };
+
+                    if !has_clip_id && !has_clip_ids {
+                        issues.push(format!(
+                            "RippleDelete command {} missing clipId or clipIds",
+                            i
+                        ));
+                    }
+                }
+                "DeleteClip" | "DuplicateClip" => {
                     if cmd.params.get("clipId").is_none() {
                         issues.push(format!("{} command {} missing clipId", cmd.command_type, i));
                     }
@@ -1584,6 +1651,21 @@ This will add the clip."#;
         assert!(result.is_valid);
     }
 
+    #[tokio::test]
+    async fn test_validate_ripple_delete_valid_with_clip_ids_shape() {
+        let gateway = AIGateway::with_defaults();
+        let script = EditScript::new("Ripple delete").add_command(EditCommand::new(
+            "RippleDelete",
+            serde_json::json!({
+                "trackId": "track_1",
+                "clipIds": ["clip_1", "clip_2"]
+            }),
+        ));
+
+        let result = gateway.validate_script(&script).await.unwrap();
+        assert!(result.is_valid);
+    }
+
     #[test]
     fn test_build_system_prompt_contains_commands() {
         let gateway = AIGateway::with_defaults();
@@ -1597,6 +1679,19 @@ This will add the clip."#;
         assert!(prompt.contains("RippleDelete"));
         assert!(prompt.contains("AddKeyframe"));
         assert!(prompt.contains("AddTransition"));
+    }
+
+    #[test]
+    fn test_build_system_prompt_documents_sequence_id_for_insert_and_overwrite_edits() {
+        let gateway = AIGateway::with_defaults();
+        let context = EditContext::new();
+
+        let prompt = gateway.build_system_prompt(&context);
+
+        assert!(prompt
+            .contains(r#"{ "commandType": "InsertEdit", "params": { "sequenceId": "required""#));
+        assert!(prompt
+            .contains(r#"{ "commandType": "OverwriteEdit", "params": { "sequenceId": "required""#));
     }
 
     #[test]

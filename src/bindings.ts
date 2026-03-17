@@ -315,6 +315,19 @@ async canRedo() : Promise<Result<boolean, string>> {
 }
 },
 /**
+ * Finds all gaps between clips on a specific track.
+ * 
+ * Returns an ordered list of gaps (empty regions) between clips.
+ * This is a read-only query — no state mutation occurs.
+ */
+async findGaps(sequenceId: string, trackId: string) : Promise<Result<GapInfo[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("find_gaps", { sequenceId, trackId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Gets all jobs from the worker pool (both active and queued)
  */
 async getJobs() : Promise<Result<JobInfoDto[], string>> {
@@ -2950,6 +2963,22 @@ motionDirection: MotionDirection;
  * Visual complexity score (0.0 = static/simple, 1.0 = complex/dynamic)
  */
 visualComplexity: number }
+/**
+ * Describes a gap (empty region) between clips on a track.
+ */
+export type GapInfo = { 
+/**
+ * Start time of the gap (end of preceding clip).
+ */
+start: number; 
+/**
+ * End time of the gap (start of next clip).
+ */
+end: number; 
+/**
+ * Duration of the gap.
+ */
+duration: number }
 export type GeneralSettingsDto = { language: string; showWelcomeOnStartup: boolean; hasCompletedSetup: boolean; recentProjectsLimit: number; checkUpdatesOnStartup: boolean; defaultProjectLocation: string | null }
 /**
  * Response for get_annotation command
@@ -4732,6 +4761,10 @@ clips: Clip[]; blendMode: BlendMode;
  * Present for modern projects; true only for protected default timeline tracks.
  */
 isBaseTrack?: boolean | null; muted: boolean; locked: boolean; visible: boolean; 
+/**
+ * When true, this track shifts in sync during insert/ripple edits on other tracks.
+ */
+syncLock?: boolean; 
 /**
  * Volume for audio tracks (0.0 - 2.0, 1.0 = 100%)
  */

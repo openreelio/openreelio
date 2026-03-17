@@ -170,6 +170,30 @@ export const SHORTCUT_ACTIONS: Record<string, ShortcutAction> = {
     category: 'timeline',
     description: 'Duplicate selected clips',
   },
+  'timeline.insertEdit': {
+    id: 'timeline.insertEdit',
+    label: 'Insert Edit',
+    category: 'timeline',
+    description: 'Insert edit from Source Monitor at playhead',
+  },
+  'timeline.overwriteEdit': {
+    id: 'timeline.overwriteEdit',
+    label: 'Overwrite Edit',
+    category: 'timeline',
+    description: 'Overwrite edit from Source Monitor at playhead',
+  },
+  'timeline.liftEdit': {
+    id: 'timeline.liftEdit',
+    label: 'Lift',
+    category: 'timeline',
+    description: 'Remove selected clips leaving gap',
+  },
+  'timeline.extractEdit': {
+    id: 'timeline.extractEdit',
+    label: 'Extract',
+    category: 'timeline',
+    description: 'Remove In/Out range and close gap',
+  },
 
   // Project
   'project.save': {
@@ -311,6 +335,10 @@ export const DEFAULT_SHORTCUTS: CustomShortcuts = {
   'timeline.copy': 'Ctrl+C',
   'timeline.paste': 'Ctrl+V',
   'timeline.duplicate': 'Ctrl+Shift+D',
+  'timeline.insertEdit': ',',
+  'timeline.overwriteEdit': '.',
+  'timeline.liftEdit': ';',
+  'timeline.extractEdit': "'",
 
   // Project
   'project.save': 'Ctrl+S',

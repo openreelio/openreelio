@@ -817,6 +817,8 @@ mod tauri_app {
                 $crate::ipc::redo,
                 $crate::ipc::can_undo,
                 $crate::ipc::can_redo,
+                // Gap management commands (S24-004)
+                $crate::ipc::find_gaps,
                 // Job commands
                 $crate::ipc::get_jobs,
                 $crate::ipc::submit_job,
@@ -1181,6 +1183,8 @@ mod tauri_app {
             ipc::redo,
             ipc::can_undo,
             ipc::can_redo,
+            // Gap management commands (S24-004)
+            ipc::find_gaps,
             // Job commands
             ipc::get_jobs,
             ipc::submit_job,
