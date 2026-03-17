@@ -56,7 +56,7 @@ import type { BlendMode, Sequence, CaptionPosition, ClipId, TextClipData } from 
 import type { AddTextPayload } from '@/components/features/text';
 import type { ChannelLevels } from '@/components/features/mixer';
 import type { MulticamGroup } from '@/utils/multicam';
-import { isTextClip } from '@/types';
+import { isTextClip, hasActiveTimeRemap } from '@/types';
 
 const logger = createLogger('EditorView');
 const AI_AUTO_COLLAPSE_BREAKPOINT = 1440;
@@ -331,6 +331,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     handleLiftClips,
     handleInsertEditFromSource,
     handleOverwriteEditFromSource,
+    handleSetClipSpeed,
+    handleReverseClip,
+    handleCreateFreezeFrame,
   } = useTimelineActions({ sequence });
 
   // Text clip operations
@@ -437,6 +440,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
           timelineInSec: clip.place.timelineInSec,
         },
         blendMode: clip.blendMode,
+        speed: clip.speed,
+        reverse: clip.reverse,
+        hasTimeRemap: hasActiveTimeRemap(clip),
       };
     }
     return undefined;
@@ -749,6 +755,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                   selectedTextClip={selectedTextClip}
                   selectedCaption={selectedCaption}
                   onClipBlendModeChange={handleClipBlendModeChange}
+                  onClipSpeedChange={handleSetClipSpeed}
+                  onClipReverseToggle={handleReverseClip}
+                  onFreezeFrame={handleCreateFreezeFrame}
                   onTextDataChange={onTextDataChange}
                   onCaptionChange={onCaptionChange}
                 />
@@ -849,6 +858,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                       onLiftClips={handleLiftClips}
                       onInsertEditFromSource={handleInsertEditFromSource}
                       onOverwriteEditFromSource={handleOverwriteEditFromSource}
+                      onClipSpeedChange={handleSetClipSpeed}
+                      onClipReverse={handleReverseClip}
+                      onClipFreezeFrame={handleCreateFreezeFrame}
                     />
                   </TimelineErrorBoundary>
                 </div>

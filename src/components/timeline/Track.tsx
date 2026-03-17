@@ -75,6 +75,8 @@ interface TrackProps {
   isDropTarget?: boolean;
   /** Drop validity result when track is a drop target */
   dropValidity?: DropValidity;
+  /** Whether this track is the target for 3-point editing (source monitor active) */
+  isEditTarget?: boolean;
   /** Mute toggle handler */
   onMuteToggle?: (trackId: string) => void;
   /** Lock toggle handler */
@@ -113,6 +115,12 @@ interface TrackProps {
   showTransitionZones?: boolean;
   /** Transition zone click handler */
   onTransitionZoneClick?: (clipAId: string, clipBId: string) => void;
+  /** Clip context menu handler for speed operations */
+  onClipSpeedChange?: (clipId: string, trackId: string, speed: number, reverse: boolean) => void;
+  /** Clip reverse handler */
+  onClipReverse?: (clipId: string, trackId: string) => void;
+  /** Clip freeze frame handler */
+  onClipFreezeFrame?: (clipId: string, trackId: string) => void;
 }
 
 // =============================================================================
@@ -159,6 +167,7 @@ export function Track({
   snapThreshold = 0,
   isDropTarget = false,
   dropValidity,
+  isEditTarget = false,
   onMuteToggle,
   onLockToggle,
   onVisibilityToggle,
@@ -176,6 +185,9 @@ export function Track({
   onSnapPointChange,
   showTransitionZones = false,
   onTransitionZoneClick,
+  onClipSpeedChange,
+  onClipReverse,
+  onClipFreezeFrame,
 }: TrackProps) {
   // Ref for measuring viewport width if not provided
   const contentRef = useRef<HTMLDivElement>(null);
@@ -258,6 +270,57 @@ export function Track({
     gapStart: number;
     gapEnd: number;
   } | null>(null);
+
+  const [clipContextMenu, setClipContextMenu] = useState<{
+    x: number;
+    y: number;
+    clipId: string;
+  } | null>(null);
+
+  const handleClipContextMenu = useCallback(
+    (event: ReactMouseEvent, clipId: string) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setClipContextMenu({ x: event.clientX, y: event.clientY, clipId });
+    },
+    [],
+  );
+
+  const clipContextMenuItems = useMemo<MenuItemOrDivider[]>(() => {
+    if (!clipContextMenu) return [];
+    const { clipId } = clipContextMenu;
+    const clip = track.clips.find((c) => c.id === clipId);
+    if (!clip) return [];
+
+    return [
+      {
+        label: clip.reverse ? 'Unreverse' : 'Reverse',
+        shortcut: 'R',
+        onClick: () => {
+          onClipReverse?.(clipId, track.id);
+          setClipContextMenu(null);
+        },
+        disabled: !onClipReverse,
+      },
+      {
+        label: 'Freeze Frame',
+        onClick: () => {
+          onClipFreezeFrame?.(clipId, track.id);
+          setClipContextMenu(null);
+        },
+        disabled: !onClipFreezeFrame,
+      },
+      { type: 'divider' as const },
+      ...[0.5, 1.0, 2.0, 4.0].map((speed) => ({
+        label: `Speed ${Math.round(speed * 100)}%`,
+        onClick: () => {
+          onClipSpeedChange?.(clipId, track.id, speed, clip.reverse ?? false);
+          setClipContextMenu(null);
+        },
+        disabled: !onClipSpeedChange,
+      })),
+    ];
+  }, [clipContextMenu, track.id, onClipReverse, onClipFreezeFrame, onClipSpeedChange]);
 
   const handleContentContextMenu = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>) => {
@@ -437,6 +500,7 @@ export function Track({
             ${!track.visible ? 'opacity-50' : ''}
             ${isDropTarget && dropValidity?.isValid ? 'bg-blue-500/10 ring-1 ring-blue-500/50 ring-inset' : ''}
             ${isDropTarget && dropValidity && !dropValidity.isValid ? 'bg-red-500/10 ring-1 ring-red-500/50 ring-inset' : ''}
+            ${isEditTarget && !isDropTarget ? 'border-l-2 border-cyan-400/60' : ''}
             ${track.locked ? 'cursor-not-allowed' : ''}
           `}
           style={{ height: TRACK_HEIGHT }}
@@ -473,6 +537,7 @@ export function Track({
                 onDrag={(data, previewPosition) => onClipDrag?.(track.id, data, previewPosition)}
                 onDragEnd={(data, finalPosition) => onClipDragEnd?.(track.id, data, finalPosition)}
                 onSnapPointChange={onSnapPointChange}
+                onContextMenu={handleClipContextMenu}
               />
             ))}
 
@@ -525,6 +590,15 @@ export function Track({
           y={gapContextMenu.y}
           items={gapContextMenuItems}
           onClose={() => setGapContextMenu(null)}
+        />
+      )}
+
+      {clipContextMenu && (
+        <ContextMenu
+          x={clipContextMenu.x}
+          y={clipContextMenu.y}
+          items={clipContextMenuItems}
+          onClose={() => setClipContextMenu(null)}
         />
       )}
     </>

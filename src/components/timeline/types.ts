@@ -313,6 +313,12 @@ export interface TimelineProps {
   onInsertEditFromSource?: () => void | Promise<void>;
   /** Callback to overwrite edit from Source Monitor at playhead */
   onOverwriteEditFromSource?: () => void | Promise<void>;
+  /** Callback when clip speed changes */
+  onClipSpeedChange?: (clipId: string, trackId: string, speed: number, reverse: boolean) => void | Promise<void>;
+  /** Callback when clip reverse is toggled */
+  onClipReverse?: (clipId: string, trackId: string) => void | Promise<void>;
+  /** Callback when freeze frame is requested */
+  onClipFreezeFrame?: (clipId: string, trackId: string) => void | Promise<void>;
 }
 
 // =============================================================================

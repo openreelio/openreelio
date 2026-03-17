@@ -227,6 +227,9 @@ export function Timeline({
   onLiftClips,
   onInsertEditFromSource,
   onOverwriteEditFromSource,
+  onClipSpeedChange,
+  onClipReverse,
+  onClipFreezeFrame,
 }: TimelineProps) {
   // ===========================================================================
   // Store State - Using targeted selectors to minimize re-renders
@@ -252,6 +255,18 @@ export function Timeline({
   const toggleLinkedSelection = useTimelineStore((state) => state.toggleLinkedSelection);
 
   const assets = useProjectStore((state) => state.assets);
+
+  // Edit target: first unlocked video track (receives 3-point edits).
+  // Derive a stable key from track identity + lock state so we don't recompute on clip edits.
+  const trackLockKey = useMemo(
+    () => sequence?.tracks.map((t) => `${t.id}:${t.kind}:${t.locked}`).join(',') ?? '',
+    [sequence?.tracks],
+  );
+  const editTargetTrackId = useMemo(
+    () => sequence?.tracks.find((t) => t.kind === 'video' && !t.locked)?.id ?? null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [trackLockKey],
+  );
 
   // Editor tool store - for tool switching
   const setActiveTool = useEditorToolStore((state) => state.setActiveTool);
@@ -2005,6 +2020,7 @@ export function Timeline({
                     onClipDragEnd={handleClipDragEnd}
                     onClipAudioSettingsChange={handleClipAudioSettingsChange}
                     onSnapPointChange={setActiveSnapPoint}
+                    isEditTarget={track.id === editTargetTrackId}
                     onMuteToggle={createTrackHandler(onTrackMuteToggle)}
                     onLockToggle={createTrackHandler(onTrackLockToggle)}
                     onVisibilityToggle={createTrackHandler(onTrackVisibilityToggle)}
@@ -2012,6 +2028,9 @@ export function Timeline({
                     canDeleteTrack={!isProtectedBaseTrack(sequence.tracks, track.id)}
                     swapTargets={swapTargets}
                     onSwapTracks={handleTrackSwap}
+                    onClipSpeedChange={onClipSpeedChange}
+                    onClipReverse={onClipReverse}
+                    onClipFreezeFrame={onClipFreezeFrame}
                   />
                 );
               })}

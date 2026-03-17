@@ -6,7 +6,7 @@
  * Supports text clips with the TextInspector sub-component.
  */
 
-import { useMemo, useState, useCallback } from 'react';
+import { useMemo, useState, useCallback, useRef, useEffect } from 'react';
 import {
   Film,
   Music,
@@ -16,6 +16,7 @@ import {
   Clock,
   Maximize,
   Type,
+  Gauge,
 } from 'lucide-react';
 // Direct import instead of barrel to avoid bundling all utilities
 import { formatDuration } from '@/utils/formatters';
@@ -54,6 +55,12 @@ export interface SelectedClip {
   effects?: Effect[];
   /** Clip blend mode (default: 'normal') */
   blendMode?: BlendMode;
+  /** Playback speed (1.0 = normal) */
+  speed?: number;
+  /** Whether clip plays in reverse */
+  reverse?: boolean;
+  /** Whether clip has time remap active */
+  hasTimeRemap?: boolean;
 }
 
 /** Asset selection data */
@@ -93,6 +100,12 @@ export interface InspectorProps {
   onClipChange?: (clipId: string, property: string, value: unknown) => void;
   /** Callback when clip blend mode changes */
   onClipBlendModeChange?: (clipId: string, trackId: string, blendMode: BlendMode) => void;
+  /** Callback when clip speed changes */
+  onClipSpeedChange?: (clipId: string, trackId: string, speed: number, reverse: boolean) => void;
+  /** Callback when reverse is toggled */
+  onClipReverseToggle?: (clipId: string, trackId: string) => void;
+  /** Callback when freeze frame is requested */
+  onFreezeFrame?: (clipId: string, trackId: string) => void;
   /** Callback when text clip data changes */
   onTextDataChange?: (clipId: ClipId, textData: TextClipData) => void;
   /** Callback when caption property changes */
@@ -160,6 +173,57 @@ function normalizeCaptionPosition(position: CaptionPosition | undefined): Captio
 // Sub-components
 // =============================================================================
 
+/** Debounced speed input that commits on blur or Enter to avoid IPC flood. */
+function SpeedInput({
+  speed,
+  reverse,
+  clipId,
+  trackId,
+  onClipSpeedChange,
+  disabled,
+}: {
+  speed: number;
+  reverse: boolean;
+  clipId: string;
+  trackId: string;
+  onClipSpeedChange?: (clipId: string, trackId: string, speed: number, reverse: boolean) => void;
+  disabled?: boolean;
+}) {
+  const [localValue, setLocalValue] = useState(() => Math.round((speed || 1) * 100));
+  const prevSpeed = useRef(speed);
+
+  useEffect(() => {
+    if (speed !== prevSpeed.current) {
+      prevSpeed.current = speed;
+      setLocalValue(Math.round((speed || 1) * 100));
+    }
+  }, [speed]);
+
+  const commit = useCallback(() => {
+    if (localValue >= 10 && localValue <= 10000 && onClipSpeedChange) {
+      onClipSpeedChange(clipId, trackId, localValue / 100, reverse);
+    }
+  }, [localValue, clipId, trackId, reverse, onClipSpeedChange]);
+
+  return (
+    <input
+      data-testid="speed-input"
+      type="number"
+      min={10}
+      max={10000}
+      step={10}
+      className="w-24 bg-editor-input bg-opacity-50 border border-editor-border rounded px-2 py-1 text-sm text-editor-text text-right focus:border-primary-500 focus:ring-1 focus:ring-primary-500 focus:outline-none"
+      value={localValue}
+      onChange={(e) => setLocalValue(Number(e.target.value))}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit();
+      }}
+      disabled={disabled}
+    />
+  );
+}
+
 interface PropertyRowProps {
   label: string;
   value: string;
@@ -192,6 +256,9 @@ export function Inspector({
   selectedCaption,
   // onClipChange is reserved for future clip property editing
   onClipBlendModeChange,
+  onClipSpeedChange,
+  onClipReverseToggle,
+  onFreezeFrame,
   onTextDataChange,
   onCaptionChange,
   onEffectToggle,
@@ -346,6 +413,55 @@ export function Inspector({
             grouped
             compact
           />
+        </div>
+
+        {/* Speed Section */}
+        <div className="mt-4 pt-4 border-t border-editor-border">
+          <h4 className="text-xs font-semibold text-editor-text-muted mb-3 flex items-center gap-2">
+            <Gauge className="w-3 h-3" />
+            Speed
+          </h4>
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="text-sm text-editor-text-muted">Speed (%)</label>
+              <SpeedInput
+                speed={selectedClip.speed ?? 1}
+                reverse={selectedClip.reverse ?? false}
+                clipId={selectedClip.id}
+                trackId={selectedClip.place.trackId}
+                onClipSpeedChange={onClipSpeedChange}
+                disabled={readOnly || !onClipSpeedChange}
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                data-testid="reverse-toggle"
+                className={`flex-1 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+                  selectedClip.reverse
+                    ? 'bg-orange-500 text-white'
+                    : 'bg-editor-input bg-opacity-50 text-editor-text-muted border border-editor-border hover:bg-opacity-80'
+                }`}
+                onClick={() => onClipReverseToggle?.(selectedClip.id, selectedClip.place.trackId)}
+                disabled={readOnly || !onClipReverseToggle}
+              >
+                Reverse
+              </button>
+              <button
+                data-testid="freeze-frame-btn"
+                className="flex-1 px-3 py-1.5 rounded text-xs font-medium bg-editor-input bg-opacity-50 text-editor-text-muted border border-editor-border hover:bg-opacity-80 transition-colors"
+                onClick={() => onFreezeFrame?.(selectedClip.id, selectedClip.place.trackId)}
+                disabled={readOnly || !onFreezeFrame}
+              >
+                Freeze Frame
+              </button>
+            </div>
+            {selectedClip.hasTimeRemap && (
+              <div data-testid="time-remap-status" className="flex items-center gap-2 text-xs text-teal-400">
+                <span className="w-2 h-2 rounded-full bg-teal-400" />
+                Time Remap Active
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Effects Section */}
