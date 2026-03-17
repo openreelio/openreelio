@@ -943,6 +943,7 @@ mod tauri_app {
                 $crate::ipc::get_source_state,
                 $crate::ipc::match_frame,
                 $crate::ipc::reverse_match_frame,
+                $crate::ipc::three_point_insert,
                 // Agent commands
                 $crate::ipc::write_agent_trace,
                 $crate::ipc::list_agent_traces,
@@ -1310,6 +1311,7 @@ mod tauri_app {
             ipc::get_source_state,
             ipc::match_frame,
             ipc::reverse_match_frame,
+            ipc::three_point_insert,
             // Agent commands
             ipc::write_agent_trace,
             ipc::list_agent_traces,

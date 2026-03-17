@@ -12,7 +12,7 @@ import { useEditorToolStore } from '@/stores/editorToolStore';
 import { useClipDrag, type DragPreviewPosition, type ClipDragData } from '@/hooks/useClipDrag';
 import { useWaveformPeaks } from '@/hooks/useWaveformPeaks';
 import type { Clip as ClipType, SnapPoint, Asset, TrackKind } from '@/types';
-import { isTextClip } from '@/types';
+import { isTextClip, hasActiveTimeRemap } from '@/types';
 import { AudioClipWaveform } from './AudioClipWaveform';
 import { WaveformPeaksDisplay } from './WaveformPeaksDisplay';
 import { LazyThumbnailStrip } from './LazyThumbnailStrip';
@@ -101,6 +101,8 @@ interface ClipProps {
   onDragEnd?: (data: ClipDragData, finalPosition: DragPreviewPosition) => void;
   /** Snap point change handler - called when snap point changes during drag */
   onSnapPointChange?: (snapPoint: import('@/types').SnapPoint | null) => void;
+  /** Right-click handler for context menu */
+  onContextMenu?: (event: MouseEvent, clipId: string) => void;
 }
 
 // =============================================================================
@@ -127,6 +129,7 @@ export function Clip({
   onDrag,
   onDragEnd,
   onSnapPointChange,
+  onContextMenu,
 }: ClipProps) {
   // Use the clip drag hook for smooth drag operations
   const activeTool = useEditorToolStore((state) => state.activeTool);
@@ -280,6 +283,8 @@ export function Clip({
 
   const hasEffects = clip.effects.length > 0;
   const hasSpeedChange = clip.speed !== 1;
+  const isReversed = clip.reverse === true;
+  const hasTimeRemap = hasActiveTimeRemap(clip);
 
   // Determine if this is a text clip
   const isText = isTextClip(clip.assetId);
@@ -334,6 +339,7 @@ export function Clip({
       onClick={handleClick}
       onDoubleClick={handleDoubleClick}
       onMouseDown={handleClipMouseDown}
+      onContextMenu={(e) => onContextMenu?.(e, clip.id)}
     >
       {/* Video Thumbnails (background layer) - not for text clips */}
       {!isText && thumbnailConfig?.enabled && displayPosition.width > 0 && (
@@ -427,12 +433,13 @@ export function Clip({
           )}
 
           {/* Speed indicator */}
-          {hasSpeedChange && (
+          {(hasSpeedChange || isReversed || hasTimeRemap) && (
             <div
               data-testid="speed-indicator"
-              className="px-1 h-3 bg-orange-500 rounded text-[8px] text-white flex items-center"
+              className="px-1 h-3 bg-orange-500 rounded text-[8px] text-white flex items-center gap-0.5"
             >
-              {clip.speed}x
+              {hasTimeRemap ? 'TR' : isReversed && !hasSpeedChange ? 'R' : `${clip.speed}x`}
+              {isReversed && hasSpeedChange && !hasTimeRemap && 'R'}
             </div>
           )}
         </div>

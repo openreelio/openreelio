@@ -436,7 +436,200 @@ fn find_clip_at_time(
 /// Helper: checks whether a source time falls inside a clip's source range.
 /// Uses half-open interval [start, end) to match timeline containment semantics.
 fn clip_contains_source_time(clip: &crate::core::timeline::Clip, source_time_sec: f64) -> bool {
-    source_time_sec >= clip.range.source_in_sec && source_time_sec < clip.range.source_out_sec
+    source_time_sec >= clip.range.source_in_sec
+        && (source_time_sec < clip.range.source_out_sec
+            || (clip.reverse && (source_time_sec - clip.range.source_out_sec).abs() < 1e-6))
+}
+
+// =============================================================================
+// 3-Point Editing
+// =============================================================================
+
+/// Edit mode for 3-point editing operations.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum ThreePointEditMode {
+    /// Insert edit: pushes downstream clips right.
+    Insert,
+    /// Overwrite edit: replaces content in time range.
+    Overwrite,
+}
+
+/// Payload for atomic 3-point edit from source monitor.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ThreePointEditPayload {
+    /// Sequence to edit.
+    pub sequence_id: String,
+    /// Target track. If omitted, auto-selects first unlocked video track.
+    pub track_id: Option<String>,
+    /// Timeline playhead position (seconds).
+    pub timeline_position: f64,
+    /// Insert or overwrite mode.
+    pub edit_mode: ThreePointEditMode,
+}
+
+/// Result of a 3-point edit operation.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreePointEditResult {
+    /// ID of the created clip.
+    pub clip_id: String,
+    /// Asset ID used.
+    pub asset_id: String,
+    /// Source range used (in seconds).
+    pub source_in: f64,
+    /// Source range used (out seconds).
+    pub source_out: f64,
+    /// Timeline position where clip was placed.
+    pub timeline_position: f64,
+    /// Duration of the placed clip on the timeline.
+    pub duration: f64,
+    /// Edit mode that was applied.
+    pub edit_mode: ThreePointEditMode,
+}
+
+/// Performs an atomic 3-point edit: reads source monitor In/Out, resolves the
+/// target track, and executes an Insert or Overwrite edit in a single operation.
+///
+/// This avoids race conditions between reading source state and executing the
+/// edit that occur when the frontend orchestrates these as separate IPC calls.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state), fields(
+    seq = %payload.sequence_id,
+    mode = ?payload.edit_mode,
+    pos = payload.timeline_position,
+))]
+pub async fn three_point_insert(
+    payload: ThreePointEditPayload,
+    state: State<'_, AppState>,
+) -> Result<ThreePointEditResult, String> {
+    let timeline_position = validate_time_sec("timelinePosition", payload.timeline_position)?;
+
+    // 1. Read source monitor state atomically
+    let (asset_id, in_point, out_point) = {
+        let source = state.source_monitor.lock().await;
+        let id = source
+            .asset_id
+            .clone()
+            .ok_or_else(|| "No asset loaded in source monitor".to_string())?;
+        (id, source.in_point, source.out_point)
+    }; // source_monitor lock dropped
+
+    // 2. Acquire project, resolve track, build command, execute
+    let mut project_guard = state.project.lock().await;
+    let project = project_guard
+        .as_mut()
+        .ok_or_else(|| "No project open".to_string())?;
+
+    let sequence = project
+        .state
+        .sequences
+        .get(&payload.sequence_id)
+        .ok_or_else(|| format!("Sequence '{}' not found", payload.sequence_id))?;
+
+    // Resolve target track
+    let track_id = match payload.track_id {
+        Some(ref id) => {
+            let track = sequence
+                .tracks
+                .iter()
+                .find(|t| t.id == *id)
+                .ok_or_else(|| format!("Track '{}' not found", id))?;
+            if track.locked {
+                return Err(format!("Track '{}' is locked", id));
+            }
+            id.clone()
+        }
+        None => {
+            // Auto-detect: first unlocked video track
+            use crate::core::timeline::TrackKind;
+            sequence
+                .tracks
+                .iter()
+                .find(|t| t.kind == TrackKind::Video && !t.locked)
+                .map(|t| t.id.clone())
+                .ok_or_else(|| "No unlocked video track available".to_string())?
+        }
+    };
+
+    // Resolve source range (None → use full asset)
+    let asset = project
+        .state
+        .assets
+        .get(&asset_id)
+        .ok_or_else(|| format!("Asset '{}' not found in project", asset_id))?;
+    let asset_duration = asset.duration_sec.unwrap_or(10.0);
+
+    let source_in = in_point.unwrap_or(0.0);
+    let source_out = out_point.unwrap_or(asset_duration);
+
+    if source_in >= source_out {
+        return Err(format!(
+            "Source In ({:.3}s) must be before Out ({:.3}s)",
+            source_in, source_out
+        ));
+    }
+
+    let clip_duration = source_out - source_in;
+
+    // 3. Build and execute the appropriate command
+    use crate::core::commands::{InsertEditCommand, OverwriteEditCommand};
+
+    let (result, edit_mode) = match payload.edit_mode {
+        ThreePointEditMode::Insert => {
+            let mut cmd = InsertEditCommand::new(
+                &payload.sequence_id,
+                &track_id,
+                &asset_id,
+                timeline_position,
+            );
+            cmd.source_start = Some(source_in);
+            cmd.source_end = Some(source_out);
+            let result = project
+                .executor
+                .execute(Box::new(cmd), &mut project.state)
+                .map_err(|e| e.to_string())?;
+            (result, ThreePointEditMode::Insert)
+        }
+        ThreePointEditMode::Overwrite => {
+            let mut cmd = OverwriteEditCommand::new(
+                &payload.sequence_id,
+                &track_id,
+                &asset_id,
+                timeline_position,
+            );
+            cmd.source_start = Some(source_in);
+            cmd.source_end = Some(source_out);
+            let result = project
+                .executor
+                .execute(Box::new(cmd), &mut project.state)
+                .map_err(|e| e.to_string())?;
+            (result, ThreePointEditMode::Overwrite)
+        }
+    };
+
+    let clip_id = result.created_ids.first().cloned().unwrap_or_default();
+
+    tracing::info!(
+        clip_id = %clip_id,
+        asset_id = %asset_id,
+        source_in,
+        source_out,
+        clip_duration,
+        "3-point edit completed"
+    );
+
+    Ok(ThreePointEditResult {
+        clip_id,
+        asset_id,
+        source_in,
+        source_out,
+        timeline_position,
+        duration: clip_duration,
+        edit_mode,
+    })
 }
 
 // =============================================================================
@@ -738,6 +931,14 @@ mod tests {
     }
 
     #[test]
+    fn test_clip_contains_source_time_includes_exact_out_point_for_reversed_clip() {
+        let mut clip = make_clip("asset-1", 10.0, 20.0, 5.0);
+        clip.reverse = true;
+
+        assert!(clip_contains_source_time(&clip, 20.0));
+    }
+
+    #[test]
     fn test_match_frame_result_serialization() {
         let result = MatchFrameResult {
             asset_id: "asset-42".to_string(),
@@ -773,5 +974,91 @@ mod tests {
         // At timeline 8.0: offset=3.0, source_time = 10.0 + 3.0 = 13.0
         let source_time = clip.timeline_to_source(8.0);
         assert!((source_time - 13.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_timeline_to_source_with_reverse_trim_offset() {
+        let mut clip = make_clip("asset-1", 10.0, 20.0, 5.0);
+        clip.reverse = true;
+
+        let source_time = clip.timeline_to_source(8.0);
+        assert!((source_time - 17.0).abs() < 0.001);
+    }
+
+    // =========================================================================
+    // 3-Point Editing DTO tests
+    // =========================================================================
+
+    #[test]
+    fn test_three_point_edit_mode_serialization() {
+        let insert = ThreePointEditMode::Insert;
+        let json = serde_json::to_string(&insert).unwrap();
+        assert_eq!(json, "\"insert\"");
+
+        let overwrite = ThreePointEditMode::Overwrite;
+        let json = serde_json::to_string(&overwrite).unwrap();
+        assert_eq!(json, "\"overwrite\"");
+
+        // Deserialize
+        let parsed: ThreePointEditMode = serde_json::from_str("\"insert\"").unwrap();
+        assert!(matches!(parsed, ThreePointEditMode::Insert));
+        let parsed: ThreePointEditMode = serde_json::from_str("\"overwrite\"").unwrap();
+        assert!(matches!(parsed, ThreePointEditMode::Overwrite));
+    }
+
+    #[test]
+    fn test_three_point_edit_payload_serialization() {
+        let payload = ThreePointEditPayload {
+            sequence_id: "seq-1".to_string(),
+            track_id: Some("track-v1".to_string()),
+            timeline_position: 10.0,
+            edit_mode: ThreePointEditMode::Insert,
+        };
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains("sequenceId"));
+        assert!(json.contains("trackId"));
+        assert!(json.contains("timelinePosition"));
+        assert!(json.contains("editMode"));
+
+        let parsed: ThreePointEditPayload = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.sequence_id, "seq-1");
+        assert_eq!(parsed.track_id.as_deref(), Some("track-v1"));
+        assert_eq!(parsed.timeline_position, 10.0);
+        assert!(matches!(parsed.edit_mode, ThreePointEditMode::Insert));
+    }
+
+    #[test]
+    fn test_three_point_edit_payload_without_track_id() {
+        let json = r#"{"sequenceId":"seq-1","timelinePosition":5.0,"editMode":"overwrite"}"#;
+        let parsed: ThreePointEditPayload = serde_json::from_str(json).unwrap();
+        assert!(parsed.track_id.is_none());
+        assert!(matches!(parsed.edit_mode, ThreePointEditMode::Overwrite));
+    }
+
+    #[test]
+    fn test_three_point_edit_result_serialization() {
+        let result = ThreePointEditResult {
+            clip_id: "clip-42".to_string(),
+            asset_id: "asset-1".to_string(),
+            source_in: 2.0,
+            source_out: 8.0,
+            timeline_position: 10.0,
+            duration: 6.0,
+            edit_mode: ThreePointEditMode::Insert,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("clipId"));
+        assert!(json.contains("assetId"));
+        assert!(json.contains("sourceIn"));
+        assert!(json.contains("sourceOut"));
+        assert!(json.contains("timelinePosition"));
+        assert!(json.contains("\"duration\""));
+        assert!(json.contains("editMode"));
+
+        let parsed: ThreePointEditResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.clip_id, "clip-42");
+        assert_eq!(parsed.source_in, 2.0);
+        assert_eq!(parsed.source_out, 8.0);
+        assert_eq!(parsed.duration, 6.0);
     }
 }

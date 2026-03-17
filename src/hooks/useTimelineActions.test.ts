@@ -172,6 +172,7 @@ describe('useTimelineActions', () => {
       activeSequenceId: null,
       selectedAssetId: null,
       error: null,
+      stateVersion: 0,
     });
   });
 
@@ -3563,6 +3564,169 @@ describe('useTimelineActions', () => {
       // Hook handles refresh errors gracefully
       // The execute_command was called, and refresh error was caught
       expect(mockedInvoke).toHaveBeenCalledWith('execute_command', expect.any(Object));
+    });
+  });
+
+  // ===========================================================================
+  // 3-Point Editing Workflow Tests (TASK-S23-003)
+  // ===========================================================================
+
+  describe('handleInsertEditFromSource (3-point editing)', () => {
+    it('should sync project state after a successful insert edit', async () => {
+      const track = createMockTrack({ id: 'track_v1', kind: 'video', locked: false });
+      const insertedClip = createMockClip({
+        id: 'clip_new',
+        range: {
+          sourceInSec: 2,
+          sourceOutSec: 8,
+        },
+        place: {
+          timelineInSec: 10,
+          durationSec: 6,
+        },
+      });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [track],
+      });
+      const updatedSequence = createMockSequence({
+        ...sequence,
+        tracks: [
+          {
+            ...track,
+            clips: [insertedClip],
+          },
+        ],
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'three_point_insert') {
+          return Promise.resolve({
+            clipId: 'clip_new',
+            assetId: 'asset_001',
+            sourceIn: 2.0,
+            sourceOut: 8.0,
+            timelinePosition: 10.0,
+            duration: 6.0,
+            editMode: 'insert',
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [updatedSequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.resolve(null);
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleInsertEditFromSource();
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('three_point_insert', {
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: null,
+          timelinePosition: expect.any(Number),
+          editMode: 'insert',
+        },
+      });
+
+      const projectState = useProjectStore.getState();
+      expect(projectState.isDirty).toBe(true);
+      expect(projectState.stateVersion).toBe(1);
+      expect(projectState.activeSequenceId).toBe('seq_001');
+      expect(projectState.sequences.get('seq_001')?.tracks[0]?.clips).toEqual([insertedClip]);
+    });
+
+    it('should not call threePointInsert when no sequence is provided', async () => {
+      const { result } = renderHook(() => useTimelineActions({ sequence: null }));
+
+      await act(async () => {
+        await result.current.handleInsertEditFromSource();
+      });
+
+      expect(mockedInvoke).not.toHaveBeenCalledWith(
+        'three_point_insert',
+        expect.any(Object),
+      );
+    });
+  });
+
+  describe('handleOverwriteEditFromSource (3-point editing)', () => {
+    it('should call threePointInsert with overwrite mode', async () => {
+      const track = createMockTrack({ id: 'track_v1', kind: 'video', locked: false });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [track],
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'three_point_insert') {
+          return Promise.resolve({
+            clipId: 'clip_new',
+            assetId: 'asset_001',
+            sourceIn: 0.0,
+            sourceOut: 60.0,
+            timelinePosition: 5.0,
+            duration: 60.0,
+            editMode: 'overwrite',
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.resolve(null);
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handleOverwriteEditFromSource();
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('three_point_insert', {
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: null,
+          timelinePosition: expect.any(Number),
+          editMode: 'overwrite',
+        },
+      });
+    });
+
+    it('should handle backend error gracefully without throwing', async () => {
+      const track = createMockTrack({ id: 'track_v1', kind: 'video', locked: false });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [track],
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'three_point_insert') {
+          return Promise.reject(new Error('No asset loaded in source monitor'));
+        }
+        return Promise.resolve(null);
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      // Should not throw
+      await act(async () => {
+        await result.current.handleOverwriteEditFromSource();
+      });
+
+      // Command was attempted
+      expect(mockedInvoke).toHaveBeenCalledWith('three_point_insert', expect.any(Object));
+      expect(useProjectStore.getState().error).toContain('No asset loaded in source monitor');
     });
   });
 });

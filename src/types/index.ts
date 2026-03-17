@@ -420,6 +420,28 @@ export interface AudioSettings {
   fadeOutSec?: number;
 }
 
+/** Interpolation type for time remap keyframes */
+export type KeyframeInterpolation =
+  | 'linear'
+  | { bezier: { cp1x: number; cp1y: number; cp2x: number; cp2y: number } }
+  | 'hold';
+
+/** A single keyframe in a time remap curve */
+export interface TimeRemapKeyframe {
+  /** Timeline time in seconds (relative to clip start) */
+  timelineTime: number;
+  /** Corresponding source time in seconds */
+  sourceTime: number;
+  /** Interpolation method to next keyframe */
+  interpolation: KeyframeInterpolation;
+}
+
+/** Time remap curve for variable-speed playback */
+export interface TimeRemapCurve {
+  /** Ordered keyframes (sorted by timelineTime) */
+  keyframes: TimeRemapKeyframe[];
+}
+
 export interface Clip {
   id: ClipId;
   assetId: AssetId;
@@ -431,6 +453,10 @@ export interface Clip {
   blendMode?: BlendMode;
   speed: number;
   reverse?: boolean;
+  /** Whether this clip is a freeze frame (single looped frame) */
+  freezeFrame?: boolean;
+  /** Optional time remap curve for variable-speed playback */
+  timeRemap?: TimeRemapCurve | null;
   effects: EffectId[];
   audio: AudioSettings;
   label?: string;
@@ -439,6 +465,14 @@ export interface Clip {
   captionStyle?: CaptionStyle;
   /** Optional caption position override (used for caption-track clips) */
   captionPosition?: CaptionPosition;
+}
+
+/** Returns true if the clip has a valid active time remap curve (>= 2 keyframes). */
+export function hasActiveTimeRemap(clip: Pick<Clip, 'timeRemap'>): boolean {
+  return (
+    clip.timeRemap != null &&
+    clip.timeRemap.keyframes.length >= 2
+  );
 }
 
 export interface Marker {
@@ -814,7 +848,13 @@ export type CommandType =
   | 'ExtractEdit'
   // Gap management commands (S24-004)
   | 'CloseGap'
-  | 'CloseAllGaps';
+  | 'CloseAllGaps'
+  // Speed operations (S25)
+  | 'SetClipSpeed'
+  | 'ReverseClip'
+  | 'CreateFreezeFrame'
+  | 'SetTimeRemap'
+  | 'ClearTimeRemap';
 
 export interface Command {
   type: CommandType;

@@ -560,6 +560,204 @@ impl Default for AudioSettings {
 }
 
 // =============================================================================
+// Time Remapping (Variable Speed Keyframes)
+// =============================================================================
+
+/// Interpolation method for time remap keyframes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum KeyframeInterpolation {
+    /// Constant speed between keyframes (linear source-time mapping)
+    #[default]
+    Linear,
+    /// Smooth ease via cubic bezier (control points define the curve shape)
+    Bezier {
+        /// Control point 1 x (0.0-1.0, normalized within the keyframe segment)
+        cp1x: f64,
+        /// Control point 1 y (0.0-1.0, normalized within source-time range)
+        cp1y: f64,
+        /// Control point 2 x (0.0-1.0)
+        cp2x: f64,
+        /// Control point 2 y (0.0-1.0)
+        cp2y: f64,
+    },
+    /// Hold at the current source time until the next keyframe
+    Hold,
+}
+
+/// A single keyframe in a time remap curve.
+///
+/// Maps a timeline position to a source position: "at `timeline_time` seconds
+/// into the clip, show the frame from `source_time` seconds in the source."
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeRemapKeyframe {
+    /// Position on the timeline (seconds from clip start, 0-based)
+    pub timeline_time: f64,
+    /// Corresponding position in the source media (seconds)
+    pub source_time: f64,
+    /// How to interpolate to the next keyframe
+    #[serde(default)]
+    pub interpolation: KeyframeInterpolation,
+}
+
+/// A complete time remap curve for variable-speed playback.
+///
+/// When active on a clip, this replaces the constant `speed` field.
+/// The curve defines a mapping from timeline time to source time via keyframes.
+/// Between keyframes, interpolation determines how source time progresses.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TimeRemapCurve {
+    /// Ordered keyframes (must be sorted by `timeline_time`)
+    pub keyframes: Vec<TimeRemapKeyframe>,
+}
+
+impl TimeRemapCurve {
+    /// Creates a new time remap curve from keyframes.
+    /// Keyframes are sorted by timeline_time on creation.
+    pub fn new(mut keyframes: Vec<TimeRemapKeyframe>) -> Self {
+        keyframes.sort_by(|a, b| {
+            a.timeline_time
+                .partial_cmp(&b.timeline_time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Self { keyframes }
+    }
+
+    /// Returns true if the curve has at least 2 keyframes (minimum for a ramp).
+    pub fn is_valid(&self) -> bool {
+        self.keyframes.len() >= 2
+    }
+
+    /// Evaluates the curve at a given timeline time (seconds from clip start).
+    /// Returns the corresponding source time.
+    pub fn evaluate(&self, timeline_time: f64) -> f64 {
+        if self.keyframes.is_empty() {
+            return timeline_time;
+        }
+
+        // Before first keyframe: extrapolate from first keyframe
+        if timeline_time <= self.keyframes[0].timeline_time {
+            return self.keyframes[0].source_time;
+        }
+
+        // After last keyframe: extrapolate from last keyframe
+        let last = &self.keyframes[self.keyframes.len() - 1];
+        if timeline_time >= last.timeline_time {
+            return last.source_time;
+        }
+
+        // Find the segment containing timeline_time
+        for i in 0..self.keyframes.len() - 1 {
+            let kf0 = &self.keyframes[i];
+            let kf1 = &self.keyframes[i + 1];
+
+            if timeline_time >= kf0.timeline_time && timeline_time < kf1.timeline_time {
+                let segment_duration = kf1.timeline_time - kf0.timeline_time;
+                if segment_duration <= 0.0 {
+                    return kf0.source_time;
+                }
+
+                let t = (timeline_time - kf0.timeline_time) / segment_duration;
+
+                return match &kf0.interpolation {
+                    KeyframeInterpolation::Linear => {
+                        kf0.source_time + t * (kf1.source_time - kf0.source_time)
+                    }
+                    KeyframeInterpolation::Bezier {
+                        cp1x,
+                        cp1y,
+                        cp2x,
+                        cp2y,
+                    } => {
+                        let bezier_t = cubic_bezier_t(*cp1x, *cp2x, t);
+                        let source_range = kf1.source_time - kf0.source_time;
+                        let y = cubic_bezier_y(*cp1y, *cp2y, bezier_t);
+                        kf0.source_time + y * source_range
+                    }
+                    KeyframeInterpolation::Hold => kf0.source_time,
+                };
+            }
+        }
+
+        // Fallback (should not reach here)
+        last.source_time
+    }
+
+    /// Computes the total source duration covered by this curve.
+    /// Returns the absolute difference between first and last source times.
+    pub fn source_duration(&self) -> f64 {
+        if self.keyframes.len() < 2 {
+            return 0.0;
+        }
+        let first = self.keyframes[0].source_time;
+        let last = self.keyframes[self.keyframes.len() - 1].source_time;
+        (last - first).abs()
+    }
+
+    /// Returns the (min, max) source time range covered by this curve.
+    pub fn source_range(&self) -> (f64, f64) {
+        if self.keyframes.is_empty() {
+            return (0.0, 0.0);
+        }
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for kf in &self.keyframes {
+            if kf.source_time < min {
+                min = kf.source_time;
+            }
+            if kf.source_time > max {
+                max = kf.source_time;
+            }
+        }
+        (min, max)
+    }
+
+    /// Computes the total timeline duration of this curve.
+    pub fn timeline_duration(&self) -> f64 {
+        if self.keyframes.len() < 2 {
+            return 0.0;
+        }
+        let first = self.keyframes[0].timeline_time;
+        let last = self.keyframes[self.keyframes.len() - 1].timeline_time;
+        last - first
+    }
+}
+
+/// Solve for t in cubic bezier x(t) = target_x using Newton's method.
+/// The bezier is defined as: x(t) = 3(1-t)²t·cp1x + 3(1-t)t²·cp2x + t³
+fn cubic_bezier_t(cp1x: f64, cp2x: f64, target_x: f64) -> f64 {
+    let mut t = target_x; // Initial guess
+    for _ in 0..8 {
+        let t2 = t * t;
+        let t3 = t2 * t;
+        let mt = 1.0 - t;
+        let mt2 = mt * mt;
+
+        // x(t) = 3·mt²·t·cp1x + 3·mt·t²·cp2x + t³
+        let x = 3.0 * mt2 * t * cp1x + 3.0 * mt * t2 * cp2x + t3;
+        let dx = 3.0 * mt2 * cp1x + 6.0 * mt * t * (cp2x - cp1x) + 3.0 * t2 * (1.0 - cp2x);
+
+        if dx.abs() < 1e-12 {
+            break;
+        }
+        t -= (x - target_x) / dx;
+        t = t.clamp(0.0, 1.0);
+    }
+    t
+}
+
+/// Evaluate cubic bezier y at parameter t.
+/// y(t) = 3(1-t)²t·cp1y + 3(1-t)t²·cp2y + t³
+fn cubic_bezier_y(cp1y: f64, cp2y: f64, t: f64) -> f64 {
+    let mt = 1.0 - t;
+    let mt2 = mt * mt;
+    let t2 = t * t;
+    3.0 * mt2 * t * cp1y + 3.0 * mt * t2 * cp2y + t * t2
+}
+
+// =============================================================================
 // Clip
 // =============================================================================
 
@@ -584,6 +782,13 @@ pub struct Clip {
     /// Playback direction (true = reverse)
     #[serde(default)]
     pub reverse: bool,
+    /// Whether this clip is a freeze frame (single frame looped for duration)
+    #[serde(default)]
+    pub freeze_frame: bool,
+    /// Optional time remap curve for variable-speed playback.
+    /// When present and valid, overrides the constant `speed` field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_remap: Option<TimeRemapCurve>,
     pub effects: Vec<EffectId>,
     pub audio: AudioSettings,
     /// Optional label for organization
@@ -613,6 +818,8 @@ impl Clip {
             blend_mode: BlendMode::Normal,
             speed: 1.0,
             reverse: false,
+            freeze_frame: false,
+            time_remap: None,
             effects: vec![],
             audio: AudioSettings::default(),
             label: None,
@@ -655,6 +862,8 @@ impl Clip {
             blend_mode: BlendMode::Normal,
             speed: 1.0,
             reverse: false,
+            freeze_frame: false,
+            time_remap: None,
             effects: vec![],
             audio: AudioSettings::default(),
             label: None,
@@ -671,7 +880,7 @@ impl Clip {
     }
 
     /// Returns the effective playback speed, falling back to 1.0 for invalid values.
-    fn safe_speed(&self) -> f64 {
+    pub fn safe_speed(&self) -> f64 {
         if self.speed > 0.0 {
             self.speed as f64
         } else {
@@ -686,8 +895,16 @@ impl Clip {
         self
     }
 
-    /// Returns the effective duration considering speed
+    /// Returns the effective duration considering speed or time remap.
+    ///
+    /// When a valid time remap curve is active, the timeline duration comes from
+    /// the curve. Otherwise falls back to `source_duration / speed`.
     pub fn duration(&self) -> TimeSec {
+        if let Some(ref remap) = self.time_remap {
+            if remap.is_valid() {
+                return remap.timeline_duration();
+            }
+        }
         self.range.duration() / self.safe_speed()
     }
 
@@ -708,10 +925,29 @@ impl Clip {
         self.place.contains_inclusive(time_sec)
     }
 
-    /// Converts a timeline time to source time
+    /// Converts a timeline time to source time.
+    ///
+    /// When a valid time remap curve is active, evaluates the curve to find the
+    /// source time. Otherwise uses the constant speed mapping.
     pub fn timeline_to_source(&self, timeline_sec: TimeSec) -> TimeSec {
         let offset = timeline_sec - self.place.timeline_in_sec;
-        self.range.source_in_sec + (offset * self.safe_speed())
+        if let Some(ref remap) = self.time_remap {
+            if remap.is_valid() {
+                return remap.evaluate(offset);
+            }
+        }
+        let source_time = if self.reverse {
+            self.range.source_out_sec - (offset * self.safe_speed())
+        } else {
+            self.range.source_in_sec + (offset * self.safe_speed())
+        };
+
+        source_time.clamp(self.range.source_in_sec, self.range.source_out_sec)
+    }
+
+    /// Returns true if this clip has an active time remap curve.
+    pub fn has_time_remap(&self) -> bool {
+        self.time_remap.as_ref().is_some_and(|r| r.is_valid())
     }
 }
 
@@ -875,6 +1111,18 @@ mod tests {
         assert_eq!(clip.timeline_to_source(5.0), 10.0);
         // At timeline 10.0, we should be at source 15.0
         assert_eq!(clip.timeline_to_source(10.0), 15.0);
+    }
+
+    #[test]
+    fn test_timeline_to_source_with_reverse() {
+        let mut clip = Clip::new("asset_123")
+            .with_source_range(10.0, 20.0)
+            .place_at(5.0);
+        clip.reverse = true;
+
+        assert_eq!(clip.timeline_to_source(5.0), 20.0);
+        assert_eq!(clip.timeline_to_source(10.0), 15.0);
+        assert_eq!(clip.timeline_to_source(15.0), 10.0);
     }
 
     #[test]
@@ -1105,5 +1353,255 @@ mod tests {
         assert_eq!(marker.time_sec, 5.0);
         assert_eq!(marker.label, "Test Marker");
         assert_eq!(marker.marker_type, MarkerType::Generic);
+    }
+
+    // =========================================================================
+    // Time Remap Tests
+    // =========================================================================
+
+    #[test]
+    fn test_time_remap_linear_2x_speed() {
+        // Scenario: Two keyframes mapping 2s of timeline to 4s of source = 2x speed
+        let curve = TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 2.0,
+                source_time: 4.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]);
+
+        assert!(curve.is_valid());
+        assert!((curve.evaluate(0.0) - 0.0).abs() < 1e-6);
+        assert!((curve.evaluate(1.0) - 2.0).abs() < 1e-6);
+        assert!((curve.evaluate(2.0) - 4.0).abs() < 1e-6);
+        assert!((curve.timeline_duration() - 2.0).abs() < 1e-6);
+        assert!((curve.source_duration() - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_time_remap_linear_slow_motion() {
+        // Scenario: 4s of timeline maps to 2s of source = 0.5x speed
+        let curve = TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 4.0,
+                source_time: 2.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]);
+
+        assert!((curve.evaluate(2.0) - 1.0).abs() < 1e-6);
+        assert!((curve.evaluate(4.0) - 2.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_time_remap_multi_segment_speed_ramp() {
+        // Scenario: 0→1s at 1x, 1→2s at 3x (speed ramp)
+        let curve = TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 1.0,
+                source_time: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 2.0,
+                source_time: 4.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]);
+
+        // First segment: 1x speed
+        assert!((curve.evaluate(0.5) - 0.5).abs() < 1e-6);
+        // Second segment: 3x speed
+        assert!((curve.evaluate(1.5) - 2.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_time_remap_bezier_smooth_ramp() {
+        // Scenario: Bezier interpolation should produce values between endpoints
+        let curve = TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 0.0,
+                interpolation: KeyframeInterpolation::Bezier {
+                    cp1x: 0.42,
+                    cp1y: 0.0,
+                    cp2x: 0.58,
+                    cp2y: 1.0,
+                },
+            },
+            TimeRemapKeyframe {
+                timeline_time: 2.0,
+                source_time: 4.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]);
+
+        let mid = curve.evaluate(1.0);
+        // Bezier ease: at t=0.5 on the x-axis, the y value should be
+        // between 0 and 4 but NOT exactly 2.0 (that would be linear)
+        assert!(mid > 0.0 && mid < 4.0);
+        // Endpoints should be exact
+        assert!((curve.evaluate(0.0) - 0.0).abs() < 1e-6);
+        assert!((curve.evaluate(2.0) - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_time_remap_hold_interpolation() {
+        // Scenario: Hold interpolation holds source time until next keyframe
+        let curve = TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 1.0,
+                interpolation: KeyframeInterpolation::Hold,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 2.0,
+                source_time: 5.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]);
+
+        // Hold: any point between 0 and 2 returns source_time of first keyframe
+        assert!((curve.evaluate(0.0) - 1.0).abs() < 1e-6);
+        assert!((curve.evaluate(0.5) - 1.0).abs() < 1e-6);
+        assert!((curve.evaluate(1.0) - 1.0).abs() < 1e-6);
+        assert!((curve.evaluate(1.999) - 1.0).abs() < 1e-6);
+        // At the second keyframe
+        assert!((curve.evaluate(2.0) - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_time_remap_json_roundtrip() {
+        let curve = TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 2.0,
+                source_time: 4.0,
+                interpolation: KeyframeInterpolation::Bezier {
+                    cp1x: 0.25,
+                    cp1y: 0.1,
+                    cp2x: 0.75,
+                    cp2y: 0.9,
+                },
+            },
+        ]);
+
+        let json = serde_json::to_string(&curve).unwrap();
+        let deserialized: TimeRemapCurve = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(curve, deserialized);
+    }
+
+    #[test]
+    fn test_time_remap_invalid_single_keyframe() {
+        let curve = TimeRemapCurve::new(vec![TimeRemapKeyframe {
+            timeline_time: 0.0,
+            source_time: 0.0,
+            interpolation: KeyframeInterpolation::Linear,
+        }]);
+
+        assert!(!curve.is_valid());
+    }
+
+    #[test]
+    fn test_time_remap_empty_curve() {
+        let curve = TimeRemapCurve::new(vec![]);
+        assert!(!curve.is_valid());
+        assert!((curve.evaluate(1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_clip_duration_with_time_remap() {
+        let mut clip = Clip::new("asset_1")
+            .with_source_range(0.0, 10.0)
+            .place_at(0.0);
+        // Without time remap: 10s / 1.0 speed = 10s
+        assert!((clip.duration() - 10.0).abs() < 1e-6);
+
+        // With time remap: timeline duration is 5s (regardless of source range)
+        clip.time_remap = Some(TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 5.0,
+                source_time: 10.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]));
+        assert!((clip.duration() - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_clip_timeline_to_source_with_time_remap() {
+        let mut clip = Clip::new("asset_1")
+            .with_source_range(0.0, 10.0)
+            .place_at(5.0);
+        clip.time_remap = Some(TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 2.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 4.0,
+                source_time: 8.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]));
+
+        // timeline_sec=5.0, clip starts at 5.0, offset=0.0 → source 2.0
+        assert!((clip.timeline_to_source(5.0) - 2.0).abs() < 1e-6);
+        // timeline_sec=7.0, offset=2.0 → source 5.0
+        assert!((clip.timeline_to_source(7.0) - 5.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_clip_has_time_remap() {
+        let mut clip = Clip::new("asset_1");
+        assert!(!clip.has_time_remap());
+
+        clip.time_remap = Some(TimeRemapCurve::new(vec![TimeRemapKeyframe {
+            timeline_time: 0.0,
+            source_time: 0.0,
+            interpolation: KeyframeInterpolation::Linear,
+        }]));
+        // Single keyframe is not valid
+        assert!(!clip.has_time_remap());
+
+        clip.time_remap = Some(TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 2.0,
+                source_time: 4.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]));
+        assert!(clip.has_time_remap());
     }
 }

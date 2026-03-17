@@ -626,6 +626,324 @@ impl AssetAudioInfo {
 }
 
 // =============================================================================
+// Speed Filter Helpers
+// =============================================================================
+
+/// Build setpts expression for video speed adjustment.
+///
+/// For speed 1.0 (or very close), returns `"PTS-STARTPTS"` (no change).
+/// For other speeds, returns `"(PTS-STARTPTS)/{speed}"` which scales
+/// presentation timestamps to achieve the desired playback speed.
+///
+/// # Examples
+///
+/// - speed 2.0 → `"(PTS-STARTPTS)/2"` (plays twice as fast)
+/// - speed 0.5 → `"(PTS-STARTPTS)/0.5"` (plays at half speed)
+fn build_speed_setpts(speed: f64) -> String {
+    if (speed - 1.0).abs() < 1e-6 {
+        "PTS-STARTPTS".to_string()
+    } else {
+        // Format without unnecessary trailing zeros
+        let speed_str = format_speed_number(speed);
+        format!("(PTS-STARTPTS)/{}", speed_str)
+    }
+}
+
+/// Build chained atempo filters for audio speed adjustment.
+///
+/// Returns `None` if speed is 1.0 (no change needed).
+/// FFmpeg's atempo filter operates in the range \[0.5, 100.0\], but for
+/// quality we chain multiple filters within \[0.5, 2.0\] to cover
+/// extreme speed values.
+///
+/// # Examples
+///
+/// - speed 2.0 → `Some("atempo=2")`
+/// - speed 4.0 → `Some("atempo=2,atempo=2")`
+/// - speed 0.25 → `Some("atempo=0.5,atempo=0.5")`
+fn build_atempo_chain(speed: f64) -> Option<String> {
+    if (speed - 1.0).abs() < 1e-6 {
+        return None;
+    }
+
+    let mut filters = Vec::new();
+    let mut remaining = speed;
+
+    // Chain atempo=2.0 for speeds above 2.0
+    while remaining > 2.0 {
+        filters.push("atempo=2".to_string());
+        remaining /= 2.0;
+    }
+    // Chain atempo=0.5 for speeds below 0.5
+    while remaining < 0.5 {
+        filters.push("atempo=0.5".to_string());
+        remaining /= 0.5;
+    }
+
+    filters.push(format!("atempo={}", format_speed_number(remaining)));
+    Some(filters.join(","))
+}
+
+/// Format a speed value without unnecessary trailing zeros.
+fn format_speed_number(value: f64) -> String {
+    let mut s = format!("{:.6}", value);
+    let trimmed_len = s.trim_end_matches('0').trim_end_matches('.').len();
+    s.truncate(trimmed_len);
+    s
+}
+
+/// Build video trim filter with speed, reverse, freeze frame, and time remap support.
+///
+/// Generates the complete video filter chain from input to the trim output label:
+/// - trim → setpts (speed/time_remap) → [reverse] → [freeze loop] → output
+fn build_video_trim_filter(
+    clip: &Clip,
+    input_index: usize,
+    trim_label: &str,
+    filter_complex: &mut String,
+) {
+    if clip.freeze_frame {
+        // Freeze frame: extract single frame, loop to fill duration
+        let tpad_duration = format_speed_number(clip.place.duration_sec);
+        let filter = format!(
+            "[{}:v]trim=start={}:end={},setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={},trim=0:{},setpts=PTS-STARTPTS[{}]",
+            input_index,
+            clip.range.source_in_sec,
+            clip.range.source_out_sec,
+            tpad_duration,
+            tpad_duration,
+            trim_label
+        );
+        filter_complex.push_str(&filter);
+    } else if clip.has_time_remap() {
+        // Time remap: use piecewise setpts expression from keyframe curve
+        let remap = clip.time_remap.as_ref().unwrap();
+        let setpts = build_time_remap_setpts(remap);
+        let (source_start, source_end) = remap.source_range();
+        let filter = format!(
+            "[{}:v]trim=start={}:end={},setpts={}[{}]",
+            input_index,
+            format_speed_number(source_start),
+            format_speed_number(source_end),
+            setpts,
+            trim_label
+        );
+        filter_complex.push_str(&filter);
+    } else if clip.reverse {
+        // Reverse: apply reverse filter after trim, before speed
+        let speed = clip.safe_speed();
+        let setpts = build_speed_setpts(speed);
+        let filter = format!(
+            "[{}:v]trim=start={}:end={},setpts=PTS-STARTPTS,reverse,setpts={}[{}]",
+            input_index, clip.range.source_in_sec, clip.range.source_out_sec, setpts, trim_label
+        );
+        filter_complex.push_str(&filter);
+    } else {
+        // Normal: trim with constant speed adjustment
+        let speed = clip.safe_speed();
+        let setpts = build_speed_setpts(speed);
+        let filter = format!(
+            "[{}:v]trim=start={}:end={},setpts={}[{}]",
+            input_index, clip.range.source_in_sec, clip.range.source_out_sec, setpts, trim_label
+        );
+        filter_complex.push_str(&filter);
+    }
+    filter_complex.push(';');
+}
+
+/// Build an FFmpeg `setpts` expression from a time remap curve.
+///
+/// Generates an inverse piecewise expression using nested `if()` calls.
+/// Each segment maps input source PTS to output timeline PTS.
+///
+/// For example, a 2-keyframe curve (0→0, 2→4) produces:
+/// `(PTS-STARTPTS)*0.5` (4s of source compressed into 2s of output)
+///
+/// A 3-keyframe curve (0→0, 1→1, 2→4) produces:
+/// `if(lt(PTS-STARTPTS,1),(PTS-STARTPTS)*1,((PTS-STARTPTS)-1)*0.333333+1)`
+fn build_time_remap_setpts(curve: &crate::core::timeline::TimeRemapCurve) -> String {
+    use crate::core::timeline::KeyframeInterpolation;
+
+    let kfs = &curve.keyframes;
+    if kfs.len() < 2 {
+        return "PTS-STARTPTS".to_string();
+    }
+    let source_origin = kfs[0].source_time;
+
+    // For 2 keyframes with linear interpolation, simplify to constant speed
+    if kfs.len() == 2 {
+        let dt = kfs[1].timeline_time - kfs[0].timeline_time;
+        let ds = kfs[1].source_time - kfs[0].source_time;
+        if dt > 0.0 {
+            match &kfs[0].interpolation {
+                KeyframeInterpolation::Linear => {
+                    if ds.abs() < 1e-6 {
+                        return format_speed_number(kfs[0].timeline_time);
+                    }
+
+                    let time_scale = dt / ds;
+                    let source_offset = kfs[0].source_time - source_origin;
+                    let timeline_offset = kfs[0].timeline_time;
+                    if source_offset.abs() < 1e-6 {
+                        if timeline_offset.abs() < 1e-6 {
+                            return format!("(PTS-STARTPTS)*{}", format_speed_number(time_scale));
+                        }
+                        return format!(
+                            "(PTS-STARTPTS)*{}+{}",
+                            format_speed_number(time_scale),
+                            format_speed_number(timeline_offset)
+                        );
+                    }
+                    return format!(
+                        "((PTS-STARTPTS)-{})*{}+{}",
+                        format_speed_number(source_offset),
+                        format_speed_number(time_scale),
+                        format_speed_number(timeline_offset)
+                    );
+                }
+                KeyframeInterpolation::Hold => {
+                    // Hold: show the same frame for the entire duration
+                    return format_speed_number(kfs[0].source_time);
+                }
+                KeyframeInterpolation::Bezier { .. } => {
+                    // Fall through to piecewise generation
+                }
+            }
+        }
+    }
+
+    // Build piecewise inverse expression:
+    // if(lt(S,s1), segment0, if(lt(S,s2), segment1, ...))
+    // where S = PTS-STARTPTS (source time from trimmed segment start)
+    let mut segments: Vec<String> = Vec::new();
+
+    for i in 0..kfs.len() - 1 {
+        let kf0 = &kfs[i];
+        let kf1 = &kfs[i + 1];
+        let dt = kf1.timeline_time - kf0.timeline_time;
+        let ds = kf1.source_time - kf0.source_time;
+
+        let segment_expr = match &kf0.interpolation {
+            KeyframeInterpolation::Hold => format_speed_number(kf0.source_time),
+            // Bezier curves cannot be perfectly expressed in FFmpeg setpts;
+            // approximate with linear interpolation for render.
+            KeyframeInterpolation::Linear | KeyframeInterpolation::Bezier { .. } => {
+                if dt > 0.0 && ds.abs() > 1e-6 {
+                    let time_scale = dt / ds;
+                    let source_offset = kf0.source_time - source_origin;
+                    format!(
+                        "((PTS-STARTPTS)-{})*{}+{}",
+                        format_speed_number(source_offset),
+                        format_speed_number(time_scale),
+                        format_speed_number(kf0.timeline_time)
+                    )
+                } else {
+                    format_speed_number(kf0.timeline_time)
+                }
+            }
+        };
+
+        segments.push(segment_expr);
+    }
+
+    // Build nested if() expression
+    if segments.len() == 1 {
+        return segments[0].clone();
+    }
+
+    // Start from the last segment and wrap backwards
+    let mut expr = segments[segments.len() - 1].clone();
+    for i in (0..segments.len() - 1).rev() {
+        let threshold = format_speed_number(kfs[i + 1].source_time - source_origin);
+        expr = format!(
+            "if(lt((PTS-STARTPTS),{}),{},{})",
+            threshold, segments[i], expr
+        );
+    }
+
+    expr
+}
+
+/// Build audio trim filter with speed, reverse, and freeze frame support.
+///
+/// Generates the complete audio filter chain from input to the audio output label,
+/// including atempo for speed and areverse for reverse playback.
+/// Returns the label to use as input for subsequent audio effects.
+fn build_audio_trim_filter(
+    clip: &Clip,
+    input_index: usize,
+    audio_trim_label: &str,
+    filter_complex: &mut String,
+) -> String {
+    debug_assert!(
+        !clip.freeze_frame,
+        "build_audio_trim_filter should not be called for freeze frame clips"
+    );
+
+    if clip.has_time_remap() {
+        // Time remap: trim the full source range, then apply average speed via atempo
+        let remap = clip.time_remap.as_ref().unwrap();
+        let (source_start, source_end) = remap.source_range();
+
+        let filter = format!(
+            "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
+            input_index,
+            format_speed_number(source_start),
+            format_speed_number(source_end),
+            audio_trim_label
+        );
+        filter_complex.push_str(&filter);
+        filter_complex.push(';');
+
+        let mut current_label = audio_trim_label.to_string();
+
+        // Compute average speed from the curve: source_duration / timeline_duration
+        let source_dur = remap.source_duration();
+        let timeline_dur = remap.timeline_duration();
+        let avg_speed = if timeline_dur > 0.0 {
+            source_dur / timeline_dur
+        } else {
+            1.0
+        };
+
+        if let Some(atempo) = build_atempo_chain(avg_speed) {
+            let speed_label = format!("aspd{}", input_index);
+            filter_complex.push_str(&format!("[{}]{}[{}];", current_label, atempo, speed_label));
+            current_label = speed_label;
+        }
+
+        return current_label;
+    }
+
+    // Regular audio trim
+    let filter = format!(
+        "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
+        input_index, clip.range.source_in_sec, clip.range.source_out_sec, audio_trim_label
+    );
+    filter_complex.push_str(&filter);
+    filter_complex.push(';');
+
+    let mut current_label = audio_trim_label.to_string();
+
+    // Apply reverse if needed
+    if clip.reverse {
+        let rev_label = format!("{}rev", audio_trim_label);
+        filter_complex.push_str(&format!("[{}]areverse[{}];", current_label, rev_label));
+        current_label = rev_label;
+    }
+
+    // Apply atempo for speed adjustment
+    let speed = clip.safe_speed();
+    if let Some(atempo) = build_atempo_chain(speed) {
+        let speed_label = format!("aspd{}", input_index);
+        filter_complex.push_str(&format!("[{}]{}[{}];", current_label, atempo, speed_label));
+        current_label = speed_label;
+    }
+
+    current_label
+}
+
+// =============================================================================
 // Text Clip Detection
 // =============================================================================
 
@@ -1398,27 +1716,18 @@ impl ExportEngine {
             // Build filters based on track type
             match track.kind {
                 TrackKind::Video => {
-                    // Video processing: trim -> effects -> [tonemap] -> output
+                    // Video processing: trim → [reverse] → [speed] → effects → [tonemap] → output
                     let trim_label = format!("trim{}", input_index);
                     let video_out_label = format!("v{}", input_index);
 
-                    // Use an intermediate label when tonemapping is needed
                     let effects_out_label = if tonemap_filter.is_some() {
                         format!("vfx{}", input_index)
                     } else {
                         video_out_label.clone()
                     };
 
-                    // Step 1: Trim filter
-                    let trim_filter = format!(
-                        "[{}:v]trim=start={}:end={},setpts=PTS-STARTPTS[{}]",
-                        input_index,
-                        clip.range.source_in_sec,
-                        clip.range.source_out_sec,
-                        trim_label
-                    );
-                    filter_complex.push_str(&trim_filter);
-                    filter_complex.push(';');
+                    // Step 1: Video trim with speed/reverse/freeze support
+                    build_video_trim_filter(clip, input_index, &trim_label, &mut filter_complex);
 
                     // Step 2: Apply video effects if any
                     if clip_filter_graph.has_video_effects() {
@@ -1427,7 +1736,6 @@ impl ExportEngine {
                         filter_complex.push_str(&effects_filter);
                         filter_complex.push(';');
                     } else {
-                        // No effects - pass through with null filter
                         filter_complex
                             .push_str(&format!("[{}]null[{}];", trim_label, effects_out_label));
                     }
@@ -1444,71 +1752,60 @@ impl ExportEngine {
                     video_transitions.push(find_transition_effect(clip, effects));
 
                     // Audio processing: ONLY if this asset has audio
-                    if clip_has_audio {
+                    // Freeze frame clips have muted audio, so skip
+                    if clip_has_audio && !clip.freeze_frame {
                         let audio_trim_label = format!("atrim{}", input_index);
                         let audio_out_label = format!("a{}", input_index);
 
-                        // Audio trim filter
-                        let audio_trim = format!(
-                            "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
+                        let audio_effects_input = build_audio_trim_filter(
+                            clip,
                             input_index,
-                            clip.range.source_in_sec,
-                            clip.range.source_out_sec,
-                            audio_trim_label
+                            &audio_trim_label,
+                            &mut filter_complex,
                         );
-                        filter_complex.push_str(&audio_trim);
-                        filter_complex.push(';');
 
-                        // Apply audio effects if any
                         if clip_filter_graph.has_audio_effects() {
                             let effects_filter = clip_filter_graph
-                                .to_audio_filter_complex(&audio_trim_label, &audio_out_label);
+                                .to_audio_filter_complex(&audio_effects_input, &audio_out_label);
                             filter_complex.push_str(&effects_filter);
                             filter_complex.push(';');
                         } else {
-                            // No effects - pass through with anull filter
                             filter_complex.push_str(&format!(
                                 "[{}]anull[{}];",
-                                audio_trim_label, audio_out_label
+                                audio_effects_input, audio_out_label
                             ));
                         }
 
                         audio_streams.push(format!("[{}]", audio_out_label));
                     }
-                    // If no audio, simply skip audio filter generation for this clip
                 }
                 TrackKind::Audio => {
-                    // Audio-only track processing - only if has audio
-                    if clip_has_audio {
+                    // Audio-only track processing
+                    if clip_has_audio && !clip.freeze_frame {
                         let audio_trim_label = format!("atrim{}", input_index);
                         let audio_out_label = format!("a{}", input_index);
 
-                        let audio_trim = format!(
-                            "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
+                        let audio_effects_input = build_audio_trim_filter(
+                            clip,
                             input_index,
-                            clip.range.source_in_sec,
-                            clip.range.source_out_sec,
-                            audio_trim_label
+                            &audio_trim_label,
+                            &mut filter_complex,
                         );
-                        filter_complex.push_str(&audio_trim);
-                        filter_complex.push(';');
 
-                        // Apply audio effects if any
                         if clip_filter_graph.has_audio_effects() {
                             let effects_filter = clip_filter_graph
-                                .to_audio_filter_complex(&audio_trim_label, &audio_out_label);
+                                .to_audio_filter_complex(&audio_effects_input, &audio_out_label);
                             filter_complex.push_str(&effects_filter);
                             filter_complex.push(';');
                         } else {
                             filter_complex.push_str(&format!(
                                 "[{}]anull[{}];",
-                                audio_trim_label, audio_out_label
+                                audio_effects_input, audio_out_label
                             ));
                         }
 
                         audio_streams.push(format!("[{}]", audio_out_label));
                     }
-                    // Skip audio-only clips that somehow have no audio
                 }
                 _ => {
                     // Skip non-video/audio tracks (caption, overlay)
@@ -2395,7 +2692,6 @@ pub fn build_complex_filter_args_with_audio_info(
         // Build filters based on track type
         match track.kind {
             TrackKind::Video => {
-                // Video processing
                 let trim_label = format!("trim{}", input_index);
                 let video_out_label = format!("v{}", input_index);
                 let effects_out_label = if tonemap_filter.is_some() {
@@ -2404,12 +2700,7 @@ pub fn build_complex_filter_args_with_audio_info(
                     video_out_label.clone()
                 };
 
-                let trim_filter = format!(
-                    "[{}:v]trim=start={}:end={},setpts=PTS-STARTPTS[{}]",
-                    input_index, clip.range.source_in_sec, clip.range.source_out_sec, trim_label
-                );
-                filter_complex.push_str(&trim_filter);
-                filter_complex.push(';');
+                build_video_trim_filter(clip, input_index, &trim_label, &mut filter_complex);
 
                 if clip_filter_graph.has_video_effects() {
                     let effects_filter =
@@ -2430,30 +2721,26 @@ pub fn build_complex_filter_args_with_audio_info(
 
                 video_streams.push(format!("[{}]", video_out_label));
 
-                // Audio processing: ONLY if this asset has audio
-                if clip_has_audio {
+                if clip_has_audio && !clip.freeze_frame {
                     let audio_trim_label = format!("atrim{}", input_index);
                     let audio_out_label = format!("a{}", input_index);
 
-                    let audio_trim = format!(
-                        "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
+                    let audio_effects_input = build_audio_trim_filter(
+                        clip,
                         input_index,
-                        clip.range.source_in_sec,
-                        clip.range.source_out_sec,
-                        audio_trim_label
+                        &audio_trim_label,
+                        &mut filter_complex,
                     );
-                    filter_complex.push_str(&audio_trim);
-                    filter_complex.push(';');
 
                     if clip_filter_graph.has_audio_effects() {
                         let effects_filter = clip_filter_graph
-                            .to_audio_filter_complex(&audio_trim_label, &audio_out_label);
+                            .to_audio_filter_complex(&audio_effects_input, &audio_out_label);
                         filter_complex.push_str(&effects_filter);
                         filter_complex.push(';');
                     } else {
                         filter_complex.push_str(&format!(
                             "[{}]anull[{}];",
-                            audio_trim_label, audio_out_label
+                            audio_effects_input, audio_out_label
                         ));
                     }
 
@@ -2461,29 +2748,26 @@ pub fn build_complex_filter_args_with_audio_info(
                 }
             }
             TrackKind::Audio => {
-                if clip_has_audio {
+                if clip_has_audio && !clip.freeze_frame {
                     let audio_trim_label = format!("atrim{}", input_index);
                     let audio_out_label = format!("a{}", input_index);
 
-                    let audio_trim = format!(
-                        "[{}:a]atrim=start={}:end={},asetpts=PTS-STARTPTS[{}]",
+                    let audio_effects_input = build_audio_trim_filter(
+                        clip,
                         input_index,
-                        clip.range.source_in_sec,
-                        clip.range.source_out_sec,
-                        audio_trim_label
+                        &audio_trim_label,
+                        &mut filter_complex,
                     );
-                    filter_complex.push_str(&audio_trim);
-                    filter_complex.push(';');
 
                     if clip_filter_graph.has_audio_effects() {
                         let effects_filter = clip_filter_graph
-                            .to_audio_filter_complex(&audio_trim_label, &audio_out_label);
+                            .to_audio_filter_complex(&audio_effects_input, &audio_out_label);
                         filter_complex.push_str(&effects_filter);
                         filter_complex.push(';');
                     } else {
                         filter_complex.push_str(&format!(
                             "[{}]anull[{}];",
-                            audio_trim_label, audio_out_label
+                            audio_effects_input, audio_out_label
                         ));
                     }
 
@@ -4875,5 +5159,379 @@ mod tests {
         let json = r#"{"preset":"youtube1080p","outputPath":"out.mp4","videoCodec":"h264","audioCodec":"aac","twoPass":false,"hdrMode":"sdr"}"#;
         let parsed: ExportSettings = serde_json::from_str(json).unwrap();
         assert!(parsed.tonemap_mode.is_none());
+    }
+
+    // =========================================================================
+    // Speed Filter Tests (BDD-style)
+    // =========================================================================
+
+    #[test]
+    fn should_return_identity_setpts_when_speed_is_normal() {
+        // Given a clip with speed 1.0
+        let setpts = build_speed_setpts(1.0);
+        // Then setpts should be the identity expression
+        assert_eq!(setpts, "PTS-STARTPTS");
+    }
+
+    #[test]
+    fn should_scale_setpts_when_speed_is_double() {
+        // Given a clip with speed 2.0
+        let setpts = build_speed_setpts(2.0);
+        // Then setpts should divide timestamps by 2 (plays faster)
+        assert_eq!(setpts, "(PTS-STARTPTS)/2");
+    }
+
+    #[test]
+    fn should_scale_setpts_when_speed_is_half() {
+        // Given a clip with speed 0.5
+        let setpts = build_speed_setpts(0.5);
+        // Then setpts should divide timestamps by 0.5 (plays slower)
+        assert_eq!(setpts, "(PTS-STARTPTS)/0.5");
+    }
+
+    #[test]
+    fn should_handle_fractional_speed_in_setpts() {
+        // Given a clip with speed 1.5
+        let setpts = build_speed_setpts(1.5);
+        // Then setpts should use the fractional value
+        assert_eq!(setpts, "(PTS-STARTPTS)/1.5");
+    }
+
+    #[test]
+    fn should_return_none_atempo_when_speed_is_normal() {
+        // Given a clip with speed 1.0
+        let atempo = build_atempo_chain(1.0);
+        // Then no atempo filter is needed
+        assert!(atempo.is_none());
+    }
+
+    #[test]
+    fn should_return_single_atempo_when_speed_within_range() {
+        // Given a clip with speed 1.5 (within 0.5-2.0)
+        let atempo = build_atempo_chain(1.5);
+        // Then a single atempo filter is sufficient
+        assert_eq!(atempo.unwrap(), "atempo=1.5");
+    }
+
+    #[test]
+    fn should_chain_atempo_when_speed_exceeds_double() {
+        // Given a clip with speed 4.0 (exceeds 2.0 limit per filter)
+        let atempo = build_atempo_chain(4.0);
+        // Then atempo filters are chained: 2.0 * 2.0 = 4.0
+        assert_eq!(atempo.unwrap(), "atempo=2,atempo=2");
+    }
+
+    #[test]
+    fn should_chain_atempo_when_speed_below_half() {
+        // Given a clip with speed 0.25 (below 0.5 limit per filter)
+        let atempo = build_atempo_chain(0.25);
+        // Then atempo filters are chained: 0.5 * 0.5 = 0.25
+        assert_eq!(atempo.unwrap(), "atempo=0.5,atempo=0.5");
+    }
+
+    #[test]
+    fn should_chain_atempo_for_extreme_fast_speed() {
+        // Given a clip with speed 8.0
+        let atempo = build_atempo_chain(8.0);
+        // Then three atempo=2 filters are chained: 2 * 2 * 2 = 8
+        assert_eq!(atempo.unwrap(), "atempo=2,atempo=2,atempo=2");
+    }
+
+    #[test]
+    fn should_chain_atempo_for_extreme_slow_speed() {
+        // Given a clip with speed 0.125
+        let atempo = build_atempo_chain(0.125);
+        // Then three atempo=0.5 filters: 0.5 * 0.5 * 0.5 = 0.125
+        assert_eq!(atempo.unwrap(), "atempo=0.5,atempo=0.5,atempo=0.5");
+    }
+
+    #[test]
+    fn should_mix_chain_and_remainder_for_atempo() {
+        // Given a clip with speed 3.0
+        let atempo = build_atempo_chain(3.0);
+        // Then one atempo=2 plus atempo=1.5: 2 * 1.5 = 3
+        assert_eq!(atempo.unwrap(), "atempo=2,atempo=1.5");
+    }
+
+    #[test]
+    fn should_format_speed_number_without_trailing_zeros() {
+        assert_eq!(format_speed_number(2.0), "2");
+        assert_eq!(format_speed_number(0.5), "0.5");
+        assert_eq!(format_speed_number(1.5), "1.5");
+        assert_eq!(format_speed_number(1.25), "1.25");
+    }
+
+    // =========================================================================
+    // Video Trim Filter Tests (reverse & freeze frame)
+    // =========================================================================
+
+    #[test]
+    fn should_include_reverse_filter_for_reversed_clip() {
+        use crate::core::timeline::Clip;
+
+        // Given a reversed clip
+        let mut clip = Clip::new("asset_1").with_source_range(2.0, 8.0);
+        clip.reverse = true;
+
+        let mut filter = String::new();
+        build_video_trim_filter(&clip, 0, "trim0", &mut filter);
+
+        // Then filter includes the reverse filter
+        assert!(
+            filter.contains("reverse"),
+            "should contain reverse filter: {filter}"
+        );
+        assert!(
+            filter.contains("trim=start=2:end=8"),
+            "should contain trim: {filter}"
+        );
+    }
+
+    #[test]
+    fn should_include_tpad_for_freeze_frame_clip() {
+        use crate::core::timeline::Clip;
+
+        // Given a freeze frame clip
+        let mut clip = Clip::new("asset_1").with_source_range(5.0, 5.04);
+        clip.freeze_frame = true;
+        clip.place.duration_sec = 3.0;
+
+        let mut filter = String::new();
+        build_video_trim_filter(&clip, 0, "trim0", &mut filter);
+
+        // Then filter includes tpad clone
+        assert!(
+            filter.contains("tpad=stop_mode=clone:stop_duration=3"),
+            "should contain tpad: {filter}"
+        );
+    }
+
+    #[test]
+    fn should_include_areverse_for_reversed_clip_audio() {
+        use crate::core::timeline::Clip;
+
+        // Given a reversed clip
+        let mut clip = Clip::new("asset_1").with_source_range(2.0, 8.0);
+        clip.reverse = true;
+
+        let mut filter = String::new();
+        let result_label = build_audio_trim_filter(&clip, 0, "atrim0", &mut filter);
+
+        // Then filter includes areverse and the label is the reversed label
+        assert!(
+            filter.contains("areverse"),
+            "should contain areverse: {filter}"
+        );
+        assert_ne!(
+            result_label, "atrim0",
+            "label should be updated for reverse"
+        );
+    }
+
+    #[test]
+    fn should_combine_reverse_and_speed_in_audio() {
+        use crate::core::timeline::Clip;
+
+        // Given a reversed clip at 2x speed
+        let mut clip = Clip::new("asset_1").with_source_range(0.0, 10.0);
+        clip.reverse = true;
+        clip.speed = 2.0;
+
+        let mut filter = String::new();
+        let result_label = build_audio_trim_filter(&clip, 0, "atrim0", &mut filter);
+
+        // Then filter includes both areverse and atempo
+        assert!(
+            filter.contains("areverse"),
+            "should contain areverse: {filter}"
+        );
+        assert!(
+            filter.contains("atempo=2"),
+            "should contain atempo: {filter}"
+        );
+        assert_eq!(result_label, "aspd0");
+    }
+
+    // =========================================================================
+    // Time Remap Render Tests
+    // =========================================================================
+
+    #[test]
+    fn test_time_remap_setpts_linear_2x() {
+        use crate::core::timeline::{KeyframeInterpolation, TimeRemapCurve, TimeRemapKeyframe};
+
+        let curve = TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 2.0,
+                source_time: 4.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]);
+
+        let expr = build_time_remap_setpts(&curve);
+        assert_eq!(expr, "(PTS-STARTPTS)*0.5");
+    }
+
+    #[test]
+    fn test_time_remap_setpts_hold() {
+        use crate::core::timeline::{KeyframeInterpolation, TimeRemapCurve, TimeRemapKeyframe};
+
+        let curve = TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 3.0,
+                interpolation: KeyframeInterpolation::Hold,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 2.0,
+                source_time: 5.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]);
+
+        let expr = build_time_remap_setpts(&curve);
+        // Hold: should show source_time 3 (freeze at source frame 3s)
+        assert_eq!(expr, "3", "hold should produce constant: {expr}");
+    }
+
+    #[test]
+    fn test_time_remap_setpts_multi_segment() {
+        use crate::core::timeline::{KeyframeInterpolation, TimeRemapCurve, TimeRemapKeyframe};
+
+        let curve = TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 1.0,
+                source_time: 1.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 2.0,
+                source_time: 4.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]);
+
+        let expr = build_time_remap_setpts(&curve);
+        // Should contain if() for piecewise segments
+        assert!(
+            expr.contains("if("),
+            "multi-segment should use if(): {expr}"
+        );
+        assert!(
+            expr.contains("lt("),
+            "should contain lt() comparison: {expr}"
+        );
+        assert!(
+            expr.contains("0.333333"),
+            "should use inverse slope for the 3x segment: {expr}"
+        );
+        assert!(
+            expr.contains("lt((PTS-STARTPTS),1)"),
+            "should branch on source-time thresholds: {expr}"
+        );
+    }
+
+    #[test]
+    fn test_time_remap_setpts_respects_non_zero_source_offsets() {
+        use crate::core::timeline::{KeyframeInterpolation, TimeRemapCurve, TimeRemapKeyframe};
+
+        let curve = TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 2.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 4.0,
+                source_time: 8.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]);
+
+        let expr = build_time_remap_setpts(&curve);
+        assert_eq!(expr, "(PTS-STARTPTS)*0.666667");
+    }
+
+    #[test]
+    fn test_time_remap_video_filter() {
+        use crate::core::timeline::{
+            ClipPlace, ClipRange, KeyframeInterpolation, TimeRemapCurve, TimeRemapKeyframe,
+        };
+
+        let mut clip = Clip::new("asset_1");
+        clip.range = ClipRange::new(0.0, 10.0);
+        clip.place = ClipPlace::new(0.0, 5.0);
+        clip.time_remap = Some(TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 5.0,
+                source_time: 10.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]));
+
+        let mut filter = String::new();
+        build_video_trim_filter(&clip, 0, "vtrim0", &mut filter);
+
+        assert!(
+            filter.contains("setpts="),
+            "should contain setpts: {filter}"
+        );
+        assert!(
+            filter.contains("[vtrim0]"),
+            "should have output label: {filter}"
+        );
+        // Source range should cover 0 to 10
+        assert!(
+            filter.contains("trim=start=0:end=10"),
+            "should trim full source range: {filter}"
+        );
+    }
+
+    #[test]
+    fn test_time_remap_audio_filter_avg_speed() {
+        use crate::core::timeline::{
+            ClipPlace, ClipRange, KeyframeInterpolation, TimeRemapCurve, TimeRemapKeyframe,
+        };
+
+        let mut clip = Clip::new("asset_1");
+        clip.range = ClipRange::new(0.0, 10.0);
+        clip.place = ClipPlace::new(0.0, 5.0);
+        clip.time_remap = Some(TimeRemapCurve::new(vec![
+            TimeRemapKeyframe {
+                timeline_time: 0.0,
+                source_time: 0.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+            TimeRemapKeyframe {
+                timeline_time: 5.0,
+                source_time: 10.0,
+                interpolation: KeyframeInterpolation::Linear,
+            },
+        ]));
+
+        let mut filter = String::new();
+        let result_label = build_audio_trim_filter(&clip, 0, "atrim0", &mut filter);
+
+        // Average speed = 10/5 = 2.0, so atempo=2
+        assert!(
+            filter.contains("atempo=2"),
+            "should contain atempo for avg speed: {filter}"
+        );
+        assert_eq!(result_label, "aspd0");
     }
 }

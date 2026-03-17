@@ -231,6 +231,46 @@ pub struct SetClipSpeedPayload {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReverseClipPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateFreezeFramePayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub playhead_sec: f64,
+    #[serde(default = "default_freeze_duration")]
+    pub duration_sec: f64,
+}
+
+fn default_freeze_duration() -> f64 {
+    crate::core::commands::DEFAULT_FREEZE_FRAME_DURATION
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetTimeRemapPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub time_remap: crate::core::timeline::TimeRemapCurve,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClearTimeRemapPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SetClipMutePayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
@@ -747,6 +787,22 @@ pub enum CommandPayload {
     )]
     SetClipSpeed(SetClipSpeedPayload),
 
+    #[serde(alias = "reverseClip", alias = "ReverseClip")]
+    ReverseClip(ReverseClipPayload),
+
+    #[serde(
+        alias = "createFreezeFrame",
+        alias = "CreateFreezeFrame",
+        alias = "freezeFrame"
+    )]
+    CreateFreezeFrame(CreateFreezeFramePayload),
+
+    #[serde(alias = "setTimeRemap", alias = "SetTimeRemap")]
+    SetTimeRemap(SetTimeRemapPayload),
+
+    #[serde(alias = "clearTimeRemap", alias = "ClearTimeRemap")]
+    ClearTimeRemap(ClearTimeRemapPayload),
+
     #[serde(alias = "setClipMute", alias = "SetClipMute")]
     SetClipMute(SetClipMutePayload),
 
@@ -930,17 +986,18 @@ impl CommandPayload {
     ) -> Box<dyn crate::core::commands::Command> {
         use crate::core::commands::{
             AddEffectCommand, AddMarkerCommand, AddMaskCommand, AddTextClipCommand,
-            AddTrackCommand, CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand,
-            CreateFolderCommand, CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand,
-            ExtractEditCommand, ImportAssetCommand, InsertClipCommand, InsertEditCommand,
-            LiftCommand, MoveClipCommand, MoveFileCommand, OverwriteEditCommand,
-            RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand,
-            RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
-            RenameTrackCommand, ReorderTracksCommand, RippleDeleteCommand, SetClipAudioCommand,
-            SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand,
-            SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand,
-            ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
-            TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
+            AddTrackCommand, ClearTimeRemapCommand, CloseAllGapsCommand, CloseGapCommand,
+            CreateCaptionCommand, CreateFolderCommand, CreateFreezeFrameCommand,
+            CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand, ExtractEditCommand,
+            ImportAssetCommand, InsertClipCommand, InsertEditCommand, LiftCommand, MoveClipCommand,
+            MoveFileCommand, OverwriteEditCommand, RemoveAssetCommand, RemoveClipCommand,
+            RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
+            RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, ReorderTracksCommand,
+            ReverseClipCommand, RippleDeleteCommand, SetClipAudioCommand, SetClipBlendModeCommand,
+            SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand, SetTimeRemapCommand,
+            SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand,
+            ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand,
+            UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
         };
 
         match self {
@@ -1038,6 +1095,29 @@ impl CommandPayload {
                 &p.clip_id,
                 p.speed,
                 p.reverse,
+            )),
+            CommandPayload::ReverseClip(p) => Box::new(ReverseClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+            )),
+            CommandPayload::CreateFreezeFrame(p) => Box::new(CreateFreezeFrameCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.playhead_sec,
+                p.duration_sec,
+            )),
+            CommandPayload::SetTimeRemap(p) => Box::new(SetTimeRemapCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.time_remap,
+            )),
+            CommandPayload::ClearTimeRemap(p) => Box::new(ClearTimeRemapCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
             )),
             CommandPayload::SetClipMute(p) => Box::new(SetClipMuteCommand::new(
                 &p.sequence_id,

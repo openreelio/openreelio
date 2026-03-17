@@ -1460,6 +1460,20 @@ async reverseMatchFrame() : Promise<Result<ReverseMatchFrameResult, string>> {
 }
 },
 /**
+ * Performs an atomic 3-point edit: reads source monitor In/Out, resolves the
+ * target track, and executes an Insert or Overwrite edit in a single operation.
+ * 
+ * This avoids race conditions between reading source state and executing the
+ * edit that occur when the frontend orchestrates these as separate IPC calls.
+ */
+async threePointInsert(payload: ThreePointEditPayload) : Promise<Result<ThreePointEditResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("three_point_insert", { payload }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Write an agent trace JSON file to the project's trace directory.
  * 
  * Traces are stored at `{project_path}/.openreelio/traces/{trace_id}.json`.
@@ -2444,7 +2458,16 @@ speed: number;
 /**
  * Playback direction (true = reverse)
  */
-reverse?: boolean; effects: string[]; audio: AudioSettings; 
+reverse?: boolean; 
+/**
+ * Whether this clip is a freeze frame (single frame looped for duration)
+ */
+freezeFrame?: boolean; 
+/**
+ * Optional time remap curve for variable-speed playback.
+ * When present and valid, overrides the constant `speed` field.
+ */
+timeRemap?: TimeRemapCurve | null; effects: string[]; audio: AudioSettings; 
 /**
  * Optional label for organization
  */
@@ -3105,6 +3128,38 @@ export type JobStatusDto =
  */
 { type: "cancelled" }
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue }
+/**
+ * Interpolation method for time remap keyframes.
+ */
+export type KeyframeInterpolation = 
+/**
+ * Constant speed between keyframes (linear source-time mapping)
+ */
+"linear" | 
+/**
+ * Smooth ease via cubic bezier (control points define the curve shape)
+ */
+{ bezier: { 
+/**
+ * Control point 1 x (0.0-1.0, normalized within the keyframe segment)
+ */
+cp1x: number; 
+/**
+ * Control point 1 y (0.0-1.0, normalized within source-time range)
+ */
+cp1y: number; 
+/**
+ * Control point 2 x (0.0-1.0)
+ */
+cp2x: number; 
+/**
+ * Control point 2 y (0.0-1.0)
+ */
+cp2y: number } } | 
+/**
+ * Hold at the current source time until the next keyframe
+ */
+"hold"
 /**
  * A single knowledge entry learned from AI interactions.
  */
@@ -4729,6 +4784,101 @@ lineHeight?: number;
  * Letter spacing in pixels (0 = normal, positive = expanded, negative = condensed)
  */
 letterSpacing?: number }
+/**
+ * Edit mode for 3-point editing operations.
+ */
+export type ThreePointEditMode = 
+/**
+ * Insert edit: pushes downstream clips right.
+ */
+"insert" | 
+/**
+ * Overwrite edit: replaces content in time range.
+ */
+"overwrite"
+/**
+ * Payload for atomic 3-point edit from source monitor.
+ */
+export type ThreePointEditPayload = { 
+/**
+ * Sequence to edit.
+ */
+sequenceId: string; 
+/**
+ * Target track. If omitted, auto-selects first unlocked video track.
+ */
+trackId: string | null; 
+/**
+ * Timeline playhead position (seconds).
+ */
+timelinePosition: number; 
+/**
+ * Insert or overwrite mode.
+ */
+editMode: ThreePointEditMode }
+/**
+ * Result of a 3-point edit operation.
+ */
+export type ThreePointEditResult = { 
+/**
+ * ID of the created clip.
+ */
+clipId: string; 
+/**
+ * Asset ID used.
+ */
+assetId: string; 
+/**
+ * Source range used (in seconds).
+ */
+sourceIn: number; 
+/**
+ * Source range used (out seconds).
+ */
+sourceOut: number; 
+/**
+ * Timeline position where clip was placed.
+ */
+timelinePosition: number; 
+/**
+ * Duration of the placed clip on the timeline.
+ */
+duration: number; 
+/**
+ * Edit mode that was applied.
+ */
+editMode: ThreePointEditMode }
+/**
+ * A complete time remap curve for variable-speed playback.
+ * 
+ * When active on a clip, this replaces the constant `speed` field.
+ * The curve defines a mapping from timeline time to source time via keyframes.
+ * Between keyframes, interpolation determines how source time progresses.
+ */
+export type TimeRemapCurve = { 
+/**
+ * Ordered keyframes (must be sorted by `timeline_time`)
+ */
+keyframes: TimeRemapKeyframe[] }
+/**
+ * A single keyframe in a time remap curve.
+ * 
+ * Maps a timeline position to a source position: "at `timeline_time` seconds
+ * into the clip, show the frame from `source_time` seconds in the source."
+ */
+export type TimeRemapKeyframe = { 
+/**
+ * Position on the timeline (seconds from clip start, 0-based)
+ */
+timelineTime: number; 
+/**
+ * Corresponding position in the source media (seconds)
+ */
+sourceTime: number; 
+/**
+ * How to interpolate to the next keyframe
+ */
+interpolation?: KeyframeInterpolation }
 /**
  * Summary information about a single agent trace file.
  */
