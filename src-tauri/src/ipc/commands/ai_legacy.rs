@@ -760,16 +760,17 @@ pub async fn apply_edit_script(
 ) -> Result<ApplyEditScriptResult, String> {
     use crate::core::commands::{
         AddEffectCommand, AddMarkerCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand,
-        CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand, CreateFolderCommand,
-        CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand, ExtractEditCommand,
-        InsertClipCommand, InsertEditCommand, LiftCommand, MoveClipCommand, MoveFileCommand,
-        OverwriteEditCommand, RemoveAssetCommand, RemoveClipCommand, RemoveEffectCommand,
-        RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand,
-        RenameFileCommand, RenameTrackCommand, ReorderTracksCommand, RippleDeleteCommand,
-        SetClipAudioCommand, SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand,
-        SetClipTransformCommand, SetTrackBlendModeCommand, SplitClipCommand,
-        ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
-        TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
+        ClearTimeRemapCommand, CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand,
+        CreateFolderCommand, CreateFreezeFrameCommand, CreateSequenceCommand, DeleteCaptionCommand,
+        DeleteFileCommand, ExtractEditCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
+        MoveClipCommand, MoveFileCommand, OverwriteEditCommand, RemoveAssetCommand,
+        RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand,
+        RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand, RenameTrackCommand,
+        ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand, SetClipAudioCommand,
+        SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
+        SetTimeRemapCommand, SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand,
+        ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand, UpdateEffectCommand,
+        UpdateMaskCommand, UpdateTextCommand,
     };
 
     let mut guard = state.project.lock().await;
@@ -1014,6 +1015,29 @@ pub async fn apply_edit_script(
                 &p.clip_id,
                 p.speed,
                 p.reverse,
+            )),
+            CommandPayload::ReverseClip(p) => Box::new(ReverseClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+            )),
+            CommandPayload::CreateFreezeFrame(p) => Box::new(CreateFreezeFrameCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.playhead_sec,
+                p.duration_sec,
+            )),
+            CommandPayload::SetTimeRemap(p) => Box::new(SetTimeRemapCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.time_remap,
+            )),
+            CommandPayload::ClearTimeRemap(p) => Box::new(ClearTimeRemapCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
             )),
             CommandPayload::SetClipMute(p) => Box::new(SetClipMuteCommand::new(
                 &p.sequence_id,
