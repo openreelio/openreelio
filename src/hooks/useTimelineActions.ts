@@ -21,8 +21,10 @@ import { useToastStore } from '@/hooks/useToast';
 import { commands } from '@/bindings';
 import { createLogger } from '@/services/logger';
 import { isTauriRuntime } from '@/services/framePaths';
-import { refreshProjectState } from '@/utils/stateRefreshHelper';
+import { applyProjectState, refreshProjectState } from '@/utils/stateRefreshHelper';
+import { commandQueue } from '@/utils/commandQueue';
 import { probeMedia } from '@/utils/ffmpeg';
+import { requestDeduplicator } from '@/utils/requestDeduplicator';
 import type {
   AssetDropData,
   ClipAudioUpdateData,
@@ -107,6 +109,9 @@ interface TimelineActions {
   handleLiftClips: (clipIds: string[]) => Promise<void>;
   handleInsertEditFromSource: () => Promise<void>;
   handleOverwriteEditFromSource: () => Promise<void>;
+  handleSetClipSpeed: (clipId: string, trackId: string, speed: number, reverse: boolean) => Promise<void>;
+  handleReverseClip: (clipId: string, trackId: string) => Promise<void>;
+  handleCreateFreezeFrame: (clipId: string, trackId: string) => Promise<void>;
 }
 
 type ExecuteTimelineCommand = (command: Command) => Promise<CommandResult>;
@@ -2759,85 +2764,132 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     [sequence, linkedSelectionEnabled, executeCommand, getCurrentSequence],
   );
 
-  const handleInsertEditFromSource = useCallback(async (): Promise<void> => {
+  const runThreePointEdit = useCallback(async (editMode: 'insert' | 'overwrite'): Promise<void> => {
     if (!sequence) return;
+
     const playhead = usePlaybackStore.getState().currentTime;
-
-    let result;
-    try {
-      result = await commands.getSourceState();
-    } catch (error) {
-      logger.error('Insert edit: failed to query source state', { error });
-      return;
-    }
-    if (result.status !== 'ok' || !result.data.assetId) {
-      logger.warn('Insert edit: no source asset loaded');
-      return;
-    }
-
-    const { assetId, inPoint, outPoint } = result.data;
-    const targetTrack = sequence.tracks.find((t) => t.kind === 'video' && !t.locked);
-    if (!targetTrack) {
-      logger.warn('Insert edit: no unlocked video track');
-      return;
-    }
+    const payload = {
+      sequenceId: sequence.id,
+      trackId: null,
+      timelinePosition: playhead,
+      editMode,
+    };
+    const operationSuffix = editMode === 'insert' ? 'insert' : 'overwrite';
 
     try {
-      await executeCommand({
-        type: 'InsertEdit',
-        payload: {
-          sequenceId: sequence.id,
-          trackId: targetTrack.id,
-          assetId,
-          timelinePosition: playhead,
-          ...(inPoint !== null ? { sourceIn: inPoint } : {}),
-          ...(outPoint !== null ? { sourceOut: outPoint } : {}),
-        },
-      });
+      await requestDeduplicator.execute('threePointInsert', payload, () =>
+        commandQueue.enqueue(async () => {
+          const versionBefore = useProjectStore.getState().stateVersion;
+          const result = await commands.threePointInsert(payload);
+
+          if (result.status !== 'ok') {
+            const errorMessage = extractErrorMessage(result.error);
+            useProjectStore.setState((draft) => {
+              draft.error = errorMessage;
+            });
+            throw new Error(errorMessage);
+          }
+
+          const freshState = await refreshProjectState();
+          let concurrentModificationDetected = false;
+
+          useProjectStore.setState((draft) => {
+            if (draft.stateVersion !== versionBefore) {
+              concurrentModificationDetected = true;
+              logger.error(`Concurrent modification detected during 3-point ${operationSuffix} edit`, {
+                expectedVersion: versionBefore,
+                actualVersion: draft.stateVersion,
+              });
+              return;
+            }
+
+            draft.isDirty = true;
+            draft.stateVersion += 1;
+            draft.error = null;
+            applyProjectState(draft, freshState);
+          });
+
+          if (concurrentModificationDetected) {
+            throw new Error(
+              `Concurrent modification detected during 3-point ${operationSuffix} edit. Please retry the operation.`,
+            );
+          }
+
+          logger.info(`3-point ${operationSuffix} edit completed`, {
+            clipId: result.data.clipId,
+            duration: result.data.duration,
+          });
+        }, `threePointInsert:${operationSuffix}`),
+      );
     } catch (error) {
-      logger.error('Failed to insert edit from source', { error });
+      logger.error(`Failed to ${operationSuffix} edit from source`, { error });
     }
-  }, [sequence, executeCommand]);
+  }, [sequence]);
+
+  const handleInsertEditFromSource = useCallback(async (): Promise<void> => {
+    await runThreePointEdit('insert');
+  }, [runThreePointEdit]);
 
   const handleOverwriteEditFromSource = useCallback(async (): Promise<void> => {
-    if (!sequence) return;
-    const playhead = usePlaybackStore.getState().currentTime;
+    await runThreePointEdit('overwrite');
+  }, [runThreePointEdit]);
 
-    let result;
-    try {
-      result = await commands.getSourceState();
-    } catch (error) {
-      logger.error('Overwrite edit: failed to query source state', { error });
-      return;
-    }
-    if (result.status !== 'ok' || !result.data.assetId) {
-      logger.warn('Overwrite edit: no source asset loaded');
-      return;
-    }
+  // ===========================================================================
+  // Speed Operations
+  // ===========================================================================
 
-    const { assetId, inPoint, outPoint } = result.data;
-    const targetTrack = sequence.tracks.find((t) => t.kind === 'video' && !t.locked);
-    if (!targetTrack) {
-      logger.warn('Overwrite edit: no unlocked video track');
-      return;
-    }
-
-    try {
+  const handleSetClipSpeed = useCallback(
+    async (clipId: string, trackId: string, speed: number, reverse: boolean): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq) return;
       await executeCommand({
-        type: 'OverwriteEdit',
+        type: 'SetClipSpeed',
         payload: {
-          sequenceId: sequence.id,
-          trackId: targetTrack.id,
-          assetId,
-          timelinePosition: playhead,
-          ...(inPoint !== null ? { sourceIn: inPoint } : {}),
-          ...(outPoint !== null ? { sourceOut: outPoint } : {}),
+          sequenceId: seq.id,
+          trackId,
+          clipId,
+          speed,
+          reverse,
         },
       });
-    } catch (error) {
-      logger.error('Failed to overwrite edit from source', { error });
-    }
-  }, [sequence, executeCommand]);
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
+  const handleReverseClip = useCallback(
+    async (clipId: string, trackId: string): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq) return;
+      await executeCommand({
+        type: 'ReverseClip',
+        payload: {
+          sequenceId: seq.id,
+          trackId,
+          clipId,
+        },
+      });
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
+  const handleCreateFreezeFrame = useCallback(
+    async (clipId: string, trackId: string): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq) return;
+      const playheadSec = usePlaybackStore.getState().currentTime;
+      await executeCommand({
+        type: 'CreateFreezeFrame',
+        payload: {
+          sequenceId: seq.id,
+          trackId,
+          clipId,
+          playheadSec,
+          durationSec: 2.0,
+        },
+      });
+    },
+    [executeCommand, getCurrentSequence],
+  );
 
   return {
     handleClipMove,
@@ -2862,5 +2914,8 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleLiftClips,
     handleInsertEditFromSource,
     handleOverwriteEditFromSource,
+    handleSetClipSpeed,
+    handleReverseClip,
+    handleCreateFreezeFrame,
   };
 }
