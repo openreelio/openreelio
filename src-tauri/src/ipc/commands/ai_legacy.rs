@@ -1624,7 +1624,10 @@ pub async fn validate_edit_script(
                     issues.push(format!("MoveAudioKeyframe command {} missing clipId", i));
                 }
                 if cmd.params.get("keyframeIndex").is_none() {
-                    issues.push(format!("MoveAudioKeyframe command {} missing keyframeIndex", i));
+                    issues.push(format!(
+                        "MoveAudioKeyframe command {} missing keyframeIndex",
+                        i
+                    ));
                 }
                 match cmd.params.get("newTimeOffset").and_then(|v| v.as_f64()) {
                     Some(v) if v.is_finite() && v >= 0.0 => {}
