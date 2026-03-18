@@ -143,7 +143,7 @@ function normalizeCaptionPositionValue(value: unknown): CaptionPosition | null {
 }
 
 export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps): JSX.Element {
-  const { selectedAssetId, assets } = useProjectStore();
+  const { selectedAssetId, assets, executeCommand } = useProjectStore();
   const currentTime = usePlaybackStore((state) => state.currentTime);
   const { selectedClipIds, linkedSelectionEnabled } = useTimelineStore();
 
@@ -253,6 +253,10 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       void initAudioMixer();
     }
   }, [isPlaying, isAudioMixerReady, initAudioMixer]);
+
+  useEffect(() => {
+    setMixerMasterVolume(sequence?.masterVolumeDb ?? 0);
+  }, [sequence?.id, sequence?.masterVolumeDb, setMixerMasterVolume]);
 
   // Initialize mixer tracks when sequence changes
   useEffect(() => {
@@ -664,8 +668,14 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   const handleMasterVolumeChange = useCallback(
     (volumeDb: number) => {
       setMixerMasterVolume(volumeDb);
+      if (sequence?.id) {
+        void executeCommand({
+          type: 'SetMasterVolume',
+          payload: { sequenceId: sequence.id, volumeDb },
+        });
+      }
     },
-    [setMixerMasterVolume],
+    [setMixerMasterVolume, executeCommand, sequence?.id],
   );
 
   const handleMasterMuteToggle = useCallback(() => {
@@ -865,7 +875,10 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                   </TimelineErrorBoundary>
                 </div>
                 {showMixer && (
-                  <div className="shrink-0 border-t border-editor-border bg-editor-sidebar" style={{ height: '220px' }}>
+                  <div
+                    className="shrink-0 border-t border-editor-border bg-editor-sidebar"
+                    style={{ height: '220px' }}
+                  >
                     <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
                       <AudioMixerPanel
                         tracks={sequence?.tracks ?? []}
