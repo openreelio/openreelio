@@ -1013,8 +1013,32 @@ impl CommandExecutor {
                 to_value(sequence)
             }
 
-            OpKind::SequenceUpdate | OpKind::SequenceRemove => {
-                // Keep shape consistent with ProjectState::apply_sequence_update/remove.
+            OpKind::SequenceUpdate => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("SequenceUpdate payload missing sequenceId".to_string())
+                })?;
+                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                    CoreError::Internal(format!("SequenceUpdate could not find sequence: {seq_id}"))
+                })?;
+
+                let mut payload = command_json
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_else(serde_json::Map::new);
+                payload.insert(
+                    "name".to_string(),
+                    serde_json::Value::String(sequence.name.clone()),
+                );
+                payload.insert(
+                    "masterVolumeDb".to_string(),
+                    serde_json::json!(sequence.master_volume_db),
+                );
+
+                Ok(serde_json::Value::Object(payload))
+            }
+
+            OpKind::SequenceRemove => {
+                // Keep shape consistent with ProjectState::apply_sequence_remove.
                 Ok(command_json)
             }
 
@@ -1107,6 +1131,60 @@ impl CommandExecutor {
                     "visible": visible,
                     "volume": volume,
                 }))
+            }
+
+            OpKind::ClipUpdate => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("ClipUpdate payload missing sequenceId".to_string())
+                })?;
+                let clip_id = get_str(&command_json, "clipId").ok_or_else(|| {
+                    CoreError::Internal("ClipUpdate payload missing clipId".to_string())
+                })?;
+
+                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                    CoreError::Internal(format!("ClipUpdate could not find sequence: {seq_id}"))
+                })?;
+                let (_, clip) =
+                    Self::find_clip_in_sequence(sequence, clip_id).ok_or_else(|| {
+                        CoreError::Internal(format!("ClipUpdate could not find clip: {clip_id}"))
+                    })?;
+
+                let mut payload = command_json
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_else(serde_json::Map::new);
+                payload.insert(
+                    "sequenceId".to_string(),
+                    serde_json::Value::String(seq_id.to_string()),
+                );
+                payload.insert(
+                    "clipId".to_string(),
+                    serde_json::Value::String(clip_id.to_string()),
+                );
+
+                if matches!(
+                    type_name,
+                    "SetClipAudio"
+                        | "SetClipMute"
+                        | "AddAudioKeyframe"
+                        | "RemoveAudioKeyframe"
+                        | "MoveAudioKeyframe"
+                        | "SetAudioKeyframeValue"
+                        | "SetAudioFadeIn"
+                        | "SetAudioFadeOut"
+                ) {
+                    payload.insert("audio".to_string(), to_value(&clip.audio)?);
+                }
+
+                if type_name == "SetClipTransform" {
+                    payload.insert("transform".to_string(), to_value(&clip.transform)?);
+                }
+
+                if type_name == "SetClipBlendMode" {
+                    payload.insert("blendMode".to_string(), to_value(&clip.blend_mode)?);
+                }
+
+                Ok(serde_json::Value::Object(payload))
             }
 
             OpKind::ClipAdd => {
@@ -1465,8 +1543,17 @@ impl CommandExecutor {
             "RemoveClip" | "DeleteClip" => OpKind::ClipRemove,
             "MoveClip" => OpKind::ClipMove,
             "TrimClip" => OpKind::ClipTrim,
-            "SetClipMute" | "SetClipTransform" | "SetClipAudio" | "SetClipSpeed"
-            | "SetClipBlendMode" => OpKind::ClipUpdate,
+            "SetClipMute"
+            | "SetClipTransform"
+            | "SetClipAudio"
+            | "SetClipSpeed"
+            | "SetClipBlendMode"
+            | "AddAudioKeyframe"
+            | "RemoveAudioKeyframe"
+            | "MoveAudioKeyframe"
+            | "SetAudioKeyframeValue"
+            | "SetAudioFadeIn"
+            | "SetAudioFadeOut" => OpKind::ClipUpdate,
             "SplitClip" => OpKind::ClipSplit,
             "AddTrack" | "InsertTrack" => OpKind::TrackAdd,
             "RemoveTrack" | "DeleteTrack" => OpKind::TrackRemove,
@@ -1489,7 +1576,7 @@ impl CommandExecutor {
             "CreateCaption" => OpKind::CaptionAdd,
             "DeleteCaption" => OpKind::CaptionRemove,
             "CreateSequence" => OpKind::SequenceCreate,
-            "UpdateSequence" => OpKind::SequenceUpdate,
+            "UpdateSequence" | "SetMasterVolume" => OpKind::SequenceUpdate,
             "RemoveSequence" | "DeleteSequence" => OpKind::SequenceRemove,
             "CreateProject" => OpKind::ProjectCreate,
             "UpdateProjectSettings" => OpKind::ProjectSettings,
@@ -1524,14 +1611,18 @@ mod tests {
     use super::*;
     use crate::core::assets::{Asset, VideoInfo};
     use crate::core::commands::{
-        AddEffectCommand, CloseAllGapsCommand, CloseGapCommand, CreateSequenceCommand,
-        ExtractEditCommand, ImportAssetCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
-        MoveClipCommand, OverwriteEditCommand, RippleDeleteCommand, SetClipBlendModeCommand,
-        SetTrackBlendModeCommand, SplitClipCommand, StateChange, TrimClipCommand,
+        AddAudioKeyframeCommand, AddEffectCommand, CloseAllGapsCommand, CloseGapCommand,
+        CreateSequenceCommand, ExtractEditCommand, ImportAssetCommand, InsertClipCommand,
+        InsertEditCommand, LiftCommand, MoveClipCommand, OverwriteEditCommand, RippleDeleteCommand,
+        SetAudioFadeInCommand, SetAudioFadeOutCommand, SetClipBlendModeCommand,
+        SetMasterVolumeCommand, SetTrackBlendModeCommand, SplitClipCommand, StateChange,
+        TrimClipCommand,
     };
     use crate::core::effects::{EffectType, ParamValue};
     use crate::core::project::{OpKind, Operation, OpsLog, ProjectMeta, ProjectState};
-    use crate::core::timeline::{BlendMode, Clip, Sequence, SequenceFormat, Track, TrackKind};
+    use crate::core::timeline::{
+        BlendMode, Clip, FadeType, Sequence, SequenceFormat, Track, TrackKind,
+    };
     use tempfile::TempDir;
 
     // Test command implementation
@@ -2776,6 +2867,18 @@ mod tests {
             OpKind::AssetImport
         );
         assert_eq!(
+            CommandExecutor::type_name_to_op_kind("AddAudioKeyframe"),
+            OpKind::ClipUpdate
+        );
+        assert_eq!(
+            CommandExecutor::type_name_to_op_kind("SetAudioFadeIn"),
+            OpKind::ClipUpdate
+        );
+        assert_eq!(
+            CommandExecutor::type_name_to_op_kind("SetMasterVolume"),
+            OpKind::SequenceUpdate
+        );
+        assert_eq!(
             CommandExecutor::type_name_to_op_kind("UnknownCommand"),
             OpKind::Batch
         );
@@ -2947,6 +3050,124 @@ mod tests {
         // Ensure deterministic ordering after replay.
         let ordered: Vec<_> = replayed_track.clips.iter().map(|c| c.id.clone()).collect();
         assert_eq!(ordered, vec![clip_id, new_clip_id]);
+    }
+
+    #[test]
+    fn test_executor_ops_log_replay_roundtrip_for_audio_automation_and_master_volume() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+
+        let mut executor = CommandExecutor::with_ops_log(OpsLog::new(&ops_path));
+        let mut state = ProjectState::new_empty("Test");
+
+        executor
+            .execute(
+                Box::new(CreateSequenceCommand::new("Main", "1080p")),
+                &mut state,
+            )
+            .unwrap();
+
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let audio_track_id = state.sequences[&seq_id].tracks[1].id.clone();
+
+        let asset_path = temp_dir.path().join("tone.wav");
+        std::fs::write(&asset_path, b"test").unwrap();
+        let asset_uri = asset_path.to_string_lossy().to_string();
+
+        let import_cmd = ImportAssetCommand::new("tone.wav", &asset_uri).with_duration(30.0);
+        executor
+            .execute(Box::new(import_cmd.clone()), &mut state)
+            .unwrap();
+        let asset_id = import_cmd.asset_id().to_string();
+
+        let insert_result = executor
+            .execute(
+                Box::new(
+                    InsertClipCommand::new(&seq_id, &audio_track_id, &asset_id, 0.0)
+                        .with_source_range(0.0, 10.0),
+                ),
+                &mut state,
+            )
+            .unwrap();
+        let clip_id = insert_result.created_ids[0].clone();
+
+        executor
+            .execute(
+                Box::new(AddAudioKeyframeCommand::new(
+                    &seq_id,
+                    &audio_track_id,
+                    &clip_id,
+                    2.5,
+                    -9.0,
+                    Default::default(),
+                )),
+                &mut state,
+            )
+            .unwrap();
+        executor
+            .execute(
+                Box::new(AddAudioKeyframeCommand::new(
+                    &seq_id,
+                    &audio_track_id,
+                    &clip_id,
+                    7.5,
+                    -3.0,
+                    Default::default(),
+                )),
+                &mut state,
+            )
+            .unwrap();
+        executor
+            .execute(
+                Box::new(SetAudioFadeInCommand::new(
+                    &seq_id,
+                    &audio_track_id,
+                    &clip_id,
+                    1.25,
+                    FadeType::SCurve,
+                )),
+                &mut state,
+            )
+            .unwrap();
+        executor
+            .execute(
+                Box::new(SetAudioFadeOutCommand::new(
+                    &seq_id,
+                    &audio_track_id,
+                    &clip_id,
+                    0.75,
+                    FadeType::Exponential,
+                )),
+                &mut state,
+            )
+            .unwrap();
+        executor
+            .execute(
+                Box::new(SetMasterVolumeCommand::new(&seq_id, -6.0)),
+                &mut state,
+            )
+            .unwrap();
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+
+        let replayed_sequence = replayed.sequences.get(&seq_id).unwrap();
+        let replayed_clip = replayed_sequence
+            .get_track(&audio_track_id)
+            .and_then(|track| track.get_clip(&clip_id))
+            .unwrap();
+
+        assert!((replayed_sequence.master_volume_db - (-6.0)).abs() < 1e-6);
+        assert_eq!(replayed_clip.audio.volume_keyframes.len(), 2);
+        assert!((replayed_clip.audio.volume_keyframes[0].time_offset - 2.5).abs() < 1e-6);
+        assert!((replayed_clip.audio.volume_keyframes[0].value_db - (-9.0)).abs() < 1e-6);
+        assert!((replayed_clip.audio.volume_keyframes[1].time_offset - 7.5).abs() < 1e-6);
+        assert!((replayed_clip.audio.volume_keyframes[1].value_db - (-3.0)).abs() < 1e-6);
+        assert!((replayed_clip.audio.fade_in_sec - 1.25).abs() < 1e-6);
+        assert_eq!(replayed_clip.audio.fade_in_type, FadeType::SCurve);
+        assert!((replayed_clip.audio.fade_out_sec - 0.75).abs() < 1e-6);
+        assert_eq!(replayed_clip.audio.fade_out_type, FadeType::Exponential);
     }
 
     #[test]
