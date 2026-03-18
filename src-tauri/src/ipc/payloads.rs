@@ -293,6 +293,70 @@ pub struct SetClipAudioPayload {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AddAudioKeyframePayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub time_offset: f64,
+    pub value_db: f64,
+    #[serde(default)]
+    pub interpolation: crate::core::timeline::KeyframeInterpolation,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveAudioKeyframePayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub keyframe_index: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MoveAudioKeyframePayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub keyframe_index: usize,
+    pub new_time_offset: f64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetAudioKeyframeValuePayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub keyframe_index: usize,
+    pub value_db: f64,
+    pub interpolation: Option<crate::core::timeline::KeyframeInterpolation>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetAudioFadeInPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub duration: f64,
+    #[serde(default)]
+    pub fade_type: crate::core::timeline::FadeType,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetAudioFadeOutPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub duration: f64,
+    #[serde(default)]
+    pub fade_type: crate::core::timeline::FadeType,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SplitClipPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
@@ -319,6 +383,13 @@ pub struct RemoveAssetPayload {
 pub struct CreateSequencePayload {
     pub name: String,
     pub format: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetMasterVolumePayload {
+    pub sequence_id: SequenceId,
+    pub volume_db: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -809,6 +880,24 @@ pub enum CommandPayload {
     #[serde(alias = "setClipAudio", alias = "SetClipAudio")]
     SetClipAudio(SetClipAudioPayload),
 
+    #[serde(alias = "addAudioKeyframe", alias = "AddAudioKeyframe")]
+    AddAudioKeyframe(AddAudioKeyframePayload),
+
+    #[serde(alias = "removeAudioKeyframe", alias = "RemoveAudioKeyframe")]
+    RemoveAudioKeyframe(RemoveAudioKeyframePayload),
+
+    #[serde(alias = "moveAudioKeyframe", alias = "MoveAudioKeyframe")]
+    MoveAudioKeyframe(MoveAudioKeyframePayload),
+
+    #[serde(alias = "setAudioKeyframeValue", alias = "SetAudioKeyframeValue")]
+    SetAudioKeyframeValue(SetAudioKeyframeValuePayload),
+
+    #[serde(alias = "setAudioFadeIn", alias = "SetAudioFadeIn")]
+    SetAudioFadeIn(SetAudioFadeInPayload),
+
+    #[serde(alias = "setAudioFadeOut", alias = "SetAudioFadeOut")]
+    SetAudioFadeOut(SetAudioFadeOutPayload),
+
     #[serde(alias = "setTrackBlendMode", alias = "SetTrackBlendMode")]
     SetTrackBlendMode(SetTrackBlendModePayload),
 
@@ -823,6 +912,9 @@ pub enum CommandPayload {
 
     #[serde(alias = "createSequence", alias = "CreateSequence")]
     CreateSequence(CreateSequencePayload),
+
+    #[serde(alias = "setMasterVolume", alias = "SetMasterVolume")]
+    SetMasterVolume(SetMasterVolumePayload),
 
     #[serde(
         alias = "createTrack",
@@ -985,19 +1077,22 @@ impl CommandPayload {
         project_path: &std::path::Path,
     ) -> Box<dyn crate::core::commands::Command> {
         use crate::core::commands::{
-            AddEffectCommand, AddMarkerCommand, AddMaskCommand, AddTextClipCommand,
-            AddTrackCommand, ClearTimeRemapCommand, CloseAllGapsCommand, CloseGapCommand,
-            CreateCaptionCommand, CreateFolderCommand, CreateFreezeFrameCommand,
+            AddAudioKeyframeCommand, AddEffectCommand, AddMarkerCommand, AddMaskCommand,
+            AddTextClipCommand, AddTrackCommand, ClearTimeRemapCommand, CloseAllGapsCommand,
+            CloseGapCommand, CreateCaptionCommand, CreateFolderCommand, CreateFreezeFrameCommand,
             CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand, ExtractEditCommand,
-            ImportAssetCommand, InsertClipCommand, InsertEditCommand, LiftCommand, MoveClipCommand,
-            MoveFileCommand, OverwriteEditCommand, RemoveAssetCommand, RemoveClipCommand,
-            RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
-            RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, ReorderTracksCommand,
-            ReverseClipCommand, RippleDeleteCommand, SetClipAudioCommand, SetClipBlendModeCommand,
-            SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand, SetTimeRemapCommand,
-            SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand,
-            ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand,
-            UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
+            ImportAssetCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
+            MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand, OverwriteEditCommand,
+            RemoveAssetCommand, RemoveAudioKeyframeCommand, RemoveClipCommand, RemoveEffectCommand,
+            RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand,
+            RenameFileCommand, RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand,
+            RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
+            SetAudioKeyframeValueCommand, SetClipAudioCommand, SetClipBlendModeCommand,
+            SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
+            SetMasterVolumeCommand, SetTimeRemapCommand, SetTrackBlendModeCommand,
+            SplitClipCommand, ToggleTrackLockCommand, ToggleTrackMuteCommand,
+            ToggleTrackVisibilityCommand, TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand,
+            UpdateTextCommand,
         };
 
         match self {
@@ -1135,6 +1230,51 @@ impl CommandPayload {
                 p.fade_in_sec,
                 p.fade_out_sec,
             )),
+            CommandPayload::AddAudioKeyframe(p) => Box::new(AddAudioKeyframeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.time_offset,
+                p.value_db,
+                p.interpolation,
+            )),
+            CommandPayload::RemoveAudioKeyframe(p) => Box::new(RemoveAudioKeyframeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.keyframe_index,
+            )),
+            CommandPayload::MoveAudioKeyframe(p) => Box::new(MoveAudioKeyframeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.keyframe_index,
+                p.new_time_offset,
+            )),
+            CommandPayload::SetAudioKeyframeValue(p) => {
+                Box::new(SetAudioKeyframeValueCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.keyframe_index,
+                    p.value_db,
+                    p.interpolation,
+                ))
+            }
+            CommandPayload::SetAudioFadeIn(p) => Box::new(SetAudioFadeInCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.duration,
+                p.fade_type,
+            )),
+            CommandPayload::SetAudioFadeOut(p) => Box::new(SetAudioFadeOutCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.duration,
+                p.fade_type,
+            )),
             CommandPayload::SetTrackBlendMode(p) => Box::new(SetTrackBlendModeCommand::new(
                 &p.sequence_id,
                 &p.track_id,
@@ -1152,6 +1292,9 @@ impl CommandPayload {
                 &p.name,
                 &p.format.unwrap_or_else(|| "1080p".to_string()),
             )),
+            CommandPayload::SetMasterVolume(p) => {
+                Box::new(SetMasterVolumeCommand::new(&p.sequence_id, p.volume_db))
+            }
             CommandPayload::CreateTrack(p) => {
                 let mut cmd = AddTrackCommand::new(&p.sequence_id, &p.name, p.kind);
                 if let Some(position) = p.position {

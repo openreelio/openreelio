@@ -759,18 +759,21 @@ pub async fn apply_edit_script(
     state: State<'_, AppState>,
 ) -> Result<ApplyEditScriptResult, String> {
     use crate::core::commands::{
-        AddEffectCommand, AddMarkerCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand,
-        ClearTimeRemapCommand, CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand,
-        CreateFolderCommand, CreateFreezeFrameCommand, CreateSequenceCommand, DeleteCaptionCommand,
-        DeleteFileCommand, ExtractEditCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
+        AddAudioKeyframeCommand, AddEffectCommand, AddMarkerCommand, AddMaskCommand,
+        AddTextClipCommand, AddTrackCommand, ClearTimeRemapCommand, CloseAllGapsCommand,
+        CloseGapCommand, CreateCaptionCommand, CreateFolderCommand, CreateFreezeFrameCommand,
+        CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand, ExtractEditCommand,
+        InsertClipCommand, InsertEditCommand, LiftCommand, MoveAudioKeyframeCommand,
         MoveClipCommand, MoveFileCommand, OverwriteEditCommand, RemoveAssetCommand,
-        RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand,
-        RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand, RenameTrackCommand,
-        ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand, SetClipAudioCommand,
-        SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
-        SetTimeRemapCommand, SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand,
-        ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand, UpdateEffectCommand,
-        UpdateMaskCommand, UpdateTextCommand,
+        RemoveAudioKeyframeCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand,
+        RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
+        RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand,
+        SetAudioFadeInCommand, SetAudioFadeOutCommand, SetAudioKeyframeValueCommand,
+        SetClipAudioCommand, SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand,
+        SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
+        SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand, ToggleTrackMuteCommand,
+        ToggleTrackVisibilityCommand, TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand,
+        UpdateTextCommand,
     };
 
     let mut guard = state.project.lock().await;
@@ -1055,6 +1058,54 @@ pub async fn apply_edit_script(
                 p.fade_in_sec,
                 p.fade_out_sec,
             )),
+            CommandPayload::AddAudioKeyframe(p) => Box::new(AddAudioKeyframeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.time_offset,
+                p.value_db,
+                p.interpolation,
+            )),
+            CommandPayload::RemoveAudioKeyframe(p) => Box::new(RemoveAudioKeyframeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.keyframe_index,
+            )),
+            CommandPayload::MoveAudioKeyframe(p) => Box::new(MoveAudioKeyframeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.keyframe_index,
+                p.new_time_offset,
+            )),
+            CommandPayload::SetAudioKeyframeValue(p) => {
+                Box::new(SetAudioKeyframeValueCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.keyframe_index,
+                    p.value_db,
+                    p.interpolation,
+                ))
+            }
+            CommandPayload::SetAudioFadeIn(p) => Box::new(SetAudioFadeInCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.duration,
+                p.fade_type,
+            )),
+            CommandPayload::SetAudioFadeOut(p) => Box::new(SetAudioFadeOutCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.duration,
+                p.fade_type,
+            )),
+            CommandPayload::SetMasterVolume(p) => {
+                Box::new(SetMasterVolumeCommand::new(&p.sequence_id, p.volume_db))
+            }
             CommandPayload::SetTrackBlendMode(p) => Box::new(SetTrackBlendModeCommand::new(
                 &p.sequence_id,
                 &p.track_id,
