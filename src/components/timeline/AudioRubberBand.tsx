@@ -140,11 +140,15 @@ export function AudioRubberBand({
   );
 
   // Right-click keyframe for context menu
-  const handleKeyframeContextMenu = useCallback((e: MouseEvent<SVGElement>, index: number) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setContextMenu({ x: e.clientX, y: e.clientY, keyframeIndex: index });
-  }, []);
+  const handleKeyframeContextMenu = useCallback(
+    (e: MouseEvent<SVGElement>, index: number) => {
+      if (disabled) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setContextMenu({ x: e.clientX, y: e.clientY, keyframeIndex: index });
+    },
+    [disabled],
+  );
 
   // Global drag events
   useEffect(() => {
@@ -258,7 +262,7 @@ export function AudioRubberBand({
       </svg>
 
       {/* Context menu */}
-      {contextMenu && (
+      {contextMenu && !disabled && (
         <KeyframeContextMenu
           x={contextMenu.x}
           y={contextMenu.y}

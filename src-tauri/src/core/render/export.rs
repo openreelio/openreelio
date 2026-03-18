@@ -2738,8 +2738,17 @@ pub fn build_complex_filter_args_with_audio_info(
         let clip_duration = clip.range.source_out_sec - clip.range.source_in_sec;
         let midpoint_time = clip_duration / 2.0;
 
+        // When volume automation keyframes are active, skip Volume effects
+        // to prevent double-application (keyframe filter + effect filter).
+        let skip_volume_effects = clip.audio.has_volume_automation();
+
         for effect_id in &clip.effects {
             if let Some(effect) = effects.get(effect_id) {
+                if skip_volume_effects && effect.effect_type == EffectType::Volume && effect.enabled
+                {
+                    continue;
+                }
+
                 // If effect has keyframes, resolve them at midpoint
                 let resolved_effect = if effect.has_keyframes() {
                     effect.with_params_at_time(midpoint_time)

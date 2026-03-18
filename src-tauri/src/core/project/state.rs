@@ -353,11 +353,9 @@ impl ProjectState {
             .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
 
         if let Some(sequence) = self.sequences.get_mut(seq_id) {
-            if let Some(name) = op.payload["name"].as_str() {
-                sequence.name = name.to_string();
-            }
-
-            if let Some(volume_value) = op
+            // Stage all values before mutation to ensure atomicity
+            let next_name = op.payload["name"].as_str().map(str::to_string);
+            let next_master_volume_db = if let Some(volume_value) = op
                 .payload
                 .get("masterVolumeDb")
                 .or_else(|| op.payload.get("master_volume_db"))
@@ -369,16 +367,26 @@ impl ProjectState {
                                 "Invalid masterVolumeDb value (expected finite number)".to_string(),
                             ));
                         }
-                        Some(v) => {
-                            sequence.master_volume_db = (v as f32).clamp(-60.0, 6.0);
-                        }
+                        Some(v) => Some((v as f32).clamp(-60.0, 6.0)),
                         None => {
                             return Err(CoreError::InvalidCommand(
                                 "Invalid masterVolumeDb value (expected number)".to_string(),
                             ));
                         }
                     }
+                } else {
+                    None
                 }
+            } else {
+                None
+            };
+
+            // Commit all mutations after validation
+            if let Some(name) = next_name {
+                sequence.name = name;
+            }
+            if let Some(volume_db) = next_master_volume_db {
+                sequence.master_volume_db = volume_db;
             }
         }
         Ok(())
@@ -1053,6 +1061,21 @@ impl ProjectState {
 
                 let has_full_audio_payload = parsed_audio.is_some();
 
+                // Pre-validate transform before any mutation to ensure atomicity
+                let parsed_transform = if has_full_audio_payload {
+                    op.payload
+                        .get("transform")
+                        .filter(|v| !v.is_null())
+                        .map(|v| {
+                            serde_json::from_value(v.clone()).map_err(|e| {
+                                CoreError::InvalidCommand(format!("Invalid transform: {e}"))
+                            })
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
+
                 if let Some(audio) = parsed_audio {
                     clip.audio = audio;
                 }
@@ -1083,16 +1106,9 @@ impl ProjectState {
 
                 if has_full_audio_payload {
                     // Full audio payloads are already normalized above.
-                    if let Some(transform_val) = op.payload.get("transform") {
-                        if transform_val.is_null() {
-                            // no-op: null means no change
-                        } else {
-                            let transform =
-                                serde_json::from_value(transform_val.clone()).map_err(|e| {
-                                    CoreError::InvalidCommand(format!("Invalid transform: {e}"))
-                                })?;
-                            clip.transform = transform;
-                        }
+                    // Transform was pre-validated before any mutation.
+                    if let Some(transform) = parsed_transform {
+                        clip.transform = transform;
                     }
                     return Ok(());
                 }

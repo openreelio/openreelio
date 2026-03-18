@@ -261,11 +261,12 @@ export function AudioClipControls({
 
   const handleFadeContextMenu = useCallback(
     (direction: 'in' | 'out') => (e: MouseEvent<HTMLElement>) => {
+      if (disabled || !sequenceId || !trackId) return;
       e.preventDefault();
       e.stopPropagation();
       setFadeTypeMenu({ x: e.clientX, y: e.clientY, direction });
     },
-    [],
+    [disabled, sequenceId, trackId],
   );
 
   const handleVolumeHandleDoubleClick = useCallback(
@@ -420,13 +421,13 @@ export function AudioClipControls({
                 }`}
                 onClick={(e) => {
                   e.stopPropagation();
-                  if (sequenceId && trackId) {
+                  if (!disabled && sequenceId && trackId) {
                     const cmdType =
                       fadeTypeMenu.direction === 'in' ? 'SetAudioFadeIn' : 'SetAudioFadeOut';
                     const duration =
                       fadeTypeMenu.direction === 'in'
-                        ? (clip.audio?.fadeInSec ?? 0)
-                        : (clip.audio?.fadeOutSec ?? 0);
+                        ? draftAudioSettings.fadeInSec
+                        : draftAudioSettings.fadeOutSec;
                     void executeCommand({
                       type: cmdType,
                       payload: {

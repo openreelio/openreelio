@@ -1587,6 +1587,125 @@ pub async fn validate_edit_script(
             }
             // CloseAllGaps: no special params beyond trackId (injected by defaults)
             "CloseAllGaps" => {}
+            // Audio keyframe commands
+            "AddAudioKeyframe" | "addAudioKeyframe" => {
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("AddAudioKeyframe command {} missing clipId", i));
+                }
+                match cmd.params.get("timeOffset").and_then(|v| v.as_f64()) {
+                    Some(v) if v.is_finite() && v >= 0.0 => {}
+                    Some(_) => {
+                        issues.push(format!(
+                            "AddAudioKeyframe command {} has invalid timeOffset: must be finite and non-negative",
+                            i
+                        ));
+                    }
+                    None => {
+                        issues.push(format!("AddAudioKeyframe command {} missing timeOffset", i));
+                    }
+                }
+                if cmd.params.get("valueDb").is_none() {
+                    issues.push(format!("AddAudioKeyframe command {} missing valueDb", i));
+                }
+            }
+            "RemoveAudioKeyframe" | "removeAudioKeyframe" => {
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("RemoveAudioKeyframe command {} missing clipId", i));
+                }
+                if cmd.params.get("keyframeIndex").is_none() {
+                    issues.push(format!(
+                        "RemoveAudioKeyframe command {} missing keyframeIndex",
+                        i
+                    ));
+                }
+            }
+            "MoveAudioKeyframe" | "moveAudioKeyframe" => {
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("MoveAudioKeyframe command {} missing clipId", i));
+                }
+                if cmd.params.get("keyframeIndex").is_none() {
+                    issues.push(format!("MoveAudioKeyframe command {} missing keyframeIndex", i));
+                }
+                match cmd.params.get("newTimeOffset").and_then(|v| v.as_f64()) {
+                    Some(v) if v.is_finite() && v >= 0.0 => {}
+                    Some(_) => {
+                        issues.push(format!(
+                            "MoveAudioKeyframe command {} has invalid newTimeOffset: must be finite and non-negative",
+                            i
+                        ));
+                    }
+                    None => {
+                        issues.push(format!(
+                            "MoveAudioKeyframe command {} missing newTimeOffset",
+                            i
+                        ));
+                    }
+                }
+            }
+            "SetAudioKeyframeValue" | "setAudioKeyframeValue" => {
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!(
+                        "SetAudioKeyframeValue command {} missing clipId",
+                        i
+                    ));
+                }
+                if cmd.params.get("keyframeIndex").is_none() {
+                    issues.push(format!(
+                        "SetAudioKeyframeValue command {} missing keyframeIndex",
+                        i
+                    ));
+                }
+                if cmd.params.get("valueDb").is_none() {
+                    issues.push(format!(
+                        "SetAudioKeyframeValue command {} missing valueDb",
+                        i
+                    ));
+                }
+            }
+            // Audio fade commands
+            "SetAudioFadeIn" | "setAudioFadeIn" => {
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("SetAudioFadeIn command {} missing clipId", i));
+                }
+                match cmd.params.get("duration").and_then(|v| v.as_f64()) {
+                    Some(v) if v.is_finite() && v >= 0.0 => {}
+                    Some(_) => {
+                        issues.push(format!(
+                            "SetAudioFadeIn command {} has invalid duration: must be finite and non-negative",
+                            i
+                        ));
+                    }
+                    None => {
+                        issues.push(format!("SetAudioFadeIn command {} missing duration", i));
+                    }
+                }
+            }
+            "SetAudioFadeOut" | "setAudioFadeOut" => {
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("SetAudioFadeOut command {} missing clipId", i));
+                }
+                match cmd.params.get("duration").and_then(|v| v.as_f64()) {
+                    Some(v) if v.is_finite() && v >= 0.0 => {}
+                    Some(_) => {
+                        issues.push(format!(
+                            "SetAudioFadeOut command {} has invalid duration: must be finite and non-negative",
+                            i
+                        ));
+                    }
+                    None => {
+                        issues.push(format!("SetAudioFadeOut command {} missing duration", i));
+                    }
+                }
+            }
+            // Master volume command
+            "SetMasterVolume" | "setMasterVolume" => {
+                if cmd.params.get("sequenceId").is_none() {
+                    issues.push(format!("SetMasterVolume command {} missing sequenceId", i));
+                }
+                if cmd.params.get("volumeDb").is_none() {
+                    issues.push(format!("SetMasterVolume command {} missing volumeDb", i));
+                }
+            }
             _ => {
                 issues.push(format!("Unknown command type: {}", cmd.command_type));
             }

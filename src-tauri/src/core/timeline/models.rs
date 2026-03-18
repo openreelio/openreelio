@@ -929,15 +929,18 @@ impl AudioKeyframe {
             return None;
         }
 
-        // Each part is (threshold_time, segment_expression) in linear amplitude.
+        // Interpolate in dB space (matching AudioKeyframe::interpolate()),
+        // then convert the final dB expression to linear amplitude for FFmpeg.
+        // FFmpeg volume filter expects linear multiplier, so we wrap with
+        // pow(10, dB_expr/20) at the end.
         let mut parts: Vec<(f64, String)> = Vec::new();
 
         for i in 0..keyframes.len() - 1 {
             let kf0 = &keyframes[i];
             let kf1 = &keyframes[i + 1];
 
-            let v0 = db_to_linear(kf0.value_db);
-            let v1 = db_to_linear(kf1.value_db);
+            let db0 = kf0.value_db;
+            let db1 = kf1.value_db;
             let t0 = kf0.time_offset;
             let t1 = kf1.time_offset;
             let dt = t1 - t0;
@@ -946,23 +949,25 @@ impl AudioKeyframe {
                 continue;
             }
 
-            let segment_expr = match &kf0.interpolation {
+            let db_segment_expr = match &kf0.interpolation {
                 KeyframeInterpolation::Linear | KeyframeInterpolation::Bezier { .. } => {
                     // Bezier is approximated as linear for FFmpeg (no native
                     // bezier support in volume filter expressions).
-                    if (v1 - v0).abs() < 1e-9 {
-                        format!("{:.6}", v0)
+                    if (db1 - db0).abs() < 1e-9 {
+                        format!("{:.6}", db0)
                     } else {
-                        let slope = (v1 - v0) / dt;
-                        format!("({:.6}+{:.6}*(t-{:.6}))", v0, slope, t0)
+                        let slope_db = (db1 - db0) / dt;
+                        format!("({:.6}+{:.6}*(t-{:.6}))", db0, slope_db, t0)
                     }
                 }
                 KeyframeInterpolation::Hold => {
-                    format!("{:.6}", v0)
+                    format!("{:.6}", db0)
                 }
             };
 
-            parts.push((t1, segment_expr));
+            // Convert dB expression to linear: pow(10, dB/20)
+            let linear_segment = format!("pow(10,{}/20)", db_segment_expr);
+            parts.push((t1, linear_segment));
         }
 
         if parts.is_empty() {
@@ -970,7 +975,6 @@ impl AudioKeyframe {
         }
 
         // Build nested if: if(lt(t,t1), expr0, if(lt(t,t2), expr1, ... last_val))
-        let first_linear = db_to_linear(keyframes[0].value_db);
         let last_linear = db_to_linear(keyframes[keyframes.len() - 1].value_db);
 
         let mut expr = format!("{:.6}", last_linear);
@@ -979,6 +983,7 @@ impl AudioKeyframe {
         }
 
         // Before first keyframe: hold first value
+        let first_linear = db_to_linear(keyframes[0].value_db);
         let first_t = keyframes[0].time_offset;
         if first_t > 0.0 {
             expr = format!("if(lt(t,{:.6}),{:.6},{})", first_t, first_linear, expr);
@@ -1969,6 +1974,11 @@ mod tests {
         assert!(!expr.contains('\''), "Should not contain single quotes");
         assert!(!expr.contains("\\,"), "Commas should not be escaped");
         assert!(expr.contains("if(lt(t,"));
+        // Expression must interpolate in dB space then convert to linear via pow(10, dB/20)
+        assert!(
+            expr.contains("pow(10,"),
+            "Should use dB-to-linear conversion: pow(10, dB/20)"
+        );
     }
 
     #[test]
