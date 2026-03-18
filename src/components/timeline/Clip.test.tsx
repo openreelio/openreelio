@@ -9,6 +9,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import type { Clip as ClipType, Asset } from '@/types';
 import { TEXT_ASSET_PREFIX } from '@/types';
 import { useEditorToolStore } from '@/stores/editorToolStore';
+import { useProjectStore } from '@/stores/projectStore';
 
 vi.mock('./LazyThumbnailStrip', () => ({
   LazyThumbnailStrip: () => <div data-testid="lazy-thumbnail-strip-mock" />,
@@ -65,8 +66,17 @@ const mockVisualAsset: Asset = {
 // =============================================================================
 
 describe('Clip', () => {
+  const mockExecuteCommand = vi.fn();
+
   beforeEach(() => {
     useEditorToolStore.setState({ activeTool: 'select', previousTool: null });
+    mockExecuteCommand.mockReset().mockResolvedValue({
+      opId: 'op-1',
+      changes: [],
+      createdIds: [],
+      deletedIds: [],
+    });
+    useProjectStore.setState({ executeCommand: mockExecuteCommand });
   });
 
   // ===========================================================================
@@ -311,6 +321,58 @@ describe('Clip', () => {
       expect(screen.getByTestId('audio-volume-handle')).toBeInTheDocument();
       expect(screen.getByTestId('audio-fade-in-handle')).toBeInTheDocument();
       expect(screen.getByTestId('audio-fade-out-handle')).toBeInTheDocument();
+    });
+
+    it('should add the first audio keyframe from the volume line', () => {
+      render(
+        <Clip
+          clip={mockClip}
+          zoom={100}
+          selected={false}
+          trackKind="audio"
+          sequenceId="seq-1"
+          trackId="track-1"
+        />,
+      );
+
+      fireEvent.doubleClick(screen.getByTestId('audio-volume-handle'), {
+        clientX: 250,
+        clientY: 32,
+      });
+
+      expect(mockExecuteCommand).toHaveBeenCalledWith({
+        type: 'AddAudioKeyframe',
+        payload: {
+          sequenceId: 'seq-1',
+          trackId: 'track-1',
+          clipId: 'clip_001',
+          timeOffset: 2.5,
+          valueDb: 0,
+          interpolation: 'linear',
+        },
+      });
+    });
+
+    it('should render the rubber band editor when only one keyframe exists', () => {
+      render(
+        <Clip
+          clip={{
+            ...mockClip,
+            audio: {
+              volumeDb: 0,
+              pan: 0,
+              muted: false,
+              volumeKeyframes: [{ timeOffset: 2, valueDb: -6, interpolation: 'linear' as const }],
+            },
+          }}
+          zoom={100}
+          selected={false}
+          trackKind="audio"
+        />,
+      );
+
+      expect(screen.getByTestId('audio-rubber-band')).toBeInTheDocument();
+      expect(screen.queryByTestId('audio-clip-controls')).not.toBeInTheDocument();
     });
 
     it('should commit clip volume changes after dragging the volume handle', () => {

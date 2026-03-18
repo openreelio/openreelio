@@ -525,6 +525,8 @@ export function Track({
                 waveformConfig={getClipWaveformConfig?.(clip.id, clip.assetId)}
                 thumbnailConfig={getClipThumbnailConfig?.(clip.id, clip.assetId, track.kind)}
                 trackKind={track.kind}
+                sequenceId={sequenceId}
+                trackId={track.id}
                 onAudioSettingsChange={(clipId, patch) =>
                   onClipAudioSettingsChange?.(track.id, clipId, patch)
                 }
