@@ -201,6 +201,83 @@ impl Command for DeleteSequenceCommand {
 }
 
 // =============================================================================
+// SetMasterVolumeCommand
+// =============================================================================
+
+const MASTER_MIN_VOLUME_DB: f32 = -60.0;
+const MASTER_MAX_VOLUME_DB: f32 = 6.0;
+
+/// Command to set the master output volume on a sequence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetMasterVolumeCommand {
+    pub sequence_id: SequenceId,
+    pub volume_db: f32,
+    #[serde(skip)]
+    previous_volume_db: Option<f32>,
+}
+
+impl SetMasterVolumeCommand {
+    pub fn new(sequence_id: &str, volume_db: f32) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            volume_db,
+            previous_volume_db: None,
+        }
+    }
+}
+
+impl Command for SetMasterVolumeCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !self.volume_db.is_finite() {
+            return Err(CoreError::InvalidCommand(
+                "Master volume must be a finite number".to_string(),
+            ));
+        }
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        self.previous_volume_db = Some(sequence.master_volume_db);
+        sequence.master_volume_db = self
+            .volume_db
+            .clamp(MASTER_MIN_VOLUME_DB, MASTER_MAX_VOLUME_DB);
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::SequenceModified {
+                sequence_id: self.sequence_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(previous) = self.previous_volume_db else {
+            return Ok(());
+        };
+
+        if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
+            sequence.master_volume_db = previous;
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetMasterVolume"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "volumeDb": self.volume_db,
+        })
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -307,5 +384,75 @@ mod tests {
         let result = cmd.execute(&mut state);
 
         assert!(matches!(result, Err(CoreError::SequenceNotFound(_))));
+    }
+
+    // =========================================================================
+    // SetMasterVolumeCommand Tests
+    // =========================================================================
+
+    fn create_test_state_with_sequence() -> (ProjectState, String) {
+        let mut state = create_test_state();
+        let mut cmd = CreateSequenceCommand::new("Test Seq", "1080p");
+        let result = cmd.execute(&mut state).unwrap();
+        let seq_id = result.created_ids[0].clone();
+        (state, seq_id)
+    }
+
+    #[test]
+    fn test_set_master_volume_applies_value() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+
+        let mut cmd = SetMasterVolumeCommand::new(&seq_id, -6.0);
+        cmd.execute(&mut state).unwrap();
+
+        assert!((state.sequences[&seq_id].master_volume_db - (-6.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_set_master_volume_clamps_to_range() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+
+        // Above max
+        let mut cmd = SetMasterVolumeCommand::new(&seq_id, 20.0);
+        cmd.execute(&mut state).unwrap();
+        assert!((state.sequences[&seq_id].master_volume_db - 6.0).abs() < 1e-6);
+
+        // Below min
+        let mut cmd2 = SetMasterVolumeCommand::new(&seq_id, -100.0);
+        cmd2.execute(&mut state).unwrap();
+        assert!((state.sequences[&seq_id].master_volume_db - (-60.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_set_master_volume_undo_restores_previous() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+
+        let mut cmd = SetMasterVolumeCommand::new(&seq_id, -12.0);
+        cmd.execute(&mut state).unwrap();
+        assert!((state.sequences[&seq_id].master_volume_db - (-12.0)).abs() < 1e-6);
+
+        cmd.undo(&mut state).unwrap();
+        assert!((state.sequences[&seq_id].master_volume_db - 0.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_set_master_volume_rejects_nan() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+
+        let mut cmd = SetMasterVolumeCommand::new(&seq_id, f32::NAN);
+        let result = cmd.execute(&mut state);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_set_master_volume_persists_in_project() {
+        let (mut state, seq_id) = create_test_state_with_sequence();
+
+        let mut cmd = SetMasterVolumeCommand::new(&seq_id, -3.0);
+        cmd.execute(&mut state).unwrap();
+
+        // Verify the value is stored on the sequence
+        let seq = state.sequences.get(&seq_id).unwrap();
+        assert!((seq.master_volume_db - (-3.0)).abs() < 1e-6);
     }
 }

@@ -9,8 +9,8 @@ use crate::core::{
     commands::{Command, CommandResult, StateChange},
     project::ProjectState,
     timeline::{
-        AudioSettings, BlendMode, Clip, ClipPlace, ClipRange, KeyframeInterpolation,
-        TimeRemapCurve, TimeRemapKeyframe, Track, Transform,
+        AudioKeyframe, AudioSettings, BlendMode, Clip, ClipPlace, ClipRange, FadeType,
+        KeyframeInterpolation, TimeRemapCurve, TimeRemapKeyframe, Track, Transform,
     },
     AssetId, ClipId, CoreError, CoreResult, SequenceId, TimeSec, TrackId,
 };
@@ -3811,6 +3811,746 @@ impl Command for ClearTimeRemapCommand {
             "sequenceId": self.sequence_id,
             "trackId": self.track_id,
             "clipId": self.clip_id,
+        })
+    }
+}
+
+// =============================================================================
+// SetAudioFadeInCommand
+// =============================================================================
+
+/// Command to set audio fade-in duration and curve type on a clip.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAudioFadeInCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub duration: f64,
+    pub fade_type: FadeType,
+    #[serde(skip)]
+    previous_audio: Option<AudioSettings>,
+}
+
+impl SetAudioFadeInCommand {
+    pub fn new(
+        sequence_id: &str,
+        track_id: &str,
+        clip_id: &str,
+        duration: f64,
+        fade_type: FadeType,
+    ) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            duration,
+            fade_type,
+            previous_audio: None,
+        }
+    }
+}
+
+impl Command for SetAudioFadeInCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !self.duration.is_finite() || self.duration < 0.0 {
+            return Err(CoreError::InvalidCommand(
+                "Fade-in duration must be a non-negative finite number".to_string(),
+            ));
+        }
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+        let track = sequence
+            .get_track_mut(&self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+        let clip = track
+            .get_clip_mut(&self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        self.previous_audio = Some(clip.audio.clone());
+
+        let clip_duration = clip.duration().max(0.0);
+        clip.audio.fade_in_sec = self.duration.min(clip_duration);
+        clip.audio.fade_in_type = self.fade_type.clone();
+
+        // Ensure fades don't exceed clip duration
+        let total = clip.audio.fade_in_sec + clip.audio.fade_out_sec;
+        if total > clip_duration {
+            clip.audio.fade_out_sec = (clip_duration - clip.audio.fade_in_sec).max(0.0);
+        }
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(previous_audio) = &self.previous_audio else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+        let Some(track) = sequence.get_track_mut(&self.track_id) else {
+            return Ok(());
+        };
+        if let Some(clip) = track.get_clip_mut(&self.clip_id) {
+            clip.audio = previous_audio.clone();
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetAudioFadeIn"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "duration": self.duration,
+            "fadeType": self.fade_type,
+        })
+    }
+}
+
+// =============================================================================
+// SetAudioFadeOutCommand
+// =============================================================================
+
+/// Command to set audio fade-out duration and curve type on a clip.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAudioFadeOutCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub duration: f64,
+    pub fade_type: FadeType,
+    #[serde(skip)]
+    previous_audio: Option<AudioSettings>,
+}
+
+impl SetAudioFadeOutCommand {
+    pub fn new(
+        sequence_id: &str,
+        track_id: &str,
+        clip_id: &str,
+        duration: f64,
+        fade_type: FadeType,
+    ) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            duration,
+            fade_type,
+            previous_audio: None,
+        }
+    }
+}
+
+impl Command for SetAudioFadeOutCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !self.duration.is_finite() || self.duration < 0.0 {
+            return Err(CoreError::InvalidCommand(
+                "Fade-out duration must be a non-negative finite number".to_string(),
+            ));
+        }
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+        let track = sequence
+            .get_track_mut(&self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+        let clip = track
+            .get_clip_mut(&self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        self.previous_audio = Some(clip.audio.clone());
+
+        let clip_duration = clip.duration().max(0.0);
+        clip.audio.fade_out_sec = self.duration.min(clip_duration);
+        clip.audio.fade_out_type = self.fade_type.clone();
+
+        // Ensure fades don't exceed clip duration
+        let total = clip.audio.fade_in_sec + clip.audio.fade_out_sec;
+        if total > clip_duration {
+            clip.audio.fade_in_sec = (clip_duration - clip.audio.fade_out_sec).max(0.0);
+        }
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(previous_audio) = &self.previous_audio else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+        let Some(track) = sequence.get_track_mut(&self.track_id) else {
+            return Ok(());
+        };
+        if let Some(clip) = track.get_clip_mut(&self.clip_id) {
+            clip.audio = previous_audio.clone();
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetAudioFadeOut"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "duration": self.duration,
+            "fadeType": self.fade_type,
+        })
+    }
+}
+
+// =============================================================================
+// AddAudioKeyframeCommand
+// =============================================================================
+
+/// Command to add a volume automation keyframe to a clip's audio settings.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddAudioKeyframeCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    /// Time offset from clip start in seconds
+    pub time_offset: f64,
+    /// Volume value in dB
+    pub value_db: f64,
+    /// Interpolation method to the next keyframe
+    #[serde(default)]
+    pub interpolation: KeyframeInterpolation,
+    /// Index at which the keyframe was inserted (for undo)
+    #[serde(skip)]
+    inserted_index: Option<usize>,
+    /// Actual clamped value stored for precise undo identification
+    #[serde(skip)]
+    clamped_value_db: Option<f64>,
+}
+
+impl AddAudioKeyframeCommand {
+    pub fn new(
+        sequence_id: &str,
+        track_id: &str,
+        clip_id: &str,
+        time_offset: f64,
+        value_db: f64,
+        interpolation: KeyframeInterpolation,
+    ) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            time_offset,
+            value_db,
+            interpolation,
+            inserted_index: None,
+            clamped_value_db: None,
+        }
+    }
+}
+
+impl Command for AddAudioKeyframeCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !self.time_offset.is_finite() || self.time_offset < 0.0 {
+            return Err(CoreError::InvalidCommand(
+                "timeOffset must be a finite, non-negative number".to_string(),
+            ));
+        }
+        if !self.value_db.is_finite() {
+            return Err(CoreError::InvalidCommand(
+                "valueDb must be a finite number".to_string(),
+            ));
+        }
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+        let track = sequence
+            .get_track_mut(&self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+        validate_track_unlocked(track)?;
+        let clip = track
+            .get_clip_mut(&self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        // Validate time_offset is within clip duration
+        let clip_duration = clip.duration();
+        if self.time_offset > clip_duration {
+            return Err(CoreError::InvalidCommand(format!(
+                "timeOffset ({:.3}s) exceeds clip duration ({:.3}s)",
+                self.time_offset, clip_duration
+            )));
+        }
+
+        let clamped_db = self
+            .value_db
+            .clamp(MIN_CLIP_VOLUME_DB as f64, MAX_CLIP_VOLUME_DB as f64);
+        let keyframe = AudioKeyframe::new(self.time_offset, clamped_db, self.interpolation.clone());
+        self.clamped_value_db = Some(clamped_db);
+
+        clip.audio.volume_keyframes.push(keyframe);
+        AudioKeyframe::sort_by_time(&mut clip.audio.volume_keyframes);
+
+        // Find the inserted index for undo — match on both time AND value
+        // to avoid ambiguity when multiple keyframes share the same time.
+        self.inserted_index = clip.audio.volume_keyframes.iter().position(|kf| {
+            (kf.time_offset - self.time_offset).abs() < 1e-9
+                && (kf.value_db - clamped_db).abs() < 1e-9
+        });
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(index) = self.inserted_index else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+        let Some(track) = sequence.get_track_mut(&self.track_id) else {
+            return Ok(());
+        };
+        if let Some(clip) = track.get_clip_mut(&self.clip_id) {
+            if index < clip.audio.volume_keyframes.len() {
+                clip.audio.volume_keyframes.remove(index);
+            }
+        }
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "AddAudioKeyframe"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "timeOffset": self.time_offset,
+            "valueDb": self.value_db,
+            "interpolation": self.interpolation,
+        })
+    }
+}
+
+// =============================================================================
+// RemoveAudioKeyframeCommand
+// =============================================================================
+
+/// Command to remove a volume automation keyframe by index.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveAudioKeyframeCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    /// Index of the keyframe to remove (sorted order)
+    pub keyframe_index: usize,
+    /// Removed keyframe stored for undo
+    #[serde(skip)]
+    removed_keyframe: Option<AudioKeyframe>,
+}
+
+impl RemoveAudioKeyframeCommand {
+    pub fn new(sequence_id: &str, track_id: &str, clip_id: &str, keyframe_index: usize) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            keyframe_index,
+            removed_keyframe: None,
+        }
+    }
+}
+
+impl Command for RemoveAudioKeyframeCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+        let track = sequence
+            .get_track_mut(&self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+        validate_track_unlocked(track)?;
+        let clip = track
+            .get_clip_mut(&self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        if self.keyframe_index >= clip.audio.volume_keyframes.len() {
+            return Err(CoreError::InvalidCommand(format!(
+                "keyframeIndex {} out of bounds (clip has {} keyframes)",
+                self.keyframe_index,
+                clip.audio.volume_keyframes.len()
+            )));
+        }
+
+        self.removed_keyframe = Some(clip.audio.volume_keyframes.remove(self.keyframe_index));
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(ref removed) = self.removed_keyframe else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+        let Some(track) = sequence.get_track_mut(&self.track_id) else {
+            return Ok(());
+        };
+        if let Some(clip) = track.get_clip_mut(&self.clip_id) {
+            let index = self.keyframe_index.min(clip.audio.volume_keyframes.len());
+            clip.audio.volume_keyframes.insert(index, removed.clone());
+            // Re-sort to guarantee time ordering after restore
+            AudioKeyframe::sort_by_time(&mut clip.audio.volume_keyframes);
+        }
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "RemoveAudioKeyframe"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "keyframeIndex": self.keyframe_index,
+        })
+    }
+}
+
+// =============================================================================
+// MoveAudioKeyframeCommand
+// =============================================================================
+
+/// Command to move a volume automation keyframe to a new time offset.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveAudioKeyframeCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    /// Index of the keyframe to move (sorted order, pre-move)
+    pub keyframe_index: usize,
+    /// New time offset from clip start in seconds
+    pub new_time_offset: f64,
+    /// Previous time offset stored for undo
+    #[serde(skip)]
+    previous_time_offset: Option<f64>,
+    /// Index of the keyframe after move + re-sort (for reliable undo)
+    #[serde(skip)]
+    moved_to_index: Option<usize>,
+    /// Value stored for disambiguation when multiple keyframes share the same time
+    #[serde(skip)]
+    keyframe_value_db: Option<f64>,
+}
+
+impl MoveAudioKeyframeCommand {
+    pub fn new(
+        sequence_id: &str,
+        track_id: &str,
+        clip_id: &str,
+        keyframe_index: usize,
+        new_time_offset: f64,
+    ) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            keyframe_index,
+            new_time_offset,
+            previous_time_offset: None,
+            moved_to_index: None,
+            keyframe_value_db: None,
+        }
+    }
+}
+
+impl Command for MoveAudioKeyframeCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !self.new_time_offset.is_finite() || self.new_time_offset < 0.0 {
+            return Err(CoreError::InvalidCommand(
+                "newTimeOffset must be a finite, non-negative number".to_string(),
+            ));
+        }
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+        let track = sequence
+            .get_track_mut(&self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+        validate_track_unlocked(track)?;
+        let clip = track
+            .get_clip_mut(&self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        if self.keyframe_index >= clip.audio.volume_keyframes.len() {
+            return Err(CoreError::InvalidCommand(format!(
+                "keyframeIndex {} out of bounds (clip has {} keyframes)",
+                self.keyframe_index,
+                clip.audio.volume_keyframes.len()
+            )));
+        }
+
+        let clip_duration = clip.duration();
+        if self.new_time_offset > clip_duration {
+            return Err(CoreError::InvalidCommand(format!(
+                "newTimeOffset ({:.3}s) exceeds clip duration ({:.3}s)",
+                self.new_time_offset, clip_duration
+            )));
+        }
+
+        let kf = &clip.audio.volume_keyframes[self.keyframe_index];
+        self.previous_time_offset = Some(kf.time_offset);
+        self.keyframe_value_db = Some(kf.value_db);
+        clip.audio.volume_keyframes[self.keyframe_index].time_offset = self.new_time_offset;
+
+        // Re-sort after move
+        AudioKeyframe::sort_by_time(&mut clip.audio.volume_keyframes);
+
+        // Store post-move index for reliable undo (match on time + value)
+        self.moved_to_index = clip.audio.volume_keyframes.iter().position(|kf| {
+            (kf.time_offset - self.new_time_offset).abs() < 1e-9
+                && self
+                    .keyframe_value_db
+                    .is_none_or(|v| (kf.value_db - v).abs() < 1e-9)
+        });
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(prev_offset) = self.previous_time_offset else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+        let Some(track) = sequence.get_track_mut(&self.track_id) else {
+            return Ok(());
+        };
+        if let Some(clip) = track.get_clip_mut(&self.clip_id) {
+            // Use the stored post-move index for reliable undo
+            let target_idx = self.moved_to_index.or_else(|| {
+                // Fallback: search by time + value
+                clip.audio.volume_keyframes.iter().position(|kf| {
+                    (kf.time_offset - self.new_time_offset).abs() < 1e-9
+                        && self
+                            .keyframe_value_db
+                            .is_none_or(|v| (kf.value_db - v).abs() < 1e-9)
+                })
+            });
+
+            if let Some(idx) = target_idx {
+                if idx < clip.audio.volume_keyframes.len() {
+                    clip.audio.volume_keyframes[idx].time_offset = prev_offset;
+                    AudioKeyframe::sort_by_time(&mut clip.audio.volume_keyframes);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "MoveAudioKeyframe"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "keyframeIndex": self.keyframe_index,
+            "newTimeOffset": self.new_time_offset,
+        })
+    }
+}
+
+// =============================================================================
+// SetAudioKeyframeValueCommand
+// =============================================================================
+
+/// Command to update the volume value of an existing audio keyframe.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetAudioKeyframeValueCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    /// Index of the keyframe to update (sorted order)
+    pub keyframe_index: usize,
+    /// New volume value in dB
+    pub value_db: f64,
+    /// Optional new interpolation method
+    pub interpolation: Option<KeyframeInterpolation>,
+    /// Previous value stored for undo
+    #[serde(skip)]
+    previous_value_db: Option<f64>,
+    #[serde(skip)]
+    previous_interpolation: Option<KeyframeInterpolation>,
+}
+
+impl SetAudioKeyframeValueCommand {
+    pub fn new(
+        sequence_id: &str,
+        track_id: &str,
+        clip_id: &str,
+        keyframe_index: usize,
+        value_db: f64,
+        interpolation: Option<KeyframeInterpolation>,
+    ) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            keyframe_index,
+            value_db,
+            interpolation,
+            previous_value_db: None,
+            previous_interpolation: None,
+        }
+    }
+}
+
+impl Command for SetAudioKeyframeValueCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        if !self.value_db.is_finite() {
+            return Err(CoreError::InvalidCommand(
+                "valueDb must be a finite number".to_string(),
+            ));
+        }
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+        let track = sequence
+            .get_track_mut(&self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+        validate_track_unlocked(track)?;
+        let clip = track
+            .get_clip_mut(&self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        if self.keyframe_index >= clip.audio.volume_keyframes.len() {
+            return Err(CoreError::InvalidCommand(format!(
+                "keyframeIndex {} out of bounds (clip has {} keyframes)",
+                self.keyframe_index,
+                clip.audio.volume_keyframes.len()
+            )));
+        }
+
+        let kf = &mut clip.audio.volume_keyframes[self.keyframe_index];
+        self.previous_value_db = Some(kf.value_db);
+        self.previous_interpolation = Some(kf.interpolation.clone());
+
+        kf.value_db = self
+            .value_db
+            .clamp(MIN_CLIP_VOLUME_DB as f64, MAX_CLIP_VOLUME_DB as f64);
+
+        if let Some(ref interp) = self.interpolation {
+            kf.interpolation = interp.clone();
+        }
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let (Some(prev_value), Some(ref prev_interp)) =
+            (self.previous_value_db, &self.previous_interpolation)
+        else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+        let Some(track) = sequence.get_track_mut(&self.track_id) else {
+            return Ok(());
+        };
+        if let Some(clip) = track.get_clip_mut(&self.clip_id) {
+            if let Some(kf) = clip.audio.volume_keyframes.get_mut(self.keyframe_index) {
+                kf.value_db = prev_value;
+                kf.interpolation = prev_interp.clone();
+            }
+        }
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetAudioKeyframeValue"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "keyframeIndex": self.keyframe_index,
+            "valueDb": self.value_db,
+            "interpolation": self.interpolation,
         })
     }
 }
@@ -7703,5 +8443,530 @@ mod tests {
         let err = cmd.execute(&mut state).unwrap_err();
         assert!(matches!(err, CoreError::ValidationError(_)));
         assert!(err.to_string().contains("locked"));
+    }
+
+    // =========================================================================
+    // AddAudioKeyframeCommand Tests
+    // =========================================================================
+
+    /// Creates a test state with a single 10-second clip on a video track.
+    fn create_audio_keyframe_test_state() -> (ProjectState, String, String, String) {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        let mut cmd =
+            InsertClipCommand::new(&seq_id, &track_id, &asset_id, 0.0).with_source_range(0.0, 10.0);
+        cmd.execute(&mut state).unwrap();
+        let clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        (state, seq_id, track_id, clip_id)
+    }
+
+    #[test]
+    fn add_audio_keyframe_should_create_automation_point_at_given_time() {
+        // Given a clip with no volume keyframes
+        let (mut state, seq_id, track_id, clip_id) = create_audio_keyframe_test_state();
+
+        // When adding a keyframe at 2.0s with -6dB
+        let mut cmd = AddAudioKeyframeCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            2.0,
+            -6.0,
+            KeyframeInterpolation::Linear,
+        );
+        cmd.execute(&mut state).unwrap();
+
+        // Then the clip should have 1 keyframe at the correct position
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert_eq!(clip.audio.volume_keyframes.len(), 1);
+        assert!((clip.audio.volume_keyframes[0].time_offset - 2.0).abs() < 1e-9);
+        assert!((clip.audio.volume_keyframes[0].value_db - (-6.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn add_audio_keyframe_should_maintain_sorted_order() {
+        // Given a clip
+        let (mut state, seq_id, track_id, clip_id) = create_audio_keyframe_test_state();
+
+        // When adding keyframes out of order: 5.0s, 1.0s, 3.0s
+        for (time, db) in [(5.0, 0.0), (1.0, -12.0), (3.0, -6.0)] {
+            let mut cmd = AddAudioKeyframeCommand::new(
+                &seq_id,
+                &track_id,
+                &clip_id,
+                time,
+                db,
+                KeyframeInterpolation::Linear,
+            );
+            cmd.execute(&mut state).unwrap();
+        }
+
+        // Then keyframes should be sorted by time_offset
+        let kfs = &state.sequences[&seq_id].tracks[0].clips[0]
+            .audio
+            .volume_keyframes;
+        assert_eq!(kfs.len(), 3);
+        assert!((kfs[0].time_offset - 1.0).abs() < 1e-9);
+        assert!((kfs[1].time_offset - 3.0).abs() < 1e-9);
+        assert!((kfs[2].time_offset - 5.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn add_audio_keyframe_should_reject_time_beyond_clip_duration() {
+        // Given a 10-second clip
+        let (mut state, seq_id, track_id, clip_id) = create_audio_keyframe_test_state();
+
+        // When adding a keyframe at 15.0s (beyond clip duration)
+        let mut cmd = AddAudioKeyframeCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            15.0,
+            0.0,
+            KeyframeInterpolation::Linear,
+        );
+        let result = cmd.execute(&mut state);
+
+        // Then it should fail
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_audio_keyframe_should_clamp_value_to_valid_range() {
+        // Given a clip
+        let (mut state, seq_id, track_id, clip_id) = create_audio_keyframe_test_state();
+
+        // When adding a keyframe with value_db = +20.0 (beyond max of +6.0)
+        let mut cmd = AddAudioKeyframeCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            1.0,
+            20.0,
+            KeyframeInterpolation::Linear,
+        );
+        cmd.execute(&mut state).unwrap();
+
+        // Then value should be clamped to MAX_CLIP_VOLUME_DB
+        let kf = &state.sequences[&seq_id].tracks[0].clips[0]
+            .audio
+            .volume_keyframes[0];
+        assert!((kf.value_db - 6.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn add_audio_keyframe_undo_should_remove_the_added_keyframe() {
+        // Given a clip with an added keyframe
+        let (mut state, seq_id, track_id, clip_id) = create_audio_keyframe_test_state();
+        let mut cmd = AddAudioKeyframeCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            2.0,
+            -6.0,
+            KeyframeInterpolation::Linear,
+        );
+        cmd.execute(&mut state).unwrap();
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0]
+                .audio
+                .volume_keyframes
+                .len(),
+            1
+        );
+
+        // When undoing
+        cmd.undo(&mut state).unwrap();
+
+        // Then the keyframe should be removed
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0]
+                .audio
+                .volume_keyframes
+                .len(),
+            0
+        );
+    }
+
+    // =========================================================================
+    // RemoveAudioKeyframeCommand Tests
+    // =========================================================================
+
+    #[test]
+    fn remove_audio_keyframe_should_delete_keyframe_at_index() {
+        // Given a clip with 3 keyframes
+        let (mut state, seq_id, track_id, clip_id) = create_audio_keyframe_test_state();
+        for (time, db) in [(0.0, -12.0), (5.0, -6.0), (9.0, 0.0)] {
+            let mut cmd = AddAudioKeyframeCommand::new(
+                &seq_id,
+                &track_id,
+                &clip_id,
+                time,
+                db,
+                KeyframeInterpolation::Linear,
+            );
+            cmd.execute(&mut state).unwrap();
+        }
+
+        // When removing keyframe at index 1 (the -6dB one at 5.0s)
+        let mut cmd = RemoveAudioKeyframeCommand::new(&seq_id, &track_id, &clip_id, 1);
+        cmd.execute(&mut state).unwrap();
+
+        // Then only 2 keyframes should remain
+        let kfs = &state.sequences[&seq_id].tracks[0].clips[0]
+            .audio
+            .volume_keyframes;
+        assert_eq!(kfs.len(), 2);
+        assert!((kfs[0].time_offset - 0.0).abs() < 1e-9);
+        assert!((kfs[1].time_offset - 9.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn remove_audio_keyframe_undo_should_restore_deleted_keyframe() {
+        // Given a clip with 2 keyframes, one removed
+        let (mut state, seq_id, track_id, clip_id) = create_audio_keyframe_test_state();
+        for (time, db) in [(0.0, -12.0), (5.0, 0.0)] {
+            let mut cmd = AddAudioKeyframeCommand::new(
+                &seq_id,
+                &track_id,
+                &clip_id,
+                time,
+                db,
+                KeyframeInterpolation::Linear,
+            );
+            cmd.execute(&mut state).unwrap();
+        }
+        let mut cmd = RemoveAudioKeyframeCommand::new(&seq_id, &track_id, &clip_id, 0);
+        cmd.execute(&mut state).unwrap();
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0]
+                .audio
+                .volume_keyframes
+                .len(),
+            1
+        );
+
+        // When undoing
+        cmd.undo(&mut state).unwrap();
+
+        // Then the removed keyframe should be restored
+        let kfs = &state.sequences[&seq_id].tracks[0].clips[0]
+            .audio
+            .volume_keyframes;
+        assert_eq!(kfs.len(), 2);
+        assert!((kfs[0].value_db - (-12.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn remove_audio_keyframe_should_reject_out_of_bounds_index() {
+        // Given a clip with 1 keyframe
+        let (mut state, seq_id, track_id, clip_id) = create_audio_keyframe_test_state();
+        let mut add_cmd = AddAudioKeyframeCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            0.0,
+            0.0,
+            KeyframeInterpolation::Linear,
+        );
+        add_cmd.execute(&mut state).unwrap();
+
+        // When removing at index 5 (out of bounds)
+        let mut cmd = RemoveAudioKeyframeCommand::new(&seq_id, &track_id, &clip_id, 5);
+        let result = cmd.execute(&mut state);
+
+        // Then it should fail
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // MoveAudioKeyframeCommand Tests
+    // =========================================================================
+
+    #[test]
+    fn move_audio_keyframe_should_update_time_offset() {
+        // Given a clip with a keyframe at 2.0s
+        let (mut state, seq_id, track_id, clip_id) = create_audio_keyframe_test_state();
+        let mut add_cmd = AddAudioKeyframeCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            2.0,
+            -6.0,
+            KeyframeInterpolation::Linear,
+        );
+        add_cmd.execute(&mut state).unwrap();
+
+        // When moving keyframe to 7.0s
+        let mut cmd = MoveAudioKeyframeCommand::new(&seq_id, &track_id, &clip_id, 0, 7.0);
+        cmd.execute(&mut state).unwrap();
+
+        // Then keyframe should be at new time
+        let kf = &state.sequences[&seq_id].tracks[0].clips[0]
+            .audio
+            .volume_keyframes[0];
+        assert!((kf.time_offset - 7.0).abs() < 1e-9);
+        assert!((kf.value_db - (-6.0)).abs() < 1e-9); // Value unchanged
+    }
+
+    #[test]
+    fn move_audio_keyframe_undo_should_restore_original_time() {
+        // Given a moved keyframe
+        let (mut state, seq_id, track_id, clip_id) = create_audio_keyframe_test_state();
+        let mut add_cmd = AddAudioKeyframeCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            2.0,
+            -6.0,
+            KeyframeInterpolation::Linear,
+        );
+        add_cmd.execute(&mut state).unwrap();
+        let mut cmd = MoveAudioKeyframeCommand::new(&seq_id, &track_id, &clip_id, 0, 7.0);
+        cmd.execute(&mut state).unwrap();
+
+        // When undoing
+        cmd.undo(&mut state).unwrap();
+
+        // Then keyframe should be back at 2.0s
+        let kf = &state.sequences[&seq_id].tracks[0].clips[0]
+            .audio
+            .volume_keyframes[0];
+        assert!((kf.time_offset - 2.0).abs() < 1e-9);
+    }
+
+    // =========================================================================
+    // SetAudioKeyframeValueCommand Tests
+    // =========================================================================
+
+    #[test]
+    fn set_audio_keyframe_value_should_update_volume_db() {
+        // Given a clip with a keyframe at -6dB
+        let (mut state, seq_id, track_id, clip_id) = create_audio_keyframe_test_state();
+        let mut add_cmd = AddAudioKeyframeCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            2.0,
+            -6.0,
+            KeyframeInterpolation::Linear,
+        );
+        add_cmd.execute(&mut state).unwrap();
+
+        // When setting value to -12dB
+        let mut cmd =
+            SetAudioKeyframeValueCommand::new(&seq_id, &track_id, &clip_id, 0, -12.0, None);
+        cmd.execute(&mut state).unwrap();
+
+        // Then keyframe value should be updated
+        let kf = &state.sequences[&seq_id].tracks[0].clips[0]
+            .audio
+            .volume_keyframes[0];
+        assert!((kf.value_db - (-12.0)).abs() < 1e-9);
+        assert_eq!(kf.interpolation, KeyframeInterpolation::Linear); // Unchanged
+    }
+
+    #[test]
+    fn set_audio_keyframe_value_should_update_interpolation_when_provided() {
+        // Given a clip with a linear keyframe
+        let (mut state, seq_id, track_id, clip_id) = create_audio_keyframe_test_state();
+        let mut add_cmd = AddAudioKeyframeCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            2.0,
+            -6.0,
+            KeyframeInterpolation::Linear,
+        );
+        add_cmd.execute(&mut state).unwrap();
+
+        // When setting value with Hold interpolation
+        let mut cmd = SetAudioKeyframeValueCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            0,
+            -6.0,
+            Some(KeyframeInterpolation::Hold),
+        );
+        cmd.execute(&mut state).unwrap();
+
+        // Then interpolation should be updated
+        let kf = &state.sequences[&seq_id].tracks[0].clips[0]
+            .audio
+            .volume_keyframes[0];
+        assert_eq!(kf.interpolation, KeyframeInterpolation::Hold);
+    }
+
+    #[test]
+    fn set_audio_keyframe_value_undo_should_restore_previous_value() {
+        // Given a keyframe whose value was changed
+        let (mut state, seq_id, track_id, clip_id) = create_audio_keyframe_test_state();
+        let mut add_cmd = AddAudioKeyframeCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            2.0,
+            -6.0,
+            KeyframeInterpolation::Linear,
+        );
+        add_cmd.execute(&mut state).unwrap();
+        let mut cmd = SetAudioKeyframeValueCommand::new(
+            &seq_id,
+            &track_id,
+            &clip_id,
+            0,
+            -18.0,
+            Some(KeyframeInterpolation::Hold),
+        );
+        cmd.execute(&mut state).unwrap();
+
+        // When undoing
+        cmd.undo(&mut state).unwrap();
+
+        // Then both value and interpolation should be restored
+        let kf = &state.sequences[&seq_id].tracks[0].clips[0]
+            .audio
+            .volume_keyframes[0];
+        assert!((kf.value_db - (-6.0)).abs() < 1e-9);
+        assert_eq!(kf.interpolation, KeyframeInterpolation::Linear);
+    }
+
+    // =========================================================================
+    // SetAudioFadeInCommand Tests
+    // =========================================================================
+
+    #[test]
+    fn test_set_audio_fade_in_applies_duration_and_type() {
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+        let mut cmd =
+            SetAudioFadeInCommand::new(&seq_id, &track_id, &clip_id, 1.5, FadeType::ConstantPower);
+
+        cmd.execute(&mut state).unwrap();
+
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert!((clip.audio.fade_in_sec - 1.5).abs() < 1e-9);
+        assert_eq!(clip.audio.fade_in_type, FadeType::ConstantPower);
+    }
+
+    #[test]
+    fn test_set_audio_fade_in_clamps_to_clip_duration() {
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+        // Clip duration is ~10s (source 0-10, speed 1)
+        let mut cmd =
+            SetAudioFadeInCommand::new(&seq_id, &track_id, &clip_id, 20.0, FadeType::Linear);
+
+        cmd.execute(&mut state).unwrap();
+
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert!(clip.audio.fade_in_sec <= clip.duration() + 0.001);
+    }
+
+    #[test]
+    fn test_set_audio_fade_in_reduces_fade_out_on_overflow() {
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+        // Set fade_out first
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0]
+            .audio
+            .fade_out_sec = 8.0;
+
+        let mut cmd =
+            SetAudioFadeInCommand::new(&seq_id, &track_id, &clip_id, 5.0, FadeType::Linear);
+        cmd.execute(&mut state).unwrap();
+
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        let clip_dur = clip.duration();
+        assert!(clip.audio.fade_in_sec + clip.audio.fade_out_sec <= clip_dur + 0.001);
+    }
+
+    #[test]
+    fn test_set_audio_fade_in_undo_restores_previous() {
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+        let mut cmd =
+            SetAudioFadeInCommand::new(&seq_id, &track_id, &clip_id, 2.0, FadeType::Exponential);
+
+        cmd.execute(&mut state).unwrap();
+        assert!(
+            (state.sequences[&seq_id].tracks[0].clips[0]
+                .audio
+                .fade_in_sec
+                - 2.0)
+                .abs()
+                < 1e-9
+        );
+
+        cmd.undo(&mut state).unwrap();
+        assert!(
+            (state.sequences[&seq_id].tracks[0].clips[0]
+                .audio
+                .fade_in_sec
+                - 0.0)
+                .abs()
+                < 1e-9
+        );
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0]
+                .audio
+                .fade_in_type,
+            FadeType::Linear
+        );
+    }
+
+    #[test]
+    fn test_set_audio_fade_in_rejects_negative_duration() {
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+        let mut cmd =
+            SetAudioFadeInCommand::new(&seq_id, &track_id, &clip_id, -1.0, FadeType::Linear);
+
+        let result = cmd.execute(&mut state);
+        assert!(result.is_err());
+    }
+
+    // =========================================================================
+    // SetAudioFadeOutCommand Tests
+    // =========================================================================
+
+    #[test]
+    fn test_set_audio_fade_out_applies_duration_and_type() {
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+        let mut cmd =
+            SetAudioFadeOutCommand::new(&seq_id, &track_id, &clip_id, 2.5, FadeType::SCurve);
+
+        cmd.execute(&mut state).unwrap();
+
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert!((clip.audio.fade_out_sec - 2.5).abs() < 1e-9);
+        assert_eq!(clip.audio.fade_out_type, FadeType::SCurve);
+    }
+
+    #[test]
+    fn test_set_audio_fade_out_undo_restores_previous() {
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+        let mut cmd =
+            SetAudioFadeOutCommand::new(&seq_id, &track_id, &clip_id, 3.0, FadeType::ConstantGain);
+
+        cmd.execute(&mut state).unwrap();
+        cmd.undo(&mut state).unwrap();
+
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert!((clip.audio.fade_out_sec - 0.0).abs() < 1e-9);
+        assert_eq!(clip.audio.fade_out_type, FadeType::Linear);
+    }
+
+    // =========================================================================
+    // FadeType FFmpeg Mapping Tests
+    // =========================================================================
+
+    #[test]
+    fn test_fade_type_to_ffmpeg_type() {
+        assert_eq!(FadeType::Linear.to_ffmpeg_type(), "tri");
+        assert_eq!(FadeType::ConstantGain.to_ffmpeg_type(), "tri");
+        assert_eq!(FadeType::ConstantPower.to_ffmpeg_type(), "qsin");
+        assert_eq!(FadeType::Exponential.to_ffmpeg_type(), "exp");
+        assert_eq!(FadeType::SCurve.to_ffmpeg_type(), "cub");
     }
 }
