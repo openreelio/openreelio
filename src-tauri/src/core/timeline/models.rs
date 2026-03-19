@@ -263,6 +263,82 @@ impl Sequence {
             .map(|c| c.place.timeline_out_sec())
             .fold(0.0, f64::max)
     }
+
+    // -------------------------------------------------------------------------
+    // Edit Point & Marker Navigation (S27-002)
+    // -------------------------------------------------------------------------
+
+    /// Epsilon tolerance for floating-point time comparisons (1 microsecond).
+    const TIME_EPSILON: f64 = 1e-6;
+
+    /// Collects all edit points (clip boundaries) across all tracks.
+    ///
+    /// Edit points include timeline start (0.0) and every clip in/out boundary.
+    /// Returns a sorted, deduplicated vector.
+    ///
+    /// Note: boundaries of **all** clips are included regardless of their
+    /// `enabled` state. This matches NLE convention where disabled clips
+    /// remain navigable so the editor can quickly re-enable them.
+    pub fn collect_edit_points(&self) -> Vec<f64> {
+        let mut points = Vec::new();
+        for track in &self.tracks {
+            for clip in &track.clips {
+                points.push(clip.place.timeline_in_sec);
+                points.push(clip.place.timeline_out_sec());
+            }
+        }
+        points.push(0.0);
+        points.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        points.dedup_by(|a, b| (*a - *b).abs() < Self::TIME_EPSILON);
+        points
+    }
+
+    /// Collects sorted marker times.
+    pub fn collect_marker_times(&self) -> Vec<f64> {
+        let mut times: Vec<f64> = self.markers.iter().map(|m| m.time_sec).collect();
+        times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        times
+    }
+
+    /// Finds the next edit point (clip boundary) strictly after `current_time`.
+    ///
+    /// Searches across all tracks. Returns `None` if at or past the last edit point.
+    /// Includes disabled clips (see [`collect_edit_points`](Self::collect_edit_points)).
+    pub fn next_edit_point(&self, current_time: f64) -> Option<f64> {
+        self.collect_edit_points()
+            .into_iter()
+            .find(|&p| p > current_time + Self::TIME_EPSILON)
+    }
+
+    /// Finds the previous edit point (clip boundary) strictly before `current_time`.
+    ///
+    /// Searches across all tracks. Returns `None` if at or before the first edit point.
+    /// Includes disabled clips (see [`collect_edit_points`](Self::collect_edit_points)).
+    pub fn prev_edit_point(&self, current_time: f64) -> Option<f64> {
+        self.collect_edit_points()
+            .into_iter()
+            .rev()
+            .find(|&p| p < current_time - Self::TIME_EPSILON)
+    }
+
+    /// Finds the next marker position strictly after `current_time`.
+    ///
+    /// Returns `None` if there are no markers after the current position.
+    pub fn next_marker(&self, current_time: f64) -> Option<f64> {
+        self.collect_marker_times()
+            .into_iter()
+            .find(|&t| t > current_time + Self::TIME_EPSILON)
+    }
+
+    /// Finds the previous marker position strictly before `current_time`.
+    ///
+    /// Returns `None` if there are no markers before the current position.
+    pub fn prev_marker(&self, current_time: f64) -> Option<f64> {
+        self.collect_marker_times()
+            .into_iter()
+            .rev()
+            .find(|&t| t < current_time - Self::TIME_EPSILON)
+    }
 }
 
 // =============================================================================
@@ -1048,6 +1124,14 @@ pub struct Clip {
     /// Optional caption position override for caption track clips.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caption_position: Option<serde_json::Value>,
+    /// Whether this clip is enabled (disabled clips are skipped during render/preview)
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// Serde default helper that returns `true`
+fn default_true() -> bool {
+    true
 }
 
 impl Clip {
@@ -1071,6 +1155,7 @@ impl Clip {
             color: None,
             caption_style: None,
             caption_position: None,
+            enabled: true,
         }
     }
 
@@ -1115,6 +1200,7 @@ impl Clip {
             color: None,
             caption_style: None,
             caption_position: None,
+            enabled: true,
         }
     }
 
@@ -2040,5 +2126,209 @@ mod tests {
         assert!((deserialized.time_offset - 1.5).abs() < 1e-9);
         assert!((deserialized.value_db - (-6.0)).abs() < 1e-9);
         assert_eq!(deserialized.interpolation, KeyframeInterpolation::Linear);
+    }
+
+    // =========================================================================
+    // Edit Point & Marker Navigation (S27-002)
+    // =========================================================================
+
+    /// Helper: creates a clip at the given timeline position with the given duration.
+    fn nav_clip(timeline_in: f64, duration: f64) -> Clip {
+        Clip::new("nav-test-asset")
+            .with_source_range(0.0, duration)
+            .place_at(timeline_in)
+    }
+
+    /// Helper: creates a sequence with given tracks and markers.
+    fn nav_sequence(tracks: Vec<Track>, markers: Vec<Marker>) -> Sequence {
+        let mut seq = Sequence::new("NavTest", SequenceFormat::youtube_1080());
+        seq.tracks = tracks;
+        seq.markers = markers;
+        seq
+    }
+
+    // -- collect_edit_points --
+
+    #[test]
+    fn should_include_timeline_start_as_edit_point_when_no_clips_exist() {
+        let seq = nav_sequence(vec![], vec![]);
+        let points = seq.collect_edit_points();
+        assert_eq!(points, vec![0.0]);
+    }
+
+    #[test]
+    fn should_collect_clip_boundaries_from_single_track() {
+        // Given a track with clips at [2..5] and [7..10]
+        let mut track = Track::new_video("V1");
+        track.clips = vec![nav_clip(2.0, 3.0), nav_clip(7.0, 3.0)];
+        let seq = nav_sequence(vec![track], vec![]);
+
+        // When collecting edit points
+        let points = seq.collect_edit_points();
+
+        // Then all boundaries should be present (including 0.0 start)
+        assert_eq!(points, vec![0.0, 2.0, 5.0, 7.0, 10.0]);
+    }
+
+    #[test]
+    fn should_collect_edit_points_across_all_tracks() {
+        // Given: video track [0..3], audio track [1..4]
+        let mut v = Track::new_video("V1");
+        v.clips = vec![nav_clip(0.0, 3.0)];
+        let mut a = Track::new_audio("A1");
+        a.clips = vec![nav_clip(1.0, 3.0)];
+        let seq = nav_sequence(vec![v, a], vec![]);
+
+        let points = seq.collect_edit_points();
+        // 0.0, 1.0, 3.0, 4.0
+        assert_eq!(points, vec![0.0, 1.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn should_deduplicate_coincident_edit_points_across_tracks() {
+        // Given: two clips on different tracks sharing boundary at 3.0
+        let mut t1 = Track::new_video("V1");
+        t1.clips = vec![nav_clip(0.0, 3.0)];
+        let mut t2 = Track::new_video("V2");
+        t2.clips = vec![nav_clip(3.0, 2.0)];
+        let seq = nav_sequence(vec![t1, t2], vec![]);
+
+        let points = seq.collect_edit_points();
+        assert_eq!(points, vec![0.0, 3.0, 5.0]);
+    }
+
+    // -- next_edit_point / prev_edit_point --
+
+    #[test]
+    fn should_find_next_edit_point_after_current_time() {
+        let mut track = Track::new_video("V1");
+        track.clips = vec![nav_clip(2.0, 3.0), nav_clip(7.0, 3.0)];
+        let seq = nav_sequence(vec![track], vec![]);
+
+        // Edit points: 0.0, 2.0, 5.0, 7.0, 10.0
+        assert_eq!(seq.next_edit_point(0.0), Some(2.0));
+        assert_eq!(seq.next_edit_point(2.0), Some(5.0));
+        assert_eq!(seq.next_edit_point(4.5), Some(5.0));
+        assert_eq!(seq.next_edit_point(7.0), Some(10.0));
+    }
+
+    #[test]
+    fn should_return_none_when_at_or_past_last_edit_point() {
+        let mut track = Track::new_video("V1");
+        track.clips = vec![nav_clip(0.0, 5.0)];
+        let seq = nav_sequence(vec![track], vec![]);
+
+        assert_eq!(seq.next_edit_point(5.0), None);
+        assert_eq!(seq.next_edit_point(10.0), None);
+    }
+
+    #[test]
+    fn should_find_prev_edit_point_before_current_time() {
+        let mut track = Track::new_video("V1");
+        track.clips = vec![nav_clip(2.0, 3.0), nav_clip(7.0, 3.0)];
+        let seq = nav_sequence(vec![track], vec![]);
+
+        // Edit points: 0.0, 2.0, 5.0, 7.0, 10.0
+        assert_eq!(seq.prev_edit_point(10.0), Some(7.0));
+        assert_eq!(seq.prev_edit_point(7.0), Some(5.0));
+        assert_eq!(seq.prev_edit_point(3.0), Some(2.0));
+        assert_eq!(seq.prev_edit_point(2.0), Some(0.0));
+    }
+
+    #[test]
+    fn should_return_none_when_at_timeline_start() {
+        let seq = nav_sequence(vec![], vec![]);
+        assert_eq!(seq.prev_edit_point(0.0), None);
+    }
+
+    #[test]
+    fn should_handle_playhead_between_edit_points() {
+        let mut track = Track::new_video("V1");
+        track.clips = vec![nav_clip(0.0, 5.0), nav_clip(10.0, 5.0)];
+        let seq = nav_sequence(vec![track], vec![]);
+
+        // Playhead at 7.0 (gap between clips)
+        assert_eq!(seq.next_edit_point(7.0), Some(10.0));
+        assert_eq!(seq.prev_edit_point(7.0), Some(5.0));
+    }
+
+    // -- next_marker / prev_marker --
+
+    #[test]
+    fn should_find_next_marker_after_current_time() {
+        let markers = vec![
+            Marker::new(2.0, "A"),
+            Marker::new(5.0, "B"),
+            Marker::new(8.0, "C"),
+        ];
+        let seq = nav_sequence(vec![], markers);
+
+        assert_eq!(seq.next_marker(0.0), Some(2.0));
+        assert_eq!(seq.next_marker(2.0), Some(5.0));
+        assert_eq!(seq.next_marker(6.0), Some(8.0));
+    }
+
+    #[test]
+    fn should_find_prev_marker_before_current_time() {
+        let markers = vec![
+            Marker::new(2.0, "A"),
+            Marker::new(5.0, "B"),
+            Marker::new(8.0, "C"),
+        ];
+        let seq = nav_sequence(vec![], markers);
+
+        assert_eq!(seq.prev_marker(10.0), Some(8.0));
+        assert_eq!(seq.prev_marker(8.0), Some(5.0));
+        assert_eq!(seq.prev_marker(3.0), Some(2.0));
+    }
+
+    #[test]
+    fn should_return_none_when_no_markers_exist() {
+        let seq = nav_sequence(vec![], vec![]);
+        assert_eq!(seq.next_marker(0.0), None);
+        assert_eq!(seq.prev_marker(5.0), None);
+    }
+
+    #[test]
+    fn should_return_none_when_past_last_marker() {
+        let markers = vec![Marker::new(3.0, "Only")];
+        let seq = nav_sequence(vec![], markers);
+        assert_eq!(seq.next_marker(5.0), None);
+    }
+
+    #[test]
+    fn should_return_none_when_before_first_marker() {
+        let markers = vec![Marker::new(3.0, "Only")];
+        let seq = nav_sequence(vec![], markers);
+        assert_eq!(seq.prev_marker(1.0), None);
+    }
+
+    // -- Combined multi-track + markers --
+
+    #[test]
+    fn should_navigate_through_multi_track_timeline_with_markers() {
+        // Given: Video [0..3], [5..8]; Audio [1..4]; Markers at 2.5 and 6.0
+        let mut v = Track::new_video("V1");
+        v.clips = vec![nav_clip(0.0, 3.0), nav_clip(5.0, 3.0)];
+        let mut a = Track::new_audio("A1");
+        a.clips = vec![nav_clip(1.0, 3.0)];
+        let markers = vec![Marker::new(2.5, "Hook"), Marker::new(6.0, "Beat")];
+        let seq = nav_sequence(vec![v, a], markers);
+
+        // Edit points: 0.0, 1.0, 3.0, 4.0, 5.0, 8.0
+        assert_eq!(seq.collect_edit_points(), vec![0.0, 1.0, 3.0, 4.0, 5.0, 8.0]);
+
+        // Forward edit navigation
+        assert_eq!(seq.next_edit_point(0.0), Some(1.0));
+        assert_eq!(seq.next_edit_point(1.0), Some(3.0));
+
+        // Backward edit navigation
+        assert_eq!(seq.prev_edit_point(8.0), Some(5.0));
+        assert_eq!(seq.prev_edit_point(5.0), Some(4.0));
+
+        // Marker navigation
+        assert_eq!(seq.next_marker(0.0), Some(2.5));
+        assert_eq!(seq.next_marker(2.5), Some(6.0));
+        assert_eq!(seq.prev_marker(6.0), Some(2.5));
     }
 }

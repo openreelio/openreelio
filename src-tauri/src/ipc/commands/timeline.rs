@@ -251,3 +251,73 @@ pub async fn can_redo(state: State<'_, AppState>) -> Result<bool, String> {
         .map(|p| p.executor.can_redo())
         .unwrap_or(false))
 }
+
+// =============================================================================
+// Edit Point & Marker Navigation (S27-002)
+// =============================================================================
+
+/// Helper: look up a sequence and apply a read-only navigation function.
+async fn with_sequence_nav(
+    sequence_id: String,
+    current_time: f64,
+    state: &State<'_, AppState>,
+    nav_fn: fn(&Sequence, f64) -> Option<f64>,
+) -> Result<Option<f64>, String> {
+    let guard = state.project.lock().await;
+
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let sequence = project
+        .state
+        .sequences
+        .get(&sequence_id)
+        .ok_or_else(|| CoreError::SequenceNotFound(sequence_id).to_ipc_error())?;
+
+    Ok(nav_fn(sequence, current_time))
+}
+
+/// Finds the next edit point (clip boundary) after current_time across all tracks.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_next_edit_point(
+    sequence_id: String,
+    current_time: f64,
+    state: State<'_, AppState>,
+) -> Result<Option<f64>, String> {
+    with_sequence_nav(sequence_id, current_time, &state, Sequence::next_edit_point).await
+}
+
+/// Finds the previous edit point (clip boundary) before current_time across all tracks.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_prev_edit_point(
+    sequence_id: String,
+    current_time: f64,
+    state: State<'_, AppState>,
+) -> Result<Option<f64>, String> {
+    with_sequence_nav(sequence_id, current_time, &state, Sequence::prev_edit_point).await
+}
+
+/// Finds the next marker position after current_time in the sequence.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_next_marker(
+    sequence_id: String,
+    current_time: f64,
+    state: State<'_, AppState>,
+) -> Result<Option<f64>, String> {
+    with_sequence_nav(sequence_id, current_time, &state, Sequence::next_marker).await
+}
+
+/// Finds the previous marker position before current_time in the sequence.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_prev_marker(
+    sequence_id: String,
+    current_time: f64,
+    state: State<'_, AppState>,
+) -> Result<Option<f64>, String> {
+    with_sequence_nav(sequence_id, current_time, &state, Sequence::prev_marker).await
+}
