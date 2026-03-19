@@ -2316,7 +2316,10 @@ mod tests {
         let seq = nav_sequence(vec![v, a], markers);
 
         // Edit points: 0.0, 1.0, 3.0, 4.0, 5.0, 8.0
-        assert_eq!(seq.collect_edit_points(), vec![0.0, 1.0, 3.0, 4.0, 5.0, 8.0]);
+        assert_eq!(
+            seq.collect_edit_points(),
+            vec![0.0, 1.0, 3.0, 4.0, 5.0, 8.0]
+        );
 
         // Forward edit navigation
         assert_eq!(seq.next_edit_point(0.0), Some(1.0));

@@ -1101,11 +1101,10 @@ impl CommandPayload {
             RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
             SetAudioKeyframeValueCommand, SetClipAudioCommand, SetClipBlendModeCommand,
             SetClipEnabledCommand, SetClipMuteCommand, SetClipSpeedCommand,
-            SetClipTransformCommand,
-            SetMasterVolumeCommand, SetTimeRemapCommand, SetTrackBlendModeCommand,
-            SplitClipCommand, ToggleTrackLockCommand, ToggleTrackMuteCommand,
-            ToggleTrackVisibilityCommand, TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand,
-            UpdateTextCommand,
+            SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
+            SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand,
+            ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand,
+            UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
         };
 
         match self {

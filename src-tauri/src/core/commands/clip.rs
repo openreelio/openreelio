@@ -3321,9 +3321,11 @@ impl Command for SetClipEnabledCommand {
         clip.enabled = self.enabled;
 
         let op_id = ulid::Ulid::new().to_string();
-        Ok(CommandResult::new(&op_id).with_change(StateChange::ClipModified {
-            clip_id: self.clip_id.clone(),
-        }))
+        Ok(
+            CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+                clip_id: self.clip_id.clone(),
+            }),
+        )
     }
 
     fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
