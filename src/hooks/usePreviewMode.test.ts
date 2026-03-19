@@ -148,6 +148,29 @@ describe('usePreviewMode', () => {
       expect(result.current.mode).toBe('canvas');
       expect(result.current.reason).toBe('No clips at playhead');
     });
+
+    it('should ignore disabled clips when determining active preview content', () => {
+      const track = createMockTrack({
+        clips: [
+          createMockClip({
+            enabled: false,
+            place: { timelineInSec: 0, durationSec: 5 },
+            range: { sourceInSec: 0, sourceOutSec: 5 },
+          }),
+        ],
+      });
+      const sequence = createMockSequence([track]);
+      const assets = new Map([['asset-1', createMockAsset()]]);
+
+      const { result } = renderUsePreviewMode({
+        sequence,
+        assets,
+        currentTime: 2,
+      });
+
+      expect(result.current.mode).toBe('canvas');
+      expect(result.current.reason).toBe('No clips at playhead');
+    });
   });
 
   describe('video mode selection', () => {
@@ -212,6 +235,46 @@ describe('usePreviewMode', () => {
       });
 
       expect(result.current.mode).toBe('video');
+    });
+
+    it('should ignore disabled clips when selecting preview mode', () => {
+      const enabledClip = createMockClip({
+        id: 'clip-enabled',
+        assetId: 'asset-enabled',
+        place: { timelineInSec: 0, durationSec: 10 },
+      });
+      const disabledClip = createMockClip({
+        id: 'clip-disabled',
+        assetId: 'asset-disabled',
+        place: { timelineInSec: 0, durationSec: 10 },
+        effects: ['fx-1'],
+        enabled: false,
+      });
+      const track = createMockTrack({ clips: [enabledClip, disabledClip] });
+      const sequence = createMockSequence([track]);
+      const assets = new Map([
+        [
+          'asset-enabled',
+          createMockAsset({
+            id: 'asset-enabled',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy-enabled.mp4',
+          }),
+        ],
+        [
+          'asset-disabled',
+          createMockAsset({
+            id: 'asset-disabled',
+            proxyStatus: 'ready',
+            proxyUrl: 'asset://localhost/proxy-disabled.mp4',
+          }),
+        ],
+      ]);
+
+      const { result } = renderUsePreviewMode({ sequence, assets, currentTime: 5 });
+
+      expect(result.current.mode).toBe('video');
+      expect(result.current.reason).toContain('ready proxies');
     });
   });
 

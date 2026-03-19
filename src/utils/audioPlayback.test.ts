@@ -275,4 +275,61 @@ describe('collectPlaybackAudioClips', () => {
 
     expect(result.map((entry) => entry.clip.id)).toEqual(['audio-clip']);
   });
+
+  it('skips disabled clips when collecting playback audio', () => {
+    const videoAsset = createAsset({
+      id: 'video-asset',
+      kind: 'video',
+      audio: { sampleRate: 48000, channels: 2, codec: 'aac' },
+    });
+    const audioAsset = createAsset({ id: 'audio-asset', kind: 'audio' });
+
+    const sequence = createSequence([
+      createTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [createClip({ id: 'video-clip', assetId: 'video-asset', enabled: false })],
+      }),
+      createTrack({
+        id: 'audio-track',
+        kind: 'audio',
+        clips: [createClip({ id: 'audio-clip', assetId: 'audio-asset' })],
+      }),
+    ]);
+
+    const result = collectPlaybackAudioClips(
+      sequence,
+      new Map([
+        [videoAsset.id, videoAsset],
+        [audioAsset.id, audioAsset],
+      ]),
+    );
+
+    expect(result.map((entry) => entry.clip.id)).toEqual(['audio-clip']);
+  });
+
+  it('does not suppress video-track audio for disabled audio companions', () => {
+    const videoAsset = createAsset({
+      id: 'video-asset',
+      kind: 'video',
+      audio: { sampleRate: 48000, channels: 2, codec: 'aac' },
+    });
+
+    const sequence = createSequence([
+      createTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [createClip({ id: 'video-clip', assetId: 'video-asset' })],
+      }),
+      createTrack({
+        id: 'audio-track',
+        kind: 'audio',
+        clips: [createClip({ id: 'audio-clip', assetId: 'video-asset', enabled: false })],
+      }),
+    ]);
+
+    const result = collectPlaybackAudioClips(sequence, new Map([[videoAsset.id, videoAsset]]));
+
+    expect(result.map((entry) => entry.clip.id)).toEqual(['video-clip']);
+  });
 });
