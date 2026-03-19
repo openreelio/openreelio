@@ -1480,7 +1480,7 @@ fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
     ))
 }
 
-fn collect_enabled_clips_sorted<'a>(sequence: &'a Sequence) -> Vec<(&'a Clip, &'a Track)> {
+fn collect_enabled_clips_sorted(sequence: &Sequence) -> Vec<(&Clip, &Track)> {
     let mut all_clips: Vec<(&Clip, &Track)> = Vec::new();
 
     for track in &sequence.tracks {
