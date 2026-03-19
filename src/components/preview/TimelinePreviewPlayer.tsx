@@ -254,6 +254,10 @@ export const TimelinePreviewPlayer = memo(function TimelinePreviewPlayer({
         // Build clip index map for efficient sorting later
         for (let clipIndex = 0; clipIndex < track.clips.length; clipIndex++) {
           const clip = track.clips[clipIndex];
+          if (clip.enabled === false) {
+            continue;
+          }
+
           if (isClipActiveAtTime(clip, time)) {
             // Calculate source time within the clip, respecting playback speed
             const sourceTime = getClipSourceTimeAtTimelineTime(clip, time);

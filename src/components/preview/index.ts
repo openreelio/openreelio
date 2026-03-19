@@ -39,3 +39,6 @@ export type { UnifiedPreviewPlayerProps } from './UnifiedPreviewPlayer';
 
 export { TransformOverlay } from './TransformOverlay';
 export type { TransformOverlayProps } from './TransformOverlay';
+
+export { ShuttleSpeedIndicator } from './ShuttleSpeedIndicator';
+export type { ShuttleSpeedIndicatorProps } from './ShuttleSpeedIndicator';

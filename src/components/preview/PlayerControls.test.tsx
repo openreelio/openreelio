@@ -58,11 +58,11 @@ describe('PlayerControls', () => {
       expect(screen.getByTestId('volume-slider')).toBeInTheDocument();
     });
 
-    it('should render time display', () => {
+    it('should render timecode display', () => {
       render(<PlayerControls {...defaultProps} currentTime={65} duration={180} />);
-      // 1:05 / 3:00
-      expect(screen.getByTestId('time-display')).toHaveTextContent('1:05');
-      expect(screen.getByTestId('duration-display')).toHaveTextContent('3:00');
+      // SMPTE: 00:01:05:00 / 00:03:00:00
+      expect(screen.getByTestId('timecode-display')).toHaveTextContent('00:01:05:00');
+      expect(screen.getByTestId('duration-display')).toHaveTextContent('00:03:00:00');
     });
 
     it('should render fullscreen button', () => {
@@ -363,26 +363,25 @@ describe('PlayerControls', () => {
   // ===========================================================================
 
   describe('time formatting', () => {
-    it('should format seconds correctly', () => {
+    it('should format seconds in SMPTE timecode', () => {
       render(<PlayerControls {...defaultProps} currentTime={45} duration={60} />);
-      expect(screen.getByTestId('time-display')).toHaveTextContent('0:45');
+      expect(screen.getByTestId('timecode-display')).toHaveTextContent('00:00:45:00');
     });
 
-    it('should format minutes correctly', () => {
+    it('should format minutes in SMPTE timecode', () => {
       render(<PlayerControls {...defaultProps} currentTime={125} duration={300} />);
-      expect(screen.getByTestId('time-display')).toHaveTextContent('2:05');
+      expect(screen.getByTestId('timecode-display')).toHaveTextContent('00:02:05:00');
     });
 
-    it('should format hours correctly', () => {
+    it('should format hours in SMPTE timecode', () => {
       render(<PlayerControls {...defaultProps} currentTime={3725} duration={7200} />);
-      // 1:02:05
-      expect(screen.getByTestId('time-display')).toHaveTextContent('1:02:05');
+      expect(screen.getByTestId('timecode-display')).toHaveTextContent('01:02:05:00');
     });
 
     it('should handle zero duration gracefully', () => {
       render(<PlayerControls {...defaultProps} currentTime={0} duration={0} />);
-      expect(screen.getByTestId('time-display')).toHaveTextContent('0:00');
-      expect(screen.getByTestId('duration-display')).toHaveTextContent('0:00');
+      expect(screen.getByTestId('timecode-display')).toHaveTextContent('00:00:00:00');
+      expect(screen.getByTestId('duration-display')).toHaveTextContent('00:00:00:00');
     });
   });
 
@@ -428,6 +427,7 @@ describe('PlayerControls', () => {
       expect(screen.getByTestId('play-button')).toBeDisabled();
       expect(screen.getByTestId('skip-backward-button')).toBeDisabled();
       expect(screen.getByTestId('skip-forward-button')).toBeDisabled();
+      expect(screen.getByTestId('timecode-display')).toBeDisabled();
       expect(screen.getByTestId('volume-button')).toBeDisabled();
       expect(screen.getByTestId('fullscreen-button')).toBeDisabled();
     });

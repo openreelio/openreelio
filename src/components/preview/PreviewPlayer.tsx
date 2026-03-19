@@ -8,6 +8,7 @@
 import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from 'react';
 import { VideoPlayer } from './VideoPlayer';
 import { PlayerControls } from './PlayerControls';
+import { usePlaybackStore } from '@/stores/playbackStore';
 import type { Size2D } from '@/types';
 
 // =============================================================================
@@ -27,10 +28,14 @@ export interface PreviewPlayerProps {
   playhead?: number;
   /** Whether player is playing (controlled) */
   isPlaying?: boolean;
+  /** Playback rate (controlled) */
+  playbackRate?: number;
   /** Playhead change callback */
   onPlayheadChange?: (time: number) => void;
   /** Play state change callback */
   onPlayStateChange?: (isPlaying: boolean) => void;
+  /** Playback rate change callback */
+  onPlaybackRateChange?: (rate: number) => void;
   /** Duration change callback */
   onDurationChange?: (duration: number) => void;
   /** Video dimensions change callback */
@@ -50,8 +55,10 @@ export function PreviewPlayer({
   showControls = true,
   playhead,
   isPlaying: externalIsPlaying,
+  playbackRate: externalPlaybackRate,
   onPlayheadChange,
   onPlayStateChange,
+  onPlaybackRateChange,
   onDurationChange,
   onDimensionsChange,
   onEnded,
@@ -66,11 +73,16 @@ export function PreviewPlayer({
   const [isMuted, setIsMuted] = useState(false);
   const [buffered, setBuffered] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [playbackRate, setPlaybackRate] = useState(1);
+  const [internalPlaybackRate, setInternalPlaybackRate] = useState(1);
 
   // Use external values if provided, otherwise use internal
   const currentTime = playhead !== undefined ? playhead : internalPlayhead;
   const isPlaying = externalIsPlaying !== undefined ? externalIsPlaying : internalIsPlaying;
+  const playbackRate =
+    externalPlaybackRate !== undefined ? externalPlaybackRate : internalPlaybackRate;
+
+  // Read shuttle speed from the global playback store for indicator display
+  const shuttleSpeed = usePlaybackStore((s) => s.shuttleSpeed);
 
   // ===========================================================================
   // Video Event Handlers
@@ -81,7 +93,7 @@ export function PreviewPlayer({
       setInternalPlayhead(time);
       onPlayheadChange?.(time);
     },
-    [onPlayheadChange]
+    [onPlayheadChange],
   );
 
   const handlePlayStateChange = useCallback(
@@ -89,7 +101,7 @@ export function PreviewPlayer({
       setInternalIsPlaying(playing);
       onPlayStateChange?.(playing);
     },
-    [onPlayStateChange]
+    [onPlayStateChange],
   );
 
   const handleDurationChange = useCallback(
@@ -97,7 +109,7 @@ export function PreviewPlayer({
       setDuration(dur);
       onDurationChange?.(dur);
     },
-    [onDurationChange]
+    [onDurationChange],
   );
 
   const handleBufferProgress = useCallback((bufferedRanges: TimeRanges | null) => {
@@ -136,17 +148,20 @@ export function PreviewPlayer({
     }
   }, []);
 
-  const handleVolumeChange = useCallback((newVolume: number) => {
-    const video = containerRef.current?.querySelector('video');
-    if (video) {
-      video.volume = newVolume;
-      setVolume(newVolume);
-      if (newVolume > 0 && isMuted) {
-        video.muted = false;
-        setIsMuted(false);
+  const handleVolumeChange = useCallback(
+    (newVolume: number) => {
+      const video = containerRef.current?.querySelector('video');
+      if (video) {
+        video.volume = newVolume;
+        setVolume(newVolume);
+        if (newVolume > 0 && isMuted) {
+          video.muted = false;
+          setIsMuted(false);
+        }
       }
-    }
-  }, [isMuted]);
+    },
+    [isMuted],
+  );
 
   const handleMuteToggle = useCallback(() => {
     const video = containerRef.current?.querySelector('video');
@@ -160,19 +175,35 @@ export function PreviewPlayer({
     if (!containerRef.current) return;
 
     if (!document.fullscreenElement) {
-      containerRef.current.requestFullscreen?.().then(() => {
-        setIsFullscreen(true);
-      }).catch(() => {
-        // Fullscreen not supported
-      });
+      containerRef.current
+        .requestFullscreen?.()
+        .then(() => {
+          setIsFullscreen(true);
+        })
+        .catch(() => {
+          // Fullscreen not supported
+        });
     } else {
-      document.exitFullscreen?.().then(() => {
-        setIsFullscreen(false);
-      }).catch(() => {
-        // Exit fullscreen failed
-      });
+      document
+        .exitFullscreen?.()
+        .then(() => {
+          setIsFullscreen(false);
+        })
+        .catch(() => {
+          // Exit fullscreen failed
+        });
     }
   }, []);
+
+  const handlePlaybackRateChange = useCallback(
+    (rate: number) => {
+      if (externalPlaybackRate === undefined) {
+        setInternalPlaybackRate(rate);
+      }
+      onPlaybackRateChange?.(rate);
+    },
+    [externalPlaybackRate, onPlaybackRateChange],
+  );
 
   // ===========================================================================
   // Keyboard Shortcuts
@@ -192,7 +223,7 @@ export function PreviewPlayer({
           break;
       }
     },
-    [handlePlayPause, handleFullscreenToggle]
+    [handlePlayPause, handleFullscreenToggle],
   );
 
   // ===========================================================================
@@ -302,12 +333,13 @@ export function PreviewPlayer({
             buffered={buffered}
             isFullscreen={isFullscreen}
             playbackRate={playbackRate}
+            shuttleSpeed={shuttleSpeed}
             onPlayPause={handlePlayPause}
             onSeek={handleSeek}
             onVolumeChange={handleVolumeChange}
             onMuteToggle={handleMuteToggle}
             onFullscreenToggle={handleFullscreenToggle}
-            onPlaybackRateChange={setPlaybackRate}
+            onPlaybackRateChange={handlePlaybackRateChange}
           />
         </div>
       )}
