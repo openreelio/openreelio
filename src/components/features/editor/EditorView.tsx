@@ -400,10 +400,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       for (const clipId of selectedClipIds) {
         const track = sequence.tracks.find((t) => t.clips.some((c) => c.id === clipId));
         if (track) {
-          const result = handleToggleClipEnabled(clipId, track.id);
-          if (result instanceof Promise) {
-            promises.push(result);
-          }
+          promises.push(handleToggleClipEnabled(clipId, track.id));
         }
       }
       if (promises.length > 0) {

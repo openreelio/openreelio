@@ -2163,8 +2163,15 @@ impl ExportEngine {
             settings,
         )?;
 
-        // Calculate total duration based on the last clip end time on timeline
-        let total_duration: f64 = sequence.duration();
+        // Calculate total duration from enabled clips only so progress/ETA
+        // are accurate when trailing clips are disabled.
+        let total_duration: f64 = sequence
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.enabled)
+            .map(|c| c.place.timeline_out_sec())
+            .fold(0.0, f64::max);
         let fps = settings.fps.unwrap_or(30.0);
         let total_frames = (total_duration * fps) as u64;
 
@@ -3038,6 +3045,9 @@ pub fn detect_timeline_gaps(sequence: &Sequence) -> Vec<TimelineGap> {
         }
 
         for clip in &track.clips {
+            if !clip.enabled {
+                continue;
+            }
             let start = clip.place.timeline_in_sec;
             let end = clip.place.timeline_out_sec();
             intervals.push((start, end));

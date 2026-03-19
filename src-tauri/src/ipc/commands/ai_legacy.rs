@@ -1716,6 +1716,18 @@ pub async fn validate_edit_script(
                     issues.push(format!("SetMasterVolume command {} missing volumeDb", i));
                 }
             }
+            // Clip enable/disable command
+            "SetClipEnabled" | "setClipEnabled" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("SetClipEnabled command {} missing trackId", i));
+                }
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("SetClipEnabled command {} missing clipId", i));
+                }
+                if cmd.params.get("enabled").is_none() {
+                    issues.push(format!("SetClipEnabled command {} missing enabled", i));
+                }
+            }
             _ => {
                 issues.push(format!("Unknown command type: {}", cmd.command_type));
             }

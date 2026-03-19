@@ -69,15 +69,9 @@ export function formatTimecode(seconds: number, fps: number): string {
  * parseTimecode("00:01:01:15", 30) // 61.5
  */
 export function parseTimecode(timecode: string, fps: number): number {
-  const parts = timecode.split(':');
-  if (parts.length !== 4) return 0;
-  if (!Number.isFinite(fps) || fps <= 0) return 0;
+  if (!isValidTimecode(timecode, fps)) return 0;
 
-  const normalizedParts = parts.map((part) => part.trim());
-  if (normalizedParts.some((part) => part.length === 0 || !/^\d+$/.test(part))) return 0;
-
-  const [hrs, mins, secs, frames] = normalizedParts.map(Number);
-  if ([hrs, mins, secs, frames].some(isNaN)) return 0;
+  const [hrs, mins, secs, frames] = timecode.split(':').map((p) => Number(p.trim()));
 
   return hrs * 3600 + mins * 60 + secs + frames / fps;
 }
