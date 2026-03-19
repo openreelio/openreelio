@@ -3265,6 +3265,102 @@ impl Command for ReverseClipCommand {
 }
 
 // =============================================================================
+// SetClipEnabledCommand
+// =============================================================================
+
+/// Command to enable or disable a clip.
+///
+/// Disabled clips are skipped during render/preview but remain on the timeline
+/// for non-destructive toggling. This is the clip-level equivalent of muting —
+/// the clip stays in place, preserving timing, but produces no output.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetClipEnabledCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub enabled: bool,
+    #[serde(skip)]
+    previous_enabled: Option<bool>,
+}
+
+impl SetClipEnabledCommand {
+    pub fn new(sequence_id: &str, track_id: &str, clip_id: &str, enabled: bool) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            enabled,
+            previous_enabled: None,
+        }
+    }
+}
+
+impl Command for SetClipEnabledCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        validate_track_unlocked(track)?;
+
+        let clip = track
+            .clips
+            .iter_mut()
+            .find(|c| c.id == self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        self.previous_enabled = Some(clip.enabled);
+        clip.enabled = self.enabled;
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(CommandResult::new(&op_id).with_change(StateChange::ClipModified {
+            clip_id: self.clip_id.clone(),
+        }))
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(previous_enabled) = self.previous_enabled else {
+            return Ok(());
+        };
+
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) else {
+            return Ok(());
+        };
+
+        if let Some(clip) = track.clips.iter_mut().find(|c| c.id == self.clip_id) {
+            clip.enabled = previous_enabled;
+        }
+
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "SetClipEnabled"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+            "enabled": self.enabled,
+        })
+    }
+}
+
+// =============================================================================
 // CreateFreezeFrameCommand
 // =============================================================================
 
@@ -8968,5 +9064,90 @@ mod tests {
         assert_eq!(FadeType::ConstantPower.to_ffmpeg_type(), "qsin");
         assert_eq!(FadeType::Exponential.to_ffmpeg_type(), "exp");
         assert_eq!(FadeType::SCurve.to_ffmpeg_type(), "cub");
+    }
+
+    // =========================================================================
+    // SetClipEnabledCommand Tests
+    // =========================================================================
+
+    #[test]
+    fn test_set_clip_enabled_should_disable_clip_when_enabled_is_false() {
+        // Given a clip that is enabled (default)
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+        assert!(state.sequences[&seq_id].tracks[0].clips[0].enabled);
+
+        // When SetClipEnabledCommand is executed with enabled=false
+        let mut cmd = SetClipEnabledCommand::new(&seq_id, &track_id, &clip_id, false);
+        let result = cmd.execute(&mut state);
+
+        // Then the command succeeds and the clip's enabled field should be false
+        assert!(result.is_ok());
+        assert!(!state.sequences[&seq_id].tracks[0].clips[0].enabled);
+    }
+
+    #[test]
+    fn test_set_clip_enabled_should_enable_clip_when_previously_disabled() {
+        // Given a clip that is disabled (enabled=false)
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0].enabled = false;
+        assert!(!state.sequences[&seq_id].tracks[0].clips[0].enabled);
+
+        // When SetClipEnabledCommand is executed with enabled=true
+        let mut cmd = SetClipEnabledCommand::new(&seq_id, &track_id, &clip_id, true);
+        let result = cmd.execute(&mut state);
+
+        // Then the clip's enabled field should be true
+        assert!(result.is_ok());
+        assert!(state.sequences[&seq_id].tracks[0].clips[0].enabled);
+    }
+
+    #[test]
+    fn test_set_clip_enabled_undo_should_restore_previous_state() {
+        // Given a clip that was disabled via command
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+        assert!(state.sequences[&seq_id].tracks[0].clips[0].enabled);
+
+        let mut cmd = SetClipEnabledCommand::new(&seq_id, &track_id, &clip_id, false);
+        cmd.execute(&mut state).unwrap();
+        assert!(!state.sequences[&seq_id].tracks[0].clips[0].enabled);
+
+        // When undo is called
+        cmd.undo(&mut state).unwrap();
+
+        // Then the clip's enabled field should be restored to true
+        assert!(state.sequences[&seq_id].tracks[0].clips[0].enabled);
+    }
+
+    #[test]
+    fn test_set_clip_enabled_should_reject_locked_track() {
+        // Given a track that is locked
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].locked = true;
+
+        // When SetClipEnabledCommand is executed
+        let mut cmd = SetClipEnabledCommand::new(&seq_id, &track_id, &clip_id, false);
+        let err = cmd.execute(&mut state).unwrap_err();
+
+        // Then it should return an error
+        assert!(matches!(err, CoreError::ValidationError(_)));
+        assert!(err.to_string().contains("locked"));
+    }
+
+    #[test]
+    fn test_set_clip_enabled_should_persist_through_json_serialization() {
+        // Given a clip with enabled=false
+        let (mut state, seq_id, track_id, clip_id) = create_test_state_with_clip();
+        let mut cmd = SetClipEnabledCommand::new(&seq_id, &track_id, &clip_id, false);
+        cmd.execute(&mut state).unwrap();
+
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert!(!clip.enabled);
+
+        // When serialized to JSON and deserialized
+        let json = serde_json::to_string(clip).unwrap();
+        let deserialized: crate::core::timeline::Clip = serde_json::from_str(&json).unwrap();
+
+        // Then the enabled field should remain false
+        assert!(!deserialized.enabled);
     }
 }

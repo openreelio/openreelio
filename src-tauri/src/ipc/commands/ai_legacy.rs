@@ -769,7 +769,8 @@ pub async fn apply_edit_script(
         RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
         RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand,
         SetAudioFadeInCommand, SetAudioFadeOutCommand, SetAudioKeyframeValueCommand,
-        SetClipAudioCommand, SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand,
+        SetClipAudioCommand, SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMuteCommand,
+        SetClipSpeedCommand,
         SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
         SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand, ToggleTrackMuteCommand,
         ToggleTrackVisibilityCommand, TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand,
@@ -1023,6 +1024,12 @@ pub async fn apply_edit_script(
                 &p.sequence_id,
                 &p.track_id,
                 &p.clip_id,
+            )),
+            CommandPayload::SetClipEnabled(p) => Box::new(SetClipEnabledCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.enabled,
             )),
             CommandPayload::CreateFreezeFrame(p) => Box::new(CreateFreezeFrameCommand::new(
                 &p.sequence_id,
