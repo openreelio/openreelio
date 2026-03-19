@@ -44,8 +44,21 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 // Mock PreviewPlayer to avoid video element complexity in tests
 vi.mock('@/components/preview', () => ({
-  PreviewPlayer: ({ src, showControls }: { src?: string; showControls?: boolean }) => (
-    <div data-testid="preview-player" data-src={src} data-controls={showControls}>
+  PreviewPlayer: ({
+    src,
+    showControls,
+    playbackRate,
+  }: {
+    src?: string;
+    showControls?: boolean;
+    playbackRate?: number;
+  }) => (
+    <div
+      data-testid="preview-player"
+      data-src={src}
+      data-controls={showControls}
+      data-playback-rate={playbackRate}
+    >
       Mock Player
     </div>
   ),
@@ -173,6 +186,18 @@ describe('SourceMonitor', () => {
     fireEvent.keyDown(wrapper, { key: ' ' });
 
     expect(mockSourceMonitor.togglePlayback).toHaveBeenCalledOnce();
+  });
+
+  it('should propagate shuttle playback rate changes to the preview player', () => {
+    mockSourceMonitor.assetId = 'test-asset';
+
+    const { container } = render(<SourceMonitor />);
+    const wrapper = container.firstElementChild!;
+
+    fireEvent.keyDown(wrapper, { key: 'l' });
+    fireEvent.keyDown(wrapper, { key: 'l' });
+
+    expect(screen.getByTestId('preview-player')).toHaveAttribute('data-playback-rate', '2');
   });
 
   it('should set up draggable for source-to-timeline drag', () => {

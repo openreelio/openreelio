@@ -491,6 +491,8 @@ export interface Clip {
   captionStyle?: CaptionStyle;
   /** Optional caption position override (used for caption-track clips) */
   captionPosition?: CaptionPosition;
+  /** Whether the clip is enabled. Defaults to true when undefined. */
+  enabled?: boolean;
 }
 
 /** Returns true if the clip has a valid active time remap curve (>= 2 keyframes). */
@@ -890,7 +892,9 @@ export type CommandType =
   | 'SetAudioFadeIn'
   | 'SetAudioFadeOut'
   // Master volume (S26)
-  | 'SetMasterVolume';
+  | 'SetMasterVolume'
+  // Clip enable/disable (S27)
+  | 'SetClipEnabled';
 
 export interface Command {
   type: CommandType;

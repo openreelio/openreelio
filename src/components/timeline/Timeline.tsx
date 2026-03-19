@@ -230,6 +230,7 @@ export function Timeline({
   onClipSpeedChange,
   onClipReverse,
   onClipFreezeFrame,
+  onClipToggleEnabled,
 }: TimelineProps) {
   // ===========================================================================
   // Store State - Using targeted selectors to minimize re-renders
@@ -2031,6 +2032,7 @@ export function Timeline({
                     onClipSpeedChange={onClipSpeedChange}
                     onClipReverse={onClipReverse}
                     onClipFreezeFrame={onClipFreezeFrame}
+                    onClipToggleEnabled={onClipToggleEnabled}
                   />
                 );
               })}

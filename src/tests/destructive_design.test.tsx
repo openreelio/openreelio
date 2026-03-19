@@ -24,6 +24,7 @@ vi.mock('@/stores/projectStore', () => ({
     redo: vi.fn(),
     saveProject: vi.fn(),
     isLoaded: true,
+    activeSequenceId: null,
   })),
 }));
 
@@ -84,8 +85,9 @@ describe('Destructive Design System Tests', () => {
       mockPlay = vi.fn();
       mockPause = vi.fn();
 
-      (usePlaybackStore as any).mockReturnValue({
+      const playbackStore = {
         togglePlayback: vi.fn(),
+        seek: vi.fn(),
         setCurrentTime: vi.fn(),
         currentTime: 0,
         duration: 100,
@@ -93,7 +95,18 @@ describe('Destructive Design System Tests', () => {
         play: mockPlay,
         pause: mockPause,
         isPlaying: false,
-      });
+        stepForward: vi.fn(),
+        stepBackward: vi.fn(),
+        seekForward: vi.fn(),
+        seekBackward: vi.fn(),
+        setShuttleSpeed: vi.fn(),
+        shuttleSpeed: 0,
+      };
+
+      (usePlaybackStore as any).mockImplementation(
+        (selector?: (store: typeof playbackStore) => unknown) =>
+          typeof selector === 'function' ? selector(playbackStore) : playbackStore,
+      );
     });
 
     it('should handle rapid J/L key presses without race conditions', () => {

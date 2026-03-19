@@ -239,6 +239,15 @@ pub struct ReverseClipPayload {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SetClipEnabledPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateFreezeFramePayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
@@ -861,6 +870,9 @@ pub enum CommandPayload {
     #[serde(alias = "reverseClip", alias = "ReverseClip")]
     ReverseClip(ReverseClipPayload),
 
+    #[serde(alias = "setClipEnabled", alias = "SetClipEnabled")]
+    SetClipEnabled(SetClipEnabledPayload),
+
     #[serde(
         alias = "createFreezeFrame",
         alias = "CreateFreezeFrame",
@@ -1088,11 +1100,11 @@ impl CommandPayload {
             RenameFileCommand, RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand,
             RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
             SetAudioKeyframeValueCommand, SetClipAudioCommand, SetClipBlendModeCommand,
-            SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
-            SetMasterVolumeCommand, SetTimeRemapCommand, SetTrackBlendModeCommand,
-            SplitClipCommand, ToggleTrackLockCommand, ToggleTrackMuteCommand,
-            ToggleTrackVisibilityCommand, TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand,
-            UpdateTextCommand,
+            SetClipEnabledCommand, SetClipMuteCommand, SetClipSpeedCommand,
+            SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
+            SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand,
+            ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand,
+            UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
         };
 
         match self {
@@ -1195,6 +1207,12 @@ impl CommandPayload {
                 &p.sequence_id,
                 &p.track_id,
                 &p.clip_id,
+            )),
+            CommandPayload::SetClipEnabled(p) => Box::new(SetClipEnabledCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.enabled,
             )),
             CommandPayload::CreateFreezeFrame(p) => Box::new(CreateFreezeFrameCommand::new(
                 &p.sequence_id,

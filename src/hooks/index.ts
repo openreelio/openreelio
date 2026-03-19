@@ -429,3 +429,11 @@ export type {
 // Source Monitor hook
 export { useSourceMonitor } from './useSourceMonitor';
 export type { UseSourceMonitorReturn } from './useSourceMonitor';
+
+// JKL Shuttle control hook
+export { useJKLShuttle, SHUTTLE_SPEEDS, SHUTTLE_STOP_INDEX } from './useJKLShuttle';
+export type {
+  ShuttleSpeed,
+  UseJKLShuttleOptions,
+  UseJKLShuttleReturn,
+} from './useJKLShuttle';

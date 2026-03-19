@@ -105,6 +105,10 @@ function isWindowsAbsolutePath(path: string): boolean {
   return /^[a-zA-Z]:[\\/]/.test(path);
 }
 
+function isClipEnabled(clip: Clip): boolean {
+  return clip.enabled !== false;
+}
+
 function clampTimelineTime(time: number, duration: number): number {
   if (!Number.isFinite(time)) {
     return 0;
@@ -499,6 +503,10 @@ export function ProxyPreviewPlayer({
       if (track.kind !== 'video') return;
 
       for (const clip of track.clips) {
+        if (!isClipEnabled(clip)) {
+          continue;
+        }
+
         // Check if clip is active at current time
         if (isClipActiveAtTime(clip, currentTime)) {
           const asset = assets.get(clip.assetId);
@@ -625,6 +633,10 @@ export function ProxyPreviewPlayer({
       }
 
       for (const clip of track.clips) {
+        if (!isClipEnabled(clip)) {
+          continue;
+        }
+
         if (!isClipActiveAtTime(clip, currentTime)) {
           continue;
         }
@@ -666,6 +678,10 @@ export function ProxyPreviewPlayer({
       }
 
       for (const clip of track.clips) {
+        if (!isClipEnabled(clip)) {
+          continue;
+        }
+
         if (!isClipActiveAtTime(clip, currentTime) || !isTextClip(clip.assetId)) {
           continue;
         }

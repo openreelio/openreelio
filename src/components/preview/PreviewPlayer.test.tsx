@@ -100,7 +100,7 @@ describe('PreviewPlayer', () => {
   // ===========================================================================
 
   describe('seek integration', () => {
-    it('should update time display on timeupdate', async () => {
+    it('should update timecode display on timeupdate', async () => {
       render(<PreviewPlayer src="/test-video.mp4" />);
 
       const video = screen.getByTestId('video-element') as HTMLVideoElement;
@@ -113,17 +113,12 @@ describe('PreviewPlayer', () => {
         fireEvent.timeUpdate(video);
       });
 
-      expect(screen.getByTestId('time-display')).toHaveTextContent('0:30');
+      expect(screen.getByTestId('timecode-display')).toHaveTextContent('00:00:30:00');
     });
 
     it('should seek video when skip forward clicked', async () => {
       const onPlayheadChange = vi.fn();
-      render(
-        <PreviewPlayer
-          src="/test-video.mp4"
-          onPlayheadChange={onPlayheadChange}
-        />
-      );
+      render(<PreviewPlayer src="/test-video.mp4" onPlayheadChange={onPlayheadChange} />);
 
       const video = screen.getByTestId('video-element') as HTMLVideoElement;
 
@@ -198,9 +193,7 @@ describe('PreviewPlayer', () => {
 
   describe('controlled mode', () => {
     it('should sync with external playhead prop', async () => {
-      const { rerender } = render(
-        <PreviewPlayer src="/test-video.mp4" playhead={0} />
-      );
+      const { rerender } = render(<PreviewPlayer src="/test-video.mp4" playhead={0} />);
 
       rerender(<PreviewPlayer src="/test-video.mp4" playhead={30} />);
 
@@ -210,12 +203,7 @@ describe('PreviewPlayer', () => {
 
     it('should call onPlayheadChange when time updates', async () => {
       const onPlayheadChange = vi.fn();
-      render(
-        <PreviewPlayer
-          src="/test-video.mp4"
-          onPlayheadChange={onPlayheadChange}
-        />
-      );
+      render(<PreviewPlayer src="/test-video.mp4" onPlayheadChange={onPlayheadChange} />);
 
       const video = screen.getByTestId('video-element') as HTMLVideoElement;
 
@@ -227,9 +215,7 @@ describe('PreviewPlayer', () => {
     });
 
     it('should drive the underlying video element from the controlled play state', async () => {
-      const { rerender } = render(
-        <PreviewPlayer src="/test-video.mp4" isPlaying={false} />
-      );
+      const { rerender } = render(<PreviewPlayer src="/test-video.mp4" isPlaying={false} />);
 
       const video = screen.getByTestId('video-element') as HTMLVideoElement;
       let paused = true;
@@ -262,12 +248,7 @@ describe('PreviewPlayer', () => {
 
     it('should call onPlayStateChange when play state changes', async () => {
       const onPlayStateChange = vi.fn();
-      render(
-        <PreviewPlayer
-          src="/test-video.mp4"
-          onPlayStateChange={onPlayStateChange}
-        />
-      );
+      render(<PreviewPlayer src="/test-video.mp4" onPlayStateChange={onPlayStateChange} />);
 
       const video = screen.getByTestId('video-element') as HTMLVideoElement;
 
@@ -276,6 +257,17 @@ describe('PreviewPlayer', () => {
       });
 
       expect(onPlayStateChange).toHaveBeenCalledWith(true);
+    });
+
+    it('should sync the underlying video element with a controlled playback rate', () => {
+      const { rerender } = render(<PreviewPlayer src="/test-video.mp4" playbackRate={1} />);
+
+      const video = screen.getByTestId('video-element') as HTMLVideoElement;
+      expect(video.playbackRate).toBe(1);
+
+      rerender(<PreviewPlayer src="/test-video.mp4" playbackRate={2} />);
+
+      expect(video.playbackRate).toBe(2);
     });
   });
 
@@ -320,9 +312,7 @@ describe('PreviewPlayer', () => {
 
   describe('poster', () => {
     it('should pass poster to video player', () => {
-      render(
-        <PreviewPlayer src="/test-video.mp4" poster="/poster.jpg" />
-      );
+      render(<PreviewPlayer src="/test-video.mp4" poster="/poster.jpg" />);
 
       const video = screen.getByTestId('video-element') as HTMLVideoElement;
       expect(video.poster).toContain('/poster.jpg');

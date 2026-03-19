@@ -39,6 +39,10 @@ export function isClipActiveAtTime(clip: Clip, timelineTimeSec: number, epsilonS
     return false;
   }
 
+  if (clip.enabled === false) {
+    return false;
+  }
+
   const clipStart = clip.place.timelineInSec - epsilonSec;
   const clipEnd = getClipTimelineEndSec(clip) + epsilonSec;
   if (clipEnd - clipStart <= MIN_DURATION_EPSILON_SEC) {

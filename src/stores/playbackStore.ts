@@ -7,6 +7,8 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { recordPlaybackTrace } from '@/services/playbackTrace';
+import { PLAYBACK } from '@/constants/preview';
+import type { ShuttleSpeed } from '@/hooks/useJKLShuttle';
 
 // =============================================================================
 // Types
@@ -29,6 +31,8 @@ export interface PlaybackState {
   loop: boolean;
   /** Whether playback syncs with timeline */
   syncWithTimeline: boolean;
+  /** Current JKL shuttle speed (-8 to 8, 0 = stopped) */
+  shuttleSpeed: ShuttleSpeed;
 }
 
 export interface PlaybackActions {
@@ -72,6 +76,8 @@ export interface PlaybackActions {
   setLoop: (loop: boolean) => void;
   /** Toggle sync with timeline */
   toggleSyncWithTimeline: () => void;
+  /** Set shuttle speed (for JKL shuttle indicator) */
+  setShuttleSpeed: (speed: ShuttleSpeed) => void;
   /** Reset playback state */
   reset: () => void;
 }
@@ -106,8 +112,8 @@ export const PLAYBACK_EVENTS = {
 // Constants
 // =============================================================================
 
-const MIN_PLAYBACK_RATE = 0.25;
-const MAX_PLAYBACK_RATE = 4;
+const MIN_PLAYBACK_RATE = PLAYBACK.MIN_RATE;
+const MAX_PLAYBACK_RATE = PLAYBACK.MAX_RATE;
 
 function getSafeDuration(duration: number): number {
   if (!Number.isFinite(duration) || duration < 0) {
@@ -183,6 +189,7 @@ const initialState: PlaybackState = {
   isMuted: false,
   loop: false,
   syncWithTimeline: true,
+  shuttleSpeed: 0,
 };
 
 // =============================================================================
@@ -221,13 +228,7 @@ export const usePlaybackStore = create<PlaybackStore>()(
         state.isPlaying = isPlaying;
       });
       if (prevIsPlaying !== isPlaying) {
-        recordPlaybackTrace(
-          'play-state',
-          source,
-          currentTime,
-          currentTime,
-          isPlaying,
-        );
+        recordPlaybackTrace('play-state', source, currentTime, currentTime, isPlaying);
       }
     },
 
@@ -395,11 +396,23 @@ export const usePlaybackStore = create<PlaybackStore>()(
     },
 
     // =========================================================================
+    // Shuttle
+    // =========================================================================
+
+    setShuttleSpeed: (speed: ShuttleSpeed) => {
+      set((state) => {
+        if (state.shuttleSpeed !== speed) {
+          state.shuttleSpeed = speed;
+        }
+      });
+    },
+
+    // =========================================================================
     // Reset
     // =========================================================================
 
     reset: () => {
       set(() => ({ ...initialState }));
     },
-  }))
+  })),
 );

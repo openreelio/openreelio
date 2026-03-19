@@ -71,6 +71,10 @@ function findActiveClips(
     if (track.muted || !track.visible) continue;
 
     for (const clip of track.clips) {
+      if (clip.enabled === false) {
+        continue;
+      }
+
       if (isClipActiveAtTime(clip, currentTime, ACTIVE_CLIP_EPSILON_SEC)) {
         activeClips.push({
           clip,

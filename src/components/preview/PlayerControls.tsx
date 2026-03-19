@@ -2,6 +2,8 @@
  * PlayerControls Component
  *
  * Video player control bar with play/pause, seek, volume, and fullscreen controls.
+ * JKL shuttle is handled globally by useKeyboardShortcuts; shuttle speed is
+ * passed as a prop from the parent container.
  */
 
 import { useCallback, type KeyboardEvent } from 'react';
@@ -9,7 +11,9 @@ import { Maximize, Minimize } from 'lucide-react';
 import { SeekBar } from './SeekBar';
 import { PlaybackButtons } from './PlaybackButtons';
 import { VolumeControls } from './VolumeControls';
-import { formatDuration } from '@/utils/formatters';
+import { formatTimecode } from '@/utils/formatters';
+import { ShuttleSpeedIndicator } from './ShuttleSpeedIndicator';
+import { TimecodeInput } from '@/components/features/preview/TimecodeInput';
 
 // =============================================================================
 // Types
@@ -28,6 +32,8 @@ export interface PlayerControlsProps {
   fps?: number;
   /** Current playback rate */
   playbackRate?: number;
+  /** Current JKL shuttle speed (0 = inactive) */
+  shuttleSpeed?: number;
   onPlayPause?: () => void;
   onSeek?: (time: number) => void;
   onVolumeChange?: (volume: number) => void;
@@ -45,8 +51,8 @@ const VOLUME_STEP = 0.1;
 const FAST_SEEK_STEP = 1; // For Shift+Arrow (1 second jump)
 const DEFAULT_FPS = 30;
 
-// Playback speed presets (shared between J/K/L controls and speed selector)
-const SPEED_PRESETS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 4] as const;
+// Playback speed presets for the speed selector dropdown
+const SPEED_PRESETS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 4, 8] as const;
 
 // =============================================================================
 // Component
@@ -63,6 +69,7 @@ export function PlayerControls({
   disabled = false,
   fps = DEFAULT_FPS,
   playbackRate = 1,
+  shuttleSpeed = 0,
   onPlayPause,
   onSeek,
   onVolumeChange,
@@ -71,12 +78,15 @@ export function PlayerControls({
   onPlaybackRateChange,
 }: PlayerControlsProps) {
   const frameTime = 1 / fps;
+
   const handleFullscreenToggle = useCallback(() => {
     if (!disabled) {
       onFullscreenToggle?.();
     }
   }, [disabled, onFullscreenToggle]);
 
+  // Local keyboard handler for controls-specific shortcuts.
+  // J/K/L shuttle is handled globally by useKeyboardShortcuts + useJKLShuttle.
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       if (disabled) return;
@@ -135,60 +145,6 @@ export function PlayerControls({
           onSeek?.(duration);
           break;
 
-        // J/K/L jog-shuttle controls (industry standard)
-        // Note: HTML5 video doesn't support negative playbackRate, so J decreases speed
-        case 'j':
-        case 'J':
-          e.preventDefault();
-          // Decrease playback speed
-          {
-            // Find the closest speed that's less than or equal to current rate
-            let currentIndex = SPEED_PRESETS.findIndex(s => s >= playbackRate);
-            if (currentIndex === -1) {
-              // playbackRate > max preset, go to max
-              currentIndex = SPEED_PRESETS.length - 1;
-            } else if (currentIndex === 0) {
-              // Already at minimum
-              currentIndex = 0;
-            } else {
-              // Step down
-              currentIndex = currentIndex - 1;
-            }
-            onPlaybackRateChange?.(SPEED_PRESETS[currentIndex]);
-          }
-          break;
-        case 'k':
-        case 'K':
-          e.preventDefault();
-          // Stop/pause and reset rate
-          if (isPlaying) {
-            onPlayPause?.();
-          }
-          onPlaybackRateChange?.(1);
-          break;
-        case 'l':
-        case 'L':
-          e.preventDefault();
-          // Increase playback speed
-          {
-            let currentIndex = SPEED_PRESETS.findIndex(s => s >= playbackRate);
-            if (currentIndex === -1) {
-              // playbackRate > max preset, stay at max
-              currentIndex = SPEED_PRESETS.length - 1;
-            } else if (currentIndex === SPEED_PRESETS.length - 1) {
-              // Already at maximum
-              currentIndex = SPEED_PRESETS.length - 1;
-            } else {
-              // Step up
-              currentIndex = currentIndex + 1;
-            }
-            onPlaybackRateChange?.(SPEED_PRESETS[currentIndex]);
-            if (!isPlaying) {
-              onPlayPause?.();
-            }
-          }
-          break;
-
         // Mute toggle
         case 'm':
         case 'M':
@@ -204,7 +160,7 @@ export function PlayerControls({
           break;
       }
     },
-    [disabled, currentTime, duration, volume, frameTime, playbackRate, isPlaying, onPlayPause, onSeek, onVolumeChange, onMuteToggle, onFullscreenToggle, onPlaybackRateChange]
+    [disabled, currentTime, duration, volume, frameTime, onPlayPause, onSeek, onVolumeChange, onMuteToggle, onFullscreenToggle]
   );
 
   return (
@@ -237,10 +193,22 @@ export function PlayerControls({
         />
 
         <div className="flex items-center gap-1 text-sm font-mono">
-          <span data-testid="time-display">{formatDuration(currentTime)}</span>
+          <TimecodeInput
+            currentTime={currentTime}
+            duration={duration}
+            fps={fps}
+            onSeek={onSeek}
+            disabled={disabled}
+          />
           <span>/</span>
-          <span data-testid="duration-display">{formatDuration(duration)}</span>
+          <span data-testid="duration-display">{formatTimecode(duration, fps)}</span>
         </div>
+
+        {/* Shuttle Speed Badge — visible only when shuttle is active */}
+        <ShuttleSpeedIndicator
+          shuttleSpeed={shuttleSpeed}
+          className="static translate-x-0 text-[10px] px-1.5 py-0.5"
+        />
 
         <div className="flex-1" />
 

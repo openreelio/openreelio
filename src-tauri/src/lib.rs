@@ -819,6 +819,11 @@ mod tauri_app {
                 $crate::ipc::can_redo,
                 // Gap management commands (S24-004)
                 $crate::ipc::find_gaps,
+                // Edit point & marker navigation (S27-002)
+                $crate::ipc::get_next_edit_point,
+                $crate::ipc::get_prev_edit_point,
+                $crate::ipc::get_next_marker,
+                $crate::ipc::get_prev_marker,
                 // Job commands
                 $crate::ipc::get_jobs,
                 $crate::ipc::submit_job,
@@ -1186,6 +1191,11 @@ mod tauri_app {
             ipc::can_redo,
             // Gap management commands (S24-004)
             ipc::find_gaps,
+            // Edit point & marker navigation (S27-002)
+            ipc::get_next_edit_point,
+            ipc::get_prev_edit_point,
+            ipc::get_next_marker,
+            ipc::get_prev_marker,
             // Job commands
             ipc::get_jobs,
             ipc::submit_job,

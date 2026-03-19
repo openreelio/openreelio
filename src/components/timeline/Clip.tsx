@@ -318,6 +318,19 @@ export function Clip({
       ? 'Text'
       : (thumbnailConfig?.asset.name ?? waveformConfig?.displayLabel ?? clip.assetId));
 
+  const isClipDisabled = clip.enabled === false;
+
+  // Determine opacity class based on combined disabled states.
+  // clip-disabled (data model) takes priority over interaction-disabled (prop).
+  const opacityClass =
+    disabled && isClipDisabled
+      ? 'opacity-30'
+      : isClipDisabled
+        ? 'opacity-40'
+        : disabled
+          ? 'opacity-50'
+          : '';
+
   const showVideoAudioSourceTag =
     !isText && Boolean(waveformConfig?.isVideoSource) && !thumbnailConfig?.enabled;
   const showAudioLabelBackdrop = !isText && !thumbnailConfig?.enabled;
@@ -338,8 +351,9 @@ export function Clip({
         absolute h-full rounded-sm cursor-pointer transition-shadow select-none
         ${allowLabelOverflow ? 'overflow-visible' : 'overflow-hidden'}
         ${selected ? 'ring-2 ring-primary-400 z-10' : ''}
-        ${disabled ? 'opacity-50 cursor-not-allowed' : 'hover:brightness-110'}
-        ${isDragging ? 'opacity-80 z-20' : ''}
+        ${disabled ? 'cursor-not-allowed' : 'hover:brightness-110'}
+        ${isDragging ? 'z-20' : ''}
+        ${!isDragging ? opacityClass : 'opacity-80'}
         ${isText ? 'bg-teal-600' : ''}
         ${!backgroundColor && !hasVisualContent && !isText ? 'bg-blue-600' : ''}
         ${hasVisualContent && !backgroundColor && !isText ? 'bg-gray-800' : ''}
@@ -412,6 +426,18 @@ export function Clip({
         </div>
       )}
 
+      {/* Disabled clip diagonal stripe overlay */}
+      {isClipDisabled && (
+        <div
+          data-testid="disabled-clip-overlay"
+          className="absolute inset-0 pointer-events-none z-20"
+          style={{
+            backgroundImage:
+              'repeating-linear-gradient(135deg, transparent, transparent 4px, rgba(0,0,0,0.3) 4px, rgba(0,0,0,0.3) 6px)',
+          }}
+        />
+      )}
+
       {/* Clip content */}
       <div
         className={`h-full p-1 pointer-events-none relative z-10 ${allowLabelOverflow ? 'overflow-visible' : 'overflow-hidden'}`}
@@ -455,6 +481,17 @@ export function Clip({
               title={`${clip.effects.length} effect(s)`}
             >
               <span className="text-[8px] text-white">fx</span>
+            </div>
+          )}
+
+          {/* Disabled indicator */}
+          {isClipDisabled && (
+            <div
+              data-testid="disabled-clip-indicator"
+              className="px-1 h-3 bg-gray-500 rounded text-[8px] text-white flex items-center"
+              title="Clip disabled"
+            >
+              OFF
             </div>
           )}
 

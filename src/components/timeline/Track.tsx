@@ -121,6 +121,8 @@ interface TrackProps {
   onClipReverse?: (clipId: string, trackId: string) => void;
   /** Clip freeze frame handler */
   onClipFreezeFrame?: (clipId: string, trackId: string) => void;
+  /** Clip enable/disable toggle handler */
+  onClipToggleEnabled?: (clipId: string, trackId: string) => void;
 }
 
 // =============================================================================
@@ -188,6 +190,7 @@ export function Track({
   onClipSpeedChange,
   onClipReverse,
   onClipFreezeFrame,
+  onClipToggleEnabled,
 }: TrackProps) {
   // Ref for measuring viewport width if not provided
   const contentRef = useRef<HTMLDivElement>(null);
@@ -311,6 +314,16 @@ export function Track({
         disabled: !onClipFreezeFrame,
       },
       { type: 'divider' as const },
+      {
+        label: (clip.enabled ?? true) ? 'Disable Clip' : 'Enable Clip',
+        shortcut: 'Shift+E',
+        onClick: () => {
+          onClipToggleEnabled?.(clipId, track.id);
+          setClipContextMenu(null);
+        },
+        disabled: !onClipToggleEnabled,
+      },
+      { type: 'divider' as const },
       ...[0.5, 1.0, 2.0, 4.0].map((speed) => ({
         label: `Speed ${Math.round(speed * 100)}%`,
         onClick: () => {
@@ -320,7 +333,7 @@ export function Track({
         disabled: !onClipSpeedChange,
       })),
     ];
-  }, [clipContextMenu, track.id, onClipReverse, onClipFreezeFrame, onClipSpeedChange]);
+  }, [clipContextMenu, track.id, track.clips, onClipReverse, onClipFreezeFrame, onClipToggleEnabled, onClipSpeedChange]);
 
   const handleContentContextMenu = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>) => {

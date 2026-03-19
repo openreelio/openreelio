@@ -66,6 +66,10 @@ export function collectPlaybackAudioClips(
     }
 
     for (const clip of track.clips) {
+      if (clip.enabled === false) {
+        continue;
+      }
+
       const asset = assets.get(clip.assetId);
       if (!asset || !assetHasPlayableAudio(asset, track.kind)) {
         continue;
@@ -83,6 +87,10 @@ export function collectPlaybackAudioClips(
     }
 
     for (const clip of track.clips) {
+      if (clip.enabled === false) {
+        continue;
+      }
+
       const asset = assets.get(clip.assetId);
       if (!asset || !assetHasPlayableAudio(asset, track.kind)) {
         continue;

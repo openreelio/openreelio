@@ -267,7 +267,7 @@ describe('TimelineEngine', () => {
     it('should clamp playback rate to maximum', () => {
       engine.setPlaybackRate(10);
 
-      expect(engine.playbackRate).toBe(4);
+      expect(engine.playbackRate).toBe(8);
     });
 
     it('should emit playbackRateChange event', () => {

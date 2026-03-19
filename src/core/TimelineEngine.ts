@@ -15,6 +15,7 @@
  */
 
 import { createLogger } from '@/services/logger';
+import { PLAYBACK } from '@/constants/preview';
 
 const logger = createLogger('TimelineEngine');
 
@@ -63,22 +64,17 @@ export interface PlaybackStore {
 type TimelineEngineListener = TimelineEngineEvents[TimelineEventType];
 
 type TimelineEventWithPayload = {
-  [K in TimelineEventType]: Parameters<TimelineEngineEvents[K]> extends []
-    ? never
-    : K;
+  [K in TimelineEventType]: Parameters<TimelineEngineEvents[K]> extends [] ? never : K;
 }[TimelineEventType];
 
-type TimelineEventWithoutPayload = Exclude<
-  TimelineEventType,
-  TimelineEventWithPayload
->;
+type TimelineEventWithoutPayload = Exclude<TimelineEventType, TimelineEventWithPayload>;
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-const MIN_PLAYBACK_RATE = 0.25;
-const MAX_PLAYBACK_RATE = 4;
+const MIN_PLAYBACK_RATE = PLAYBACK.MIN_RATE;
+const MAX_PLAYBACK_RATE = PLAYBACK.MAX_RATE;
 
 // =============================================================================
 // TimelineEngine Class
@@ -127,8 +123,7 @@ export class TimelineEngine {
   // Event System
   // ---------------------------------------------------------------------------
 
-  private _listeners: Map<TimelineEventType, Set<TimelineEngineListener>> =
-    new Map();
+  private _listeners: Map<TimelineEventType, Set<TimelineEngineListener>> = new Map();
 
   // ---------------------------------------------------------------------------
   // Store Sync
@@ -507,20 +502,14 @@ export class TimelineEngine {
   // Event System
   // ---------------------------------------------------------------------------
 
-  on<K extends TimelineEventType>(
-    event: K,
-    callback: TimelineEngineEvents[K]
-  ): void {
+  on<K extends TimelineEventType>(event: K, callback: TimelineEngineEvents[K]): void {
     if (!this._listeners.has(event)) {
       this._listeners.set(event, new Set<TimelineEngineListener>());
     }
     this._listeners.get(event)!.add(callback);
   }
 
-  off<K extends TimelineEventType>(
-    event: K,
-    callback: TimelineEngineEvents[K]
-  ): void {
+  off<K extends TimelineEventType>(event: K, callback: TimelineEngineEvents[K]): void {
     const listeners = this._listeners.get(event);
     if (listeners) {
       listeners.delete(callback);
@@ -530,7 +519,7 @@ export class TimelineEngine {
   private _emit<K extends TimelineEventWithoutPayload>(event: K): void;
   private _emit<K extends TimelineEventWithPayload>(
     event: K,
-    data: Parameters<TimelineEngineEvents[K]>[0]
+    data: Parameters<TimelineEngineEvents[K]>[0],
   ): void;
   private _emit(event: TimelineEventType, data?: unknown): void {
     const listeners = this._listeners.get(event);

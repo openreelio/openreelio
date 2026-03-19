@@ -328,6 +328,46 @@ async findGaps(sequenceId: string, trackId: string) : Promise<Result<GapInfo[], 
 }
 },
 /**
+ * Finds the next edit point (clip boundary) after current_time across all tracks.
+ */
+async getNextEditPoint(sequenceId: string, currentTime: number) : Promise<Result<number | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_next_edit_point", { sequenceId, currentTime }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Finds the previous edit point (clip boundary) before current_time across all tracks.
+ */
+async getPrevEditPoint(sequenceId: string, currentTime: number) : Promise<Result<number | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_prev_edit_point", { sequenceId, currentTime }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Finds the next marker position after current_time in the sequence.
+ */
+async getNextMarker(sequenceId: string, currentTime: number) : Promise<Result<number | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_next_marker", { sequenceId, currentTime }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Finds the previous marker position before current_time in the sequence.
+ */
+async getPrevMarker(sequenceId: string, currentTime: number) : Promise<Result<number | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_prev_marker", { sequenceId, currentTime }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Gets all jobs from the worker pool (both active and queued)
  */
 async getJobs() : Promise<Result<JobInfoDto[], string>> {
@@ -2516,7 +2556,11 @@ captionStyle?: JsonValue | null;
 /**
  * Optional caption position override for caption track clips.
  */
-captionPosition?: JsonValue | null }
+captionPosition?: JsonValue | null; 
+/**
+ * Whether this clip is enabled (disabled clips are skipped during render/preview)
+ */
+enabled?: boolean }
 /**
  * Clip event payload.
  */

@@ -769,8 +769,8 @@ pub async fn apply_edit_script(
         RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
         RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand,
         SetAudioFadeInCommand, SetAudioFadeOutCommand, SetAudioKeyframeValueCommand,
-        SetClipAudioCommand, SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand,
-        SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
+        SetClipAudioCommand, SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMuteCommand,
+        SetClipSpeedCommand, SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
         SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand, ToggleTrackMuteCommand,
         ToggleTrackVisibilityCommand, TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand,
         UpdateTextCommand,
@@ -1023,6 +1023,12 @@ pub async fn apply_edit_script(
                 &p.sequence_id,
                 &p.track_id,
                 &p.clip_id,
+            )),
+            CommandPayload::SetClipEnabled(p) => Box::new(SetClipEnabledCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.enabled,
             )),
             CommandPayload::CreateFreezeFrame(p) => Box::new(CreateFreezeFrameCommand::new(
                 &p.sequence_id,
@@ -1707,6 +1713,18 @@ pub async fn validate_edit_script(
                 }
                 if cmd.params.get("volumeDb").is_none() {
                     issues.push(format!("SetMasterVolume command {} missing volumeDb", i));
+                }
+            }
+            // Clip enable/disable command
+            "SetClipEnabled" | "setClipEnabled" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("SetClipEnabled command {} missing trackId", i));
+                }
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("SetClipEnabled command {} missing clipId", i));
+                }
+                if cmd.params.get("enabled").is_none() {
+                    issues.push(format!("SetClipEnabled command {} missing enabled", i));
                 }
             }
             _ => {

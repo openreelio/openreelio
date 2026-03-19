@@ -69,13 +69,69 @@ export function formatTimecode(seconds: number, fps: number): string {
  * parseTimecode("00:01:01:15", 30) // 61.5
  */
 export function parseTimecode(timecode: string, fps: number): number {
-  const parts = timecode.split(':');
-  if (parts.length !== 4) return 0;
+  if (!isValidTimecode(timecode, fps)) return 0;
 
-  const [hrs, mins, secs, frames] = parts.map(Number);
-  if ([hrs, mins, secs, frames].some(isNaN)) return 0;
+  const [hrs, mins, secs, frames] = timecode.split(':').map((p) => Number(p.trim()));
 
   return hrs * 3600 + mins * 60 + secs + frames / fps;
+}
+
+/**
+ * Validate SMPTE timecode format and value ranges.
+ *
+ * @param timecode - Timecode string to validate
+ * @param fps - Frames per second
+ * @returns True if timecode has valid format and in-range values
+ *
+ * @example
+ * isValidTimecode("00:01:30:15", 30) // true
+ * isValidTimecode("00:01:60:00", 30) // false (seconds > 59)
+ * isValidTimecode("00:01:30:30", 30) // false (frames >= fps)
+ */
+export function isValidTimecode(timecode: string, fps: number): boolean {
+  const parts = timecode.split(':');
+  if (parts.length !== 4) return false;
+  if (!Number.isFinite(fps) || fps <= 0) return false;
+
+  const normalizedParts = parts.map((part) => part.trim());
+  if (normalizedParts.some((part) => part.length === 0 || !/^\d+$/.test(part))) return false;
+
+  const nums = normalizedParts.map(Number);
+  // Defensive guards: isNaN and negative checks are unreachable after the
+  // regex test above (which rejects non-digit strings), but kept intentionally
+  // as a safety net against future refactors that might relax the regex.
+  if (nums.some(isNaN)) return false;
+
+  const [hrs, mins, secs, frames] = nums;
+  if (hrs < 0 || hrs > 99) return false;
+  if (mins < 0 || mins > 59) return false;
+  if (secs < 0 || secs > 59) return false;
+  if (frames < 0 || frames >= fps) return false;
+
+  return true;
+}
+
+// =============================================================================
+// Shuttle Speed Formatting
+// =============================================================================
+
+/**
+ * Format JKL shuttle speed for display.
+ * Negative = reverse (◀◀), Positive = forward (▶▶), Zero = empty.
+ *
+ * @param speed - Shuttle speed (-8 to 8)
+ * @returns Formatted shuttle speed label, or empty string for speed 0
+ *
+ * @example
+ * formatShuttleSpeed(2)  // "▶▶ 2x"
+ * formatShuttleSpeed(-4) // "◀◀ 4x"
+ * formatShuttleSpeed(0)  // ""
+ */
+export function formatShuttleSpeed(speed: number): string {
+  if (speed === 0) return '';
+  const absSpeed = Math.abs(speed);
+  const arrows = speed < 0 ? '\u25C0\u25C0' : '\u25B6\u25B6';
+  return `${arrows} ${absSpeed}x`;
 }
 
 // =============================================================================

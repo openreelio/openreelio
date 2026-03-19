@@ -1480,6 +1480,34 @@ fn build_caption_drawtext_with_enable(clip: &Clip) -> Option<String> {
     ))
 }
 
+fn collect_enabled_clips_sorted(sequence: &Sequence) -> Vec<(&Clip, &Track)> {
+    let mut all_clips: Vec<(&Clip, &Track)> = Vec::new();
+
+    for track in &sequence.tracks {
+        for clip in &track.clips {
+            if !clip.enabled {
+                continue;
+            }
+
+            all_clips.push((clip, track));
+        }
+    }
+
+    all_clips.sort_by(|a, b| {
+        a.0.place
+            .timeline_in_sec
+            .partial_cmp(&b.0.place.timeline_in_sec)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    all_clips
+}
+
+/// Builds drawtext filter strings for all caption clips in the input.
+///
+/// The caller is expected to pass only enabled clips (e.g. from
+/// [`collect_enabled_clips_sorted`]), so no additional `clip.enabled`
+/// check is performed here.
 fn collect_caption_drawtext_filters(all_clips: &[(&Clip, &Track)]) -> Vec<String> {
     all_clips
         .iter()
@@ -1556,6 +1584,10 @@ impl ExportEngine {
             }
 
             for clip in &track.clips {
+                if !clip.enabled {
+                    continue;
+                }
+
                 if is_text_clip(clip) {
                     continue;
                 }
@@ -1756,19 +1788,8 @@ impl ExportEngine {
         let mut audio_streams = Vec::new();
         let mut video_transitions: Vec<Option<&Effect>> = Vec::new();
 
-        // Collect all clips sorted by timeline position
-        let mut all_clips: Vec<(&Clip, &Track)> = Vec::new();
-        for track in &sequence.tracks {
-            for clip in &track.clips {
-                all_clips.push((clip, track));
-            }
-        }
-        all_clips.sort_by(|a, b| {
-            a.0.place
-                .timeline_in_sec
-                .partial_cmp(&b.0.place.timeline_in_sec)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        // Collect enabled clips sorted by timeline position.
+        let all_clips = collect_enabled_clips_sorted(sequence);
 
         if all_clips.is_empty() {
             return Err(ExportError::NoClips);
@@ -2142,8 +2163,15 @@ impl ExportEngine {
             settings,
         )?;
 
-        // Calculate total duration based on the last clip end time on timeline
-        let total_duration: f64 = sequence.duration();
+        // Calculate total duration from enabled clips only so progress/ETA
+        // are accurate when trailing clips are disabled.
+        let total_duration: f64 = sequence
+            .tracks
+            .iter()
+            .flat_map(|t| t.clips.iter())
+            .filter(|c| c.enabled)
+            .map(|c| c.place.timeline_out_sec())
+            .fold(0.0, f64::max);
         let fps = settings.fps.unwrap_or(30.0);
         let total_frames = (total_duration * fps) as u64;
 
@@ -2579,8 +2607,12 @@ pub fn validate_export_settings(
 ) -> ExportValidation {
     let mut validation = ExportValidation::valid();
 
-    // Check for empty sequence
-    let total_clips: usize = sequence.tracks.iter().map(|t| t.clips.len()).sum();
+    // Check for empty sequence after applying clip-enabled state.
+    let total_clips: usize = sequence
+        .tracks
+        .iter()
+        .map(|track| track.clips.iter().filter(|clip| clip.enabled).count())
+        .sum();
     if total_clips == 0 {
         validation.add_error("Sequence has no clips to export");
         return validation;
@@ -2590,7 +2622,7 @@ pub fn validate_export_settings(
         .tracks
         .iter()
         .filter(|track| track.kind == TrackKind::Video)
-        .map(|track| track.clips.len())
+        .map(|track| track.clips.iter().filter(|clip| clip.enabled).count())
         .sum();
     if visual_clip_count == 0 {
         validation.add_error("Sequence has no visual clips to export");
@@ -2606,6 +2638,10 @@ pub fn validate_export_settings(
         }
 
         for clip in &track.clips {
+            if !clip.enabled {
+                continue;
+            }
+
             if track.kind == TrackKind::Video && uses_non_normal_blend_mode(clip, track) {
                 validation.add_error(format!(
                     "Blend mode export is not supported yet for clip '{}' on track '{}'",
@@ -2706,19 +2742,8 @@ pub fn build_complex_filter_args_with_audio_info(
     let mut video_streams = Vec::new();
     let mut audio_streams = Vec::new();
 
-    // Collect all clips sorted by timeline position
-    let mut all_clips: Vec<(&Clip, &Track)> = Vec::new();
-    for track in &sequence.tracks {
-        for clip in &track.clips {
-            all_clips.push((clip, track));
-        }
-    }
-    all_clips.sort_by(|a, b| {
-        a.0.place
-            .timeline_in_sec
-            .partial_cmp(&b.0.place.timeline_in_sec)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    // Collect enabled clips sorted by timeline position.
+    let all_clips = collect_enabled_clips_sorted(sequence);
 
     if all_clips.is_empty() {
         return Err(ExportError::NoClips);
@@ -3020,6 +3045,9 @@ pub fn detect_timeline_gaps(sequence: &Sequence) -> Vec<TimelineGap> {
         }
 
         for clip in &track.clips {
+            if !clip.enabled {
+                continue;
+            }
             let start = clip.place.timeline_in_sec;
             let end = clip.place.timeline_out_sec();
             intervals.push((start, end));
@@ -3246,6 +3274,52 @@ mod tests {
 
         assert!(!validation.is_valid);
         assert!(validation.errors.iter().any(|e| e.contains("not found")));
+    }
+
+    #[test]
+    fn test_validation_ignores_disabled_clips_with_missing_assets() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        track.add_clip(
+            Clip::new("valid_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+
+        let mut disabled_missing_clip = Clip::new("missing_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(3.0);
+        disabled_missing_clip.enabled = false;
+        track.add_clip(disabled_missing_clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_enabled_video.mp4");
+        let mut assets = std::collections::HashMap::new();
+        let mut valid_asset = Asset::new_video(
+            "validation_enabled_video.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        valid_asset.id = "valid_asset".to_string();
+        assets.insert("valid_asset".to_string(), valid_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            validation.is_valid,
+            "Expected disabled missing clip to be ignored. Got: {validation:?}"
+        );
     }
 
     #[test]
@@ -4626,6 +4700,51 @@ mod tests {
             }
             other => panic!("Expected InvalidSettings error, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_build_filter_ignores_disabled_clips_with_missing_assets() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        track.add_clip(
+            Clip::new("valid_asset")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+
+        let mut disabled_missing_clip = Clip::new("missing_asset")
+            .with_source_range(0.0, 5.0)
+            .place_at(5.0);
+        disabled_missing_clip.enabled = false;
+        track.add_clip(disabled_missing_clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("enabled_only_video.mp4");
+        let mut assets = std::collections::HashMap::new();
+        let mut valid_asset =
+            Asset::new_video("enabled_only_video.mp4", &video_path, VideoInfo::default())
+                .with_duration(5.0)
+                .with_file_size(5_000_000);
+        valid_asset.id = "valid_asset".to_string();
+        assets.insert("valid_asset".to_string(), valid_asset);
+
+        let result = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            result.is_ok(),
+            "Expected disabled missing clip to be ignored. Error: {:?}",
+            result.err()
+        );
     }
 
     #[test]
