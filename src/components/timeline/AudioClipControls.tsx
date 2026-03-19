@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
-import type { Clip } from '@/types';
+import type { Clip, FadeType } from '@/types';
+import { useProjectStore } from '@/stores/projectStore';
 import {
   CLIP_AUDIO_MAX_VOLUME_DB,
   CLIP_AUDIO_MIN_VOLUME_DB,
@@ -21,6 +22,8 @@ interface AudioClipControlsProps {
   clip: Clip;
   width: number;
   disabled?: boolean;
+  sequenceId?: string;
+  trackId?: string;
   onCommit?: (clipId: string, patch: ClipAudioSettingsPatch) => void | Promise<void>;
 }
 
@@ -97,14 +100,26 @@ function getInitialAudioSettings(clip: Clip): DraftAudioSettings {
   };
 }
 
+const FADE_TYPES: { value: FadeType; label: string }[] = [
+  { value: 'linear', label: 'Linear' },
+  { value: 'constantGain', label: 'Constant Gain' },
+  { value: 'constantPower', label: 'Constant Power' },
+  { value: 'exponential', label: 'Exponential' },
+  { value: 'sCurve', label: 'S-Curve' },
+];
+
 export function AudioClipControls({
   clip,
   width,
   disabled = false,
+  sequenceId,
+  trackId,
   onCommit,
 }: AudioClipControlsProps): JSX.Element | null {
+  const executeCommand = useProjectStore((s) => s.executeCommand);
   const clipDurationSec = useMemo(() => getClipTimelineDurationSec(clip), [clip]);
   const initialAudioSettings = useMemo(() => getInitialAudioSettings(clip), [clip]);
+  const containerRef = useRef<HTMLDivElement>(null);
 
   const [activeDrag, setActiveDrag] = useState<AudioDragType | null>(null);
   const [draftAudioSettings, setDraftAudioSettings] =
@@ -112,6 +127,11 @@ export function AudioClipControls({
 
   const dragStateRef = useRef<AudioDragState | null>(null);
   const draftAudioRef = useRef<DraftAudioSettings>(initialAudioSettings);
+  const [fadeTypeMenu, setFadeTypeMenu] = useState<{
+    x: number;
+    y: number;
+    direction: 'in' | 'out';
+  } | null>(null);
 
   useEffect(() => {
     draftAudioRef.current = draftAudioSettings;
@@ -231,6 +251,57 @@ export function AudioClipControls({
     };
   }, [activeDrag, clip.id, onCommit]);
 
+  // Close fade type context menu on outside click
+  useEffect(() => {
+    if (!fadeTypeMenu) return;
+    const close = () => setFadeTypeMenu(null);
+    window.addEventListener('click', close);
+    return () => window.removeEventListener('click', close);
+  }, [fadeTypeMenu]);
+
+  const handleFadeContextMenu = useCallback(
+    (direction: 'in' | 'out') => (e: MouseEvent<HTMLElement>) => {
+      if (disabled || !sequenceId || !trackId) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setFadeTypeMenu({ x: e.clientX, y: e.clientY, direction });
+    },
+    [disabled, sequenceId, trackId],
+  );
+
+  const handleVolumeHandleDoubleClick = useCallback(
+    (event: MouseEvent<HTMLElement>) => {
+      if (disabled || !sequenceId || !trackId || clipDurationSec <= 0) {
+        return;
+      }
+
+      const rect = containerRef.current?.getBoundingClientRect();
+      if (!rect) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      const x = clampNumber(event.clientX - rect.left, 0, width);
+      const timeOffset = roundToPrecision((x / Math.max(1, width)) * clipDurationSec, 0.001);
+      const valueDb = roundToPrecision(draftAudioRef.current.volumeDb, VOLUME_PRECISION);
+
+      void executeCommand({
+        type: 'AddAudioKeyframe',
+        payload: {
+          sequenceId,
+          trackId,
+          clipId: clip.id,
+          timeOffset,
+          valueDb,
+          interpolation: 'linear',
+        },
+      });
+    },
+    [clip.id, clipDurationSec, disabled, executeCommand, sequenceId, trackId, width],
+  );
+
   if (width < MIN_EDITABLE_WIDTH_PX || clipDurationSec <= 0) {
     return null;
   }
@@ -254,7 +325,11 @@ export function AudioClipControls({
         : `${draftAudioSettings.volumeDb.toFixed(1)} dB`;
 
   return (
-    <div data-testid="audio-clip-controls" className="absolute inset-0 z-20 pointer-events-none">
+    <div
+      ref={containerRef}
+      data-testid="audio-clip-controls"
+      className="absolute inset-0 z-20 pointer-events-none"
+    >
       <svg className="absolute inset-0 h-full w-full" viewBox={`0 0 ${width} ${TRACK_HEIGHT}`}>
         <polyline
           points={`0,${baselineY} ${fadeInPx},${volumeLineY} ${fadeOutPx},${volumeLineY} ${width},${baselineY}`}
@@ -294,6 +369,7 @@ export function AudioClipControls({
         className="absolute left-3 right-3 h-3 -translate-y-1/2 cursor-ns-resize rounded border border-emerald-300/50 bg-emerald-300/15 pointer-events-auto"
         style={{ top: `${volumeLineY}px` }}
         onMouseDown={beginDrag('volume')}
+        onDoubleClick={handleVolumeHandleDoubleClick}
       />
 
       <button
@@ -304,6 +380,7 @@ export function AudioClipControls({
         className="absolute top-0 h-5 w-4 -translate-x-1/2 cursor-ew-resize pointer-events-auto"
         style={{ left: `${fadeInPx}px` }}
         onMouseDown={beginDrag('fade-in')}
+        onContextMenu={handleFadeContextMenu('in')}
       >
         <span className="pointer-events-none absolute left-1/2 top-1.5 h-2 w-2 -translate-x-1/2 rotate-45 rounded-[1px] bg-emerald-300 shadow" />
       </button>
@@ -316,9 +393,61 @@ export function AudioClipControls({
         className="absolute top-0 h-5 w-4 -translate-x-1/2 cursor-ew-resize pointer-events-auto"
         style={{ left: `${fadeOutPx}px` }}
         onMouseDown={beginDrag('fade-out')}
+        onContextMenu={handleFadeContextMenu('out')}
       >
         <span className="pointer-events-none absolute left-1/2 top-1.5 h-2 w-2 -translate-x-1/2 rotate-45 rounded-[1px] bg-emerald-300 shadow" />
       </button>
+
+      {fadeTypeMenu && (
+        <div
+          data-testid="fade-type-menu"
+          className="fixed z-50 rounded bg-gray-800 border border-gray-600 shadow-lg py-1 text-xs text-white min-w-[140px] pointer-events-auto"
+          style={{ left: fadeTypeMenu.x, top: fadeTypeMenu.y }}
+        >
+          <div className="px-3 py-0.5 text-gray-400">
+            {fadeTypeMenu.direction === 'in' ? 'Fade In Type' : 'Fade Out Type'}
+          </div>
+          {FADE_TYPES.map((ft) => {
+            const current =
+              fadeTypeMenu.direction === 'in'
+                ? (clip.audio?.fadeInType ?? 'linear')
+                : (clip.audio?.fadeOutType ?? 'linear');
+            return (
+              <button
+                key={ft.value}
+                type="button"
+                className={`w-full px-3 py-1 text-left hover:bg-gray-700 ${
+                  current === ft.value ? 'text-emerald-400' : ''
+                }`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!disabled && sequenceId && trackId) {
+                    const cmdType =
+                      fadeTypeMenu.direction === 'in' ? 'SetAudioFadeIn' : 'SetAudioFadeOut';
+                    const duration =
+                      fadeTypeMenu.direction === 'in'
+                        ? draftAudioSettings.fadeInSec
+                        : draftAudioSettings.fadeOutSec;
+                    void executeCommand({
+                      type: cmdType,
+                      payload: {
+                        sequenceId,
+                        trackId,
+                        clipId: clip.id,
+                        duration,
+                        fadeType: ft.value,
+                      },
+                    });
+                  }
+                  setFadeTypeMenu(null);
+                }}
+              >
+                {ft.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

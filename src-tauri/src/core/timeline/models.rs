@@ -184,6 +184,9 @@ pub struct Sequence {
     /// Tracks stored directly for efficient Event Sourcing
     pub tracks: Vec<Track>,
     pub markers: Vec<Marker>,
+    /// Master output volume in dB (-60.0 to +6.0, 0.0 = unity gain)
+    #[serde(default)]
+    pub master_volume_db: f32,
     pub created_at: String,
     pub modified_at: String,
 }
@@ -198,6 +201,7 @@ impl Sequence {
             format,
             tracks: vec![],
             markers: vec![],
+            master_volume_db: 0.0,
             created_at: now.clone(),
             modified_at: now,
         }
@@ -529,6 +533,37 @@ impl Default for Transform {
 // Audio Settings
 // =============================================================================
 
+/// Audio fade curve type for fade-in and fade-out effects.
+/// Each type produces a distinct gain curve shape.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum FadeType {
+    /// Linear ramp (straight line)
+    #[default]
+    Linear,
+    /// Constant gain crossfade (linear amplitude)
+    ConstantGain,
+    /// Constant power crossfade (equal energy, smooth)
+    ConstantPower,
+    /// Exponential curve (slow start, fast end for fade-in)
+    Exponential,
+    /// S-curve (smooth start and end)
+    SCurve,
+}
+
+impl FadeType {
+    /// Returns the FFmpeg afade type string for this fade type.
+    pub fn to_ffmpeg_type(&self) -> &'static str {
+        match self {
+            FadeType::Linear => "tri",
+            FadeType::ConstantGain => "tri",
+            FadeType::ConstantPower => "qsin",
+            FadeType::Exponential => "exp",
+            FadeType::SCurve => "cub",
+        }
+    }
+}
+
 /// Audio settings for clips
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
@@ -545,6 +580,16 @@ pub struct AudioSettings {
     /// Fade-out duration in timeline seconds
     #[serde(default)]
     pub fade_out_sec: TimeSec,
+    /// Fade-in curve type
+    #[serde(default)]
+    pub fade_in_type: FadeType,
+    /// Fade-out curve type
+    #[serde(default)]
+    pub fade_out_type: FadeType,
+    /// Volume automation keyframes (overrides flat volume_db when non-empty).
+    /// Sorted by time_offset. Values in dB, times relative to clip start.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub volume_keyframes: Vec<AudioKeyframe>,
 }
 
 impl Default for AudioSettings {
@@ -555,7 +600,26 @@ impl Default for AudioSettings {
             muted: false,
             fade_in_sec: 0.0,
             fade_out_sec: 0.0,
+            fade_in_type: FadeType::default(),
+            fade_out_type: FadeType::default(),
+            volume_keyframes: Vec::new(),
         }
+    }
+}
+
+impl AudioSettings {
+    /// Returns true when volume automation keyframes are active.
+    pub fn has_volume_automation(&self) -> bool {
+        self.volume_keyframes.len() >= 2
+    }
+
+    /// Evaluates the volume at a given time offset (seconds from clip start).
+    /// Returns volume in dB. Falls back to flat `volume_db` when no keyframes.
+    pub fn evaluate_volume_at(&self, time_offset: f64) -> f64 {
+        if !self.has_volume_automation() {
+            return self.volume_db as f64;
+        }
+        AudioKeyframe::interpolate(&self.volume_keyframes, time_offset)
     }
 }
 
@@ -755,6 +819,187 @@ fn cubic_bezier_y(cp1y: f64, cp2y: f64, t: f64) -> f64 {
     let mt2 = mt * mt;
     let t2 = t * t;
     3.0 * mt2 * t * cp1y + 3.0 * mt * t2 * cp2y + t * t2
+}
+
+// =============================================================================
+// Audio Volume Keyframes
+// =============================================================================
+
+/// A single volume automation keyframe on an audio clip.
+///
+/// Defines a volume value at a specific time offset from clip start.
+/// When multiple keyframes exist, the volume is interpolated between them
+/// using the specified interpolation method.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioKeyframe {
+    /// Time offset from clip start in seconds (must be >= 0)
+    pub time_offset: f64,
+    /// Volume value in dB (typically -60.0 to +6.0, -inf for silence)
+    pub value_db: f64,
+    /// How to interpolate to the next keyframe
+    #[serde(default)]
+    pub interpolation: KeyframeInterpolation,
+}
+
+impl AudioKeyframe {
+    /// Creates a new audio keyframe.
+    pub fn new(time_offset: f64, value_db: f64, interpolation: KeyframeInterpolation) -> Self {
+        Self {
+            time_offset,
+            value_db,
+            interpolation,
+        }
+    }
+
+    /// Interpolates volume at a given time offset within a sorted keyframe list.
+    /// Returns the interpolated volume in dB.
+    pub fn interpolate(keyframes: &[AudioKeyframe], time_offset: f64) -> f64 {
+        if keyframes.is_empty() {
+            return 0.0; // 0 dB = unity gain
+        }
+
+        // Before first keyframe: hold first value
+        if time_offset <= keyframes[0].time_offset {
+            return keyframes[0].value_db;
+        }
+
+        // After last keyframe: hold last value
+        let last = &keyframes[keyframes.len() - 1];
+        if time_offset >= last.time_offset {
+            return last.value_db;
+        }
+
+        // Find the segment containing time_offset
+        for i in 0..keyframes.len() - 1 {
+            let kf0 = &keyframes[i];
+            let kf1 = &keyframes[i + 1];
+
+            if time_offset >= kf0.time_offset && time_offset < kf1.time_offset {
+                let segment_duration = kf1.time_offset - kf0.time_offset;
+                if segment_duration <= 0.0 {
+                    return kf0.value_db;
+                }
+
+                let t = (time_offset - kf0.time_offset) / segment_duration;
+
+                return match &kf0.interpolation {
+                    KeyframeInterpolation::Linear => {
+                        kf0.value_db + t * (kf1.value_db - kf0.value_db)
+                    }
+                    KeyframeInterpolation::Bezier {
+                        cp1x,
+                        cp1y,
+                        cp2x,
+                        cp2y,
+                    } => {
+                        let bezier_t = cubic_bezier_t(*cp1x, *cp2x, t);
+                        let value_range = kf1.value_db - kf0.value_db;
+                        let y = cubic_bezier_y(*cp1y, *cp2y, bezier_t);
+                        kf0.value_db + y * value_range
+                    }
+                    KeyframeInterpolation::Hold => kf0.value_db,
+                };
+            }
+        }
+
+        // Fallback (should not reach here)
+        last.value_db
+    }
+
+    /// Sorts a keyframe list by time_offset in place.
+    pub fn sort_by_time(keyframes: &mut [AudioKeyframe]) {
+        keyframes.sort_by(|a, b| {
+            a.time_offset
+                .partial_cmp(&b.time_offset)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+    }
+
+    /// Generates FFmpeg volume filter expression from keyframes.
+    ///
+    /// Produces a piecewise-linear `volume` filter using FFmpeg's nested
+    /// `if(lt(t,T),expr,fallback)` expressions. dB values are converted to
+    /// linear amplitude (10^(dB/20)) since FFmpeg `volume` defaults to linear.
+    ///
+    /// Commas inside `if()` expressions are function argument separators and
+    /// must NOT be escaped — matches the pattern in `build_time_remap_setpts`.
+    pub fn to_ffmpeg_volume_expr(keyframes: &[AudioKeyframe]) -> Option<String> {
+        if keyframes.len() < 2 {
+            return None;
+        }
+
+        // Interpolate in dB space (matching AudioKeyframe::interpolate()),
+        // then convert the final dB expression to linear amplitude for FFmpeg.
+        // FFmpeg volume filter expects linear multiplier, so we wrap with
+        // pow(10, dB_expr/20) at the end.
+        let mut parts: Vec<(f64, String)> = Vec::new();
+
+        for i in 0..keyframes.len() - 1 {
+            let kf0 = &keyframes[i];
+            let kf1 = &keyframes[i + 1];
+
+            let db0 = kf0.value_db;
+            let db1 = kf1.value_db;
+            let t0 = kf0.time_offset;
+            let t1 = kf1.time_offset;
+            let dt = t1 - t0;
+
+            if dt <= 0.0 {
+                continue;
+            }
+
+            let db_segment_expr = match &kf0.interpolation {
+                KeyframeInterpolation::Linear | KeyframeInterpolation::Bezier { .. } => {
+                    // Bezier is approximated as linear for FFmpeg (no native
+                    // bezier support in volume filter expressions).
+                    if (db1 - db0).abs() < 1e-9 {
+                        format!("{:.6}", db0)
+                    } else {
+                        let slope_db = (db1 - db0) / dt;
+                        format!("({:.6}+{:.6}*(t-{:.6}))", db0, slope_db, t0)
+                    }
+                }
+                KeyframeInterpolation::Hold => {
+                    format!("{:.6}", db0)
+                }
+            };
+
+            // Convert dB expression to linear: pow(10, dB/20)
+            let linear_segment = format!("pow(10,{}/20)", db_segment_expr);
+            parts.push((t1, linear_segment));
+        }
+
+        if parts.is_empty() {
+            return None;
+        }
+
+        // Build nested if: if(lt(t,t1), expr0, if(lt(t,t2), expr1, ... last_val))
+        let last_linear = db_to_linear(keyframes[keyframes.len() - 1].value_db);
+
+        let mut expr = format!("{:.6}", last_linear);
+        for (threshold, segment_expr) in parts.iter().rev() {
+            expr = format!("if(lt(t,{:.6}),{},{})", threshold, segment_expr, expr);
+        }
+
+        // Before first keyframe: hold first value
+        let first_linear = db_to_linear(keyframes[0].value_db);
+        let first_t = keyframes[0].time_offset;
+        if first_t > 0.0 {
+            expr = format!("if(lt(t,{:.6}),{:.6},{})", first_t, first_linear, expr);
+        }
+
+        Some(format!("volume={}", expr))
+    }
+}
+
+/// Converts dB to linear amplitude: 10^(dB/20)
+fn db_to_linear(db: f64) -> f64 {
+    if db <= -60.0 {
+        0.0 // Treat -60 dB and below as silence
+    } else {
+        10.0_f64.powf(db / 20.0)
+    }
 }
 
 // =============================================================================
@@ -1603,5 +1848,197 @@ mod tests {
             },
         ]));
         assert!(clip.has_time_remap());
+    }
+
+    // =========================================================================
+    // AudioKeyframe Tests
+    // =========================================================================
+
+    #[test]
+    fn audio_keyframe_should_hold_first_value_before_first_keyframe() {
+        // Given keyframes: [1.0s: -6dB, 3.0s: 0dB]
+        let keyframes = vec![
+            AudioKeyframe::new(1.0, -6.0, KeyframeInterpolation::Linear),
+            AudioKeyframe::new(3.0, 0.0, KeyframeInterpolation::Linear),
+        ];
+
+        // When evaluating at t=0.0 (before first keyframe)
+        let result = AudioKeyframe::interpolate(&keyframes, 0.0);
+
+        // Then it should hold the first keyframe's value
+        assert!((result - (-6.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn audio_keyframe_should_hold_last_value_after_last_keyframe() {
+        // Given keyframes: [0.0s: -6dB, 2.0s: 0dB]
+        let keyframes = vec![
+            AudioKeyframe::new(0.0, -6.0, KeyframeInterpolation::Linear),
+            AudioKeyframe::new(2.0, 0.0, KeyframeInterpolation::Linear),
+        ];
+
+        // When evaluating at t=5.0 (after last keyframe)
+        let result = AudioKeyframe::interpolate(&keyframes, 5.0);
+
+        // Then it should hold the last keyframe's value
+        assert!((result - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn audio_keyframe_should_interpolate_linearly_between_keyframes() {
+        // Given two keyframes with linear interpolation
+        let keyframes = vec![
+            AudioKeyframe::new(0.0, -12.0, KeyframeInterpolation::Linear),
+            AudioKeyframe::new(4.0, 0.0, KeyframeInterpolation::Linear),
+        ];
+
+        // When evaluating at midpoint t=2.0
+        let result = AudioKeyframe::interpolate(&keyframes, 2.0);
+
+        // Then it should be linearly interpolated: -12 + (0 - -12) * 0.5 = -6
+        assert!((result - (-6.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn audio_keyframe_should_hold_value_with_hold_interpolation() {
+        // Given two keyframes with Hold interpolation on the first
+        let keyframes = vec![
+            AudioKeyframe::new(0.0, -12.0, KeyframeInterpolation::Hold),
+            AudioKeyframe::new(4.0, 0.0, KeyframeInterpolation::Linear),
+        ];
+
+        // When evaluating at t=2.0 (midpoint)
+        let result = AudioKeyframe::interpolate(&keyframes, 2.0);
+
+        // Then it should hold the first value (step function)
+        assert!((result - (-12.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn audio_keyframe_should_interpolate_with_bezier_curve() {
+        // Given two keyframes with Bezier interpolation (ease-in-out)
+        let keyframes = vec![
+            AudioKeyframe::new(
+                0.0,
+                -12.0,
+                KeyframeInterpolation::Bezier {
+                    cp1x: 0.42,
+                    cp1y: 0.0,
+                    cp2x: 0.58,
+                    cp2y: 1.0,
+                },
+            ),
+            AudioKeyframe::new(4.0, 0.0, KeyframeInterpolation::Linear),
+        ];
+
+        // When evaluating at t=2.0 (midpoint)
+        let result = AudioKeyframe::interpolate(&keyframes, 2.0);
+
+        // Then it should be smoothly interpolated (not exactly -6.0 due to bezier)
+        assert!(result > -12.0 && result < 0.0);
+    }
+
+    #[test]
+    fn audio_keyframe_should_sort_by_time_offset() {
+        // Given unsorted keyframes
+        let mut keyframes = vec![
+            AudioKeyframe::new(3.0, 0.0, KeyframeInterpolation::Linear),
+            AudioKeyframe::new(1.0, -6.0, KeyframeInterpolation::Linear),
+            AudioKeyframe::new(0.0, -12.0, KeyframeInterpolation::Linear),
+        ];
+
+        // When sorting
+        AudioKeyframe::sort_by_time(&mut keyframes);
+
+        // Then keyframes should be ordered by time_offset
+        assert!((keyframes[0].time_offset - 0.0).abs() < 1e-9);
+        assert!((keyframes[1].time_offset - 1.0).abs() < 1e-9);
+        assert!((keyframes[2].time_offset - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn audio_keyframe_should_generate_ffmpeg_volume_expr_for_linear_ramp() {
+        // Given two keyframes: fade from 0dB to -12dB over 2 seconds
+        let keyframes = vec![
+            AudioKeyframe::new(0.0, 0.0, KeyframeInterpolation::Linear),
+            AudioKeyframe::new(2.0, -12.0, KeyframeInterpolation::Linear),
+        ];
+
+        // When generating FFmpeg expression
+        let expr = AudioKeyframe::to_ffmpeg_volume_expr(&keyframes);
+
+        // Then it should produce a valid volume filter (no quotes, no escaped commas)
+        assert!(expr.is_some());
+        let expr = expr.unwrap();
+        assert!(expr.starts_with("volume="));
+        assert!(!expr.contains('\''), "Should not contain single quotes");
+        assert!(!expr.contains("\\,"), "Commas should not be escaped");
+        assert!(expr.contains("if(lt(t,"));
+        // Expression must interpolate in dB space then convert to linear via pow(10, dB/20)
+        assert!(
+            expr.contains("pow(10,"),
+            "Should use dB-to-linear conversion: pow(10, dB/20)"
+        );
+    }
+
+    #[test]
+    fn audio_keyframe_should_return_none_for_insufficient_keyframes() {
+        // Given only one keyframe (need >= 2)
+        let keyframes = vec![AudioKeyframe::new(0.0, 0.0, KeyframeInterpolation::Linear)];
+
+        // When generating FFmpeg expression
+        let expr = AudioKeyframe::to_ffmpeg_volume_expr(&keyframes);
+
+        // Then it should return None
+        assert!(expr.is_none());
+    }
+
+    #[test]
+    fn audio_settings_should_evaluate_flat_volume_when_no_keyframes() {
+        // Given AudioSettings with volume_db = -3.0 and no keyframes
+        let settings = AudioSettings {
+            volume_db: -3.0,
+            ..Default::default()
+        };
+
+        // When evaluating volume at any time
+        let result = settings.evaluate_volume_at(1.0);
+
+        // Then it should return the flat volume_db value
+        assert!((result - (-3.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn audio_settings_should_evaluate_keyframe_volume_when_automation_active() {
+        // Given AudioSettings with volume keyframes
+        let settings = AudioSettings {
+            volume_db: 0.0,
+            volume_keyframes: vec![
+                AudioKeyframe::new(0.0, -12.0, KeyframeInterpolation::Linear),
+                AudioKeyframe::new(4.0, 0.0, KeyframeInterpolation::Linear),
+            ],
+            ..Default::default()
+        };
+
+        // When evaluating at midpoint
+        let result = settings.evaluate_volume_at(2.0);
+
+        // Then it should use keyframe interpolation, not flat volume_db
+        assert!((result - (-6.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn audio_keyframe_should_serialize_and_deserialize_via_json() {
+        // Given an AudioKeyframe
+        let kf = AudioKeyframe::new(1.5, -6.0, KeyframeInterpolation::Linear);
+
+        // When serializing to JSON and back
+        let json = serde_json::to_string(&kf).unwrap();
+        let deserialized: AudioKeyframe = serde_json::from_str(&json).unwrap();
+
+        // Then the round-trip should preserve all values
+        assert!((deserialized.time_offset - 1.5).abs() < 1e-9);
+        assert!((deserialized.value_db - (-6.0)).abs() < 1e-9);
+        assert_eq!(deserialized.interpolation, KeyframeInterpolation::Linear);
     }
 }

@@ -344,6 +344,8 @@ export interface Sequence {
   format: SequenceFormat;
   tracks: Track[];
   markers: Marker[];
+  /** Master output volume in dB (-60 to +6, 0 = unity) */
+  masterVolumeDb?: number;
 }
 
 export type TrackKind = 'video' | 'audio' | 'caption' | 'overlay';
@@ -407,6 +409,24 @@ export interface Transform {
   anchor: Point2D;
 }
 
+/** Audio fade curve type */
+export type FadeType =
+  | 'linear'
+  | 'constantGain'
+  | 'constantPower'
+  | 'exponential'
+  | 'sCurve';
+
+/** A single volume automation keyframe on an audio clip */
+export interface AudioKeyframe {
+  /** Time offset from clip start in seconds (>= 0) */
+  timeOffset: number;
+  /** Volume value in dB (-60 to +6) */
+  valueDb: number;
+  /** How to interpolate to the next keyframe */
+  interpolation: KeyframeInterpolation;
+}
+
 export interface AudioSettings {
   /** Clip gain in dB (-60 to +6) */
   volumeDb: number;
@@ -418,6 +438,12 @@ export interface AudioSettings {
   fadeInSec?: number;
   /** Fade-out duration in timeline seconds */
   fadeOutSec?: number;
+  /** Fade-in curve type */
+  fadeInType?: FadeType;
+  /** Fade-out curve type */
+  fadeOutType?: FadeType;
+  /** Volume automation keyframes (overrides flat volumeDb when non-empty) */
+  volumeKeyframes?: AudioKeyframe[];
 }
 
 /** Interpolation type for time remap keyframes */
@@ -854,7 +880,17 @@ export type CommandType =
   | 'ReverseClip'
   | 'CreateFreezeFrame'
   | 'SetTimeRemap'
-  | 'ClearTimeRemap';
+  | 'ClearTimeRemap'
+  // Audio keyframe commands (S26)
+  | 'AddAudioKeyframe'
+  | 'RemoveAudioKeyframe'
+  | 'MoveAudioKeyframe'
+  | 'SetAudioKeyframeValue'
+  // Audio fade commands (S26)
+  | 'SetAudioFadeIn'
+  | 'SetAudioFadeOut'
+  // Master volume (S26)
+  | 'SetMasterVolume';
 
 export interface Command {
   type: CommandType;

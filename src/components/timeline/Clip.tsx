@@ -17,6 +17,8 @@ import { AudioClipWaveform } from './AudioClipWaveform';
 import { WaveformPeaksDisplay } from './WaveformPeaksDisplay';
 import { LazyThumbnailStrip } from './LazyThumbnailStrip';
 import { AudioClipControls, type ClipAudioSettingsPatch } from './AudioClipControls';
+import { AudioRubberBand } from './AudioRubberBand';
+import { useAudioKeyframes } from '@/hooks/useAudioKeyframes';
 import { TRACK_HEIGHT } from './constants';
 
 // =============================================================================
@@ -81,6 +83,10 @@ interface ClipProps {
   thumbnailConfig?: ClipThumbnailConfig;
   /** Track kind this clip belongs to */
   trackKind?: TrackKind;
+  /** Sequence ID for keyframe commands */
+  sequenceId?: string;
+  /** Track ID for keyframe commands */
+  trackId?: string;
   /** Commit callback for clip-level audio edits */
   onAudioSettingsChange?: (clipId: string, patch: ClipAudioSettingsPatch) => void | Promise<void>;
   /** Snap points for intelligent snapping (clip edges, playhead, etc.) */
@@ -119,6 +125,8 @@ export function Clip({
   waveformConfig,
   thumbnailConfig,
   trackKind,
+  sequenceId,
+  trackId,
   onAudioSettingsChange,
   snapPoints = [],
   snapThreshold = 0,
@@ -315,6 +323,13 @@ export function Clip({
   const showAudioLabelBackdrop = !isText && !thumbnailConfig?.enabled;
   const allowLabelOverflow = showAudioLabelBackdrop;
   const showAudioEditorControls = !isText && trackKind === 'audio';
+  const showAudioAutomationEditor = (clip.audio?.volumeKeyframes?.length ?? 0) >= 1;
+
+  const keyframeActions = useAudioKeyframes({
+    sequenceId: sequenceId ?? '',
+    trackId: trackId ?? '',
+    clipId: clip.id,
+  });
 
   return (
     <div
@@ -363,12 +378,23 @@ export function Clip({
         />
       )}
 
-      {showAudioEditorControls && displayPosition.width > 0 && (
+      {showAudioEditorControls && displayPosition.width > 0 && !showAudioAutomationEditor && (
         <AudioClipControls
           clip={clip}
           width={displayPosition.width}
           disabled={disabled}
+          sequenceId={sequenceId}
+          trackId={trackId}
           onCommit={onAudioSettingsChange}
+        />
+      )}
+
+      {showAudioEditorControls && showAudioAutomationEditor && displayPosition.width > 0 && (
+        <AudioRubberBand
+          clip={clip}
+          width={displayPosition.width}
+          disabled={disabled}
+          actions={keyframeActions}
         />
       )}
 

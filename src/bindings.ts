@@ -2245,6 +2245,26 @@ codec: string;
  */
 bitrate?: number | null }
 /**
+ * A single volume automation keyframe on an audio clip.
+ * 
+ * Defines a volume value at a specific time offset from clip start.
+ * When multiple keyframes exist, the volume is interpolated between them
+ * using the specified interpolation method.
+ */
+export type AudioKeyframe = { 
+/**
+ * Time offset from clip start in seconds (must be >= 0)
+ */
+timeOffset: number; 
+/**
+ * Volume value in dB (typically -60.0 to +6.0, -inf for silence)
+ */
+valueDb: number; 
+/**
+ * How to interpolate to the next keyframe
+ */
+interpolation?: KeyframeInterpolation }
+/**
  * Audio characteristics extracted from a video's audio track.
  * 
  * Contains rhythm, loudness, and spectral data used for
@@ -2297,7 +2317,20 @@ fadeInSec?: number;
 /**
  * Fade-out duration in timeline seconds
  */
-fadeOutSec?: number }
+fadeOutSec?: number; 
+/**
+ * Fade-in curve type
+ */
+fadeInType?: FadeType; 
+/**
+ * Fade-out curve type
+ */
+fadeOutType?: FadeType; 
+/**
+ * Volume automation keyframes (overrides flat volume_db when non-empty).
+ * Sorted by time_offset. Values in dB, times relative to clip start.
+ */
+volumeKeyframes: AudioKeyframe[] }
 /**
  * Audio stream information.
  */
@@ -2926,6 +2959,31 @@ emotions: string[];
  * Face ID for tracking (if available)
  */
 faceId?: string | null }
+/**
+ * Audio fade curve type for fade-in and fade-out effects.
+ * Each type produces a distinct gain curve shape.
+ */
+export type FadeType = 
+/**
+ * Linear ramp (straight line)
+ */
+"linear" | 
+/**
+ * Constant gain crossfade (linear amplitude)
+ */
+"constantGain" | 
+/**
+ * Constant power crossfade (equal energy, smooth)
+ */
+"constantPower" | 
+/**
+ * Exponential curve (slow start, fast end for fade-in)
+ */
+"exponential" | 
+/**
+ * S-curve (smooth start and end)
+ */
+"scurve"
 /**
  * A file tree entry for the frontend
  */
@@ -4053,7 +4111,11 @@ export type Sequence = { id: string; name: string; format: SequenceFormat;
 /**
  * Tracks stored directly for efficient Event Sourcing
  */
-tracks: Track[]; markers: Marker[]; createdAt: string; modifiedAt: string }
+tracks: Track[]; markers: Marker[]; 
+/**
+ * Master output volume in dB (-60.0 to +6.0, 0.0 = unity gain)
+ */
+masterVolumeDb?: number; createdAt: string; modifiedAt: string }
 /**
  * Sequence format specification
  */

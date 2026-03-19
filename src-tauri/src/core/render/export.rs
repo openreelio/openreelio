@@ -864,10 +864,11 @@ fn build_time_remap_setpts(curve: &crate::core::timeline::TimeRemapCurve) -> Str
     expr
 }
 
-/// Build audio trim filter with speed, reverse, and freeze frame support.
+/// Build audio trim filter with speed, reverse, freeze frame, and volume keyframe support.
 ///
 /// Generates the complete audio filter chain from input to the audio output label,
-/// including atempo for speed and areverse for reverse playback.
+/// including atempo for speed, areverse for reverse playback, and volume automation
+/// from audio keyframes.
 /// Returns the label to use as input for subsequent audio effects.
 fn build_audio_trim_filter(
     clip: &Clip,
@@ -912,6 +913,14 @@ fn build_audio_trim_filter(
             current_label = speed_label;
         }
 
+        // Apply volume keyframe automation
+        current_label = apply_volume_keyframes(clip, input_index, &current_label, filter_complex);
+
+        // Apply audio fades
+        let clip_dur = clip.duration().max(0.0);
+        current_label =
+            apply_audio_fades(clip, input_index, &current_label, filter_complex, clip_dur);
+
         return current_label;
     }
 
@@ -940,7 +949,124 @@ fn build_audio_trim_filter(
         current_label = speed_label;
     }
 
+    // Apply volume keyframe automation
+    current_label = apply_volume_keyframes(clip, input_index, &current_label, filter_complex);
+
+    // Apply audio fades
+    let clip_dur = clip.duration().max(0.0);
+    current_label = apply_audio_fades(clip, input_index, &current_label, filter_complex, clip_dur);
+
     current_label
+}
+
+/// Applies volume keyframe automation as an FFmpeg volume filter if the clip
+/// has active volume automation keyframes.
+fn apply_volume_keyframes(
+    clip: &Clip,
+    input_index: usize,
+    current_label: &str,
+    filter_complex: &mut String,
+) -> String {
+    use crate::core::timeline::AudioKeyframe;
+
+    if clip.audio.has_volume_automation() {
+        if let Some(vol_expr) = AudioKeyframe::to_ffmpeg_volume_expr(&clip.audio.volume_keyframes) {
+            let vol_label = format!("avol{}", input_index);
+            // Volume filter does not modify PTS — no asetpts needed here.
+            filter_complex.push_str(&format!("[{}]{}[{}];", current_label, vol_expr, vol_label));
+            return vol_label;
+        }
+    }
+    current_label.to_string()
+}
+
+/// Applies audio fade-in and fade-out as FFmpeg afade filters.
+fn apply_audio_fades(
+    clip: &Clip,
+    input_index: usize,
+    current_label: &str,
+    filter_complex: &mut String,
+    clip_duration: f64,
+) -> String {
+    let fade_in = clip.audio.fade_in_sec;
+    let fade_out = clip.audio.fade_out_sec;
+
+    if fade_in <= 0.0 && fade_out <= 0.0 {
+        return current_label.to_string();
+    }
+
+    let mut label = current_label.to_string();
+
+    if fade_in > 0.0 {
+        let fade_type = clip.audio.fade_in_type.to_ffmpeg_type();
+        let out_label = format!("afin{}", input_index);
+        filter_complex.push_str(&format!(
+            "[{}]afade=t=in:st=0:d={:.4}:curve={}[{}];",
+            label, fade_in, fade_type, out_label
+        ));
+        label = out_label;
+    }
+
+    if fade_out > 0.0 {
+        let fade_type = clip.audio.fade_out_type.to_ffmpeg_type();
+        let start_time = (clip_duration - fade_out).max(0.0);
+        let out_label = format!("afout{}", input_index);
+        filter_complex.push_str(&format!(
+            "[{}]afade=t=out:st={:.4}:d={:.4}:curve={}[{}];",
+            label, start_time, fade_out, fade_type, out_label
+        ));
+        label = out_label;
+    }
+
+    label
+}
+
+fn master_volume_db_to_linear(master_volume_db: f32) -> f64 {
+    if master_volume_db <= -60.0 {
+        0.0
+    } else {
+        10.0_f64.powf(master_volume_db as f64 / 20.0)
+    }
+}
+
+fn append_master_audio_output(
+    filter_complex: &mut String,
+    audio_streams: &[String],
+    master_volume_db: f32,
+) -> Option<String> {
+    if audio_streams.is_empty() {
+        return None;
+    }
+
+    const BASE_AUDIO_LABEL: &str = "[outa_base]";
+    const FINAL_AUDIO_LABEL: &str = "[outa]";
+
+    filter_complex.push(';');
+    if audio_streams.len() == 1 {
+        filter_complex.push_str(&format!("{}anull{}", audio_streams[0], BASE_AUDIO_LABEL));
+    } else {
+        filter_complex.push_str(&audio_streams.join(""));
+        filter_complex.push_str(&format!(
+            "concat=n={}:v=0:a=1{}",
+            audio_streams.len(),
+            BASE_AUDIO_LABEL
+        ));
+    }
+
+    let clamped_master_volume_db = master_volume_db.clamp(-60.0, 6.0);
+    if clamped_master_volume_db.abs() < f32::EPSILON {
+        return Some(BASE_AUDIO_LABEL.to_string());
+    }
+
+    filter_complex.push(';');
+    filter_complex.push_str(&format!(
+        "{}volume={:.6}{}",
+        BASE_AUDIO_LABEL,
+        master_volume_db_to_linear(clamped_master_volume_db),
+        FINAL_AUDIO_LABEL
+    ));
+
+    Some(FINAL_AUDIO_LABEL.to_string())
 }
 
 // =============================================================================
@@ -1564,6 +1690,8 @@ impl ExportEngine {
         clip: &Clip,
         effects: &std::collections::HashMap<String, Effect>,
     ) -> FilterGraph {
+        use crate::core::effects::EffectType;
+
         let mut graph = FilterGraph::new();
 
         // Calculate midpoint of clip for keyframe interpolation
@@ -1571,9 +1699,18 @@ impl ExportEngine {
         let clip_duration = clip.range.source_out_sec - clip.range.source_in_sec;
         let midpoint_time = clip_duration / 2.0;
 
+        // When volume automation keyframes are active, skip Volume effects
+        // to prevent double-application (keyframe filter + effect filter).
+        let skip_volume_effects = clip.audio.has_volume_automation();
+
         // Look up each effect ID and add to graph
         for effect_id in &clip.effects {
             if let Some(effect) = effects.get(effect_id) {
+                if skip_volume_effects && effect.effect_type == EffectType::Volume && effect.enabled
+                {
+                    continue;
+                }
+
                 // If effect has keyframes, resolve them at midpoint
                 let resolved_effect = if effect.has_keyframes() {
                     effect.with_params_at_time(midpoint_time)
@@ -1871,16 +2008,11 @@ impl ExportEngine {
         let final_video_label =
             append_caption_overlays(&mut filter_complex, "[outv]", &caption_filters);
 
-        // Concat audio streams ONLY if we have any
-        if !audio_streams.is_empty() {
-            filter_complex.push(';');
-            if audio_streams.len() == 1 {
-                filter_complex.push_str(&format!("{}anull[outa]", audio_streams[0]));
-            } else {
-                filter_complex.push_str(&audio_streams.join(""));
-                filter_complex.push_str(&format!("concat=n={}:v=0:a=1[outa]", audio_streams.len()));
-            }
-        }
+        let final_audio_label = append_master_audio_output(
+            &mut filter_complex,
+            &audio_streams,
+            sequence.master_volume_db,
+        );
 
         // Add filter complex
         args.push("-filter_complex".to_string());
@@ -1891,9 +2023,9 @@ impl ExportEngine {
         args.push(final_video_label);
 
         // Map audio output ONLY if we have audio streams
-        if !audio_streams.is_empty() {
+        if let Some(final_audio_label) = final_audio_label.as_deref() {
             args.push("-map".to_string());
-            args.push("[outa]".to_string());
+            args.push(final_audio_label.to_string());
         }
 
         // Video codec
@@ -1907,7 +2039,7 @@ impl ExportEngine {
         });
 
         // Audio codec ONLY if we have audio
-        if !audio_streams.is_empty() {
+        if final_audio_label.is_some() {
             args.push("-c:a".to_string());
             args.push(match settings.audio_codec {
                 AudioCodec::Aac => "aac".to_string(),
@@ -1926,7 +2058,7 @@ impl ExportEngine {
 
         // Audio bitrate ONLY if we have audio
         if let Some(ref bitrate) = settings.audio_bitrate {
-            if !audio_streams.is_empty() {
+            if final_audio_label.is_some() {
                 args.push("-b:a".to_string());
                 args.push(bitrate.clone());
             }
@@ -2606,8 +2738,17 @@ pub fn build_complex_filter_args_with_audio_info(
         let clip_duration = clip.range.source_out_sec - clip.range.source_in_sec;
         let midpoint_time = clip_duration / 2.0;
 
+        // When volume automation keyframes are active, skip Volume effects
+        // to prevent double-application (keyframe filter + effect filter).
+        let skip_volume_effects = clip.audio.has_volume_automation();
+
         for effect_id in &clip.effects {
             if let Some(effect) = effects.get(effect_id) {
+                if skip_volume_effects && effect.effect_type == EffectType::Volume && effect.enabled
+                {
+                    continue;
+                }
+
                 // If effect has keyframes, resolve them at midpoint
                 let resolved_effect = if effect.has_keyframes() {
                     effect.with_params_at_time(midpoint_time)
@@ -2803,16 +2944,11 @@ pub fn build_complex_filter_args_with_audio_info(
     let final_video_label =
         append_caption_overlays(&mut filter_complex, "[outv]", &caption_filters);
 
-    // Concat audio streams ONLY if we have any
-    if !audio_streams.is_empty() {
-        filter_complex.push(';');
-        if audio_streams.len() == 1 {
-            filter_complex.push_str(&format!("{}anull[outa]", audio_streams[0]));
-        } else {
-            filter_complex.push_str(&audio_streams.join(""));
-            filter_complex.push_str(&format!("concat=n={}:v=0:a=1[outa]", audio_streams.len()));
-        }
-    }
+    let final_audio_label = append_master_audio_output(
+        &mut filter_complex,
+        &audio_streams,
+        sequence.master_volume_db,
+    );
 
     // Build FFmpeg arguments
     args.push("-filter_complex".to_string());
@@ -2821,9 +2957,9 @@ pub fn build_complex_filter_args_with_audio_info(
     args.push("-map".to_string());
     args.push(final_video_label);
 
-    if !audio_streams.is_empty() {
+    if let Some(final_audio_label) = final_audio_label.as_deref() {
         args.push("-map".to_string());
-        args.push("[outa]".to_string());
+        args.push(final_audio_label.to_string());
     }
 
     args.push("-c:v".to_string());
@@ -2835,7 +2971,7 @@ pub fn build_complex_filter_args_with_audio_info(
         VideoCodec::Copy => "copy".to_string(),
     });
 
-    if !audio_streams.is_empty() {
+    if final_audio_label.is_some() {
         args.push("-c:a".to_string());
         args.push(match settings.audio_codec {
             AudioCodec::Aac => "aac".to_string(),
@@ -3941,6 +4077,59 @@ mod tests {
             args.get(first_map_index + 1).map(String::as_str),
             Some("[capv0]"),
             "Expected video map label to use caption-composited stream"
+        );
+    }
+
+    #[test]
+    fn test_build_filter_applies_sequence_master_volume_to_audio_output() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        sequence.master_volume_db = -6.0;
+
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(video_track);
+
+        let video_path = create_temp_media_file("video_master_gain.mp4");
+        let mut video_asset =
+            Asset::new_video("video_master_gain.mp4", &video_path, VideoInfo::default())
+                .with_duration(3.0)
+                .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let mut audio_info_map = std::collections::HashMap::new();
+        audio_info_map.insert(
+            "video_asset".to_string(),
+            AssetAudioInfo { has_audio: true },
+        );
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &audio_info_map,
+            &ExportSettings::default(),
+        )
+        .unwrap();
+
+        let filter_complex = args
+            .windows(2)
+            .find_map(|window| (window[0] == "-filter_complex").then_some(window[1].as_str()))
+            .unwrap();
+
+        assert!(
+            filter_complex.contains("[outa_base]volume=0.501187[outa]"),
+            "Expected master gain filter in audio output chain. Got: {}",
+            filter_complex
         );
     }
 

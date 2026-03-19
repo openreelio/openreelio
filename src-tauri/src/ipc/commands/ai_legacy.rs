@@ -759,18 +759,21 @@ pub async fn apply_edit_script(
     state: State<'_, AppState>,
 ) -> Result<ApplyEditScriptResult, String> {
     use crate::core::commands::{
-        AddEffectCommand, AddMarkerCommand, AddMaskCommand, AddTextClipCommand, AddTrackCommand,
-        ClearTimeRemapCommand, CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand,
-        CreateFolderCommand, CreateFreezeFrameCommand, CreateSequenceCommand, DeleteCaptionCommand,
-        DeleteFileCommand, ExtractEditCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
+        AddAudioKeyframeCommand, AddEffectCommand, AddMarkerCommand, AddMaskCommand,
+        AddTextClipCommand, AddTrackCommand, ClearTimeRemapCommand, CloseAllGapsCommand,
+        CloseGapCommand, CreateCaptionCommand, CreateFolderCommand, CreateFreezeFrameCommand,
+        CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand, ExtractEditCommand,
+        InsertClipCommand, InsertEditCommand, LiftCommand, MoveAudioKeyframeCommand,
         MoveClipCommand, MoveFileCommand, OverwriteEditCommand, RemoveAssetCommand,
-        RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand,
-        RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand, RenameTrackCommand,
-        ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand, SetClipAudioCommand,
-        SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
-        SetTimeRemapCommand, SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand,
-        ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand, UpdateEffectCommand,
-        UpdateMaskCommand, UpdateTextCommand,
+        RemoveAudioKeyframeCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand,
+        RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
+        RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand,
+        SetAudioFadeInCommand, SetAudioFadeOutCommand, SetAudioKeyframeValueCommand,
+        SetClipAudioCommand, SetClipBlendModeCommand, SetClipMuteCommand, SetClipSpeedCommand,
+        SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
+        SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand, ToggleTrackMuteCommand,
+        ToggleTrackVisibilityCommand, TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand,
+        UpdateTextCommand,
     };
 
     let mut guard = state.project.lock().await;
@@ -1055,6 +1058,54 @@ pub async fn apply_edit_script(
                 p.fade_in_sec,
                 p.fade_out_sec,
             )),
+            CommandPayload::AddAudioKeyframe(p) => Box::new(AddAudioKeyframeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.time_offset,
+                p.value_db,
+                p.interpolation,
+            )),
+            CommandPayload::RemoveAudioKeyframe(p) => Box::new(RemoveAudioKeyframeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.keyframe_index,
+            )),
+            CommandPayload::MoveAudioKeyframe(p) => Box::new(MoveAudioKeyframeCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.keyframe_index,
+                p.new_time_offset,
+            )),
+            CommandPayload::SetAudioKeyframeValue(p) => {
+                Box::new(SetAudioKeyframeValueCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.keyframe_index,
+                    p.value_db,
+                    p.interpolation,
+                ))
+            }
+            CommandPayload::SetAudioFadeIn(p) => Box::new(SetAudioFadeInCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.duration,
+                p.fade_type,
+            )),
+            CommandPayload::SetAudioFadeOut(p) => Box::new(SetAudioFadeOutCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.duration,
+                p.fade_type,
+            )),
+            CommandPayload::SetMasterVolume(p) => {
+                Box::new(SetMasterVolumeCommand::new(&p.sequence_id, p.volume_db))
+            }
             CommandPayload::SetTrackBlendMode(p) => Box::new(SetTrackBlendModeCommand::new(
                 &p.sequence_id,
                 &p.track_id,
@@ -1536,6 +1587,128 @@ pub async fn validate_edit_script(
             }
             // CloseAllGaps: no special params beyond trackId (injected by defaults)
             "CloseAllGaps" => {}
+            // Audio keyframe commands
+            "AddAudioKeyframe" | "addAudioKeyframe" => {
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("AddAudioKeyframe command {} missing clipId", i));
+                }
+                match cmd.params.get("timeOffset").and_then(|v| v.as_f64()) {
+                    Some(v) if v.is_finite() && v >= 0.0 => {}
+                    Some(_) => {
+                        issues.push(format!(
+                            "AddAudioKeyframe command {} has invalid timeOffset: must be finite and non-negative",
+                            i
+                        ));
+                    }
+                    None => {
+                        issues.push(format!("AddAudioKeyframe command {} missing timeOffset", i));
+                    }
+                }
+                if cmd.params.get("valueDb").is_none() {
+                    issues.push(format!("AddAudioKeyframe command {} missing valueDb", i));
+                }
+            }
+            "RemoveAudioKeyframe" | "removeAudioKeyframe" => {
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("RemoveAudioKeyframe command {} missing clipId", i));
+                }
+                if cmd.params.get("keyframeIndex").is_none() {
+                    issues.push(format!(
+                        "RemoveAudioKeyframe command {} missing keyframeIndex",
+                        i
+                    ));
+                }
+            }
+            "MoveAudioKeyframe" | "moveAudioKeyframe" => {
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("MoveAudioKeyframe command {} missing clipId", i));
+                }
+                if cmd.params.get("keyframeIndex").is_none() {
+                    issues.push(format!(
+                        "MoveAudioKeyframe command {} missing keyframeIndex",
+                        i
+                    ));
+                }
+                match cmd.params.get("newTimeOffset").and_then(|v| v.as_f64()) {
+                    Some(v) if v.is_finite() && v >= 0.0 => {}
+                    Some(_) => {
+                        issues.push(format!(
+                            "MoveAudioKeyframe command {} has invalid newTimeOffset: must be finite and non-negative",
+                            i
+                        ));
+                    }
+                    None => {
+                        issues.push(format!(
+                            "MoveAudioKeyframe command {} missing newTimeOffset",
+                            i
+                        ));
+                    }
+                }
+            }
+            "SetAudioKeyframeValue" | "setAudioKeyframeValue" => {
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!(
+                        "SetAudioKeyframeValue command {} missing clipId",
+                        i
+                    ));
+                }
+                if cmd.params.get("keyframeIndex").is_none() {
+                    issues.push(format!(
+                        "SetAudioKeyframeValue command {} missing keyframeIndex",
+                        i
+                    ));
+                }
+                if cmd.params.get("valueDb").is_none() {
+                    issues.push(format!(
+                        "SetAudioKeyframeValue command {} missing valueDb",
+                        i
+                    ));
+                }
+            }
+            // Audio fade commands
+            "SetAudioFadeIn" | "setAudioFadeIn" => {
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("SetAudioFadeIn command {} missing clipId", i));
+                }
+                match cmd.params.get("duration").and_then(|v| v.as_f64()) {
+                    Some(v) if v.is_finite() && v >= 0.0 => {}
+                    Some(_) => {
+                        issues.push(format!(
+                            "SetAudioFadeIn command {} has invalid duration: must be finite and non-negative",
+                            i
+                        ));
+                    }
+                    None => {
+                        issues.push(format!("SetAudioFadeIn command {} missing duration", i));
+                    }
+                }
+            }
+            "SetAudioFadeOut" | "setAudioFadeOut" => {
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("SetAudioFadeOut command {} missing clipId", i));
+                }
+                match cmd.params.get("duration").and_then(|v| v.as_f64()) {
+                    Some(v) if v.is_finite() && v >= 0.0 => {}
+                    Some(_) => {
+                        issues.push(format!(
+                            "SetAudioFadeOut command {} has invalid duration: must be finite and non-negative",
+                            i
+                        ));
+                    }
+                    None => {
+                        issues.push(format!("SetAudioFadeOut command {} missing duration", i));
+                    }
+                }
+            }
+            // Master volume command
+            "SetMasterVolume" | "setMasterVolume" => {
+                if cmd.params.get("sequenceId").is_none() {
+                    issues.push(format!("SetMasterVolume command {} missing sequenceId", i));
+                }
+                if cmd.params.get("volumeDb").is_none() {
+                    issues.push(format!("SetMasterVolume command {} missing volumeDb", i));
+                }
+            }
             _ => {
                 issues.push(format!("Unknown command type: {}", cmd.command_type));
             }

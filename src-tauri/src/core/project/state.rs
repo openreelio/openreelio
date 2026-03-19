@@ -11,7 +11,7 @@ use crate::core::{
     assets::Asset,
     effects::Effect,
     project::{OpKind, Operation, OpsLog},
-    timeline::{BlendMode, Clip, Sequence, Track},
+    timeline::{AudioSettings, BlendMode, Clip, Sequence, Track},
     AssetId, CoreError, CoreResult, EffectId, SequenceId,
 };
 
@@ -353,8 +353,40 @@ impl ProjectState {
             .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
 
         if let Some(sequence) = self.sequences.get_mut(seq_id) {
-            if let Some(name) = op.payload["name"].as_str() {
-                sequence.name = name.to_string();
+            // Stage all values before mutation to ensure atomicity
+            let next_name = op.payload["name"].as_str().map(str::to_string);
+            let next_master_volume_db = if let Some(volume_value) = op
+                .payload
+                .get("masterVolumeDb")
+                .or_else(|| op.payload.get("master_volume_db"))
+            {
+                if !volume_value.is_null() {
+                    match volume_value.as_f64() {
+                        Some(v) if !v.is_finite() => {
+                            return Err(CoreError::InvalidCommand(
+                                "Invalid masterVolumeDb value (expected finite number)".to_string(),
+                            ));
+                        }
+                        Some(v) => Some((v as f32).clamp(-60.0, 6.0)),
+                        None => {
+                            return Err(CoreError::InvalidCommand(
+                                "Invalid masterVolumeDb value (expected number)".to_string(),
+                            ));
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Commit all mutations after validation
+            if let Some(name) = next_name {
+                sequence.name = name;
+            }
+            if let Some(volume_db) = next_master_volume_db {
+                sequence.master_volume_db = volume_db;
             }
         }
         Ok(())
@@ -861,6 +893,70 @@ impl ProjectState {
     }
 
     fn apply_clip_update(&mut self, op: &Operation) -> CoreResult<()> {
+        fn sanitize_replayed_audio_settings(
+            mut audio: AudioSettings,
+            clip_duration: f64,
+        ) -> CoreResult<AudioSettings> {
+            if !audio.volume_db.is_finite() {
+                return Err(CoreError::InvalidCommand(
+                    "Invalid audio.volumeDb value (expected finite number)".to_string(),
+                ));
+            }
+            if !audio.pan.is_finite() {
+                return Err(CoreError::InvalidCommand(
+                    "Invalid audio.pan value (expected finite number)".to_string(),
+                ));
+            }
+            if !audio.fade_in_sec.is_finite() || audio.fade_in_sec < 0.0 {
+                return Err(CoreError::InvalidCommand(
+                    "Invalid audio.fadeInSec value (expected non-negative number)".to_string(),
+                ));
+            }
+            if !audio.fade_out_sec.is_finite() || audio.fade_out_sec < 0.0 {
+                return Err(CoreError::InvalidCommand(
+                    "Invalid audio.fadeOutSec value (expected non-negative number)".to_string(),
+                ));
+            }
+
+            for keyframe in &mut audio.volume_keyframes {
+                if !keyframe.time_offset.is_finite() || keyframe.time_offset < 0.0 {
+                    return Err(CoreError::InvalidCommand(
+                        "Invalid audio.volumeKeyframes timeOffset (expected non-negative number)"
+                            .to_string(),
+                    ));
+                }
+                if keyframe.time_offset > clip_duration {
+                    return Err(CoreError::InvalidCommand(format!(
+                        "audio.volumeKeyframes timeOffset ({:.3}s) exceeds clip duration ({:.3}s)",
+                        keyframe.time_offset, clip_duration
+                    )));
+                }
+                if !keyframe.value_db.is_finite() {
+                    return Err(CoreError::InvalidCommand(
+                        "Invalid audio.volumeKeyframes valueDb (expected finite number)"
+                            .to_string(),
+                    ));
+                }
+
+                keyframe.value_db = keyframe.value_db.clamp(-60.0, 6.0);
+            }
+
+            audio.volume_db = audio.volume_db.clamp(-60.0, 6.0);
+            audio.pan = audio.pan.clamp(-1.0, 1.0);
+            audio.fade_in_sec = audio.fade_in_sec.clamp(0.0, clip_duration);
+            audio.fade_out_sec = audio.fade_out_sec.clamp(0.0, clip_duration);
+            if audio.fade_in_sec + audio.fade_out_sec > clip_duration {
+                audio.fade_out_sec = (clip_duration - audio.fade_in_sec).max(0.0);
+            }
+            audio.volume_keyframes.sort_by(|lhs, rhs| {
+                lhs.time_offset
+                    .partial_cmp(&rhs.time_offset)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            Ok(audio)
+        }
+
         let seq_id = op.payload["sequenceId"]
             .as_str()
             .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
@@ -877,6 +973,23 @@ impl ProjectState {
         for track in &mut sequence.tracks {
             let is_video_track = track.is_video();
             if let Some(clip) = track.get_clip_mut(clip_id) {
+                let parsed_audio = if let Some(audio_value) = op.payload.get("audio") {
+                    if audio_value.is_null() {
+                        None
+                    } else {
+                        let audio = serde_json::from_value::<AudioSettings>(audio_value.clone())
+                            .map_err(|e| {
+                                CoreError::InvalidCommand(format!("Invalid audio payload: {e}"))
+                            })?;
+                        Some(sanitize_replayed_audio_settings(
+                            audio,
+                            clip.duration().max(0.0),
+                        )?)
+                    }
+                } else {
+                    None
+                };
+
                 // ── Phase 1: Validate all payload fields before any mutation ──
                 // This ensures atomicity: either all fields apply or none do.
 
@@ -946,26 +1059,58 @@ impl ProjectState {
 
                 // ── Phase 2: Apply all mutations (validation already passed) ──
 
-                if let Some(muted_value) = op.payload.get("muted") {
-                    if let Some(muted) = muted_value.as_bool() {
-                        clip.audio.muted = muted;
-                    }
+                let has_full_audio_payload = parsed_audio.is_some();
+
+                // Pre-validate transform before any mutation to ensure atomicity
+                let parsed_transform = if has_full_audio_payload {
+                    op.payload
+                        .get("transform")
+                        .filter(|v| !v.is_null())
+                        .map(|v| {
+                            serde_json::from_value(v.clone()).map_err(|e| {
+                                CoreError::InvalidCommand(format!("Invalid transform: {e}"))
+                            })
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
+
+                if let Some(audio) = parsed_audio {
+                    clip.audio = audio;
                 }
 
-                if let Some(volume_value) = op.payload.get("volumeDb") {
-                    if let Some(volume_db) = volume_value.as_f64() {
-                        clip.audio.volume_db = (volume_db as f32).clamp(-60.0, 6.0);
+                if !has_full_audio_payload {
+                    if let Some(muted_value) = op.payload.get("muted") {
+                        if let Some(muted) = muted_value.as_bool() {
+                            clip.audio.muted = muted;
+                        }
                     }
-                }
 
-                if let Some(pan_value) = op.payload.get("pan") {
-                    if let Some(pan) = pan_value.as_f64() {
-                        clip.audio.pan = (pan as f32).clamp(-1.0, 1.0);
+                    if let Some(volume_value) = op.payload.get("volumeDb") {
+                        if let Some(volume_db) = volume_value.as_f64() {
+                            clip.audio.volume_db = (volume_db as f32).clamp(-60.0, 6.0);
+                        }
+                    }
+
+                    if let Some(pan_value) = op.payload.get("pan") {
+                        if let Some(pan) = pan_value.as_f64() {
+                            clip.audio.pan = (pan as f32).clamp(-1.0, 1.0);
+                        }
                     }
                 }
 
                 if let Some(blend_mode) = parsed_blend_mode {
                     clip.blend_mode = blend_mode;
+                }
+
+                if has_full_audio_payload {
+                    // Full audio payloads are already normalized above.
+                    // Transform was pre-validated before any mutation.
+                    if let Some(transform) = parsed_transform {
+                        clip.transform = transform;
+                    }
+                    return Ok(());
                 }
 
                 let mut fade_in_updated = false;
