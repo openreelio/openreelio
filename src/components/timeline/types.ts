@@ -319,6 +319,8 @@ export interface TimelineProps {
   onClipReverse?: (clipId: string, trackId: string) => void | Promise<void>;
   /** Callback when freeze frame is requested */
   onClipFreezeFrame?: (clipId: string, trackId: string) => void | Promise<void>;
+  /** Callback when clip enable/disable is toggled */
+  onClipToggleEnabled?: (clipId: string, trackId: string) => void | Promise<void>;
 }
 
 // =============================================================================

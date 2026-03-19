@@ -112,6 +112,7 @@ interface TimelineActions {
   handleSetClipSpeed: (clipId: string, trackId: string, speed: number, reverse: boolean) => Promise<void>;
   handleReverseClip: (clipId: string, trackId: string) => Promise<void>;
   handleCreateFreezeFrame: (clipId: string, trackId: string) => Promise<void>;
+  handleToggleClipEnabled: (clipId: string, trackId: string) => Promise<void>;
 }
 
 type ExecuteTimelineCommand = (command: Command) => Promise<CommandResult>;
@@ -2891,6 +2892,30 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     [executeCommand, getCurrentSequence],
   );
 
+  const handleToggleClipEnabled = useCallback(
+    async (clipId: string, trackId: string): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq) return;
+
+      // Find the current enabled state to toggle
+      const track = seq.tracks.find((t) => t.id === trackId);
+      const clip = track?.clips.find((c) => c.id === clipId);
+      if (!clip) return;
+      const currentEnabled = clip.enabled ?? true;
+
+      await executeCommand({
+        type: 'SetClipEnabled',
+        payload: {
+          sequenceId: seq.id,
+          trackId,
+          clipId,
+          enabled: !currentEnabled,
+        },
+      });
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
   return {
     handleClipMove,
     handleClipTrim,
@@ -2917,5 +2942,6 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleSetClipSpeed,
     handleReverseClip,
     handleCreateFreezeFrame,
+    handleToggleClipEnabled,
   };
 }

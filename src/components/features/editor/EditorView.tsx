@@ -338,6 +338,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     handleSetClipSpeed,
     handleReverseClip,
     handleCreateFreezeFrame,
+    handleToggleClipEnabled,
   } = useTimelineActions({ sequence });
 
   // Text clip operations
@@ -393,6 +394,24 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     onExport: () => setShowExportDialog(true),
     onMatchFrame: handleMatchFrame,
     onReverseMatchFrame: handleReverseMatchFrame,
+    onToggleClipEnabled: () => {
+      if (!sequence || selectedClipIds.length === 0) return;
+      const promises: Promise<void>[] = [];
+      for (const clipId of selectedClipIds) {
+        const track = sequence.tracks.find((t) => t.clips.some((c) => c.id === clipId));
+        if (track) {
+          const result = handleToggleClipEnabled(clipId, track.id);
+          if (result instanceof Promise) {
+            promises.push(result);
+          }
+        }
+      }
+      if (promises.length > 0) {
+        Promise.all(promises).catch((error) => {
+          logger.error('Failed to toggle clip enabled state', { error });
+        });
+      }
+    },
   });
 
   // Get selected asset for inspector (memoized to prevent unnecessary re-renders)
@@ -871,6 +890,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                       onClipSpeedChange={handleSetClipSpeed}
                       onClipReverse={handleReverseClip}
                       onClipFreezeFrame={handleCreateFreezeFrame}
+                      onClipToggleEnabled={handleToggleClipEnabled}
                     />
                   </TimelineErrorBoundary>
                 </div>

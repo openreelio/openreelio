@@ -2,14 +2,17 @@
  * useKeyboardShortcuts Hook
  *
  * Global keyboard shortcut handler for the application.
- * Implements J/K/L Shuttle control and standard NLE shortcuts.
+ * Delegates J/K/L Shuttle control to useJKLShuttle and handles standard NLE shortcuts.
  */
 
 import { useEffect, useCallback, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores/projectStore';
+import { useJKLShuttle } from './useJKLShuttle';
 import { PLAYBACK } from '@/constants/preview';
+import { isInputElement } from '@/utils/dom';
 
 // =============================================================================
 // Types
@@ -33,33 +36,27 @@ export interface UseKeyboardShortcutsOptions {
   onExport?: () => void;
   onMatchFrame?: () => void;
   onReverseMatchFrame?: () => void;
+  onToggleClipEnabled?: () => void;
   enabled?: boolean;
-}
-
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-function isInputElement(target: EventTarget | null): boolean {
-  if (!target || !(target instanceof HTMLElement)) return false;
-  const tagName = target.tagName.toLowerCase();
-  return (
-    tagName === 'input' ||
-    tagName === 'textarea' ||
-    tagName === 'select' ||
-    target.isContentEditable ||
-    target.contentEditable === 'true'
-  );
 }
 
 // =============================================================================
 // Constants
 // =============================================================================
 
-// Shuttle speed levels (Industry Standard - Avid/Premiere)
-// Index 4 is 0 (stop)
-const SHUTTLE_SPEEDS = [-8, -4, -2, -1, 0, 1, 2, 4, 8];
-const STOP_INDEX = 4;
+/** IPC command names for edit point / marker navigation */
+const NAV_COMMANDS = {
+  NEXT_EDIT_POINT: 'get_next_edit_point',
+  PREV_EDIT_POINT: 'get_prev_edit_point',
+  NEXT_MARKER: 'get_next_marker',
+  PREV_MARKER: 'get_prev_marker',
+} as const;
+
+type NavCommand = (typeof NAV_COMMANDS)[keyof typeof NAV_COMMANDS];
+
+// =============================================================================
+// Hook
+// =============================================================================
 
 export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}): void {
   const {
@@ -71,36 +68,83 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
     onExport,
     onMatchFrame,
     onReverseMatchFrame,
+    onToggleClipEnabled,
     enabled = true,
   } = options;
-
-  // Use refs for state that updates frequently but shouldn't cause re-renders of the hook
-  // This prevents the "stale closure" problem with the shuttle index
-  const shuttleIndexRef = useRef(STOP_INDEX);
 
   // Store actions - Zustand store functions are stable and don't change
   const {
     togglePlayback,
     seek,
-    duration,
     setPlaybackRate,
     play,
     pause,
     isPlaying,
+    duration,
     stepForward,
     stepBackward,
+    seekForward,
+    seekBackward,
+    setShuttleSpeed,
   } = usePlaybackStore();
 
   const { zoomIn, zoomOut, selectedClipIds, clearClipSelection } = useTimelineStore();
-  const { undo, redo, saveProject, isLoaded } = useProjectStore();
+  const { undo, redo, saveProject, isLoaded, activeSequenceId } = useProjectStore();
+
+  // Stable callbacks for shuttle (avoid recreating interval on parent re-render)
+  const shuttleStepFwd = useCallback(() => stepForward(PLAYBACK.TARGET_FPS), [stepForward]);
+  const shuttleStepBwd = useCallback(() => stepBackward(PLAYBACK.TARGET_FPS), [stepBackward]);
+  const shuttleSeekRelative = useCallback(
+    (delta: number) => {
+      if (delta < 0) {
+        seekBackward(-delta, 'shuttle-reverse');
+      } else {
+        seekForward(delta, 'shuttle-forward');
+      }
+    },
+    [seekForward, seekBackward],
+  );
+
+  // JKL Shuttle hook — delegates all shuttle logic
+  const shuttle = useJKLShuttle({
+    play,
+    pause,
+    setPlaybackRate,
+    stepForward: shuttleStepFwd,
+    stepBackward: shuttleStepBwd,
+    seekRelative: shuttleSeekRelative,
+    enabled,
+  });
+
+  // Destructure stable callbacks to avoid depending on the full shuttle object
+  const {
+    handleKeyDown: shuttleKeyDown,
+    resetShuttle,
+    handleKeyUp: shuttleKeyUp,
+    shuttleSpeed,
+  } = shuttle;
+
+  // Sync shuttle speed to playbackStore for UI indicator access
+  useEffect(() => {
+    setShuttleSpeed(shuttleSpeed);
+  }, [shuttleSpeed, setShuttleSpeed]);
+
+  // Reset shuttle only when playback stops externally.
+  // Reverse shuttle intentionally pauses native playback while keeping shuttle active.
+  const previousIsPlayingRef = useRef(isPlaying);
+  useEffect(() => {
+    if (previousIsPlayingRef.current && !isPlaying && shuttleSpeed >= 0) {
+      resetShuttle();
+    }
+    previousIsPlayingRef.current = isPlaying;
+  }, [isPlaying, shuttleSpeed, resetShuttle]);
 
   // Use refs for frequently-changing state values to avoid recreating the callback
-  // This significantly reduces re-renders when selection changes
   const selectedClipIdsRef = useRef(selectedClipIds);
   const isLoadedRef = useRef(isLoaded);
+  const activeSequenceIdRef = useRef(activeSequenceId);
   const durationRef = useRef(duration);
 
-  // Keep refs up to date (cheap updates, don't cause callback recreation)
   useEffect(() => {
     selectedClipIdsRef.current = selectedClipIds;
   }, [selectedClipIds]);
@@ -110,90 +154,60 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
   }, [isLoaded]);
 
   useEffect(() => {
+    activeSequenceIdRef.current = activeSequenceId;
+  }, [activeSequenceId]);
+
+  useEffect(() => {
     durationRef.current = duration;
   }, [duration]);
 
-  // Reset shuttle index when playback state changes externally (e.g. hitting stop button in UI)
-  useEffect(() => {
-    if (!isPlaying) {
-      shuttleIndexRef.current = STOP_INDEX;
-    }
-  }, [isPlaying]);
+  // Helper: navigate to an edit point or marker via IPC
+  const navigateToPoint = useCallback(
+    (command: NavCommand) => {
+      const seqId = activeSequenceIdRef.current;
+      if (!seqId) return;
+      const currentTime = usePlaybackStore.getState().currentTime;
+      void invoke<number | null>(command, { sequenceId: seqId, currentTime })
+        .then((time) => {
+          if (time !== null) seek(time);
+        })
+        .catch(() => {
+          // Navigation IPC failed — no user-facing impact
+        });
+    },
+    [seek],
+  );
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
-      // 1. Safety Checks
+      // Safety checks
       if (!enabled || isInputElement(e.target)) return;
-      // Respect handlers on focused feature surfaces (timeline, preview, etc.)
-      // to avoid duplicate execution from the global listener.
+
+      // Respect handlers on focused feature surfaces to avoid duplicate execution
       if (e.defaultPrevented) {
-        // Timeline handles Space locally via TimelineEngine. Keep global shuttle
-        // speed normalization to avoid stale non-1x playback rates after focus
-        // transitions, but do not toggle playback again.
         if (!e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && e.key === ' ') {
-          shuttleIndexRef.current = STOP_INDEX;
-          setPlaybackRate(1);
+          resetShuttle();
         }
         return;
       }
-      if (e.repeat) return; // Prevent holding key down from triggering logic repeatedly (optional)
+      if (e.repeat) return;
 
       const { key, ctrlKey, metaKey, shiftKey } = e;
       const ctrl = ctrlKey || metaKey;
 
       // -----------------------------------------------------------------------
-      // Transport Controls (J/K/L)
+      // Transport Controls (J/K/L) — delegated to useJKLShuttle
       // -----------------------------------------------------------------------
-
-      // J - Reverse
-      if (key.toLowerCase() === 'j' && !ctrl && !shiftKey) {
+      if (shuttleKeyDown(key, ctrl, shiftKey)) {
         e.preventDefault();
-        if (shuttleIndexRef.current > 0) {
-          shuttleIndexRef.current--;
-          const speed = SHUTTLE_SPEEDS[shuttleIndexRef.current];
-          if (speed === 0) {
-            pause();
-            setPlaybackRate(1);
-          } else {
-            play();
-            setPlaybackRate(speed);
-          }
-        }
         return;
       }
 
-      // K - Stop
-      if (key.toLowerCase() === 'k' && !ctrl && !shiftKey) {
-        e.preventDefault();
-        shuttleIndexRef.current = STOP_INDEX;
-        pause();
-        setPlaybackRate(1);
-        return;
-      }
-
-      // L - Forward
-      if (key.toLowerCase() === 'l' && !ctrl && !shiftKey) {
-        e.preventDefault();
-        if (shuttleIndexRef.current < SHUTTLE_SPEEDS.length - 1) {
-          shuttleIndexRef.current++;
-          const speed = SHUTTLE_SPEEDS[shuttleIndexRef.current];
-          if (speed === 0) {
-            pause();
-            setPlaybackRate(1);
-          } else {
-            play();
-            setPlaybackRate(speed);
-          }
-        }
-        return;
-      }
-
-      // Space - Toggle
+      // Space - Toggle (resets shuttle)
       if (key === ' ' && !ctrl && !shiftKey) {
         e.preventDefault();
         togglePlayback();
-        shuttleIndexRef.current = STOP_INDEX; // Reset shuttle on manual toggle
-        setPlaybackRate(1);
+        resetShuttle();
         return;
       }
 
@@ -210,6 +224,32 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       if (key === 'ArrowRight' && !ctrl && !shiftKey) {
         e.preventDefault();
         stepForward(PLAYBACK.TARGET_FPS);
+        return;
+      }
+
+      // Up/Down Arrow — edit point navigation (S27-002)
+      if (key === 'ArrowUp' && !ctrl && !shiftKey) {
+        e.preventDefault();
+        navigateToPoint(NAV_COMMANDS.PREV_EDIT_POINT);
+        return;
+      }
+
+      if (key === 'ArrowDown' && !ctrl && !shiftKey) {
+        e.preventDefault();
+        navigateToPoint(NAV_COMMANDS.NEXT_EDIT_POINT);
+        return;
+      }
+
+      // Shift+Up/Down — marker navigation (S27-002)
+      if (key === 'ArrowUp' && !ctrl && shiftKey) {
+        e.preventDefault();
+        navigateToPoint(NAV_COMMANDS.PREV_MARKER);
+        return;
+      }
+
+      if (key === 'ArrowDown' && !ctrl && shiftKey) {
+        e.preventDefault();
+        navigateToPoint(NAV_COMMANDS.NEXT_MARKER);
         return;
       }
 
@@ -308,6 +348,15 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
         }
       }
 
+      // Toggle Clip Enabled (Shift+E)
+      if (key.toLowerCase() === 'e' && shiftKey && !ctrl && !e.altKey) {
+        if (onToggleClipEnabled) {
+          e.preventDefault();
+          onToggleClipEnabled();
+        }
+        return; // Always return, even if callback is absent
+      }
+
       // Export
       if (key.toLowerCase() === 'e' && ctrl && shiftKey) {
         e.preventDefault();
@@ -315,16 +364,13 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
         return;
       }
     },
-    // Dependencies optimized: frequently-changing values (selectedClipIds, duration, isLoaded)
-    // are accessed via refs to prevent unnecessary callback recreation.
-    // Store functions (togglePlayback, play, pause, etc.) are stable and don't change.
     [
       enabled,
+      shuttleKeyDown,
+      resetShuttle,
+      navigateToPoint,
       togglePlayback,
       seek,
-      setPlaybackRate,
-      play,
-      pause,
       stepForward,
       stepBackward,
       zoomIn,
@@ -338,18 +384,30 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       onExport,
       onMatchFrame,
       onReverseMatchFrame,
+      onToggleClipEnabled,
       undo,
       redo,
       saveProject,
     ],
   );
 
+  // Handle keyup for K release detection (K+J/K+L combo)
+  const handleKeyUp = useCallback(
+    (e: KeyboardEvent) => {
+      if (!enabled || isInputElement(e.target)) return;
+      shuttleKeyUp(e.key);
+    },
+    [enabled, shuttleKeyUp],
+  );
+
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [handleKeyDown]);
+  }, [handleKeyDown, handleKeyUp]);
 }
 
 export const KEYBOARD_SHORTCUTS = [
@@ -357,11 +415,19 @@ export const KEYBOARD_SHORTCUTS = [
     category: 'Transport',
     shortcuts: [
       { key: 'Space', description: 'Play/Pause' },
-      { key: 'J', description: 'Shuttle Reverse (Speed -1x, -2x, -4x...)' },
+      { key: 'J', description: 'Shuttle Reverse (-1x, -2x, -4x, -8x)' },
       { key: 'K', description: 'Stop' },
-      { key: 'L', description: 'Shuttle Forward (Speed 1x, 2x, 4x...)' },
+      { key: 'L', description: 'Shuttle Forward (1x, 2x, 4x, 8x)' },
+      { key: 'K+J', description: 'Step One Frame Backward' },
+      { key: 'K+L', description: 'Step One Frame Forward' },
       { key: 'Left', description: 'Previous Frame' },
       { key: 'Right', description: 'Next Frame' },
+      { key: 'Up', description: 'Previous Edit Point' },
+      { key: 'Down', description: 'Next Edit Point' },
+      { key: 'Shift+Up', description: 'Previous Marker' },
+      { key: 'Shift+Down', description: 'Next Marker' },
+      { key: 'Home', description: 'Go to Timeline Start' },
+      { key: 'End', description: 'Go to Timeline End' },
     ],
   },
   {
