@@ -111,8 +111,9 @@ export const PLAYBACK = {
 
   /**
    * Maximum playback rate.
+   * Supports up to 8x for JKL shuttle control.
    */
-  MAX_RATE: 4,
+  MAX_RATE: 8,
 
   /**
    * Frame drop threshold in milliseconds.

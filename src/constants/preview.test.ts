@@ -51,7 +51,7 @@ describe('PLAYBACK constants', () => {
     expect(PLAYBACK.MIN_RATE).toBeGreaterThan(0);
     expect(PLAYBACK.MIN_RATE).toBeLessThan(1);
     expect(PLAYBACK.MAX_RATE).toBeGreaterThan(1);
-    expect(PLAYBACK.MAX_RATE).toBeLessThanOrEqual(4);
+    expect(PLAYBACK.MAX_RATE).toBe(8);
   });
 
   it('should have reasonable audio sync threshold', () => {

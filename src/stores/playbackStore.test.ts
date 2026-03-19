@@ -22,6 +22,8 @@ describe('playbackStore', () => {
       volume: 1,
       isMuted: false,
       loop: false,
+      syncWithTimeline: true,
+      shuttleSpeed: 0,
     });
     vi.useFakeTimers();
   });
@@ -264,7 +266,7 @@ describe('playbackStore', () => {
 
     it('should clamp playback rate to maximum', () => {
       usePlaybackStore.getState().setPlaybackRate(10);
-      expect(usePlaybackStore.getState().playbackRate).toBe(4);
+      expect(usePlaybackStore.getState().playbackRate).toBe(8);
     });
 
     it('should guard against NaN playback rate', () => {
@@ -293,6 +295,35 @@ describe('playbackStore', () => {
     it('should set loop directly', () => {
       usePlaybackStore.getState().setLoop(true);
       expect(usePlaybackStore.getState().loop).toBe(true);
+    });
+  });
+
+  // ===========================================================================
+  // Shuttle Speed Tests
+  // ===========================================================================
+
+  describe('shuttle speed', () => {
+    it('should set shuttle speed', () => {
+      usePlaybackStore.getState().setShuttleSpeed(4);
+      expect(usePlaybackStore.getState().shuttleSpeed).toBe(4);
+    });
+
+    it('should not update state when setting the same speed (no-op)', () => {
+      usePlaybackStore.getState().setShuttleSpeed(2);
+      expect(usePlaybackStore.getState().shuttleSpeed).toBe(2);
+
+      // Subscribe to detect state changes
+      let stateChangeCount = 0;
+      const unsub = usePlaybackStore.subscribe(() => {
+        stateChangeCount++;
+      });
+
+      // Set same speed again
+      usePlaybackStore.getState().setShuttleSpeed(2);
+      expect(usePlaybackStore.getState().shuttleSpeed).toBe(2);
+      expect(stateChangeCount).toBe(0);
+
+      unsub();
     });
   });
 

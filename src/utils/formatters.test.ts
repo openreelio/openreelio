@@ -10,7 +10,9 @@ import {
   formatTimecode,
   formatFileSize,
   formatRelativeTime,
+  formatShuttleSpeed,
   parseTimecode,
+  isValidTimecode,
 } from './formatters';
 
 describe('formatDuration', () => {
@@ -78,6 +80,45 @@ describe('parseTimecode', () => {
     expect(parseTimecode('invalid', 30)).toBe(0);
     expect(parseTimecode('', 30)).toBe(0);
     expect(parseTimecode('00:00:00', 30)).toBe(0);
+    expect(parseTimecode('00::10:00', 30)).toBe(0);
+    expect(parseTimecode(':::', 30)).toBe(0);
+  });
+});
+
+describe('isValidTimecode', () => {
+  it('accepts valid SMPTE timecodes', () => {
+    expect(isValidTimecode('00:00:00:00', 30)).toBe(true);
+    expect(isValidTimecode('01:30:45:15', 30)).toBe(true);
+    expect(isValidTimecode('99:59:59:29', 30)).toBe(true);
+    expect(isValidTimecode('00:00:00:23', 24)).toBe(true);
+  });
+
+  it('rejects malformed strings', () => {
+    expect(isValidTimecode('', 30)).toBe(false);
+    expect(isValidTimecode('invalid', 30)).toBe(false);
+    expect(isValidTimecode('00:00:00', 30)).toBe(false); // only 3 parts
+    expect(isValidTimecode('00:00:00:00:00', 30)).toBe(false); // 5 parts
+    expect(isValidTimecode('aa:bb:cc:dd', 30)).toBe(false);
+    expect(isValidTimecode('00::10:00', 30)).toBe(false);
+    expect(isValidTimecode(':::', 30)).toBe(false);
+  });
+
+  it('rejects out-of-range minutes', () => {
+    expect(isValidTimecode('00:60:00:00', 30)).toBe(false);
+  });
+
+  it('rejects out-of-range seconds', () => {
+    expect(isValidTimecode('00:00:60:00', 30)).toBe(false);
+  });
+
+  it('rejects frames >= fps', () => {
+    expect(isValidTimecode('00:00:00:30', 30)).toBe(false);
+    expect(isValidTimecode('00:00:00:24', 24)).toBe(false);
+  });
+
+  it('accepts frame value at fps-1', () => {
+    expect(isValidTimecode('00:00:00:29', 30)).toBe(true);
+    expect(isValidTimecode('00:00:00:23', 24)).toBe(true);
   });
 });
 
@@ -95,6 +136,31 @@ describe('formatFileSize', () => {
   it('formats with appropriate decimal places', () => {
     expect(formatFileSize(1500000)).toBe('1.4 MB');
     expect(formatFileSize(2500000000)).toBe('2.3 GB');
+  });
+});
+
+describe('formatShuttleSpeed', () => {
+  it('should return empty string for speed 0', () => {
+    expect(formatShuttleSpeed(0)).toBe('');
+  });
+
+  it('should show forward indicator for positive speeds', () => {
+    expect(formatShuttleSpeed(1)).toBe('\u25B6\u25B6 1x');
+    expect(formatShuttleSpeed(2)).toBe('\u25B6\u25B6 2x');
+    expect(formatShuttleSpeed(4)).toBe('\u25B6\u25B6 4x');
+    expect(formatShuttleSpeed(8)).toBe('\u25B6\u25B6 8x');
+  });
+
+  it('should show reverse indicator for negative speeds', () => {
+    expect(formatShuttleSpeed(-1)).toBe('\u25C0\u25C0 1x');
+    expect(formatShuttleSpeed(-2)).toBe('\u25C0\u25C0 2x');
+    expect(formatShuttleSpeed(-4)).toBe('\u25C0\u25C0 4x');
+    expect(formatShuttleSpeed(-8)).toBe('\u25C0\u25C0 8x');
+  });
+
+  it('should use absolute value for display magnitude', () => {
+    expect(formatShuttleSpeed(3)).toBe('\u25B6\u25B6 3x');
+    expect(formatShuttleSpeed(-3)).toBe('\u25C0\u25C0 3x');
   });
 });
 
