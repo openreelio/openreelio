@@ -905,6 +905,25 @@ export const VIDEO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
     },
   ],
 
+  temperature_tint: [
+    {
+      name: 'temperature',
+      label: 'Temperature',
+      default: { type: 'float', value: 0 },
+      min: -100,
+      max: 100,
+      step: 1,
+    },
+    {
+      name: 'tint',
+      label: 'Tint',
+      default: { type: 'float', value: 0 },
+      min: -100,
+      max: 100,
+      step: 1,
+    },
+  ],
+
   blend_mode: [
     {
       name: 'mode',

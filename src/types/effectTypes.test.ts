@@ -20,26 +20,67 @@ import { getEffectParamDefs, hasEffectParamDefs } from '@/utils/effectParamDefs'
 // All string-literal effect types (excludes { custom: string })
 const ALL_STRING_EFFECT_TYPES: EffectType[] = [
   // Color
-  'brightness', 'contrast', 'saturation', 'hue', 'color_balance',
-  'color_wheels', 'gamma', 'levels', 'curves', 'lut',
+  'brightness',
+  'contrast',
+  'saturation',
+  'hue',
+  'color_balance',
+  'color_wheels',
+  'gamma',
+  'levels',
+  'curves',
+  'temperature_tint',
+  'lut',
   // Transform
-  'crop', 'flip', 'mirror', 'rotate',
+  'crop',
+  'flip',
+  'mirror',
+  'rotate',
   // Blur/Sharpen
-  'gaussian_blur', 'box_blur', 'motion_blur', 'radial_blur', 'sharpen', 'unsharp_mask',
+  'gaussian_blur',
+  'box_blur',
+  'motion_blur',
+  'radial_blur',
+  'sharpen',
+  'unsharp_mask',
   // Stylize
-  'vignette', 'glow', 'film_grain', 'chromatic_aberration', 'noise', 'pixelate', 'posterize',
+  'vignette',
+  'glow',
+  'film_grain',
+  'chromatic_aberration',
+  'noise',
+  'pixelate',
+  'posterize',
   // Transitions
-  'cross_dissolve', 'fade', 'wipe', 'slide', 'zoom',
+  'cross_dissolve',
+  'fade',
+  'wipe',
+  'slide',
+  'zoom',
   // Audio
-  'volume', 'gain', 'eq_band', 'compressor', 'limiter', 'noise_reduction', 'reverb', 'delay',
+  'volume',
+  'gain',
+  'eq_band',
+  'compressor',
+  'limiter',
+  'noise_reduction',
+  'reverb',
+  'delay',
   // Text
-  'text_overlay', 'subtitle',
+  'text_overlay',
+  'subtitle',
   // AI
-  'background_removal', 'auto_reframe', 'face_blur', 'object_tracking',
+  'background_removal',
+  'auto_reframe',
+  'face_blur',
+  'object_tracking',
   // Keying
-  'chroma_key', 'luma_key', 'hsl_qualifier',
+  'chroma_key',
+  'luma_key',
+  'hsl_qualifier',
   // Compositing
-  'blend_mode', 'opacity',
+  'blend_mode',
+  'opacity',
   // Audio normalization
   'loudness_normalize',
 ];
@@ -48,9 +89,18 @@ describe('EffectType system integration', () => {
   describe('getEffectCategory', () => {
     it('should return a valid category for every string effect type', () => {
       const validCategories: EffectCategory[] = [
-        'color', 'advanced_color', 'transform', 'blur_sharpen',
-        'stylize', 'transition', 'audio', 'text', 'ai', 'keying',
-        'compositing', 'custom',
+        'color',
+        'advanced_color',
+        'transform',
+        'blur_sharpen',
+        'stylize',
+        'transition',
+        'audio',
+        'text',
+        'ai',
+        'keying',
+        'compositing',
+        'custom',
       ];
 
       for (const effectType of ALL_STRING_EFFECT_TYPES) {
@@ -89,8 +139,15 @@ describe('EffectType system integration', () => {
   describe('isAudioEffect', () => {
     it('should return true for audio effects', () => {
       const audioEffects: EffectType[] = [
-        'volume', 'gain', 'eq_band', 'compressor', 'limiter',
-        'noise_reduction', 'reverb', 'delay', 'loudness_normalize',
+        'volume',
+        'gain',
+        'eq_band',
+        'compressor',
+        'limiter',
+        'noise_reduction',
+        'reverb',
+        'delay',
+        'loudness_normalize',
       ];
       for (const effectType of audioEffects) {
         expect(isAudioEffect(effectType), `${effectType} should be audio`).toBe(true);
@@ -108,16 +165,22 @@ describe('EffectType system integration', () => {
   describe('EFFECT_CATEGORY_LABELS', () => {
     it('should have a label for every category including compositing', () => {
       const categories: EffectCategory[] = [
-        'color', 'advanced_color', 'transform', 'blur_sharpen',
-        'stylize', 'transition', 'audio', 'text', 'ai', 'keying',
-        'compositing', 'custom',
+        'color',
+        'advanced_color',
+        'transform',
+        'blur_sharpen',
+        'stylize',
+        'transition',
+        'audio',
+        'text',
+        'ai',
+        'keying',
+        'compositing',
+        'custom',
       ];
 
       for (const cat of categories) {
-        expect(
-          EFFECT_CATEGORY_LABELS[cat],
-          `Missing label for category '${cat}'`,
-        ).toBeDefined();
+        expect(EFFECT_CATEGORY_LABELS[cat], `Missing label for category '${cat}'`).toBeDefined();
         expect(typeof EFFECT_CATEGORY_LABELS[cat]).toBe('string');
       }
     });
@@ -131,10 +194,7 @@ describe('EffectType system integration', () => {
     it('should have all TypeScript string effect types in Zod enum', () => {
       for (const effectType of ALL_STRING_EFFECT_TYPES) {
         const result = ZodEffectType.safeParse(effectType);
-        expect(
-          result.success,
-          `Zod EffectType missing '${effectType}'`,
-        ).toBe(true);
+        expect(result.success, `Zod EffectType missing '${effectType}'`).toBe(true);
       }
     });
 
@@ -151,20 +211,14 @@ describe('EffectType system integration', () => {
           missing.push(effectType);
         }
       }
-      expect(
-        missing,
-        `Missing param defs for: ${missing.join(', ')}`,
-      ).toEqual([]);
+      expect(missing, `Missing param defs for: ${missing.join(', ')}`).toEqual([]);
     });
 
     it('should return non-empty param defs for known effect types', () => {
       for (const effectType of ALL_STRING_EFFECT_TYPES) {
         if (typeof effectType === 'string') {
           const defs = getEffectParamDefs(effectType);
-          expect(
-            defs.length,
-            `effectParamDefs for '${effectType}' is empty`,
-          ).toBeGreaterThan(0);
+          expect(defs.length, `effectParamDefs for '${effectType}' is empty`).toBeGreaterThan(0);
         }
       }
     });

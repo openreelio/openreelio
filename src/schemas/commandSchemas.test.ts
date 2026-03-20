@@ -455,6 +455,23 @@ describe('commandSchemas', () => {
       expect(result.success).toBe(true);
     });
 
+    it('should validate temperature_tint effect', () => {
+      const command = {
+        commandType: 'AddEffect',
+        params: {
+          clipId: '550e8400-e29b-41d4-a716-446655440000',
+          effectType: 'temperature_tint',
+          params: {
+            temperature: 25,
+            tint: -10,
+          },
+        },
+      };
+
+      const result = AddEffectSchema.safeParse(command);
+      expect(result.success).toBe(true);
+    });
+
     it('should reject invalid effect type', () => {
       const command = {
         commandType: 'AddEffect',
@@ -1109,15 +1126,15 @@ describe('commandSchemas', () => {
       'loudness_normalize',
     ];
 
-    it('should validate all 52 effect types', () => {
+    it('should validate all 53 effect types', () => {
       for (const effect of allEffectTypes) {
         const result = EffectType.safeParse(effect);
         expect(result.success, `EffectType should accept '${effect}'`).toBe(true);
       }
     });
 
-    it('should have exactly 52 valid values', () => {
-      expect(EffectType.options).toHaveLength(52);
+    it('should have exactly 53 valid values', () => {
+      expect(EffectType.options).toHaveLength(53);
     });
 
     it('should reject legacy camelCase effect types', () => {

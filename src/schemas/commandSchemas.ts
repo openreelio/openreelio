@@ -85,6 +85,7 @@ export const EffectType = z.enum([
   'gamma',
   'levels',
   'curves',
+  'temperature_tint',
   'lut',
   // Transform effects
   'crop',
