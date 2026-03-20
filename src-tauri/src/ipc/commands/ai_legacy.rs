@@ -1857,6 +1857,8 @@ pub async fn configure_ai_provider(
 
     // Run a real connectivity/auth check.
     let provider_name = provider.name().to_string();
+    let provider_type_label =
+        effective_provider_type_label(&provider_name, &provider_type.to_string());
     let is_configured = provider.is_available();
     let (is_available, error_message) = match provider.health_check().await {
         Ok(()) => (true, None),
@@ -1877,7 +1879,7 @@ pub async fn configure_ai_provider(
         .set_provider_boxed_with_status(
             provider,
             ProviderRuntimeStatus {
-                provider_type: Some(provider_type.to_string()),
+                provider_type: Some(provider_type_label.clone()),
                 is_configured,
                 is_available,
                 current_model: requested_model.clone(),
@@ -1897,7 +1899,7 @@ pub async fn configure_ai_provider(
     let streaming_model = requested_model
         .clone()
         .unwrap_or_else(|| match provider_type {
-            ProviderType::OpenAI => "gpt-5.2".to_string(),
+            ProviderType::OpenAI => "gpt-5.4".to_string(),
             ProviderType::Anthropic => "claude-sonnet-4-5-20251015".to_string(),
             ProviderType::Gemini => "gemini-3-flash-preview".to_string(),
             ProviderType::Local => "llama3.2".to_string(),
@@ -1923,7 +1925,7 @@ pub async fn configure_ai_provider(
     );
 
     Ok(ProviderStatusDto {
-        provider_type: Some(provider_type.to_string()),
+        provider_type: Some(provider_type_label),
         is_configured,
         is_available,
         current_model: requested_model,
@@ -1961,6 +1963,160 @@ pub async fn clear_ai_provider(state: State<'_, AppState>) -> Result<(), String>
 
     tracing::info!("Cleared AI provider");
     Ok(())
+}
+
+fn is_direct_openai_api_key(value: &str) -> bool {
+    value.trim().starts_with("sk-")
+}
+
+fn effective_provider_type_label(provider_name: &str, fallback: &str) -> String {
+    match provider_name {
+        "openai-codex" => "openai-codex".to_string(),
+        _ => fallback.to_string(),
+    }
+}
+
+async fn ensure_stored_codex_oauth(
+    vault: &crate::core::credentials::CredentialVault,
+) -> Result<Option<String>, String> {
+    use crate::core::credentials::CredentialType;
+
+    if vault.exists(CredentialType::OpenaiCodexOauth).await {
+        return vault
+            .retrieve(CredentialType::OpenaiCodexOauth)
+            .await
+            .map(Some)
+            .map_err(|e| format!("Failed to retrieve stored Codex OAuth credential: {}", e));
+    }
+
+    if let Some(stored_oauth) = crate::core::credentials::codex_local_oauth()
+        .map_err(|e| format!("Failed to read local Codex OAuth: {}", e))?
+    {
+        vault
+            .store(CredentialType::OpenaiCodexOauth, &stored_oauth)
+            .await
+            .map_err(|e| format!("Failed to store Codex OAuth credential: {}", e))?;
+        tracing::info!("Imported local Codex OAuth into vault during OpenAI credential resolution");
+        return Ok(Some(stored_oauth));
+    }
+
+    Ok(None)
+}
+
+async fn ensure_direct_openai_api_key(
+    vault: &crate::core::credentials::CredentialVault,
+) -> Result<Option<String>, String> {
+    use crate::core::credentials::CredentialType;
+
+    if vault.exists(CredentialType::OpenaiApiKey).await {
+        let stored = vault
+            .retrieve(CredentialType::OpenaiApiKey)
+            .await
+            .map_err(|e| format!("Failed to retrieve OpenAI API key: {}", e))?;
+        if is_direct_openai_api_key(&stored) {
+            return Ok(Some(stored));
+        }
+    }
+
+    let Some(imported_api_key) = crate::core::credentials::codex_openai_api_key()
+        .map_err(|e| format!("Failed to read Codex auth: {}", e))?
+    else {
+        return Ok(None);
+    };
+
+    if !is_direct_openai_api_key(&imported_api_key) {
+        return Ok(None);
+    }
+
+    vault
+        .store(CredentialType::OpenaiApiKey, &imported_api_key)
+        .await
+        .map_err(|e| format!("Failed to import OpenAI API key from Codex: {}", e))?;
+    tracing::info!("Imported OpenAI API key from local Codex auth into vault");
+    Ok(Some(imported_api_key))
+}
+
+async fn resolve_openai_provider_config(
+    vault: &crate::core::credentials::CredentialVault,
+    model: &str,
+) -> Result<Option<crate::core::ai::ProviderConfig>, String> {
+    let direct_api_key = ensure_direct_openai_api_key(vault).await?;
+    let stored_oauth = ensure_stored_codex_oauth(vault).await?;
+
+    if let Some(oauth_json) = stored_oauth {
+        if crate::core::ai::OpenAICodexProvider::supports_model(model) {
+            return Ok(Some(
+                crate::core::ai::ProviderConfig::openai_codex(&oauth_json).with_model(model),
+            ));
+        }
+    }
+
+    if let Some(api_key) = direct_api_key {
+        return Ok(Some(
+            crate::core::ai::ProviderConfig::openai(&api_key).with_model(model),
+        ));
+    }
+
+    Ok(None)
+}
+
+async fn resolve_openai_available_models(
+    vault: &crate::core::credentials::CredentialVault,
+) -> Result<Vec<String>, String> {
+    if let Some(stored_oauth) = ensure_stored_codex_oauth(vault).await? {
+        let provider = crate::core::ai::OpenAICodexProvider::new(
+            crate::core::ai::ProviderConfig::openai_codex(&stored_oauth),
+        )
+        .map_err(|e| e.to_ipc_error())?;
+        return provider
+            .fetch_available_models()
+            .await
+            .map_err(|e| e.to_ipc_error());
+    }
+
+    if let Some(api_key) = ensure_direct_openai_api_key(vault).await? {
+        let provider =
+            crate::core::ai::OpenAIProvider::new(crate::core::ai::ProviderConfig::openai(&api_key))
+                .map_err(|e| e.to_ipc_error())?;
+        return provider
+            .fetch_available_models()
+            .await
+            .map_err(|e| e.to_ipc_error());
+    }
+
+    Ok(crate::core::ai::OpenAIProvider::available_models())
+}
+
+async fn openai_missing_configuration_message(
+    vault: &crate::core::credentials::CredentialVault,
+    model: &str,
+) -> String {
+    use crate::core::credentials::CredentialType;
+
+    let has_stored_codex_oauth = vault.exists(CredentialType::OpenaiCodexOauth).await;
+    let has_direct_api_key = vault.exists(CredentialType::OpenaiApiKey).await;
+    let codex_status = crate::core::credentials::codex_auth_status();
+
+    if has_stored_codex_oauth && !crate::core::ai::OpenAICodexProvider::supports_model(model) {
+        return format!(
+            "OpenAI via Codex OAuth is connected, but model {} requires a direct OpenAI API key.",
+            model
+        );
+    }
+
+    if has_stored_codex_oauth || codex_status.can_exchange_oauth {
+        return "Codex auth is available. Select a Codex-supported GPT-5 model or add a direct OpenAI API key for standard /v1 models.".to_string();
+    }
+
+    if codex_status.has_access_token {
+        return "Codex auth.json contains an access token but no reusable refresh token or direct OpenAI API key.".to_string();
+    }
+
+    if has_direct_api_key {
+        return "Stored OpenAI credential is not a reusable direct API key. Replace it with an sk-* key or connect Codex OAuth.".to_string();
+    }
+
+    "No OpenAI credential configured. Connect Codex OAuth or add a direct OpenAI API key.".to_string()
 }
 
 /// Syncs AI provider configuration from settings and encrypted vault
@@ -2012,23 +2168,11 @@ pub async fn sync_ai_from_vault(
         crate::core::settings::ProviderType::Local => ProviderType::Local,
     };
 
+    let mut resolved_provider_config: Option<ProviderConfig> = None;
+
     // Get API key from vault (if needed)
     let api_key = if let Some(cred_type) = credential_type {
         let vault_path = app_data_dir.join("credentials.vault");
-
-        if !vault_path.exists() {
-            tracing::warn!("Credential vault does not exist, provider not configured");
-            return Ok(ProviderStatusDto {
-                provider_type: Some(ai_provider_type.to_string()),
-                is_configured: false,
-                is_available: false,
-                current_model: Some(model),
-                available_models: vec![],
-                error_message: Some(
-                    "No API key configured. Please set your API key in Settings.".to_string(),
-                ),
-            });
-        }
 
         let mut guard = state.credential_vault.lock().await;
         if guard.is_none() {
@@ -2041,8 +2185,37 @@ pub async fn sync_ai_from_vault(
             .as_ref()
             .ok_or_else(|| "Credential vault unavailable".to_string())?;
 
-        // Check if credential exists
-        if !vault.exists(cred_type).await {
+        let resolved_credential = if cred_type == CredentialType::OpenaiApiKey {
+            resolved_provider_config = resolve_openai_provider_config(vault, &model).await?;
+            resolved_provider_config
+                .as_ref()
+                .and_then(|config| config.api_key.clone())
+        } else if vault.exists(cred_type).await {
+            Some(
+                vault
+                    .retrieve(cred_type)
+                    .await
+                    .map_err(|e| format!("Failed to retrieve credential: {}", e))?,
+            )
+        } else {
+            None
+        };
+
+        if resolved_credential.is_none() && resolved_provider_config.is_none() && cred_type == CredentialType::OpenaiApiKey {
+            let error_message = openai_missing_configuration_message(vault, &model).await;
+
+            tracing::warn!("No compatible OpenAI credential found for model {}", model);
+            return Ok(ProviderStatusDto {
+                provider_type: Some(ai_provider_type.to_string()),
+                is_configured: false,
+                is_available: false,
+                current_model: Some(model),
+                available_models: vec![],
+                error_message: Some(error_message),
+            });
+        }
+
+        if resolved_credential.is_none() && cred_type != CredentialType::OpenaiApiKey {
             tracing::warn!("No API key found in vault for provider {:?}", provider_type);
             return Ok(ProviderStatusDto {
                 provider_type: Some(ai_provider_type.to_string()),
@@ -2050,73 +2223,90 @@ pub async fn sync_ai_from_vault(
                 is_available: false,
                 current_model: Some(model),
                 available_models: vec![],
-                error_message: Some(
-                    "No API key configured. Please set your API key in Settings.".to_string(),
-                ),
+                error_message: Some("No API key configured. Please set your API key in Settings.".to_string()),
             });
         }
 
-        // Retrieve the API key
-        Some(
-            vault
-                .retrieve(cred_type)
-                .await
-                .map_err(|e| format!("Failed to retrieve credential: {}", e))?,
-        )
+        resolved_credential
     } else {
         None
     };
 
     let streaming_api_key = api_key.clone().unwrap_or_default();
-    let streaming_base_url = match ai_provider_type {
-        ProviderType::OpenAI => crate::core::ai::OpenAIProvider::DEFAULT_BASE_URL.to_string(),
-        ProviderType::Anthropic => crate::core::ai::AnthropicProvider::DEFAULT_BASE_URL.to_string(),
-        ProviderType::Gemini => crate::core::ai::GeminiProvider::DEFAULT_BASE_URL.to_string(),
-        ProviderType::Local => settings
-            .ai
-            .ollama_url
-            .clone()
-            .unwrap_or_else(|| crate::core::ai::LocalProvider::DEFAULT_BASE_URL.to_string()),
+
+    let provider_config = if let Some(provider_config) = resolved_provider_config.clone() {
+        provider_config
+    } else {
+        match ai_provider_type {
+            ProviderType::OpenAI => {
+                let key = api_key.ok_or_else(|| "API key required for OpenAI".to_string())?;
+                ProviderConfig::openai(&key).with_model(&model)
+            }
+            ProviderType::Anthropic => {
+                let key = api_key.ok_or_else(|| "API key required for Anthropic".to_string())?;
+                ProviderConfig::anthropic(&key).with_model(&model)
+            }
+            ProviderType::Gemini => {
+                let key = api_key.ok_or_else(|| "API key required for Gemini".to_string())?;
+                ProviderConfig::gemini(&key).with_model(&model)
+            }
+            ProviderType::Local => {
+                let base_url = settings
+                    .ai
+                    .ollama_url
+                    .as_deref()
+                    .unwrap_or("http://localhost:11434");
+                ProviderConfig::local(Some(base_url)).with_model(&model)
+            }
+        }
     };
 
-    // Build provider config
-    let provider_config = match ai_provider_type {
-        ProviderType::OpenAI => {
-            let key = api_key.ok_or_else(|| "API key required for OpenAI".to_string())?;
-            ProviderConfig::openai(&key).with_model(&model)
-        }
-        ProviderType::Anthropic => {
-            let key = api_key.ok_or_else(|| "API key required for Anthropic".to_string())?;
-            ProviderConfig::anthropic(&key).with_model(&model)
-        }
-        ProviderType::Gemini => {
-            let key = api_key.ok_or_else(|| "API key required for Gemini".to_string())?;
-            ProviderConfig::gemini(&key).with_model(&model)
-        }
-        ProviderType::Local => {
-            let base_url = settings
+    let streaming_base_url = match provider_config.base_url.clone() {
+        Some(url) => url,
+        None => match ai_provider_type {
+            ProviderType::OpenAI => crate::core::ai::OpenAIProvider::DEFAULT_BASE_URL.to_string(),
+            ProviderType::Anthropic => crate::core::ai::AnthropicProvider::DEFAULT_BASE_URL.to_string(),
+            ProviderType::Gemini => crate::core::ai::GeminiProvider::DEFAULT_BASE_URL.to_string(),
+            ProviderType::Local => settings
                 .ai
                 .ollama_url
-                .as_deref()
-                .unwrap_or("http://localhost:11434");
-            ProviderConfig::local(Some(base_url)).with_model(&model)
-        }
+                .clone()
+                .unwrap_or_else(|| crate::core::ai::LocalProvider::DEFAULT_BASE_URL.to_string()),
+        },
     };
 
     // Create the provider
-    let provider = create_provider(provider_config).map_err(|e| e.to_ipc_error())?;
+    let provider = create_provider(provider_config.clone()).map_err(|e| e.to_ipc_error())?;
 
     // Run a real connectivity/auth check
     let provider_name = provider.name().to_string();
+    let provider_type_label =
+        effective_provider_type_label(&provider_name, &ai_provider_type.to_string());
     let is_configured = provider.is_available();
     let (is_available, error_message) = match provider.health_check().await {
         Ok(()) => (true, None),
         Err(e) => (false, Some(e.to_string())),
     };
 
-    // Get available models based on provider type
     let available_models = match ai_provider_type {
-        ProviderType::OpenAI => crate::core::ai::OpenAIProvider::available_models(),
+        ProviderType::OpenAI => {
+            let vault_path = app_data_dir.join("credentials.vault");
+            if !vault_path.exists() {
+                crate::core::ai::OpenAIProvider::available_models()
+            } else {
+                let mut guard = state.credential_vault.lock().await;
+                if guard.is_none() {
+                    *guard = Some(
+                        crate::core::credentials::CredentialVault::new(vault_path)
+                            .map_err(|e| format!("Failed to initialize credential vault: {}", e))?,
+                    );
+                }
+                let vault = guard
+                    .as_ref()
+                    .ok_or_else(|| "Credential vault unavailable".to_string())?;
+                resolve_openai_available_models(vault).await?
+            }
+        }
         ProviderType::Anthropic => crate::core::ai::AnthropicProvider::available_models(),
         ProviderType::Gemini => crate::core::ai::GeminiProvider::available_models(),
         ProviderType::Local => crate::core::ai::LocalProvider::common_models(),
@@ -2128,7 +2318,7 @@ pub async fn sync_ai_from_vault(
         .set_provider_boxed_with_status(
             provider,
             ProviderRuntimeStatus {
-                provider_type: Some(ai_provider_type.to_string()),
+                provider_type: Some(provider_type_label.clone()),
                 is_configured,
                 is_available,
                 current_model: Some(model.clone()),
@@ -2138,17 +2328,19 @@ pub async fn sync_ai_from_vault(
         )
         .await;
 
-    crate::core::ai::set_streaming_provider_config(crate::core::ai::StreamingProviderConfig {
-        provider_type: ai_provider_type,
-        api_key: if ai_provider_type == ProviderType::Local {
-            String::new()
-        } else {
-            streaming_api_key
-        },
-        base_url: streaming_base_url,
-        model: model.clone(),
-    })
-    .await;
+    if provider_name != "openai-codex" {
+        crate::core::ai::set_streaming_provider_config(crate::core::ai::StreamingProviderConfig {
+            provider_type: ai_provider_type,
+            api_key: if ai_provider_type == ProviderType::Local {
+                String::new()
+            } else {
+                streaming_api_key
+            },
+            base_url: streaming_base_url,
+            model: model.clone(),
+        })
+        .await;
+    }
 
     tracing::info!(
         "Synced AI provider from vault: {} (configured: {}, available: {})",
@@ -2158,7 +2350,7 @@ pub async fn sync_ai_from_vault(
     );
 
     Ok(ProviderStatusDto {
-        provider_type: Some(ai_provider_type.to_string()),
+        provider_type: Some(provider_type_label),
         is_configured,
         is_available,
         current_model: Some(model),
@@ -2507,13 +2699,38 @@ pub async fn generate_edit_script_with_ai(
 /// Gets available AI models for a provider type
 #[tauri::command]
 #[specta::specta]
-pub async fn get_available_ai_models(provider_type: String) -> Result<Vec<String>, String> {
+pub async fn get_available_ai_models(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    provider_type: String,
+) -> Result<Vec<String>, String> {
     use crate::core::ai::ProviderType;
 
     let ptype: ProviderType = provider_type.parse().map_err(|e: String| e)?;
 
     let models = match ptype {
-        ProviderType::OpenAI => crate::core::ai::OpenAIProvider::available_models(),
+        ProviderType::OpenAI => {
+            let app_data_dir = super::system::get_app_data_dir(&app)?;
+            let vault_path = app_data_dir.join("credentials.vault");
+
+            if !vault_path.exists() {
+                crate::core::ai::OpenAIProvider::available_models()
+            } else {
+                {
+                    let mut guard = state.credential_vault.lock().await;
+                    if guard.is_none() {
+                        *guard = Some(
+                            crate::core::credentials::CredentialVault::new(vault_path)
+                                .map_err(|e| format!("Failed to initialize credential vault: {}", e))?,
+                        );
+                    }
+                    let vault = guard
+                        .as_ref()
+                        .ok_or_else(|| "Credential vault unavailable".to_string())?;
+                    resolve_openai_available_models(vault).await?
+                }
+            }
+        }
         ProviderType::Anthropic => crate::core::ai::AnthropicProvider::available_models(),
         ProviderType::Gemini => crate::core::ai::GeminiProvider::available_models(),
         ProviderType::Local => crate::core::ai::LocalProvider::common_models(),

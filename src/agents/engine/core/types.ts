@@ -813,7 +813,15 @@ export function createEmptyContext(projectId: string): AgentContext {
  * Merge partial config with defaults
  */
 export function mergeConfig(partial?: PartialEngineConfig): AgenticEngineConfig {
-  return { ...DEFAULT_ENGINE_CONFIG, ...partial };
+  if (!partial) {
+    return { ...DEFAULT_ENGINE_CONFIG };
+  }
+
+  const definedEntries = Object.entries(partial).filter(([, value]) => value !== undefined);
+  return {
+    ...DEFAULT_ENGINE_CONFIG,
+    ...Object.fromEntries(definedEntries),
+  } as AgenticEngineConfig;
 }
 
 /**

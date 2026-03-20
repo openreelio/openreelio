@@ -12,6 +12,10 @@ use tauri::{Manager, State};
 use crate::core::settings::{AppSettings, SettingsManager};
 use crate::AppState;
 
+fn is_direct_openai_api_key(value: &str) -> bool {
+    value.trim().starts_with("sk-")
+}
+
 // =============================================================================
 // App Lifecycle DTOs
 // =============================================================================
@@ -461,9 +465,35 @@ impl From<AppSettingsDto> for AppSettings {
 #[serde(rename_all = "camelCase")]
 pub struct CredentialStatusDto {
     pub openai: bool,
+    pub openai_api_key: bool,
+    pub openai_codex_oauth: bool,
     pub anthropic: bool,
     pub google: bool,
     pub seedance: bool,
+}
+
+/// Status of local Codex auth availability.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexAuthStatusDto {
+    pub has_auth_file: bool,
+    pub has_openai_api_key: bool,
+    pub has_access_token: bool,
+    pub has_refresh_token: bool,
+    pub can_exchange_oauth: bool,
+}
+
+/// Result of attempting to import OpenAI credentials from Codex.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportCodexAuthResultDto {
+    pub imported: bool,
+    pub has_auth_file: bool,
+    pub has_openai_api_key: bool,
+    pub has_access_token: bool,
+    pub has_refresh_token: bool,
+    pub can_exchange_oauth: bool,
+    pub message: String,
 }
 
 // =============================================================================
@@ -878,6 +908,8 @@ pub async fn get_credential_status(app: tauri::AppHandle) -> Result<CredentialSt
     if !vault_path.exists() {
         return Ok(CredentialStatusDto {
             openai: false,
+            openai_api_key: false,
+            openai_codex_oauth: false,
             anthropic: false,
             google: false,
             seedance: false,
@@ -896,11 +928,161 @@ pub async fn get_credential_status(app: tauri::AppHandle) -> Result<CredentialSt
         .as_ref()
         .ok_or_else(|| "Credential vault unavailable".to_string())?;
 
+    let openai_api_key = if vault.exists(CredentialType::OpenaiApiKey).await {
+        vault
+            .retrieve(CredentialType::OpenaiApiKey)
+            .await
+            .map(|value| is_direct_openai_api_key(&value))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    let openai_codex_oauth = vault.exists(CredentialType::OpenaiCodexOauth).await;
+
     Ok(CredentialStatusDto {
-        openai: vault.exists(CredentialType::OpenaiApiKey).await,
+        openai: openai_api_key || openai_codex_oauth,
+        openai_api_key,
+        openai_codex_oauth,
         anthropic: vault.exists(CredentialType::AnthropicApiKey).await,
         google: vault.exists(CredentialType::GoogleApiKey).await,
         seedance: vault.exists(CredentialType::SeedanceApiKey).await,
+    })
+}
+
+/// Gets the status of a local Codex auth store.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_codex_auth_status() -> Result<CodexAuthStatusDto, String> {
+    let status = crate::core::credentials::codex_auth_status();
+    Ok(CodexAuthStatusDto {
+        has_auth_file: status.has_auth_file,
+        has_openai_api_key: status.has_openai_api_key,
+        has_access_token: status.has_access_token,
+        has_refresh_token: status.has_refresh_token,
+        can_exchange_oauth: status.can_exchange_oauth,
+    })
+}
+
+/// Imports an OpenAI API key from the local Codex auth store into the encrypted vault.
+#[tauri::command]
+#[specta::specta]
+pub async fn import_codex_auth(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+) -> Result<ImportCodexAuthResultDto, String> {
+    let codex_path = crate::core::credentials::codex_auth_path();
+    let status = crate::core::credentials::codex_auth_status();
+
+    if !status.has_auth_file {
+        return Ok(ImportCodexAuthResultDto {
+            imported: false,
+            has_auth_file: false,
+            has_openai_api_key: false,
+            has_access_token: false,
+            has_refresh_token: false,
+            can_exchange_oauth: false,
+            message: format!(
+                "Codex auth file not found at {}.",
+                codex_path.display()
+            ),
+        });
+    }
+
+    if let Some(stored_oauth) = crate::core::credentials::codex_local_oauth()
+        .map_err(|e| format!("Failed to read Codex OAuth: {}", e))?
+    {
+        let app_data_dir = get_app_data_dir(&app)?;
+        let vault_path = app_data_dir.join("credentials.vault");
+
+        let mut guard = state.credential_vault.lock().await;
+        if guard.is_none() {
+            *guard = Some(
+                CredentialVault::new(vault_path)
+                    .map_err(|e| format!("Failed to initialize credential vault: {}", e))?,
+            );
+        }
+        let vault = guard
+            .as_ref()
+            .ok_or_else(|| "Credential vault unavailable".to_string())?;
+
+        vault
+            .store(CredentialType::OpenaiCodexOauth, &stored_oauth)
+            .await
+            .map_err(|e| format!("Failed to store imported Codex OAuth credential: {}", e))?;
+
+        if vault.exists(CredentialType::OpenaiApiKey).await {
+            if let Ok(existing) = vault.retrieve(CredentialType::OpenaiApiKey).await {
+                if !is_direct_openai_api_key(&existing) {
+                    let _ = vault.delete(CredentialType::OpenaiApiKey).await;
+                }
+            }
+        }
+
+        tracing::info!("Stored Codex OAuth credential for OpenAI in encrypted vault");
+
+        return Ok(ImportCodexAuthResultDto {
+            imported: true,
+            has_auth_file: true,
+            has_openai_api_key: status.has_openai_api_key,
+            has_access_token: status.has_access_token,
+            has_refresh_token: status.has_refresh_token,
+            can_exchange_oauth: status.can_exchange_oauth,
+            message: "Connected Codex OAuth for OpenAI. OpenReelio will exchange it into a runtime credential when needed.".to_string(),
+        });
+    }
+
+    let Some(api_key) = crate::core::credentials::codex_openai_api_key()
+        .map_err(|e| format!("Failed to read Codex auth: {}", e))?
+    else {
+        let message = if status.can_exchange_oauth {
+            "Codex auth was detected but OpenReelio could not store reusable Codex OAuth credentials."
+        } else if status.has_access_token {
+            "Codex auth.json contains an access token but no reusable refresh token or API key."
+        } else {
+            "Codex auth.json does not contain reusable OpenAI credentials."
+        };
+
+        return Ok(ImportCodexAuthResultDto {
+            imported: false,
+            has_auth_file: true,
+            has_openai_api_key: false,
+            has_access_token: status.has_access_token,
+            has_refresh_token: status.has_refresh_token,
+            can_exchange_oauth: status.can_exchange_oauth,
+            message: message.to_string(),
+        });
+    };
+
+    let app_data_dir = get_app_data_dir(&app)?;
+    let vault_path = app_data_dir.join("credentials.vault");
+
+    let mut guard = state.credential_vault.lock().await;
+    if guard.is_none() {
+        *guard = Some(
+            CredentialVault::new(vault_path)
+                .map_err(|e| format!("Failed to initialize credential vault: {}", e))?,
+        );
+    }
+    let vault = guard
+        .as_ref()
+        .ok_or_else(|| "Credential vault unavailable".to_string())?;
+
+    vault
+        .store(CredentialType::OpenaiApiKey, &api_key)
+        .await
+        .map_err(|e| format!("Failed to store imported Codex credential: {}", e))?;
+
+    tracing::info!("Imported OpenAI API key from Codex auth");
+
+    Ok(ImportCodexAuthResultDto {
+        imported: true,
+        has_auth_file: true,
+        has_openai_api_key: status.has_openai_api_key,
+        has_access_token: status.has_access_token,
+        has_refresh_token: status.has_refresh_token,
+        can_exchange_oauth: status.can_exchange_oauth,
+        message: "Imported OpenAI API key from Codex into the encrypted credential vault."
+            .to_string(),
     })
 }
 

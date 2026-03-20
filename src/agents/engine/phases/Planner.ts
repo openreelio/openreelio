@@ -180,7 +180,7 @@ export class Planner {
         // and non-ASCII prompts (Korean, Japanese, etc.) that consume
         // 2-3× more tokens per character.  Compact retry keeps the same
         // output budget since it already saves tokens on the input side.
-        const plan = await this.executeWithTimeout(
+        const rawPlan = await this.executeWithTimeout(
           () =>
             this.llm.generateStructured<Plan>(messages, schema, {
               maxTokens: this.config.maxOutputTokens ?? 16384,
@@ -189,6 +189,7 @@ export class Planner {
           timeoutMs,
         );
 
+        const plan = this.normalizePlan(rawPlan, thought);
         this.validatePlan(plan, context);
         return plan;
       } catch (error) {
@@ -280,7 +281,8 @@ export class Planner {
 
       // Parse the accumulated streaming output as structured JSON
       // instead of making a second LLM call
-      const plan = this.parseAccumulatedPlan<Plan>(accumulated);
+      const rawPlan = this.parseAccumulatedPlan<Plan>(accumulated);
+      const plan = this.normalizePlan(rawPlan, thought);
 
       this.validatePlan(plan, context);
       return plan;
@@ -900,6 +902,68 @@ export class Planner {
     }
 
     return normalized as Record<string, unknown>;
+  }
+
+  private normalizePlan(plan: unknown, thought: Thought): Plan {
+    const source = plan && typeof plan === 'object' ? (plan as Record<string, unknown>) : {};
+    const rawSteps = Array.isArray(source.steps) ? source.steps : [];
+
+    const steps = rawSteps.map((step, index) => {
+      const raw = step && typeof step === 'object' ? (step as Record<string, unknown>) : {};
+      const riskLevel = ['low', 'medium', 'high', 'critical'].includes(raw.riskLevel as string)
+        ? (raw.riskLevel as PlanStep['riskLevel'])
+        : 'low';
+
+      return {
+        id:
+          typeof raw.id === 'string' && raw.id.trim().length > 0
+            ? raw.id
+            : `step-${index + 1}`,
+        tool: typeof raw.tool === 'string' ? raw.tool : '',
+        args:
+          raw.args && typeof raw.args === 'object' && !Array.isArray(raw.args)
+            ? (raw.args as Record<string, unknown>)
+            : {},
+        description:
+          typeof raw.description === 'string' && raw.description.trim().length > 0
+            ? raw.description
+            : `Execute step ${index + 1}`,
+        riskLevel,
+        estimatedDuration:
+          typeof raw.estimatedDuration === 'number' && Number.isFinite(raw.estimatedDuration)
+            ? raw.estimatedDuration
+            : 1000,
+        dependsOn: Array.isArray(raw.dependsOn)
+          ? raw.dependsOn.filter((value): value is string => typeof value === 'string')
+          : undefined,
+      };
+    });
+
+    const estimatedTotalDuration =
+      typeof source.estimatedTotalDuration === 'number' && Number.isFinite(source.estimatedTotalDuration)
+        ? source.estimatedTotalDuration
+        : steps.reduce((sum, step) => sum + step.estimatedDuration, 0);
+
+    const requiresApproval =
+      typeof source.requiresApproval === 'boolean'
+        ? source.requiresApproval
+        : steps.some((step) => step.riskLevel === 'high' || step.riskLevel === 'critical');
+
+    const rollbackStrategy =
+      typeof source.rollbackStrategy === 'string' && source.rollbackStrategy.trim().length > 0
+        ? source.rollbackStrategy
+        : 'Undo completed steps in reverse order when possible.';
+
+    return {
+      goal:
+        typeof source.goal === 'string' && source.goal.trim().length > 0
+          ? source.goal
+          : thought.understanding,
+      steps,
+      estimatedTotalDuration,
+      requiresApproval,
+      rollbackStrategy,
+    };
   }
 
   private validateStepReferences(steps: PlanStep[]): string[] {

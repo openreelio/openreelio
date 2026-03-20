@@ -20,7 +20,12 @@ import { useAIStore } from '@/stores/aiStore';
 const logger = createLogger('useCredentials');
 
 /** Supported credential provider types */
-export type CredentialProvider = 'openai' | 'anthropic' | 'google' | 'seedance';
+export type CredentialProvider =
+  | 'openai'
+  | 'openai_codex_oauth'
+  | 'anthropic'
+  | 'google'
+  | 'seedance';
 
 /**
  * Maps credential provider to AI provider type for cache invalidation
@@ -28,6 +33,7 @@ export type CredentialProvider = 'openai' | 'anthropic' | 'google' | 'seedance';
 function mapProviderToAIProvider(provider: CredentialProvider): 'openai' | 'anthropic' | 'gemini' | undefined {
   switch (provider) {
     case 'openai':
+    case 'openai_codex_oauth':
       return 'openai';
     case 'anthropic':
       return 'anthropic';
@@ -43,9 +49,29 @@ function mapProviderToAIProvider(provider: CredentialProvider): 'openai' | 'anth
 /** Status of credentials for each provider */
 export interface CredentialStatus {
   openai: boolean;
+  openaiApiKey: boolean;
+  openaiCodexOauth: boolean;
   anthropic: boolean;
   google: boolean;
   seedance: boolean;
+}
+
+export interface CodexAuthStatus {
+  hasAuthFile: boolean;
+  hasOpenaiApiKey: boolean;
+  hasAccessToken: boolean;
+  hasRefreshToken: boolean;
+  canExchangeOauth: boolean;
+}
+
+export interface ImportCodexAuthResult {
+  imported: boolean;
+  hasAuthFile: boolean;
+  hasOpenaiApiKey: boolean;
+  hasAccessToken: boolean;
+  hasRefreshToken: boolean;
+  canExchangeOauth: boolean;
+  message: string;
 }
 
 /** Hook state */
@@ -68,6 +94,10 @@ interface UseCredentialsActions {
   hasCredential: (provider: CredentialProvider) => Promise<boolean>;
   /** Delete a credential */
   deleteCredential: (provider: CredentialProvider) => Promise<void>;
+  /** Read local Codex auth availability */
+  getCodexAuthStatus: () => Promise<CodexAuthStatus>;
+  /** Import OpenAI API key from local Codex auth */
+  importCodexAuth: () => Promise<ImportCodexAuthResult>;
   /** Refresh credential status */
   refreshStatus: () => Promise<void>;
   /** Clear any error */
@@ -99,6 +129,8 @@ export type UseCredentialsReturn = UseCredentialsState & UseCredentialsActions;
 export function useCredentials(): UseCredentialsReturn {
   const [status, setStatus] = useState<CredentialStatus>({
     openai: false,
+    openaiApiKey: false,
+    openaiCodexOauth: false,
     anthropic: false,
     google: false,
     seedance: false,
@@ -228,6 +260,45 @@ export function useCredentials(): UseCredentialsReturn {
     [refreshStatus]
   );
 
+  const getCodexAuthStatus = useCallback(async (): Promise<CodexAuthStatus> => {
+    try {
+      return await invoke<CodexAuthStatus>('get_codex_auth_status');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error('Failed to read Codex auth status', { error: message });
+      throw new Error(message);
+    }
+  }, []);
+
+  const importCodexAuth = useCallback(async (): Promise<ImportCodexAuthResult> => {
+    try {
+      setIsSaving(true);
+      setError(null);
+
+      const result = await invoke<ImportCodexAuthResult>('import_codex_auth');
+      await refreshStatus();
+
+      if (result.imported) {
+        invalidateModelCache('openai');
+        try {
+          await useAIStore.getState().syncFromSettings();
+          logger.info('AI provider synced after Codex import');
+        } catch (syncError) {
+          logger.warn('Failed to sync AI provider after Codex import', { syncError });
+        }
+      }
+
+      return result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error('Failed to import Codex auth', { error: message });
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setIsSaving(false);
+    }
+  }, [refreshStatus]);
+
   /**
    * Clears the current error
    */
@@ -248,6 +319,8 @@ export function useCredentials(): UseCredentialsReturn {
     storeCredential,
     hasCredential,
     deleteCredential,
+    getCodexAuthStatus,
+    importCodexAuth,
     refreshStatus,
     clearError,
   };

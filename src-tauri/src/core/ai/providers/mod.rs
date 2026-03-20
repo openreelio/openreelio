@@ -6,11 +6,13 @@ mod anthropic;
 mod gemini;
 mod local;
 mod openai;
+mod openai_codex;
 
 pub use anthropic::AnthropicProvider;
 pub use gemini::GeminiProvider;
 pub use local::LocalProvider;
 pub use openai::OpenAIProvider;
+pub use openai_codex::OpenAICodexProvider;
 
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -49,7 +51,7 @@ impl std::str::FromStr for ProviderType {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "openai" => Ok(ProviderType::OpenAI),
+            "openai" | "openai-codex" => Ok(ProviderType::OpenAI),
             "anthropic" => Ok(ProviderType::Anthropic),
             "gemini" => Ok(ProviderType::Gemini),
             "local" | "ollama" => Ok(ProviderType::Local),
@@ -77,6 +79,13 @@ pub struct ProviderStatus {
 }
 
 /// Configuration for creating a provider
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenAIAuthMode {
+    ApiKey,
+    CodexOauth,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderConfig {
@@ -84,12 +93,16 @@ pub struct ProviderConfig {
     pub provider_type: ProviderType,
     /// API key (for cloud providers)
     pub api_key: Option<String>,
+    /// Stored OAuth credential (for Codex-backed OpenAI flows)
+    pub oauth_credential: Option<String>,
     /// Base URL (for custom endpoints or local models)
     pub base_url: Option<String>,
     /// Default model to use
     pub model: Option<String>,
     /// Request timeout in seconds
     pub timeout_secs: Option<u64>,
+    /// Optional OpenAI auth mode override
+    pub auth_mode: Option<OpenAIAuthMode>,
 }
 
 impl ProviderConfig {
@@ -98,9 +111,24 @@ impl ProviderConfig {
         Self {
             provider_type: ProviderType::OpenAI,
             api_key: Some(api_key.to_string()),
+            oauth_credential: None,
             base_url: None,
-            model: Some("gpt-5.2".to_string()),
+            model: Some("gpt-5.4".to_string()),
             timeout_secs: Some(60),
+            auth_mode: Some(OpenAIAuthMode::ApiKey),
+        }
+    }
+
+    /// Creates a new OpenAI Codex OAuth-backed provider config
+    pub fn openai_codex(oauth_credential: &str) -> Self {
+        Self {
+            provider_type: ProviderType::OpenAI,
+            api_key: None,
+            oauth_credential: Some(oauth_credential.to_string()),
+            base_url: Some(OpenAICodexProvider::DEFAULT_BASE_URL.to_string()),
+            model: Some("gpt-5.4".to_string()),
+            timeout_secs: Some(60),
+            auth_mode: Some(OpenAIAuthMode::CodexOauth),
         }
     }
 
@@ -109,9 +137,11 @@ impl ProviderConfig {
         Self {
             provider_type: ProviderType::Anthropic,
             api_key: Some(api_key.to_string()),
+            oauth_credential: None,
             base_url: None,
             model: Some("claude-sonnet-4-5-20251015".to_string()),
             timeout_secs: Some(60),
+            auth_mode: None,
         }
     }
 
@@ -120,9 +150,11 @@ impl ProviderConfig {
         Self {
             provider_type: ProviderType::Gemini,
             api_key: Some(api_key.to_string()),
+            oauth_credential: None,
             base_url: None,
             model: Some("gemini-3-flash-preview".to_string()),
             timeout_secs: Some(120), // Longer timeout for large context
+            auth_mode: None,
         }
     }
 
@@ -131,9 +163,11 @@ impl ProviderConfig {
         Self {
             provider_type: ProviderType::Local,
             api_key: None,
+            oauth_credential: None,
             base_url: base_url.map(|s| s.to_string()),
             model: Some("llama3.2".to_string()),
             timeout_secs: Some(120),
+            auth_mode: None,
         }
     }
 
@@ -161,8 +195,13 @@ use crate::core::CoreResult;
 pub fn create_provider(config: ProviderConfig) -> CoreResult<Box<dyn AIProvider>> {
     match config.provider_type {
         ProviderType::OpenAI => {
-            let provider = OpenAIProvider::new(config)?;
-            Ok(Box::new(provider))
+            if config.auth_mode == Some(OpenAIAuthMode::CodexOauth) {
+                let provider = OpenAICodexProvider::new(config)?;
+                Ok(Box::new(provider))
+            } else {
+                let provider = OpenAIProvider::new(config)?;
+                Ok(Box::new(provider))
+            }
         }
         ProviderType::Anthropic => {
             let provider = AnthropicProvider::new(config)?;
@@ -191,6 +230,10 @@ mod tests {
     fn test_provider_type_parsing() {
         assert_eq!(
             "openai".parse::<ProviderType>().unwrap(),
+            ProviderType::OpenAI
+        );
+        assert_eq!(
+            "openai-codex".parse::<ProviderType>().unwrap(),
             ProviderType::OpenAI
         );
         assert_eq!(
@@ -224,7 +267,16 @@ mod tests {
         let config = ProviderConfig::openai("test-key").with_model("gpt-4.1");
         assert_eq!(config.provider_type, ProviderType::OpenAI);
         assert_eq!(config.api_key, Some("test-key".to_string()));
+        assert_eq!(config.auth_mode, Some(OpenAIAuthMode::ApiKey));
         assert_eq!(config.model, Some("gpt-4.1".to_string()));
+    }
+
+    #[test]
+    fn test_provider_config_openai_codex() {
+        let config = ProviderConfig::openai_codex("{\"type\":\"oauth\"}");
+        assert_eq!(config.provider_type, ProviderType::OpenAI);
+        assert_eq!(config.auth_mode, Some(OpenAIAuthMode::CodexOauth));
+        assert!(config.oauth_credential.is_some());
     }
 
     #[test]

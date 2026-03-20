@@ -44,6 +44,15 @@ const MODEL_REGISTRY: Record<string, ModelTokenLimits> = {
   'gpt-4o': { contextWindow: 128_000, maxOutputTokens: 16_384 },
   'gpt-4o-mini': { contextWindow: 128_000, maxOutputTokens: 16_384 },
   'gpt-4o-2024-11-20': { contextWindow: 128_000, maxOutputTokens: 16_384 },
+  // OpenAI — GPT-5 family
+  'gpt-5.4': { contextWindow: 400_000, maxOutputTokens: 128_000 },
+  'gpt-5.3-codex': { contextWindow: 400_000, maxOutputTokens: 128_000 },
+  'gpt-5.3-codex-spark': { contextWindow: 400_000, maxOutputTokens: 128_000 },
+  'gpt-5.2': { contextWindow: 400_000, maxOutputTokens: 128_000 },
+  'gpt-5.2-codex': { contextWindow: 400_000, maxOutputTokens: 128_000 },
+  'gpt-5.1-codex': { contextWindow: 400_000, maxOutputTokens: 128_000 },
+  'gpt-5.1-codex-mini': { contextWindow: 400_000, maxOutputTokens: 128_000 },
+  'gpt-5.1-codex-max': { contextWindow: 400_000, maxOutputTokens: 128_000 },
   // OpenAI — o-series reasoning
   'o1': { contextWindow: 200_000, maxOutputTokens: 100_000 },
   'o1-mini': { contextWindow: 128_000, maxOutputTokens: 65_536 },
@@ -65,6 +74,7 @@ const MODEL_REGISTRY: Record<string, ModelTokenLimits> = {
 const PROVIDER_DEFAULTS: Record<string, ModelTokenLimits> = {
   anthropic: { contextWindow: 200_000, maxOutputTokens: 8_192 },
   openai: { contextWindow: 128_000, maxOutputTokens: 16_384 },
+  'openai-codex': { contextWindow: 400_000, maxOutputTokens: 128_000 },
   gemini: { contextWindow: 1_048_576, maxOutputTokens: 8_192 },
   local: { contextWindow: 32_000, maxOutputTokens: 4_096 },
 };

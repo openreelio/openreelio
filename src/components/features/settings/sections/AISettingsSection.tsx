@@ -15,7 +15,11 @@ import React, { useCallback, useState, useEffect } from 'react';
 import type { AISettings, ProviderType, ProposalReviewMode } from '@/stores/settingsStore';
 import { CostControlPanel } from './CostControlPanel';
 import { useAIModels, getDefaultModel } from '@/hooks/useAIModels';
-import { useCredentials, type CredentialProvider } from '@/hooks/useCredentials';
+import {
+  useCredentials,
+  type CodexAuthStatus,
+  type CredentialProvider,
+} from '@/hooks/useCredentials';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
 
 // =============================================================================
@@ -36,7 +40,7 @@ export interface AISettingsSectionProps {
 // =============================================================================
 
 const PROVIDER_OPTIONS: Array<{ value: ProviderType; label: string; description: string }> = [
-  { value: 'openai', label: 'OpenAI', description: 'GPT-5, O3 models for advanced reasoning' },
+  { value: 'openai', label: 'OpenAI', description: 'GPT-5.4 and O-series models for advanced reasoning' },
   {
     value: 'anthropic',
     label: 'Anthropic',
@@ -155,7 +159,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   onChange,
   disabled,
 }) => {
-  const { models, isLoading, error } = useAIModels(provider);
+  const { models, isLoading, error, refreshModels } = useAIModels(provider);
 
   // Handle provider change - update to default model if current is not available
   useEffect(() => {
@@ -171,8 +175,20 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
 
   if (isLoading) {
     return (
-      <div className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text-muted">
-        Loading models...
+      <div className="space-y-2">
+        <div className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text-muted">
+          Loading models...
+        </div>
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => void refreshModels()}
+            disabled={disabled}
+            className="px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text hover:bg-editor-bg-hover disabled:opacity-50"
+          >
+            Refresh models
+          </button>
+        </div>
       </div>
     );
   }
@@ -195,19 +211,35 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   }
 
   return (
-    <select
-      id={id}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      disabled={disabled || models.length === 0}
-      className="w-full px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text focus:outline-none focus:border-primary-500 disabled:opacity-50"
-    >
-      {models.map((model) => (
-        <option key={model} value={model}>
-          {model}
-        </option>
-      ))}
-    </select>
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <select
+          id={id}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          disabled={disabled || models.length === 0}
+          className="flex-1 px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text focus:outline-none focus:border-primary-500 disabled:opacity-50"
+        >
+          {models.map((model) => (
+            <option key={model} value={model}>
+              {model}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={() => void refreshModels()}
+          disabled={disabled}
+          className="px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text hover:bg-editor-bg-hover disabled:opacity-50"
+        >
+          Refresh
+        </button>
+      </div>
+      <p className="text-xs text-editor-text-muted">
+        OpenAI models are fetched from the active transport. With Codex OAuth, Refresh reads the
+        Codex model catalog instead of OpenAI `/v1/models`.
+      </p>
+    </div>
   );
 };
 
@@ -218,6 +250,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
 interface SecureApiKeyInputProps {
   provider: CredentialProvider;
   placeholder: string;
+  isConfigured: boolean;
   disabled?: boolean;
   onSaved?: () => void;
 }
@@ -225,15 +258,14 @@ interface SecureApiKeyInputProps {
 const SecureApiKeyInput: React.FC<SecureApiKeyInputProps> = ({
   provider,
   placeholder,
+  isConfigured,
   disabled,
   onSaved,
 }) => {
-  const { status, storeCredential, deleteCredential, isSaving, isLoading } = useCredentials();
+  const { storeCredential, deleteCredential, isSaving, isLoading } = useCredentials();
   const [inputValue, setInputValue] = useState('');
   const [showInput, setShowInput] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
-
-  const isConfigured = status[provider];
 
   const handleSave = async () => {
     if (!inputValue.trim()) return;
@@ -344,6 +376,119 @@ const SecureApiKeyInput: React.FC<SecureApiKeyInputProps> = ({
       <p className="text-xs text-editor-text-muted">
         Your API key will be encrypted and stored securely. It never leaves your device.
       </p>
+    </div>
+  );
+};
+
+interface CodexImportHintProps {
+  disabled?: boolean;
+}
+
+const CodexImportHint: React.FC<CodexImportHintProps> = ({ disabled }) => {
+  const { getCodexAuthStatus, importCodexAuth, deleteCredential, status: credentialStatus, isSaving } = useCredentials();
+  const [status, setStatus] = useState<CodexAuthStatus | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [isChecking, setIsChecking] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        setIsChecking(true);
+        const nextStatus = await getCodexAuthStatus();
+        if (!cancelled) {
+          setStatus(nextStatus);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setMessage(err instanceof Error ? err.message : 'Failed to inspect Codex auth');
+        }
+      } finally {
+        if (!cancelled) {
+          setIsChecking(false);
+        }
+      }
+    };
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [getCodexAuthStatus]);
+
+  if (isChecking) {
+    return <p className="text-xs text-editor-text-muted">Checking for Codex auth…</p>;
+  }
+
+  if (!status?.hasAuthFile) {
+    return <p className="text-xs text-editor-text-muted">No local Codex auth file detected.</p>;
+  }
+
+  const handleConnect = async () => {
+    try {
+      const result = await importCodexAuth();
+      setMessage(result.message);
+      setStatus({
+        hasAuthFile: result.hasAuthFile,
+        hasOpenaiApiKey: result.hasOpenaiApiKey,
+        hasAccessToken: result.hasAccessToken,
+        hasRefreshToken: result.hasRefreshToken,
+        canExchangeOauth: result.canExchangeOauth,
+      });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Failed to import Codex auth');
+    }
+  };
+
+  const handleDelete = async () => {
+    try {
+      await deleteCredential('openai_codex_oauth');
+      setMessage('Removed stored Codex OAuth from the encrypted vault.');
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Failed to remove Codex OAuth');
+    }
+  };
+
+  return (
+    <div className="mt-2 rounded border border-editor-border bg-editor-bg px-3 py-2 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-sm font-medium text-editor-text-muted">OpenAI via Codex OAuth</p>
+        <StatusBadge isConfigured={credentialStatus.openaiCodexOauth} isLoading={isChecking} />
+      </div>
+      <p className="text-xs text-editor-text-muted">
+        {credentialStatus.openaiCodexOauth
+          ? ' Codex OAuth is stored separately in the encrypted vault and is used through the Codex transport for supported GPT-5 models.'
+          : status.canExchangeOauth
+            ? ' Local Codex CLI OAuth was found and can be connected as a separate OpenAI credential source.'
+            : status.hasOpenaiApiKey
+              ? ' Local Codex auth only exposes a direct API key on this machine.'
+              : status.hasAccessToken
+                ? ' Codex auth exists, but it does not include a reusable refresh token or API key.'
+                : ' No reusable Codex OAuth credential was found.'}
+      </p>
+      <div className="flex items-center gap-2">
+        {credentialStatus.openaiCodexOauth ? (
+          <button
+            type="button"
+            onClick={handleDelete}
+            disabled={disabled || isSaving}
+            className="px-3 py-2 rounded bg-red-600 text-white hover:bg-red-700 disabled:opacity-50"
+          >
+            {isSaving ? 'Removing...' : 'Disconnect Codex'}
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={handleConnect}
+            disabled={disabled || isSaving || (!status.hasOpenaiApiKey && !status.canExchangeOauth)}
+            className="px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text hover:bg-editor-bg-hover disabled:opacity-50"
+          >
+            {isSaving ? 'Connecting...' : 'Connect from Codex'}
+          </button>
+        )}
+      </div>
+      {message && <p className="text-xs text-editor-text-muted">{message}</p>}
     </div>
   );
 };
@@ -466,21 +611,26 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
     if (!labelInfo) return null;
 
     const { label, placeholder } = labelInfo;
+    const providerConfigured =
+      credentialProvider === 'openai'
+        ? credentialStatus.openaiApiKey
+        : credentialProvider === 'anthropic'
+          ? credentialStatus.anthropic
+          : credentialStatus.google;
 
     return (
       <div>
         <div className="flex items-center justify-between mb-1">
           <label className="block text-sm font-medium text-editor-text-muted">{label}</label>
-          <StatusBadge
-            isConfigured={credentialStatus[credentialProvider]}
-            isLoading={credentialsLoading}
-          />
+          <StatusBadge isConfigured={providerConfigured} isLoading={credentialsLoading} />
         </div>
         <SecureApiKeyInput
           provider={credentialProvider}
           placeholder={placeholder}
+          isConfigured={providerConfigured}
           disabled={disabled}
         />
+        {credentialProvider === 'openai' && <CodexImportHint disabled={disabled} />}
       </div>
     );
   };
@@ -696,6 +846,7 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
               <SecureApiKeyInput
                 provider="seedance"
                 placeholder="Enter your Seedance API key"
+                isConfigured={credentialStatus.seedance}
                 disabled={disabled}
               />
             </div>

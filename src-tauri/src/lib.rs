@@ -920,6 +920,8 @@ mod tauri_app {
                 $crate::ipc::has_credential,
                 $crate::ipc::delete_credential,
                 $crate::ipc::get_credential_status,
+                $crate::ipc::get_codex_auth_status,
+                $crate::ipc::import_codex_auth,
                 // Video Generation
                 $crate::ipc::submit_video_generation,
                 $crate::ipc::poll_generation_job,
@@ -1293,6 +1295,8 @@ mod tauri_app {
             ipc::has_credential,
             ipc::delete_credential,
             ipc::get_credential_status,
+            ipc::get_codex_auth_status,
+            ipc::import_codex_auth,
             // Video Generation
             ipc::submit_video_generation,
             ipc::poll_generation_job,
