@@ -17,6 +17,7 @@ import { ParameterEditor } from './ParameterEditor';
 import { KeyframeEditor } from './KeyframeEditor';
 import { ColorWheelsPanel, type ColorWheelsValues, type ColorWheelsParamName } from './ColorWheelsPanel';
 import { ChromaKeyControl } from './ChromaKeyControl';
+import { ColorCurvesPanel, TemperatureTintPanel } from '@/components/features/color';
 import type { ChromaKeyParams } from '@/hooks/useChromaKey';
 
 // =============================================================================
@@ -186,6 +187,20 @@ function isColorWheelsEffect(effectType: Effect['effectType']): boolean {
  */
 function isChromaKeyEffect(effectType: Effect['effectType']): boolean {
   return effectType === 'chroma_key';
+}
+
+/**
+ * Check if an effect is a Color Curves effect.
+ */
+function isCurvesEffect(effectType: Effect['effectType']): boolean {
+  return effectType === 'curves';
+}
+
+/**
+ * Check if an effect is a Temperature/Tint effect.
+ */
+function isTemperatureTintEffect(effectType: Effect['effectType']): boolean {
+  return effectType === 'temperature_tint';
 }
 
 /**
@@ -432,6 +447,22 @@ export const EffectInspector = memo(function EffectInspector({
                 handleParamChange('edge_feather', chromaParams.edgeFeather);
             }}
             disabled={readOnly}
+          />
+        ) : isCurvesEffect(effect.effectType) ? (
+          <ColorCurvesPanel
+            params={effectParams ?? {}}
+            onChange={(paramName: string, value: SimpleParamValue) => {
+              handleParamChange(paramName, value);
+            }}
+            readOnly={readOnly}
+          />
+        ) : isTemperatureTintEffect(effect.effectType) ? (
+          <TemperatureTintPanel
+            params={effectParams ?? {}}
+            onChange={(paramName: string, value: SimpleParamValue) => {
+              handleParamChange(paramName, value);
+            }}
+            readOnly={readOnly}
           />
         ) : paramDefs.length === 0 ? (
           <p className="text-sm text-editor-text-muted text-center py-4">
