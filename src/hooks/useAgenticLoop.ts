@@ -50,6 +50,7 @@ import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { useAIStore } from '@/stores/aiStore';
 import { globalToolRegistry } from '@/agents';
 import { clearPendingApprovals } from '@/hooks/useAgentApproval';
 import { registerAgentAbort, unregisterAgentAbort } from '@/agents/engine/core/agentCleanup';
@@ -57,6 +58,9 @@ import { createLogger } from '@/services/logger';
 
 const logger = createLogger('useAgenticLoop');
 const CONTEXT_HISTORY_LIMIT = 30;
+const CODEX_THINKING_TIMEOUT_MS = 180_000;
+const CODEX_PLANNING_TIMEOUT_MS = 240_000;
+const CODEX_OBSERVATION_TIMEOUT_MS = 45_000;
 
 // =============================================================================
 // Types
@@ -468,8 +472,8 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     registerAgentAbort(abort);
     return () => {
       unregisterAgentAbort();
-      // Use the shared abort() to ensure resolver and approval cleanup
-      abort();
+      // Do not force-abort on component unmount. In dev, transient remounts can
+      // otherwise cancel an active run and surface as a misleading timeout/error.
     };
   }, [abort]);
 
@@ -613,6 +617,19 @@ export function useAgenticLoopWithStores(
   const aiMaxTokens = useSettingsStore((s) => s.settings.ai.maxTokens);
   const aiPrimaryModel = useSettingsStore((s) => s.settings.ai.primaryModel);
   const aiPrimaryProvider = useSettingsStore((s) => s.settings.ai.primaryProvider);
+  const runtimeProviderStatus = useAIStore((s) => s.providerStatus);
+
+  const runtimeProvider =
+    options.config?.activeProvider
+    ?? (runtimeProviderStatus.isConfigured
+      ? runtimeProviderStatus.providerType ?? aiPrimaryProvider
+      : aiPrimaryProvider);
+  const runtimeModel =
+    options.config?.activeModel
+    ?? (runtimeProviderStatus.isConfigured
+      ? runtimeProviderStatus.currentModel ?? aiPrimaryModel
+      : aiPrimaryModel);
+  const isCodexRuntime = runtimeProvider === 'openai-codex';
 
   return useAgenticLoop({
     ...options,
@@ -621,8 +638,17 @@ export function useAgenticLoopWithStores(
       ...options.config,
       contextRefresher,
       maxOutputTokens: options.config?.maxOutputTokens ?? aiMaxTokens,
-      activeModel: options.config?.activeModel ?? aiPrimaryModel,
-      activeProvider: options.config?.activeProvider ?? aiPrimaryProvider,
+      activeModel: runtimeModel,
+      activeProvider: runtimeProvider,
+      thinkingTimeout:
+        options.config?.thinkingTimeout
+        ?? (isCodexRuntime ? CODEX_THINKING_TIMEOUT_MS : undefined),
+      planningTimeout:
+        options.config?.planningTimeout
+        ?? (isCodexRuntime ? CODEX_PLANNING_TIMEOUT_MS : undefined),
+      observationTimeout:
+        options.config?.observationTimeout
+        ?? (isCodexRuntime ? CODEX_OBSERVATION_TIMEOUT_MS : undefined),
     },
   });
 }

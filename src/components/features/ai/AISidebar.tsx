@@ -136,6 +136,19 @@ export function AISidebar({
     return 'bg-green-500';
   };
 
+  const runtimeProviderLabel =
+    providerStatus.providerType === 'openai-codex'
+      ? 'Codex'
+      : providerStatus.providerType === 'openai'
+        ? 'OpenAI'
+        : providerStatus.providerType === 'anthropic'
+          ? 'Anthropic'
+          : providerStatus.providerType === 'gemini'
+            ? 'Gemini'
+            : providerStatus.providerType === 'local'
+              ? 'Local'
+              : null;
+
   return (
     <aside
       data-testid="ai-sidebar"
@@ -182,6 +195,14 @@ export function AISidebar({
             <Zap className="w-2.5 h-2.5" />
             Agent
           </span>
+          {runtimeProviderLabel && (
+            <span
+              className="px-1.5 py-0.5 text-[10px] font-medium bg-editor-surface text-editor-text-muted rounded"
+              title={`Runtime provider: ${runtimeProviderLabel}`}
+            >
+              {runtimeProviderLabel}
+            </span>
+          )}
           <div
             data-testid="provider-status"
             className={`w-2 h-2 rounded-full ${getProviderStatusColor()} ring-2 ring-offset-1 ring-offset-editor-sidebar/50 ring-transparent`}

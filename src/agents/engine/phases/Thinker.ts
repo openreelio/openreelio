@@ -15,7 +15,7 @@
 
 import type { ILLMClient, LLMMessage } from '../ports/ILLMClient';
 import type { AgentContext, LanguagePolicy, Thought } from '../core/types';
-import { ThinkingTimeoutError, UnderstandingError } from '../core/errors';
+import { SessionAbortedError, ThinkingTimeoutError, UnderstandingError } from '../core/errors';
 
 // =============================================================================
 // Types
@@ -97,11 +97,12 @@ export class Thinker {
     const schema = this.buildThoughtSchema();
 
     try {
-      const thought = await this.executeWithTimeout(
+      const rawThought = await this.executeWithTimeout(
         () => this.llm.generateStructured<Thought>(messages, schema),
         this.config.timeout,
       );
 
+      const thought = this.normalizeThought(rawThought);
       this.validateThought(thought);
       return thought;
     } catch (error) {
@@ -149,7 +150,8 @@ export class Thinker {
 
       // Then get the structured result
       const schema = this.buildThoughtSchema();
-      const thought = await this.llm.generateStructured<Thought>(messages, schema);
+      const rawThought = await this.llm.generateStructured<Thought>(messages, schema);
+      const thought = this.normalizeThought(rawThought);
 
       this.validateThought(thought);
       return thought;
@@ -176,6 +178,57 @@ export class Thinker {
   // ===========================================================================
   // Private Methods
   // ===========================================================================
+
+  /**
+   * Normalize partially valid model output into a full Thought object.
+   */
+  private normalizeThought(thought: unknown): Thought {
+    const source =
+      thought && typeof thought === 'object' ? (thought as Record<string, unknown>) : {};
+
+    const understanding =
+      typeof source.understanding === 'string' && source.understanding.trim().length > 0
+        ? source.understanding
+        : 'The user wants help with a video editing task.';
+
+    const requirements = Array.isArray(source.requirements)
+      ? source.requirements.filter((value): value is string => typeof value === 'string')
+      : [];
+
+    const uncertainties = Array.isArray(source.uncertainties)
+      ? source.uncertainties.filter((value): value is string => typeof value === 'string')
+      : [];
+
+    const explicitClarificationQuestion =
+      typeof source.clarificationQuestion === 'string' && source.clarificationQuestion.trim().length > 0
+        ? source.clarificationQuestion
+        : undefined;
+
+    const needsMoreInfo =
+      typeof source.needsMoreInfo === 'boolean'
+        ? source.needsMoreInfo
+        : Boolean(explicitClarificationQuestion) || uncertainties.length > 0;
+
+    const clarificationQuestion =
+      explicitClarificationQuestion
+      ?? (needsMoreInfo ? 'Could you clarify your request so I can proceed?' : undefined);
+
+    const approach =
+      typeof source.approach === 'string' && source.approach.trim().length > 0
+        ? source.approach
+        : needsMoreInfo
+          ? 'Ask one concise follow-up question to gather the missing information.'
+          : 'Proceed with a safe, minimal editing strategy using the available context and tools.';
+
+    return {
+      understanding,
+      requirements,
+      uncertainties,
+      approach,
+      needsMoreInfo,
+      clarificationQuestion,
+    };
+  }
 
   /**
    * Build messages for LLM including system prompt, optional history, and user input
@@ -345,30 +398,31 @@ export class Thinker {
         }
       }, timeout);
 
-      const abortHandler = () => {
-        if (!settled) {
-          settled = true;
-          clearTimeout(timeoutId);
-          reject(new ThinkingTimeoutError(timeout));
-        }
-      };
-
-      if (this.abortController?.signal.aborted) {
-        clearTimeout(timeoutId);
-        reject(new ThinkingTimeoutError(timeout));
-        return;
-      }
-
       const signal = this.abortController?.signal;
-      if (signal) {
-        signal.addEventListener('abort', abortHandler);
-      }
-
       const cleanup = () => {
         if (signal) {
           signal.removeEventListener('abort', abortHandler);
         }
       };
+
+      const abortHandler = () => {
+        if (!settled) {
+          settled = true;
+          clearTimeout(timeoutId);
+          cleanup();
+          reject(new SessionAbortedError('Thinking aborted', 'thinking'));
+        }
+      };
+
+      if (this.abortController?.signal.aborted) {
+        clearTimeout(timeoutId);
+        cleanup();
+        reject(new SessionAbortedError('Thinking aborted', 'thinking'));
+        return;
+      }
+      if (signal) {
+        signal.addEventListener('abort', abortHandler);
+      }
 
       operation()
         .then((result) => {

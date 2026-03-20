@@ -31,7 +31,7 @@ const debouncedSaveChatHistory = createDebouncedSaver(1000);
 // =============================================================================
 
 /** Supported AI provider types */
-export type ProviderType = 'openai' | 'anthropic' | 'gemini' | 'local';
+export type ProviderType = 'openai' | 'openai-codex' | 'anthropic' | 'gemini' | 'local';
 
 /** AI provider status */
 export interface ProviderStatus {

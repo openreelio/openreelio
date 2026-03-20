@@ -30,10 +30,12 @@ use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
 };
 use rand::rngs::OsRng;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
@@ -45,6 +47,8 @@ use tracing::{debug, info, warn};
 pub enum CredentialType {
     /// OpenAI API key (sk-...)
     OpenaiApiKey,
+    /// Stored Codex/OpenAI OAuth credentials used to mint runtime bearer tokens
+    OpenaiCodexOauth,
     /// Anthropic API key (sk-ant-...)
     AnthropicApiKey,
     /// Google AI API key (AIza...)
@@ -56,10 +60,20 @@ pub enum CredentialType {
 }
 
 impl CredentialType {
+    fn max_value_len(&self) -> usize {
+        match self {
+            // Codex/OpenAI OAuth exchanges can yield JWT-style bearer tokens that are
+            // substantially longer than traditional `sk-*` API keys.
+            Self::OpenaiApiKey | Self::OpenaiCodexOauth => 4096,
+            _ => 1024,
+        }
+    }
+
     /// Returns the key name used in the vault
     pub fn vault_key(&self) -> &'static str {
         match self {
             Self::OpenaiApiKey => "openai_api_key",
+            Self::OpenaiCodexOauth => "openai_codex_oauth",
             Self::AnthropicApiKey => "anthropic_api_key",
             Self::GoogleApiKey => "google_api_key",
             Self::SeedanceApiKey => "seedance_api_key",
@@ -73,17 +87,25 @@ impl CredentialType {
             return Err(CredentialError::EmptyValue);
         }
 
-        if value.len() > 1024 {
+        if value.len() > self.max_value_len() {
             return Err(CredentialError::ValueTooLong);
         }
 
         // Basic format validation (not exhaustive - APIs will reject invalid keys)
         match self {
             Self::OpenaiApiKey => {
-                if !value.starts_with("sk-") && !value.starts_with("sess-") {
+                if !value.starts_with("sk-")
+                    && !value.starts_with("sess-")
+                    && !value.starts_with("eyJ")
+                {
                     warn!(
-                        "OpenAI API key does not match expected format (sk-* or sess-*), proceeding anyway"
+                        "OpenAI credential does not match expected format (sk-*, sess-*, or JWT bearer token), proceeding anyway"
                     );
+                }
+            }
+            Self::OpenaiCodexOauth => {
+                if serde_json::from_str::<StoredCodexOauthCredential>(value).is_err() {
+                    warn!("Codex OAuth credential did not parse as expected JSON, proceeding anyway");
                 }
             }
             Self::AnthropicApiKey => {
@@ -131,6 +153,7 @@ impl std::str::FromStr for CredentialType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "openai_api_key" | "openai" => Ok(Self::OpenaiApiKey),
+            "openai_codex_oauth" | "codex_oauth" | "openai_codex" => Ok(Self::OpenaiCodexOauth),
             "anthropic_api_key" | "anthropic" => Ok(Self::AnthropicApiKey),
             "google_api_key" | "google" | "gemini" => Ok(Self::GoogleApiKey),
             "seedance_api_key" | "seedance" => Ok(Self::SeedanceApiKey),
@@ -155,7 +178,7 @@ pub enum CredentialError {
     #[error("Credential value is empty")]
     EmptyValue,
 
-    #[error("Credential value too long (max 1024 bytes)")]
+    #[error("Credential value too long for this provider")]
     ValueTooLong,
 
     #[error("Invalid credential type: {0}")]
@@ -227,7 +250,80 @@ struct CodexHelperExchange {
     api_key: Option<String>,
     mode: Option<String>,
     source: Option<String>,
+    #[serde(rename = "newCredentials")]
+    new_credentials: Option<StoredCodexOauthCredential>,
     message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexHelperOauthExport {
+    ok: bool,
+    oauth: Option<StoredCodexOauthCredential>,
+    #[allow(dead_code)]
+    source: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CodexHelperModels {
+    pub ok: bool,
+    pub models: Option<Vec<String>>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CodexHelperUsageCost {
+    pub input: f64,
+    pub output: f64,
+    #[serde(rename = "cacheRead")]
+    pub cache_read: f64,
+    #[serde(rename = "cacheWrite")]
+    pub cache_write: f64,
+    pub total: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CodexHelperUsage {
+    pub input: u32,
+    pub output: u32,
+    #[serde(rename = "cacheRead")]
+    pub cache_read: u32,
+    #[serde(rename = "cacheWrite")]
+    pub cache_write: u32,
+    #[serde(rename = "totalTokens")]
+    pub total_tokens: u32,
+    pub cost: CodexHelperUsageCost,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CodexHelperCompletion {
+    pub ok: bool,
+    #[allow(dead_code)]
+    pub provider: Option<String>,
+    #[allow(dead_code)]
+    pub api: Option<String>,
+    pub model: Option<String>,
+    pub text: Option<String>,
+    #[serde(rename = "stopReason")]
+    pub stop_reason: Option<String>,
+    #[serde(rename = "errorMessage")]
+    pub error_message: Option<String>,
+    pub usage: Option<CodexHelperUsage>,
+    #[serde(rename = "newCredentials")]
+    pub new_credentials: Option<StoredCodexOauthCredential>,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredCodexOauthCredential {
+    #[serde(rename = "type")]
+    pub credential_type: String,
+    pub provider: String,
+    pub access: String,
+    pub refresh: String,
+    pub expires: i64,
+    #[serde(rename = "accountId")]
+    pub account_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -235,6 +331,7 @@ pub struct CodexResolvedApiKey {
     pub api_key: String,
     pub mode: String,
     pub source: Option<String>,
+    pub updated_oauth: Option<String>,
 }
 
 /// Returns the default local Codex auth file path.
@@ -289,6 +386,82 @@ pub fn codex_exchange_api_key() -> CredentialResult<Option<CodexResolvedApiKey>>
         api_key,
         mode: result.mode.unwrap_or_else(|| "unknown".to_string()),
         source: result.source,
+        updated_oauth: result
+            .new_credentials
+            .map(|oauth| serde_json::to_string(&oauth))
+            .transpose()
+            .map_err(|e| {
+                CredentialError::SerializationError(format!(
+                    "Failed to serialize refreshed Codex OAuth credentials: {}",
+                    e
+                ))
+            })?,
+    }))
+}
+
+pub fn codex_local_oauth() -> CredentialResult<Option<String>> {
+    let Some(result) = codex_helper_export_oauth()? else {
+        return Ok(None);
+    };
+
+    if !result.ok {
+        return Ok(None);
+    }
+
+    result
+        .oauth
+        .map(|oauth| {
+            serde_json::to_string(&oauth).map_err(|e| {
+                CredentialError::SerializationError(format!(
+                    "Failed to serialize Codex OAuth credential: {}",
+                    e
+                ))
+            })
+        })
+        .transpose()
+}
+
+pub fn codex_exchange_stored_oauth(
+    stored_oauth_json: &str,
+) -> CredentialResult<Option<CodexResolvedApiKey>> {
+    let oauth = serde_json::from_str::<StoredCodexOauthCredential>(stored_oauth_json).map_err(
+        |e| CredentialError::SerializationError(format!("Failed to parse stored Codex OAuth credential: {}", e)),
+    )?;
+
+    let Some(result) = codex_helper_exchange_oauth(&oauth)? else {
+        return Ok(None);
+    };
+
+    if !result.ok {
+        return Ok(None);
+    }
+
+    let api_key = result
+        .api_key
+        .and_then(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        })
+        .ok_or_else(|| {
+            CredentialError::SerializationError(
+                "Codex helper reported success without an API key".to_string(),
+            )
+        })?;
+
+    Ok(Some(CodexResolvedApiKey {
+        api_key,
+        mode: result.mode.unwrap_or_else(|| "oauth_exchange".to_string()),
+        source: result.source,
+        updated_oauth: result
+            .new_credentials
+            .map(|updated| serde_json::to_string(&updated))
+            .transpose()
+            .map_err(|e| {
+                CredentialError::SerializationError(format!(
+                    "Failed to serialize refreshed stored Codex OAuth credential: {}",
+                    e
+                ))
+            })?,
     }))
 }
 
@@ -354,6 +527,12 @@ fn load_codex_auth(path: &Path) -> CredentialResult<Option<CodexAuthFile>> {
 }
 
 fn codex_helper_script_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("OPENREELIO_CODEX_HELPER_PATH") {
+        let candidate = PathBuf::from(path);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("scripts")
@@ -361,6 +540,10 @@ fn codex_helper_script_path() -> PathBuf {
 }
 
 fn run_codex_helper(command: &str) -> CredentialResult<String> {
+    run_codex_helper_with_input(command, None)
+}
+
+fn run_codex_helper_with_input(command: &str, input: Option<&str>) -> CredentialResult<String> {
     let script_path = codex_helper_script_path();
     if !script_path.exists() {
         return Err(CredentialError::NotFound(format!(
@@ -369,11 +552,27 @@ fn run_codex_helper(command: &str) -> CredentialResult<String> {
         )));
     }
 
-    let output = Command::new("node")
+    let mut child = Command::new("node")
         .arg(script_path)
         .arg(command)
-        .output()
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| CredentialError::InitializationFailed(format!("Failed to execute Codex helper: {}", e)))?;
+
+    if let Some(input) = input {
+        let stdin = child.stdin.as_mut().ok_or_else(|| {
+            CredentialError::InitializationFailed("Failed to open Codex helper stdin".to_string())
+        })?;
+        stdin
+            .write_all(input.as_bytes())
+            .map_err(|e| CredentialError::InitializationFailed(format!("Failed to write Codex helper stdin: {}", e)))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| CredentialError::InitializationFailed(format!("Failed to wait for Codex helper: {}", e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -388,19 +587,70 @@ fn run_codex_helper(command: &str) -> CredentialResult<String> {
         .map_err(|e| CredentialError::SerializationError(format!("Codex helper output was not UTF-8: {}", e)))
 }
 
-fn codex_helper_status() -> CredentialResult<Option<CodexHelperStatus>> {
-    let stdout = run_codex_helper("status")?;
-    let parsed = serde_json::from_str::<CodexHelperStatus>(&stdout).map_err(|e| {
-        CredentialError::SerializationError(format!("Failed to parse Codex helper status: {}", e))
+pub(crate) fn run_codex_helper_json<T>(command: &str) -> CredentialResult<T>
+where
+    T: DeserializeOwned,
+{
+    let stdout = run_codex_helper(command)?;
+    serde_json::from_str::<T>(&stdout).map_err(|e| {
+        CredentialError::SerializationError(format!(
+            "Failed to parse Codex helper {} response: {}",
+            command, e
+        ))
+    })
+}
+
+pub(crate) fn run_codex_helper_json_with_input<T, P>(
+    command: &str,
+    payload: &P,
+) -> CredentialResult<T>
+where
+    T: DeserializeOwned,
+    P: Serialize,
+{
+    let input = serde_json::to_string(payload).map_err(|e| {
+        CredentialError::SerializationError(format!(
+            "Failed to serialize Codex helper {} payload: {}",
+            command, e
+        ))
     })?;
+    let stdout = run_codex_helper_with_input(command, Some(&input))?;
+    serde_json::from_str::<T>(&stdout).map_err(|e| {
+        CredentialError::SerializationError(format!(
+            "Failed to parse Codex helper {} response: {}",
+            command, e
+        ))
+    })
+}
+
+fn codex_helper_status() -> CredentialResult<Option<CodexHelperStatus>> {
+    let parsed = run_codex_helper_json::<CodexHelperStatus>("status")?;
     Ok(Some(parsed))
 }
 
 fn codex_helper_exchange() -> CredentialResult<Option<CodexHelperExchange>> {
-    let stdout = run_codex_helper("exchange")?;
-    let parsed = serde_json::from_str::<CodexHelperExchange>(&stdout).map_err(|e| {
-        CredentialError::SerializationError(format!("Failed to parse Codex helper exchange: {}", e))
-    })?;
+    let parsed = run_codex_helper_json::<CodexHelperExchange>("exchange")?;
+    if !parsed.ok && parsed.message.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(parsed))
+}
+
+fn codex_helper_export_oauth() -> CredentialResult<Option<CodexHelperOauthExport>> {
+    let parsed = run_codex_helper_json::<CodexHelperOauthExport>("export-oauth")?;
+    if !parsed.ok && parsed.message.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(parsed))
+}
+
+fn codex_helper_exchange_oauth(
+    oauth: &StoredCodexOauthCredential,
+) -> CredentialResult<Option<CodexHelperExchange>> {
+    let parsed = run_codex_helper_json_with_input::<CodexHelperExchange, _>(
+        "exchange-oauth-stdin",
+        oauth,
+    )?;
     if !parsed.ok && parsed.message.is_none() {
         return Ok(None);
     }
@@ -864,6 +1114,12 @@ mod tests {
         assert!(CredentialType::OpenaiApiKey
             .validate("sk-test1234567890")
             .is_ok());
+        assert!(CredentialType::OpenaiApiKey
+            .validate(&"e".repeat(1889))
+            .is_ok());
+        assert!(CredentialType::OpenaiCodexOauth
+            .validate(r#"{"type":"oauth","provider":"openai-codex","access":"a","refresh":"b","expires":1,"accountId":"acct"}"#)
+            .is_ok());
 
         // Empty value
         assert!(matches!(
@@ -871,10 +1127,17 @@ mod tests {
             Err(CredentialError::EmptyValue)
         ));
 
-        // Too long
+        // Too long for OpenAI
+        let openai_long_value = "x".repeat(5000);
+        assert!(matches!(
+            CredentialType::OpenaiApiKey.validate(&openai_long_value),
+            Err(CredentialError::ValueTooLong)
+        ));
+
+        // Too long for providers that still use the default limit
         let long_value = "x".repeat(2000);
         assert!(matches!(
-            CredentialType::OpenaiApiKey.validate(&long_value),
+            CredentialType::AnthropicApiKey.validate(&long_value),
             Err(CredentialError::ValueTooLong)
         ));
     }
@@ -896,6 +1159,10 @@ mod tests {
         assert_eq!(
             "anthropic_api_key".parse::<CredentialType>().unwrap(),
             CredentialType::AnthropicApiKey
+        );
+        assert_eq!(
+            "openai_codex_oauth".parse::<CredentialType>().unwrap(),
+            CredentialType::OpenaiCodexOauth
         );
         assert_eq!(
             "gemini".parse::<CredentialType>().unwrap(),

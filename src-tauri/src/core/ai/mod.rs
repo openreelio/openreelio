@@ -59,8 +59,8 @@ pub use provider::{
     TokenUsage,
 };
 pub use providers::{
-    create_provider, AnthropicProvider, GeminiProvider, LocalProvider, OpenAIProvider,
-    ProviderConfig, ProviderStatus, ProviderType,
+    create_provider, AnthropicProvider, GeminiProvider, LocalProvider, OpenAICodexProvider,
+    OpenAIProvider, ProviderConfig, ProviderStatus, ProviderType,
 };
 pub use streaming::{
     clear_streaming_provider_config, set_streaming_provider_config, StreamEvent, StreamMessage,

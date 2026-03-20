@@ -375,9 +375,11 @@ mod tests {
         let config = ProviderConfig {
             provider_type: super::super::ProviderType::Anthropic,
             api_key: None,
+            oauth_credential: None,
             base_url: None,
             model: None,
             timeout_secs: None,
+            auth_mode: None,
         };
         let result = AnthropicProvider::new(config);
 

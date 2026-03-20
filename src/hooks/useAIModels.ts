@@ -237,6 +237,7 @@ function getFallbackModels(provider: ProviderType): string[] {
   switch (provider) {
     case 'openai':
       return [
+        'gpt-5.4',
         'gpt-5.2',
         'gpt-5.1',
         'gpt-5-mini',
@@ -284,7 +285,7 @@ function getFallbackModels(provider: ProviderType): string[] {
 export function getDefaultModel(provider: ProviderType): string {
   switch (provider) {
     case 'openai':
-      return 'gpt-5.2';
+      return 'gpt-5.4';
     case 'anthropic':
       return 'claude-sonnet-4-5-20251015';
     case 'gemini':

@@ -20,7 +20,12 @@ import { useAIStore } from '@/stores/aiStore';
 const logger = createLogger('useCredentials');
 
 /** Supported credential provider types */
-export type CredentialProvider = 'openai' | 'anthropic' | 'google' | 'seedance';
+export type CredentialProvider =
+  | 'openai'
+  | 'openai_codex_oauth'
+  | 'anthropic'
+  | 'google'
+  | 'seedance';
 
 /**
  * Maps credential provider to AI provider type for cache invalidation
@@ -28,6 +33,7 @@ export type CredentialProvider = 'openai' | 'anthropic' | 'google' | 'seedance';
 function mapProviderToAIProvider(provider: CredentialProvider): 'openai' | 'anthropic' | 'gemini' | undefined {
   switch (provider) {
     case 'openai':
+    case 'openai_codex_oauth':
       return 'openai';
     case 'anthropic':
       return 'anthropic';
@@ -43,6 +49,8 @@ function mapProviderToAIProvider(provider: CredentialProvider): 'openai' | 'anth
 /** Status of credentials for each provider */
 export interface CredentialStatus {
   openai: boolean;
+  openaiApiKey: boolean;
+  openaiCodexOauth: boolean;
   anthropic: boolean;
   google: boolean;
   seedance: boolean;
@@ -121,6 +129,8 @@ export type UseCredentialsReturn = UseCredentialsState & UseCredentialsActions;
 export function useCredentials(): UseCredentialsReturn {
   const [status, setStatus] = useState<CredentialStatus>({
     openai: false,
+    openaiApiKey: false,
+    openaiCodexOauth: false,
     anthropic: false,
     google: false,
     seedance: false,

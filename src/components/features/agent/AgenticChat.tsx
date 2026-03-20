@@ -163,6 +163,10 @@ export const AgenticChat = forwardRef<AgenticChatHandle, AgenticChatProps>(funct
     const userInput = input.trim();
     setInput('');
 
+    // Create the session eagerly so the sidebar session list and persistence
+    // become visible before the first agent round-trip starts.
+    await useConversationStore.getState().ensureSession('editor');
+
     addUserMessage(userInput);
     onSubmit?.(userInput);
 

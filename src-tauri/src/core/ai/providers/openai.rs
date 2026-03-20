@@ -39,6 +39,7 @@ impl OpenAIProvider {
 
     /// Available GPT models (2026)
     pub const AVAILABLE_MODELS: &'static [&'static str] = &[
+        "gpt-5.4",
         "gpt-5.2",
         "gpt-5.1",
         "gpt-5-mini",
@@ -66,7 +67,7 @@ impl OpenAIProvider {
             .base_url
             .unwrap_or_else(|| Self::DEFAULT_BASE_URL.to_string());
 
-        let default_model = config.model.unwrap_or_else(|| "gpt-5.2".to_string());
+        let default_model = config.model.unwrap_or_else(|| "gpt-5.4".to_string());
         let timeout_secs = config.timeout_secs.unwrap_or(60);
 
         #[cfg(feature = "ai-providers")]
@@ -196,6 +197,18 @@ struct ApiErrorDetail {
     message: String,
     #[serde(rename = "type")]
     error_type: Option<String>,
+}
+
+#[cfg_attr(not(feature = "ai-providers"), allow(dead_code))]
+#[derive(Deserialize)]
+struct ModelsListResponse {
+    data: Vec<ModelDescriptor>,
+}
+
+#[cfg_attr(not(feature = "ai-providers"), allow(dead_code))]
+#[derive(Deserialize)]
+struct ModelDescriptor {
+    id: String,
 }
 
 // =============================================================================
@@ -416,6 +429,62 @@ impl AIProvider for OpenAIProvider {
     }
 }
 
+impl OpenAIProvider {
+    fn parse_available_models_response(body: &str) -> CoreResult<Vec<String>> {
+        let parsed = serde_json::from_str::<ModelsListResponse>(body).map_err(|e| {
+            CoreError::AIRequestFailed(format!("Failed to parse OpenAI models response: {}", e))
+        })?;
+
+        let mut models = parsed
+            .data
+            .into_iter()
+            .map(|model| model.id)
+            .filter(|id| {
+                id.starts_with("gpt-")
+                    || id.starts_with("o1")
+                    || id.starts_with("o3")
+                    || id.starts_with("o4")
+            })
+            .collect::<Vec<_>>();
+
+        models.sort();
+        models.dedup();
+
+        if models.is_empty() {
+            return Ok(Self::available_models());
+        }
+
+        Ok(models)
+    }
+
+    #[cfg(feature = "ai-providers")]
+    pub async fn fetch_available_models(&self) -> CoreResult<Vec<String>> {
+        let url = format!("{}/models", self.base_url);
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await
+            .map_err(|e| CoreError::AIRequestFailed(format!("Failed to fetch models: {}", e)))?;
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .map_err(|e| CoreError::AIRequestFailed(format!("Failed to read models response: {}", e)))?;
+
+        if !status.is_success() {
+            return Err(CoreError::AIRequestFailed(format!(
+                "OpenAI models request failed ({}): {}",
+                status, body
+            )));
+        }
+
+        Self::parse_available_models_response(&body)
+    }
+}
+
 // =============================================================================
 // Tests
 // =============================================================================
@@ -446,9 +515,11 @@ mod tests {
         let config = ProviderConfig {
             provider_type: super::super::ProviderType::OpenAI,
             api_key: None,
+            oauth_credential: None,
             base_url: None,
             model: None,
             timeout_secs: None,
+            auth_mode: None,
         };
         let result = OpenAIProvider::new(config);
 
@@ -475,7 +546,40 @@ mod tests {
     #[test]
     fn test_available_models() {
         let models = OpenAIProvider::available_models();
-        assert!(models.contains(&"gpt-5.2".to_string()));
+        assert!(models.contains(&"gpt-5.4".to_string()));
         assert!(models.contains(&"gpt-4.1".to_string()));
+    }
+
+    #[test]
+    fn test_parse_available_models_response_filters_and_dedupes() {
+        let models = OpenAIProvider::parse_available_models_response(
+            r#"{
+              "data": [
+                {"id": "gpt-5.4"},
+                {"id": "o4-mini"},
+                {"id": "whisper-1"},
+                {"id": "gpt-5.4"}
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(models, vec!["gpt-5.4".to_string(), "o4-mini".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_available_models_response_falls_back_when_no_supported_models() {
+        let models = OpenAIProvider::parse_available_models_response(
+            r#"{
+              "data": [
+                {"id": "whisper-1"},
+                {"id": "text-embedding-3-large"}
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        assert!(models.contains(&"gpt-5.4".to_string()));
+        assert!(models.contains(&"o3".to_string()));
     }
 }

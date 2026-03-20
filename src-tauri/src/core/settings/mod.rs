@@ -671,7 +671,7 @@ fn default_primary_model() -> String {
 
 fn default_model_for_provider(provider: ProviderType) -> String {
     match provider {
-        ProviderType::OpenAI => "gpt-5.2".to_string(),
+        ProviderType::OpenAI => "gpt-5.4".to_string(),
         ProviderType::Anthropic => "claude-sonnet-4-5-20251015".to_string(),
         ProviderType::Gemini => "gemini-3-flash-preview".to_string(),
         ProviderType::Local => "llama3.2".to_string(),
@@ -765,6 +765,12 @@ impl AISettings {
         self.primary_model = self.primary_model.trim().to_string();
         if self.primary_model.is_empty() {
             self.primary_model = default_model_for_provider(self.primary_provider);
+        } else if self.primary_provider == ProviderType::OpenAI
+            && self.primary_model == "gpt-5.2"
+        {
+            // Migrate the old OpenAI default forward without overriding
+            // deliberate user selections.
+            self.primary_model = "gpt-5.4".to_string();
         } else if let Some(inferred) = infer_provider_from_model_name(&self.primary_model) {
             if inferred != self.primary_provider {
                 warn!(
@@ -1209,7 +1215,20 @@ mod tests {
 
         ai_settings.normalize();
 
-        assert_eq!(ai_settings.primary_model, "gpt-5.2");
+        assert_eq!(ai_settings.primary_model, "gpt-5.4");
+    }
+
+    #[test]
+    fn test_ai_settings_normalization_migrates_old_openai_default() {
+        let mut ai_settings = AISettings {
+            primary_provider: ProviderType::OpenAI,
+            primary_model: "gpt-5.2".to_string(),
+            ..Default::default()
+        };
+
+        ai_settings.normalize();
+
+        assert_eq!(ai_settings.primary_model, "gpt-5.4");
     }
 
     #[test]
