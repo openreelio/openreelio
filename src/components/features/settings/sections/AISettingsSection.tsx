@@ -15,7 +15,11 @@ import React, { useCallback, useState, useEffect } from 'react';
 import type { AISettings, ProviderType, ProposalReviewMode } from '@/stores/settingsStore';
 import { CostControlPanel } from './CostControlPanel';
 import { useAIModels, getDefaultModel } from '@/hooks/useAIModels';
-import { useCredentials, type CredentialProvider } from '@/hooks/useCredentials';
+import {
+  useCredentials,
+  type CodexAuthStatus,
+  type CredentialProvider,
+} from '@/hooks/useCredentials';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
 
 // =============================================================================
@@ -348,6 +352,90 @@ const SecureApiKeyInput: React.FC<SecureApiKeyInputProps> = ({
   );
 };
 
+interface CodexImportHintProps {
+  disabled?: boolean;
+}
+
+const CodexImportHint: React.FC<CodexImportHintProps> = ({ disabled }) => {
+  const { getCodexAuthStatus, importCodexAuth, isSaving } = useCredentials();
+  const [status, setStatus] = useState<CodexAuthStatus | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
+  const [isChecking, setIsChecking] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        setIsChecking(true);
+        const nextStatus = await getCodexAuthStatus();
+        if (!cancelled) {
+          setStatus(nextStatus);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setMessage(err instanceof Error ? err.message : 'Failed to inspect Codex auth');
+        }
+      } finally {
+        if (!cancelled) {
+          setIsChecking(false);
+        }
+      }
+    };
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [getCodexAuthStatus]);
+
+  if (isChecking) {
+    return <p className="text-xs text-editor-text-muted">Checking for Codex auth…</p>;
+  }
+
+  if (!status?.hasAuthFile) {
+    return <p className="text-xs text-editor-text-muted">No local Codex auth file detected.</p>;
+  }
+
+  const handleImport = async () => {
+    try {
+      const result = await importCodexAuth();
+      setMessage(result.message);
+      setStatus({
+        hasAuthFile: result.hasAuthFile,
+        hasOpenaiApiKey: result.hasOpenaiApiKey,
+        hasAccessToken: result.hasAccessToken,
+      });
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Failed to import Codex auth');
+    }
+  };
+
+  return (
+    <div className="mt-2 rounded border border-editor-border bg-editor-bg px-3 py-2 space-y-2">
+      <p className="text-xs text-editor-text-muted">
+        Codex auth detected.
+        {status.hasOpenaiApiKey
+          ? ' An OpenAI API key is available for import.'
+          : status.hasAccessToken
+            ? ' Only a Codex session token is available, which OpenReelio cannot use directly with api.openai.com.'
+            : ' No OpenAI API key was found in the Codex auth file.'}
+      </p>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={handleImport}
+          disabled={disabled || isSaving || !status.hasOpenaiApiKey}
+          className="px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text hover:bg-editor-bg-hover disabled:opacity-50"
+        >
+          {isSaving ? 'Importing...' : 'Import from Codex'}
+        </button>
+      </div>
+      {message && <p className="text-xs text-editor-text-muted">{message}</p>}
+    </div>
+  );
+};
+
 // =============================================================================
 // Main Component
 // =============================================================================
@@ -481,6 +569,7 @@ export const AISettingsSection: React.FC<AISettingsSectionProps> = ({
           placeholder={placeholder}
           disabled={disabled}
         />
+        {credentialProvider === 'openai' && <CodexImportHint disabled={disabled} />}
       </div>
     );
   };

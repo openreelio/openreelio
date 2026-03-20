@@ -2016,20 +2016,6 @@ pub async fn sync_ai_from_vault(
     let api_key = if let Some(cred_type) = credential_type {
         let vault_path = app_data_dir.join("credentials.vault");
 
-        if !vault_path.exists() {
-            tracing::warn!("Credential vault does not exist, provider not configured");
-            return Ok(ProviderStatusDto {
-                provider_type: Some(ai_provider_type.to_string()),
-                is_configured: false,
-                is_available: false,
-                current_model: Some(model),
-                available_models: vec![],
-                error_message: Some(
-                    "No API key configured. Please set your API key in Settings.".to_string(),
-                ),
-            });
-        }
-
         let mut guard = state.credential_vault.lock().await;
         if guard.is_none() {
             *guard = Some(
@@ -2041,8 +2027,31 @@ pub async fn sync_ai_from_vault(
             .as_ref()
             .ok_or_else(|| "Credential vault unavailable".to_string())?;
 
+        if cred_type == CredentialType::OpenaiApiKey && !vault.exists(cred_type).await {
+            if let Some(imported_api_key) = crate::core::credentials::codex_openai_api_key()
+                .map_err(|e| format!("Failed to read Codex auth: {}", e))?
+            {
+                vault
+                    .store(cred_type, &imported_api_key)
+                    .await
+                    .map_err(|e| format!("Failed to import Codex credential: {}", e))?;
+                tracing::info!("Imported OpenAI API key from Codex during provider sync");
+            }
+        }
+
         // Check if credential exists
         if !vault.exists(cred_type).await {
+            let error_message = if cred_type == CredentialType::OpenaiApiKey {
+                let codex_status = crate::core::credentials::codex_auth_status();
+                if codex_status.has_access_token && !codex_status.has_openai_api_key {
+                    "Codex is signed in, but auth.json only contains a session token. OpenReelio still needs an OpenAI API key for api.openai.com.".to_string()
+                } else {
+                    "No API key configured. Please set your API key in Settings.".to_string()
+                }
+            } else {
+                "No API key configured. Please set your API key in Settings.".to_string()
+            };
+
             tracing::warn!("No API key found in vault for provider {:?}", provider_type);
             return Ok(ProviderStatusDto {
                 provider_type: Some(ai_provider_type.to_string()),
@@ -2050,9 +2059,7 @@ pub async fn sync_ai_from_vault(
                 is_available: false,
                 current_model: Some(model),
                 available_models: vec![],
-                error_message: Some(
-                    "No API key configured. Please set your API key in Settings.".to_string(),
-                ),
+                error_message: Some(error_message),
             });
         }
 

@@ -182,6 +182,90 @@ pub enum CredentialError {
 /// Result type for credential operations
 pub type CredentialResult<T> = Result<T, CredentialError>;
 
+/// Minimal status for a local Codex auth store.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodexAuthStatus {
+    pub has_auth_file: bool,
+    pub has_openai_api_key: bool,
+    pub has_access_token: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexAuthFile {
+    #[serde(rename = "OPENAI_API_KEY")]
+    openai_api_key: Option<String>,
+    tokens: Option<CodexTokens>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexTokens {
+    access_token: Option<String>,
+}
+
+/// Returns the default local Codex auth file path.
+pub fn codex_auth_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("~"))
+        .join(".codex")
+        .join("auth.json")
+}
+
+/// Reads the local Codex auth file status without exposing any token values.
+pub fn codex_auth_status() -> CodexAuthStatus {
+    codex_auth_status_at(&codex_auth_path())
+}
+
+/// Reads an OpenAI API key from the local Codex auth file when one is present.
+pub fn codex_openai_api_key() -> CredentialResult<Option<String>> {
+    codex_openai_api_key_at(&codex_auth_path())
+}
+
+fn codex_auth_status_at(path: &Path) -> CodexAuthStatus {
+    let auth = match load_codex_auth(path) {
+        Ok(Some(auth)) => auth,
+        Ok(None) | Err(_) => return CodexAuthStatus::default(),
+    };
+
+    CodexAuthStatus {
+        has_auth_file: true,
+        has_openai_api_key: auth
+            .openai_api_key
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty()),
+        has_access_token: auth
+            .tokens
+            .as_ref()
+            .and_then(|tokens| tokens.access_token.as_deref())
+            .is_some_and(|value| !value.trim().is_empty()),
+    }
+}
+
+fn codex_openai_api_key_at(path: &Path) -> CredentialResult<Option<String>> {
+    let Some(auth) = load_codex_auth(path)? else {
+        return Ok(None);
+    };
+
+    Ok(auth.openai_api_key.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }))
+}
+
+fn load_codex_auth(path: &Path) -> CredentialResult<Option<CodexAuthFile>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let data = std::fs::read(path)?;
+    let parsed = serde_json::from_slice::<CodexAuthFile>(&data)
+        .map_err(|e| CredentialError::SerializationError(format!("Failed to parse Codex auth.json: {}", e)))?;
+    Ok(Some(parsed))
+}
+
 /// Secure credential vault using encryption at rest
 ///
 /// This implementation uses a layered security approach:
@@ -879,5 +963,55 @@ mod tests {
             .await
             .unwrap();
         assert!(value.starts_with("sk-test-"));
+    }
+
+    #[test]
+    fn test_codex_auth_status_with_api_key() {
+        let temp_dir = TempDir::new().unwrap();
+        let auth_path = temp_dir.path().join("auth.json");
+
+        std::fs::write(
+            &auth_path,
+            r#"{
+              "OPENAI_API_KEY": "sk-test-codex",
+              "tokens": {
+                "access_token": "access-token"
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let status = codex_auth_status_at(&auth_path);
+        assert!(status.has_auth_file);
+        assert!(status.has_openai_api_key);
+        assert!(status.has_access_token);
+
+        let imported = codex_openai_api_key_at(&auth_path).unwrap();
+        assert_eq!(imported.as_deref(), Some("sk-test-codex"));
+    }
+
+    #[test]
+    fn test_codex_auth_status_with_token_only() {
+        let temp_dir = TempDir::new().unwrap();
+        let auth_path = temp_dir.path().join("auth.json");
+
+        std::fs::write(
+            &auth_path,
+            r#"{
+              "OPENAI_API_KEY": null,
+              "tokens": {
+                "access_token": "access-token"
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let status = codex_auth_status_at(&auth_path);
+        assert!(status.has_auth_file);
+        assert!(!status.has_openai_api_key);
+        assert!(status.has_access_token);
+
+        let imported = codex_openai_api_key_at(&auth_path).unwrap();
+        assert!(imported.is_none());
     }
 }

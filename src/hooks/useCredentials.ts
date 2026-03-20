@@ -48,6 +48,20 @@ export interface CredentialStatus {
   seedance: boolean;
 }
 
+export interface CodexAuthStatus {
+  hasAuthFile: boolean;
+  hasOpenaiApiKey: boolean;
+  hasAccessToken: boolean;
+}
+
+export interface ImportCodexAuthResult {
+  imported: boolean;
+  hasAuthFile: boolean;
+  hasOpenaiApiKey: boolean;
+  hasAccessToken: boolean;
+  message: string;
+}
+
 /** Hook state */
 interface UseCredentialsState {
   /** Status of each credential */
@@ -68,6 +82,10 @@ interface UseCredentialsActions {
   hasCredential: (provider: CredentialProvider) => Promise<boolean>;
   /** Delete a credential */
   deleteCredential: (provider: CredentialProvider) => Promise<void>;
+  /** Read local Codex auth availability */
+  getCodexAuthStatus: () => Promise<CodexAuthStatus>;
+  /** Import OpenAI API key from local Codex auth */
+  importCodexAuth: () => Promise<ImportCodexAuthResult>;
   /** Refresh credential status */
   refreshStatus: () => Promise<void>;
   /** Clear any error */
@@ -228,6 +246,45 @@ export function useCredentials(): UseCredentialsReturn {
     [refreshStatus]
   );
 
+  const getCodexAuthStatus = useCallback(async (): Promise<CodexAuthStatus> => {
+    try {
+      return await invoke<CodexAuthStatus>('get_codex_auth_status');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error('Failed to read Codex auth status', { error: message });
+      throw new Error(message);
+    }
+  }, []);
+
+  const importCodexAuth = useCallback(async (): Promise<ImportCodexAuthResult> => {
+    try {
+      setIsSaving(true);
+      setError(null);
+
+      const result = await invoke<ImportCodexAuthResult>('import_codex_auth');
+      await refreshStatus();
+
+      if (result.imported) {
+        invalidateModelCache('openai');
+        try {
+          await useAIStore.getState().syncFromSettings();
+          logger.info('AI provider synced after Codex import');
+        } catch (syncError) {
+          logger.warn('Failed to sync AI provider after Codex import', { syncError });
+        }
+      }
+
+      return result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error('Failed to import Codex auth', { error: message });
+      setError(message);
+      throw new Error(message);
+    } finally {
+      setIsSaving(false);
+    }
+  }, [refreshStatus]);
+
   /**
    * Clears the current error
    */
@@ -248,6 +305,8 @@ export function useCredentials(): UseCredentialsReturn {
     storeCredential,
     hasCredential,
     deleteCredential,
+    getCodexAuthStatus,
+    importCodexAuth,
     refreshStatus,
     clearError,
   };
