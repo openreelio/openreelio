@@ -473,6 +473,8 @@ pub struct CodexAuthStatusDto {
     pub has_auth_file: bool,
     pub has_openai_api_key: bool,
     pub has_access_token: bool,
+    pub has_refresh_token: bool,
+    pub can_exchange_oauth: bool,
 }
 
 /// Result of attempting to import OpenAI credentials from Codex.
@@ -483,6 +485,8 @@ pub struct ImportCodexAuthResultDto {
     pub has_auth_file: bool,
     pub has_openai_api_key: bool,
     pub has_access_token: bool,
+    pub has_refresh_token: bool,
+    pub can_exchange_oauth: bool,
     pub message: String,
 }
 
@@ -933,6 +937,8 @@ pub async fn get_codex_auth_status() -> Result<CodexAuthStatusDto, String> {
         has_auth_file: status.has_auth_file,
         has_openai_api_key: status.has_openai_api_key,
         has_access_token: status.has_access_token,
+        has_refresh_token: status.has_refresh_token,
+        can_exchange_oauth: status.can_exchange_oauth,
     })
 }
 
@@ -952,6 +958,8 @@ pub async fn import_codex_auth(
             has_auth_file: false,
             has_openai_api_key: false,
             has_access_token: false,
+            has_refresh_token: false,
+            can_exchange_oauth: false,
             message: format!(
                 "Codex auth file not found at {}.",
                 codex_path.display()
@@ -959,13 +967,15 @@ pub async fn import_codex_auth(
         });
     }
 
-    let Some(api_key) = crate::core::credentials::codex_openai_api_key()
-        .map_err(|e| format!("Failed to read Codex auth: {}", e))?
+    let Some(resolved) = crate::core::credentials::codex_exchange_api_key()
+        .map_err(|e| format!("Failed to resolve Codex auth: {}", e))?
     else {
-        let message = if status.has_access_token {
-            "Codex auth.json contains a session token but no OpenAI API key. OpenReelio's OpenAI provider still requires an API key for api.openai.com."
+        let message = if status.can_exchange_oauth {
+            "Codex auth was detected but OpenReelio could not exchange it into a usable OpenAI runtime key."
+        } else if status.has_access_token {
+            "Codex auth.json contains an access token but no reusable refresh token or API key."
         } else {
-            "Codex auth.json does not contain an OpenAI API key."
+            "Codex auth.json does not contain reusable OpenAI credentials."
         };
 
         return Ok(ImportCodexAuthResultDto {
@@ -973,6 +983,8 @@ pub async fn import_codex_auth(
             has_auth_file: true,
             has_openai_api_key: false,
             has_access_token: status.has_access_token,
+            has_refresh_token: status.has_refresh_token,
+            can_exchange_oauth: status.can_exchange_oauth,
             message: message.to_string(),
         });
     };
@@ -992,19 +1004,23 @@ pub async fn import_codex_auth(
         .ok_or_else(|| "Credential vault unavailable".to_string())?;
 
     vault
-        .store(CredentialType::OpenaiApiKey, &api_key)
+        .store(CredentialType::OpenaiApiKey, &resolved.api_key)
         .await
         .map_err(|e| format!("Failed to store imported Codex credential: {}", e))?;
 
-    tracing::info!("Imported OpenAI API key from Codex auth.json");
+    tracing::info!("Imported OpenAI API key from Codex auth via {}", resolved.mode);
 
     Ok(ImportCodexAuthResultDto {
         imported: true,
         has_auth_file: true,
-        has_openai_api_key: true,
+        has_openai_api_key: status.has_openai_api_key,
         has_access_token: status.has_access_token,
-        message: "Imported OpenAI API key from Codex into the encrypted credential vault."
-            .to_string(),
+        has_refresh_token: status.has_refresh_token,
+        can_exchange_oauth: status.can_exchange_oauth,
+        message: format!(
+            "Imported OpenAI credential from Codex into the encrypted credential vault via {}.",
+            resolved.mode
+        ),
     })
 }
 

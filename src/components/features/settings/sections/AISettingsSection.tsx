@@ -405,6 +405,8 @@ const CodexImportHint: React.FC<CodexImportHintProps> = ({ disabled }) => {
         hasAuthFile: result.hasAuthFile,
         hasOpenaiApiKey: result.hasOpenaiApiKey,
         hasAccessToken: result.hasAccessToken,
+        hasRefreshToken: result.hasRefreshToken,
+        canExchangeOauth: result.canExchangeOauth,
       });
     } catch (err) {
       setMessage(err instanceof Error ? err.message : 'Failed to import Codex auth');
@@ -417,15 +419,17 @@ const CodexImportHint: React.FC<CodexImportHintProps> = ({ disabled }) => {
         Codex auth detected.
         {status.hasOpenaiApiKey
           ? ' An OpenAI API key is available for import.'
-          : status.hasAccessToken
-            ? ' Only a Codex session token is available, which OpenReelio cannot use directly with api.openai.com.'
+          : status.canExchangeOauth
+            ? ' Codex CLI OAuth can be exchanged into a reusable OpenAI runtime key and imported.'
+            : status.hasAccessToken
+            ? ' Codex auth exists, but it does not include a reusable refresh token or API key.'
             : ' No OpenAI API key was found in the Codex auth file.'}
       </p>
       <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={handleImport}
-          disabled={disabled || isSaving || !status.hasOpenaiApiKey}
+          disabled={disabled || isSaving || (!status.hasOpenaiApiKey && !status.canExchangeOauth)}
           className="px-3 py-2 rounded bg-editor-bg border border-editor-border text-editor-text hover:bg-editor-bg-hover disabled:opacity-50"
         >
           {isSaving ? 'Importing...' : 'Import from Codex'}

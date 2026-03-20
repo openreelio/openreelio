@@ -28,6 +28,7 @@
     "prepare": "husky"
   },
   "dependencies": {
+    "@mariozechner/pi-ai": "^0.60.0",
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "immer": "^10.1.1",

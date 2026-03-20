@@ -33,6 +33,7 @@ use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
@@ -188,6 +189,8 @@ pub struct CodexAuthStatus {
     pub has_auth_file: bool,
     pub has_openai_api_key: bool,
     pub has_access_token: bool,
+    pub has_refresh_token: bool,
+    pub can_exchange_oauth: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,6 +203,38 @@ struct CodexAuthFile {
 #[derive(Debug, Deserialize)]
 struct CodexTokens {
     access_token: Option<String>,
+    refresh_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexHelperStatus {
+    #[serde(rename = "hasAuthFile")]
+    has_auth_file: bool,
+    #[serde(rename = "hasOpenaiApiKey")]
+    has_openai_api_key: bool,
+    #[serde(rename = "hasAccessToken")]
+    has_access_token: bool,
+    #[serde(rename = "hasRefreshToken")]
+    has_refresh_token: bool,
+    #[serde(rename = "canExchangeOauth")]
+    can_exchange_oauth: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexHelperExchange {
+    ok: bool,
+    #[serde(rename = "apiKey")]
+    api_key: Option<String>,
+    mode: Option<String>,
+    source: Option<String>,
+    message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexResolvedApiKey {
+    pub api_key: String,
+    pub mode: String,
+    pub source: Option<String>,
 }
 
 /// Returns the default local Codex auth file path.
@@ -212,12 +247,49 @@ pub fn codex_auth_path() -> PathBuf {
 
 /// Reads the local Codex auth file status without exposing any token values.
 pub fn codex_auth_status() -> CodexAuthStatus {
+    if let Ok(Some(status)) = codex_helper_status() {
+        return CodexAuthStatus {
+            has_auth_file: status.has_auth_file,
+            has_openai_api_key: status.has_openai_api_key,
+            has_access_token: status.has_access_token,
+            has_refresh_token: status.has_refresh_token,
+            can_exchange_oauth: status.can_exchange_oauth,
+        };
+    }
     codex_auth_status_at(&codex_auth_path())
 }
 
 /// Reads an OpenAI API key from the local Codex auth file when one is present.
 pub fn codex_openai_api_key() -> CredentialResult<Option<String>> {
     codex_openai_api_key_at(&codex_auth_path())
+}
+
+pub fn codex_exchange_api_key() -> CredentialResult<Option<CodexResolvedApiKey>> {
+    let Some(result) = codex_helper_exchange()? else {
+        return Ok(None);
+    };
+
+    if !result.ok {
+        return Ok(None);
+    }
+
+    let api_key = result
+        .api_key
+        .and_then(|value| {
+            let trimmed = value.trim().to_string();
+            if trimmed.is_empty() { None } else { Some(trimmed) }
+        })
+        .ok_or_else(|| {
+            CredentialError::SerializationError(
+                "Codex helper reported success without an API key".to_string(),
+            )
+        })?;
+
+    Ok(Some(CodexResolvedApiKey {
+        api_key,
+        mode: result.mode.unwrap_or_else(|| "unknown".to_string()),
+        source: result.source,
+    }))
 }
 
 fn codex_auth_status_at(path: &Path) -> CodexAuthStatus {
@@ -237,6 +309,21 @@ fn codex_auth_status_at(path: &Path) -> CodexAuthStatus {
             .as_ref()
             .and_then(|tokens| tokens.access_token.as_deref())
             .is_some_and(|value| !value.trim().is_empty()),
+        has_refresh_token: auth
+            .tokens
+            .as_ref()
+            .and_then(|tokens| tokens.refresh_token.as_deref())
+            .is_some_and(|value| !value.trim().is_empty()),
+        can_exchange_oauth: auth
+            .tokens
+            .as_ref()
+            .and_then(|tokens| tokens.access_token.as_deref())
+            .is_some_and(|value| !value.trim().is_empty())
+            && auth
+                .tokens
+                .as_ref()
+                .and_then(|tokens| tokens.refresh_token.as_deref())
+                .is_some_and(|value| !value.trim().is_empty()),
     }
 }
 
@@ -263,6 +350,60 @@ fn load_codex_auth(path: &Path) -> CredentialResult<Option<CodexAuthFile>> {
     let data = std::fs::read(path)?;
     let parsed = serde_json::from_slice::<CodexAuthFile>(&data)
         .map_err(|e| CredentialError::SerializationError(format!("Failed to parse Codex auth.json: {}", e)))?;
+    Ok(Some(parsed))
+}
+
+fn codex_helper_script_path() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("scripts")
+        .join("codex-auth-exchange.mjs")
+}
+
+fn run_codex_helper(command: &str) -> CredentialResult<String> {
+    let script_path = codex_helper_script_path();
+    if !script_path.exists() {
+        return Err(CredentialError::NotFound(format!(
+            "Codex helper script not found: {}",
+            script_path.display()
+        )));
+    }
+
+    let output = Command::new("node")
+        .arg(script_path)
+        .arg(command)
+        .output()
+        .map_err(|e| CredentialError::InitializationFailed(format!("Failed to execute Codex helper: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(CredentialError::InitializationFailed(if stderr.is_empty() {
+            format!("Codex helper exited with status {}", output.status)
+        } else {
+            format!("Codex helper failed: {}", stderr)
+        }));
+    }
+
+    String::from_utf8(output.stdout)
+        .map_err(|e| CredentialError::SerializationError(format!("Codex helper output was not UTF-8: {}", e)))
+}
+
+fn codex_helper_status() -> CredentialResult<Option<CodexHelperStatus>> {
+    let stdout = run_codex_helper("status")?;
+    let parsed = serde_json::from_str::<CodexHelperStatus>(&stdout).map_err(|e| {
+        CredentialError::SerializationError(format!("Failed to parse Codex helper status: {}", e))
+    })?;
+    Ok(Some(parsed))
+}
+
+fn codex_helper_exchange() -> CredentialResult<Option<CodexHelperExchange>> {
+    let stdout = run_codex_helper("exchange")?;
+    let parsed = serde_json::from_str::<CodexHelperExchange>(&stdout).map_err(|e| {
+        CredentialError::SerializationError(format!("Failed to parse Codex helper exchange: {}", e))
+    })?;
+    if !parsed.ok && parsed.message.is_none() {
+        return Ok(None);
+    }
     Ok(Some(parsed))
 }
 
@@ -985,6 +1126,8 @@ mod tests {
         assert!(status.has_auth_file);
         assert!(status.has_openai_api_key);
         assert!(status.has_access_token);
+        assert!(!status.has_refresh_token);
+        assert!(!status.can_exchange_oauth);
 
         let imported = codex_openai_api_key_at(&auth_path).unwrap();
         assert_eq!(imported.as_deref(), Some("sk-test-codex"));
@@ -1010,6 +1153,8 @@ mod tests {
         assert!(status.has_auth_file);
         assert!(!status.has_openai_api_key);
         assert!(status.has_access_token);
+        assert!(!status.has_refresh_token);
+        assert!(!status.can_exchange_oauth);
 
         let imported = codex_openai_api_key_at(&auth_path).unwrap();
         assert!(imported.is_none());

@@ -2028,14 +2028,17 @@ pub async fn sync_ai_from_vault(
             .ok_or_else(|| "Credential vault unavailable".to_string())?;
 
         if cred_type == CredentialType::OpenaiApiKey && !vault.exists(cred_type).await {
-            if let Some(imported_api_key) = crate::core::credentials::codex_openai_api_key()
+            if let Some(resolved) = crate::core::credentials::codex_exchange_api_key()
                 .map_err(|e| format!("Failed to read Codex auth: {}", e))?
             {
                 vault
-                    .store(cred_type, &imported_api_key)
+                    .store(cred_type, &resolved.api_key)
                     .await
                     .map_err(|e| format!("Failed to import Codex credential: {}", e))?;
-                tracing::info!("Imported OpenAI API key from Codex during provider sync");
+                tracing::info!(
+                    "Imported OpenAI API key from Codex during provider sync via {}",
+                    resolved.mode
+                );
             }
         }
 
@@ -2043,8 +2046,10 @@ pub async fn sync_ai_from_vault(
         if !vault.exists(cred_type).await {
             let error_message = if cred_type == CredentialType::OpenaiApiKey {
                 let codex_status = crate::core::credentials::codex_auth_status();
-                if codex_status.has_access_token && !codex_status.has_openai_api_key {
-                    "Codex is signed in, but auth.json only contains a session token. OpenReelio still needs an OpenAI API key for api.openai.com.".to_string()
+                if codex_status.can_exchange_oauth {
+                    "Codex auth was detected, but OpenReelio could not exchange it into a usable OpenAI runtime key.".to_string()
+                } else if codex_status.has_access_token {
+                    "Codex auth.json contains an access token but no reusable refresh token or API key.".to_string()
                 } else {
                     "No API key configured. Please set your API key in Settings.".to_string()
                 }

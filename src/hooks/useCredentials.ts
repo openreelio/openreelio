@@ -52,6 +52,8 @@ export interface CodexAuthStatus {
   hasAuthFile: boolean;
   hasOpenaiApiKey: boolean;
   hasAccessToken: boolean;
+  hasRefreshToken: boolean;
+  canExchangeOauth: boolean;
 }
 
 export interface ImportCodexAuthResult {
@@ -59,6 +61,8 @@ export interface ImportCodexAuthResult {
   hasAuthFile: boolean;
   hasOpenaiApiKey: boolean;
   hasAccessToken: boolean;
+  hasRefreshToken: boolean;
+  canExchangeOauth: boolean;
   message: string;
 }
 
