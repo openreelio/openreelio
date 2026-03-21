@@ -1128,6 +1128,7 @@ export type EffectType =
   | 'gamma'
   | 'levels'
   | 'curves'
+  | 'temperature_tint' // White balance (temperature + tint)
   | 'lut'
   // Transform effects
   | 'crop'
@@ -1303,6 +1304,7 @@ export function getEffectCategory(effectType: EffectType): EffectCategory {
     case 'gamma':
     case 'levels':
     case 'curves':
+    case 'temperature_tint':
     case 'lut':
       return 'color';
 
@@ -1408,6 +1410,7 @@ export const EFFECT_TYPE_LABELS: Partial<Record<string, string>> = {
   gamma: 'Gamma',
   levels: 'Levels',
   curves: 'Curves',
+  temperature_tint: 'Temperature / Tint',
   lut: 'LUT',
   crop: 'Crop',
   flip: 'Flip',

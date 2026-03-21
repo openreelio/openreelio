@@ -53,11 +53,38 @@ Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
   writable: true,
   value: vi.fn(() => {
     return {
-      // minimal 2D context surface used by our components
+      // 2D context surface used by canvas-based components (CurveEditor, ColorCurvesPanel, etc.)
       fillStyle: '#000000',
+      strokeStyle: '#000000',
+      lineWidth: 1,
+      globalAlpha: 1.0,
       fillRect: vi.fn(),
-      drawImage: vi.fn(),
+      strokeRect: vi.fn(),
       clearRect: vi.fn(),
+      drawImage: vi.fn(),
+      beginPath: vi.fn(),
+      closePath: vi.fn(),
+      moveTo: vi.fn(),
+      lineTo: vi.fn(),
+      arc: vi.fn(),
+      stroke: vi.fn(),
+      fill: vi.fn(),
+      setLineDash: vi.fn(),
+      getLineDash: vi.fn(() => []),
+      measureText: vi.fn(() => ({ width: 0 })),
+      fillText: vi.fn(),
+      strokeText: vi.fn(),
+      save: vi.fn(),
+      restore: vi.fn(),
+      translate: vi.fn(),
+      scale: vi.fn(),
+      rotate: vi.fn(),
+      createLinearGradient: vi.fn(() => ({
+        addColorStop: vi.fn(),
+      })),
+      createRadialGradient: vi.fn(() => ({
+        addColorStop: vi.fn(),
+      })),
     } as unknown as CanvasRenderingContext2D;
   }),
 });

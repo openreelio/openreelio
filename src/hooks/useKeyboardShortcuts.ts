@@ -37,6 +37,7 @@ export interface UseKeyboardShortcutsOptions {
   onMatchFrame?: () => void;
   onReverseMatchFrame?: () => void;
   onToggleClipEnabled?: () => void;
+  onToggleColorComparison?: () => void;
   enabled?: boolean;
 }
 
@@ -69,6 +70,7 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
     onMatchFrame,
     onReverseMatchFrame,
     onToggleClipEnabled,
+    onToggleColorComparison,
     enabled = true,
   } = options;
 
@@ -357,6 +359,15 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
         return; // Always return, even if callback is absent
       }
 
+      // Toggle Color Comparison (Shift+D)
+      if (key.toLowerCase() === 'd' && shiftKey && !ctrl && !e.altKey) {
+        if (onToggleColorComparison) {
+          e.preventDefault();
+          onToggleColorComparison();
+        }
+        return;
+      }
+
       // Export
       if (key.toLowerCase() === 'e' && ctrl && shiftKey) {
         e.preventDefault();
@@ -385,6 +396,7 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       onMatchFrame,
       onReverseMatchFrame,
       onToggleClipEnabled,
+      onToggleColorComparison,
       undo,
       redo,
       saveProject,
@@ -448,6 +460,12 @@ export const KEYBOARD_SHORTCUTS = [
       { key: 'S', description: 'Split Clip' },
       { key: 'Delete', description: 'Delete Selected' },
       { key: 'Esc', description: 'Deselect All' },
+    ],
+  },
+  {
+    category: 'Color',
+    shortcuts: [
+      { key: 'Shift+D', description: 'Toggle Before/After Color Comparison' },
     ],
   },
 ];

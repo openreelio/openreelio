@@ -11,6 +11,153 @@ use crate::core::masks::MaskGroup;
 use crate::core::EffectId;
 
 // =============================================================================
+// Color Curves Types
+// =============================================================================
+
+/// A single control point on a color curve.
+///
+/// Both `x` (input) and `y` (output) are normalized to \[0.0, 1.0\].
+/// An identity (no-change) curve is the diagonal: `[(0,0), (1,1)]`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CurvePoint {
+    /// Input value (0.0–1.0)
+    pub x: f64,
+    /// Output value (0.0–1.0)
+    pub y: f64,
+}
+
+impl CurvePoint {
+    /// Creates a new curve point, clamping to \[0.0, 1.0\].
+    pub fn new(x: f64, y: f64) -> Self {
+        Self {
+            x: x.clamp(0.0, 1.0),
+            y: y.clamp(0.0, 1.0),
+        }
+    }
+}
+
+/// Returns the identity (no-change) curve: a straight diagonal.
+pub fn default_identity_curve() -> Vec<CurvePoint> {
+    vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)]
+}
+
+/// Serializes a curve point list to a JSON string for storage in `ParamValue::String`.
+pub fn curve_points_to_json(points: &[CurvePoint]) -> String {
+    serde_json::to_string(points).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Deserializes curve points from a JSON string.
+/// Returns the identity curve on parse failure.
+pub fn parse_curve_points(json: &str) -> Vec<CurvePoint> {
+    parse_curve_points_with_fallback(json, default_identity_curve())
+}
+
+/// Deserializes curve points from a JSON string using the provided fallback curve.
+///
+/// Returns the fallback when parsing fails or when fewer than two control points are present.
+pub fn parse_curve_points_with_fallback(json: &str, fallback: Vec<CurvePoint>) -> Vec<CurvePoint> {
+    match serde_json::from_str::<Vec<CurvePoint>>(json) {
+        Ok(points) if points.len() >= 2 => points
+            .into_iter()
+            .map(|point| CurvePoint::new(point.x, point.y))
+            .collect(),
+        _ => fallback,
+    }
+}
+
+/// Converts curve points to FFmpeg `curves` filter point format: `"x/y x/y x/y"`.
+///
+/// Points are sorted by x-coordinate and clamped to \[0.0, 1.0\].
+pub fn curve_points_to_ffmpeg(points: &[CurvePoint]) -> String {
+    let mut sorted: Vec<&CurvePoint> = points.iter().collect();
+    sorted.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+
+    sorted
+        .iter()
+        .map(|p| format!("{:.4}/{:.4}", p.x, p.y))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Returns true if the curve is effectively the identity diagonal.
+///
+/// An identity curve has exactly two points at (0,0) and (1,1), meaning
+/// input maps directly to output with no modification.
+pub fn is_identity_curve(points: &[CurvePoint]) -> bool {
+    if points.len() != 2 {
+        return false;
+    }
+    let p0 = &points[0];
+    let p1 = &points[1];
+    (p0.x - 0.0).abs() < 0.001
+        && (p0.y - 0.0).abs() < 0.001
+        && (p1.x - 1.0).abs() < 0.001
+        && (p1.y - 1.0).abs() < 0.001
+}
+
+/// Returns the flat identity curve for advanced curve types (Hue vs Hue, Hue vs Sat, Luma vs Sat).
+///
+/// A flat line at y=0.5 represents no change:
+/// - Hue vs Hue: no hue shift
+/// - Hue vs Sat: no saturation change
+/// - Luma vs Sat: no saturation change
+pub fn default_flat_curve() -> Vec<CurvePoint> {
+    vec![CurvePoint::new(0.0, 0.5), CurvePoint::new(1.0, 0.5)]
+}
+
+/// Returns true if the curve is a flat line at y=0.5 (no change for advanced curves).
+///
+/// Advanced curves (H/H, H/S, L/S) use y=0.5 as the neutral position,
+/// unlike RGB curves which use the diagonal [(0,0),(1,1)].
+pub fn is_flat_identity_curve(points: &[CurvePoint]) -> bool {
+    if points.len() != 2 {
+        return false;
+    }
+    let p0 = &points[0];
+    let p1 = &points[1];
+    (p0.x - 0.0).abs() < 0.001
+        && (p0.y - 0.5).abs() < 0.001
+        && (p1.x - 1.0).abs() < 0.001
+        && (p1.y - 0.5).abs() < 0.001
+}
+
+/// Linearly interpolate a curve value at a given x position.
+///
+/// Used to sample advanced curves at specific hue/luminance positions.
+/// Returns 0.5 (neutral) if curve is empty.
+pub fn sample_curve_at(points: &[CurvePoint], x: f64) -> f64 {
+    if points.is_empty() {
+        return 0.5;
+    }
+
+    let mut sorted: Vec<&CurvePoint> = points.iter().collect();
+    sorted.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Before first point
+    if x <= sorted[0].x {
+        return sorted[0].y;
+    }
+    // After last point
+    if x >= sorted[sorted.len() - 1].x {
+        return sorted[sorted.len() - 1].y;
+    }
+
+    // Linear interpolation between adjacent points
+    for i in 0..sorted.len() - 1 {
+        if x >= sorted[i].x && x <= sorted[i + 1].x {
+            let dx = sorted[i + 1].x - sorted[i].x;
+            if dx < 1e-10 {
+                return sorted[i + 1].y;
+            }
+            let t = (x - sorted[i].x) / dx;
+            return sorted[i].y + t * (sorted[i + 1].y - sorted[i].y);
+        }
+    }
+
+    0.5
+}
+
+// =============================================================================
 // Effect Types
 // =============================================================================
 
@@ -58,6 +205,7 @@ pub enum EffectType {
     Gamma,
     Levels,
     Curves,
+    TemperatureTint, // White balance (temperature + tint)
     Lut,
 
     // Transform effects
@@ -141,6 +289,7 @@ impl EffectType {
             | Self::Gamma
             | Self::Levels
             | Self::Curves
+            | Self::TemperatureTint
             | Self::Lut => EffectCategory::Color,
 
             Self::Crop | Self::Flip | Self::Mirror | Self::Rotate => EffectCategory::Transform,
@@ -548,6 +697,40 @@ impl Effect {
                 params.insert("lum_adjust".to_string(), ParamValue::Float(0.0)); // Luminance adjustment (-1.0 to 1.0)
                 params.insert("invert".to_string(), ParamValue::Bool(false)); // Invert selection
             }
+            EffectType::TemperatureTint => {
+                // White balance: temperature (blue↔orange) and tint (green↔magenta)
+                params.insert("temperature".to_string(), ParamValue::Float(0.0));
+                params.insert("tint".to_string(), ParamValue::Float(0.0));
+            }
+            EffectType::Curves => {
+                // RGB Color Curves — each channel stored as JSON-serialized Vec<CurvePoint>
+                let identity = curve_points_to_json(&default_identity_curve());
+                params.insert(
+                    "master_curve".to_string(),
+                    ParamValue::String(identity.clone()),
+                );
+                params.insert(
+                    "red_curve".to_string(),
+                    ParamValue::String(identity.clone()),
+                );
+                params.insert(
+                    "green_curve".to_string(),
+                    ParamValue::String(identity.clone()),
+                );
+                params.insert("blue_curve".to_string(), ParamValue::String(identity));
+
+                // Advanced curves — flat line at y=0.5 = no change
+                let flat = curve_points_to_json(&default_flat_curve());
+                params.insert(
+                    "hue_vs_hue_curve".to_string(),
+                    ParamValue::String(flat.clone()),
+                );
+                params.insert(
+                    "hue_vs_sat_curve".to_string(),
+                    ParamValue::String(flat.clone()),
+                );
+                params.insert("luma_vs_sat_curve".to_string(), ParamValue::String(flat));
+            }
             EffectType::LoudnessNormalize => {
                 // EBU R128 loudness normalization
                 params.insert("target_lufs".to_string(), ParamValue::Float(-14.0)); // Target integrated loudness (-70 to -5 LUFS)
@@ -654,6 +837,23 @@ impl Effect {
                 // Invert
                 ParamDef::boolean("invert", "Invert Selection", false),
             ],
+            EffectType::TemperatureTint => vec![
+                ParamDef::float("temperature", "Temperature", 0.0, -100.0, 100.0),
+                ParamDef::float("tint", "Tint", 0.0, -100.0, 100.0),
+            ],
+            EffectType::Curves => {
+                let identity_json = curve_points_to_json(&default_identity_curve());
+                let flat_json = curve_points_to_json(&default_flat_curve());
+                vec![
+                    ParamDef::string("master_curve", "Master Curve", &identity_json),
+                    ParamDef::string("red_curve", "Red Curve", &identity_json),
+                    ParamDef::string("green_curve", "Green Curve", &identity_json),
+                    ParamDef::string("blue_curve", "Blue Curve", &identity_json),
+                    ParamDef::string("hue_vs_hue_curve", "Hue vs Hue", &flat_json),
+                    ParamDef::string("hue_vs_sat_curve", "Hue vs Sat", &flat_json),
+                    ParamDef::string("luma_vs_sat_curve", "Luma vs Sat", &flat_json),
+                ]
+            }
             EffectType::LoudnessNormalize => vec![
                 // EBU R128 loudness normalization parameters
                 ParamDef::float("target_lufs", "Target LUFS", -14.0, -70.0, -5.0),
@@ -1297,5 +1497,238 @@ mod tests {
         let volume = Effect::new(EffectType::Volume);
         assert!(volume.is_audio());
         assert!(!volume.is_video());
+    }
+
+    // -------------------------------------------------------------------------
+    // Color Curves Tests (BDD-style)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn should_create_curves_effect_with_identity_defaults() {
+        // Given a new Curves effect
+        let effect = Effect::new(EffectType::Curves);
+
+        // Then all four channels should have identity curve JSON
+        let identity_json = curve_points_to_json(&default_identity_curve());
+        assert_eq!(effect.get_string("master_curve").unwrap(), identity_json);
+        assert_eq!(effect.get_string("red_curve").unwrap(), identity_json);
+        assert_eq!(effect.get_string("green_curve").unwrap(), identity_json);
+        assert_eq!(effect.get_string("blue_curve").unwrap(), identity_json);
+
+        // And the effect should be a Color category
+        assert_eq!(effect.category(), EffectCategory::Color);
+    }
+
+    #[test]
+    fn should_roundtrip_curve_points_through_json() {
+        // Given a set of curve points (S-curve for contrast)
+        let s_curve = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.25, 0.15),
+            CurvePoint::new(0.5, 0.5),
+            CurvePoint::new(0.75, 0.85),
+            CurvePoint::new(1.0, 1.0),
+        ];
+
+        // When serialized and deserialized
+        let json = curve_points_to_json(&s_curve);
+        let parsed = parse_curve_points(&json);
+
+        // Then values should match exactly
+        assert_eq!(parsed.len(), 5);
+        assert_eq!(parsed[0].x, 0.0);
+        assert_eq!(parsed[0].y, 0.0);
+        assert_eq!(parsed[1].x, 0.25);
+        assert_eq!(parsed[1].y, 0.15);
+        assert_eq!(parsed[3].x, 0.75);
+        assert_eq!(parsed[3].y, 0.85);
+    }
+
+    #[test]
+    fn should_detect_identity_curve() {
+        // Given an identity curve
+        let identity = default_identity_curve();
+        assert!(is_identity_curve(&identity));
+
+        // And a non-identity curve (S-curve)
+        let s_curve = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.25, 0.15),
+            CurvePoint::new(1.0, 1.0),
+        ];
+        assert!(!is_identity_curve(&s_curve));
+
+        // And an empty curve
+        let empty: Vec<CurvePoint> = vec![];
+        assert!(!is_identity_curve(&empty));
+    }
+
+    #[test]
+    fn should_convert_curve_points_to_ffmpeg_format() {
+        // Given curve points
+        let points = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.7),
+            CurvePoint::new(1.0, 1.0),
+        ];
+
+        // When converted to FFmpeg format
+        let ffmpeg = curve_points_to_ffmpeg(&points);
+
+        // Then it should match FFmpeg point syntax
+        assert_eq!(ffmpeg, "0.0000/0.0000 0.5000/0.7000 1.0000/1.0000");
+    }
+
+    #[test]
+    fn should_fallback_to_identity_on_malformed_json() {
+        // Given malformed JSON strings
+        let from_empty = parse_curve_points("");
+        let from_garbage = parse_curve_points("{not valid json}");
+        let from_wrong_type = parse_curve_points("42");
+
+        // Then all should return identity curve
+        assert!(is_identity_curve(&from_empty));
+        assert!(is_identity_curve(&from_garbage));
+        assert!(is_identity_curve(&from_wrong_type));
+    }
+
+    #[test]
+    fn should_clamp_curve_point_coordinates() {
+        // Given out-of-range values
+        let p = CurvePoint::new(-0.5, 1.5);
+
+        // Then coordinates should be clamped to [0.0, 1.0]
+        assert_eq!(p.x, 0.0);
+        assert_eq!(p.y, 1.0);
+    }
+
+    #[test]
+    fn should_sort_curve_points_by_x_in_ffmpeg_output() {
+        // Given unsorted points
+        let points = vec![
+            CurvePoint::new(1.0, 1.0),
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.6),
+        ];
+
+        // When converted to FFmpeg format
+        let ffmpeg = curve_points_to_ffmpeg(&points);
+
+        // Then points should be sorted by x
+        assert_eq!(ffmpeg, "0.0000/0.0000 0.5000/0.6000 1.0000/1.0000");
+    }
+
+    #[test]
+    fn should_provide_param_definitions_for_curves() {
+        // Given a Curves effect
+        let effect = Effect::new(EffectType::Curves);
+
+        // When getting param definitions
+        let defs = effect.param_definitions();
+
+        // Then there should be 7 string params (4 RGB + 3 advanced)
+        assert_eq!(defs.len(), 7);
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"master_curve"));
+        assert!(names.contains(&"red_curve"));
+        assert!(names.contains(&"green_curve"));
+        assert!(names.contains(&"blue_curve"));
+        assert!(names.contains(&"hue_vs_hue_curve"));
+        assert!(names.contains(&"hue_vs_sat_curve"));
+        assert!(names.contains(&"luma_vs_sat_curve"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Advanced Curve Utilities (flat curve, sample_curve_at) — BDD-style
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn should_create_flat_identity_curve_at_y_half() {
+        // Given a flat identity curve
+        let flat = default_flat_curve();
+
+        // Then it should have 2 points at y=0.5
+        assert_eq!(flat.len(), 2);
+        assert!((flat[0].x - 0.0).abs() < 0.001);
+        assert!((flat[0].y - 0.5).abs() < 0.001);
+        assert!((flat[1].x - 1.0).abs() < 0.001);
+        assert!((flat[1].y - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_detect_flat_identity_curve() {
+        // Given the default flat curve
+        assert!(is_flat_identity_curve(&default_flat_curve()));
+
+        // And a non-flat curve should not match
+        assert!(!is_flat_identity_curve(&default_identity_curve()));
+
+        // And a modified curve should not match
+        let modified = vec![CurvePoint::new(0.0, 0.3), CurvePoint::new(1.0, 0.7)];
+        assert!(!is_flat_identity_curve(&modified));
+
+        // And a 3-point curve should not match
+        let three = vec![
+            CurvePoint::new(0.0, 0.5),
+            CurvePoint::new(0.5, 0.8),
+            CurvePoint::new(1.0, 0.5),
+        ];
+        assert!(!is_flat_identity_curve(&three));
+    }
+
+    #[test]
+    fn should_sample_curve_at_exact_control_points() {
+        let points = vec![
+            CurvePoint::new(0.0, 0.2),
+            CurvePoint::new(0.5, 0.8),
+            CurvePoint::new(1.0, 0.4),
+        ];
+
+        // At exact control points
+        assert!((sample_curve_at(&points, 0.0) - 0.2).abs() < 0.001);
+        assert!((sample_curve_at(&points, 0.5) - 0.8).abs() < 0.001);
+        assert!((sample_curve_at(&points, 1.0) - 0.4).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_linearly_interpolate_between_curve_points() {
+        let points = vec![CurvePoint::new(0.0, 0.0), CurvePoint::new(1.0, 1.0)];
+
+        // Midpoint of linear diagonal should be 0.5
+        assert!((sample_curve_at(&points, 0.5) - 0.5).abs() < 0.001);
+        assert!((sample_curve_at(&points, 0.25) - 0.25).abs() < 0.001);
+        assert!((sample_curve_at(&points, 0.75) - 0.75).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_return_neutral_for_empty_curve() {
+        // Empty curve should return 0.5 (neutral)
+        assert!((sample_curve_at(&[], 0.5) - 0.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_clamp_to_boundary_values_outside_curve_range() {
+        let points = vec![CurvePoint::new(0.2, 0.3), CurvePoint::new(0.8, 0.7)];
+
+        // Before first point → use first point's y
+        assert!((sample_curve_at(&points, 0.0) - 0.3).abs() < 0.001);
+        // After last point → use last point's y
+        assert!((sample_curve_at(&points, 1.0) - 0.7).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_include_advanced_curve_params_in_curves_defaults() {
+        // Given a new Curves effect
+        let effect = Effect::new(EffectType::Curves);
+
+        // Then it should have flat identity curves for advanced params
+        let hvh = effect.get_string("hue_vs_hue_curve").unwrap();
+        let hvs = effect.get_string("hue_vs_sat_curve").unwrap();
+        let lvs = effect.get_string("luma_vs_sat_curve").unwrap();
+
+        let flat_json = curve_points_to_json(&default_flat_curve());
+        assert_eq!(hvh, flat_json);
+        assert_eq!(hvs, flat_json);
+        assert_eq!(lvs, flat_json);
     }
 }

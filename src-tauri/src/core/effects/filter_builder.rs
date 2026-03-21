@@ -17,7 +17,109 @@
 //! // Returns: "[0:v]gblur=sigma=5.0[out]"
 //! ```
 
-use super::{Effect, EffectType};
+use super::{
+    curve_points_to_ffmpeg, default_flat_curve, is_flat_identity_curve, is_identity_curve,
+    parse_curve_points, parse_curve_points_with_fallback, sample_curve_at, CurvePoint, Effect,
+    EffectType,
+};
+
+// =============================================================================
+// Advanced Curve Helpers (Hue vs Hue, Hue vs Sat)
+// =============================================================================
+
+/// Map saturation delta to selectivecolor CMYK adjustments.
+///
+/// Adjusts the complementary color component to modify saturation:
+/// - `delta > 0` → saturate (remove complement)
+/// - `delta < 0` → desaturate (add complement)
+fn sat_adjust_cmyk(range: &str, delta: f64) -> (f64, f64, f64) {
+    // Invert: positive delta = more saturated = negative complement values
+    let v = -delta;
+    match range {
+        "reds" => (v, 0.0, 0.0),               // Complement: cyan
+        "yellows" => (v * 0.5, v * 0.5, 0.0),  // Complement: blue (C+M)
+        "greens" => (0.0, v, 0.0),             // Complement: magenta
+        "cyans" => (0.0, v * 0.5, v * 0.5),    // Complement: red (M+Y)
+        "blues" => (0.0, 0.0, v),              // Complement: yellow
+        "magentas" => (v * 0.5, 0.0, v * 0.5), // Complement: green (C+Y)
+        _ => (0.0, 0.0, 0.0),
+    }
+}
+
+/// Map hue shift delta to selectivecolor CMYK adjustments.
+///
+/// Shifts colors toward adjacent hues on the color wheel:
+/// - `delta > 0` → clockwise (reds→yellows, yellows→greens, etc.)
+/// - `delta < 0` → counter-clockwise (reds→magentas, yellows→reds, etc.)
+///
+/// Color wheel order: R → Y → G → C → B → M → R
+fn hue_shift_cmyk(range: &str, delta: f64) -> (f64, f64, f64) {
+    if delta >= 0.0 {
+        // Clockwise: shift toward next hue neighbor
+        match range {
+            "reds" => (0.0, -delta, 0.0),    // R→Y: -M = +G
+            "yellows" => (delta, 0.0, 0.0),  // Y→G: +C = -R
+            "greens" => (0.0, 0.0, -delta),  // G→C: -Y = +B
+            "cyans" => (0.0, delta, 0.0),    // C→B: +M = -G
+            "blues" => (-delta, 0.0, 0.0),   // B→M: -C = +R
+            "magentas" => (0.0, 0.0, delta), // M→R: +Y = -B
+            _ => (0.0, 0.0, 0.0),
+        }
+    } else {
+        // Counter-clockwise: shift toward previous hue neighbor
+        let d = -delta; // positive magnitude
+        match range {
+            "reds" => (0.0, 0.0, -d),    // R→M: -Y = +B
+            "yellows" => (0.0, d, 0.0),  // Y→R: +M = -G
+            "greens" => (-d, 0.0, 0.0),  // G→Y: -C = +R
+            "cyans" => (0.0, 0.0, d),    // C→G: +Y = -B
+            "blues" => (0.0, -d, 0.0),   // B→C: -M = +G
+            "magentas" => (d, 0.0, 0.0), // M→B: +C = -R
+            _ => (0.0, 0.0, 0.0),
+        }
+    }
+}
+
+fn curve_points_sorted(points: &[CurvePoint]) -> Vec<&CurvePoint> {
+    let mut sorted: Vec<&CurvePoint> = points.iter().collect();
+    sorted.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+    sorted
+}
+
+fn luma_sat_factor_expr(points: &[CurvePoint], luma_expr: &str) -> String {
+    let sorted = curve_points_sorted(points);
+    if sorted.is_empty() {
+        return "1.000000".to_string();
+    }
+
+    let first = sorted[0];
+    let last = sorted[sorted.len() - 1];
+    let first_factor = first.y * 2.0;
+    let last_factor = last.y * 2.0;
+
+    let mut expr = format!("{last_factor:.6}");
+    for pair in sorted.windows(2).rev() {
+        let start = pair[0];
+        let end = pair[1];
+        let start_factor = start.y * 2.0;
+        let dx = (end.x - start.x).max(1e-6);
+        let slope = ((end.y - start.y) * 2.0) / dx;
+        let segment = format!(
+            "{start_factor:.6}+(({luma_expr})-{:.6})*{slope:.6}",
+            start.x
+        );
+        expr = format!("if(lte({luma_expr}\\,{:.6})\\,{segment}\\,{expr})", end.x);
+    }
+
+    format!(
+        "if(lte({luma_expr}\\,{:.6})\\,{first_factor:.6}\\,{expr})",
+        first.x
+    )
+}
+
+// =============================================================================
+// FFmpeg Utility Functions
+// =============================================================================
 
 fn escape_ffmpeg_filter_value(raw: &str) -> String {
     // FFmpeg filtergraphs treat `:` and `,` as separators and `\` as an escape character.
@@ -149,6 +251,7 @@ impl IntoFFmpegFilter for Effect {
             EffectType::Gamma => "eq",
             EffectType::Levels => "levels",
             EffectType::Curves => "curves",
+            EffectType::TemperatureTint => "colorbalance",
             EffectType::Lut => "lut3d",
 
             // Transform effects
@@ -258,6 +361,8 @@ impl Effect {
             EffectType::Saturation => self.build_saturation_filter(),
             EffectType::Hue => self.build_hue_filter(),
             EffectType::ColorWheels => self.build_color_wheels_filter(),
+            EffectType::TemperatureTint => self.build_temperature_tint_filter(),
+            EffectType::Curves => self.build_curves_filter(),
             EffectType::Gamma => self.build_gamma_filter(),
 
             // Transform effects
@@ -400,6 +505,227 @@ impl Effect {
             gamma_r, gamma_g, gamma_b,
             gain_r, gain_g, gain_b
         )
+    }
+
+    /// Builds FFmpeg `colorbalance` filter for temperature/tint white balance.
+    ///
+    /// Temperature shifts the blue↔orange axis (cool↔warm):
+    /// - Positive = warm (boost red, reduce blue)
+    /// - Negative = cool (boost blue, reduce red)
+    ///
+    /// Tint shifts the green↔magenta axis:
+    /// - Positive = magenta (reduce green)
+    /// - Negative = green (boost green)
+    ///
+    /// Values are normalized from [-100, +100] to [-1.0, +1.0] and applied
+    /// across shadows, midtones, and highlights with weighted distribution.
+    fn build_temperature_tint_filter(&self) -> String {
+        let temperature = self
+            .get_float("temperature")
+            .unwrap_or(0.0)
+            .clamp(-100.0, 100.0);
+        let tint = self.get_float("tint").unwrap_or(0.0).clamp(-100.0, 100.0);
+
+        // No-op check: both at neutral
+        if temperature.abs() < 0.01 && tint.abs() < 0.01 {
+            return "null".to_string();
+        }
+
+        // Normalize to [-1.0, +1.0]
+        let temp_norm = temperature / 100.0;
+        let tint_norm = tint / 100.0;
+
+        // Temperature: red and blue channels inversely proportional
+        // Distribute across shadows (0.3), midtones (0.5), highlights (0.2)
+        let rs = temp_norm * 0.3;
+        let rm = temp_norm * 0.5;
+        let rh = temp_norm * 0.2;
+        let bs = -temp_norm * 0.3;
+        let bm = -temp_norm * 0.5;
+        let bh = -temp_norm * 0.2;
+
+        // Tint: green channel (positive tint = magenta = reduce green)
+        let gs = -tint_norm * 0.3;
+        let gm = -tint_norm * 0.5;
+        let gh = -tint_norm * 0.2;
+
+        format!(
+            "colorbalance=rs={:.4}:gs={:.4}:bs={:.4}:rm={:.4}:gm={:.4}:bm={:.4}:rh={:.4}:gh={:.4}:bh={:.4}",
+            rs, gs, bs, rm, gm, bm, rh, gh, bh
+        )
+    }
+
+    /// Build the complete curves filter chain: RGB curves + advanced curves.
+    ///
+    /// Returns chained filters separated by `,` (FFmpeg linear chain):
+    /// - RGB curves via `curves` filter
+    /// - Hue vs Sat via `selectivecolor` filter
+    /// - Hue vs Hue via `selectivecolor` filter
+    /// - Luma vs Sat via `geq` chroma scaling
+    ///
+    /// Returns `"null"` if all curves are identity (no-op).
+    fn build_curves_filter(&self) -> String {
+        let mut filters: Vec<String> = Vec::new();
+
+        let rgb = self.build_rgb_curves_segment();
+        if !rgb.is_empty() {
+            filters.push(rgb);
+        }
+
+        let hvs = self.build_hue_vs_sat_segment();
+        if !hvs.is_empty() {
+            filters.push(hvs);
+        }
+
+        let hvh = self.build_hue_vs_hue_segment();
+        if !hvh.is_empty() {
+            filters.push(hvh);
+        }
+
+        let lvs = self.build_luma_vs_sat_segment();
+        if !lvs.is_empty() {
+            filters.push(lvs);
+        }
+
+        if filters.is_empty() {
+            "null".to_string()
+        } else {
+            filters.join(",")
+        }
+    }
+
+    fn parse_advanced_curve_param(&self, param_name: &str) -> Vec<CurvePoint> {
+        self.get_string(param_name)
+            .map(|json| parse_curve_points_with_fallback(&json, default_flat_curve()))
+            .unwrap_or_else(default_flat_curve)
+    }
+
+    /// Build RGB curves segment: `curves=master='...':r='...':g='...':b='...'`
+    ///
+    /// Returns empty string if all four channels are identity.
+    fn build_rgb_curves_segment(&self) -> String {
+        let channels = [
+            ("master_curve", "master"),
+            ("red_curve", "r"),
+            ("green_curve", "g"),
+            ("blue_curve", "b"),
+        ];
+
+        let mut parts: Vec<String> = Vec::new();
+
+        for (param_name, filter_name) in channels {
+            let json = self.get_string(param_name).unwrap_or_default();
+            let points = parse_curve_points(&json);
+            if !is_identity_curve(&points) {
+                parts.push(format!(
+                    "{}='{}'",
+                    filter_name,
+                    curve_points_to_ffmpeg(&points)
+                ));
+            }
+        }
+
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("curves={}", parts.join(":"))
+        }
+    }
+
+    /// Build Hue vs Sat segment using `selectivecolor` filter.
+    ///
+    /// Samples the curve at 6 hue positions and adjusts saturation by
+    /// adding/removing the complementary color component per range.
+    /// y=0.5 → no change, y<0.5 → desaturate, y>0.5 → saturate.
+    fn build_hue_vs_sat_segment(&self) -> String {
+        let points = self.parse_advanced_curve_param("hue_vs_sat_curve");
+        if is_flat_identity_curve(&points) {
+            return String::new();
+        }
+
+        let ranges: [(&str, f64); 6] = [
+            ("reds", 0.0),
+            ("yellows", 1.0 / 6.0),
+            ("greens", 2.0 / 6.0),
+            ("cyans", 0.5),
+            ("blues", 4.0 / 6.0),
+            ("magentas", 5.0 / 6.0),
+        ];
+
+        let mut parts = Vec::new();
+        for (name, x_pos) in &ranges {
+            let y = sample_curve_at(&points, *x_pos);
+            let delta = (y - 0.5) * 2.0;
+            if delta.abs() < 0.01 {
+                continue;
+            }
+
+            let (c, m, yv) = sat_adjust_cmyk(name, delta);
+            parts.push(format!("{}='{:.3} {:.3} {:.3} 0'", name, c, m, yv));
+        }
+
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("selectivecolor={}", parts.join(":"))
+        }
+    }
+
+    /// Build Hue vs Hue segment using `selectivecolor` filter.
+    ///
+    /// Approximates hue rotation per hue range by shifting colors toward
+    /// their neighbors on the color wheel via CMY adjustments.
+    /// y=0.5 → no shift, y>0.5 → clockwise, y<0.5 → counter-clockwise.
+    fn build_hue_vs_hue_segment(&self) -> String {
+        let points = self.parse_advanced_curve_param("hue_vs_hue_curve");
+        if is_flat_identity_curve(&points) {
+            return String::new();
+        }
+
+        let ranges: [(&str, f64); 6] = [
+            ("reds", 0.0),
+            ("yellows", 1.0 / 6.0),
+            ("greens", 2.0 / 6.0),
+            ("cyans", 0.5),
+            ("blues", 4.0 / 6.0),
+            ("magentas", 5.0 / 6.0),
+        ];
+
+        let mut parts = Vec::new();
+        for (name, x_pos) in &ranges {
+            let y = sample_curve_at(&points, *x_pos);
+            let delta = (y - 0.5) * 2.0;
+            if delta.abs() < 0.01 {
+                continue;
+            }
+
+            let (c, m, yv) = hue_shift_cmyk(name, delta);
+            parts.push(format!("{}='{:.3} {:.3} {:.3} 0'", name, c, m, yv));
+        }
+
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("selectivecolor={}", parts.join(":"))
+        }
+    }
+
+    /// Build Luma vs Sat segment using per-pixel chroma scaling in YUV space.
+    ///
+    /// Preserves per-luma behavior by scaling Cb/Cr around neutral chroma based on
+    /// the sampled Luma vs Sat curve. y=0.5 → 1.0x (no change).
+    fn build_luma_vs_sat_segment(&self) -> String {
+        let points = self.parse_advanced_curve_param("luma_vs_sat_curve");
+        if is_flat_identity_curve(&points) {
+            return String::new();
+        }
+
+        let luma_expr = "lum(X,Y)/255";
+        let factor_expr = luma_sat_factor_expr(&points, luma_expr);
+        let cb_expr = format!("max(0,min(255,128+(cb(X,Y)-128)*({factor_expr})))");
+        let cr_expr = format!("max(0,min(255,128+(cr(X,Y)-128)*({factor_expr})))");
+
+        format!("format=yuv444p,geq=lum='lum(X,Y)':cb='{cb_expr}':cr='{cr_expr}'")
     }
 
     // -------------------------------------------------------------------------
@@ -1328,7 +1654,7 @@ impl Default for FilterGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::effects::ParamValue;
+    use crate::core::effects::{curve_points_to_json, CurvePoint, EffectCategory, ParamValue};
 
     #[test]
     fn test_brightness_filter() {
@@ -2635,7 +2961,7 @@ mod tests {
         let effect = Effect::new(EffectType::ColorWheels);
         assert_eq!(
             effect.category(),
-            super::super::EffectCategory::Color,
+            EffectCategory::Color,
             "ColorWheels should be in Color category"
         );
     }
@@ -3728,6 +4054,606 @@ mod tests {
             effect.filter_name(),
             "loudnorm",
             "LoudnessNormalize should use loudnorm filter"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // RGB Color Curves Filter Tests (BDD-style)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn should_produce_null_filter_when_all_curves_are_identity() {
+        // Given a default Curves effect (all identity curves)
+        let effect = Effect::new(EffectType::Curves);
+
+        // When building the filter
+        let filter = effect.to_filter_string("0:v", "out");
+
+        // Then it should be a no-op (null pass-through)
+        assert_eq!(filter, "[0:v]null[out]");
+    }
+
+    #[test]
+    fn should_produce_valid_filter_for_s_curve_contrast() {
+        // Given a Curves effect with an S-curve on the master channel
+        let mut effect = Effect::new(EffectType::Curves);
+        let s_curve = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.25, 0.15), // darken shadows
+            CurvePoint::new(0.75, 0.85), // brighten highlights
+            CurvePoint::new(1.0, 1.0),
+        ];
+        let json = curve_points_to_json(&s_curve);
+        effect.set_param("master_curve", ParamValue::String(json));
+
+        // When building the filter
+        let filter = effect.to_filter_string("0:v", "out");
+
+        // Then it should contain the curves filter with master channel
+        assert!(
+            filter.contains("curves=master='"),
+            "Expected curves=master filter, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("0.2500/0.1500"),
+            "Expected shadow point, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("0.7500/0.8500"),
+            "Expected highlight point, got: {}",
+            filter
+        );
+        // Other channels should NOT appear (they are identity)
+        // Use `:r='` prefix to distinguish from `master='` which ends with `r='`
+        assert!(!filter.contains(":r='"), "Red channel should not appear");
+        assert!(!filter.contains(":g='"), "Green channel should not appear");
+        assert!(!filter.contains(":b='"), "Blue channel should not appear");
+    }
+
+    #[test]
+    fn should_apply_individual_channel_curves_independently() {
+        // Given a Curves effect with only the red channel modified
+        let mut effect = Effect::new(EffectType::Curves);
+        let red_boost = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.7), // boost red midtones
+            CurvePoint::new(1.0, 1.0),
+        ];
+        let json = curve_points_to_json(&red_boost);
+        effect.set_param("red_curve", ParamValue::String(json));
+
+        // When building the filter
+        let filter = effect.to_filter_string("0:v", "out");
+
+        // Then only the red channel should appear
+        assert!(
+            filter.contains("r='"),
+            "Expected red channel in filter, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("0.5000/0.7000"),
+            "Expected red midtone boost, got: {}",
+            filter
+        );
+        // Master, green, blue should NOT appear
+        assert!(
+            !filter.contains("master='"),
+            "Master should not appear: {}",
+            filter
+        );
+        assert!(
+            !filter.contains(":g='"),
+            "Green should not appear: {}",
+            filter
+        );
+        assert!(
+            !filter.contains(":b='"),
+            "Blue should not appear: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn should_handle_all_channels_modified_simultaneously() {
+        // Given a Curves effect with all four channels modified
+        let mut effect = Effect::new(EffectType::Curves);
+        let curve = vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.5, 0.6),
+            CurvePoint::new(1.0, 1.0),
+        ];
+        let json = curve_points_to_json(&curve);
+        effect.set_param("master_curve", ParamValue::String(json.clone()));
+        effect.set_param("red_curve", ParamValue::String(json.clone()));
+        effect.set_param("green_curve", ParamValue::String(json.clone()));
+        effect.set_param("blue_curve", ParamValue::String(json));
+
+        // When building the filter
+        let filter = effect.to_filter_string("0:v", "out");
+
+        // Then all four channels should appear
+        assert!(filter.contains("master='"), "Missing master: {}", filter);
+        assert!(filter.contains("r='"), "Missing red: {}", filter);
+        assert!(filter.contains("g='"), "Missing green: {}", filter);
+        assert!(filter.contains("b='"), "Missing blue: {}", filter);
+        assert!(filter.starts_with("[0:v]curves="));
+    }
+
+    #[test]
+    fn should_fallback_to_identity_for_malformed_curve_json() {
+        // Given a Curves effect with a malformed red curve
+        let mut effect = Effect::new(EffectType::Curves);
+        effect.set_param(
+            "red_curve",
+            ParamValue::String("not valid json".to_string()),
+        );
+
+        // When building the filter
+        let filter = effect.to_filter_string("0:v", "out");
+
+        // Then the malformed channel falls back to identity → null output
+        // (all channels are identity: master=default, red=fallback-identity, g/b=default)
+        assert_eq!(filter, "[0:v]null[out]");
+    }
+
+    #[test]
+    fn should_report_curves_filter_name() {
+        let effect = Effect::new(EffectType::Curves);
+        assert_eq!(effect.filter_name(), "curves");
+    }
+
+    #[test]
+    fn should_classify_curves_as_color_video_effect() {
+        let effect = Effect::new(EffectType::Curves);
+        assert!(effect.is_video());
+        assert!(!effect.is_audio());
+        assert!(effect.is_ffmpeg_compatible());
+        assert_eq!(effect.category(), EffectCategory::Color);
+    }
+
+    // -------------------------------------------------------------------------
+    // Advanced Curves Filter Tests (H/H, H/S, L/S) — BDD-style
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn should_produce_null_filter_when_all_advanced_curves_are_flat_identity() {
+        // Given a Curves effect with default params (all identity + all flat)
+        let effect = Effect::new(EffectType::Curves);
+
+        // Then the filter should be null (no processing needed)
+        let filter = effect.to_filter_string("0:v", "out");
+        assert_eq!(filter, "[0:v]null[out]");
+    }
+
+    #[test]
+    fn should_treat_missing_advanced_curves_as_flat_identity() {
+        // Given a legacy Curves effect saved before advanced curves existed
+        let mut effect = Effect::new(EffectType::Curves);
+        effect.params.remove("hue_vs_hue_curve");
+        effect.params.remove("hue_vs_sat_curve");
+        effect.params.remove("luma_vs_sat_curve");
+
+        // Then it should remain a no-op instead of applying unintended color shifts
+        let filter = effect.to_filter_string("0:v", "out");
+        assert_eq!(filter, "[0:v]null[out]");
+    }
+
+    #[test]
+    fn should_treat_malformed_advanced_curves_as_flat_identity() {
+        // Given malformed advanced curve payloads
+        let mut effect = Effect::new(EffectType::Curves);
+        effect.set_param(
+            "hue_vs_sat_curve",
+            ParamValue::String("{not valid json}".to_string()),
+        );
+        effect.set_param("hue_vs_hue_curve", ParamValue::String("42".to_string()));
+        effect.set_param("luma_vs_sat_curve", ParamValue::String("[]".to_string()));
+
+        // Then malformed advanced curves should be treated as neutral
+        let filter = effect.to_filter_string("0:v", "out");
+        assert_eq!(filter, "[0:v]null[out]");
+    }
+
+    #[test]
+    fn should_generate_selectivecolor_for_hue_vs_sat_curve() {
+        // Given a Curves effect with H/S curve boosting red saturation
+        let mut effect = Effect::new(EffectType::Curves);
+        // Curve: reds (x=0) at y=0.8 (saturate), rest at y=0.5 (no change)
+        let hvs_curve =
+            serde_json::to_string(&vec![CurvePoint::new(0.0, 0.8), CurvePoint::new(1.0, 0.5)])
+                .unwrap();
+        effect.set_param("hue_vs_sat_curve", ParamValue::String(hvs_curve));
+
+        // Then filter should include selectivecolor with reds adjustment
+        let filter = effect.to_filter_string("0:v", "out");
+        assert!(
+            filter.contains("selectivecolor="),
+            "Expected selectivecolor filter, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("reds="),
+            "Expected reds range, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn should_generate_selectivecolor_for_hue_vs_hue_curve() {
+        // Given a Curves effect with H/H curve shifting reds clockwise toward yellow
+        let mut effect = Effect::new(EffectType::Curves);
+        // Curve: reds (x=0) at y=0.8 (clockwise shift), rest at y=0.5
+        let hvh_curve =
+            serde_json::to_string(&vec![CurvePoint::new(0.0, 0.8), CurvePoint::new(1.0, 0.5)])
+                .unwrap();
+        effect.set_param("hue_vs_hue_curve", ParamValue::String(hvh_curve));
+
+        // Then filter should include selectivecolor for hue shifting
+        let filter = effect.to_filter_string("0:v", "out");
+        assert!(
+            filter.contains("selectivecolor="),
+            "Expected selectivecolor filter, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("reds="),
+            "Expected reds range adjustment, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn should_generate_per_luma_saturation_expression_for_luma_vs_sat_curve() {
+        // Given a Curves effect with more saturation in shadows and less in highlights
+        let mut effect = Effect::new(EffectType::Curves);
+        let lvs_curve = serde_json::to_string(&vec![
+            CurvePoint::new(0.0, 0.75),
+            CurvePoint::new(1.0, 0.25),
+        ])
+        .unwrap();
+        effect.set_param("luma_vs_sat_curve", ParamValue::String(lvs_curve));
+
+        // Then the filter should preserve per-luma behavior instead of collapsing to one value
+        let filter = effect.to_filter_string("0:v", "out");
+        assert!(
+            filter.contains("geq="),
+            "Expected geq-based luma-selective saturation, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("lum(X,Y)/255"),
+            "Expected luma-dependent expression, got: {}",
+            filter
+        );
+        assert!(
+            !filter.contains("eq=saturation="),
+            "Expected luma-selective saturation instead of global eq saturation, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn should_chain_rgb_curves_with_advanced_curves() {
+        // Given a Curves effect with both master S-curve and H/S desaturation
+        let mut effect = Effect::new(EffectType::Curves);
+
+        // Master S-curve
+        let s_curve = serde_json::to_string(&vec![
+            CurvePoint::new(0.0, 0.0),
+            CurvePoint::new(0.25, 0.15),
+            CurvePoint::new(0.75, 0.85),
+            CurvePoint::new(1.0, 1.0),
+        ])
+        .unwrap();
+        effect.set_param("master_curve", ParamValue::String(s_curve));
+
+        // H/S: desaturate blues
+        let hvs_curve = serde_json::to_string(&vec![
+            CurvePoint::new(0.0, 0.5),
+            CurvePoint::new(4.0 / 6.0, 0.2),
+            CurvePoint::new(1.0, 0.5),
+        ])
+        .unwrap();
+        effect.set_param("hue_vs_sat_curve", ParamValue::String(hvs_curve));
+
+        // Then filter should chain curves and selectivecolor with comma
+        let filter = effect.to_filter_string("0:v", "out");
+        assert!(
+            filter.contains("curves="),
+            "Expected curves filter, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains(",selectivecolor="),
+            "Expected chained selectivecolor, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn should_handle_hue_vs_hue_counter_clockwise_shift() {
+        // Given a H/H curve that shifts reds counter-clockwise (toward magenta)
+        let mut effect = Effect::new(EffectType::Curves);
+        let hvh_curve =
+            serde_json::to_string(&vec![CurvePoint::new(0.0, 0.2), CurvePoint::new(1.0, 0.5)])
+                .unwrap();
+        effect.set_param("hue_vs_hue_curve", ParamValue::String(hvh_curve));
+
+        // Then filter should produce selectivecolor with negative delta for reds
+        let filter = effect.to_filter_string("0:v", "out");
+        assert!(
+            filter.contains("selectivecolor="),
+            "Expected selectivecolor, got: {}",
+            filter
+        );
+        // Counter-clockwise reds → magenta: -Y component (negative y value)
+        assert!(
+            filter.contains("reds="),
+            "Expected reds adjustment, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn should_produce_desaturation_selectivecolor_for_low_hue_vs_sat() {
+        // Given H/S curve that desaturates greens (y=0.2 at green position)
+        let mut effect = Effect::new(EffectType::Curves);
+        let hvs_curve = serde_json::to_string(&vec![
+            CurvePoint::new(0.0, 0.5),
+            CurvePoint::new(2.0 / 6.0, 0.2),
+            CurvePoint::new(1.0, 0.5),
+        ])
+        .unwrap();
+        effect.set_param("hue_vs_sat_curve", ParamValue::String(hvs_curve));
+
+        let filter = effect.to_filter_string("0:v", "out");
+        // Desaturation of greens → positive magenta value (add complement)
+        assert!(
+            filter.contains("greens="),
+            "Expected greens adjustment, got: {}",
+            filter
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Temperature/Tint Filter Tests (BDD-style)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn should_create_default_temperature_tint_effect_with_neutral_values() {
+        // Given a new TemperatureTint effect
+        let effect = Effect::new(EffectType::TemperatureTint);
+
+        // Then temperature and tint should both be 0.0 (neutral)
+        assert_eq!(
+            effect.get_float("temperature"),
+            Some(0.0),
+            "Default temperature should be 0.0"
+        );
+        assert_eq!(
+            effect.get_float("tint"),
+            Some(0.0),
+            "Default tint should be 0.0"
+        );
+    }
+
+    #[test]
+    fn should_produce_null_filter_when_both_temperature_and_tint_are_zero() {
+        // Given a TemperatureTint effect with default (neutral) values
+        let effect = Effect::new(EffectType::TemperatureTint);
+
+        // When building the filter
+        let filter = effect.to_filter_string("0:v", "out");
+
+        // Then it should be a no-op (null pass-through)
+        assert_eq!(
+            filter, "[0:v]null[out]",
+            "Neutral temperature/tint should produce null filter"
+        );
+    }
+
+    #[test]
+    fn should_produce_warm_colorbalance_filter_when_temperature_is_positive() {
+        // Given a TemperatureTint effect with positive temperature (warm)
+        let mut effect = Effect::new(EffectType::TemperatureTint);
+        effect.set_param("temperature", ParamValue::Float(50.0));
+        effect.set_param("tint", ParamValue::Float(0.0));
+
+        // When building the filter
+        let filter = effect.to_filter_string("0:v", "out");
+
+        // Then it should contain colorbalance with positive red and negative blue
+        assert!(
+            filter.contains("colorbalance="),
+            "Expected colorbalance filter, got: {}",
+            filter
+        );
+
+        // Parse the filter to check red (positive) and blue (negative) values
+        // temp_norm = 50/100 = 0.5
+        // rs = 0.5 * 0.3 = 0.15, rm = 0.5 * 0.5 = 0.25, rh = 0.5 * 0.2 = 0.10
+        assert!(
+            filter.contains("rs=0.1500"),
+            "Expected positive red shadows, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("rm=0.2500"),
+            "Expected positive red midtones, got: {}",
+            filter
+        );
+        // bs = -0.5 * 0.3 = -0.15, bm = -0.5 * 0.5 = -0.25
+        assert!(
+            filter.contains("bs=-0.1500"),
+            "Expected negative blue shadows, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("bm=-0.2500"),
+            "Expected negative blue midtones, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn should_produce_cool_colorbalance_filter_when_temperature_is_negative() {
+        // Given a TemperatureTint effect with negative temperature (cool)
+        let mut effect = Effect::new(EffectType::TemperatureTint);
+        effect.set_param("temperature", ParamValue::Float(-50.0));
+        effect.set_param("tint", ParamValue::Float(0.0));
+
+        // When building the filter
+        let filter = effect.to_filter_string("0:v", "out");
+
+        // Then it should contain colorbalance with negative red and positive blue
+        // temp_norm = -0.5
+        // rs = -0.5 * 0.3 = -0.15
+        assert!(
+            filter.contains("rs=-0.1500"),
+            "Expected negative red shadows for cool, got: {}",
+            filter
+        );
+        // bs = -(-0.5) * 0.3 = 0.15
+        assert!(
+            filter.contains("bs=0.1500"),
+            "Expected positive blue shadows for cool, got: {}",
+            filter
+        );
+        // bm = -(-0.5) * 0.5 = 0.25
+        assert!(
+            filter.contains("bm=0.2500"),
+            "Expected positive blue midtones for cool, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn should_produce_magenta_tint_when_tint_is_positive() {
+        // Given a TemperatureTint effect with positive tint (magenta)
+        let mut effect = Effect::new(EffectType::TemperatureTint);
+        effect.set_param("temperature", ParamValue::Float(0.0));
+        effect.set_param("tint", ParamValue::Float(50.0));
+
+        // When building the filter
+        let filter = effect.to_filter_string("0:v", "out");
+
+        // Then green channels should be negative (reducing green = magenta shift)
+        // tint_norm = 0.5, gs = -0.5 * 0.3 = -0.15, gm = -0.5 * 0.5 = -0.25
+        assert!(
+            filter.contains("gs=-0.1500"),
+            "Expected negative green shadows for magenta, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("gm=-0.2500"),
+            "Expected negative green midtones for magenta, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn should_produce_green_tint_when_tint_is_negative() {
+        // Given a TemperatureTint effect with negative tint (green)
+        let mut effect = Effect::new(EffectType::TemperatureTint);
+        effect.set_param("temperature", ParamValue::Float(0.0));
+        effect.set_param("tint", ParamValue::Float(-50.0));
+
+        // When building the filter
+        let filter = effect.to_filter_string("0:v", "out");
+
+        // Then green channels should be positive (boosting green)
+        // tint_norm = -0.5, gs = -(-0.5) * 0.3 = 0.15, gm = -(-0.5) * 0.5 = 0.25
+        assert!(
+            filter.contains("gs=0.1500"),
+            "Expected positive green shadows for green tint, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("gm=0.2500"),
+            "Expected positive green midtones for green tint, got: {}",
+            filter
+        );
+    }
+
+    #[test]
+    fn should_combine_temperature_and_tint_in_a_single_filter() {
+        // Given a TemperatureTint effect with both temperature and tint set
+        let mut effect = Effect::new(EffectType::TemperatureTint);
+        effect.set_param("temperature", ParamValue::Float(50.0));
+        effect.set_param("tint", ParamValue::Float(-30.0));
+
+        // When building the filter
+        let filter = effect.to_filter_string("0:v", "out");
+
+        // Then it should produce a single colorbalance filter with both adjustments
+        assert!(
+            filter.contains("colorbalance="),
+            "Expected colorbalance filter, got: {}",
+            filter
+        );
+
+        // Temperature: warm (positive red, negative blue)
+        // temp_norm = 0.5, rs = 0.15
+        assert!(
+            filter.contains("rs=0.1500"),
+            "Expected warm red from temperature, got: {}",
+            filter
+        );
+        // Tint: green (positive green)
+        // tint_norm = -0.3, gs = -(-0.3) * 0.3 = 0.09
+        assert!(
+            filter.contains("gs=0.0900"),
+            "Expected green tint adjustment, got: {}",
+            filter
+        );
+
+        // Should be a single filter, not chained
+        let filter_body = effect.to_filter_body();
+        assert!(
+            filter_body.starts_with("colorbalance="),
+            "Filter body should be a single colorbalance"
+        );
+        assert!(
+            !filter_body.contains(','),
+            "Should not chain multiple filters"
+        );
+    }
+
+    #[test]
+    fn should_clamp_extreme_values_to_valid_range() {
+        // Given a TemperatureTint effect with out-of-range temperature
+        let mut effect = Effect::new(EffectType::TemperatureTint);
+        effect.set_param("temperature", ParamValue::Float(200.0));
+        effect.set_param("tint", ParamValue::Float(0.0));
+
+        // When building the filter
+        let filter = effect.to_filter_string("0:v", "out");
+
+        // Then values should be clamped to 100 (temp_norm = 1.0)
+        // rs = 1.0 * 0.3 = 0.30, rm = 1.0 * 0.5 = 0.50, rh = 1.0 * 0.2 = 0.20
+        assert!(
+            filter.contains("rs=0.3000"),
+            "Expected clamped red shadows, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("rm=0.5000"),
+            "Expected clamped red midtones, got: {}",
+            filter
+        );
+        assert!(
+            filter.contains("rh=0.2000"),
+            "Expected clamped red highlights, got: {}",
+            filter
+        );
+        // bs = -1.0 * 0.3 = -0.30
+        assert!(
+            filter.contains("bs=-0.3000"),
+            "Expected clamped blue shadows, got: {}",
+            filter
         );
     }
 }

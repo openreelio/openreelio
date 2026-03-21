@@ -7,7 +7,7 @@
  */
 
 import { useCallback, type KeyboardEvent } from 'react';
-import { Maximize, Minimize } from 'lucide-react';
+import { Columns2, Maximize, Minimize } from 'lucide-react';
 import { SeekBar } from './SeekBar';
 import { PlaybackButtons } from './PlaybackButtons';
 import { VolumeControls } from './VolumeControls';
@@ -34,6 +34,8 @@ export interface PlayerControlsProps {
   playbackRate?: number;
   /** Current JKL shuttle speed (0 = inactive) */
   shuttleSpeed?: number;
+  /** Whether color comparison overlay is active */
+  isComparisonActive?: boolean;
   onPlayPause?: () => void;
   onSeek?: (time: number) => void;
   onVolumeChange?: (volume: number) => void;
@@ -41,6 +43,8 @@ export interface PlayerControlsProps {
   onFullscreenToggle?: () => void;
   /** Callback for playback rate change */
   onPlaybackRateChange?: (rate: number) => void;
+  /** Callback to toggle color comparison overlay */
+  onToggleComparison?: () => void;
 }
 
 // =============================================================================
@@ -70,12 +74,14 @@ export function PlayerControls({
   fps = DEFAULT_FPS,
   playbackRate = 1,
   shuttleSpeed = 0,
+  isComparisonActive = false,
   onPlayPause,
   onSeek,
   onVolumeChange,
   onMuteToggle,
   onFullscreenToggle,
   onPlaybackRateChange,
+  onToggleComparison,
 }: PlayerControlsProps) {
   const frameTime = 1 / fps;
 
@@ -235,6 +241,23 @@ export function PlayerControls({
             </option>
           ))}
         </select>
+
+        {onToggleComparison && (
+          <button
+            data-testid="comparison-toggle-button"
+            type="button"
+            className={`p-1.5 rounded hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed ${
+              isComparisonActive ? 'bg-blue-500/40 text-blue-300' : ''
+            }`}
+            onClick={onToggleComparison}
+            disabled={disabled}
+            aria-label="Toggle color comparison"
+            aria-pressed={isComparisonActive}
+            title="Before/After Comparison (Shift+D)"
+          >
+            <Columns2 className="w-4 h-4" />
+          </button>
+        )}
 
         <button
           data-testid="fullscreen-button"
