@@ -155,7 +155,8 @@ fn collect_affected_link_refs(
             continue;
         };
 
-        for (group_track_id, group_clip_id) in collect_clip_refs_for_link_group(sequence, link_group_id)
+        for (group_track_id, group_clip_id) in
+            collect_clip_refs_for_link_group(sequence, link_group_id)
         {
             push_unique_clip_ref(
                 &mut seen,
@@ -248,10 +249,7 @@ fn normalize_degenerate_link_groups(
     Ok(normalized_refs)
 }
 
-fn append_clip_modified_changes(
-    result: &mut CommandResult,
-    clip_refs: &[(TrackId, ClipId)],
-) {
+fn append_clip_modified_changes(result: &mut CommandResult, clip_refs: &[(TrackId, ClipId)]) {
     let mut seen_clip_ids = HashSet::new();
     for (_, clip_id) in clip_refs {
         if seen_clip_ids.insert(clip_id.clone()) {
@@ -5891,15 +5889,11 @@ impl Command for DetachAudioCommand {
         } else {
             // Find the first unlocked audio track that can accept the clip,
             // or create one if every existing lane would overlap.
-            if let Some(audio_track) = sequence
-                .tracks
-                .iter()
-                .find(|t| {
-                    t.kind == TrackKind::Audio
-                        && !t.locked
-                        && validate_no_overlap(t, &audio_clip.place, None).is_ok()
-                })
-            {
+            if let Some(audio_track) = sequence.tracks.iter().find(|t| {
+                t.kind == TrackKind::Audio
+                    && !t.locked
+                    && validate_no_overlap(t, &audio_clip.place, None).is_ok()
+            }) {
                 audio_track.id.clone()
             } else {
                 // Create a new audio track
@@ -5944,7 +5938,10 @@ impl Command for DetachAudioCommand {
                 clip_id: audio_clip_id.clone(),
             })
             .with_created_id(&audio_clip_id);
-        append_clip_modified_changes(&mut result, &[(self.track_id.clone(), self.clip_id.clone())]);
+        append_clip_modified_changes(
+            &mut result,
+            &[(self.track_id.clone(), self.clip_id.clone())],
+        );
         append_clip_modified_changes(&mut result, &normalized_refs);
         Ok(result)
     }
@@ -9876,7 +9873,8 @@ mod tests {
         (state, seq_id, video_track_id, audio_track_id)
     }
 
-    fn create_test_state_with_video_and_empty_audio_track() -> (ProjectState, String, String, String) {
+    fn create_test_state_with_video_and_empty_audio_track() -> (ProjectState, String, String, String)
+    {
         let mut state = ProjectState::new("Test Project");
 
         let asset =
@@ -9930,15 +9928,11 @@ mod tests {
     #[test]
     fn test_link_clips_should_reject_fewer_than_two_clips() {
         // Given a single clip reference
-        let (mut state, seq_id, v_track_id, _) =
-            create_test_state_with_video_and_audio_tracks();
+        let (mut state, seq_id, v_track_id, _) = create_test_state_with_video_and_audio_tracks();
         let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
 
         // When LinkClips is executed with only 1 clip
-        let mut cmd = LinkClipsCommand::new(
-            &seq_id,
-            vec![(v_track_id.clone(), v_clip_id.clone())],
-        );
+        let mut cmd = LinkClipsCommand::new(&seq_id, vec![(v_track_id.clone(), v_clip_id.clone())]);
         let result = cmd.execute(&mut state);
 
         // Then it should return a validation error
@@ -9986,14 +9980,20 @@ mod tests {
             ],
         );
         cmd.execute(&mut state).unwrap();
-        assert!(state.sequences[&seq_id].tracks[0].clips[0].link_group_id.is_some());
+        assert!(state.sequences[&seq_id].tracks[0].clips[0]
+            .link_group_id
+            .is_some());
 
         // When undo is called
         cmd.undo(&mut state).unwrap();
 
         // Then both clips should have their original link_group_id (None)
-        assert!(state.sequences[&seq_id].tracks[0].clips[0].link_group_id.is_none());
-        assert!(state.sequences[&seq_id].tracks[1].clips[0].link_group_id.is_none());
+        assert!(state.sequences[&seq_id].tracks[0].clips[0]
+            .link_group_id
+            .is_none());
+        assert!(state.sequences[&seq_id].tracks[1].clips[0]
+            .link_group_id
+            .is_none());
     }
 
     // =========================================================================
@@ -10059,7 +10059,9 @@ mod tests {
             ],
         );
         link_cmd.execute(&mut state).unwrap();
-        let link_group = state.sequences[&seq_id].tracks[0].clips[0].link_group_id.clone();
+        let link_group = state.sequences[&seq_id].tracks[0].clips[0]
+            .link_group_id
+            .clone();
 
         let mut unlink_cmd = UnlinkClipsCommand::new(
             &seq_id,
@@ -10074,8 +10076,14 @@ mod tests {
         unlink_cmd.undo(&mut state).unwrap();
 
         // Then the link_group_id should be restored
-        assert_eq!(state.sequences[&seq_id].tracks[0].clips[0].link_group_id, link_group);
-        assert_eq!(state.sequences[&seq_id].tracks[1].clips[0].link_group_id, link_group);
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0].link_group_id,
+            link_group
+        );
+        assert_eq!(
+            state.sequences[&seq_id].tracks[1].clips[0].link_group_id,
+            link_group
+        );
     }
 
     #[test]
@@ -10143,12 +10151,8 @@ mod tests {
         let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
 
         // When DetachAudio is executed
-        let mut cmd = DetachAudioCommand::new(
-            &seq_id,
-            &v_track_id,
-            &v_clip_id,
-            Some(a_track_id.clone()),
-        );
+        let mut cmd =
+            DetachAudioCommand::new(&seq_id, &v_track_id, &v_clip_id, Some(a_track_id.clone()));
         let result = cmd.execute(&mut state);
 
         // Then a new audio clip should exist on the audio track
@@ -10159,17 +10163,23 @@ mod tests {
         let audio_track = &state.sequences[&seq_id].tracks[1];
         assert_eq!(audio_track.clips.len(), 1);
 
-        let new_clip = audio_track.clips.iter().find(|c| c.id == result.created_ids[0]).unwrap();
+        let new_clip = audio_track
+            .clips
+            .iter()
+            .find(|c| c.id == result.created_ids[0])
+            .unwrap();
         let source_clip = &state.sequences[&seq_id].tracks[0].clips[0];
         assert_eq!(new_clip.asset_id, source_clip.asset_id);
-        assert_eq!(new_clip.place.timeline_in_sec, source_clip.place.timeline_in_sec);
+        assert_eq!(
+            new_clip.place.timeline_in_sec,
+            source_clip.place.timeline_in_sec
+        );
     }
 
     #[test]
     fn test_detach_audio_should_reject_audio_track_source() {
         // Given a clip on an audio track
-        let (mut state, seq_id, _, a_track_id) =
-            create_test_state_with_video_and_audio_tracks();
+        let (mut state, seq_id, _, a_track_id) = create_test_state_with_video_and_audio_tracks();
         let a_clip_id = state.sequences[&seq_id].tracks[1].clips[0].id.clone();
 
         // When DetachAudio is executed on an audio track clip
@@ -10195,7 +10205,11 @@ mod tests {
         assert!(result.is_ok());
         let seq = &state.sequences[&seq_id];
         assert!(seq.tracks.len() >= 2);
-        let audio_track = seq.tracks.iter().find(|t| t.kind == TrackKind::Audio).unwrap();
+        let audio_track = seq
+            .tracks
+            .iter()
+            .find(|t| t.kind == TrackKind::Audio)
+            .unwrap();
         assert_eq!(audio_track.clips.len(), 1);
         assert_eq!(audio_track.name, "Audio (Detached)");
     }
@@ -10217,15 +10231,12 @@ mod tests {
             ],
         );
         link_cmd.execute(&mut state).unwrap();
-        assert!(state.sequences[&seq_id].tracks[0].clips[0].link_group_id.is_some());
+        assert!(state.sequences[&seq_id].tracks[0].clips[0]
+            .link_group_id
+            .is_some());
 
         // When DetachAudio is executed
-        let mut cmd = DetachAudioCommand::new(
-            &seq_id,
-            &v_track_id,
-            &v_clip_id,
-            None,
-        );
+        let mut cmd = DetachAudioCommand::new(&seq_id, &v_track_id, &v_clip_id, None);
         cmd.execute(&mut state).unwrap();
 
         // Then the source clip's link_group_id should carry the explicit unlink sentinel
@@ -10245,12 +10256,8 @@ mod tests {
         let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
 
         // When DetachAudio is executed
-        let mut cmd = DetachAudioCommand::new(
-            &seq_id,
-            &v_track_id,
-            &v_clip_id,
-            Some(a_track_id.clone()),
-        );
+        let mut cmd =
+            DetachAudioCommand::new(&seq_id, &v_track_id, &v_clip_id, Some(a_track_id.clone()));
         let result = cmd.execute(&mut state).unwrap();
         let created_clip_id = result.created_ids[0].clone();
 
@@ -10283,14 +10290,11 @@ mod tests {
             ],
         );
         link_cmd.execute(&mut state).unwrap();
-        let original_link = state.sequences[&seq_id].tracks[0].clips[0].link_group_id.clone();
+        let original_link = state.sequences[&seq_id].tracks[0].clips[0]
+            .link_group_id
+            .clone();
 
-        let mut cmd = DetachAudioCommand::new(
-            &seq_id,
-            &v_track_id,
-            &v_clip_id,
-            None,
-        );
+        let mut cmd = DetachAudioCommand::new(&seq_id, &v_track_id, &v_clip_id, None);
         cmd.execute(&mut state).unwrap();
         let created_track_id = cmd.created_audio_track_id.clone().unwrap();
 
@@ -10374,22 +10378,26 @@ mod tests {
         let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
 
         // Set custom audio settings on the source clip
-        state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0].audio.volume_db = -6.0;
-        state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0].audio.pan = 0.5;
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0]
+            .audio
+            .volume_db = -6.0;
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].clips[0]
+            .audio
+            .pan = 0.5;
 
         // When DetachAudio is executed
-        let mut cmd = DetachAudioCommand::new(
-            &seq_id,
-            &v_track_id,
-            &v_clip_id,
-            Some(a_track_id.clone()),
-        );
+        let mut cmd =
+            DetachAudioCommand::new(&seq_id, &v_track_id, &v_clip_id, Some(a_track_id.clone()));
         let result = cmd.execute(&mut state).unwrap();
 
         // Then the new audio clip should have the same audio settings
         let new_clip_id = &result.created_ids[0];
         let audio_track = &state.sequences[&seq_id].tracks[1];
-        let new_clip = audio_track.clips.iter().find(|c| &c.id == new_clip_id).unwrap();
+        let new_clip = audio_track
+            .clips
+            .iter()
+            .find(|c| &c.id == new_clip_id)
+            .unwrap();
         assert_eq!(new_clip.audio.volume_db, -6.0);
         assert_eq!(new_clip.audio.pan, 0.5);
     }
@@ -10397,8 +10405,7 @@ mod tests {
     #[test]
     fn test_link_clips_should_reject_duplicate_clip_refs() {
         // Given the same clip ref provided twice
-        let (mut state, seq_id, v_track_id, _) =
-            create_test_state_with_video_and_audio_tracks();
+        let (mut state, seq_id, v_track_id, _) = create_test_state_with_video_and_audio_tracks();
         let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
 
         // When LinkClips is executed with duplicate refs
@@ -10425,12 +10432,8 @@ mod tests {
 
         // Audio track already has a clip at position 0.0 (from setup)
         // When DetachAudio tries to create another clip at the same position
-        let mut cmd = DetachAudioCommand::new(
-            &seq_id,
-            &v_track_id,
-            &v_clip_id,
-            Some(a_track_id.clone()),
-        );
+        let mut cmd =
+            DetachAudioCommand::new(&seq_id, &v_track_id, &v_clip_id, Some(a_track_id.clone()));
         let result = cmd.execute(&mut state);
 
         // Then it should return an overlap error
@@ -10446,8 +10449,7 @@ mod tests {
     #[test]
     fn test_detach_audio_should_copy_time_remap() {
         // Given a video clip with time remap
-        let (mut state, seq_id, v_track_id, _) =
-            create_test_state_with_video_and_audio_tracks();
+        let (mut state, seq_id, v_track_id, _) = create_test_state_with_video_and_audio_tracks();
         let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
 
         // Set time remap on source clip
@@ -10462,8 +10464,20 @@ mod tests {
         // Then the new audio clip should have the same time remap
         let new_clip_id = &result.created_ids[0];
         let seq = &state.sequences[&seq_id];
-        let audio_track = seq.tracks.iter().find(|t| t.kind == TrackKind::Audio && !t.clips.is_empty() && t.clips.iter().any(|c| &c.id == new_clip_id)).unwrap();
-        let new_clip = audio_track.clips.iter().find(|c| &c.id == new_clip_id).unwrap();
+        let audio_track = seq
+            .tracks
+            .iter()
+            .find(|t| {
+                t.kind == TrackKind::Audio
+                    && !t.clips.is_empty()
+                    && t.clips.iter().any(|c| &c.id == new_clip_id)
+            })
+            .unwrap();
+        let new_clip = audio_track
+            .clips
+            .iter()
+            .find(|c| &c.id == new_clip_id)
+            .unwrap();
         assert!(new_clip.time_remap.is_some());
         assert_eq!(new_clip.time_remap.as_ref().unwrap().keyframes.len(), 2);
     }
@@ -10522,8 +10536,7 @@ mod tests {
             AudioKeyframe::new(5.0, -21.0, KeyframeInterpolation::Linear),
             AudioKeyframe::new(10.0, -6.0, KeyframeInterpolation::Linear),
         ];
-        let mut cmd =
-            ApplyAudioDuckingCommand::new(&seq_id, &audio_track_id, &clip_id, duck_kfs);
+        let mut cmd = ApplyAudioDuckingCommand::new(&seq_id, &audio_track_id, &clip_id, duck_kfs);
         cmd.execute(&mut state).unwrap();
 
         // And then undone
@@ -10548,8 +10561,7 @@ mod tests {
             AudioKeyframe::new(0.0, 0.0, KeyframeInterpolation::Linear),
             AudioKeyframe::new(5.0, -15.0, KeyframeInterpolation::Linear),
         ];
-        let mut cmd =
-            ApplyAudioDuckingCommand::new(&seq_id, &audio_track_id, &clip_id, keyframes);
+        let mut cmd = ApplyAudioDuckingCommand::new(&seq_id, &audio_track_id, &clip_id, keyframes);
         let result = cmd.execute(&mut state);
 
         // Then it fails
@@ -10561,12 +10573,8 @@ mod tests {
         let (mut state, seq_id, _, audio_track_id) =
             create_test_state_with_video_and_audio_tracks();
 
-        let mut cmd = ApplyAudioDuckingCommand::new(
-            &seq_id,
-            &audio_track_id,
-            "nonexistent-clip",
-            vec![],
-        );
+        let mut cmd =
+            ApplyAudioDuckingCommand::new(&seq_id, &audio_track_id, "nonexistent-clip", vec![]);
         let result = cmd.execute(&mut state);
         assert!(result.is_err());
     }
@@ -10585,8 +10593,7 @@ mod tests {
         ];
 
         // When ducking is applied with empty keyframes
-        let mut cmd =
-            ApplyAudioDuckingCommand::new(&seq_id, &audio_track_id, &clip_id, vec![]);
+        let mut cmd = ApplyAudioDuckingCommand::new(&seq_id, &audio_track_id, &clip_id, vec![]);
         cmd.execute(&mut state).unwrap();
 
         // Then keyframes are cleared

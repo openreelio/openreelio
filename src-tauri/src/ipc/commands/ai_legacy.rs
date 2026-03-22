@@ -760,11 +760,10 @@ pub async fn apply_edit_script(
 ) -> Result<ApplyEditScriptResult, String> {
     use crate::core::commands::{
         AddAudioKeyframeCommand, AddEffectCommand, AddMarkerCommand, AddMaskCommand,
-        AddTextClipCommand, AddTrackCommand, ApplyAudioDuckingCommand,
-        ClearTimeRemapCommand, CloseAllGapsCommand,
-        CloseGapCommand, CreateCaptionCommand, CreateFolderCommand, CreateFreezeFrameCommand,
-        CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand, DetachAudioCommand,
-        ExtractEditCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
+        AddTextClipCommand, AddTrackCommand, ApplyAudioDuckingCommand, ClearTimeRemapCommand,
+        CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand, CreateFolderCommand,
+        CreateFreezeFrameCommand, CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand,
+        DetachAudioCommand, ExtractEditCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
         LinkClipsCommand, MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand,
         OverwriteEditCommand, RemoveAssetCommand, RemoveAudioKeyframeCommand, RemoveClipCommand,
         RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
@@ -1794,7 +1793,10 @@ pub async fn validate_edit_script(
             // Audio ducking command
             "ApplyAudioDucking" | "applyAudioDucking" => {
                 if cmd.params.get("sequenceId").is_none() {
-                    issues.push(format!("ApplyAudioDucking command {} missing sequenceId", i));
+                    issues.push(format!(
+                        "ApplyAudioDucking command {} missing sequenceId",
+                        i
+                    ));
                 }
                 if cmd.params.get("trackId").is_none() {
                     issues.push(format!("ApplyAudioDucking command {} missing trackId", i));
@@ -1808,7 +1810,10 @@ pub async fn validate_edit_script(
                     .map(|v| v.is_array())
                     .unwrap_or(false);
                 if !has_keyframes {
-                    issues.push(format!("ApplyAudioDucking command {} missing keyframes array", i));
+                    issues.push(format!(
+                        "ApplyAudioDucking command {} missing keyframes array",
+                        i
+                    ));
                 }
             }
             _ => {

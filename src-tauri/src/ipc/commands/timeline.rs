@@ -420,13 +420,12 @@ pub async fn apply_audio_ducking(
     );
 
     // 3. Execute command (atomic, undoable)
-    let command: Box<dyn crate::core::commands::Command> =
-        Box::new(ApplyAudioDuckingCommand::new(
-            &sequence_id,
-            &music_track_id,
-            &music_clip_id,
-            keyframes,
-        ));
+    let command: Box<dyn crate::core::commands::Command> = Box::new(ApplyAudioDuckingCommand::new(
+        &sequence_id,
+        &music_track_id,
+        &music_clip_id,
+        keyframes,
+    ));
 
     let result = project
         .executor

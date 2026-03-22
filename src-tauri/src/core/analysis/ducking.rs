@@ -84,7 +84,11 @@ pub fn invert_silence_to_speech(
     }
 
     let mut sorted: Vec<&SilenceRegion> = silence_regions.iter().collect();
-    sorted.sort_by(|a, b| a.start_sec.partial_cmp(&b.start_sec).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        a.start_sec
+            .partial_cmp(&b.start_sec)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut speech = Vec::new();
     let mut cursor = 0.0;
@@ -133,7 +137,11 @@ pub fn merge_speech_regions(
     let min_gap = (attack_sec + release_sec).max(0.3);
 
     let mut sorted = regions.to_vec();
-    sorted.sort_by(|a, b| a.start_sec.partial_cmp(&b.start_sec).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        a.start_sec
+            .partial_cmp(&b.start_sec)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut merged = vec![sorted[0].clone()];
     for region in &sorted[1..] {
@@ -311,10 +319,7 @@ mod tests {
     #[test]
     fn should_detect_speech_between_silence_regions() {
         // Given silence at 0-2s and 5-8s in a 10-second clip
-        let silence = vec![
-            SilenceRegion::new(0.0, 2.0),
-            SilenceRegion::new(5.0, 8.0),
-        ];
+        let silence = vec![SilenceRegion::new(0.0, 2.0), SilenceRegion::new(5.0, 8.0)];
 
         // When inverting
         let speech = invert_silence_to_speech(&silence, 10.0);
@@ -354,10 +359,7 @@ mod tests {
     #[test]
     fn should_merge_overlapping_regions() {
         // Given two overlapping speech regions
-        let regions = vec![
-            SpeechRegion::new(1.0, 5.0),
-            SpeechRegion::new(4.0, 8.0),
-        ];
+        let regions = vec![SpeechRegion::new(1.0, 5.0), SpeechRegion::new(4.0, 8.0)];
 
         // When merging with 200ms attack + 500ms release
         let merged = merge_speech_regions(&regions, 0.2, 0.5);
@@ -371,10 +373,7 @@ mod tests {
     #[test]
     fn should_merge_adjacent_regions_within_gap_threshold() {
         // Given two regions 0.5s apart (less than attack + release = 0.7s)
-        let regions = vec![
-            SpeechRegion::new(1.0, 3.0),
-            SpeechRegion::new(3.5, 6.0),
-        ];
+        let regions = vec![SpeechRegion::new(1.0, 3.0), SpeechRegion::new(3.5, 6.0)];
 
         // When merging
         let merged = merge_speech_regions(&regions, 0.2, 0.5);
@@ -388,10 +387,7 @@ mod tests {
     #[test]
     fn should_keep_distant_regions_separate() {
         // Given two regions 3s apart (greater than any reasonable threshold)
-        let regions = vec![
-            SpeechRegion::new(1.0, 3.0),
-            SpeechRegion::new(6.0, 9.0),
-        ];
+        let regions = vec![SpeechRegion::new(1.0, 3.0), SpeechRegion::new(6.0, 9.0)];
 
         // When merging
         let merged = merge_speech_regions(&regions, 0.2, 0.5);
@@ -429,15 +425,26 @@ mod tests {
         // 10.0s = -15dB (duck end)
         // 10.5s = 0dB (release end)
         // 20.0s = 0dB (clip end)
-        assert!(keyframes.len() >= 5, "expected at least 5 keyframes, got {}", keyframes.len());
+        assert!(
+            keyframes.len() >= 5,
+            "expected at least 5 keyframes, got {}",
+            keyframes.len()
+        );
 
         // Verify duck happens
-        let duck_kf = keyframes.iter().find(|kf| (kf.value_db - (-15.0)).abs() < 0.01);
+        let duck_kf = keyframes
+            .iter()
+            .find(|kf| (kf.value_db - (-15.0)).abs() < 0.01);
         assert!(duck_kf.is_some(), "should have a keyframe at -15dB");
 
         // Verify original volume restored after release
-        let post_release = keyframes.iter().find(|kf| kf.time_offset > 10.0 && (kf.value_db - 0.0).abs() < 0.01);
-        assert!(post_release.is_some(), "should restore to 0dB after release");
+        let post_release = keyframes
+            .iter()
+            .find(|kf| kf.time_offset > 10.0 && (kf.value_db - 0.0).abs() < 0.01);
+        assert!(
+            post_release.is_some(),
+            "should restore to 0dB after release"
+        );
     }
 
     #[test]
@@ -455,14 +462,22 @@ mod tests {
         let keyframes = generate_duck_keyframes(&speech, &params, 0.0, 20.0, 0.0);
 
         // Then attack ramp: 4.8s (0dB) → 5.0s (-12dB) = 200ms ramp
-        let pre_duck = keyframes.iter().find(|kf| (kf.time_offset - 4.8).abs() < 0.05 && (kf.value_db - 0.0).abs() < 0.01);
-        let duck_start = keyframes.iter().find(|kf| (kf.time_offset - 5.0).abs() < 0.05 && (kf.value_db - (-12.0)).abs() < 0.01);
+        let pre_duck = keyframes
+            .iter()
+            .find(|kf| (kf.time_offset - 4.8).abs() < 0.05 && (kf.value_db - 0.0).abs() < 0.01);
+        let duck_start = keyframes
+            .iter()
+            .find(|kf| (kf.time_offset - 5.0).abs() < 0.05 && (kf.value_db - (-12.0)).abs() < 0.01);
         assert!(pre_duck.is_some(), "should have pre-duck anchor at 4.8s");
         assert!(duck_start.is_some(), "should have duck start at 5.0s");
 
         // Then release ramp: 10.0s (-12dB) → 10.5s (0dB) = 500ms ramp
-        let duck_end = keyframes.iter().find(|kf| (kf.time_offset - 10.0).abs() < 0.05 && (kf.value_db - (-12.0)).abs() < 0.01);
-        let release_end = keyframes.iter().find(|kf| (kf.time_offset - 10.5).abs() < 0.05 && (kf.value_db - 0.0).abs() < 0.01);
+        let duck_end = keyframes.iter().find(|kf| {
+            (kf.time_offset - 10.0).abs() < 0.05 && (kf.value_db - (-12.0)).abs() < 0.01
+        });
+        let release_end = keyframes
+            .iter()
+            .find(|kf| (kf.time_offset - 10.5).abs() < 0.05 && (kf.value_db - 0.0).abs() < 0.01);
         assert!(duck_end.is_some(), "should have duck end at 10.0s");
         assert!(release_end.is_some(), "should have release end at 10.5s");
     }
@@ -505,7 +520,9 @@ mod tests {
         assert!((keyframes[0].time_offset - 0.0).abs() < 0.01);
 
         // There should be a duck keyframe
-        let has_duck = keyframes.iter().any(|kf| (kf.value_db - (-10.0)).abs() < 0.01);
+        let has_duck = keyframes
+            .iter()
+            .any(|kf| (kf.value_db - (-10.0)).abs() < 0.01);
         assert!(has_duck, "should still duck even without attack room");
     }
 
@@ -526,17 +543,17 @@ mod tests {
         // Then keyframes are clamped to clip duration
         assert!(!keyframes.is_empty());
         for kf in &keyframes {
-            assert!(kf.time_offset <= 20.0, "keyframe should not exceed clip duration");
+            assert!(
+                kf.time_offset <= 20.0,
+                "keyframe should not exceed clip duration"
+            );
         }
     }
 
     #[test]
     fn should_handle_multiple_speech_regions() {
         // Given two separate speech regions
-        let speech = vec![
-            SpeechRegion::new(2.0, 4.0),
-            SpeechRegion::new(8.0, 12.0),
-        ];
+        let speech = vec![SpeechRegion::new(2.0, 4.0), SpeechRegion::new(8.0, 12.0)];
         let params = AudioDuckingParams {
             duck_amount_db: -15.0,
             attack_ms: 200.0,
@@ -548,8 +565,14 @@ mod tests {
         let keyframes = generate_duck_keyframes(&speech, &params, 0.0, 20.0, 0.0);
 
         // Then there should be two duck regions
-        let duck_keyframes: Vec<_> = keyframes.iter().filter(|kf| (kf.value_db - (-15.0)).abs() < 0.01).collect();
-        assert!(duck_keyframes.len() >= 2, "should have at least 2 duck keyframes for 2 speech regions");
+        let duck_keyframes: Vec<_> = keyframes
+            .iter()
+            .filter(|kf| (kf.value_db - (-15.0)).abs() < 0.01)
+            .collect();
+        assert!(
+            duck_keyframes.len() >= 2,
+            "should have at least 2 duck keyframes for 2 speech regions"
+        );
     }
 
     #[test]
@@ -565,18 +588,24 @@ mod tests {
         let keyframes = generate_duck_keyframes(&speech, &params, 0.0, 20.0, -6.0);
 
         // Then original keyframes are at -6dB, ducked keyframes at -16dB
-        let original = keyframes.iter().filter(|kf| (kf.value_db - (-6.0)).abs() < 0.01).count();
-        let ducked = keyframes.iter().filter(|kf| (kf.value_db - (-16.0)).abs() < 0.01).count();
-        assert!(original >= 2, "should have original volume keyframes at -6dB");
+        let original = keyframes
+            .iter()
+            .filter(|kf| (kf.value_db - (-6.0)).abs() < 0.01)
+            .count();
+        let ducked = keyframes
+            .iter()
+            .filter(|kf| (kf.value_db - (-16.0)).abs() < 0.01)
+            .count();
+        assert!(
+            original >= 2,
+            "should have original volume keyframes at -6dB"
+        );
         assert!(ducked >= 1, "should have ducked keyframes at -16dB");
     }
 
     #[test]
     fn should_produce_keyframes_sorted_by_time() {
-        let speech = vec![
-            SpeechRegion::new(8.0, 12.0),
-            SpeechRegion::new(2.0, 4.0),
-        ];
+        let speech = vec![SpeechRegion::new(8.0, 12.0), SpeechRegion::new(2.0, 4.0)];
         let params = AudioDuckingParams::default();
 
         let keyframes = generate_duck_keyframes(&speech, &params, 0.0, 20.0, 0.0);
@@ -619,7 +648,9 @@ mod tests {
         let keyframes = generate_duck_keyframes(&speech, &params, 10.0, 20.0, 0.0);
 
         // Then keyframes use clip-local time (speech starts at 2.0 in local time)
-        let duck_kf = keyframes.iter().find(|kf| (kf.value_db - (-15.0)).abs() < 0.01);
+        let duck_kf = keyframes
+            .iter()
+            .find(|kf| (kf.value_db - (-15.0)).abs() < 0.01);
         assert!(duck_kf.is_some());
         let duck_time = duck_kf.unwrap().time_offset;
         assert!(
