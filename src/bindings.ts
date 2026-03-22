@@ -1635,6 +1635,21 @@ async clearAgentMemory(projectId: string, category: string | null) : Promise<Res
 } catch (e) {
     return { status: "error", error: e  as any };
 }
+},
+/**
+ * Analyzes a speech track for clip positions and generates volume-ducking
+ * keyframes on a music clip.
+ * 
+ * Speech regions are derived from enabled clip positions on the speech track.
+ * The generated keyframes smoothly duck the music volume during speech
+ * segments using the specified attack and release ramps.
+ */
+async applyAudioDucking(args: ApplyAudioDuckingArgs) : Promise<Result<CommandResultDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("apply_audio_ducking", { args }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -2071,6 +2086,10 @@ export type AppCleanupResult = { projectSaved: boolean; workersShutdown: boolean
 export type AppSettingsDto = { version: number; general: GeneralSettingsDto; editor: EditorSettingsDto; playback: PlaybackSettingsDto; export: ExportSettingsDto; appearance: AppearanceSettingsDto; shortcuts: ShortcutSettingsDto; autoSave: AutoSaveSettingsDto; performance: PerformanceSettingsDto; ai: AISettingsDto }
 export type AppearanceSettingsDto = { theme: string; accentColor: string; uiScale: number; showStatusBar: boolean; compactMode: boolean }
 /**
+ * Payload for the audio ducking IPC command.
+ */
+export type ApplyAudioDuckingArgs = { sequenceId: string; speechTrackId: string; musicTrackId: string; musicClipId: string; params: AudioDuckingParams }
+/**
  * Result of applying an EditScript.
  */
 export type ApplyEditScriptResult = { 
@@ -2252,6 +2271,27 @@ duration: number | null;
  * Associated tags
  */
 tags: string[] }
+/**
+ * Parameters for audio ducking.
+ */
+export type AudioDuckingParams = { 
+/**
+ * Loudness threshold in dB below which audio is considered silent.
+ * Used by FFmpeg `silencedetect` in the IPC layer. Default: -30.0
+ */
+thresholdDb: number; 
+/**
+ * Amount to reduce music volume in dB (negative = quieter). Default: -15.0
+ */
+duckAmountDb: number; 
+/**
+ * Ramp-down time in milliseconds when ducking starts. Default: 200
+ */
+attackMs: number; 
+/**
+ * Ramp-up time in milliseconds when ducking ends. Default: 500
+ */
+releaseMs: number }
 /**
  * Compact audio characteristics stored with the ESD for compatibility scoring.
  */
@@ -2560,7 +2600,12 @@ captionPosition?: JsonValue | null;
 /**
  * Whether this clip is enabled (disabled clips are skipped during render/preview)
  */
-enabled?: boolean }
+enabled?: boolean; 
+/**
+ * Link group ID for audio-video linked editing.
+ * Clips sharing the same link_group_id are selected/moved together.
+ */
+linkGroupId?: string | null }
 /**
  * Clip event payload.
  */
