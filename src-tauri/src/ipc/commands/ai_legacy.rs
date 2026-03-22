@@ -760,19 +760,20 @@ pub async fn apply_edit_script(
 ) -> Result<ApplyEditScriptResult, String> {
     use crate::core::commands::{
         AddAudioKeyframeCommand, AddEffectCommand, AddMarkerCommand, AddMaskCommand,
-        AddTextClipCommand, AddTrackCommand, ClearTimeRemapCommand, CloseAllGapsCommand,
-        CloseGapCommand, CreateCaptionCommand, CreateFolderCommand, CreateFreezeFrameCommand,
-        CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand, ExtractEditCommand,
-        InsertClipCommand, InsertEditCommand, LiftCommand, MoveAudioKeyframeCommand,
-        MoveClipCommand, MoveFileCommand, OverwriteEditCommand, RemoveAssetCommand,
-        RemoveAudioKeyframeCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand,
-        RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
-        RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand,
-        SetAudioFadeInCommand, SetAudioFadeOutCommand, SetAudioKeyframeValueCommand,
-        SetClipAudioCommand, SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMuteCommand,
-        SetClipSpeedCommand, SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
-        SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand, ToggleTrackMuteCommand,
-        ToggleTrackVisibilityCommand, TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand,
+        AddTextClipCommand, AddTrackCommand, ApplyAudioDuckingCommand, ClearTimeRemapCommand,
+        CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand, CreateFolderCommand,
+        CreateFreezeFrameCommand, CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand,
+        DetachAudioCommand, ExtractEditCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
+        LinkClipsCommand, MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand,
+        OverwriteEditCommand, RemoveAssetCommand, RemoveAudioKeyframeCommand, RemoveClipCommand,
+        RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
+        RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, ReorderTracksCommand,
+        ReverseClipCommand, RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
+        SetAudioKeyframeValueCommand, SetClipAudioCommand, SetClipBlendModeCommand,
+        SetClipEnabledCommand, SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
+        SetMasterVolumeCommand, SetTimeRemapCommand, SetTrackBlendModeCommand, SplitClipCommand,
+        ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
+        TrimClipCommand, UnlinkClipsCommand, UpdateEffectCommand, UpdateMaskCommand,
         UpdateTextCommand,
     };
 
@@ -1029,6 +1030,26 @@ pub async fn apply_edit_script(
                 &p.track_id,
                 &p.clip_id,
                 p.enabled,
+            )),
+            CommandPayload::LinkClips(p) => Box::new(LinkClipsCommand::new(
+                &p.sequence_id,
+                p.clip_refs
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect(),
+            )),
+            CommandPayload::UnlinkClips(p) => Box::new(UnlinkClipsCommand::new(
+                &p.sequence_id,
+                p.clip_refs
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect(),
+            )),
+            CommandPayload::DetachAudio(p) => Box::new(DetachAudioCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.target_audio_track_id,
             )),
             CommandPayload::CreateFreezeFrame(p) => Box::new(CreateFreezeFrameCommand::new(
                 &p.sequence_id,
@@ -1317,6 +1338,19 @@ pub async fn apply_edit_script(
                 &p.relative_path,
                 project.path.clone(),
             )),
+
+            CommandPayload::ApplyAudioDucking(p) => {
+                if p.keyframes.is_empty() {
+                    errors.push("ApplyAudioDucking: keyframes array is empty, skipping to avoid clearing existing automation".to_string());
+                    continue;
+                }
+                Box::new(ApplyAudioDuckingCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.keyframes,
+                ))
+            }
         };
 
         match project.executor.execute(command, &mut project.state) {
@@ -1725,6 +1759,61 @@ pub async fn validate_edit_script(
                 }
                 if cmd.params.get("enabled").is_none() {
                     issues.push(format!("SetClipEnabled command {} missing enabled", i));
+                }
+            }
+            // Clip linking commands
+            "LinkClips" | "linkClips" => {
+                let has_clip_refs = cmd
+                    .params
+                    .get("clipRefs")
+                    .map(|v| v.is_array())
+                    .unwrap_or(false);
+                if !has_clip_refs {
+                    issues.push(format!("LinkClips command {} missing clipRefs array", i));
+                }
+            }
+            "UnlinkClips" | "unlinkClips" => {
+                let has_clip_refs = cmd
+                    .params
+                    .get("clipRefs")
+                    .map(|v| v.is_array())
+                    .unwrap_or(false);
+                if !has_clip_refs {
+                    issues.push(format!("UnlinkClips command {} missing clipRefs array", i));
+                }
+            }
+            "DetachAudio" | "detachAudio" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("DetachAudio command {} missing trackId", i));
+                }
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("DetachAudio command {} missing clipId", i));
+                }
+            }
+            // Audio ducking command
+            "ApplyAudioDucking" | "applyAudioDucking" => {
+                if cmd.params.get("sequenceId").is_none() {
+                    issues.push(format!(
+                        "ApplyAudioDucking command {} missing sequenceId",
+                        i
+                    ));
+                }
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("ApplyAudioDucking command {} missing trackId", i));
+                }
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("ApplyAudioDucking command {} missing clipId", i));
+                }
+                let has_keyframes = cmd
+                    .params
+                    .get("keyframes")
+                    .map(|v| v.is_array())
+                    .unwrap_or(false);
+                if !has_keyframes {
+                    issues.push(format!(
+                        "ApplyAudioDucking command {} missing keyframes array",
+                        i
+                    ));
                 }
             }
             _ => {

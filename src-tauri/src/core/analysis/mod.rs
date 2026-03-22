@@ -24,6 +24,7 @@
 
 pub mod audio;
 pub mod dtw;
+pub mod ducking;
 pub mod esd;
 pub mod segmentation;
 pub mod style_planner;

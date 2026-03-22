@@ -231,6 +231,9 @@ export function Timeline({
   onClipReverse,
   onClipFreezeFrame,
   onClipToggleEnabled,
+  onClipLink,
+  onClipUnlink,
+  onClipDetachAudio,
 }: TimelineProps) {
   // ===========================================================================
   // Store State - Using targeted selectors to minimize re-renders
@@ -718,6 +721,38 @@ export function Timeline({
       }
     },
     [sequence, onClipDuplicate, linkedSelectionEnabled],
+  );
+
+  const resolveLinkedClipRefs = useCallback(
+    (clipId: string) => {
+      if (!sequence) {
+        return [];
+      }
+
+      const linkedClipIds = expandClipIdsWithLinkedCompanions(sequence, [clipId]);
+      const seen = new Set<string>();
+      const clipRefs: Array<{ trackId: string; clipId: string }> = [];
+
+      for (const linkedClipId of linkedClipIds) {
+        if (seen.has(linkedClipId)) {
+          continue;
+        }
+
+        const clipRef = findClipReference(sequence, linkedClipId);
+        if (!clipRef) {
+          continue;
+        }
+
+        seen.add(clipRef.clip.id);
+        clipRefs.push({
+          trackId: clipRef.track.id,
+          clipId: clipRef.clip.id,
+        });
+      }
+
+      return clipRefs;
+    },
+    [sequence],
   );
 
   const { copy, cut, paste, duplicate, canCopy, canPaste } = useClipboard({
@@ -2033,6 +2068,10 @@ export function Timeline({
                     onClipReverse={onClipReverse}
                     onClipFreezeFrame={onClipFreezeFrame}
                     onClipToggleEnabled={onClipToggleEnabled}
+                    onClipLink={onClipLink}
+                    onClipUnlink={onClipUnlink}
+                    onClipDetachAudio={onClipDetachAudio}
+                    resolveLinkedClipRefs={resolveLinkedClipRefs}
                   />
                 );
               })}

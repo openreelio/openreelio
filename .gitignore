@@ -91,6 +91,9 @@ coverage/
 # Local runtime caches / generated artifacts
 /src-tauri/.openreelio/
 
+# Auto-generated TypeScript bindings (tauri-specta)
+src-tauri/src/bindings.ts
+
 # Temporary files
 *.tmp
 *.temp

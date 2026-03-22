@@ -6,7 +6,12 @@
 use specta::Type;
 use tauri::State;
 
-use crate::core::{commands::CreateSequenceCommand, timeline::Sequence, CoreError};
+use crate::core::{
+    analysis::ducking::{generate_duck_keyframes, AudioDuckingParams, SpeechRegion},
+    commands::{ApplyAudioDuckingCommand, CreateSequenceCommand},
+    timeline::Sequence,
+    CoreError,
+};
 use crate::ipc::payloads::CommandPayload;
 use crate::AppState;
 
@@ -320,4 +325,116 @@ pub async fn get_prev_marker(
     state: State<'_, AppState>,
 ) -> Result<Option<f64>, String> {
     with_sequence_nav(sequence_id, current_time, &state, Sequence::prev_marker).await
+}
+
+// =============================================================================
+// Audio Ducking
+// =============================================================================
+
+/// Payload for the audio ducking IPC command.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyAudioDuckingArgs {
+    pub sequence_id: String,
+    pub speech_track_id: String,
+    pub music_track_id: String,
+    pub music_clip_id: String,
+    pub params: AudioDuckingParams,
+}
+
+/// Analyzes a speech track for clip positions and generates volume-ducking
+/// keyframes on a music clip.
+///
+/// Speech regions are derived from enabled clip positions on the speech track.
+/// The generated keyframes smoothly duck the music volume during speech
+/// segments using the specified attack and release ramps.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state))]
+pub async fn apply_audio_ducking(
+    args: ApplyAudioDuckingArgs,
+    state: State<'_, AppState>,
+) -> Result<CommandResultDto, String> {
+    let mut guard = state.project.lock().await;
+    let project = guard
+        .as_mut()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let sequence_id = args.sequence_id;
+    let speech_track_id = args.speech_track_id;
+    let music_track_id = args.music_track_id;
+    let music_clip_id = args.music_clip_id;
+    let params = args.params;
+
+    // 1. Collect speech regions from enabled clips on the speech track
+    let (speech_regions, clip_start, clip_duration, original_volume) = {
+        let sequence = project
+            .state
+            .sequences
+            .get(&sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(sequence_id.clone()).to_ipc_error())?;
+
+        let speech_track = sequence
+            .get_track(&speech_track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(speech_track_id.clone()).to_ipc_error())?;
+
+        let regions: Vec<SpeechRegion> = speech_track
+            .clips
+            .iter()
+            .filter(|c| c.enabled)
+            .map(|c| {
+                SpeechRegion::new(
+                    c.place.timeline_in_sec,
+                    c.place.timeline_in_sec + c.place.duration_sec,
+                )
+            })
+            .collect();
+
+        let music_track = sequence
+            .get_track(&music_track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(music_track_id.clone()).to_ipc_error())?;
+
+        let music_clip = music_track
+            .get_clip(&music_clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(music_clip_id.clone()).to_ipc_error())?;
+
+        (
+            regions,
+            music_clip.place.timeline_in_sec,
+            music_clip.place.duration_sec,
+            music_clip.audio.volume_db as f64,
+        )
+    };
+
+    if speech_regions.is_empty() {
+        return Err("No enabled clips found on speech track".to_string());
+    }
+
+    // 2. Generate duck keyframes
+    let keyframes = generate_duck_keyframes(
+        &speech_regions,
+        &params,
+        clip_start,
+        clip_duration,
+        original_volume,
+    );
+
+    // 3. Execute command (atomic, undoable)
+    let command: Box<dyn crate::core::commands::Command> = Box::new(ApplyAudioDuckingCommand::new(
+        &sequence_id,
+        &music_track_id,
+        &music_clip_id,
+        keyframes,
+    ));
+
+    let result = project
+        .executor
+        .execute(command, &mut project.state)
+        .map_err(|e| e.to_ipc_error())?;
+
+    Ok(CommandResultDto {
+        op_id: result.op_id,
+        created_ids: result.created_ids,
+        deleted_ids: result.deleted_ids,
+    })
 }

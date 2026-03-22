@@ -46,6 +46,10 @@ function trackKindCanHaveCompanion(trackKind: TrackKind): boolean {
   return trackKind === 'video' || trackKind === 'overlay' || trackKind === 'audio';
 }
 
+function hasExplicitLinkMetadata(clip: Clip): boolean {
+  return clip.linkGroupId !== undefined;
+}
+
 function isVisualTrackKind(trackKind: TrackKind): boolean {
   return trackKind === 'video' || trackKind === 'overlay';
 }
@@ -85,6 +89,36 @@ export function findLinkedCompanionClipIds(sequence: Sequence, clipId: string): 
     return [];
   }
 
+  // Explicit link metadata takes precedence over the legacy implicit matcher.
+  // This lets manual link/unlink and detach-audio operations override
+  // asset/timing-based auto-pairing.
+  if (hasExplicitLinkMetadata(sourceRef.clip)) {
+    const explicitLinkGroupId = sourceRef.clip.linkGroupId;
+    if (!explicitLinkGroupId) {
+      return [];
+    }
+
+    const companions: string[] = [];
+
+    for (const track of sequence.tracks) {
+      if (!trackKindCanHaveCompanion(track.kind)) {
+        continue;
+      }
+
+      for (const clip of track.clips) {
+        if (clip.id === sourceRef.clip.id) {
+          continue;
+        }
+
+        if (clip.linkGroupId === explicitLinkGroupId) {
+          companions.push(clip.id);
+        }
+      }
+    }
+
+    return companions;
+  }
+
   const sourceIsAudio = sourceRef.track.kind === 'audio';
   const sourceKey = createClipLinkKey(sourceRef.clip);
   const companions: string[] = [];
@@ -100,6 +134,12 @@ export function findLinkedCompanionClipIds(sequence: Sequence, clipId: string): 
 
     for (const clip of track.clips) {
       if (clip.id === sourceRef.clip.id) {
+        continue;
+      }
+
+      // Do not implicitly pair against clips that already carry explicit link
+      // metadata, including the explicit "unlinked" sentinel.
+      if (hasExplicitLinkMetadata(clip)) {
         continue;
       }
 

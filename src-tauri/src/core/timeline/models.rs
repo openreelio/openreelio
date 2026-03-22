@@ -1127,6 +1127,10 @@ pub struct Clip {
     /// Whether this clip is enabled (disabled clips are skipped during render/preview)
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Link group ID for audio-video linked editing.
+    /// Clips sharing the same link_group_id are selected/moved together.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_group_id: Option<String>,
 }
 
 /// Serde default helper that returns `true`
@@ -1156,6 +1160,7 @@ impl Clip {
             caption_style: None,
             caption_position: None,
             enabled: true,
+            link_group_id: None,
         }
     }
 
@@ -1201,6 +1206,7 @@ impl Clip {
             caption_style: None,
             caption_position: None,
             enabled: true,
+            link_group_id: None,
         }
     }
 

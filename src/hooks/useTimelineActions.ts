@@ -113,6 +113,9 @@ interface TimelineActions {
   handleReverseClip: (clipId: string, trackId: string) => Promise<void>;
   handleCreateFreezeFrame: (clipId: string, trackId: string) => Promise<void>;
   handleToggleClipEnabled: (clipId: string, trackId: string) => Promise<void>;
+  handleLinkClips: (clipIds: string[]) => Promise<void>;
+  handleUnlinkClips: (clipRefs: Array<{ trackId: string; clipId: string }>) => Promise<void>;
+  handleDetachAudio: (clipId: string, trackId: string) => Promise<void>;
 }
 
 type ExecuteTimelineCommand = (command: Command) => Promise<CommandResult>;
@@ -1972,20 +1975,20 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             payload: buildInsertPayload(audioTrack.id),
           });
 
-          if (shouldApplyDurationHint) {
-            let insertedAudioClipId: string | undefined = audioInsertResult.createdIds[0];
-            if (!insertedAudioClipId) {
-              const latestSequence = getCurrentSequence();
-              const latestAudioTrack = latestSequence?.tracks.find(
-                (track) => track.id === audioTrack.id,
-              );
-              insertedAudioClipId = findClipByAssetAtTimeline(
-                latestAudioTrack,
-                droppedAssetId,
-                data.timelinePosition,
-              )?.id;
-            }
+          let insertedAudioClipId: string | undefined = audioInsertResult.createdIds[0];
+          if (!insertedAudioClipId) {
+            const latestSequence = getCurrentSequence();
+            const latestAudioTrack = latestSequence?.tracks.find(
+              (track) => track.id === audioTrack.id,
+            );
+            insertedAudioClipId = findClipByAssetAtTimeline(
+              latestAudioTrack,
+              droppedAssetId,
+              data.timelinePosition,
+            )?.id;
+          }
 
+          if (shouldApplyDurationHint) {
             if (insertedAudioClipId) {
               try {
                 await executeCommand({
@@ -2010,34 +2013,59 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
             }
           }
 
-          if (!primaryVideoClipId) {
-            logger.warn('Linked audio inserted, but source video clip ID could not be resolved', {
+          if (!primaryVideoClipId || !insertedAudioClipId) {
+            logger.warn('Linked A/V pair inserted, but explicit link targets could not be resolved', {
               sequenceId: sequence.id,
               assetId: droppedAssetId,
               videoTrackId: visualTrack.id,
+              audioTrackId: audioTrack.id,
+              videoClipId: primaryVideoClipId,
+              audioClipId: insertedAudioClipId,
               timelinePosition: data.timelinePosition,
             });
-            return true;
-          }
-
-          try {
-            await executeCommand({
-              type: 'SetClipMute',
-              payload: {
+          } else {
+            try {
+              await executeCommand({
+                type: 'LinkClips',
+                payload: {
+                  sequenceId: sequence.id,
+                  clipRefs: [
+                    { trackId: visualTrack.id, clipId: primaryVideoClipId },
+                    { trackId: audioTrack.id, clipId: insertedAudioClipId },
+                  ],
+                },
+              });
+            } catch (linkError) {
+              logger.warn('Linked A/V pair inserted, but failed to establish explicit link group', {
                 sequenceId: sequence.id,
-                trackId: visualTrack.id,
-                clipId: primaryVideoClipId,
-                muted: true,
-              },
-            });
-          } catch (muteError) {
-            logger.warn('Linked A/V pair inserted, but failed to mute source video clip audio', {
-              sequenceId: sequence.id,
-              assetId: droppedAssetId,
-              videoTrackId: visualTrack.id,
-              videoClipId: primaryVideoClipId,
-              error: muteError,
-            });
+                assetId: droppedAssetId,
+                videoTrackId: visualTrack.id,
+                audioTrackId: audioTrack.id,
+                videoClipId: primaryVideoClipId,
+                audioClipId: insertedAudioClipId,
+                error: linkError,
+              });
+            }
+
+            try {
+              await executeCommand({
+                type: 'SetClipMute',
+                payload: {
+                  sequenceId: sequence.id,
+                  trackId: visualTrack.id,
+                  clipId: primaryVideoClipId,
+                  muted: true,
+                },
+              });
+            } catch (muteError) {
+              logger.warn('Linked A/V pair inserted, but failed to mute source video clip audio', {
+                sequenceId: sequence.id,
+                assetId: droppedAssetId,
+                videoTrackId: visualTrack.id,
+                videoClipId: primaryVideoClipId,
+                error: muteError,
+              });
+            }
           }
         } catch (audioInsertError) {
           logger.warn('Primary clip inserted, but linked audio extraction failed', {
@@ -2916,6 +2944,65 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     [executeCommand, getCurrentSequence],
   );
 
+  const handleLinkClips = useCallback(
+    async (clipIds: string[]): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq || clipIds.length < 2) return;
+
+      // Resolve correct trackId for each clip by searching all tracks
+      const clipRefs: Array<{ trackId: string; clipId: string }> = [];
+      for (const clipId of clipIds) {
+        const track = seq.tracks.find((t) => t.clips.some((c) => c.id === clipId));
+        if (track) {
+          clipRefs.push({ trackId: track.id, clipId });
+        }
+      }
+      if (clipRefs.length < 2) return;
+
+      await executeCommand({
+        type: 'LinkClips',
+        payload: {
+          sequenceId: seq.id,
+          clipRefs,
+        },
+      });
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
+  const handleUnlinkClips = useCallback(
+    async (clipRefs: Array<{ trackId: string; clipId: string }>): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq || clipRefs.length === 0) return;
+
+      await executeCommand({
+        type: 'UnlinkClips',
+        payload: {
+          sequenceId: seq.id,
+          clipRefs,
+        },
+      });
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
+  const handleDetachAudio = useCallback(
+    async (clipId: string, trackId: string): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq) return;
+
+      await executeCommand({
+        type: 'DetachAudio',
+        payload: {
+          sequenceId: seq.id,
+          trackId,
+          clipId,
+        },
+      });
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
   return {
     handleClipMove,
     handleClipTrim,
@@ -2943,5 +3030,8 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleReverseClip,
     handleCreateFreezeFrame,
     handleToggleClipEnabled,
+    handleLinkClips,
+    handleUnlinkClips,
+    handleDetachAudio,
   };
 }

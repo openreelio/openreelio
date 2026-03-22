@@ -321,6 +321,12 @@ export interface TimelineProps {
   onClipFreezeFrame?: (clipId: string, trackId: string) => void | Promise<void>;
   /** Callback when clip enable/disable is toggled */
   onClipToggleEnabled?: (clipId: string, trackId: string) => void | Promise<void>;
+  /** Callback when clips are linked together (accepts clip IDs; resolves trackIds internally) */
+  onClipLink?: (clipIds: string[]) => void | Promise<void>;
+  /** Callback when clips are unlinked */
+  onClipUnlink?: (clipRefs: Array<{ trackId: string; clipId: string }>) => void | Promise<void>;
+  /** Callback when audio is detached from a video clip */
+  onClipDetachAudio?: (clipId: string, trackId: string) => void | Promise<void>;
 }
 
 // =============================================================================

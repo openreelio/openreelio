@@ -43,8 +43,12 @@ import { useSequenceTextClipData } from '@/hooks/useSequenceTextClipData';
 import { useAudioMixer } from '@/hooks/useAudioMixer';
 import { useMulticamSession } from '@/hooks/useMulticamSession';
 import { useBlendMode } from '@/hooks/useBlendMode';
+import { useAudioDucking } from '@/hooks/useAudioDucking';
+import { useAudioScrubbing } from '@/hooks/useAudioScrubbing';
+import { useToastStore } from '@/hooks/useToast';
 import { useResponsiveSidebarState } from './hooks/useResponsiveSidebarState';
 import { dbToLinear, linearToDb } from '@/utils/audioMeter';
+import { resolveAutoDuckTargets } from '@/utils/audioDucking';
 import { extractTextDataFromClipWithMap } from '@/utils/textRenderer';
 import { commands } from '@/bindings';
 import { createLogger } from '@/services/logger';
@@ -229,6 +233,38 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     [mixerMasterState.levels.left, mixerMasterState.levels.right],
   );
 
+  // Audio ducking
+  const { applyDucking, isApplying: isAutoDucking } = useAudioDucking();
+
+  const handleAutoDuck = useCallback(async () => {
+    if (!sequence) return;
+
+    const resolution = resolveAutoDuckTargets(sequence, selectedClipIds);
+    if (!resolution.ok) {
+      logger.warn('Auto-duck target resolution failed', { reason: resolution.reason });
+      useToastStore.getState().addToast({
+        message: resolution.reason,
+        variant: 'warning',
+      });
+      return;
+    }
+
+    try {
+      await applyDucking(
+        sequence.id,
+        resolution.targets.speechTrackId,
+        resolution.targets.musicTrackId,
+        resolution.targets.musicClipId,
+      );
+    } catch (err) {
+      logger.error('Auto-duck failed', { reason: String(err) });
+      useToastStore.getState().addToast({
+        message: 'Auto-duck failed. Check the selected tracks and try again.',
+        variant: 'error',
+      });
+    }
+  }, [sequence, selectedClipIds, applyDucking]);
+
   // Audio playback integration
   // The hook handles audio scheduling, volume control, and clip synchronization
   // It uses Web Audio API for precise timing and responds to playback store changes
@@ -237,6 +273,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     assets,
     enabled: true, // Always enabled when in editor view
   });
+
+  // Audio scrubbing: plays short snippets when dragging playhead while paused
+  useAudioScrubbing({ sequence, assets });
 
   // Initialize audio context on first play interaction
   // Web Audio API requires user gesture to create AudioContext
@@ -339,6 +378,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     handleReverseClip,
     handleCreateFreezeFrame,
     handleToggleClipEnabled,
+    handleLinkClips,
+    handleUnlinkClips,
+    handleDetachAudio,
   } = useTimelineActions({ sequence });
 
   // Text clip operations
@@ -888,6 +930,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                       onClipReverse={handleReverseClip}
                       onClipFreezeFrame={handleCreateFreezeFrame}
                       onClipToggleEnabled={handleToggleClipEnabled}
+                      onClipLink={handleLinkClips}
+                      onClipUnlink={handleUnlinkClips}
+                      onClipDetachAudio={handleDetachAudio}
                     />
                   </TimelineErrorBoundary>
                 </div>
@@ -911,6 +956,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                         onSoloToggle={handleMixerSoloToggle}
                         onMasterVolumeChange={handleMasterVolumeChange}
                         onMasterMuteToggle={handleMasterMuteToggle}
+                        onAutoDuck={handleAutoDuck}
+                        isAutoDucking={isAutoDucking}
                         compact
                         className="h-full"
                       />
