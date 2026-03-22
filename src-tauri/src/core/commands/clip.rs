@@ -11573,7 +11573,7 @@ mod tests {
         );
 
         // And inner sequence is removed
-        assert!(state.sequences.get(&inner_seq_id).is_none());
+        assert!(!state.sequences.contains_key(&inner_seq_id));
 
         // And no compound clips remain
         assert!(state.sequences[&seq_id].tracks[0]
@@ -11738,7 +11738,7 @@ mod tests {
         assert_eq!(track.clips.len(), 2); // compound + remaining
 
         // And inner sequence is restored
-        assert!(state.sequences.get(&inner_seq_id).is_some());
+        assert!(state.sequences.contains_key(&inner_seq_id));
     }
 
     #[test]
