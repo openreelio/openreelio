@@ -23,6 +23,7 @@
 //! ```
 
 pub mod audio;
+pub mod ducking;
 pub mod dtw;
 pub mod esd;
 pub mod segmentation;
