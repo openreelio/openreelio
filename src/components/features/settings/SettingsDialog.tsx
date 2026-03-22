@@ -5,7 +5,7 @@
  */
 
 import { useEffect, useRef, useCallback } from 'react';
-import { X, Settings2, Palette, Keyboard, RotateCcw, Bot, Shield, Wrench } from 'lucide-react';
+import { X, Settings2, Palette, Keyboard, RotateCcw, Bot, Shield, Wrench, Play } from 'lucide-react';
 import { useSettings } from '@/hooks/useSettings';
 import { useUIStore } from '@/stores';
 import { GeneralSettings } from './sections/GeneralSettings';
@@ -14,6 +14,7 @@ import { ShortcutsSettings } from './sections/ShortcutsSettings';
 import { AISettingsSection } from './sections/AISettingsSection';
 import { AgentPermissionsSection } from './sections/AgentPermissionsSection';
 import { DeveloperSettings } from './sections/DeveloperSettings';
+import { PlaybackSettings } from './sections/PlaybackSettings';
 
 // =============================================================================
 // Types
@@ -24,7 +25,7 @@ export interface SettingsDialogProps {
   onClose: () => void;
 }
 
-type TabId = 'general' | 'appearance' | 'shortcuts' | 'ai' | 'permissions' | 'developer';
+type TabId = 'general' | 'playback' | 'appearance' | 'shortcuts' | 'ai' | 'permissions' | 'developer';
 
 interface Tab {
   id: TabId;
@@ -38,6 +39,7 @@ interface Tab {
 
 const TABS: Tab[] = [
   { id: 'general', label: 'General', icon: <Settings2 className="w-4 h-4" /> },
+  { id: 'playback', label: 'Playback', icon: <Play className="w-4 h-4" /> },
   { id: 'appearance', label: 'Appearance', icon: <Palette className="w-4 h-4" /> },
   { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard className="w-4 h-4" /> },
   { id: 'ai', label: 'AI', icon: <Bot className="w-4 h-4" /> },
@@ -56,9 +58,11 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
 
   const {
     general,
+    playback,
     appearance,
     ai,
     updateGeneral,
+    updatePlayback,
     updateAppearance,
     updateAI,
     resetSettings,
@@ -101,6 +105,13 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
       void updateGeneral(values);
     },
     [updateGeneral]
+  );
+
+  const handlePlaybackUpdate = useCallback(
+    (values: Parameters<typeof updatePlayback>[0]) => {
+      void updatePlayback(values);
+    },
+    [updatePlayback]
   );
 
   const handleAppearanceUpdate = useCallback(
@@ -191,6 +202,14 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
               <GeneralSettings
                 settings={general}
                 onUpdate={handleGeneralUpdate}
+                disabled={isSaving}
+              />
+            )}
+
+            {activeTab === 'playback' && (
+              <PlaybackSettings
+                settings={playback}
+                onUpdate={handlePlaybackUpdate}
                 disabled={isSaving}
               />
             )}
