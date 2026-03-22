@@ -10302,11 +10302,10 @@ mod tests {
         cmd.undo(&mut state).unwrap();
 
         // Then the created audio track and clip should be removed
-        assert!(state.sequences[&seq_id]
+        assert!(!state.sequences[&seq_id]
             .tracks
             .iter()
-            .find(|track| track.id == created_track_id)
-            .is_none());
+            .any(|track| track.id == created_track_id));
 
         // And the source clip's link_group_id should be restored
         assert_eq!(
