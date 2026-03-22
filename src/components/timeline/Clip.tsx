@@ -495,6 +495,17 @@ export function Clip({
             </div>
           )}
 
+          {/* Link indicator */}
+          {clip.linkGroupId && (
+            <div
+              data-testid="link-indicator"
+              className="px-1 h-3 bg-cyan-600 rounded text-[8px] text-white flex items-center"
+              title="Linked clip"
+            >
+              LK
+            </div>
+          )}
+
           {/* Speed indicator */}
           {(hasSpeedChange || isReversed || hasTimeRemap) && (
             <div

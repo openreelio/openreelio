@@ -123,6 +123,14 @@ interface TrackProps {
   onClipFreezeFrame?: (clipId: string, trackId: string) => void;
   /** Clip enable/disable toggle handler */
   onClipToggleEnabled?: (clipId: string, trackId: string) => void;
+  /** Link selected clips handler (accepts clip IDs; resolves trackIds internally) */
+  onClipLink?: (clipIds: string[]) => void;
+  /** Unlink clips handler */
+  onClipUnlink?: (clipRefs: Array<{ trackId: string; clipId: string }>) => void;
+  /** Detach audio from video clip handler */
+  onClipDetachAudio?: (clipId: string, trackId: string) => void;
+  /** Resolve the full linked group for a clip */
+  resolveLinkedClipRefs?: (clipId: string) => Array<{ trackId: string; clipId: string }>;
 }
 
 // =============================================================================
@@ -191,6 +199,10 @@ export function Track({
   onClipReverse,
   onClipFreezeFrame,
   onClipToggleEnabled,
+  onClipLink,
+  onClipUnlink,
+  onClipDetachAudio,
+  resolveLinkedClipRefs,
 }: TrackProps) {
   // Ref for measuring viewport width if not provided
   const contentRef = useRef<HTMLDivElement>(null);
@@ -295,6 +307,14 @@ export function Track({
     const clip = track.clips.find((c) => c.id === clipId);
     if (!clip) return [];
 
+    const linkedClipRefs =
+      resolveLinkedClipRefs?.(clipId) ??
+      (clip.linkGroupId ? [{ trackId: track.id, clipId }] : []);
+    const isLinked = linkedClipRefs.length >= 2 || (!resolveLinkedClipRefs && !!clip.linkGroupId);
+    const isVisualTrack = track.kind === 'video' || track.kind === 'overlay';
+    // For link: need at least 2 clips selected
+    const canLink = selectedClipIds.length >= 2;
+
     return [
       {
         label: clip.reverse ? 'Unreverse' : 'Reverse',
@@ -324,6 +344,42 @@ export function Track({
         disabled: !onClipToggleEnabled,
       },
       { type: 'divider' as const },
+      // Link/Unlink/Detach Audio section
+      {
+        label: 'Link Clips',
+        shortcut: 'Ctrl+L',
+        onClick: () => {
+          if (onClipLink && canLink) {
+            // Pass clip IDs — handler resolves correct trackIds from sequence
+            onClipLink(selectedClipIds);
+          }
+          setClipContextMenu(null);
+        },
+        disabled: !onClipLink || !canLink,
+      },
+      {
+        label: 'Unlink',
+        onClick: () => {
+          if (onClipUnlink && isLinked) {
+            onClipUnlink(linkedClipRefs);
+          }
+          setClipContextMenu(null);
+        },
+        disabled: !onClipUnlink || !isLinked,
+      },
+      ...(isVisualTrack
+        ? [
+            {
+              label: 'Detach Audio',
+              onClick: () => {
+                onClipDetachAudio?.(clipId, track.id);
+                setClipContextMenu(null);
+              },
+              disabled: !onClipDetachAudio,
+            },
+          ]
+        : []),
+      { type: 'divider' as const },
       ...[0.5, 1.0, 2.0, 4.0].map((speed) => ({
         label: `Speed ${Math.round(speed * 100)}%`,
         onClick: () => {
@@ -333,7 +389,21 @@ export function Track({
         disabled: !onClipSpeedChange,
       })),
     ];
-  }, [clipContextMenu, track.id, track.clips, onClipReverse, onClipFreezeFrame, onClipToggleEnabled, onClipSpeedChange]);
+  }, [
+    clipContextMenu,
+    track.id,
+    track.kind,
+    track.clips,
+    selectedClipIds,
+    onClipReverse,
+    onClipFreezeFrame,
+    onClipToggleEnabled,
+    onClipLink,
+    onClipUnlink,
+    onClipDetachAudio,
+    onClipSpeedChange,
+    resolveLinkedClipRefs,
+  ]);
 
   const handleContentContextMenu = useCallback(
     (event: ReactMouseEvent<HTMLDivElement>) => {

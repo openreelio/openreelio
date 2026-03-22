@@ -1181,7 +1181,7 @@ describe('useTimelineActions', () => {
         });
       });
 
-      expect(executeCalls).toHaveLength(3);
+      expect(executeCalls).toHaveLength(4);
       expect(executeCalls[0]).toEqual({
         commandType: 'InsertClip',
         payload: {
@@ -1191,15 +1191,6 @@ describe('useTimelineActions', () => {
           timelineIn: 3,
         },
       });
-      expect(executeCalls[2]).toEqual({
-        commandType: 'SetClipMute',
-        payload: {
-          sequenceId: 'seq_001',
-          trackId: 'track_v1',
-          clipId: 'clip_1',
-          muted: true,
-        },
-      });
       expect(executeCalls[1]).toEqual({
         commandType: 'InsertClip',
         payload: {
@@ -1207,6 +1198,25 @@ describe('useTimelineActions', () => {
           trackId: 'track_a1',
           assetId: 'asset_001',
           timelineIn: 3,
+        },
+      });
+      expect(executeCalls[2]).toEqual({
+        commandType: 'LinkClips',
+        payload: {
+          sequenceId: 'seq_001',
+          clipRefs: [
+            { trackId: 'track_v1', clipId: 'clip_1' },
+            { trackId: 'track_a1', clipId: 'clip_2' },
+          ],
+        },
+      });
+      expect(executeCalls[3]).toEqual({
+        commandType: 'SetClipMute',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          clipId: 'clip_1',
+          muted: true,
         },
       });
     });
@@ -1281,7 +1291,7 @@ describe('useTimelineActions', () => {
       });
 
       expect(mockedProbeMedia).toHaveBeenCalledWith('/path/to/video.mp4');
-      expect(executeCalls).toHaveLength(3);
+      expect(executeCalls).toHaveLength(4);
       expect(executeCalls[1]).toEqual({
         commandType: 'InsertClip',
         payload: {
@@ -1289,6 +1299,16 @@ describe('useTimelineActions', () => {
           trackId: 'track_a1',
           assetId: 'asset_001',
           timelineIn: 3,
+        },
+      });
+      expect(executeCalls[2]).toEqual({
+        commandType: 'LinkClips',
+        payload: {
+          sequenceId: 'seq_001',
+          clipRefs: [
+            { trackId: 'track_v1', clipId: 'clip_1' },
+            { trackId: 'track_a1', clipId: 'clip_2' },
+          ],
         },
       });
     });
@@ -1348,7 +1368,7 @@ describe('useTimelineActions', () => {
         });
       });
 
-      expect(executeCalls).toHaveLength(3);
+      expect(executeCalls).toHaveLength(4);
       expect(executeCalls[0]).toEqual({
         commandType: 'InsertClip',
         payload: {
@@ -1358,15 +1378,6 @@ describe('useTimelineActions', () => {
           timelineIn: 3,
         },
       });
-      expect(executeCalls[2]).toEqual({
-        commandType: 'SetClipMute',
-        payload: {
-          sequenceId: 'seq_001',
-          trackId: 'track_v1',
-          clipId: 'clip_1',
-          muted: true,
-        },
-      });
       expect(executeCalls[1]).toEqual({
         commandType: 'InsertClip',
         payload: {
@@ -1374,6 +1385,25 @@ describe('useTimelineActions', () => {
           trackId: 'track_a1',
           assetId: 'asset_001',
           timelineIn: 3,
+        },
+      });
+      expect(executeCalls[2]).toEqual({
+        commandType: 'LinkClips',
+        payload: {
+          sequenceId: 'seq_001',
+          clipRefs: [
+            { trackId: 'track_v1', clipId: 'clip_1' },
+            { trackId: 'track_a1', clipId: 'clip_2' },
+          ],
+        },
+      });
+      expect(executeCalls[3]).toEqual({
+        commandType: 'SetClipMute',
+        payload: {
+          sequenceId: 'seq_001',
+          trackId: 'track_v1',
+          clipId: 'clip_1',
+          muted: true,
         },
       });
     });
@@ -1453,7 +1483,7 @@ describe('useTimelineActions', () => {
         });
       });
 
-      expect(executeCalls).toHaveLength(4);
+      expect(executeCalls).toHaveLength(5);
       expect(executeCalls[0].commandType).toBe('InsertClip');
       expect(executeCalls[1]).toEqual({
         commandType: 'CreateTrack',
@@ -1474,6 +1504,16 @@ describe('useTimelineActions', () => {
         },
       });
       expect(executeCalls[3]).toEqual({
+        commandType: 'LinkClips',
+        payload: {
+          sequenceId: 'seq_001',
+          clipRefs: [
+            { trackId: 'track_v1', clipId: 'clip_1' },
+            { trackId: 'track_a1', clipId: 'clip_3' },
+          ],
+        },
+      });
+      expect(executeCalls[4]).toEqual({
         commandType: 'SetClipMute',
         payload: {
           sequenceId: 'seq_001',
@@ -1551,7 +1591,7 @@ describe('useTimelineActions', () => {
         });
       });
 
-      expect(executeCalls).toHaveLength(3);
+      expect(executeCalls).toHaveLength(4);
       expect(executeCalls[1]).toEqual({
         commandType: 'InsertClip',
         payload: {
@@ -1562,6 +1602,16 @@ describe('useTimelineActions', () => {
         },
       });
       expect(executeCalls[2]).toEqual({
+        commandType: 'LinkClips',
+        payload: {
+          sequenceId: 'seq_001',
+          clipRefs: [
+            { trackId: 'track_v1', clipId: 'clip_1' },
+            { trackId: 'track_a2', clipId: 'clip_2' },
+          ],
+        },
+      });
+      expect(executeCalls[3]).toEqual({
         commandType: 'SetClipMute',
         payload: {
           sequenceId: 'seq_001',
