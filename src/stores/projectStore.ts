@@ -96,6 +96,8 @@ interface ProjectState {
   assets: Map<string, Asset>;
   sequences: Map<string, Sequence>;
   activeSequenceId: string | null;
+  /** Navigation stack for compound clip sequence drilling (parent → child) */
+  sequenceNavigationStack: string[];
   selectedAssetId: string | null;
   error: string | null;
   /** State version for conflict detection (increments on each state update) */
@@ -119,6 +121,10 @@ interface ProjectState {
   createSequence: (name: string, format: string) => Promise<string>;
   setActiveSequence: (sequenceId: string) => void;
   getActiveSequence: () => Sequence | undefined;
+  /** Navigate into a compound clip's inner sequence */
+  pushSequence: (sequenceId: string) => void;
+  /** Navigate back to the parent sequence */
+  popSequence: () => void;
 
   // Command execution
   executeCommand: (command: Command) => Promise<CommandResult>;
@@ -142,6 +148,7 @@ export const useProjectStore = create<ProjectState>()(
     assets: new Map(),
     sequences: new Map(),
     activeSequenceId: null,
+    sequenceNavigationStack: [],
     selectedAssetId: null,
     error: null,
     stateVersion: 0,
@@ -165,6 +172,7 @@ export const useProjectStore = create<ProjectState>()(
           state.meta = projectInfo;
           state.isDirty = false;
           state.selectedAssetId = null;
+          state.sequenceNavigationStack = [];
 
           // Populate assets
           state.assets = projectState.assets;
@@ -229,6 +237,7 @@ export const useProjectStore = create<ProjectState>()(
           state.meta = projectInfo;
           state.selectedAssetId = null;
           state.isDirty = false;
+          state.sequenceNavigationStack = [];
 
           // Populate assets (empty for new project)
           state.assets = projectState.assets;
@@ -251,6 +260,7 @@ export const useProjectStore = create<ProjectState>()(
           state.assets = new Map();
           state.sequences = new Map();
           state.activeSequenceId = null;
+          state.sequenceNavigationStack = [];
           state.error = error instanceof Error ? error.message : String(error);
         });
         throw error;
@@ -276,6 +286,7 @@ export const useProjectStore = create<ProjectState>()(
           state.meta = projectInfo;
           state.isDirty = false;
           state.selectedAssetId = null;
+          state.sequenceNavigationStack = [];
 
           // Populate assets
           state.assets = projectState.assets;
@@ -358,6 +369,7 @@ export const useProjectStore = create<ProjectState>()(
         state.assets = new Map();
         state.sequences = new Map();
         state.activeSequenceId = null;
+        state.sequenceNavigationStack = [];
         state.selectedAssetId = null;
         state.isDirty = false;
         state.error = null;
@@ -513,6 +525,8 @@ export const useProjectStore = create<ProjectState>()(
     setActiveSequence: (sequenceId: string) => {
       set((state) => {
         if (state.sequences.has(sequenceId)) {
+          // Switching root sequences exits local compound navigation.
+          state.sequenceNavigationStack = [];
           state.activeSequenceId = sequenceId;
         }
       });
@@ -523,6 +537,47 @@ export const useProjectStore = create<ProjectState>()(
       const state = get();
       if (!state.activeSequenceId) return undefined;
       return state.sequences.get(state.activeSequenceId);
+    },
+
+    // Navigate into a compound clip's inner sequence
+    pushSequence: (sequenceId: string) => {
+      set((state) => {
+        if (state.sequences.has(sequenceId)) {
+          if (state.activeSequenceId === sequenceId) {
+            return;
+          }
+          if (state.activeSequenceId) {
+            state.sequenceNavigationStack.push(state.activeSequenceId);
+          }
+          state.activeSequenceId = sequenceId;
+        }
+      });
+    },
+
+    // Navigate back to the parent sequence (skips deleted sequences, falls back to root)
+    popSequence: () => {
+      set((state) => {
+        if (state.sequenceNavigationStack.length === 0) {
+          return;
+        }
+
+        while (state.sequenceNavigationStack.length > 0) {
+          const parentId = state.sequenceNavigationStack.pop()!;
+          if (state.sequences.has(parentId)) {
+            state.activeSequenceId = parentId;
+            return;
+          }
+        }
+        // Stack exhausted without finding a valid parent — fall back only when
+        // the current active sequence also no longer exists.
+        const firstSeqId = state.sequences.keys().next().value;
+        if (
+          firstSeqId &&
+          (!state.activeSequenceId || !state.sequences.has(state.activeSequenceId))
+        ) {
+          state.activeSequenceId = firstSeqId;
+        }
+      });
     },
 
     /**

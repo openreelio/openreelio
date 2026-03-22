@@ -150,6 +150,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   const { selectedAssetId, assets, executeCommand } = useProjectStore();
   const currentTime = usePlaybackStore((state) => state.currentTime);
   const { selectedClipIds, linkedSelectionEnabled } = useTimelineStore();
+  const sequenceNavigationStack = useProjectStore((s) => s.sequenceNavigationStack);
+  const sequences = useProjectStore((s) => s.sequences);
+  const popSequence = useProjectStore((s) => s.popSequence);
 
   // Export dialog state
   const [showExportDialog, setShowExportDialog] = useState(false);
@@ -381,11 +384,32 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     handleLinkClips,
     handleUnlinkClips,
     handleDetachAudio,
+    handleCreateCompoundClip,
+    handleUnnestCompoundClip,
+    handleCreateAdjustmentLayer,
+    handleGroupClips,
+    handleUngroupClips,
   } = useTimelineActions({ sequence });
 
   // Text clip operations
   const { addTextClip, updateTextClip } = useTextClip();
   const textClipDataById = useSequenceTextClipData(sequence);
+
+  // Double-click handler: open compound clip's nested sequence
+  const pushSequence = useProjectStore((s) => s.pushSequence);
+  const handleClipDoubleClick = useCallback(
+    (clipId: string) => {
+      if (!sequence) return;
+      for (const track of sequence.tracks) {
+        const clip = track.clips.find((c) => c.id === clipId);
+        if (clip?.compoundSequenceId) {
+          pushSequence(clip.compoundSequenceId);
+          return;
+        }
+      }
+    },
+    [sequence, pushSequence],
+  );
 
   // Split at playhead handler for keyboard shortcut
   const handleSplitAtPlayhead = useCallback(() => {
@@ -897,6 +921,31 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                     <Sliders className="h-3.5 w-3.5" />
                   </button>
                 </div>
+                {/* Sequence breadcrumb for compound clip navigation */}
+                {sequenceNavigationStack.length > 0 && (
+                  <div className="flex items-center gap-1 px-3 py-1 bg-gray-800 border-b border-gray-700 text-xs text-gray-300">
+                    <button
+                      className="hover:text-white transition-colors"
+                      onClick={popSequence}
+                      title="Back to parent sequence"
+                    >
+                      &larr; Back
+                    </button>
+                    <span className="text-gray-500">/</span>
+                    {sequenceNavigationStack.map((seqId) => {
+                      const seq = sequences.get(seqId);
+                      return (
+                        <span key={seqId} className="text-gray-400">
+                          {seq?.name ?? seqId}
+                          <span className="text-gray-500 mx-1">/</span>
+                        </span>
+                      );
+                    })}
+                    <span className="text-white font-medium">
+                      {sequence?.name ?? 'Inner Sequence'}
+                    </span>
+                  </div>
+                )}
                 <div className="min-h-0 flex-1">
                   <TimelineErrorBoundary
                     onError={(error) => logger.error('Timeline error', { error })}
@@ -933,6 +982,12 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                       onClipLink={handleLinkClips}
                       onClipUnlink={handleUnlinkClips}
                       onClipDetachAudio={handleDetachAudio}
+                      onCreateCompoundClip={handleCreateCompoundClip}
+                      onUnnestCompoundClip={handleUnnestCompoundClip}
+                      onCreateAdjustmentLayer={handleCreateAdjustmentLayer}
+                      onClipGroup={handleGroupClips}
+                      onClipUngroup={handleUngroupClips}
+                      onClipDoubleClick={handleClipDoubleClick}
                     />
                   </TimelineErrorBoundary>
                 </div>
