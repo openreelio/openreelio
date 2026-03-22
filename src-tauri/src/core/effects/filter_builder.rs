@@ -1594,6 +1594,55 @@ impl FilterGraph {
         filters.join(";")
     }
 
+    /// Generates a time-scoped FFmpeg filter_complex string for video effects.
+    ///
+    /// Each filter is gated with `enable='between(t,start,end)'` so that the
+    /// effects only apply during the given time window.  Used for adjustment
+    /// layers whose effects must be restricted to the clip's timeline range.
+    pub fn to_video_filter_complex_timed(
+        &self,
+        input_label: &str,
+        output_label: &str,
+        start_sec: f64,
+        end_sec: f64,
+    ) -> String {
+        let video_effects: Vec<&Effect> = self.effects.iter().filter(|e| e.is_video()).collect();
+
+        if video_effects.is_empty() {
+            return format!("[{input_label}]null[{output_label}]");
+        }
+
+        let enable_clause = format!(
+            ":enable='between(t,{:.6},{:.6})'",
+            start_sec.max(0.0),
+            end_sec.max(0.0)
+        );
+
+        let mut filters = Vec::new();
+        let mut current_label = input_label.to_string();
+
+        for (i, effect) in video_effects.iter().enumerate() {
+            let is_last = i == video_effects.len() - 1;
+            let next_label = if is_last {
+                output_label.to_string()
+            } else {
+                format!("{}_{}", output_label, i)
+            };
+
+            let filter_body = effect.to_filter_body();
+            if filter_body.is_empty() {
+                filters.push(format!("[{current_label}]null[{next_label}]"));
+            } else {
+                filters.push(format!(
+                    "[{current_label}]{filter_body}{enable_clause}[{next_label}]"
+                ));
+            }
+            current_label = next_label;
+        }
+
+        filters.join(";")
+    }
+
     /// Generates the FFmpeg filter_complex string for audio effects
     ///
     /// # Arguments

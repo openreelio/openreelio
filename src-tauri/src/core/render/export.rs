@@ -1801,11 +1801,31 @@ impl ExportEngine {
         let output_width = settings.width.unwrap_or(1920);
         let output_height = settings.height.unwrap_or(1080);
 
+        // Collect adjustment layer effects for post-processing.
+        // These are applied to the composited output after the main concat,
+        // time-scoped to the adjustment layer's timeline range.
+        let mut adjustment_layer_effects: Vec<(FilterGraph, f64, f64)> = Vec::new();
+        for (clip, _track) in &all_clips {
+            if clip.is_adjustment_layer() && !clip.effects.is_empty() {
+                let graph = self.build_clip_filter_graph(clip, effects);
+                if graph.has_video_effects() {
+                    let start = clip.place.timeline_in_sec;
+                    let end = clip.place.timeline_out_sec();
+                    adjustment_layer_effects.push((graph, start, end));
+                }
+            }
+        }
+
         // Add inputs and build filter graph
         for (clip, track) in &all_clips {
             if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
                 // Caption/overlay tracks are not rendered by the current export pipeline.
                 // Skip them so virtual caption clips are not treated as file inputs.
+                continue;
+            }
+
+            // Adjustment layers have no source media — their effects are applied as post-processing.
+            if clip.is_adjustment_layer() {
                 continue;
             }
 
@@ -2024,6 +2044,25 @@ impl ExportEngine {
                     current_stream = output_label;
                 }
             }
+        }
+
+        // Apply adjustment layer effects as post-processing on the composited output.
+        // Each adjustment layer's effects are time-scoped to the layer's clip range
+        // using FFmpeg's enable='between(t,start,end)' clause.
+        let mut adj_video_label = "outv".to_string();
+        for (i, (graph, start, end)) in adjustment_layer_effects.iter().enumerate() {
+            let out_label = format!("adj{}", i);
+            let adj_filter =
+                graph.to_video_filter_complex_timed(&adj_video_label, &out_label, *start, *end);
+            filter_complex.push(';');
+            filter_complex.push_str(&adj_filter);
+            adj_video_label = out_label;
+        }
+
+        // Rename the final adjustment output back to [outv] if we applied any
+        if !adjustment_layer_effects.is_empty() {
+            filter_complex.push(';');
+            filter_complex.push_str(&format!("[{}]null[outv]", adj_video_label));
         }
 
         let final_video_label =
@@ -2665,6 +2704,11 @@ pub fn validate_export_settings(
                 continue;
             }
 
+            // Adjustment layers have no source media — skip file validation
+            if clip.is_adjustment_layer() {
+                continue;
+            }
+
             let Some(asset) = assets.get(&clip.asset_id) else {
                 validation.add_error(format!(
                     "Asset '{}' not found for clip '{}'",
@@ -2791,11 +2835,29 @@ pub fn build_complex_filter_args_with_audio_info(
     let output_width = settings.width.unwrap_or(1920);
     let output_height = settings.height.unwrap_or(1080);
 
+    // Collect adjustment layer effects for post-processing, time-scoped to clip range
+    let mut adjustment_layer_effects: Vec<(FilterGraph, f64, f64)> = Vec::new();
+    for (clip, _track) in &all_clips {
+        if clip.is_adjustment_layer() && !clip.effects.is_empty() {
+            let graph = build_clip_filter_graph_standalone(clip, effects);
+            if graph.has_video_effects() {
+                let start = clip.place.timeline_in_sec;
+                let end = clip.place.timeline_out_sec();
+                adjustment_layer_effects.push((graph, start, end));
+            }
+        }
+    }
+
     // Add inputs and build filter graph
     for (clip, track) in &all_clips {
         if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
             // Caption/overlay tracks are not rendered by the current export pipeline.
             // Skip them so virtual caption clips are not treated as file inputs.
+            continue;
+        }
+
+        // Adjustment layers have no source media — their effects are applied as post-processing.
+        if clip.is_adjustment_layer() {
             continue;
         }
 
@@ -2964,6 +3026,21 @@ pub fn build_complex_filter_args_with_audio_info(
     } else {
         filter_complex.push_str(&video_streams.join(""));
         filter_complex.push_str(&format!("concat=n={}:v=1:a=0[outv]", video_streams.len()));
+    }
+
+    // Apply adjustment layer effects as post-processing, time-scoped via enable clause
+    let mut adj_video_label = "outv".to_string();
+    for (i, (graph, start, end)) in adjustment_layer_effects.iter().enumerate() {
+        let out_label = format!("adj{}", i);
+        let adj_filter =
+            graph.to_video_filter_complex_timed(&adj_video_label, &out_label, *start, *end);
+        filter_complex.push(';');
+        filter_complex.push_str(&adj_filter);
+        adj_video_label = out_label;
+    }
+    if !adjustment_layer_effects.is_empty() {
+        filter_complex.push(';');
+        filter_complex.push_str(&format!("[{}]null[outv]", adj_video_label));
     }
 
     let final_video_label =
