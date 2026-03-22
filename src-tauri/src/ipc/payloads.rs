@@ -270,6 +270,20 @@ pub struct UnlinkClipsPayload {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GroupClipsPayload {
+    pub sequence_id: SequenceId,
+    pub clip_refs: Vec<ClipRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UngroupClipsPayload {
+    pub sequence_id: SequenceId,
+    pub clip_refs: Vec<ClipRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DetachAudioPayload {
     pub sequence_id: SequenceId,
     pub track_id: TrackId,
@@ -845,6 +859,33 @@ pub struct ApplyAudioDuckingPayload {
     pub keyframes: Vec<crate::core::timeline::AudioKeyframe>,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateCompoundClipPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_ids: Vec<ClipId>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UnnestCompoundClipPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateAdjustmentLayerPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub position: f64,
+    pub duration: f64,
+    pub name: Option<String>,
+}
+
 // =============================================================================
 // Tagged Union
 // =============================================================================
@@ -919,6 +960,12 @@ pub enum CommandPayload {
 
     #[serde(alias = "unlinkClips", alias = "UnlinkClips")]
     UnlinkClips(UnlinkClipsPayload),
+
+    #[serde(alias = "groupClips", alias = "GroupClips")]
+    GroupClips(GroupClipsPayload),
+
+    #[serde(alias = "ungroupClips", alias = "UngroupClips")]
+    UngroupClips(UngroupClipsPayload),
 
     #[serde(alias = "detachAudio", alias = "DetachAudio")]
     DetachAudio(DetachAudioPayload),
@@ -1089,6 +1136,15 @@ pub enum CommandPayload {
 
     #[serde(alias = "applyAudioDucking", alias = "ApplyAudioDucking")]
     ApplyAudioDucking(ApplyAudioDuckingPayload),
+
+    #[serde(alias = "createCompoundClip", alias = "CreateCompoundClip")]
+    CreateCompoundClip(CreateCompoundClipPayload),
+
+    #[serde(alias = "unnestCompoundClip", alias = "UnnestCompoundClip")]
+    UnnestCompoundClip(UnnestCompoundClipPayload),
+
+    #[serde(alias = "createAdjustmentLayer", alias = "CreateAdjustmentLayer")]
+    CreateAdjustmentLayer(CreateAdjustmentLayerPayload),
 }
 
 impl CommandPayload {
@@ -1146,20 +1202,23 @@ impl CommandPayload {
             AddTextClipCommand, AddTrackCommand, ApplyAudioDuckingCommand, ClearTimeRemapCommand,
             CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand, CreateFolderCommand,
             CreateFreezeFrameCommand, CreateSequenceCommand, DeleteCaptionCommand,
-            DeleteFileCommand, DetachAudioCommand, ExtractEditCommand, ImportAssetCommand,
-            InsertClipCommand, InsertEditCommand, LiftCommand, LinkClipsCommand,
-            MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand, OverwriteEditCommand,
-            RemoveAssetCommand, RemoveAudioKeyframeCommand, RemoveClipCommand, RemoveEffectCommand,
-            RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand,
-            RenameFileCommand, RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand,
-            RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
-            SetAudioKeyframeValueCommand, SetClipAudioCommand, SetClipBlendModeCommand,
-            SetClipEnabledCommand, SetClipMuteCommand, SetClipSpeedCommand,
-            SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
-            SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand,
-            ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand,
-            UnlinkClipsCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
+            DeleteFileCommand, DetachAudioCommand, ExtractEditCommand, GroupClipsCommand,
+            ImportAssetCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
+            LinkClipsCommand, MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand,
+            OverwriteEditCommand, RemoveAssetCommand, RemoveAudioKeyframeCommand,
+            RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand,
+            RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand, RenameTrackCommand,
+            ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand, SetAudioFadeInCommand,
+            SetAudioFadeOutCommand, SetAudioKeyframeValueCommand, SetClipAudioCommand,
+            SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMuteCommand,
+            SetClipSpeedCommand, SetClipTransformCommand, SetMasterVolumeCommand,
+            SetTimeRemapCommand, SetTrackBlendModeCommand, SplitClipCommand,
+            ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
+            TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand, UnnestCompoundClipCommand,
+            UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
         };
+
+        use crate::core::commands::{CreateAdjustmentLayerCommand, CreateCompoundClipCommand};
 
         match self {
             CommandPayload::InsertClip(p) => {
@@ -1276,6 +1335,20 @@ impl CommandPayload {
                     .collect(),
             )),
             CommandPayload::UnlinkClips(p) => Box::new(UnlinkClipsCommand::new(
+                &p.sequence_id,
+                p.clip_refs
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect(),
+            )),
+            CommandPayload::GroupClips(p) => Box::new(GroupClipsCommand::new(
+                &p.sequence_id,
+                p.clip_refs
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect(),
+            )),
+            CommandPayload::UngroupClips(p) => Box::new(UngroupClipsCommand::new(
                 &p.sequence_id,
                 p.clip_refs
                     .into_iter()
@@ -1576,6 +1649,31 @@ impl CommandPayload {
                 &p.clip_id,
                 p.keyframes,
             )),
+            CommandPayload::CreateCompoundClip(p) => {
+                let mut cmd =
+                    CreateCompoundClipCommand::new(&p.sequence_id, &p.track_id, p.clip_ids);
+                if let Some(name) = p.name {
+                    cmd = cmd.with_name(&name);
+                }
+                Box::new(cmd)
+            }
+            CommandPayload::UnnestCompoundClip(p) => Box::new(UnnestCompoundClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+            )),
+            CommandPayload::CreateAdjustmentLayer(p) => {
+                let mut cmd = CreateAdjustmentLayerCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    p.position,
+                    p.duration,
+                );
+                if let Some(name) = p.name {
+                    cmd = cmd.with_name(&name);
+                }
+                Box::new(cmd)
+            }
         }
     }
 }

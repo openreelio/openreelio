@@ -1650,6 +1650,37 @@ async applyAudioDucking(args: ApplyAudioDuckingArgs) : Promise<Result<CommandRes
 } catch (e) {
     return { status: "error", error: e  as any };
 }
+},
+/**
+ * Creates a compound clip by nesting selected clips into a new inner sequence.
+ */
+async createCompoundClip(args: CreateCompoundClipArgs) : Promise<Result<CommandResultDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_compound_clip", { args }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Unnests a compound clip, restoring its inner clips to the parent timeline.
+ */
+async unnestCompoundClip(args: UnnestCompoundClipArgs) : Promise<Result<CommandResultDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("unnest_compound_clip", { args }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Creates an adjustment layer clip on a video/overlay track.
+ * Adjustment layers are transparent clips whose effects apply to all clips below.
+ */
+async createAdjustmentLayer(args: CreateAdjustmentLayerArgs) : Promise<Result<CommandResultDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_adjustment_layer", { args }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -2605,7 +2636,24 @@ enabled?: boolean;
  * Link group ID for audio-video linked editing.
  * Clips sharing the same link_group_id are selected/moved together.
  */
-linkGroupId?: string | null }
+linkGroupId?: string | null; 
+/**
+ * Compound clip: references a nested sequence.
+ * When set, this clip acts as a container for the inner sequence.
+ * The clip's duration matches the inner sequence duration.
+ */
+compoundSequenceId?: string | null; 
+/**
+ * Whether this clip is an adjustment layer.
+ * Adjustment layers are transparent clips whose effects apply to all clips below them.
+ */
+isAdjustmentLayer?: boolean; 
+/**
+ * Group ID for clip grouping.
+ * Clips sharing the same group_id are selected/moved together,
+ * but remain independent for individual operations (trim, effects).
+ */
+groupId?: string | null }
 /**
  * Clip event payload.
  */
@@ -2822,6 +2870,14 @@ assetDurationSec: number;
  * Breakdown by analysis type
  */
 breakdown: CostBreakdownItem[] }
+/**
+ * Arguments for creating an adjustment layer.
+ */
+export type CreateAdjustmentLayerArgs = { sequenceId: string; trackId: string; position: number; duration: number; name: string | null }
+/**
+ * Arguments for creating a compound clip from selected clips.
+ */
+export type CreateCompoundClipArgs = { sequenceId: string; trackId: string; clipIds: string[]; name: string | null }
 /**
  * Status of credentials for each provider
  */
@@ -5266,6 +5322,10 @@ canUndo: boolean;
  * Whether more redo operations are available
  */
 canRedo: boolean }
+/**
+ * Arguments for unnesting a compound clip.
+ */
+export type UnnestCompoundClipArgs = { sequenceId: string; trackId: string; clipId: string }
 /**
  * DTO for update check result
  */

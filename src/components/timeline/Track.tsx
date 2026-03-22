@@ -129,8 +129,20 @@ interface TrackProps {
   onClipUnlink?: (clipRefs: Array<{ trackId: string; clipId: string }>) => void;
   /** Detach audio from video clip handler */
   onClipDetachAudio?: (clipId: string, trackId: string) => void;
+  /** Create compound clip from selected clips */
+  onCreateCompoundClip?: (clipIds: string[], trackId: string) => void | Promise<void>;
+  /** Unnest compound clip */
+  onUnnestCompoundClip?: (clipId: string, trackId: string) => void | Promise<void>;
+  /** Create adjustment layer on track */
+  onCreateAdjustmentLayer?: (trackId: string) => void | Promise<void>;
   /** Resolve the full linked group for a clip */
   resolveLinkedClipRefs?: (clipId: string) => Array<{ trackId: string; clipId: string }>;
+  /** Group selected clips handler (accepts clip IDs; resolves trackIds internally) */
+  onClipGroup?: (clipIds: string[]) => void;
+  /** Ungroup clips handler */
+  onClipUngroup?: (clipRefs: Array<{ trackId: string; clipId: string }>) => void;
+  /** Resolve the full clip group for a clip */
+  resolveGroupClipRefs?: (clipId: string) => Array<{ trackId: string; clipId: string }>;
 }
 
 // =============================================================================
@@ -202,7 +214,13 @@ export function Track({
   onClipLink,
   onClipUnlink,
   onClipDetachAudio,
+  onCreateCompoundClip,
+  onUnnestCompoundClip,
+  onCreateAdjustmentLayer,
   resolveLinkedClipRefs,
+  onClipGroup,
+  onClipUngroup,
+  resolveGroupClipRefs,
 }: TrackProps) {
   // Ref for measuring viewport width if not provided
   const contentRef = useRef<HTMLDivElement>(null);
@@ -292,26 +310,26 @@ export function Track({
     clipId: string;
   } | null>(null);
 
-  const handleClipContextMenu = useCallback(
-    (event: ReactMouseEvent, clipId: string) => {
-      event.preventDefault();
-      event.stopPropagation();
-      setClipContextMenu({ x: event.clientX, y: event.clientY, clipId });
-    },
-    [],
-  );
+  const handleClipContextMenu = useCallback((event: ReactMouseEvent, clipId: string) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setClipContextMenu({ x: event.clientX, y: event.clientY, clipId });
+  }, []);
 
   const clipContextMenuItems = useMemo<MenuItemOrDivider[]>(() => {
     if (!clipContextMenu) return [];
     const { clipId } = clipContextMenu;
-    const clip = track.clips.find((c) => c.id === clipId);
+    const clip = clips.find((c) => c.id === clipId);
     if (!clip) return [];
 
     const linkedClipRefs = resolveLinkedClipRefs?.(clipId) ?? [];
     const isLinked = linkedClipRefs.length >= 2;
+    const groupedClipRefs = resolveGroupClipRefs?.(clipId) ?? [];
+    const isGrouped = groupedClipRefs.length >= 2;
     const isVisualTrack = track.kind === 'video' || track.kind === 'overlay';
     // For link: need at least 2 clips selected
     const canLink = selectedClipIds.length >= 2;
+    const canGroup = selectedClipIds.length >= 2;
 
     return [
       {
@@ -378,6 +396,74 @@ export function Track({
           ]
         : []),
       { type: 'divider' as const },
+      // Group/Ungroup section
+      {
+        label: 'Group',
+        shortcut: 'Ctrl+G',
+        onClick: () => {
+          if (onClipGroup && canGroup) {
+            onClipGroup(selectedClipIds);
+          }
+          setClipContextMenu(null);
+        },
+        disabled: !onClipGroup || !canGroup,
+      },
+      {
+        label: 'Ungroup',
+        shortcut: 'Ctrl+Shift+G',
+        onClick: () => {
+          if (onClipUngroup && isGrouped) {
+            onClipUngroup(groupedClipRefs);
+          }
+          setClipContextMenu(null);
+        },
+        disabled: !onClipUngroup || !isGrouped,
+      },
+      { type: 'divider' as const },
+      // Compound clip section (only for video/overlay tracks)
+      ...(isVisualTrack
+        ? [
+            {
+              label: 'Nest',
+              onClick: () => {
+                const selectedClipIdsOnTrack = selectedClipIds.filter(
+                  (selectedClipId: string) =>
+                    clips.some((trackClip) => trackClip.id === selectedClipId),
+                );
+                const ids =
+                  selectedClipIdsOnTrack.length > 0 ? selectedClipIdsOnTrack : [clipId];
+                onCreateCompoundClip?.(ids, track.id);
+                setClipContextMenu(null);
+              },
+              disabled: !onCreateCompoundClip,
+            },
+            ...(clip.compoundSequenceId
+              ? [
+                  {
+                    label: 'Unnest',
+                    onClick: () => {
+                      onUnnestCompoundClip?.(clipId, track.id);
+                      setClipContextMenu(null);
+                    },
+                    disabled: !onUnnestCompoundClip,
+                  },
+                ]
+              : []),
+          ]
+        : []),
+      ...(track.kind === 'video'
+        ? [
+            {
+              label: 'New Adjustment Layer',
+              onClick: () => {
+                onCreateAdjustmentLayer?.(track.id);
+                setClipContextMenu(null);
+              },
+              disabled: !onCreateAdjustmentLayer,
+            },
+          ]
+        : []),
+      { type: 'divider' as const },
       ...[0.5, 1.0, 2.0, 4.0].map((speed) => ({
         label: `Speed ${Math.round(speed * 100)}%`,
         onClick: () => {
@@ -391,7 +477,7 @@ export function Track({
     clipContextMenu,
     track.id,
     track.kind,
-    track.clips,
+    clips,
     selectedClipIds,
     onClipReverse,
     onClipFreezeFrame,
@@ -399,8 +485,14 @@ export function Track({
     onClipLink,
     onClipUnlink,
     onClipDetachAudio,
+    onCreateCompoundClip,
+    onUnnestCompoundClip,
+    onCreateAdjustmentLayer,
     onClipSpeedChange,
     resolveLinkedClipRefs,
+    onClipGroup,
+    onClipUngroup,
+    resolveGroupClipRefs,
   ]);
 
   const handleContentContextMenu = useCallback(
@@ -413,13 +505,10 @@ export function Track({
       const timeSec = mouseX / zoom;
 
       // Check if the click falls in a gap between clips
-      const sortedClips = [...clips].sort(
-        (a, b) => a.place.timelineInSec - b.place.timelineInSec,
-      );
+      const sortedClips = [...clips].sort((a, b) => a.place.timelineInSec - b.place.timelineInSec);
 
       for (let i = 0; i < sortedClips.length - 1; i++) {
-        const currentEnd =
-          sortedClips[i].place.timelineInSec + sortedClips[i].place.durationSec;
+        const currentEnd = sortedClips[i].place.timelineInSec + sortedClips[i].place.durationSec;
         const nextStart = sortedClips[i + 1].place.timelineInSec;
 
         if (nextStart > currentEnd && timeSec >= currentEnd && timeSec < nextStart) {
@@ -436,7 +525,11 @@ export function Track({
       }
 
       // Check leading gap (before first clip)
-      if (sortedClips.length > 0 && sortedClips[0].place.timelineInSec > 0 && timeSec < sortedClips[0].place.timelineInSec) {
+      if (
+        sortedClips.length > 0 &&
+        sortedClips[0].place.timelineInSec > 0 &&
+        timeSec < sortedClips[0].place.timelineInSec
+      ) {
         event.preventDefault();
         event.stopPropagation();
         setGapContextMenu({

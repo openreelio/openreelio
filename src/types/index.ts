@@ -507,6 +507,12 @@ export interface Clip {
   enabled?: boolean;
   /** Link group ID for audio-video linked editing. Clips sharing the same linkGroupId move together. */
   linkGroupId?: string;
+  /** Compound clip: references a nested sequence. When set, this clip acts as a container. */
+  compoundSequenceId?: string;
+  /** Whether this clip is an adjustment layer. Effects on adjustment layers apply to all clips below. */
+  isAdjustmentLayer?: boolean;
+  /** Group ID for clip grouping. Clips sharing the same groupId are selected/moved together. */
+  groupId?: string;
 }
 
 /** Returns true if the clip has a valid active time remap curve (>= 2 keyframes). */
@@ -914,7 +920,15 @@ export type CommandType =
   | 'UnlinkClips'
   | 'DetachAudio'
   // Audio ducking (S29)
-  | 'ApplyAudioDucking';
+  | 'ApplyAudioDucking'
+  // Compound clip commands (S30)
+  | 'CreateCompoundClip'
+  | 'UnnestCompoundClip'
+  // Adjustment layer (S30)
+  | 'CreateAdjustmentLayer'
+  // Clip group/ungroup (S30)
+  | 'GroupClips'
+  | 'UngroupClips';
 
 export interface Command {
   type: CommandType;

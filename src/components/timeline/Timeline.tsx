@@ -234,6 +234,13 @@ export function Timeline({
   onClipLink,
   onClipUnlink,
   onClipDetachAudio,
+  onCreateCompoundClip,
+  onUnnestCompoundClip,
+  onCreateAdjustmentLayer,
+  onClipDoubleClick,
+  onClipGroup,
+  onClipUngroup,
+  resolveGroupClipRefs,
 }: TimelineProps) {
   // ===========================================================================
   // Store State - Using targeted selectors to minimize re-renders
@@ -755,6 +762,40 @@ export function Timeline({
     [sequence],
   );
 
+  // Resolve group members: return all (trackId, clipId) pairs that share
+  // the same group_id as the given clip. Falls back to props if provided.
+  const resolveGroupClipRefsInternal = useCallback(
+    (clipId: string): Array<{ trackId: string; clipId: string }> => {
+      if (!sequence) return [];
+
+      // Find the clip to get its groupId
+      let groupId: string | undefined;
+      for (const track of sequence.tracks) {
+        const clip = track.clips.find((c) => c.id === clipId);
+        if (clip?.groupId) {
+          groupId = clip.groupId;
+          break;
+        }
+      }
+      if (!groupId) return [];
+
+      // Collect all clips sharing this groupId
+      const clipRefs: Array<{ trackId: string; clipId: string }> = [];
+      for (const track of sequence.tracks) {
+        for (const clip of track.clips) {
+          if (clip.groupId === groupId) {
+            clipRefs.push({ trackId: track.id, clipId: clip.id });
+          }
+        }
+      }
+      return clipRefs;
+    },
+    [sequence],
+  );
+
+  // Use provided resolveGroupClipRefs or our internal resolver
+  const effectiveResolveGroupClipRefs = resolveGroupClipRefs ?? resolveGroupClipRefsInternal;
+
   const { copy, cut, paste, duplicate, canCopy, canPaste } = useClipboard({
     sequence,
     selectedClipIds,
@@ -874,6 +915,28 @@ export function Timeline({
               return;
             }
             break;
+          case 'g':
+            if (e.shiftKey) {
+              // Ctrl+Shift+G: Ungroup
+              if (onClipUngroup && selectedClipIds.length >= 1) {
+                const firstClipId = selectedClipIds[0];
+                const groupRefs = effectiveResolveGroupClipRefs(firstClipId);
+                if (groupRefs.length >= 2) {
+                  void Promise.resolve(onClipUngroup(groupRefs)).catch((err) => {
+                    console.error('Failed to ungroup clips', err);
+                  });
+                }
+              }
+            } else {
+              // Ctrl+G: Group
+              if (onClipGroup && selectedClipIds.length >= 2) {
+                void Promise.resolve(onClipGroup([...selectedClipIds])).catch((err) => {
+                  console.error('Failed to group clips', err);
+                });
+              }
+            }
+            e.preventDefault();
+            return;
         }
       }
 
@@ -946,6 +1009,10 @@ export function Timeline({
       toggleRipple,
       toggleLinkedSelection,
       onAddText,
+      onClipGroup,
+      onClipUngroup,
+      selectedClipIds,
+      effectiveResolveGroupClipRefs,
     ],
   );
 
@@ -2071,7 +2138,14 @@ export function Timeline({
                     onClipLink={onClipLink}
                     onClipUnlink={onClipUnlink}
                     onClipDetachAudio={onClipDetachAudio}
+                    onCreateCompoundClip={onCreateCompoundClip}
+                    onUnnestCompoundClip={onUnnestCompoundClip}
+                    onCreateAdjustmentLayer={onCreateAdjustmentLayer}
+                    onClipDoubleClick={onClipDoubleClick}
                     resolveLinkedClipRefs={resolveLinkedClipRefs}
+                    onClipGroup={onClipGroup}
+                    onClipUngroup={onClipUngroup}
+                    resolveGroupClipRefs={effectiveResolveGroupClipRefs}
                   />
                 );
               })}

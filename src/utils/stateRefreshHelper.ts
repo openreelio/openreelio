@@ -29,6 +29,53 @@ export interface TransformedProjectState {
   activeSequenceId: string | null;
 }
 
+interface ProjectStateDraftLike {
+  assets: Map<string, Asset>;
+  sequences: Map<string, Sequence>;
+  activeSequenceId: string | null;
+  sequenceNavigationStack?: string[];
+}
+
+interface ResolvedSequenceNavigationState {
+  activeSequenceId: string | null;
+  sequenceNavigationStack: string[];
+}
+
+function resolveSequenceNavigationState(
+  previousActiveSequenceId: string | null,
+  previousSequenceNavigationStack: string[],
+  state: TransformedProjectState,
+): ResolvedSequenceNavigationState {
+  const validSequenceNavigationStack = previousSequenceNavigationStack.filter((sequenceId) =>
+    state.sequences.has(sequenceId),
+  );
+
+  if (validSequenceNavigationStack.length === 0) {
+    return {
+      activeSequenceId:
+        state.activeSequenceId && state.sequences.has(state.activeSequenceId)
+          ? state.activeSequenceId
+          : null,
+      sequenceNavigationStack: [],
+    };
+  }
+
+  if (previousActiveSequenceId && state.sequences.has(previousActiveSequenceId)) {
+    return {
+      activeSequenceId: previousActiveSequenceId,
+      sequenceNavigationStack: validSequenceNavigationStack,
+    };
+  }
+
+  const fallbackActiveSequenceId =
+    validSequenceNavigationStack[validSequenceNavigationStack.length - 1] ?? null;
+
+  return {
+    activeSequenceId: fallbackActiveSequenceId,
+    sequenceNavigationStack: validSequenceNavigationStack.slice(0, -1),
+  };
+}
+
 /**
  * Fetches the current project state from the backend.
  *
@@ -97,14 +144,27 @@ export async function refreshProjectState(): Promise<TransformedProjectState> {
  * ```
  */
 export function applyProjectState(
-  draft: {
-    assets: Map<string, Asset>;
-    sequences: Map<string, Sequence>;
-    activeSequenceId: string | null;
-  },
+  draft: ProjectStateDraftLike,
   state: TransformedProjectState,
 ): void {
+  const previousActiveSequenceId = draft.activeSequenceId;
+  const previousSequenceNavigationStack = Array.isArray(draft.sequenceNavigationStack)
+    ? [...draft.sequenceNavigationStack]
+    : [];
+
   draft.assets = state.assets;
   draft.sequences = state.sequences;
+
+  if (Array.isArray(draft.sequenceNavigationStack)) {
+    const resolvedNavigationState = resolveSequenceNavigationState(
+      previousActiveSequenceId,
+      previousSequenceNavigationStack,
+      state,
+    );
+    draft.sequenceNavigationStack = resolvedNavigationState.sequenceNavigationStack;
+    draft.activeSequenceId = resolvedNavigationState.activeSequenceId;
+    return;
+  }
+
   draft.activeSequenceId = state.activeSequenceId;
 }

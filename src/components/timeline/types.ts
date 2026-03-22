@@ -327,6 +327,20 @@ export interface TimelineProps {
   onClipUnlink?: (clipRefs: Array<{ trackId: string; clipId: string }>) => void | Promise<void>;
   /** Callback when audio is detached from a video clip */
   onClipDetachAudio?: (clipId: string, trackId: string) => void | Promise<void>;
+  /** Callback when selected clips should be grouped into a compound clip */
+  onCreateCompoundClip?: (clipIds: string[], trackId: string) => void | Promise<void>;
+  /** Callback when a compound clip should be unnested back to individual clips */
+  onUnnestCompoundClip?: (clipId: string, trackId: string) => void | Promise<void>;
+  /** Callback when a clip is double-clicked (e.g., to enter a compound clip) */
+  onClipDoubleClick?: (clipId: string) => void;
+  /** Callback when an adjustment layer should be created on a track */
+  onCreateAdjustmentLayer?: (trackId: string) => void | Promise<void>;
+  /** Callback when clips are grouped together (accepts clip IDs; resolves trackIds internally) */
+  onClipGroup?: (clipIds: string[]) => void | Promise<void>;
+  /** Callback when clips are ungrouped */
+  onClipUngroup?: (clipRefs: Array<{ trackId: string; clipId: string }>) => void | Promise<void>;
+  /** Resolve the full clip group for a clip */
+  resolveGroupClipRefs?: (clipId: string) => Array<{ trackId: string; clipId: string }>;
 }
 
 // =============================================================================

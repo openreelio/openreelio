@@ -1425,6 +1425,74 @@ impl CommandExecutor {
                 ))),
             },
 
+            OpKind::CompoundClipCreate => {
+                let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
+                    CoreError::Internal("CompoundClipCreate payload missing sequenceId".to_string())
+                })?;
+                let track_id = get_str(&command_json, "trackId").ok_or_else(|| {
+                    CoreError::Internal("CompoundClipCreate payload missing trackId".to_string())
+                })?;
+                let compound_clip_id = result.created_ids.first().ok_or_else(|| {
+                    CoreError::Internal(
+                        "CompoundClipCreate missing created compound clip ID".to_string(),
+                    )
+                })?;
+                let sequence = state.sequences.get(seq_id).ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "CompoundClipCreate could not find sequence: {seq_id}"
+                    ))
+                })?;
+                let track = sequence
+                    .tracks
+                    .iter()
+                    .find(|track| track.id == track_id)
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "CompoundClipCreate could not find track: {track_id}"
+                        ))
+                    })?;
+                let compound_clip = track
+                    .clips
+                    .iter()
+                    .find(|clip| clip.id == *compound_clip_id)
+                    .ok_or_else(|| {
+                        CoreError::Internal(format!(
+                            "CompoundClipCreate could not find compound clip: {compound_clip_id}"
+                        ))
+                    })?;
+                let inner_sequence_id = compound_clip.compound_sequence_id.as_deref().ok_or_else(
+                    || {
+                        CoreError::Internal(format!(
+                            "CompoundClipCreate compound clip missing inner sequence ID: {compound_clip_id}"
+                        ))
+                    },
+                )?;
+                let inner_sequence = state.sequences.get(inner_sequence_id).ok_or_else(|| {
+                    CoreError::Internal(format!(
+                        "CompoundClipCreate could not find inner sequence: {inner_sequence_id}"
+                    ))
+                })?;
+
+                Ok(serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clipIds": command_json
+                        .get("clipIds")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::Value::Array(vec![])),
+                    "name": command_json
+                        .get("name")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                    "compoundClip": to_value(compound_clip)?,
+                    "innerSequence": to_value(inner_sequence)?,
+                }))
+            }
+
+            OpKind::CompoundClipUnnest | OpKind::ClipGroup | OpKind::ClipUngroup => {
+                Ok(command_json)
+            }
+
             // Bin operations (deprecated - pass through command JSON for backward compatibility)
             OpKind::BinCreate
             | OpKind::BinRemove
@@ -1555,6 +1623,11 @@ impl CommandExecutor {
             | "SetAudioFadeIn"
             | "SetAudioFadeOut" => OpKind::ClipUpdate,
             "SplitClip" => OpKind::ClipSplit,
+            "CreateCompoundClip" => OpKind::CompoundClipCreate,
+            "UnnestCompoundClip" => OpKind::CompoundClipUnnest,
+            "GroupClips" => OpKind::ClipGroup,
+            "UngroupClips" => OpKind::ClipUngroup,
+            "CreateAdjustmentLayer" => OpKind::ClipAdd,
             "AddTrack" | "InsertTrack" => OpKind::TrackAdd,
             "RemoveTrack" | "DeleteTrack" => OpKind::TrackRemove,
             "ReorderTracks" => OpKind::TrackReorder,
@@ -1612,11 +1685,12 @@ mod tests {
     use crate::core::assets::{Asset, VideoInfo};
     use crate::core::commands::{
         AddAudioKeyframeCommand, AddEffectCommand, CloseAllGapsCommand, CloseGapCommand,
-        CreateSequenceCommand, ExtractEditCommand, ImportAssetCommand, InsertClipCommand,
+        CreateAdjustmentLayerCommand, CreateCompoundClipCommand, CreateSequenceCommand,
+        ExtractEditCommand, GroupClipsCommand, ImportAssetCommand, InsertClipCommand,
         InsertEditCommand, LiftCommand, MoveClipCommand, OverwriteEditCommand, RippleDeleteCommand,
         SetAudioFadeInCommand, SetAudioFadeOutCommand, SetClipBlendModeCommand,
         SetMasterVolumeCommand, SetTrackBlendModeCommand, SplitClipCommand, StateChange,
-        TrimClipCommand,
+        TrimClipCommand, UngroupClipsCommand, UnnestCompoundClipCommand,
     };
     use crate::core::effects::{EffectType, ParamValue};
     use crate::core::project::{OpKind, Operation, OpsLog, ProjectMeta, ProjectState};
@@ -1716,6 +1790,53 @@ mod tests {
                 clips[1].id
             );
         }
+    }
+
+    fn seed_replayable_video_track_with_clips(
+        ops_log: &OpsLog,
+        state: &mut ProjectState,
+        spans: &[(f64, f64)],
+    ) -> (String, String, Vec<String>) {
+        let sequence = Sequence::new("Test Sequence", SequenceFormat::youtube_1080());
+        let seq_id = sequence.id.clone();
+        let seq_op = Operation::new(
+            OpKind::SequenceCreate,
+            serde_json::to_value(&sequence).unwrap(),
+        );
+        ops_log.append(&seq_op).unwrap();
+        state.apply_operation(&seq_op).unwrap();
+
+        let track = Track::new("Video Track", TrackKind::Video);
+        let track_id = track.id.clone();
+        let track_op = Operation::new(
+            OpKind::TrackAdd,
+            serde_json::json!({
+                "sequenceId": seq_id,
+                "track": track,
+                "position": 0,
+            }),
+        );
+        ops_log.append(&track_op).unwrap();
+        state.apply_operation(&track_op).unwrap();
+
+        let mut clip_ids = Vec::with_capacity(spans.len());
+        for (timeline_in, duration) in spans {
+            let clip = Clip::with_range("asset_001", 0.0, *duration).place_at(*timeline_in);
+            let clip_id = clip.id.clone();
+            let clip_op = Operation::new(
+                OpKind::ClipAdd,
+                serde_json::json!({
+                    "sequenceId": seq_id,
+                    "trackId": track_id,
+                    "clip": clip,
+                }),
+            );
+            ops_log.append(&clip_op).unwrap();
+            state.apply_operation(&clip_op).unwrap();
+            clip_ids.push(clip_id);
+        }
+
+        (seq_id, track_id, clip_ids)
     }
 
     #[test]
@@ -2879,6 +3000,26 @@ mod tests {
             OpKind::SequenceUpdate
         );
         assert_eq!(
+            CommandExecutor::type_name_to_op_kind("CreateCompoundClip"),
+            OpKind::CompoundClipCreate
+        );
+        assert_eq!(
+            CommandExecutor::type_name_to_op_kind("UnnestCompoundClip"),
+            OpKind::CompoundClipUnnest
+        );
+        assert_eq!(
+            CommandExecutor::type_name_to_op_kind("GroupClips"),
+            OpKind::ClipGroup
+        );
+        assert_eq!(
+            CommandExecutor::type_name_to_op_kind("UngroupClips"),
+            OpKind::ClipUngroup
+        );
+        assert_eq!(
+            CommandExecutor::type_name_to_op_kind("CreateAdjustmentLayer"),
+            OpKind::ClipAdd
+        );
+        assert_eq!(
             CommandExecutor::type_name_to_op_kind("UnknownCommand"),
             OpKind::Batch
         );
@@ -2918,6 +3059,206 @@ mod tests {
         assert_eq!(result.operations.len(), 2);
         assert_eq!(result.operations[0].kind, OpKind::AssetImport);
         assert_eq!(result.operations[1].kind, OpKind::AssetImport);
+    }
+
+    #[test]
+    fn test_executor_persists_adjustment_layer_as_replayable_clip_add() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+        let ops_log = OpsLog::new(&ops_path);
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let (seq_id, track_id, _) =
+            seed_replayable_video_track_with_clips(&ops_log, &mut state, &[]);
+        let mut executor = CommandExecutor::with_ops_log(ops_log);
+
+        let result = executor
+            .execute(
+                Box::new(CreateAdjustmentLayerCommand::new(
+                    &seq_id, &track_id, 2.0, 5.0,
+                )),
+                &mut state,
+            )
+            .unwrap();
+        let adjustment_clip_id = result.created_ids[0].clone();
+
+        let persisted = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted.kind, OpKind::ClipAdd);
+        assert_eq!(
+            persisted.payload["clip"]["id"].as_str(),
+            Some(adjustment_clip_id.as_str())
+        );
+        assert_eq!(
+            persisted.payload["clip"]["isAdjustmentLayer"].as_bool(),
+            Some(true)
+        );
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let track = replayed
+            .get_sequence(&seq_id)
+            .unwrap()
+            .get_track(&track_id)
+            .unwrap();
+        let clip = track.get_clip(&adjustment_clip_id).unwrap();
+        assert!(clip.is_adjustment_layer());
+        assert_eq!(clip.place.timeline_in_sec, 2.0);
+        assert_eq!(clip.place.duration_sec, 5.0);
+    }
+
+    #[test]
+    fn test_executor_replays_compound_clip_create_and_unnest_with_stable_ids() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+        let ops_log = OpsLog::new(&ops_path);
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let (seq_id, track_id, clip_ids) = seed_replayable_video_track_with_clips(
+            &ops_log,
+            &mut state,
+            &[(0.0, 5.0), (5.0, 5.0), (10.0, 5.0)],
+        );
+        let mut executor = CommandExecutor::with_ops_log(ops_log);
+
+        let create_result = executor
+            .execute(
+                Box::new(CreateCompoundClipCommand::new(
+                    &seq_id,
+                    &track_id,
+                    vec![clip_ids[0].clone(), clip_ids[1].clone()],
+                )),
+                &mut state,
+            )
+            .unwrap();
+        let compound_clip_id = create_result.created_ids[0].clone();
+        let compound_clip = state
+            .get_sequence(&seq_id)
+            .unwrap()
+            .get_track(&track_id)
+            .unwrap()
+            .get_clip(&compound_clip_id)
+            .unwrap()
+            .clone();
+        let inner_sequence_id = compound_clip.compound_sequence_id.clone().unwrap();
+
+        let persisted_group = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted_group.kind, OpKind::CompoundClipCreate);
+        assert_eq!(
+            persisted_group.payload["compoundClip"]["id"].as_str(),
+            Some(compound_clip_id.as_str())
+        );
+        assert_eq!(
+            persisted_group.payload["innerSequence"]["id"].as_str(),
+            Some(inner_sequence_id.as_str())
+        );
+
+        executor
+            .execute(
+                Box::new(UnnestCompoundClipCommand::new(
+                    &seq_id,
+                    &track_id,
+                    &compound_clip_id,
+                )),
+                &mut state,
+            )
+            .unwrap();
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_track = replayed
+            .get_sequence(&seq_id)
+            .unwrap()
+            .get_track(&track_id)
+            .unwrap();
+
+        assert_eq!(replayed_track.clips.len(), 3);
+        assert!(replayed_track.get_clip(&clip_ids[0]).is_some());
+        assert!(replayed_track.get_clip(&clip_ids[1]).is_some());
+        assert!(replayed_track.get_clip(&clip_ids[2]).is_some());
+        assert!(replayed_track.clips.iter().all(|clip| !clip.is_compound()));
+        assert!(replayed.get_sequence(&inner_sequence_id).is_none());
+        assert_track_has_no_overlap(replayed_track);
+    }
+
+    #[test]
+    fn test_executor_replays_clip_group_and_ungroup_without_compound_payloads() {
+        let temp_dir = TempDir::new().unwrap();
+        let ops_path = temp_dir.path().join("ops.jsonl");
+        let ops_log = OpsLog::new(&ops_path);
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let (seq_id, track_id, clip_ids) = seed_replayable_video_track_with_clips(
+            &ops_log,
+            &mut state,
+            &[(0.0, 5.0), (5.0, 5.0), (10.0, 5.0)],
+        );
+        let mut executor = CommandExecutor::with_ops_log(ops_log);
+
+        executor
+            .execute(
+                Box::new(GroupClipsCommand::new(
+                    &seq_id,
+                    vec![
+                        (track_id.clone(), clip_ids[0].clone()),
+                        (track_id.clone(), clip_ids[1].clone()),
+                    ],
+                )),
+                &mut state,
+            )
+            .unwrap();
+
+        let grouped_track = state
+            .get_sequence(&seq_id)
+            .unwrap()
+            .get_track(&track_id)
+            .unwrap();
+        let group_id = grouped_track
+            .get_clip(&clip_ids[0])
+            .unwrap()
+            .group_id
+            .clone()
+            .unwrap();
+
+        let persisted_group = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted_group.kind, OpKind::ClipGroup);
+        assert_eq!(
+            persisted_group.payload["groupId"].as_str(),
+            Some(group_id.as_str())
+        );
+        assert!(persisted_group.payload.get("compoundClip").is_none());
+        assert!(persisted_group.payload.get("innerSequence").is_none());
+
+        executor
+            .execute(
+                Box::new(UngroupClipsCommand::new(
+                    &seq_id,
+                    vec![(track_id.clone(), clip_ids[0].clone())],
+                )),
+                &mut state,
+            )
+            .unwrap();
+
+        let persisted_ungroup = OpsLog::new(&ops_path).last().unwrap().unwrap();
+        assert_eq!(persisted_ungroup.kind, OpKind::ClipUngroup);
+        assert!(persisted_ungroup.payload.get("clipId").is_none());
+
+        let replayed =
+            ProjectState::from_ops_log(&OpsLog::new(&ops_path), ProjectMeta::new("Replay"))
+                .unwrap();
+        let replayed_track = replayed
+            .get_sequence(&seq_id)
+            .unwrap()
+            .get_track(&track_id)
+            .unwrap();
+
+        assert_eq!(replayed_track.clips.len(), 3);
+        assert!(replayed_track
+            .clips
+            .iter()
+            .all(|clip| clip.group_id.is_none()));
+        assert_track_has_no_overlap(replayed_track);
     }
 
     #[test]

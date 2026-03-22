@@ -6,6 +6,7 @@
 //! - Effect to FFmpeg filter conversion
 //! - Filter graph composition for multiple effects
 //! - Support for keyframe animation in filters
+//! - Time-scoped filter gating for adjustment layers
 //!
 //! # Example
 //!
@@ -1594,6 +1595,58 @@ impl FilterGraph {
         filters.join(";")
     }
 
+    /// Generates a time-scoped FFmpeg filter_complex string for video effects.
+    ///
+    /// Each individual sub-filter is gated with `enable='between(t,start,end)'`
+    /// so that the effects only apply during the given time window. Used for
+    /// adjustment layers whose effects must be restricted to the clip's
+    /// timeline range.
+    pub fn to_video_filter_complex_timed(
+        &self,
+        input_label: &str,
+        output_label: &str,
+        start_sec: f64,
+        end_sec: f64,
+    ) -> String {
+        let video_effects: Vec<&Effect> = self.effects.iter().filter(|e| e.is_video()).collect();
+
+        if video_effects.is_empty() {
+            return format!("[{input_label}]null[{output_label}]");
+        }
+
+        let enable_clause = format!(
+            ":enable='between(t,{:.6},{:.6})'",
+            start_sec.max(0.0),
+            end_sec.max(0.0)
+        );
+
+        let mut filters = Vec::new();
+        let mut current_label = input_label.to_string();
+
+        for (i, effect) in video_effects.iter().enumerate() {
+            let is_last = i == video_effects.len() - 1;
+            let next_label = if is_last {
+                output_label.to_string()
+            } else {
+                format!("{}_{}", output_label, i)
+            };
+
+            let filter_body = effect.to_filter_body();
+            if filter_body.is_empty() {
+                filters.push(format!("[{current_label}]null[{next_label}]"));
+            } else {
+                // Apply enable clause to each sub-filter individually.
+                // filter_body can be a comma-separated chain (e.g. "chromakey=...,boxblur=...").
+                // FFmpeg requires enable on EACH filter in the chain, not just the last one.
+                let enabled_body = add_enable_to_each_filter(&filter_body, &enable_clause);
+                filters.push(format!("[{current_label}]{enabled_body}[{next_label}]"));
+            }
+            current_label = next_label;
+        }
+
+        filters.join(";")
+    }
+
     /// Generates the FFmpeg filter_complex string for audio effects
     ///
     /// # Arguments
@@ -1645,6 +1698,44 @@ impl Default for FilterGraph {
     fn default() -> Self {
         Self::new()
     }
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+/// Injects an FFmpeg `enable` clause into every top-level filter in a
+/// comma-separated filter chain. FFmpeg requires `enable` on each individual
+/// filter; appending it once only gates the last filter in the chain.
+///
+/// Respects parenthesized sub-expressions so that commas inside `(...)` are
+/// not treated as filter separators.
+fn add_enable_to_each_filter(body: &str, enable_clause: &str) -> String {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut depth: i32 = 0;
+
+    for ch in body.chars() {
+        match ch {
+            '(' | '[' => {
+                depth += 1;
+                current.push(ch);
+            }
+            ')' | ']' => {
+                depth -= 1;
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                result.push(format!("{current}{enable_clause}"));
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        result.push(format!("{current}{enable_clause}"));
+    }
+    result.join(",")
 }
 
 // =============================================================================

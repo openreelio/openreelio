@@ -598,4 +598,109 @@ describe('Clip', () => {
       expect(clipElement).toHaveClass('ring-2');
     });
   });
+
+  // ===========================================================================
+  // Compound Clip Tests (BDD)
+  // ===========================================================================
+
+  describe('compound clip indicator', () => {
+    it('should show CMPD badge when clip has compoundSequenceId', () => {
+      const compoundClip: ClipType = {
+        ...mockClip,
+        compoundSequenceId: 'inner_seq_001',
+        assetId: '__compound__inner_seq_001',
+      };
+      render(<Clip clip={compoundClip} zoom={100} selected={false} />);
+
+      expect(screen.getByTestId('compound-clip-indicator')).toBeInTheDocument();
+      expect(screen.getByText('CMPD')).toBeInTheDocument();
+    });
+
+    it('should not show CMPD badge for regular clips', () => {
+      render(<Clip clip={mockClip} zoom={100} selected={false} />);
+
+      expect(screen.queryByTestId('compound-clip-indicator')).not.toBeInTheDocument();
+    });
+
+    it('should show CMPD badge alongside other indicators', () => {
+      const compoundWithEffects: ClipType = {
+        ...mockClip,
+        compoundSequenceId: 'inner_seq_002',
+        effects: ['effect_1'],
+        speed: 2.0,
+      };
+      render(<Clip clip={compoundWithEffects} zoom={100} selected={false} />);
+
+      expect(screen.getByTestId('compound-clip-indicator')).toBeInTheDocument();
+      expect(screen.getByTestId('speed-indicator')).toBeInTheDocument();
+      expect(screen.getByTestId('effects-indicator')).toBeInTheDocument();
+    });
+
+    it('should fire double-click handler for compound clips', () => {
+      const onDoubleClick = vi.fn();
+      const compoundClip: ClipType = {
+        ...mockClip,
+        compoundSequenceId: 'inner_seq_003',
+      };
+      const { container } = render(
+        <Clip clip={compoundClip} zoom={100} selected={false} onDoubleClick={onDoubleClick} />,
+      );
+
+      fireEvent.dblClick(container.firstChild as HTMLElement);
+      expect(onDoubleClick).toHaveBeenCalledWith('clip_001');
+    });
+  });
+
+  // ===========================================================================
+  // Adjustment Layer Tests (BDD)
+  // ===========================================================================
+
+  describe('adjustment layer indicator', () => {
+    it('should show ADJ badge when clip is an adjustment layer', () => {
+      const adjustmentClip: ClipType = {
+        ...mockClip,
+        isAdjustmentLayer: true,
+        assetId: '__adjustment_layer__',
+      };
+      render(<Clip clip={adjustmentClip} zoom={100} selected={false} />);
+
+      expect(screen.getByTestId('adjustment-layer-indicator')).toBeInTheDocument();
+      expect(screen.getByText('ADJ')).toBeInTheDocument();
+    });
+
+    it('should not show ADJ badge for regular clips', () => {
+      render(<Clip clip={mockClip} zoom={100} selected={false} />);
+
+      expect(screen.queryByTestId('adjustment-layer-indicator')).not.toBeInTheDocument();
+    });
+
+    it('should render adjustment layer with accessible title tooltip', () => {
+      const adjustmentClip: ClipType = {
+        ...mockClip,
+        isAdjustmentLayer: true,
+        assetId: '__adjustment_layer__',
+      };
+      render(<Clip clip={adjustmentClip} zoom={100} selected={false} />);
+
+      const indicator = screen.getByTestId('adjustment-layer-indicator');
+      expect(indicator).toHaveAttribute('aria-label', 'Adjustment layer');
+      expect(indicator).toHaveAttribute(
+        'title',
+        'Adjustment layer - effects apply to clips below',
+      );
+    });
+
+    it('should show ADJ badge alongside other indicators', () => {
+      const adjustmentWithEffects: ClipType = {
+        ...mockClip,
+        isAdjustmentLayer: true,
+        assetId: '__adjustment_layer__',
+        effects: ['effect_1'],
+      };
+      render(<Clip clip={adjustmentWithEffects} zoom={100} selected={false} />);
+
+      expect(screen.getByTestId('adjustment-layer-indicator')).toBeInTheDocument();
+      expect(screen.getByTestId('effects-indicator')).toBeInTheDocument();
+    });
+  });
 });

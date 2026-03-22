@@ -8,7 +8,10 @@ use tauri::State;
 
 use crate::core::{
     analysis::ducking::{generate_duck_keyframes, AudioDuckingParams, SpeechRegion},
-    commands::{ApplyAudioDuckingCommand, CreateSequenceCommand},
+    commands::{
+        ApplyAudioDuckingCommand, CreateAdjustmentLayerCommand, CreateCompoundClipCommand,
+        CreateSequenceCommand, UnnestCompoundClipCommand,
+    },
     timeline::Sequence,
     CoreError,
 };
@@ -430,6 +433,134 @@ pub async fn apply_audio_ducking(
     let result = project
         .executor
         .execute(command, &mut project.state)
+        .map_err(|e| e.to_ipc_error())?;
+
+    Ok(CommandResultDto {
+        op_id: result.op_id,
+        created_ids: result.created_ids,
+        deleted_ids: result.deleted_ids,
+    })
+}
+
+// =============================================================================
+// Compound Clip Commands
+// =============================================================================
+
+/// Arguments for creating a compound clip from selected clips.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCompoundClipArgs {
+    pub sequence_id: String,
+    pub track_id: String,
+    pub clip_ids: Vec<String>,
+    pub name: Option<String>,
+}
+
+/// Creates a compound clip by nesting selected clips into a new inner sequence.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state))]
+pub async fn create_compound_clip(
+    args: CreateCompoundClipArgs,
+    state: State<'_, AppState>,
+) -> Result<CommandResultDto, String> {
+    let mut guard = state.project.lock().await;
+    let project = guard
+        .as_mut()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let mut command =
+        CreateCompoundClipCommand::new(&args.sequence_id, &args.track_id, args.clip_ids);
+    if let Some(name) = args.name {
+        command = command.with_name(&name);
+    }
+
+    let result = project
+        .executor
+        .execute(Box::new(command), &mut project.state)
+        .map_err(|e| e.to_ipc_error())?;
+
+    Ok(CommandResultDto {
+        op_id: result.op_id,
+        created_ids: result.created_ids,
+        deleted_ids: result.deleted_ids,
+    })
+}
+
+/// Arguments for unnesting a compound clip.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UnnestCompoundClipArgs {
+    pub sequence_id: String,
+    pub track_id: String,
+    pub clip_id: String,
+}
+
+/// Unnests a compound clip, restoring its inner clips to the parent timeline.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state))]
+pub async fn unnest_compound_clip(
+    args: UnnestCompoundClipArgs,
+    state: State<'_, AppState>,
+) -> Result<CommandResultDto, String> {
+    let mut guard = state.project.lock().await;
+    let project = guard
+        .as_mut()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let command = UnnestCompoundClipCommand::new(&args.sequence_id, &args.track_id, &args.clip_id);
+
+    let result = project
+        .executor
+        .execute(Box::new(command), &mut project.state)
+        .map_err(|e| e.to_ipc_error())?;
+
+    Ok(CommandResultDto {
+        op_id: result.op_id,
+        created_ids: result.created_ids,
+        deleted_ids: result.deleted_ids,
+    })
+}
+
+/// Arguments for creating an adjustment layer.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAdjustmentLayerArgs {
+    pub sequence_id: String,
+    pub track_id: String,
+    pub position: f64,
+    pub duration: f64,
+    pub name: Option<String>,
+}
+
+/// Creates an adjustment layer clip on a video/overlay track.
+/// Adjustment layers are transparent clips whose effects apply to all clips below.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state))]
+pub async fn create_adjustment_layer(
+    args: CreateAdjustmentLayerArgs,
+    state: State<'_, AppState>,
+) -> Result<CommandResultDto, String> {
+    let mut guard = state.project.lock().await;
+    let project = guard
+        .as_mut()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let mut command = CreateAdjustmentLayerCommand::new(
+        &args.sequence_id,
+        &args.track_id,
+        args.position,
+        args.duration,
+    );
+    if let Some(name) = args.name {
+        command = command.with_name(&name);
+    }
+
+    let result = project
+        .executor
+        .execute(Box::new(command), &mut project.state)
         .map_err(|e| e.to_ipc_error())?;
 
     Ok(CommandResultDto {
