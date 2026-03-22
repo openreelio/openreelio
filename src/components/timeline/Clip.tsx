@@ -294,8 +294,9 @@ export function Clip({
   const isReversed = clip.reverse === true;
   const hasTimeRemap = hasActiveTimeRemap(clip);
 
-  // Determine if this is a text clip
+  // Determine if this is a text clip or adjustment layer
   const isText = isTextClip(clip.assetId);
+  const isAdjustmentLayer = clip.isAdjustmentLayer === true;
 
   // Subscribe only to the missing flag to avoid re-renders on unrelated asset updates
   const isAssetMissing = useProjectStore((s) => s.assets.get(clip.assetId)?.missing === true);
@@ -350,13 +351,14 @@ export function Clip({
       className={`
         absolute h-full rounded-sm cursor-pointer transition-shadow select-none
         ${allowLabelOverflow ? 'overflow-visible' : 'overflow-hidden'}
-        ${selected ? 'ring-2 ring-primary-400 z-10' : ''}
+        ${selected ? 'ring-2 ring-primary-400 z-10' : clip.groupId ? 'ring-1 ring-emerald-400/70' : ''}
         ${disabled ? 'cursor-not-allowed' : 'hover:brightness-110'}
         ${isDragging ? 'z-20' : ''}
         ${!isDragging ? opacityClass : 'opacity-80'}
-        ${isText ? 'bg-teal-600' : ''}
-        ${!backgroundColor && !hasVisualContent && !isText ? 'bg-blue-600' : ''}
-        ${hasVisualContent && !backgroundColor && !isText ? 'bg-gray-800' : ''}
+        ${isAdjustmentLayer ? 'bg-purple-600/50 border border-purple-400/60' : ''}
+        ${isText && !isAdjustmentLayer ? 'bg-teal-600' : ''}
+        ${!backgroundColor && !hasVisualContent && !isText && !isAdjustmentLayer ? 'bg-blue-600' : ''}
+        ${hasVisualContent && !backgroundColor && !isText && !isAdjustmentLayer ? 'bg-gray-800' : ''}
       `}
       style={{
         left: `${displayPosition.left}px`,
@@ -514,6 +516,41 @@ export function Clip({
             >
               {hasTimeRemap ? 'TR' : isReversed && !hasSpeedChange ? 'R' : `${clip.speed}x`}
               {isReversed && hasSpeedChange && !hasTimeRemap && 'R'}
+            </div>
+          )}
+
+          {/* Compound clip indicator */}
+          {clip.compoundSequenceId && (
+            <div
+              data-testid="compound-clip-indicator"
+              className="px-1 h-3 bg-indigo-600 rounded text-[8px] text-white flex items-center"
+              title="Compound clip - double-click to edit"
+              aria-label="Compound clip"
+            >
+              CMPD
+            </div>
+          )}
+
+          {/* Adjustment layer indicator */}
+          {clip.isAdjustmentLayer === true && (
+            <div
+              data-testid="adjustment-layer-indicator"
+              className="px-1 h-3 bg-purple-600 rounded text-[8px] text-white flex items-center"
+              title="Adjustment layer - effects apply to clips below"
+              aria-label="Adjustment layer"
+            >
+              ADJ
+            </div>
+          )}
+
+          {/* Group indicator */}
+          {clip.groupId && (
+            <div
+              data-testid="group-indicator"
+              className="px-1 h-3 bg-emerald-600 rounded text-[8px] text-white flex items-center"
+              title="Grouped clip"
+            >
+              GRP
             </div>
           )}
         </div>

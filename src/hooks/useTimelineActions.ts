@@ -77,6 +77,7 @@ const logger = createLogger('TimelineActions');
 
 const WORKSPACE_DROP_QUEUE_MAX_ATTEMPTS = 3;
 const WORKSPACE_DROP_QUEUE_RETRY_DELAY_MS = 350;
+const DEFAULT_ADJUSTMENT_LAYER_DURATION_SEC = 5.0;
 
 // =============================================================================
 // Types
@@ -116,6 +117,11 @@ interface TimelineActions {
   handleLinkClips: (clipIds: string[]) => Promise<void>;
   handleUnlinkClips: (clipRefs: Array<{ trackId: string; clipId: string }>) => Promise<void>;
   handleDetachAudio: (clipId: string, trackId: string) => Promise<void>;
+  handleCreateCompoundClip: (clipIds: string[], trackId: string) => Promise<void>;
+  handleUnnestCompoundClip: (clipId: string, trackId: string) => Promise<void>;
+  handleCreateAdjustmentLayer: (trackId: string) => Promise<void>;
+  handleGroupClips: (clipIds: string[]) => Promise<void>;
+  handleUngroupClips: (clipRefs: Array<{ trackId: string; clipId: string }>) => Promise<void>;
 }
 
 type ExecuteTimelineCommand = (command: Command) => Promise<CommandResult>;
@@ -3003,6 +3009,102 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     [executeCommand, getCurrentSequence],
   );
 
+  const handleCreateCompoundClip = useCallback(
+    async (clipIds: string[], trackId: string): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq || clipIds.length === 0) return;
+
+      await executeCommand({
+        type: 'CreateCompoundClip',
+        payload: {
+          sequenceId: seq.id,
+          trackId,
+          clipIds,
+        },
+      });
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
+  const handleUnnestCompoundClip = useCallback(
+    async (clipId: string, trackId: string): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq) return;
+
+      await executeCommand({
+        type: 'UnnestCompoundClip',
+        payload: {
+          sequenceId: seq.id,
+          trackId,
+          clipId,
+        },
+      });
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
+  const handleCreateAdjustmentLayer = useCallback(
+    async (trackId: string): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq) return;
+
+      const playhead = usePlaybackStore.getState().currentTime;
+
+      await executeCommand({
+        type: 'CreateAdjustmentLayer',
+        payload: {
+          sequenceId: seq.id,
+          trackId,
+          position: playhead,
+          duration: DEFAULT_ADJUSTMENT_LAYER_DURATION_SEC,
+        },
+      });
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
+  const handleGroupClips = useCallback(
+    async (clipIds: string[]): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq || clipIds.length < 2) return;
+
+      // Resolve correct trackId for each clip by searching all tracks
+      const clipRefs: Array<{ trackId: string; clipId: string }> = [];
+      for (const clipId of clipIds) {
+        const track = seq.tracks.find((t) => t.clips.some((c) => c.id === clipId));
+        if (track) {
+          clipRefs.push({ trackId: track.id, clipId });
+        }
+      }
+      if (clipRefs.length < 2) return;
+
+      await executeCommand({
+        type: 'GroupClips',
+        payload: {
+          sequenceId: seq.id,
+          clipRefs,
+        },
+      });
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
+  const handleUngroupClips = useCallback(
+    async (clipRefs: Array<{ trackId: string; clipId: string }>): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq || clipRefs.length === 0) return;
+
+      await executeCommand({
+        type: 'UngroupClips',
+        payload: {
+          sequenceId: seq.id,
+          clipRefs,
+        },
+      });
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
   return {
     handleClipMove,
     handleClipTrim,
@@ -3033,5 +3135,10 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleLinkClips,
     handleUnlinkClips,
     handleDetachAudio,
+    handleCreateCompoundClip,
+    handleUnnestCompoundClip,
+    handleCreateAdjustmentLayer,
+    handleGroupClips,
+    handleUngroupClips,
   };
 }
