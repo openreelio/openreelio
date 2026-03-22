@@ -2661,7 +2661,13 @@ pub fn validate_export_settings(
         .tracks
         .iter()
         .filter(|track| track.kind == TrackKind::Video)
-        .map(|track| track.clips.iter().filter(|clip| clip.enabled).count())
+        .map(|track| {
+            track
+                .clips
+                .iter()
+                .filter(|clip| clip.enabled && !clip.is_adjustment_layer())
+                .count()
+        })
         .sum();
     if visual_clip_count == 0 {
         validation.add_error("Sequence has no visual clips to export");

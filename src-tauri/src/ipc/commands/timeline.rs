@@ -467,7 +467,7 @@ pub async fn create_compound_clip(
     let mut guard = state.project.lock().await;
     let project = guard
         .as_mut()
-        .ok_or_else(|| "No project open".to_string())?;
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
     let mut command =
         CreateCompoundClipCommand::new(&args.sequence_id, &args.track_id, args.clip_ids);
@@ -507,7 +507,7 @@ pub async fn unnest_compound_clip(
     let mut guard = state.project.lock().await;
     let project = guard
         .as_mut()
-        .ok_or_else(|| "No project open".to_string())?;
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
     let command = UnnestCompoundClipCommand::new(&args.sequence_id, &args.track_id, &args.clip_id);
 
@@ -546,7 +546,7 @@ pub async fn create_adjustment_layer(
     let mut guard = state.project.lock().await;
     let project = guard
         .as_mut()
-        .ok_or_else(|| "No project open".to_string())?;
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
     let mut command = CreateAdjustmentLayerCommand::new(
         &args.sequence_id,

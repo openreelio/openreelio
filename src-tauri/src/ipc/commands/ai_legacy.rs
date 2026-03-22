@@ -1824,23 +1824,21 @@ pub async fn validate_edit_script(
             }
             // Clip grouping commands
             "GroupClips" | "groupClips" => {
-                let has_clip_refs = cmd
-                    .params
-                    .get("clipRefs")
-                    .map(|v| v.is_array())
-                    .unwrap_or(false);
-                if !has_clip_refs {
-                    issues.push(format!("GroupClips command {} missing clipRefs array", i));
+                match cmd.params.get("clipRefs").and_then(|v| v.as_array()) {
+                    Some(refs) if refs.len() >= 2 => {}
+                    _ => issues.push(format!(
+                        "GroupClips command {} requires at least two clipRefs",
+                        i
+                    )),
                 }
             }
             "UngroupClips" | "ungroupClips" => {
-                let has_clip_refs = cmd
-                    .params
-                    .get("clipRefs")
-                    .map(|v| v.is_array())
-                    .unwrap_or(false);
-                if !has_clip_refs {
-                    issues.push(format!("UngroupClips command {} missing clipRefs array", i));
+                match cmd.params.get("clipRefs").and_then(|v| v.as_array()) {
+                    Some(refs) if !refs.is_empty() => {}
+                    _ => issues.push(format!(
+                        "UngroupClips command {} requires at least one clipRef",
+                        i
+                    )),
                 }
             }
             "DetachAudio" | "detachAudio" => {
@@ -1926,11 +1924,22 @@ pub async fn validate_edit_script(
                         i
                     ));
                 }
+                let position_valid = cmd
+                    .params
+                    .get("position")
+                    .and_then(|v| v.as_f64())
+                    .is_some_and(|p| p.is_finite() && p >= 0.0);
+                if !position_valid {
+                    issues.push(format!(
+                        "CreateAdjustmentLayer command {} missing or invalid position",
+                        i
+                    ));
+                }
                 let duration_valid = cmd
                     .params
                     .get("duration")
                     .and_then(|v| v.as_f64())
-                    .is_some_and(|d| d > 0.0);
+                    .is_some_and(|d| d.is_finite() && d > 0.0);
                 if !duration_valid {
                     issues.push(format!(
                         "CreateAdjustmentLayer command {} missing or invalid duration",

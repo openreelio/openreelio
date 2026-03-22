@@ -922,13 +922,17 @@ export function Timeline({
                 const firstClipId = selectedClipIds[0];
                 const groupRefs = effectiveResolveGroupClipRefs(firstClipId);
                 if (groupRefs.length >= 2) {
-                  onClipUngroup(groupRefs);
+                  void Promise.resolve(onClipUngroup(groupRefs)).catch((err) => {
+                    console.error('Failed to ungroup clips', err);
+                  });
                 }
               }
             } else {
               // Ctrl+G: Group
               if (onClipGroup && selectedClipIds.length >= 2) {
-                onClipGroup([...selectedClipIds]);
+                void Promise.resolve(onClipGroup([...selectedClipIds])).catch((err) => {
+                  console.error('Failed to group clips', err);
+                });
               }
             }
             e.preventDefault();

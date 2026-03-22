@@ -1655,6 +1655,9 @@ impl ProjectState {
         }
 
         // Legacy replay path: reconstruct nested entities from command inputs only.
+        // WARNING: This path generates non-deterministic IDs; subsequent ops
+        // referencing the compound clip or inner sequence may fail during replay.
+        tracing::warn!("CompoundClipCreate replay using legacy path with non-deterministic IDs");
         let sequence = self
             .sequences
             .get(seq_id)
@@ -1759,18 +1762,22 @@ impl ProjectState {
             .clone();
         let compound_start = compound_clip.place.timeline_in_sec;
 
-        // Collect inner clips
+        // Collect inner clips — only single-track inner sequences are supported
         let inner_sequence = self
             .sequences
             .get(&inner_seq_id)
             .ok_or_else(|| CoreError::SequenceNotFound(inner_seq_id.clone()))?;
+        if inner_sequence.tracks.len() != 1 {
+            return Err(CoreError::ValidationError(
+                "Cannot unnest a compound clip whose inner sequence has multiple tracks"
+                    .to_string(),
+            ));
+        }
         let mut inner_clips: Vec<Clip> = Vec::new();
-        for inner_track in &inner_sequence.tracks {
-            for clip in &inner_track.clips {
-                let mut restored = clip.clone();
-                restored.place.timeline_in_sec += compound_start;
-                inner_clips.push(restored);
-            }
+        for clip in &inner_sequence.tracks[0].clips {
+            let mut restored = clip.clone();
+            restored.place.timeline_in_sec += compound_start;
+            inner_clips.push(restored);
         }
 
         // Remove inner sequence
@@ -1807,7 +1814,10 @@ impl ProjectState {
 
         let mut command = GroupClipsCommand::new(seq_id, clip_refs);
         command.group_id = group_id.to_string();
-        command.execute(self).map(|_| ())
+        let was_dirty = self.is_dirty;
+        let result = command.execute(self).map(|_| ());
+        self.is_dirty = was_dirty;
+        result
     }
 
     fn apply_clip_ungroup(&mut self, op: &Operation) -> CoreResult<()> {
@@ -1823,7 +1833,10 @@ impl ProjectState {
         let clip_refs = Self::parse_clip_refs_from_payload(&op.payload)?;
 
         let mut command = UngroupClipsCommand::new(seq_id, clip_refs);
-        command.execute(self).map(|_| ())
+        let was_dirty = self.is_dirty;
+        let result = command.execute(self).map(|_| ());
+        self.is_dirty = was_dirty;
+        result
     }
 
     fn apply_batch(&mut self, op: &Operation) -> CoreResult<()> {

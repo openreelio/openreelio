@@ -451,7 +451,7 @@ export function Track({
               : []),
           ]
         : []),
-      ...(isVisualTrack
+      ...(track.kind === 'video'
         ? [
             {
               label: 'New Adjustment Layer',
