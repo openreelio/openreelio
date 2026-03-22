@@ -229,6 +229,7 @@ impl Command for AddTextClipCommand {
             caption_style: None,
             caption_position: None,
             enabled: true,
+            link_group_id: None,
         };
 
         // 9. Create the TextOverlay effect
