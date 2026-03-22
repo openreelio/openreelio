@@ -760,19 +760,21 @@ pub async fn apply_edit_script(
 ) -> Result<ApplyEditScriptResult, String> {
     use crate::core::commands::{
         AddAudioKeyframeCommand, AddEffectCommand, AddMarkerCommand, AddMaskCommand,
-        AddTextClipCommand, AddTrackCommand, ClearTimeRemapCommand, CloseAllGapsCommand,
+        AddTextClipCommand, AddTrackCommand, ApplyAudioDuckingCommand,
+        ClearTimeRemapCommand, CloseAllGapsCommand,
         CloseGapCommand, CreateCaptionCommand, CreateFolderCommand, CreateFreezeFrameCommand,
-        CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand, ExtractEditCommand,
-        InsertClipCommand, InsertEditCommand, LiftCommand, MoveAudioKeyframeCommand,
-        MoveClipCommand, MoveFileCommand, OverwriteEditCommand, RemoveAssetCommand,
-        RemoveAudioKeyframeCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand,
-        RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
-        RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand,
-        SetAudioFadeInCommand, SetAudioFadeOutCommand, SetAudioKeyframeValueCommand,
-        SetClipAudioCommand, SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMuteCommand,
-        SetClipSpeedCommand, SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
-        SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand, ToggleTrackMuteCommand,
-        ToggleTrackVisibilityCommand, TrimClipCommand, UpdateEffectCommand, UpdateMaskCommand,
+        CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand, DetachAudioCommand,
+        ExtractEditCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
+        LinkClipsCommand, MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand,
+        OverwriteEditCommand, RemoveAssetCommand, RemoveAudioKeyframeCommand, RemoveClipCommand,
+        RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
+        RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, ReorderTracksCommand,
+        ReverseClipCommand, RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
+        SetAudioKeyframeValueCommand, SetClipAudioCommand, SetClipBlendModeCommand,
+        SetClipEnabledCommand, SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
+        SetMasterVolumeCommand, SetTimeRemapCommand, SetTrackBlendModeCommand, SplitClipCommand,
+        ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
+        TrimClipCommand, UnlinkClipsCommand, UpdateEffectCommand, UpdateMaskCommand,
         UpdateTextCommand,
     };
 
@@ -1029,6 +1031,26 @@ pub async fn apply_edit_script(
                 &p.track_id,
                 &p.clip_id,
                 p.enabled,
+            )),
+            CommandPayload::LinkClips(p) => Box::new(LinkClipsCommand::new(
+                &p.sequence_id,
+                p.clip_refs
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect(),
+            )),
+            CommandPayload::UnlinkClips(p) => Box::new(UnlinkClipsCommand::new(
+                &p.sequence_id,
+                p.clip_refs
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect(),
+            )),
+            CommandPayload::DetachAudio(p) => Box::new(DetachAudioCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.target_audio_track_id,
             )),
             CommandPayload::CreateFreezeFrame(p) => Box::new(CreateFreezeFrameCommand::new(
                 &p.sequence_id,
@@ -1316,6 +1338,13 @@ pub async fn apply_edit_script(
             CommandPayload::DeleteFile(p) => Box::new(DeleteFileCommand::new(
                 &p.relative_path,
                 project.path.clone(),
+            )),
+
+            CommandPayload::ApplyAudioDucking(p) => Box::new(ApplyAudioDuckingCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.keyframes,
             )),
         };
 

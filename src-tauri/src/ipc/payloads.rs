@@ -246,6 +246,38 @@ pub struct SetClipEnabledPayload {
     pub enabled: bool,
 }
 
+/// Clip reference: a (trackId, clipId) pair used in multi-clip commands.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ClipRef {
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LinkClipsPayload {
+    pub sequence_id: SequenceId,
+    pub clip_refs: Vec<ClipRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct UnlinkClipsPayload {
+    pub sequence_id: SequenceId,
+    pub clip_refs: Vec<ClipRef>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DetachAudioPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_audio_track_id: Option<TrackId>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateFreezeFramePayload {
@@ -804,6 +836,15 @@ pub struct DeleteFilePayload {
     pub relative_path: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ApplyAudioDuckingPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    pub keyframes: Vec<crate::core::timeline::AudioKeyframe>,
+}
+
 // =============================================================================
 // Tagged Union
 // =============================================================================
@@ -872,6 +913,15 @@ pub enum CommandPayload {
 
     #[serde(alias = "setClipEnabled", alias = "SetClipEnabled")]
     SetClipEnabled(SetClipEnabledPayload),
+
+    #[serde(alias = "linkClips", alias = "LinkClips")]
+    LinkClips(LinkClipsPayload),
+
+    #[serde(alias = "unlinkClips", alias = "UnlinkClips")]
+    UnlinkClips(UnlinkClipsPayload),
+
+    #[serde(alias = "detachAudio", alias = "DetachAudio")]
+    DetachAudio(DetachAudioPayload),
 
     #[serde(
         alias = "createFreezeFrame",
@@ -1036,6 +1086,9 @@ pub enum CommandPayload {
 
     #[serde(alias = "deleteFile", alias = "DeleteFile")]
     DeleteFile(DeleteFilePayload),
+
+    #[serde(alias = "applyAudioDucking", alias = "ApplyAudioDucking")]
+    ApplyAudioDucking(ApplyAudioDuckingPayload),
 }
 
 impl CommandPayload {
@@ -1090,20 +1143,22 @@ impl CommandPayload {
     ) -> Box<dyn crate::core::commands::Command> {
         use crate::core::commands::{
             AddAudioKeyframeCommand, AddEffectCommand, AddMarkerCommand, AddMaskCommand,
+            ApplyAudioDuckingCommand,
             AddTextClipCommand, AddTrackCommand, ClearTimeRemapCommand, CloseAllGapsCommand,
             CloseGapCommand, CreateCaptionCommand, CreateFolderCommand, CreateFreezeFrameCommand,
-            CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand, ExtractEditCommand,
-            ImportAssetCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
-            MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand, OverwriteEditCommand,
-            RemoveAssetCommand, RemoveAudioKeyframeCommand, RemoveClipCommand, RemoveEffectCommand,
-            RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand,
-            RenameFileCommand, RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand,
-            RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
-            SetAudioKeyframeValueCommand, SetClipAudioCommand, SetClipBlendModeCommand,
-            SetClipEnabledCommand, SetClipMuteCommand, SetClipSpeedCommand,
-            SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
-            SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand,
-            ToggleTrackMuteCommand, ToggleTrackVisibilityCommand, TrimClipCommand,
+            CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand, DetachAudioCommand,
+            ExtractEditCommand, ImportAssetCommand, InsertClipCommand, InsertEditCommand,
+            LiftCommand, LinkClipsCommand, MoveAudioKeyframeCommand, MoveClipCommand,
+            MoveFileCommand, OverwriteEditCommand, RemoveAssetCommand, RemoveAudioKeyframeCommand,
+            RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand,
+            RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand, RenameTrackCommand,
+            ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand,
+            SetAudioFadeInCommand, SetAudioFadeOutCommand, SetAudioKeyframeValueCommand,
+            SetClipAudioCommand, SetClipBlendModeCommand, SetClipEnabledCommand,
+            SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
+            SetMasterVolumeCommand, SetTimeRemapCommand, SetTrackBlendModeCommand,
+            SplitClipCommand, ToggleTrackLockCommand, ToggleTrackMuteCommand,
+            ToggleTrackVisibilityCommand, TrimClipCommand, UnlinkClipsCommand,
             UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
         };
 
@@ -1213,6 +1268,26 @@ impl CommandPayload {
                 &p.track_id,
                 &p.clip_id,
                 p.enabled,
+            )),
+            CommandPayload::LinkClips(p) => Box::new(LinkClipsCommand::new(
+                &p.sequence_id,
+                p.clip_refs
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect(),
+            )),
+            CommandPayload::UnlinkClips(p) => Box::new(UnlinkClipsCommand::new(
+                &p.sequence_id,
+                p.clip_refs
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect(),
+            )),
+            CommandPayload::DetachAudio(p) => Box::new(DetachAudioCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.target_audio_track_id,
             )),
             CommandPayload::CreateFreezeFrame(p) => Box::new(CreateFreezeFrameCommand::new(
                 &p.sequence_id,
@@ -1494,6 +1569,13 @@ impl CommandPayload {
             CommandPayload::DeleteFile(p) => Box::new(DeleteFileCommand::new(
                 &p.relative_path,
                 project_path.to_path_buf(),
+            )),
+
+            CommandPayload::ApplyAudioDucking(p) => Box::new(ApplyAudioDuckingCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+                p.keyframes,
             )),
         }
     }

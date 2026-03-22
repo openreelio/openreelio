@@ -960,6 +960,8 @@ mod tauri_app {
                 $crate::ipc::get_agent_memory,
                 $crate::ipc::delete_agent_memory,
                 $crate::ipc::clear_agent_memory,
+                // Audio ducking
+                $crate::ipc::apply_audio_ducking,
             ]
         };
     }
@@ -1333,6 +1335,8 @@ mod tauri_app {
             ipc::get_agent_memory,
             ipc::delete_agent_memory,
             ipc::clear_agent_memory,
+            // Audio ducking
+            ipc::apply_audio_ducking,
         ])
         .run(tauri::generate_context!());
 
