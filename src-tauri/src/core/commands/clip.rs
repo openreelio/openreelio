@@ -6097,6 +6097,875 @@ impl Command for ApplyAudioDuckingCommand {
 }
 
 // =============================================================================
+// Compound Clip Commands
+// =============================================================================
+
+/// Command to create a compound clip by nesting selected clips into a new sequence.
+///
+/// Selected clips are moved into a new inner sequence and replaced with a single
+/// compound clip that references the inner sequence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateCompoundClipCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_ids: Vec<ClipId>,
+    pub name: Option<String>,
+
+    #[serde(skip)]
+    created_sequence_id: Option<SequenceId>,
+    #[serde(skip)]
+    created_compound_clip_id: Option<ClipId>,
+    #[serde(skip)]
+    removed_clips: Vec<Clip>,
+}
+
+impl CreateCompoundClipCommand {
+    pub fn new(sequence_id: &str, track_id: &str, clip_ids: Vec<String>) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_ids,
+            name: None,
+            created_sequence_id: None,
+            created_compound_clip_id: None,
+            removed_clips: Vec::new(),
+        }
+    }
+
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = Some(name.to_string());
+        self
+    }
+}
+
+impl Command for CreateCompoundClipCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        // 1. Deduplicate and validate inputs
+        let mut unique_ids: Vec<ClipId> = self.clip_ids.clone();
+        unique_ids.sort();
+        unique_ids.dedup();
+        self.clip_ids = unique_ids;
+
+        if self.clip_ids.is_empty() {
+            return Err(CoreError::ValidationError(
+                "CreateCompoundClip requires at least 1 clip".to_string(),
+            ));
+        }
+
+        // 2. Get source sequence and validate track
+        let sequence = state
+            .sequences
+            .get(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        validate_track_unlocked(track)?;
+
+        // 3. Collect selected clips and validate they all exist
+        let mut selected_clips: Vec<Clip> = Vec::new();
+        for clip_id in &self.clip_ids {
+            let clip = track
+                .clips
+                .iter()
+                .find(|c| c.id == *clip_id)
+                .ok_or_else(|| CoreError::ClipNotFound(clip_id.clone()))?;
+            selected_clips.push(clip.clone());
+        }
+
+        // 4. Compute the time span of selected clips
+        let span_start = selected_clips
+            .iter()
+            .map(|c| c.place.timeline_in_sec)
+            .fold(f64::INFINITY, f64::min);
+        let span_end = selected_clips
+            .iter()
+            .map(|c| c.place.timeline_out_sec())
+            .fold(f64::NEG_INFINITY, f64::max);
+        let compound_duration = span_end - span_start;
+
+        if !compound_duration.is_finite() || compound_duration <= 0.0 {
+            return Err(CoreError::ValidationError(
+                "Selected clips have zero, negative, or invalid total duration".to_string(),
+            ));
+        }
+
+        let selected_clip_id_set: std::collections::HashSet<&str> = self
+            .clip_ids
+            .iter()
+            .map(|clip_id| clip_id.as_str())
+            .collect();
+        if let Some(conflicting_clip) = track.clips.iter().find(|clip| {
+            !selected_clip_id_set.contains(clip.id.as_str())
+                && clip.place.timeline_in_sec < span_end
+                && clip.place.timeline_out_sec() > span_start
+        }) {
+            return Err(CoreError::ValidationError(format!(
+                "CreateCompoundClip requires selecting all clips within the nested span; clip '{}' overlaps the selection window",
+                conflicting_clip.id
+            )));
+        }
+
+        // 5. Create inner sequence with same format
+        let seq_format = sequence.format.clone();
+        let compound_name = self
+            .name
+            .clone()
+            .unwrap_or_else(|| "Compound Clip".to_string());
+        let mut inner_sequence = crate::core::timeline::Sequence::new(&compound_name, seq_format);
+
+        // 6. Create a track in the inner sequence matching the source track kind
+        let inner_track = crate::core::timeline::Track::new(&track.name, track.kind.clone());
+        let inner_track_id = inner_track.id.clone();
+        inner_sequence.add_track(inner_track);
+
+        // 7. Move clips to inner sequence (adjust positions relative to span_start)
+        let inner_track_mut = inner_sequence
+            .get_track_mut(&inner_track_id)
+            .ok_or_else(|| {
+                CoreError::Internal(format!(
+                    "Inner track '{}' not found after creation",
+                    inner_track_id
+                ))
+            })?;
+        for clip in &selected_clips {
+            let mut inner_clip = clip.clone();
+            inner_clip.place.timeline_in_sec -= span_start;
+            insert_clip_sorted(inner_track_mut, inner_clip);
+        }
+
+        let inner_sequence_id = inner_sequence.id.clone();
+
+        // 8. Create compound clip at the original span position
+        let compound_clip =
+            Clip::compound(&inner_sequence_id, compound_duration).place_at(span_start);
+        let compound_clip_id = compound_clip.id.clone();
+
+        // 9. Store undo state before modifying
+        self.removed_clips = selected_clips;
+        self.created_sequence_id = Some(inner_sequence_id.clone());
+        self.created_compound_clip_id = Some(compound_clip_id.clone());
+
+        // 10. Mutate state: add inner sequence
+        state
+            .sequences
+            .insert(inner_sequence_id.clone(), inner_sequence);
+
+        // 11. Mutate state: remove original clips and add compound clip
+        let sequence_mut = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track_mut = sequence_mut
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        // Remove the original clips
+        track_mut
+            .clips
+            .retain(|c| !selected_clip_id_set.contains(c.id.as_str()));
+
+        // Insert compound clip
+        insert_clip_sorted(track_mut, compound_clip);
+
+        state.is_dirty = true;
+
+        // 12. Build result
+        let op_id = ulid::Ulid::new().to_string();
+        let mut result = CommandResult::new(&op_id)
+            .with_change(StateChange::SequenceCreated {
+                sequence_id: inner_sequence_id,
+            })
+            .with_change(StateChange::ClipCreated {
+                clip_id: compound_clip_id.clone(),
+            })
+            .with_created_id(&compound_clip_id);
+
+        for clip_id in &self.clip_ids {
+            result = result.with_change(StateChange::ClipDeleted {
+                clip_id: clip_id.clone(),
+            });
+            result = result.with_deleted_id(clip_id);
+        }
+
+        Ok(result)
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        // 1. Remove the inner sequence
+        if let Some(ref inner_seq_id) = self.created_sequence_id {
+            state.sequences.remove(inner_seq_id);
+        }
+
+        // 2. Remove compound clip and restore original clips
+        if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) {
+                // Remove compound clip
+                if let Some(ref compound_id) = self.created_compound_clip_id {
+                    track.clips.retain(|c| &c.id != compound_id);
+                }
+
+                // Restore original clips
+                for clip in &self.removed_clips {
+                    insert_clip_sorted(track, clip.clone());
+                }
+            }
+        }
+
+        state.is_dirty = true;
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "CreateCompoundClip"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipIds": self.clip_ids,
+            "name": self.name,
+        })
+    }
+}
+
+/// Command to unnest a compound clip, restoring its inner clips to the parent timeline.
+///
+/// The compound clip is replaced with the clips from its inner sequence,
+/// repositioned to the compound clip's timeline position.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnnestCompoundClipCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+
+    #[serde(skip)]
+    removed_compound_clip: Option<Clip>,
+    #[serde(skip)]
+    removed_inner_sequence: Option<crate::core::timeline::Sequence>,
+    #[serde(skip)]
+    restored_clip_ids: Vec<ClipId>,
+}
+
+impl UnnestCompoundClipCommand {
+    pub fn new(sequence_id: &str, track_id: &str, clip_id: &str) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            clip_id: clip_id.to_string(),
+            removed_compound_clip: None,
+            removed_inner_sequence: None,
+            restored_clip_ids: Vec::new(),
+        }
+    }
+}
+
+impl Command for UnnestCompoundClipCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        // 1. Validate and get compound clip
+        let sequence = state
+            .sequences
+            .get(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        validate_track_unlocked(track)?;
+
+        let compound_clip = track
+            .clips
+            .iter()
+            .find(|c| c.id == self.clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(self.clip_id.clone()))?;
+
+        // 2. Validate it is a compound clip
+        let inner_seq_id = compound_clip
+            .compound_sequence_id
+            .as_ref()
+            .ok_or_else(|| {
+                CoreError::ValidationError(format!(
+                    "Clip '{}' is not a compound clip",
+                    self.clip_id
+                ))
+            })?
+            .clone();
+
+        let compound_start = compound_clip.place.timeline_in_sec;
+
+        // 3. Get inner sequence clips
+        let inner_sequence = state
+            .sequences
+            .get(&inner_seq_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(inner_seq_id.clone()))?;
+
+        let populated_inner_tracks: Vec<&crate::core::timeline::Track> = inner_sequence
+            .tracks
+            .iter()
+            .filter(|inner_track| !inner_track.clips.is_empty())
+            .collect();
+        if populated_inner_tracks.len() > 1
+            || populated_inner_tracks
+                .iter()
+                .any(|inner_track| inner_track.kind != track.kind)
+        {
+            return Err(CoreError::ValidationError(
+                "UnnestCompoundClip currently supports only a single populated inner track matching the parent track kind".to_string(),
+            ));
+        }
+
+        // Collect all clips from all tracks in the inner sequence
+        let mut inner_clips: Vec<Clip> = Vec::new();
+        for inner_track in &inner_sequence.tracks {
+            for clip in &inner_track.clips {
+                let mut restored_clip = clip.clone();
+                // Adjust positions back to parent timeline
+                restored_clip.place.timeline_in_sec += compound_start;
+                inner_clips.push(restored_clip);
+            }
+        }
+
+        let restored_ids: Vec<ClipId> = inner_clips.iter().map(|c| c.id.clone()).collect();
+
+        // 4. Store undo state
+        self.removed_compound_clip = Some(compound_clip.clone());
+        self.removed_inner_sequence = Some(inner_sequence.clone());
+        self.restored_clip_ids = restored_ids.clone();
+
+        // 5. Mutate state: remove inner sequence
+        state.sequences.remove(&inner_seq_id);
+
+        // 6. Mutate state: replace compound clip with inner clips
+        let sequence_mut = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        let track_mut = sequence_mut
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        // Remove compound clip
+        track_mut.clips.retain(|c| c.id != self.clip_id);
+
+        // Insert restored clips
+        for clip in inner_clips {
+            insert_clip_sorted(track_mut, clip);
+        }
+
+        state.is_dirty = true;
+
+        // 7. Build result
+        let op_id = ulid::Ulid::new().to_string();
+        let mut result = CommandResult::new(&op_id).with_change(StateChange::ClipDeleted {
+            clip_id: self.clip_id.clone(),
+        });
+
+        for clip_id in &restored_ids {
+            result = result
+                .with_change(StateChange::ClipCreated {
+                    clip_id: clip_id.clone(),
+                })
+                .with_created_id(clip_id);
+        }
+
+        Ok(result)
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        // 1. Restore inner sequence
+        if let Some(ref inner_seq) = self.removed_inner_sequence {
+            state
+                .sequences
+                .insert(inner_seq.id.clone(), inner_seq.clone());
+        }
+
+        // 2. Remove restored clips and re-add compound clip
+        if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) {
+                // Remove the restored clips
+                let restored_set: std::collections::HashSet<&str> =
+                    self.restored_clip_ids.iter().map(|s| s.as_str()).collect();
+                track
+                    .clips
+                    .retain(|c| !restored_set.contains(c.id.as_str()));
+
+                // Restore compound clip
+                if let Some(ref compound_clip) = self.removed_compound_clip {
+                    insert_clip_sorted(track, compound_clip.clone());
+                }
+            }
+        }
+
+        state.is_dirty = true;
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "UnnestCompoundClip"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "clipId": self.clip_id,
+        })
+    }
+}
+
+// =============================================================================
+// CreateAdjustmentLayerCommand
+// =============================================================================
+
+/// Creates an adjustment layer clip on a specified track.
+///
+/// Adjustment layers are transparent clips whose effects apply to all clips
+/// below them on the timeline. They have no source media — they are purely
+/// effect containers that can be moved, trimmed, and stacked like regular clips.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct CreateAdjustmentLayerCommand {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub position: TimeSec,
+    pub duration: TimeSec,
+    pub name: Option<String>,
+    #[serde(skip)]
+    created_clip_id: Option<ClipId>,
+}
+
+impl CreateAdjustmentLayerCommand {
+    pub fn new(sequence_id: &str, track_id: &str, position: TimeSec, duration: TimeSec) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            track_id: track_id.to_string(),
+            position,
+            duration,
+            name: None,
+            created_clip_id: None,
+        }
+    }
+
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = Some(name.to_string());
+        self
+    }
+}
+
+impl Command for CreateAdjustmentLayerCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        // Validate position
+        if self.position < 0.0 {
+            return Err(CoreError::ValidationError(
+                "Adjustment layer position must not be negative".to_string(),
+            ));
+        }
+
+        // Validate duration
+        if self.duration <= 0.0 {
+            return Err(CoreError::ValidationError(
+                "Adjustment layer duration must be positive".to_string(),
+            ));
+        }
+
+        // Validate sequence exists
+        let sequence = state
+            .sequences
+            .get(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        // Validate track exists and is a video/overlay track
+        let track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        validate_track_unlocked(track)?;
+
+        if !track.is_video() {
+            return Err(CoreError::ValidationError(
+                "Adjustment layers can only be placed on video or overlay tracks".to_string(),
+            ));
+        }
+
+        // Create the adjustment layer clip
+        let mut clip = Clip::adjustment_layer(self.duration).place_at(self.position);
+        if let Some(ref name) = self.name {
+            clip.label = Some(name.clone());
+        }
+
+        validate_no_overlap(track, &clip.place, None)?;
+
+        let clip_id = clip.id.clone();
+        self.created_clip_id = Some(clip_id.clone());
+
+        // Insert into track
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+        let track = sequence
+            .tracks
+            .iter_mut()
+            .find(|t| t.id == self.track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(self.track_id.clone()))?;
+
+        insert_clip_sorted(track, clip);
+        state.is_dirty = true;
+
+        let op_id = ulid::Ulid::new().to_string();
+        Ok(CommandResult::new(&op_id)
+            .with_change(StateChange::ClipCreated {
+                clip_id: clip_id.clone(),
+            })
+            .with_created_id(&clip_id))
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        if let Some(ref clip_id) = self.created_clip_id {
+            if let Some(sequence) = state.sequences.get_mut(&self.sequence_id) {
+                if let Some(track) = sequence.tracks.iter_mut().find(|t| t.id == self.track_id) {
+                    track.clips.retain(|c| &c.id != clip_id);
+                }
+            }
+            state.is_dirty = true;
+        }
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "CreateAdjustmentLayer"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "trackId": self.track_id,
+            "position": self.position,
+            "duration": self.duration,
+            "name": self.name,
+        })
+    }
+}
+
+// =============================================================================
+// GroupClipsCommand
+// =============================================================================
+
+/// Collects all (track_id, clip_id) pairs that share a given `group_id`.
+fn collect_clip_refs_for_group(
+    sequence: &crate::core::timeline::Sequence,
+    group_id: &str,
+) -> Vec<(TrackId, ClipId)> {
+    if group_id.is_empty() {
+        return Vec::new();
+    }
+
+    let mut clip_refs = Vec::new();
+    for track in &sequence.tracks {
+        for clip in &track.clips {
+            if clip.group_id.as_deref() == Some(group_id) {
+                clip_refs.push((track.id.clone(), clip.id.clone()));
+            }
+        }
+    }
+
+    clip_refs
+}
+
+/// Captures the previous group_id for each clip, enabling undo.
+fn capture_group_state(
+    sequence: &crate::core::timeline::Sequence,
+    clip_refs: &[(TrackId, ClipId)],
+) -> CoreResult<Vec<(TrackId, ClipId, Option<String>)>> {
+    let mut previous_group_ids = Vec::with_capacity(clip_refs.len());
+
+    for (track_id, clip_id) in clip_refs {
+        let (_, clip) = find_clip_ref(sequence, track_id, clip_id)?;
+        previous_group_ids.push((track_id.clone(), clip_id.clone(), clip.group_id.clone()));
+    }
+
+    Ok(previous_group_ids)
+}
+
+/// Normalizes degenerate groups (groups with fewer than 2 members) by clearing group_id.
+fn normalize_degenerate_groups(
+    sequence: &mut crate::core::timeline::Sequence,
+    clip_refs: &[(TrackId, ClipId)],
+) -> CoreResult<Vec<(TrackId, ClipId)>> {
+    let mut group_ids = HashSet::new();
+
+    for (track_id, clip_id) in clip_refs {
+        let (_, clip) = find_clip_ref(sequence, track_id, clip_id)?;
+        if let Some(gid) = clip.group_id.as_deref() {
+            if !gid.is_empty() {
+                group_ids.insert(gid.to_string());
+            }
+        }
+    }
+
+    let mut normalized_refs = Vec::new();
+    let mut seen = HashSet::new();
+
+    for gid in group_ids {
+        let members = collect_clip_refs_for_group(sequence, &gid);
+        if members.len() >= 2 {
+            continue;
+        }
+
+        // Groups with < 2 members are degenerate — clear their group_id
+        for (track_id, clip_id) in members {
+            let track = sequence
+                .tracks
+                .iter_mut()
+                .find(|track| track.id == track_id)
+                .ok_or_else(|| CoreError::TrackNotFound(track_id.clone()))?;
+            let clip = track
+                .clips
+                .iter_mut()
+                .find(|clip| clip.id == clip_id)
+                .ok_or_else(|| CoreError::ClipNotFound(clip_id.clone()))?;
+            clip.group_id = None;
+            push_unique_clip_ref(&mut seen, &mut normalized_refs, &track_id, &clip_id);
+        }
+    }
+
+    Ok(normalized_refs)
+}
+
+/// Command to group multiple clips together for synchronized selection/movement.
+/// Grouped clips share a `group_id` but remain independent for individual operations.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupClipsCommand {
+    pub sequence_id: SequenceId,
+    /// Pairs of (track_id, clip_id) to group together
+    pub clip_refs: Vec<(TrackId, ClipId)>,
+    pub(crate) group_id: String,
+
+    #[serde(skip)]
+    previous_group_ids: Vec<(TrackId, ClipId, Option<String>)>,
+}
+
+impl GroupClipsCommand {
+    pub fn new(sequence_id: &str, clip_refs: Vec<(String, String)>) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            clip_refs,
+            group_id: ulid::Ulid::new().to_string(),
+            previous_group_ids: Vec::new(),
+        }
+    }
+}
+
+impl Command for GroupClipsCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        // Deduplicate clip refs
+        let mut unique_refs = self.clip_refs.clone();
+        unique_refs.sort();
+        unique_refs.dedup();
+        if unique_refs.len() < 2 {
+            return Err(CoreError::ValidationError(
+                "GroupClips requires at least 2 distinct clips".to_string(),
+            ));
+        }
+        self.clip_refs = unique_refs;
+
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        // Validate all clips exist and tracks are unlocked
+        validate_clip_refs_unlocked(sequence, &self.clip_refs)?;
+
+        // Capture previous group state for undo (include clips in existing groups that may be affected)
+        let mut all_affected = Vec::new();
+        let mut seen = HashSet::new();
+        for (track_id, clip_id) in &self.clip_refs {
+            push_unique_clip_ref(&mut seen, &mut all_affected, track_id, clip_id);
+            let (_, clip) = find_clip_ref(sequence, track_id, clip_id)?;
+            if let Some(gid) = clip.group_id.as_deref() {
+                for (gt, gc) in collect_clip_refs_for_group(sequence, gid) {
+                    push_unique_clip_ref(&mut seen, &mut all_affected, &gt, &gc);
+                }
+            }
+        }
+        self.previous_group_ids = capture_group_state(sequence, &all_affected)?;
+
+        // Apply group ID to all specified clips
+        for (track_id, clip_id) in &self.clip_refs {
+            let track = sequence
+                .tracks
+                .iter_mut()
+                .find(|t| &t.id == track_id)
+                .ok_or_else(|| CoreError::TrackNotFound(track_id.clone()))?;
+            let clip = track
+                .clips
+                .iter_mut()
+                .find(|c| &c.id == clip_id)
+                .ok_or_else(|| CoreError::ClipNotFound(clip_id.clone()))?;
+            clip.group_id = Some(self.group_id.clone());
+        }
+
+        // Normalize degenerate groups (previous groups that lost members)
+        let normalized_refs = normalize_degenerate_groups(sequence, &all_affected)?;
+
+        let op_id = ulid::Ulid::new().to_string();
+        let mut result = CommandResult::new(&op_id);
+        append_clip_modified_changes(&mut result, &self.clip_refs);
+        append_clip_modified_changes(&mut result, &normalized_refs);
+        state.is_dirty = true;
+        Ok(result)
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        for (track_id, clip_id, prev_group) in &self.previous_group_ids {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| &t.id == track_id) {
+                if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                    clip.group_id = prev_group.clone();
+                }
+            }
+        }
+
+        state.is_dirty = true;
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "GroupClips"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "clipRefs": self.clip_refs.iter().map(|(t, c)| serde_json::json!({"trackId": t, "clipId": c})).collect::<Vec<_>>(),
+            "groupId": self.group_id,
+        })
+    }
+}
+
+// =============================================================================
+// UngroupClipsCommand
+// =============================================================================
+
+/// Command to ungroup clips by clearing their `group_id`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UngroupClipsCommand {
+    pub sequence_id: SequenceId,
+    /// Pairs of (track_id, clip_id) to ungroup
+    pub clip_refs: Vec<(TrackId, ClipId)>,
+
+    #[serde(skip)]
+    previous_group_ids: Vec<(TrackId, ClipId, Option<String>)>,
+}
+
+impl UngroupClipsCommand {
+    pub fn new(sequence_id: &str, clip_refs: Vec<(String, String)>) -> Self {
+        Self {
+            sequence_id: sequence_id.to_string(),
+            clip_refs,
+            previous_group_ids: Vec::new(),
+        }
+    }
+}
+
+impl Command for UngroupClipsCommand {
+    fn execute(&mut self, state: &mut ProjectState) -> CoreResult<CommandResult> {
+        let sequence = state
+            .sequences
+            .get_mut(&self.sequence_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(self.sequence_id.clone()))?;
+
+        // Expand to all group members for affected clips
+        let mut all_affected = Vec::new();
+        let mut seen = HashSet::new();
+        for (track_id, clip_id) in &self.clip_refs {
+            push_unique_clip_ref(&mut seen, &mut all_affected, track_id, clip_id);
+            let (_, clip) = find_clip_ref(sequence, track_id, clip_id)?;
+            if let Some(gid) = clip.group_id.as_deref() {
+                for (gt, gc) in collect_clip_refs_for_group(sequence, gid) {
+                    push_unique_clip_ref(&mut seen, &mut all_affected, &gt, &gc);
+                }
+            }
+        }
+
+        validate_clip_refs_unlocked(sequence, &all_affected)?;
+        self.previous_group_ids = capture_group_state(sequence, &all_affected)?;
+
+        // Clear group_id on all affected clips (entire group, not just selected clips)
+        for (track_id, clip_id) in &all_affected {
+            let track = sequence
+                .tracks
+                .iter_mut()
+                .find(|t| &t.id == track_id)
+                .ok_or_else(|| CoreError::TrackNotFound(track_id.clone()))?;
+            let clip = track
+                .clips
+                .iter_mut()
+                .find(|c| &c.id == clip_id)
+                .ok_or_else(|| CoreError::ClipNotFound(clip_id.clone()))?;
+            clip.group_id = None;
+        }
+
+        let op_id = ulid::Ulid::new().to_string();
+        let mut result = CommandResult::new(&op_id);
+        append_clip_modified_changes(&mut result, &all_affected);
+        state.is_dirty = true;
+        Ok(result)
+    }
+
+    fn undo(&self, state: &mut ProjectState) -> CoreResult<()> {
+        let Some(sequence) = state.sequences.get_mut(&self.sequence_id) else {
+            return Ok(());
+        };
+
+        for (track_id, clip_id, prev_group) in &self.previous_group_ids {
+            if let Some(track) = sequence.tracks.iter_mut().find(|t| &t.id == track_id) {
+                if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                    clip.group_id = prev_group.clone();
+                }
+            }
+        }
+
+        state.is_dirty = true;
+        Ok(())
+    }
+
+    fn type_name(&self) -> &'static str {
+        "UngroupClips"
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sequenceId": self.sequence_id,
+            "clipRefs": self.clip_refs.iter().map(|(t, c)| serde_json::json!({"trackId": t, "clipId": c})).collect::<Vec<_>>(),
+        })
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -10600,5 +11469,824 @@ mod tests {
         // Then keyframes are cleared
         let clip = &state.sequences[&seq_id].tracks[1].clips[0];
         assert!(clip.audio.volume_keyframes.is_empty());
+    }
+
+    // =========================================================================
+    // Compound Clip Tests (BDD)
+    // =========================================================================
+
+    /// Helper: create a test state with multiple clips on one track.
+    fn create_test_state_with_multiple_clips() -> (ProjectState, String, String, Vec<String>) {
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        let asset_id = state.assets.keys().next().unwrap().clone();
+
+        // Insert 3 clips: [0-10], [10-20], [20-30]
+        let mut clip_ids = Vec::new();
+        for i in 0..3 {
+            let start = i as f64 * 10.0;
+            let mut cmd = InsertClipCommand::new(&seq_id, &track_id, &asset_id, start);
+            cmd.source_start = Some(0.0);
+            cmd.source_end = Some(10.0);
+            cmd.execute(&mut state).unwrap();
+            let id = state.sequences[&seq_id].tracks[0]
+                .clips
+                .iter()
+                .find(|c| (c.place.timeline_in_sec - start).abs() < 0.001)
+                .unwrap()
+                .id
+                .clone();
+            clip_ids.push(id);
+        }
+
+        (state, seq_id, track_id, clip_ids)
+    }
+
+    #[test]
+    fn test_create_compound_clip_should_replace_selected_clips_with_single_compound() {
+        // Given a timeline with 3 clips [0-10], [10-20], [20-30]
+        let (mut state, seq_id, track_id, clip_ids) = create_test_state_with_multiple_clips();
+        assert_eq!(state.sequences[&seq_id].tracks[0].clips.len(), 3);
+
+        // When creating a compound clip from clips 0 and 1
+        let mut cmd = CreateCompoundClipCommand::new(
+            &seq_id,
+            &track_id,
+            vec![clip_ids[0].clone(), clip_ids[1].clone()],
+        );
+        let result = cmd.execute(&mut state).unwrap();
+
+        // Then the track has 2 clips (compound + remaining)
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 2);
+
+        // And the compound clip spans [0-20]
+        let compound = track.clips.iter().find(|c| c.is_compound()).unwrap();
+        assert_eq!(compound.place.timeline_in_sec, 0.0);
+        assert_eq!(compound.place.duration_sec, 20.0);
+        assert!(compound.compound_sequence_id.is_some());
+
+        // And the inner sequence exists with 2 clips
+        let inner_seq_id = compound.compound_sequence_id.as_ref().unwrap();
+        let inner_seq = state.sequences.get(inner_seq_id).unwrap();
+        assert_eq!(inner_seq.tracks[0].clips.len(), 2);
+
+        // And inner clips have positions relative to span start (0.0)
+        assert_eq!(inner_seq.tracks[0].clips[0].place.timeline_in_sec, 0.0);
+        assert_eq!(inner_seq.tracks[0].clips[1].place.timeline_in_sec, 10.0);
+
+        // And result reports created/deleted IDs
+        assert_eq!(result.created_ids.len(), 1);
+        assert_eq!(result.deleted_ids.len(), 2);
+    }
+
+    #[test]
+    fn test_create_compound_clip_should_undo_atomically() {
+        // Given a compound clip was created
+        let (mut state, seq_id, track_id, clip_ids) = create_test_state_with_multiple_clips();
+        let original_clip_count = state.sequences[&seq_id].tracks[0].clips.len();
+
+        let mut cmd = CreateCompoundClipCommand::new(
+            &seq_id,
+            &track_id,
+            vec![clip_ids[0].clone(), clip_ids[1].clone()],
+        );
+        cmd.execute(&mut state).unwrap();
+
+        let inner_seq_id = state.sequences[&seq_id].tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.is_compound())
+            .unwrap()
+            .compound_sequence_id
+            .clone()
+            .unwrap();
+
+        // When undo is called
+        cmd.undo(&mut state).unwrap();
+
+        // Then original clips are restored
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips.len(),
+            original_clip_count
+        );
+
+        // And inner sequence is removed
+        assert!(state.sequences.get(&inner_seq_id).is_none());
+
+        // And no compound clips remain
+        assert!(state.sequences[&seq_id].tracks[0]
+            .clips
+            .iter()
+            .all(|c| !c.is_compound()));
+    }
+
+    #[test]
+    fn test_create_compound_clip_should_reject_empty_clip_list() {
+        // Given a valid state
+        let (mut state, seq_id, track_id, _) = create_test_state_with_multiple_clips();
+
+        // When creating a compound clip with no clips
+        let mut cmd = CreateCompoundClipCommand::new(&seq_id, &track_id, vec![]);
+        let result = cmd.execute(&mut state);
+
+        // Then it fails with validation error
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("at least 1 clip"));
+    }
+
+    #[test]
+    fn test_create_compound_clip_should_reject_locked_track() {
+        // Given a locked track
+        let (mut state, seq_id, track_id, clip_ids) = create_test_state_with_multiple_clips();
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].locked = true;
+
+        // When creating a compound clip
+        let mut cmd = CreateCompoundClipCommand::new(&seq_id, &track_id, vec![clip_ids[0].clone()]);
+        let result = cmd.execute(&mut state);
+
+        // Then it fails
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("locked"));
+    }
+
+    #[test]
+    fn test_create_compound_clip_should_reject_open_selection_span() {
+        // Given a timeline with 3 adjacent clips [0-10], [10-20], [20-30]
+        let (mut state, seq_id, track_id, clip_ids) = create_test_state_with_multiple_clips();
+
+        // When nesting only the first and third clips
+        let mut cmd = CreateCompoundClipCommand::new(
+            &seq_id,
+            &track_id,
+            vec![clip_ids[0].clone(), clip_ids[2].clone()],
+        );
+        let result = cmd.execute(&mut state);
+
+        // Then the command fails instead of creating an overlapping compound clip
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires selecting all clips within the nested span"));
+        assert_eq!(state.sequences[&seq_id].tracks[0].clips.len(), 3);
+    }
+
+    #[test]
+    fn test_create_compound_clip_with_custom_name() {
+        // Given clips on a track
+        let (mut state, seq_id, track_id, clip_ids) = create_test_state_with_multiple_clips();
+
+        // When creating a compound clip with a custom name
+        let mut cmd = CreateCompoundClipCommand::new(&seq_id, &track_id, vec![clip_ids[0].clone()])
+            .with_name("Interview Segment");
+        cmd.execute(&mut state).unwrap();
+
+        // Then the inner sequence has the custom name
+        let compound = state.sequences[&seq_id].tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.is_compound())
+            .unwrap();
+        let inner_seq_id = compound.compound_sequence_id.as_ref().unwrap();
+        assert_eq!(state.sequences[inner_seq_id].name, "Interview Segment");
+    }
+
+    #[test]
+    fn test_unnest_compound_clip_should_restore_inner_clips() {
+        // Given a compound clip was created from 2 clips
+        let (mut state, seq_id, track_id, clip_ids) = create_test_state_with_multiple_clips();
+
+        let mut create_cmd = CreateCompoundClipCommand::new(
+            &seq_id,
+            &track_id,
+            vec![clip_ids[0].clone(), clip_ids[1].clone()],
+        );
+        create_cmd.execute(&mut state).unwrap();
+
+        let compound_clip_id = state.sequences[&seq_id].tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.is_compound())
+            .unwrap()
+            .id
+            .clone();
+
+        // When unnesting the compound clip
+        let mut unnest_cmd = UnnestCompoundClipCommand::new(&seq_id, &track_id, &compound_clip_id);
+        let result = unnest_cmd.execute(&mut state).unwrap();
+
+        // Then original clips are restored at their original positions
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert_eq!(track.clips.len(), 3); // 2 restored + 1 untouched
+
+        // And positions are correct (back to absolute timeline positions)
+        assert!(track
+            .clips
+            .iter()
+            .any(|c| (c.place.timeline_in_sec - 0.0).abs() < 0.001));
+        assert!(track
+            .clips
+            .iter()
+            .any(|c| (c.place.timeline_in_sec - 10.0).abs() < 0.001));
+
+        // And no compound clips remain
+        assert!(track.clips.iter().all(|c| !c.is_compound()));
+
+        // And result reports created IDs
+        assert_eq!(result.created_ids.len(), 2);
+    }
+
+    #[test]
+    fn test_unnest_compound_clip_should_undo_atomically() {
+        // Given a compound clip was unnested
+        let (mut state, seq_id, track_id, clip_ids) = create_test_state_with_multiple_clips();
+
+        let mut create_cmd = CreateCompoundClipCommand::new(
+            &seq_id,
+            &track_id,
+            vec![clip_ids[0].clone(), clip_ids[1].clone()],
+        );
+        create_cmd.execute(&mut state).unwrap();
+
+        let compound_clip_id = state.sequences[&seq_id].tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.is_compound())
+            .unwrap()
+            .id
+            .clone();
+        let inner_seq_id = state.sequences[&seq_id].tracks[0]
+            .clips
+            .iter()
+            .find(|c| c.is_compound())
+            .unwrap()
+            .compound_sequence_id
+            .clone()
+            .unwrap();
+
+        let mut unnest_cmd = UnnestCompoundClipCommand::new(&seq_id, &track_id, &compound_clip_id);
+        unnest_cmd.execute(&mut state).unwrap();
+
+        // When undo is called
+        unnest_cmd.undo(&mut state).unwrap();
+
+        // Then compound clip is restored
+        let track = &state.sequences[&seq_id].tracks[0];
+        assert!(track.clips.iter().any(|c| c.is_compound()));
+        assert_eq!(track.clips.len(), 2); // compound + remaining
+
+        // And inner sequence is restored
+        assert!(state.sequences.get(&inner_seq_id).is_some());
+    }
+
+    #[test]
+    fn test_unnest_should_reject_non_compound_clip() {
+        // Given a regular (non-compound) clip
+        let (mut state, seq_id, track_id, clip_ids) = create_test_state_with_multiple_clips();
+
+        // When trying to unnest a regular clip
+        let mut cmd = UnnestCompoundClipCommand::new(&seq_id, &track_id, &clip_ids[0]);
+        let result = cmd.execute(&mut state);
+
+        // Then it fails with validation error
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("not a compound clip"));
+    }
+
+    #[test]
+    fn test_unnest_should_reject_multi_track_inner_sequences() {
+        // Given a compound clip whose inner sequence was edited to include another populated track
+        let (mut state, seq_id, track_id, clip_ids) = create_test_state_with_multiple_clips();
+
+        let mut create_cmd = CreateCompoundClipCommand::new(
+            &seq_id,
+            &track_id,
+            vec![clip_ids[0].clone(), clip_ids[1].clone()],
+        );
+        create_cmd.execute(&mut state).unwrap();
+
+        let compound_clip = state.sequences[&seq_id].tracks[0]
+            .clips
+            .iter()
+            .find(|clip| clip.is_compound())
+            .unwrap()
+            .clone();
+        let inner_seq_id = compound_clip.compound_sequence_id.clone().unwrap();
+
+        let inner_sequence = state.sequences.get_mut(&inner_seq_id).unwrap();
+        let mut extra_track = Track::new("Video Extra", TrackKind::Video);
+        extra_track
+            .clips
+            .push(inner_sequence.tracks[0].clips[0].clone());
+        inner_sequence.add_track(extra_track);
+
+        // When unnesting
+        let mut unnest_cmd = UnnestCompoundClipCommand::new(&seq_id, &track_id, &compound_clip.id);
+        let result = unnest_cmd.execute(&mut state);
+
+        // Then the command fails instead of flattening multiple inner tracks into one
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("single populated inner track"));
+    }
+
+    // =========================================================================
+    // CreateAdjustmentLayerCommand Tests
+    // =========================================================================
+
+    #[test]
+    fn test_create_adjustment_layer_should_create_clip_on_video_track() {
+        // Given a sequence with a video track
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        // When creating an adjustment layer
+        let mut cmd = CreateAdjustmentLayerCommand::new(&seq_id, &track_id, 2.0, 5.0);
+        let result = cmd.execute(&mut state);
+
+        // Then it succeeds and creates a clip with correct properties
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert_eq!(result.created_ids.len(), 1);
+
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert!(clip.is_adjustment_layer());
+        assert_eq!(clip.asset_id, Clip::ADJUSTMENT_LAYER_ASSET_ID);
+        assert_eq!(clip.place.timeline_in_sec, 2.0);
+        assert_eq!(clip.place.duration_sec, 5.0);
+        assert_eq!(clip.label.as_deref(), Some("Adjustment Layer"));
+    }
+
+    #[test]
+    fn test_create_adjustment_layer_should_undo_cleanly() {
+        // Given an adjustment layer was created
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        let mut cmd = CreateAdjustmentLayerCommand::new(&seq_id, &track_id, 0.0, 3.0);
+        cmd.execute(&mut state).unwrap();
+        assert_eq!(state.sequences[&seq_id].tracks[0].clips.len(), 1);
+
+        // When undo is called
+        cmd.undo(&mut state).unwrap();
+
+        // Then the adjustment layer is removed
+        assert_eq!(state.sequences[&seq_id].tracks[0].clips.len(), 0);
+    }
+
+    #[test]
+    fn test_create_adjustment_layer_should_reject_audio_track() {
+        // Given a sequence with an audio track
+        let (mut state, seq_id, _, _) = create_test_state_with_video_and_audio_tracks();
+        let audio_track_id = state.sequences[&seq_id]
+            .tracks
+            .iter()
+            .find(|t| t.kind == crate::core::timeline::TrackKind::Audio)
+            .unwrap()
+            .id
+            .clone();
+
+        // When trying to create adjustment layer on audio track
+        let mut cmd = CreateAdjustmentLayerCommand::new(&seq_id, &audio_track_id, 0.0, 5.0);
+        let result = cmd.execute(&mut state);
+
+        // Then it fails with validation error
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("video or overlay"));
+    }
+
+    #[test]
+    fn test_create_adjustment_layer_should_reject_locked_track() {
+        // Given a locked video track
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].locked = true;
+
+        // When trying to create adjustment layer on locked track
+        let mut cmd = CreateAdjustmentLayerCommand::new(&seq_id, &track_id, 0.0, 5.0);
+        let result = cmd.execute(&mut state);
+
+        // Then it fails with lock error
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("locked"));
+    }
+
+    #[test]
+    fn test_create_adjustment_layer_should_reject_overlapping_clip() {
+        // Given a video track that already contains clips
+        let (mut state, seq_id, track_id, _) = create_test_state_with_multiple_clips();
+
+        // When creating an adjustment layer that overlaps an existing clip
+        let mut cmd = CreateAdjustmentLayerCommand::new(&seq_id, &track_id, 2.0, 3.0);
+        let result = cmd.execute(&mut state);
+
+        // Then it fails instead of violating the single-lane track invariant
+        assert!(matches!(result.unwrap_err(), CoreError::ClipOverlap { .. }));
+    }
+
+    #[test]
+    fn test_create_adjustment_layer_should_reject_zero_duration() {
+        // Given a sequence
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        // When creating with zero duration
+        let mut cmd = CreateAdjustmentLayerCommand::new(&seq_id, &track_id, 0.0, 0.0);
+        let result = cmd.execute(&mut state);
+
+        // Then it fails
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("duration must be positive"));
+    }
+
+    #[test]
+    fn test_create_adjustment_layer_should_reject_negative_position() {
+        // Given a sequence
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        // When creating with negative position
+        let mut cmd = CreateAdjustmentLayerCommand::new(&seq_id, &track_id, -1.0, 5.0);
+        let result = cmd.execute(&mut state);
+
+        // Then it fails
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("position must not be negative"));
+    }
+
+    #[test]
+    fn test_create_adjustment_layer_should_accept_custom_name() {
+        // Given a sequence
+        let mut state = create_test_state();
+        let seq_id = state.active_sequence_id.clone().unwrap();
+        let track_id = state.sequences[&seq_id].tracks[0].id.clone();
+
+        // When creating with custom name
+        let mut cmd = CreateAdjustmentLayerCommand::new(&seq_id, &track_id, 0.0, 5.0)
+            .with_name("Color Grade");
+        cmd.execute(&mut state).unwrap();
+
+        // Then the clip has the custom name
+        let clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert_eq!(clip.label.as_deref(), Some("Color Grade"));
+    }
+
+    #[test]
+    fn test_adjustment_layer_clip_model_properties() {
+        // Given an adjustment layer clip
+        let clip = Clip::adjustment_layer(10.0);
+
+        // Then it has correct default properties
+        assert!(clip.is_adjustment_layer());
+        assert!(!clip.is_compound());
+        assert_eq!(clip.asset_id, Clip::ADJUSTMENT_LAYER_ASSET_ID);
+        assert_eq!(clip.range.source_in_sec, 0.0);
+        assert_eq!(clip.range.source_out_sec, 10.0);
+        assert_eq!(clip.place.duration_sec, 10.0);
+        assert!(clip.effects.is_empty());
+        assert!(clip.enabled);
+        assert_eq!(clip.opacity, 1.0);
+    }
+
+    // =========================================================================
+    // GroupClips / UngroupClips tests
+    // =========================================================================
+
+    #[test]
+    fn test_group_clips_should_set_shared_group_id() {
+        // Given two clips on different tracks
+        let (mut state, seq_id, v_track_id, a_track_id) =
+            create_test_state_with_video_and_audio_tracks();
+        let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let a_clip_id = state.sequences[&seq_id].tracks[1].clips[0].id.clone();
+
+        // When GroupClips command is executed
+        let mut cmd = GroupClipsCommand::new(
+            &seq_id,
+            vec![
+                (v_track_id.clone(), v_clip_id.clone()),
+                (a_track_id.clone(), a_clip_id.clone()),
+            ],
+        );
+        let result = cmd.execute(&mut state);
+
+        // Then both clips should share the same group_id
+        assert!(result.is_ok());
+        let v_clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        let a_clip = &state.sequences[&seq_id].tracks[1].clips[0];
+        assert!(v_clip.group_id.is_some());
+        assert_eq!(v_clip.group_id, a_clip.group_id);
+    }
+
+    #[test]
+    fn test_group_clips_should_reject_fewer_than_two_clips() {
+        // Given a single clip reference
+        let (mut state, seq_id, v_track_id, _) = create_test_state_with_video_and_audio_tracks();
+        let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        // When GroupClips is executed with only 1 clip
+        let mut cmd =
+            GroupClipsCommand::new(&seq_id, vec![(v_track_id.clone(), v_clip_id.clone())]);
+        let result = cmd.execute(&mut state);
+
+        // Then it should return a validation error
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("at least 2"));
+    }
+
+    #[test]
+    fn test_group_clips_should_reject_locked_track() {
+        // Given a locked track
+        let (mut state, seq_id, v_track_id, a_track_id) =
+            create_test_state_with_video_and_audio_tracks();
+        let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let a_clip_id = state.sequences[&seq_id].tracks[1].clips[0].id.clone();
+        state.sequences.get_mut(&seq_id).unwrap().tracks[0].locked = true;
+
+        // When GroupClips is executed
+        let mut cmd = GroupClipsCommand::new(
+            &seq_id,
+            vec![
+                (v_track_id.clone(), v_clip_id.clone()),
+                (a_track_id.clone(), a_clip_id.clone()),
+            ],
+        );
+        let result = cmd.execute(&mut state);
+
+        // Then it should return an error about locked track
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("locked"));
+    }
+
+    #[test]
+    fn test_group_clips_undo_should_restore_previous_group_state() {
+        // Given two clips that were grouped
+        let (mut state, seq_id, v_track_id, a_track_id) =
+            create_test_state_with_video_and_audio_tracks();
+        let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let a_clip_id = state.sequences[&seq_id].tracks[1].clips[0].id.clone();
+
+        let mut cmd = GroupClipsCommand::new(
+            &seq_id,
+            vec![
+                (v_track_id.clone(), v_clip_id.clone()),
+                (a_track_id.clone(), a_clip_id.clone()),
+            ],
+        );
+        cmd.execute(&mut state).unwrap();
+        assert!(state.sequences[&seq_id].tracks[0].clips[0]
+            .group_id
+            .is_some());
+
+        // When undo is called
+        cmd.undo(&mut state).unwrap();
+
+        // Then both clips should have their original group_id (None)
+        assert!(state.sequences[&seq_id].tracks[0].clips[0]
+            .group_id
+            .is_none());
+        assert!(state.sequences[&seq_id].tracks[1].clips[0]
+            .group_id
+            .is_none());
+    }
+
+    #[test]
+    fn test_ungroup_clips_should_clear_group_id() {
+        // Given two grouped clips
+        let (mut state, seq_id, v_track_id, a_track_id) =
+            create_test_state_with_video_and_audio_tracks();
+        let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let a_clip_id = state.sequences[&seq_id].tracks[1].clips[0].id.clone();
+
+        let mut group_cmd = GroupClipsCommand::new(
+            &seq_id,
+            vec![
+                (v_track_id.clone(), v_clip_id.clone()),
+                (a_track_id.clone(), a_clip_id.clone()),
+            ],
+        );
+        group_cmd.execute(&mut state).unwrap();
+
+        // When UngroupClips is executed on one of the grouped clips
+        let mut ungroup_cmd =
+            UngroupClipsCommand::new(&seq_id, vec![(v_track_id.clone(), v_clip_id.clone())]);
+        let result = ungroup_cmd.execute(&mut state);
+
+        // Then all clips in the group should have their group_id cleared
+        assert!(result.is_ok());
+        assert!(state.sequences[&seq_id].tracks[0].clips[0]
+            .group_id
+            .is_none());
+        assert!(state.sequences[&seq_id].tracks[1].clips[0]
+            .group_id
+            .is_none());
+    }
+
+    #[test]
+    fn test_ungroup_clips_undo_should_restore_group() {
+        // Given two clips that were grouped then ungrouped
+        let (mut state, seq_id, v_track_id, a_track_id) =
+            create_test_state_with_video_and_audio_tracks();
+        let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let a_clip_id = state.sequences[&seq_id].tracks[1].clips[0].id.clone();
+
+        let mut group_cmd = GroupClipsCommand::new(
+            &seq_id,
+            vec![
+                (v_track_id.clone(), v_clip_id.clone()),
+                (a_track_id.clone(), a_clip_id.clone()),
+            ],
+        );
+        group_cmd.execute(&mut state).unwrap();
+        let original_group_id = state.sequences[&seq_id].tracks[0].clips[0].group_id.clone();
+
+        let mut ungroup_cmd =
+            UngroupClipsCommand::new(&seq_id, vec![(v_track_id.clone(), v_clip_id.clone())]);
+        ungroup_cmd.execute(&mut state).unwrap();
+
+        // When undo is called
+        ungroup_cmd.undo(&mut state).unwrap();
+
+        // Then group_id should be restored
+        assert_eq!(
+            state.sequences[&seq_id].tracks[0].clips[0].group_id,
+            original_group_id
+        );
+        assert_eq!(
+            state.sequences[&seq_id].tracks[1].clips[0].group_id,
+            original_group_id
+        );
+    }
+
+    #[test]
+    fn test_group_clips_should_reject_duplicate_clip_refs() {
+        // Given duplicate clip references
+        let (mut state, seq_id, v_track_id, _) = create_test_state_with_video_and_audio_tracks();
+        let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+
+        // When GroupClips is executed with duplicates of the same clip
+        let mut cmd = GroupClipsCommand::new(
+            &seq_id,
+            vec![
+                (v_track_id.clone(), v_clip_id.clone()),
+                (v_track_id.clone(), v_clip_id.clone()),
+            ],
+        );
+        let result = cmd.execute(&mut state);
+
+        // Then it should reject because deduplication leaves only 1 unique clip
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("at least 2"));
+    }
+
+    #[test]
+    fn test_group_clips_should_normalize_degenerate_previous_groups() {
+        // Given clip A (video), clip B (audio), clip C (new overlay track)
+        let (mut state, seq_id, v_track_id, a_track_id) =
+            create_test_state_with_video_and_audio_tracks();
+        let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let a_clip_id = state.sequences[&seq_id].tracks[1].clips[0].id.clone();
+
+        // Add a third track with a clip (to avoid overlap on existing tracks)
+        let overlay_track = crate::core::timeline::Track::new(
+            "Overlay 1",
+            crate::core::timeline::TrackKind::Overlay,
+        );
+        let overlay_track_id = overlay_track.id.clone();
+        state
+            .sequences
+            .get_mut(&seq_id)
+            .unwrap()
+            .tracks
+            .push(overlay_track);
+        let asset_id = state.sequences[&seq_id].tracks[0].clips[0].asset_id.clone();
+        let mut insert3 = InsertClipCommand::new(&seq_id, &overlay_track_id, &asset_id, 0.0);
+        insert3.execute(&mut state).unwrap();
+        let c_clip_id = state.sequences[&seq_id].tracks[2].clips[0].id.clone();
+
+        // Group A and B
+        let mut group_ab = GroupClipsCommand::new(
+            &seq_id,
+            vec![
+                (v_track_id.clone(), v_clip_id.clone()),
+                (a_track_id.clone(), a_clip_id.clone()),
+            ],
+        );
+        group_ab.execute(&mut state).unwrap();
+
+        // Now regroup: A and C (pulling A out of its group with B)
+        let mut group_ac = GroupClipsCommand::new(
+            &seq_id,
+            vec![
+                (v_track_id.clone(), v_clip_id.clone()),
+                (overlay_track_id.clone(), c_clip_id.clone()),
+            ],
+        );
+        group_ac.execute(&mut state).unwrap();
+
+        // Then: A and C share new group, B's degenerate group is cleared
+        let v_clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        let a_clip = &state.sequences[&seq_id].tracks[1].clips[0];
+        let c_clip = &state.sequences[&seq_id].tracks[2].clips[0];
+        assert!(v_clip.group_id.is_some());
+        assert_eq!(v_clip.group_id, c_clip.group_id);
+        // B's group was degenerate (only 1 member left) → cleared to None
+        assert!(a_clip.group_id.is_none());
+    }
+
+    #[test]
+    fn test_group_clips_should_not_affect_link_group_id() {
+        // Given two clips that are linked
+        let (mut state, seq_id, v_track_id, a_track_id) =
+            create_test_state_with_video_and_audio_tracks();
+        let v_clip_id = state.sequences[&seq_id].tracks[0].clips[0].id.clone();
+        let a_clip_id = state.sequences[&seq_id].tracks[1].clips[0].id.clone();
+
+        let mut link_cmd = LinkClipsCommand::new(
+            &seq_id,
+            vec![
+                (v_track_id.clone(), v_clip_id.clone()),
+                (a_track_id.clone(), a_clip_id.clone()),
+            ],
+        );
+        link_cmd.execute(&mut state).unwrap();
+        let original_link_id = state.sequences[&seq_id].tracks[0].clips[0]
+            .link_group_id
+            .clone();
+
+        // When GroupClips is also executed on the same clips
+        let mut group_cmd = GroupClipsCommand::new(
+            &seq_id,
+            vec![
+                (v_track_id.clone(), v_clip_id.clone()),
+                (a_track_id.clone(), a_clip_id.clone()),
+            ],
+        );
+        group_cmd.execute(&mut state).unwrap();
+
+        // Then link_group_id should be unchanged, and group_id should be set
+        let v_clip = &state.sequences[&seq_id].tracks[0].clips[0];
+        assert_eq!(v_clip.link_group_id, original_link_id);
+        assert!(v_clip.group_id.is_some());
+    }
+
+    #[test]
+    fn test_group_clips_json_round_trip() {
+        // Given a clip with group_id set
+        let mut clip = Clip::new("test-asset");
+        clip.group_id = Some("test-group-123".to_string());
+
+        // When serialized and deserialized
+        let json = serde_json::to_string(&clip).unwrap();
+        let deserialized: Clip = serde_json::from_str(&json).unwrap();
+
+        // Then group_id should be preserved
+        assert_eq!(deserialized.group_id, Some("test-group-123".to_string()));
+    }
+
+    #[test]
+    fn test_group_id_none_not_serialized() {
+        // Given a clip with no group_id
+        let clip = Clip::new("test-asset");
+
+        // When serialized to JSON
+        let json = serde_json::to_string(&clip).unwrap();
+
+        // Then groupId should not appear in the output (skip_serializing_if)
+        assert!(!json.contains("groupId"));
+    }
+
+    #[test]
+    fn test_group_id_backward_compat_deserialization() {
+        // Given a clip serialized to JSON (simulates old data without groupId)
+        let clip = Clip::new("test-asset");
+        let mut json_value: serde_json::Value = serde_json::to_value(&clip).unwrap();
+
+        // Manually remove groupId to simulate old format
+        json_value.as_object_mut().unwrap().remove("groupId");
+
+        // When deserialized from the old format
+        let deserialized: Clip = serde_json::from_value(json_value).unwrap();
+
+        // Then group_id defaults to None (backward compatible)
+        assert!(deserialized.group_id.is_none());
     }
 }

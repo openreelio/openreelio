@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::core::{
     assets::Asset,
+    commands::{Command as _, GroupClipsCommand, UngroupClipsCommand},
     effects::Effect,
     project::{OpKind, Operation, OpsLog},
     timeline::{AudioSettings, BlendMode, Clip, Sequence, Track},
@@ -197,6 +198,10 @@ impl ProjectState {
             OpKind::ClipTrim => self.apply_clip_trim(op)?,
             OpKind::ClipSplit => self.apply_clip_split(op)?,
             OpKind::ClipUpdate => self.apply_clip_update(op)?,
+            OpKind::CompoundClipCreate => self.apply_compound_clip_create(op)?,
+            OpKind::CompoundClipUnnest => self.apply_compound_clip_unnest(op)?,
+            OpKind::ClipGroup => self.apply_clip_group(op)?,
+            OpKind::ClipUngroup => self.apply_clip_ungroup(op)?,
 
             // Effect operations
             OpKind::EffectAdd => self.apply_effect_add(op)?,
@@ -1571,6 +1576,256 @@ impl ProjectState {
     // Batch Operation Handler
     // =========================================================================
 
+    fn parse_clip_refs_from_payload(
+        payload: &serde_json::Value,
+    ) -> CoreResult<Vec<(String, String)>> {
+        payload["clipRefs"]
+            .as_array()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing clipRefs".to_string()))?
+            .iter()
+            .map(|clip_ref| {
+                let track_id = clip_ref["trackId"].as_str().ok_or_else(|| {
+                    CoreError::InvalidCommand("Clip ref missing trackId".to_string())
+                })?;
+                let clip_id = clip_ref["clipId"].as_str().ok_or_else(|| {
+                    CoreError::InvalidCommand("Clip ref missing clipId".to_string())
+                })?;
+                Ok((track_id.to_string(), clip_id.to_string()))
+            })
+            .collect()
+    }
+
+    fn apply_compound_clip_create(&mut self, op: &Operation) -> CoreResult<()> {
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let track_id = op.payload["trackId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing trackId".to_string()))?;
+        let clip_ids: Vec<String> = op.payload["clipIds"]
+            .as_array()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing clipIds".to_string()))?
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        let compound_name = op.payload["name"]
+            .as_str()
+            .unwrap_or("Compound Clip")
+            .to_string();
+
+        if !op.payload["innerSequence"].is_null() && !op.payload["compoundClip"].is_null() {
+            let inner_sequence: Sequence =
+                serde_json::from_value(op.payload["innerSequence"].clone()).map_err(|e| {
+                    CoreError::InvalidCommand(format!(
+                        "Invalid ClipGroup innerSequence payload: {e}"
+                    ))
+                })?;
+            let compound_clip: Clip = serde_json::from_value(op.payload["compoundClip"].clone())
+                .map_err(|e| {
+                    CoreError::InvalidCommand(format!(
+                        "Invalid ClipGroup compoundClip payload: {e}"
+                    ))
+                })?;
+            let clip_id_set: HashSet<&str> = clip_ids.iter().map(|s| s.as_str()).collect();
+
+            self.sequences
+                .get(seq_id)
+                .ok_or_else(|| CoreError::SequenceNotFound(seq_id.to_string()))?
+                .tracks
+                .iter()
+                .find(|track| track.id == track_id)
+                .ok_or_else(|| CoreError::TrackNotFound(track_id.to_string()))?;
+
+            self.sequences
+                .insert(inner_sequence.id.clone(), inner_sequence);
+
+            let sequence_mut = self
+                .sequences
+                .get_mut(seq_id)
+                .ok_or_else(|| CoreError::SequenceNotFound(seq_id.to_string()))?;
+            let track_mut = sequence_mut
+                .get_track_mut(track_id)
+                .ok_or_else(|| CoreError::TrackNotFound(track_id.to_string()))?;
+            track_mut
+                .clips
+                .retain(|clip| !clip_id_set.contains(clip.id.as_str()));
+            track_mut.add_clip(compound_clip);
+            Self::sort_track_clips(track_mut);
+            return Ok(());
+        }
+
+        // Legacy replay path: reconstruct nested entities from command inputs only.
+        let sequence = self
+            .sequences
+            .get(seq_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(seq_id.to_string()))?;
+        let track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(track_id.to_string()))?;
+
+        let clip_id_set: HashSet<&str> = clip_ids.iter().map(|s| s.as_str()).collect();
+        let selected_clips: Vec<Clip> = track
+            .clips
+            .iter()
+            .filter(|c| clip_id_set.contains(c.id.as_str()))
+            .cloned()
+            .collect();
+
+        if selected_clips.is_empty() {
+            return Err(CoreError::InvalidCommand(
+                "No matching clips found for ClipGroup replay".to_string(),
+            ));
+        }
+
+        let span_start = selected_clips
+            .iter()
+            .map(|c| c.place.timeline_in_sec)
+            .fold(f64::INFINITY, f64::min);
+        let span_end = selected_clips
+            .iter()
+            .map(|c| c.place.timeline_out_sec())
+            .fold(f64::NEG_INFINITY, f64::max);
+        let compound_duration = span_end - span_start;
+
+        let seq_format = sequence.format.clone();
+        let mut inner_sequence = Sequence::new(&compound_name, seq_format);
+        let inner_track = Track::new(&track.name, track.kind.clone());
+        let inner_track_id = inner_track.id.clone();
+        inner_sequence.add_track(inner_track);
+
+        if let Some(inner_track_mut) = inner_sequence.get_track_mut(&inner_track_id) {
+            for clip in &selected_clips {
+                let mut inner_clip = clip.clone();
+                inner_clip.place.timeline_in_sec -= span_start;
+                inner_track_mut.add_clip(inner_clip);
+            }
+            Self::sort_track_clips(inner_track_mut);
+        }
+
+        let inner_seq_id = inner_sequence.id.clone();
+        self.sequences.insert(inner_seq_id.clone(), inner_sequence);
+
+        if let Some(sequence_mut) = self.sequences.get_mut(seq_id) {
+            if let Some(track_mut) = sequence_mut.get_track_mut(track_id) {
+                track_mut
+                    .clips
+                    .retain(|c| !clip_id_set.contains(c.id.as_str()));
+                let compound_clip =
+                    Clip::compound(&inner_seq_id, compound_duration).place_at(span_start);
+                track_mut.add_clip(compound_clip);
+                Self::sort_track_clips(track_mut);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_compound_clip_unnest(&mut self, op: &Operation) -> CoreResult<()> {
+        // Replay UnnestCompoundClip: restore inner clips, remove inner sequence
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let track_id = op.payload["trackId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing trackId".to_string()))?;
+        let clip_id = op.payload["clipId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing clipId".to_string()))?;
+
+        // Find compound clip and its inner sequence ID
+        let sequence = self
+            .sequences
+            .get(seq_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(seq_id.to_string()))?;
+        let track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .ok_or_else(|| CoreError::TrackNotFound(track_id.to_string()))?;
+        let compound_clip = track
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .ok_or_else(|| CoreError::ClipNotFound(clip_id.to_string()))?;
+
+        let inner_seq_id = compound_clip
+            .compound_sequence_id
+            .as_ref()
+            .ok_or_else(|| {
+                CoreError::InvalidCommand(format!("Clip '{}' is not a compound clip", clip_id))
+            })?
+            .clone();
+        let compound_start = compound_clip.place.timeline_in_sec;
+
+        // Collect inner clips
+        let inner_sequence = self
+            .sequences
+            .get(&inner_seq_id)
+            .ok_or_else(|| CoreError::SequenceNotFound(inner_seq_id.clone()))?;
+        let mut inner_clips: Vec<Clip> = Vec::new();
+        for inner_track in &inner_sequence.tracks {
+            for clip in &inner_track.clips {
+                let mut restored = clip.clone();
+                restored.place.timeline_in_sec += compound_start;
+                inner_clips.push(restored);
+            }
+        }
+
+        // Remove inner sequence
+        self.sequences.remove(&inner_seq_id);
+
+        // Replace compound clip with inner clips
+        if let Some(sequence_mut) = self.sequences.get_mut(seq_id) {
+            if let Some(track_mut) = sequence_mut.get_track_mut(track_id) {
+                track_mut.clips.retain(|c| c.id != clip_id);
+                for clip in inner_clips {
+                    track_mut.add_clip(clip);
+                }
+                Self::sort_track_clips(track_mut);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn apply_clip_group(&mut self, op: &Operation) -> CoreResult<()> {
+        // Backward compatibility: earlier builds persisted compound clip creation
+        // under `clip_group`. Detect that payload shape and replay it accordingly.
+        if op.payload.get("clipRefs").is_none() {
+            return self.apply_compound_clip_create(op);
+        }
+
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let clip_refs = Self::parse_clip_refs_from_payload(&op.payload)?;
+        let group_id = op.payload["groupId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing groupId".to_string()))?;
+
+        let mut command = GroupClipsCommand::new(seq_id, clip_refs);
+        command.group_id = group_id.to_string();
+        command.execute(self).map(|_| ())
+    }
+
+    fn apply_clip_ungroup(&mut self, op: &Operation) -> CoreResult<()> {
+        // Backward compatibility: earlier builds persisted compound clip unnest
+        // under `clip_ungroup`. Detect that payload shape and replay it accordingly.
+        if op.payload.get("clipRefs").is_none() {
+            return self.apply_compound_clip_unnest(op);
+        }
+
+        let seq_id = op.payload["sequenceId"]
+            .as_str()
+            .ok_or_else(|| CoreError::InvalidCommand("Missing sequenceId".to_string()))?;
+        let clip_refs = Self::parse_clip_refs_from_payload(&op.payload)?;
+
+        let mut command = UngroupClipsCommand::new(seq_id, clip_refs);
+        command.execute(self).map(|_| ())
+    }
+
     fn apply_batch(&mut self, op: &Operation) -> CoreResult<()> {
         if let Some(operations) = op.payload["operations"].as_array() {
             for op_value in operations {
@@ -1843,6 +2098,81 @@ mod tests {
         let seq = state.get_sequence(&seq_id).unwrap();
         assert_eq!(seq.tracks[0].clips.len(), 1);
         assert_eq!(seq.tracks[0].clips[0].id, clip_id);
+    }
+
+    #[test]
+    fn test_apply_legacy_compound_clip_ops_under_clip_group_kinds() {
+        let mut state = ProjectState::new_empty("Test Project");
+
+        let mut sequence = Sequence::new("Main Sequence", SequenceFormat::youtube_1080());
+        let mut track = Track::new("Video 1", TrackKind::Video);
+        let clip_a = Clip::new("asset_a")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        let clip_b = Clip::new("asset_b")
+            .with_source_range(0.0, 5.0)
+            .place_at(5.0);
+        let clip_ids = vec![clip_a.id.clone(), clip_b.id.clone()];
+        track.add_clip(clip_a.clone());
+        track.add_clip(clip_b.clone());
+        let track_id = track.id.clone();
+        let sequence_id = sequence.id.clone();
+        sequence.add_track(track);
+        state
+            .sequences
+            .insert(sequence_id.clone(), sequence.clone());
+        state.active_sequence_id = Some(sequence_id.clone());
+
+        let mut inner_sequence = Sequence::new("Compound Clip", sequence.format.clone());
+        let inner_track = Track::new("Video 1", TrackKind::Video);
+        let inner_track_id = inner_track.id.clone();
+        inner_sequence.add_track(inner_track);
+        {
+            let inner_track = inner_sequence.get_track_mut(&inner_track_id).unwrap();
+            inner_track.add_clip(clip_a.clone().place_at(0.0));
+            inner_track.add_clip(clip_b.clone().place_at(5.0));
+        }
+        let inner_sequence_id = inner_sequence.id.clone();
+        let compound_clip = Clip::compound(&inner_sequence_id, 10.0).place_at(0.0);
+        let compound_clip_id = compound_clip.id.clone();
+
+        let legacy_group_op = Operation::new(
+            OpKind::ClipGroup,
+            serde_json::json!({
+                "sequenceId": sequence_id,
+                "trackId": track_id,
+                "clipIds": clip_ids,
+                "name": "Compound Clip",
+                "compoundClip": compound_clip,
+                "innerSequence": inner_sequence,
+            }),
+        );
+
+        state.apply_operation(&legacy_group_op).unwrap();
+
+        let sequence_after_group = state.get_sequence(&sequence.id).unwrap();
+        let track_after_group = sequence_after_group.get_track(&track_id).unwrap();
+        assert_eq!(track_after_group.clips.len(), 1);
+        assert_eq!(track_after_group.clips[0].id, compound_clip_id);
+        assert!(state.get_sequence(&inner_sequence_id).is_some());
+
+        let legacy_ungroup_op = Operation::new(
+            OpKind::ClipUngroup,
+            serde_json::json!({
+                "sequenceId": sequence.id,
+                "trackId": track_id,
+                "clipId": compound_clip_id,
+            }),
+        );
+
+        state.apply_operation(&legacy_ungroup_op).unwrap();
+
+        let sequence_after_ungroup = state.get_sequence(&sequence.id).unwrap();
+        let track_after_ungroup = sequence_after_ungroup.get_track(&track_id).unwrap();
+        assert_eq!(track_after_ungroup.clips.len(), 2);
+        assert!(track_after_ungroup.get_clip(&clip_a.id).is_some());
+        assert!(track_after_ungroup.get_clip(&clip_b.id).is_some());
+        assert!(state.get_sequence(&inner_sequence_id).is_none());
     }
 
     #[test]
