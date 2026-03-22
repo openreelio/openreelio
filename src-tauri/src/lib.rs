@@ -962,6 +962,11 @@ mod tauri_app {
                 $crate::ipc::clear_agent_memory,
                 // Audio ducking
                 $crate::ipc::apply_audio_ducking,
+                // Compound clip commands
+                $crate::ipc::create_compound_clip,
+                $crate::ipc::unnest_compound_clip,
+                // Adjustment layer
+                $crate::ipc::create_adjustment_layer,
             ]
         };
     }
@@ -1337,6 +1342,11 @@ mod tauri_app {
             ipc::clear_agent_memory,
             // Audio ducking
             ipc::apply_audio_ducking,
+            // Compound clip commands
+            ipc::create_compound_clip,
+            ipc::unnest_compound_clip,
+            // Adjustment layer
+            ipc::create_adjustment_layer,
         ])
         .run(tauri::generate_context!());
 

@@ -763,19 +763,20 @@ pub async fn apply_edit_script(
         AddTextClipCommand, AddTrackCommand, ApplyAudioDuckingCommand, ClearTimeRemapCommand,
         CloseAllGapsCommand, CloseGapCommand, CreateCaptionCommand, CreateFolderCommand,
         CreateFreezeFrameCommand, CreateSequenceCommand, DeleteCaptionCommand, DeleteFileCommand,
-        DetachAudioCommand, ExtractEditCommand, InsertClipCommand, InsertEditCommand, LiftCommand,
-        LinkClipsCommand, MoveAudioKeyframeCommand, MoveClipCommand, MoveFileCommand,
-        OverwriteEditCommand, RemoveAssetCommand, RemoveAudioKeyframeCommand, RemoveClipCommand,
-        RemoveEffectCommand, RemoveMarkerCommand, RemoveMaskCommand, RemoveTextClipCommand,
-        RemoveTrackCommand, RenameFileCommand, RenameTrackCommand, ReorderTracksCommand,
-        ReverseClipCommand, RippleDeleteCommand, SetAudioFadeInCommand, SetAudioFadeOutCommand,
-        SetAudioKeyframeValueCommand, SetClipAudioCommand, SetClipBlendModeCommand,
-        SetClipEnabledCommand, SetClipMuteCommand, SetClipSpeedCommand, SetClipTransformCommand,
-        SetMasterVolumeCommand, SetTimeRemapCommand, SetTrackBlendModeCommand, SplitClipCommand,
-        ToggleTrackLockCommand, ToggleTrackMuteCommand, ToggleTrackVisibilityCommand,
-        TrimClipCommand, UnlinkClipsCommand, UpdateEffectCommand, UpdateMaskCommand,
-        UpdateTextCommand,
+        DetachAudioCommand, ExtractEditCommand, GroupClipsCommand, InsertClipCommand,
+        InsertEditCommand, LiftCommand, LinkClipsCommand, MoveAudioKeyframeCommand,
+        MoveClipCommand, MoveFileCommand, OverwriteEditCommand, RemoveAssetCommand,
+        RemoveAudioKeyframeCommand, RemoveClipCommand, RemoveEffectCommand, RemoveMarkerCommand,
+        RemoveMaskCommand, RemoveTextClipCommand, RemoveTrackCommand, RenameFileCommand,
+        RenameTrackCommand, ReorderTracksCommand, ReverseClipCommand, RippleDeleteCommand,
+        SetAudioFadeInCommand, SetAudioFadeOutCommand, SetAudioKeyframeValueCommand,
+        SetClipAudioCommand, SetClipBlendModeCommand, SetClipEnabledCommand, SetClipMuteCommand,
+        SetClipSpeedCommand, SetClipTransformCommand, SetMasterVolumeCommand, SetTimeRemapCommand,
+        SetTrackBlendModeCommand, SplitClipCommand, ToggleTrackLockCommand, ToggleTrackMuteCommand,
+        ToggleTrackVisibilityCommand, TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand,
+        UnnestCompoundClipCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
     };
+    use crate::core::commands::{CreateAdjustmentLayerCommand, CreateCompoundClipCommand};
 
     let mut guard = state.project.lock().await;
 
@@ -1039,6 +1040,20 @@ pub async fn apply_edit_script(
                     .collect(),
             )),
             CommandPayload::UnlinkClips(p) => Box::new(UnlinkClipsCommand::new(
+                &p.sequence_id,
+                p.clip_refs
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect(),
+            )),
+            CommandPayload::GroupClips(p) => Box::new(GroupClipsCommand::new(
+                &p.sequence_id,
+                p.clip_refs
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect(),
+            )),
+            CommandPayload::UngroupClips(p) => Box::new(UngroupClipsCommand::new(
                 &p.sequence_id,
                 p.clip_refs
                     .into_iter()
@@ -1350,6 +1365,31 @@ pub async fn apply_edit_script(
                     &p.clip_id,
                     p.keyframes,
                 ))
+            }
+            CommandPayload::CreateCompoundClip(p) => {
+                let mut cmd =
+                    CreateCompoundClipCommand::new(&p.sequence_id, &p.track_id, p.clip_ids);
+                if let Some(name) = p.name {
+                    cmd = cmd.with_name(&name);
+                }
+                Box::new(cmd)
+            }
+            CommandPayload::UnnestCompoundClip(p) => Box::new(UnnestCompoundClipCommand::new(
+                &p.sequence_id,
+                &p.track_id,
+                &p.clip_id,
+            )),
+            CommandPayload::CreateAdjustmentLayer(p) => {
+                let mut cmd = CreateAdjustmentLayerCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    p.position,
+                    p.duration,
+                );
+                if let Some(name) = p.name {
+                    cmd = cmd.with_name(&name);
+                }
+                Box::new(cmd)
             }
         };
 
@@ -1782,6 +1822,27 @@ pub async fn validate_edit_script(
                     issues.push(format!("UnlinkClips command {} missing clipRefs array", i));
                 }
             }
+            // Clip grouping commands
+            "GroupClips" | "groupClips" => {
+                let has_clip_refs = cmd
+                    .params
+                    .get("clipRefs")
+                    .map(|v| v.is_array())
+                    .unwrap_or(false);
+                if !has_clip_refs {
+                    issues.push(format!("GroupClips command {} missing clipRefs array", i));
+                }
+            }
+            "UngroupClips" | "ungroupClips" => {
+                let has_clip_refs = cmd
+                    .params
+                    .get("clipRefs")
+                    .map(|v| v.is_array())
+                    .unwrap_or(false);
+                if !has_clip_refs {
+                    issues.push(format!("UngroupClips command {} missing clipRefs array", i));
+                }
+            }
             "DetachAudio" | "detachAudio" => {
                 if cmd.params.get("trackId").is_none() {
                     issues.push(format!("DetachAudio command {} missing trackId", i));
@@ -1812,6 +1873,67 @@ pub async fn validate_edit_script(
                 if !has_keyframes {
                     issues.push(format!(
                         "ApplyAudioDucking command {} missing keyframes array",
+                        i
+                    ));
+                }
+            }
+            "CreateCompoundClip" | "createCompoundClip" => {
+                if cmd.params.get("sequenceId").is_none() {
+                    issues.push(format!(
+                        "CreateCompoundClip command {} missing sequenceId",
+                        i
+                    ));
+                }
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("CreateCompoundClip command {} missing trackId", i));
+                }
+                let clip_ids_valid = cmd
+                    .params
+                    .get("clipIds")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|a| !a.is_empty());
+                if !clip_ids_valid {
+                    issues.push(format!(
+                        "CreateCompoundClip command {} missing or empty clipIds array",
+                        i
+                    ));
+                }
+            }
+            "UnnestCompoundClip" | "unnestCompoundClip" => {
+                if cmd.params.get("sequenceId").is_none() {
+                    issues.push(format!(
+                        "UnnestCompoundClip command {} missing sequenceId",
+                        i
+                    ));
+                }
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("UnnestCompoundClip command {} missing trackId", i));
+                }
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("UnnestCompoundClip command {} missing clipId", i));
+                }
+            }
+            "CreateAdjustmentLayer" | "createAdjustmentLayer" => {
+                if cmd.params.get("sequenceId").is_none() {
+                    issues.push(format!(
+                        "CreateAdjustmentLayer command {} missing sequenceId",
+                        i
+                    ));
+                }
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!(
+                        "CreateAdjustmentLayer command {} missing trackId",
+                        i
+                    ));
+                }
+                let duration_valid = cmd
+                    .params
+                    .get("duration")
+                    .and_then(|v| v.as_f64())
+                    .is_some_and(|d| d > 0.0);
+                if !duration_valid {
+                    issues.push(format!(
+                        "CreateAdjustmentLayer command {} missing or invalid duration",
                         i
                     ));
                 }
