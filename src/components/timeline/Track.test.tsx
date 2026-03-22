@@ -252,6 +252,26 @@ describe('Track', () => {
       expect(screen.queryByTestId('visibility-button')).not.toBeInTheDocument();
       expect(screen.getByTestId('lock-button')).toBeInTheDocument();
     });
+
+    it('should only nest selected clips from the current track', async () => {
+      const onCreateCompoundClip = vi.fn();
+
+      render(
+        <Track
+          track={mockTrack}
+          clips={mockClips}
+          zoom={100}
+          viewportWidth={3000}
+          selectedClipIds={['clip_001', 'clip_other_track']}
+          onCreateCompoundClip={onCreateCompoundClip}
+        />,
+      );
+
+      fireEvent.contextMenu(screen.getByTestId('clip-clip_001'));
+      fireEvent.click(await screen.findByRole('button', { name: 'Nest' }));
+
+      expect(onCreateCompoundClip).toHaveBeenCalledWith(['clip_001'], 'track_001');
+    });
   });
 
   // ===========================================================================

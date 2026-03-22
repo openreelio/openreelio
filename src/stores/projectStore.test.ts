@@ -36,6 +36,7 @@ describe('projectStore', () => {
       assets: new Map(),
       sequences: new Map(),
       activeSequenceId: null,
+      sequenceNavigationStack: [],
       selectedAssetId: null,
       error: null,
       stateVersion: 0,
@@ -76,8 +77,8 @@ describe('projectStore', () => {
       const mockState = createMockProjectState();
 
       mockTauriCommands({
-        'open_project': mockMeta,
-        'get_project_state': mockState,
+        open_project: mockMeta,
+        get_project_state: mockState,
       });
 
       const { loadProject } = useProjectStore.getState();
@@ -136,8 +137,8 @@ describe('projectStore', () => {
       const mockState = createMockProjectState();
 
       mockTauriCommands({
-        'open_project': mockMeta,
-        'get_project_state': mockState,
+        open_project: mockMeta,
+        get_project_state: mockState,
       });
 
       await useProjectStore.getState().loadProject('/my/project/path');
@@ -351,9 +352,9 @@ describe('projectStore', () => {
       const mockAssets = [{ id: 'asset_001', name: 'video.mp4', uri: '/path/to/video.mp4' }];
 
       mockTauriCommands({
-        'import_asset': { assetId: 'asset_001', name: 'video.mp4' },
-        'get_assets': mockAssets,
-        'generate_asset_thumbnail': null,
+        import_asset: { assetId: 'asset_001', name: 'video.mp4' },
+        get_assets: mockAssets,
+        generate_asset_thumbnail: null,
       });
 
       const { importAsset } = useProjectStore.getState();
@@ -367,9 +368,9 @@ describe('projectStore', () => {
       const mockAssets = [{ id: 'asset_001', name: 'video.mp4', uri: '/path/to/video.mp4' }];
 
       mockTauriCommands({
-        'import_asset': { assetId: 'asset_001', name: 'video.mp4' },
-        'get_assets': mockAssets,
-        'generate_asset_thumbnail': null,
+        import_asset: { assetId: 'asset_001', name: 'video.mp4' },
+        get_assets: mockAssets,
+        generate_asset_thumbnail: null,
       });
 
       await useProjectStore.getState().importAsset('/path/to/video.mp4');
@@ -490,6 +491,23 @@ describe('projectStore', () => {
 
       expect(useProjectStore.getState().activeSequenceId).toBe('seq_existing');
     });
+
+    it('should clear compound navigation stack when switching root sequences', () => {
+      const sequences = new Map();
+      sequences.set('seq_001', { id: 'seq_001', name: 'Main' });
+      sequences.set('seq_002', { id: 'seq_002', name: 'Nested' });
+      useProjectStore.setState({
+        sequences,
+        activeSequenceId: 'seq_001',
+        sequenceNavigationStack: ['seq_parent'],
+      });
+
+      const { setActiveSequence } = useProjectStore.getState();
+      setActiveSequence('seq_002');
+
+      expect(useProjectStore.getState().activeSequenceId).toBe('seq_002');
+      expect(useProjectStore.getState().sequenceNavigationStack).toEqual([]);
+    });
   });
 
   describe('getActiveSequence', () => {
@@ -568,14 +586,56 @@ describe('projectStore', () => {
       expect(useProjectStore.getState().activeSequenceId).toBe('seq_new');
     });
 
+    it('should preserve local nested sequence navigation after command refresh', async () => {
+      const mockResult = {
+        opId: 'op_003',
+        changes: [],
+        createdIds: [],
+        deletedIds: [],
+      };
+
+      const parentSequence = createMockSequence({ id: 'seq_parent', name: 'Parent Sequence' });
+      const childSequence = createMockSequence({ id: 'seq_child', name: 'Nested Sequence' });
+       
+      const sequences = new Map([
+        [parentSequence.id, { ...parentSequence, markers: [], masterVolumeDb: 0 }],
+        [childSequence.id, { ...childSequence, markers: [], masterVolumeDb: 0 }],
+      ]) as any;
+
+      useProjectStore.setState({
+        isLoaded: true,
+        sequences,
+        activeSequenceId: childSequence.id,
+        sequenceNavigationStack: [parentSequence.id],
+      });
+
+      mockTauriCommand('execute_command', mockResult);
+      mockTauriCommand('get_project_state', {
+        assets: [],
+        sequences: [
+          { ...parentSequence, markers: [], masterVolumeDb: 0 },
+          { ...childSequence, markers: [], masterVolumeDb: 0 },
+        ],
+        activeSequenceId: parentSequence.id,
+      });
+
+      await useProjectStore.getState().executeCommand({
+        type: 'UpdateTextClip',
+        payload: { sequenceId: childSequence.id, clipId: 'clip_001', text: 'Updated' },
+      });
+
+      expect(useProjectStore.getState().activeSequenceId).toBe(childSequence.id);
+      expect(useProjectStore.getState().sequenceNavigationStack).toEqual([parentSequence.id]);
+    });
+
     it('should handle command error', async () => {
       mockTauriCommandError('execute_command', 'Invalid command');
 
       const { executeCommand } = useProjectStore.getState();
 
-      await expect(
-        executeCommand({ type: 'DeleteClip', payload: {} })
-      ).rejects.toThrow('Invalid command');
+      await expect(executeCommand({ type: 'DeleteClip', payload: {} })).rejects.toThrow(
+        'Invalid command',
+      );
     });
   });
 
@@ -746,11 +806,7 @@ describe('projectStore', () => {
       await Promise.all(promises);
 
       // Commands should execute sequentially (no interleaving)
-      expect(executionOrder).toEqual([
-        'start:1', 'end:1',
-        'start:2', 'end:2',
-        'start:3', 'end:3',
-      ]);
+      expect(executionOrder).toEqual(['start:1', 'end:1', 'start:2', 'end:2', 'start:3', 'end:3']);
     });
 
     // Note: The 'should continue queue processing after command failure' test
@@ -813,6 +869,255 @@ describe('projectStore', () => {
       // Verify the test utility exists and is callable
       expect(typeof _resetCommandQueueForTesting).toBe('function');
       _resetCommandQueueForTesting(); // Should not throw
+    });
+  });
+
+  // ===========================================================================
+  // Sequence Navigation Stack (Compound Clip Support)
+  // ===========================================================================
+
+  describe('sequence navigation stack', () => {
+    it('should push and pop sequences for compound clip navigation', () => {
+      const { getState, setState } = useProjectStore;
+
+      // Setup: two sequences (cast to Sequence for store compatibility)
+      const parentSeq = createMockSequence({ id: 'seq_parent', name: 'Parent' });
+      const childSeq = createMockSequence({ id: 'seq_child', name: 'Child Compound' });
+      const sequences = new Map([
+        [parentSeq.id, { ...parentSeq, markers: [], masterVolumeDb: 0 }],
+        [childSeq.id, { ...childSeq, markers: [], masterVolumeDb: 0 }],
+         
+      ]) as any;
+
+      setState({
+        isLoaded: true,
+        sequences,
+        activeSequenceId: parentSeq.id,
+        sequenceNavigationStack: [],
+      });
+
+      // When pushing into child sequence
+      getState().pushSequence(childSeq.id);
+
+      // Then active sequence is the child
+      expect(getState().activeSequenceId).toBe(childSeq.id);
+      // And parent is on the stack
+      expect(getState().sequenceNavigationStack).toEqual([parentSeq.id]);
+
+      // When popping back
+      getState().popSequence();
+
+      // Then active sequence is the parent again
+      expect(getState().activeSequenceId).toBe(parentSeq.id);
+      // And stack is empty
+      expect(getState().sequenceNavigationStack).toEqual([]);
+    });
+
+    it('should not push sequence if it does not exist', () => {
+      const { getState, setState } = useProjectStore;
+
+      const seq = createMockSequence({ id: 'seq_main', name: 'Main' });
+       
+      const sequences = new Map([[seq.id, { ...seq, markers: [], masterVolumeDb: 0 }]]) as any;
+      setState({
+        isLoaded: true,
+        sequences,
+        activeSequenceId: seq.id,
+        sequenceNavigationStack: [],
+      });
+
+      // When pushing a non-existent sequence
+      getState().pushSequence('non_existent_id');
+
+      // Then nothing changes
+      expect(getState().activeSequenceId).toBe(seq.id);
+      expect(getState().sequenceNavigationStack).toEqual([]);
+    });
+
+    it('should not push the active sequence onto the stack again', () => {
+      const { getState, setState } = useProjectStore;
+
+      const seq = createMockSequence({ id: 'seq_main', name: 'Main' });
+       
+      const sequences = new Map([[seq.id, { ...seq, markers: [], masterVolumeDb: 0 }]]) as any;
+      setState({
+        isLoaded: true,
+        sequences,
+        activeSequenceId: seq.id,
+        sequenceNavigationStack: [],
+      });
+
+      getState().pushSequence(seq.id);
+
+      expect(getState().activeSequenceId).toBe(seq.id);
+      expect(getState().sequenceNavigationStack).toEqual([]);
+    });
+
+    it('should not pop when stack is empty', () => {
+      const { getState, setState } = useProjectStore;
+
+      const seq = createMockSequence({ id: 'seq_main', name: 'Main' });
+       
+      const sequences = new Map([[seq.id, { ...seq, markers: [], masterVolumeDb: 0 }]]) as any;
+      setState({
+        isLoaded: true,
+        sequences,
+        activeSequenceId: seq.id,
+        sequenceNavigationStack: [],
+      });
+
+      // When popping with empty stack
+      getState().popSequence();
+
+      // Then nothing changes
+      expect(getState().activeSequenceId).toBe(seq.id);
+    });
+
+    it('should not jump to another root sequence when pop is called with an empty stack', () => {
+      const { getState, setState } = useProjectStore;
+
+      const mainSeq = createMockSequence({ id: 'seq_main', name: 'Main' });
+      const altSeq = createMockSequence({ id: 'seq_alt', name: 'Alt' });
+       
+      const sequences = new Map([
+        [mainSeq.id, { ...mainSeq, markers: [], masterVolumeDb: 0 }],
+        [altSeq.id, { ...altSeq, markers: [], masterVolumeDb: 0 }],
+      ]) as any;
+      setState({
+        isLoaded: true,
+        sequences,
+        activeSequenceId: altSeq.id,
+        sequenceNavigationStack: [],
+      });
+
+      getState().popSequence();
+
+      expect(getState().activeSequenceId).toBe(altSeq.id);
+      expect(getState().sequenceNavigationStack).toEqual([]);
+    });
+  });
+
+  // ===========================================================================
+  // Adjustment Layer State Tests (BDD)
+  // ===========================================================================
+
+  describe('adjustment layer state', () => {
+    it('should correctly store adjustment layer clip in project state', () => {
+      const { getState, setState } = useProjectStore;
+
+      const seq = createMockSequence();
+      seq.tracks = [
+        {
+          id: 'track_001',
+          kind: 'video',
+          name: 'Video 1',
+          clips: [
+            {
+              id: 'adj_001',
+              assetId: '__adjustment_layer__',
+              range: { sourceInSec: 0, sourceOutSec: 5 },
+              place: { timelineInSec: 0, durationSec: 5 },
+              transform: {
+                position: { x: 0.5, y: 0.5 },
+                scale: { x: 1, y: 1 },
+                rotationDeg: 0,
+                anchor: { x: 0.5, y: 0.5 },
+              },
+              opacity: 1,
+              speed: 1,
+              effects: [],
+              audio: { volumeDb: 0, pan: 0, muted: false },
+              isAdjustmentLayer: true,
+            },
+          ],
+          muted: false,
+          locked: false,
+          visible: true,
+          volume: 1,
+          syncLock: false,
+          blendMode: 'Normal',
+        },
+      ];
+
+       
+      const sequences = new Map([[seq.id, { ...seq, markers: [], masterVolumeDb: 0 }]]) as any;
+      setState({
+        sequences,
+        activeSequenceId: seq.id,
+      });
+
+      const storedSeq = getState().sequences.get(seq.id);
+      const clip = storedSeq?.tracks[0].clips[0];
+      expect(clip?.isAdjustmentLayer).toBe(true);
+      expect(clip?.assetId).toBe('__adjustment_layer__');
+    });
+
+    it('should distinguish adjustment layers from regular clips', () => {
+      const { getState, setState } = useProjectStore;
+
+      const seq = createMockSequence();
+      seq.tracks = [
+        {
+          id: 'track_001',
+          kind: 'video',
+          name: 'Video 1',
+          clips: [
+            {
+              id: 'regular_001',
+              assetId: 'asset_001',
+              range: { sourceInSec: 0, sourceOutSec: 10 },
+              place: { timelineInSec: 0, durationSec: 10 },
+              transform: {
+                position: { x: 0.5, y: 0.5 },
+                scale: { x: 1, y: 1 },
+                rotationDeg: 0,
+                anchor: { x: 0.5, y: 0.5 },
+              },
+              opacity: 1,
+              speed: 1,
+              effects: [],
+              audio: { volumeDb: 0, pan: 0, muted: false },
+            },
+            {
+              id: 'adj_001',
+              assetId: '__adjustment_layer__',
+              range: { sourceInSec: 0, sourceOutSec: 5 },
+              place: { timelineInSec: 10, durationSec: 5 },
+              transform: {
+                position: { x: 0.5, y: 0.5 },
+                scale: { x: 1, y: 1 },
+                rotationDeg: 0,
+                anchor: { x: 0.5, y: 0.5 },
+              },
+              opacity: 1,
+              speed: 1,
+              effects: [],
+              audio: { volumeDb: 0, pan: 0, muted: false },
+              isAdjustmentLayer: true,
+            },
+          ],
+          muted: false,
+          locked: false,
+          visible: true,
+          volume: 1,
+          syncLock: false,
+          blendMode: 'Normal',
+        },
+      ];
+
+       
+      const sequences = new Map([[seq.id, { ...seq, markers: [], masterVolumeDb: 0 }]]) as any;
+      setState({
+        sequences,
+        activeSequenceId: seq.id,
+      });
+
+      const clips = getState().sequences.get(seq.id)?.tracks[0].clips ?? [];
+      const regularClips = clips.filter((c) => !c.isAdjustmentLayer);
+      const adjustmentLayers = clips.filter((c) => c.isAdjustmentLayer === true);
+
+      expect(regularClips).toHaveLength(1);
+      expect(adjustmentLayers).toHaveLength(1);
     });
   });
 });
