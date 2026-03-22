@@ -417,6 +417,18 @@ export type FadeType =
   | 'exponential'
   | 'sCurve';
 
+/** Parameters for audio ducking (auto-duck music during speech) */
+export interface AudioDuckingParams {
+  /** Loudness threshold in dB for speech detection (default: -30) */
+  thresholdDb: number;
+  /** Amount to reduce music volume in dB (default: -15, negative = quieter) */
+  duckAmountDb: number;
+  /** Ramp-down time in milliseconds when ducking starts (default: 200) */
+  attackMs: number;
+  /** Ramp-up time in milliseconds when ducking ends (default: 500) */
+  releaseMs: number;
+}
+
 /** A single volume automation keyframe on an audio clip */
 export interface AudioKeyframe {
   /** Time offset from clip start in seconds (>= 0) */
@@ -493,6 +505,8 @@ export interface Clip {
   captionPosition?: CaptionPosition;
   /** Whether the clip is enabled. Defaults to true when undefined. */
   enabled?: boolean;
+  /** Link group ID for audio-video linked editing. Clips sharing the same linkGroupId move together. */
+  linkGroupId?: string;
 }
 
 /** Returns true if the clip has a valid active time remap curve (>= 2 keyframes). */
@@ -894,7 +908,13 @@ export type CommandType =
   // Master volume (S26)
   | 'SetMasterVolume'
   // Clip enable/disable (S27)
-  | 'SetClipEnabled';
+  | 'SetClipEnabled'
+  // Audio-video link/unlink/detach (S29)
+  | 'LinkClips'
+  | 'UnlinkClips'
+  | 'DetachAudio'
+  // Audio ducking (S29)
+  | 'ApplyAudioDucking';
 
 export interface Command {
   type: CommandType;

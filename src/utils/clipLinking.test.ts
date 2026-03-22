@@ -82,6 +82,52 @@ describe('clipLinking utilities', () => {
     expect(findLinkedCompanionClipIds(sequence, 'audio-clip')).toEqual(['video-clip']);
   });
 
+  it('prefers explicit link groups over asset/timing-based matching', () => {
+    const sequence = createSequence([
+      createTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [createClip({ id: 'video-clip', assetId: 'asset-1', linkGroupId: 'group-1' })],
+      }),
+      createTrack({
+        id: 'audio-track',
+        kind: 'audio',
+        clips: [
+          createClip({
+            id: 'audio-clip',
+            assetId: 'asset-2',
+            place: { timelineInSec: 42, durationSec: 8 },
+            linkGroupId: 'group-1',
+          }),
+        ],
+      }),
+    ]);
+
+    expect(findLinkedCompanionClipIds(sequence, 'video-clip')).toEqual(['audio-clip']);
+    expect(expandClipIdsWithLinkedCompanions(sequence, ['video-clip'])).toEqual([
+      'video-clip',
+      'audio-clip',
+    ]);
+  });
+
+  it('treats an empty linkGroupId as an explicit unlink marker', () => {
+    const sequence = createSequence([
+      createTrack({
+        id: 'video-track',
+        kind: 'video',
+        clips: [createClip({ id: 'video-clip', assetId: 'asset-1', linkGroupId: '' })],
+      }),
+      createTrack({
+        id: 'audio-track',
+        kind: 'audio',
+        clips: [createClip({ id: 'audio-clip', assetId: 'asset-1' })],
+      }),
+    ]);
+
+    expect(findLinkedCompanionClipIds(sequence, 'video-clip')).toEqual([]);
+    expect(expandClipIdsWithLinkedCompanions(sequence, ['video-clip'])).toEqual(['video-clip']);
+  });
+
   it('expands clip selections with linked companions', () => {
     const sequence = createSequence([
       createTrack({
