@@ -307,10 +307,8 @@ export function Track({
     const clip = track.clips.find((c) => c.id === clipId);
     if (!clip) return [];
 
-    const linkedClipRefs =
-      resolveLinkedClipRefs?.(clipId) ??
-      (clip.linkGroupId ? [{ trackId: track.id, clipId }] : []);
-    const isLinked = linkedClipRefs.length >= 2 || (!resolveLinkedClipRefs && !!clip.linkGroupId);
+    const linkedClipRefs = resolveLinkedClipRefs?.(clipId) ?? [];
+    const isLinked = linkedClipRefs.length >= 2;
     const isVisualTrack = track.kind === 'video' || track.kind === 'overlay';
     // For link: need at least 2 clips selected
     const canLink = selectedClipIds.length >= 2;

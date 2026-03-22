@@ -192,6 +192,7 @@ export const AudioMixerPanel = memo(function AudioMixerPanel({
           {onAutoDuck && (
             <div className="flex items-end p-2">
               <button
+                type="button"
                 data-testid="auto-duck-button"
                 onClick={onAutoDuck}
                 disabled={disabled || isAutoDucking}

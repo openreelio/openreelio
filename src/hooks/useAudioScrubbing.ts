@@ -67,6 +67,7 @@ export function useAudioScrubbing({
   const activeSnippetsRef = useRef<ActiveSnippet[]>([]);
   const lastScrubTimestampRef = useRef<number>(0);
   const prevTimeRef = useRef<number>(-1);
+  const scrubRequestIdRef = useRef<number>(0);
 
   const audioScrubbing = useSettingsStore(
     (state) => state.settings.playback.audioScrubbing,
@@ -140,6 +141,8 @@ export function useAudioScrubbing({
    * Stop all currently playing scrub snippets.
    */
   const stopSnippets = useCallback(() => {
+    // Invalidate any in-flight async scrub requests
+    scrubRequestIdRef.current += 1;
     for (const snippet of activeSnippetsRef.current) {
       try {
         snippet.source.stop();
@@ -165,6 +168,9 @@ export function useAudioScrubbing({
       // Stop previous snippets before starting new ones
       stopSnippets();
 
+      // Capture current request ID to detect stale continuations
+      const requestId = scrubRequestIdRef.current;
+
       const audioClips = collectPlaybackAudioClips(sequence, assets);
       const masterVolume = isMuted ? 0 : volume;
 
@@ -182,6 +188,8 @@ export function useAudioScrubbing({
         const sourceOffset = clip.range.sourceInSec + timeIntoClip * safeSpeed;
 
         const buffer = await loadBuffer(asset.id, asset.uri);
+        // Bail if a newer request has superseded this one
+        if (scrubRequestIdRef.current !== requestId) return;
         if (!buffer || sourceOffset >= buffer.duration) continue;
 
         // Create source node

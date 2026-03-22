@@ -1340,12 +1340,18 @@ pub async fn apply_edit_script(
                 project.path.clone(),
             )),
 
-            CommandPayload::ApplyAudioDucking(p) => Box::new(ApplyAudioDuckingCommand::new(
-                &p.sequence_id,
-                &p.track_id,
-                &p.clip_id,
-                p.keyframes,
-            )),
+            CommandPayload::ApplyAudioDucking(p) => {
+                if p.keyframes.is_empty() {
+                    errors.push("ApplyAudioDucking: keyframes array is empty, skipping to avoid clearing existing automation".to_string());
+                    continue;
+                }
+                Box::new(ApplyAudioDuckingCommand::new(
+                    &p.sequence_id,
+                    &p.track_id,
+                    &p.clip_id,
+                    p.keyframes,
+                ))
+            }
         };
 
         match project.executor.execute(command, &mut project.state) {
@@ -1754,6 +1760,55 @@ pub async fn validate_edit_script(
                 }
                 if cmd.params.get("enabled").is_none() {
                     issues.push(format!("SetClipEnabled command {} missing enabled", i));
+                }
+            }
+            // Clip linking commands
+            "LinkClips" | "linkClips" => {
+                let has_clip_refs = cmd
+                    .params
+                    .get("clipRefs")
+                    .map(|v| v.is_array())
+                    .unwrap_or(false);
+                if !has_clip_refs {
+                    issues.push(format!("LinkClips command {} missing clipRefs array", i));
+                }
+            }
+            "UnlinkClips" | "unlinkClips" => {
+                let has_clip_refs = cmd
+                    .params
+                    .get("clipRefs")
+                    .map(|v| v.is_array())
+                    .unwrap_or(false);
+                if !has_clip_refs {
+                    issues.push(format!("UnlinkClips command {} missing clipRefs array", i));
+                }
+            }
+            "DetachAudio" | "detachAudio" => {
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("DetachAudio command {} missing trackId", i));
+                }
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("DetachAudio command {} missing clipId", i));
+                }
+            }
+            // Audio ducking command
+            "ApplyAudioDucking" | "applyAudioDucking" => {
+                if cmd.params.get("sequenceId").is_none() {
+                    issues.push(format!("ApplyAudioDucking command {} missing sequenceId", i));
+                }
+                if cmd.params.get("trackId").is_none() {
+                    issues.push(format!("ApplyAudioDucking command {} missing trackId", i));
+                }
+                if cmd.params.get("clipId").is_none() {
+                    issues.push(format!("ApplyAudioDucking command {} missing clipId", i));
+                }
+                let has_keyframes = cmd
+                    .params
+                    .get("keyframes")
+                    .map(|v| v.is_array())
+                    .unwrap_or(false);
+                if !has_keyframes {
+                    issues.push(format!("ApplyAudioDucking command {} missing keyframes array", i));
                 }
             }
             _ => {

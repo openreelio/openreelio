@@ -6,7 +6,7 @@
  * IPC command which analyzes clip positions and generates volume keyframes.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import type { AudioDuckingParams } from '@/types';
 import { useProjectStore } from '@/stores/projectStore';
@@ -62,6 +62,7 @@ interface UseAudioDuckingReturn {
 }
 
 export function useAudioDucking(): UseAudioDuckingReturn {
+  const pendingCountRef = useRef(0);
   const [isApplying, setIsApplying] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -73,6 +74,7 @@ export function useAudioDucking(): UseAudioDuckingReturn {
       musicClipId: string,
       params: AudioDuckingParams = DEFAULT_DUCKING_PARAMS,
     ): Promise<ApplyDuckingResult> => {
+      pendingCountRef.current += 1;
       setIsApplying(true);
       setError(null);
 
@@ -129,7 +131,11 @@ export function useAudioDucking(): UseAudioDuckingReturn {
         });
         throw err;
       } finally {
-        setIsApplying(false);
+        pendingCountRef.current -= 1;
+        if (pendingCountRef.current <= 0) {
+          pendingCountRef.current = 0;
+          setIsApplying(false);
+        }
       }
     },
     [],

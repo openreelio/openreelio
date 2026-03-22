@@ -214,7 +214,7 @@ describe('Clip Link/Unlink/Detach Audio', () => {
       expect(unlinkButton).toBeDisabled();
     });
 
-    it('should show "Unlink" as enabled when clip has linkGroupId', () => {
+    it('should show "Unlink" as disabled when clip has linkGroupId but no resolver is provided', () => {
       const onClipUnlink = vi.fn();
       const linkedClip: ClipType = { ...baseClip, linkGroupId: 'link_group_001' };
 
@@ -231,7 +231,7 @@ describe('Clip Link/Unlink/Detach Audio', () => {
 
       const unlinkButton = screen.getByRole('button', { name: /^Unlink$/ });
       expect(unlinkButton).toBeInTheDocument();
-      expect(unlinkButton).not.toBeDisabled();
+      expect(unlinkButton).toBeDisabled();
     });
 
     it('should show "Unlink" as disabled when no onClipUnlink handler is provided', () => {
@@ -251,7 +251,7 @@ describe('Clip Link/Unlink/Detach Audio', () => {
       expect(unlinkButton).toBeDisabled();
     });
 
-    it('should call onClipUnlink with clip ref when Unlink is clicked', () => {
+    it('should call onClipUnlink with resolved linked group when Unlink is clicked', () => {
       const onClipUnlink = vi.fn();
       const linkedClip: ClipType = { ...baseClip, linkGroupId: 'link_group_001' };
 
@@ -261,6 +261,10 @@ describe('Clip Link/Unlink/Detach Audio', () => {
           clips={[linkedClip]}
           zoom={100}
           onClipUnlink={onClipUnlink}
+          resolveLinkedClipRefs={() => [
+            { trackId: 'track_001', clipId: 'clip_001' },
+            { trackId: 'track_003', clipId: 'clip_003' },
+          ]}
         />,
       );
 
@@ -269,6 +273,7 @@ describe('Clip Link/Unlink/Detach Audio', () => {
 
       expect(onClipUnlink).toHaveBeenCalledWith([
         { trackId: 'track_001', clipId: 'clip_001' },
+        { trackId: 'track_003', clipId: 'clip_003' },
       ]);
     });
 

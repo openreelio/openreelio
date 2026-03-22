@@ -26,28 +26,39 @@ export function resolveAutoDuckTargets(
 
   if (selectedClipIds.length === 1) {
     const selectedClipRef = findClipReference(sequence, selectedClipIds[0]);
-    if (selectedClipRef && selectedClipRef.track.kind === 'audio') {
-      const speechTrackCandidates = audioTracks.filter(
-        (track) => track.id !== selectedClipRef.track.id,
-      );
-
-      if (speechTrackCandidates.length !== 1) {
-        return {
-          ok: false,
-          reason:
-            'Auto-duck is ambiguous with multiple speech-track candidates. Select a music clip in a two-track audio setup.',
-        };
-      }
-
+    if (!selectedClipRef) {
       return {
-        ok: true,
-        targets: {
-          speechTrackId: speechTrackCandidates[0].id,
-          musicTrackId: selectedClipRef.track.id,
-          musicClipId: selectedClipRef.clip.id,
-        },
+        ok: false,
+        reason: 'Selected clip not found in the sequence.',
       };
     }
+    if (selectedClipRef.track.kind !== 'audio') {
+      return {
+        ok: false,
+        reason: 'Selected clip is not on an audio track. Select a music clip on an audio track to duck.',
+      };
+    }
+
+    const speechTrackCandidates = audioTracks.filter(
+      (track) => track.id !== selectedClipRef.track.id,
+    );
+
+    if (speechTrackCandidates.length !== 1) {
+      return {
+        ok: false,
+        reason:
+          'Auto-duck is ambiguous with multiple speech-track candidates. Select a music clip in a two-track audio setup.',
+      };
+    }
+
+    return {
+      ok: true,
+      targets: {
+        speechTrackId: speechTrackCandidates[0].id,
+        musicTrackId: selectedClipRef.track.id,
+        musicClipId: selectedClipRef.clip.id,
+      },
+    };
   }
 
   if (audioTracks.length !== 2) {

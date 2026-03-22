@@ -90,8 +90,18 @@ pub fn invert_silence_to_speech(
     let mut cursor = 0.0;
 
     for silence in &sorted {
-        let silence_start = silence.start_sec.max(0.0);
+        let silence_start = silence.start_sec.max(0.0).min(total_duration);
         let silence_end = silence.end_sec.min(total_duration);
+
+        // Skip silence regions entirely past the analyzed window
+        if silence_start >= total_duration {
+            break;
+        }
+
+        // Skip degenerate regions where start >= end after clamping
+        if silence_start >= silence_end {
+            continue;
+        }
 
         if silence_start > cursor {
             speech.push(SpeechRegion::new(cursor, silence_start));
@@ -166,9 +176,9 @@ pub fn generate_duck_keyframes(
         return Vec::new();
     }
 
-    let attack_sec = params.attack_ms / 1000.0;
-    let release_sec = params.release_ms / 1000.0;
-    let duck_db = original_volume_db + params.duck_amount_db;
+    let attack_sec = (params.attack_ms / 1000.0).max(0.0);
+    let release_sec = (params.release_ms / 1000.0).max(0.0);
+    let duck_db = original_volume_db + params.duck_amount_db.min(0.0);
     let clip_end = clip_timeline_start + clip_duration_sec;
 
     // Pre-merge close regions
