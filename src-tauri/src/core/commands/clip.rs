@@ -196,7 +196,7 @@ fn validate_clip_refs_unlocked(
         let (track, _) = find_clip_ref(sequence, track_id, clip_id)?;
         validate_track_unlocked(track).map_err(|error| match error {
             CoreError::ValidationError(_) => CoreError::ValidationError(format!(
-                "Cannot modify linked clip '{}' because track '{}' is locked",
+                "Cannot modify clip '{}' because track '{}' is locked",
                 clip_id, track_id
             )),
             other => other,
@@ -5661,6 +5661,7 @@ impl Command for LinkClipsCommand {
         let mut result = CommandResult::new(&op_id);
         append_clip_modified_changes(&mut result, &self.clip_refs);
         append_clip_modified_changes(&mut result, &normalized_refs);
+        state.is_dirty = true;
         Ok(result)
     }
 
@@ -5752,6 +5753,7 @@ impl Command for UnlinkClipsCommand {
         let mut result = CommandResult::new(&op_id);
         append_clip_modified_changes(&mut result, &self.clip_refs);
         append_clip_modified_changes(&mut result, &normalized_refs);
+        state.is_dirty = true;
         Ok(result)
     }
 
