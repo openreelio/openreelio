@@ -50,6 +50,10 @@ export interface AudioMixerPanelProps {
   onMasterVolumeChange?: (volumeDb: number) => void;
   /** Callback when master mute is toggled */
   onMasterMuteToggle?: () => void;
+  /** Callback when Auto-Duck button is clicked */
+  onAutoDuck?: () => void;
+  /** Whether auto-ducking is in progress */
+  isAutoDucking?: boolean;
   /** Whether controls are disabled */
   disabled?: boolean;
   /** Whether to use compact layout */
@@ -103,6 +107,8 @@ export const AudioMixerPanel = memo(function AudioMixerPanel({
   onSoloToggle,
   onMasterVolumeChange,
   onMasterMuteToggle,
+  onAutoDuck,
+  isAutoDucking = false,
   disabled = false,
   compact = false,
   className = '',
@@ -181,6 +187,23 @@ export const AudioMixerPanel = memo(function AudioMixerPanel({
               />
             ))}
           </div>
+
+          {/* Auto-Duck button */}
+          {onAutoDuck && (
+            <div className="flex items-end p-2">
+              <button
+                data-testid="auto-duck-button"
+                onClick={onAutoDuck}
+                disabled={disabled || isAutoDucking}
+                className="px-2 py-1 text-xs font-medium rounded bg-editor-accent text-white
+                  hover:bg-editor-accent/80 disabled:opacity-50 disabled:cursor-not-allowed
+                  whitespace-nowrap"
+                title="Auto-duck music under speech"
+              >
+                {isAutoDucking ? 'Ducking...' : 'Auto-Duck'}
+              </button>
+            </div>
+          )}
 
           {/* Separator */}
           <div className="w-px bg-editor-border my-2" />
