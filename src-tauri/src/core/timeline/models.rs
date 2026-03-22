@@ -1131,6 +1131,20 @@ pub struct Clip {
     /// Clips sharing the same link_group_id are selected/moved together.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link_group_id: Option<String>,
+    /// Compound clip: references a nested sequence.
+    /// When set, this clip acts as a container for the inner sequence.
+    /// The clip's duration matches the inner sequence duration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compound_sequence_id: Option<SequenceId>,
+    /// Whether this clip is an adjustment layer.
+    /// Adjustment layers are transparent clips whose effects apply to all clips below them.
+    #[serde(default)]
+    pub is_adjustment_layer: bool,
+    /// Group ID for clip grouping.
+    /// Clips sharing the same group_id are selected/moved together,
+    /// but remain independent for individual operations (trim, effects).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
 }
 
 /// Serde default helper that returns `true`
@@ -1139,6 +1153,12 @@ fn default_true() -> bool {
 }
 
 impl Clip {
+    /// Asset ID prefix for compound clips (nested sequences).
+    pub const COMPOUND_ASSET_PREFIX: &'static str = "__compound__";
+
+    /// Asset ID for adjustment layer clips (no source media).
+    pub const ADJUSTMENT_LAYER_ASSET_ID: &'static str = "__adjustment_layer__";
+
     /// Creates a new clip from an asset ID with default values
     pub fn new(asset_id: &str) -> Self {
         Self {
@@ -1161,6 +1181,9 @@ impl Clip {
             caption_position: None,
             enabled: true,
             link_group_id: None,
+            compound_sequence_id: None,
+            is_adjustment_layer: false,
+            group_id: None,
         }
     }
 
@@ -1207,6 +1230,9 @@ impl Clip {
             caption_position: None,
             enabled: true,
             link_group_id: None,
+            compound_sequence_id: None,
+            is_adjustment_layer: false,
+            group_id: None,
         }
     }
 
@@ -1285,6 +1311,74 @@ impl Clip {
     /// Returns true if this clip has an active time remap curve.
     pub fn has_time_remap(&self) -> bool {
         self.time_remap.as_ref().is_some_and(|r| r.is_valid())
+    }
+
+    /// Returns true if this clip is a compound clip (nested sequence).
+    pub fn is_compound(&self) -> bool {
+        self.compound_sequence_id.is_some()
+    }
+
+    /// Creates a compound clip referencing a nested sequence.
+    pub fn compound(inner_sequence_id: &str, duration: TimeSec) -> Self {
+        let asset_id = format!("{}{}", Self::COMPOUND_ASSET_PREFIX, inner_sequence_id);
+        Self {
+            id: ulid::Ulid::new().to_string(),
+            asset_id,
+            range: ClipRange::new(0.0, duration),
+            place: ClipPlace::new(0.0, duration),
+            transform: Transform::default(),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            speed: 1.0,
+            reverse: false,
+            freeze_frame: false,
+            time_remap: None,
+            effects: vec![],
+            audio: AudioSettings::default(),
+            label: None,
+            color: None,
+            caption_style: None,
+            caption_position: None,
+            enabled: true,
+            link_group_id: None,
+            compound_sequence_id: Some(inner_sequence_id.to_string()),
+            is_adjustment_layer: false,
+            group_id: None,
+        }
+    }
+
+    /// Returns true if this clip is an adjustment layer.
+    pub fn is_adjustment_layer(&self) -> bool {
+        self.is_adjustment_layer
+    }
+
+    /// Creates an adjustment layer clip with the given duration.
+    /// Adjustment layers have no source media — they are purely effect containers.
+    pub fn adjustment_layer(duration: TimeSec) -> Self {
+        Self {
+            id: ulid::Ulid::new().to_string(),
+            asset_id: Self::ADJUSTMENT_LAYER_ASSET_ID.to_string(),
+            range: ClipRange::new(0.0, duration),
+            place: ClipPlace::new(0.0, duration),
+            transform: Transform::default(),
+            opacity: 1.0,
+            blend_mode: BlendMode::Normal,
+            speed: 1.0,
+            reverse: false,
+            freeze_frame: false,
+            time_remap: None,
+            effects: vec![],
+            audio: AudioSettings::default(),
+            label: Some("Adjustment Layer".to_string()),
+            color: None,
+            caption_style: None,
+            caption_position: None,
+            enabled: true,
+            link_group_id: None,
+            compound_sequence_id: None,
+            is_adjustment_layer: true,
+            group_id: None,
+        }
     }
 }
 
@@ -2339,5 +2433,93 @@ mod tests {
         assert_eq!(seq.next_marker(0.0), Some(2.5));
         assert_eq!(seq.next_marker(2.5), Some(6.0));
         assert_eq!(seq.prev_marker(6.0), Some(2.5));
+    }
+
+    // =========================================================================
+    // Compound Clip Tests
+    // =========================================================================
+
+    #[test]
+    fn test_compound_clip_creation() {
+        let clip = Clip::compound("seq_inner_001", 15.0);
+
+        assert!(clip.is_compound());
+        assert_eq!(clip.compound_sequence_id.as_deref(), Some("seq_inner_001"));
+        assert!(clip.asset_id.starts_with(Clip::COMPOUND_ASSET_PREFIX));
+        assert_eq!(clip.duration(), 15.0);
+        assert_eq!(clip.place.duration_sec, 15.0);
+        assert_eq!(clip.range.source_in_sec, 0.0);
+        assert_eq!(clip.range.source_out_sec, 15.0);
+    }
+
+    #[test]
+    fn test_regular_clip_is_not_compound() {
+        let clip = Clip::new("asset_regular");
+
+        assert!(!clip.is_compound());
+        assert!(clip.compound_sequence_id.is_none());
+    }
+
+    #[test]
+    fn test_compound_clip_json_round_trip() {
+        let clip = Clip::compound("seq_inner_002", 30.0).place_at(10.0);
+
+        let json = serde_json::to_string(&clip).unwrap();
+        let parsed: Clip = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.compound_sequence_id, clip.compound_sequence_id);
+        assert!(parsed.is_compound());
+        assert_eq!(parsed.place.timeline_in_sec, 10.0);
+        assert_eq!(parsed.place.duration_sec, 30.0);
+        assert!(parsed.asset_id.starts_with(Clip::COMPOUND_ASSET_PREFIX));
+    }
+
+    #[test]
+    fn test_compound_clip_absent_in_legacy_json() {
+        // Backward compatibility: JSON without compound_sequence_id deserializes with None
+        let json = r#"{
+            "id": "test_clip",
+            "assetId": "asset_1",
+            "range": {"sourceInSec": 0.0, "sourceOutSec": 10.0},
+            "place": {"timelineInSec": 0.0, "durationSec": 10.0},
+            "transform": {"position": {"x": 0.5, "y": 0.5}, "scale": {"x": 1.0, "y": 1.0}, "rotationDeg": 0.0, "anchor": {"x": 0.5, "y": 0.5}},
+            "opacity": 1.0,
+            "speed": 1.0,
+            "effects": [],
+            "audio": {"volumeDb": 0.0, "pan": 0.0, "muted": false, "fadeInSec": 0.0, "fadeOutSec": 0.0}
+        }"#;
+
+        let clip: Clip = serde_json::from_str(json).unwrap();
+        assert!(!clip.is_compound());
+        assert!(clip.compound_sequence_id.is_none());
+    }
+
+    #[test]
+    fn test_compound_clip_asset_id_format() {
+        let inner_id = "01HQ3K4MNOP";
+        let clip = Clip::compound(inner_id, 5.0);
+        let expected_asset_id = format!("{}{}", Clip::COMPOUND_ASSET_PREFIX, inner_id);
+
+        assert_eq!(clip.asset_id, expected_asset_id);
+    }
+
+    #[test]
+    fn test_adjustment_layer_absent_in_legacy_json() {
+        // Backward compatibility: JSON without is_adjustment_layer deserializes as false
+        let json = r#"{
+            "id": "test_clip",
+            "assetId": "asset_1",
+            "range": {"sourceInSec": 0.0, "sourceOutSec": 10.0},
+            "place": {"timelineInSec": 0.0, "durationSec": 10.0},
+            "transform": {"position": {"x": 0.5, "y": 0.5}, "scale": {"x": 1.0, "y": 1.0}, "rotationDeg": 0.0, "anchor": {"x": 0.5, "y": 0.5}},
+            "opacity": 1.0,
+            "speed": 1.0,
+            "effects": [],
+            "audio": {"volumeDb": 0.0, "pan": 0.0, "muted": false, "fadeInSec": 0.0, "fadeOutSec": 0.0}
+        }"#;
+
+        let clip: Clip = serde_json::from_str(json).unwrap();
+        assert!(!clip.is_adjustment_layer());
+        assert_ne!(clip.asset_id, Clip::ADJUSTMENT_LAYER_ASSET_ID);
     }
 }

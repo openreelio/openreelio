@@ -32,6 +32,10 @@ pub enum OpKind {
     ClipTrim,
     ClipSplit,
     ClipUpdate,
+    CompoundClipCreate,
+    CompoundClipUnnest,
+    ClipGroup,
+    ClipUngroup,
 
     // Track operations
     TrackAdd,
