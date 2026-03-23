@@ -2,25 +2,23 @@
  * EffectsBrowser Component
  *
  * Browser panel for discovering and applying effects to clips.
- * Displays available effects organized by category with search functionality.
+ * Displays available effects organized by category with search and favorites.
  */
 
-import { memo, useState, useMemo, type ReactNode } from 'react';
+import { memo, type ReactNode } from 'react';
+import { Wand2, Search, Star } from 'lucide-react';
+import type { EffectCategory } from '@/types';
+import { EFFECT_CATEGORY_LABELS } from '@/types';
 import {
-  Wand2,
-  Sparkles,
-  Palette,
-  Volume2,
-  Zap,
-  Layers,
-  Focus,
-  Type,
-  Bot,
-  Search,
-  Scissors,
-} from 'lucide-react';
-import type { EffectCategory, EffectType } from '@/types';
-import { EFFECT_CATEGORY_LABELS, EFFECT_TYPE_LABELS } from '@/types';
+  useEffectSearch,
+  getEffectTypeKey,
+  type EffectEntry,
+} from '@/hooks/useEffectSearch';
+import {
+  EFFECT_CATEGORIES,
+  CATEGORY_ICONS,
+  TOTAL_EFFECT_COUNT,
+} from './effectCategoryData';
 
 // =============================================================================
 // Types
@@ -33,153 +31,30 @@ export interface EffectsBrowserProps {
   onEffectSelect?: (effectType: string) => void;
 }
 
-interface EffectEntry {
-  type: EffectType;
-  label: string;
-}
-
-interface CategoryDefinition {
-  id: EffectCategory;
-  icon: ReactNode;
-  effects: EffectEntry[];
-}
-
 // =============================================================================
-// Effect Definitions by Category
+// Helpers
 // =============================================================================
 
-const CATEGORY_ICONS: Record<EffectCategory, ReactNode> = {
-  color: <Palette className="w-4 h-4" />,
-  advanced_color: <Palette className="w-4 h-4" />,
-  transform: <Zap className="w-4 h-4" />,
-  blur_sharpen: <Focus className="w-4 h-4" />,
-  stylize: <Sparkles className="w-4 h-4" />,
-  transition: <Layers className="w-4 h-4" />,
-  audio: <Volume2 className="w-4 h-4" />,
-  text: <Type className="w-4 h-4" />,
-  ai: <Bot className="w-4 h-4" />,
-  keying: <Scissors className="w-4 h-4" />,
-  compositing: <Layers className="w-4 h-4" />,
-  custom: <Wand2 className="w-4 h-4" />,
-};
+/** Renders effect label with highlighted matching text */
+function HighlightedLabel({ label, query }: { label: string; query: string }): ReactNode {
+  if (!query.trim()) return label;
 
-/**
- * Effect definitions organized by category
- * Uses EFFECT_TYPE_LABELS for display names
- */
-const EFFECT_CATEGORIES: CategoryDefinition[] = [
-  {
-    id: 'color',
-    icon: CATEGORY_ICONS.color,
-    effects: [
-      { type: 'brightness', label: EFFECT_TYPE_LABELS.brightness ?? 'Brightness' },
-      { type: 'contrast', label: EFFECT_TYPE_LABELS.contrast ?? 'Contrast' },
-      { type: 'saturation', label: EFFECT_TYPE_LABELS.saturation ?? 'Saturation' },
-      { type: 'hue', label: EFFECT_TYPE_LABELS.hue ?? 'Hue' },
-      { type: 'color_balance', label: EFFECT_TYPE_LABELS.color_balance ?? 'Color Balance' },
-      { type: 'color_wheels', label: EFFECT_TYPE_LABELS.color_wheels ?? 'Color Wheels' },
-      { type: 'gamma', label: EFFECT_TYPE_LABELS.gamma ?? 'Gamma' },
-      { type: 'levels', label: EFFECT_TYPE_LABELS.levels ?? 'Levels' },
-      { type: 'curves', label: EFFECT_TYPE_LABELS.curves ?? 'Curves' },
-      { type: 'lut', label: EFFECT_TYPE_LABELS.lut ?? 'LUT' },
-    ],
-  },
-  {
-    id: 'transform',
-    icon: CATEGORY_ICONS.transform,
-    effects: [
-      { type: 'crop', label: EFFECT_TYPE_LABELS.crop ?? 'Crop' },
-      { type: 'flip', label: EFFECT_TYPE_LABELS.flip ?? 'Flip' },
-      { type: 'mirror', label: EFFECT_TYPE_LABELS.mirror ?? 'Mirror' },
-      { type: 'rotate', label: EFFECT_TYPE_LABELS.rotate ?? 'Rotate' },
-    ],
-  },
-  {
-    id: 'blur_sharpen',
-    icon: CATEGORY_ICONS.blur_sharpen,
-    effects: [
-      { type: 'gaussian_blur', label: EFFECT_TYPE_LABELS.gaussian_blur ?? 'Gaussian Blur' },
-      { type: 'box_blur', label: EFFECT_TYPE_LABELS.box_blur ?? 'Box Blur' },
-      { type: 'motion_blur', label: EFFECT_TYPE_LABELS.motion_blur ?? 'Motion Blur' },
-      { type: 'radial_blur', label: EFFECT_TYPE_LABELS.radial_blur ?? 'Radial Blur' },
-      { type: 'sharpen', label: EFFECT_TYPE_LABELS.sharpen ?? 'Sharpen' },
-      { type: 'unsharp_mask', label: EFFECT_TYPE_LABELS.unsharp_mask ?? 'Unsharp Mask' },
-    ],
-  },
-  {
-    id: 'stylize',
-    icon: CATEGORY_ICONS.stylize,
-    effects: [
-      { type: 'vignette', label: EFFECT_TYPE_LABELS.vignette ?? 'Vignette' },
-      { type: 'glow', label: EFFECT_TYPE_LABELS.glow ?? 'Glow' },
-      { type: 'film_grain', label: EFFECT_TYPE_LABELS.film_grain ?? 'Film Grain' },
-      {
-        type: 'chromatic_aberration',
-        label: EFFECT_TYPE_LABELS.chromatic_aberration ?? 'Chromatic Aberration',
-      },
-      { type: 'noise', label: EFFECT_TYPE_LABELS.noise ?? 'Noise' },
-      { type: 'pixelate', label: EFFECT_TYPE_LABELS.pixelate ?? 'Pixelate' },
-      { type: 'posterize', label: EFFECT_TYPE_LABELS.posterize ?? 'Posterize' },
-    ],
-  },
-  {
-    id: 'transition',
-    icon: CATEGORY_ICONS.transition,
-    effects: [
-      { type: 'cross_dissolve', label: EFFECT_TYPE_LABELS.cross_dissolve ?? 'Cross Dissolve' },
-      { type: 'fade', label: EFFECT_TYPE_LABELS.fade ?? 'Fade' },
-      { type: 'wipe', label: EFFECT_TYPE_LABELS.wipe ?? 'Wipe' },
-      { type: 'slide', label: EFFECT_TYPE_LABELS.slide ?? 'Slide' },
-      { type: 'zoom', label: EFFECT_TYPE_LABELS.zoom ?? 'Zoom' },
-    ],
-  },
-  {
-    id: 'audio',
-    icon: CATEGORY_ICONS.audio,
-    effects: [
-      { type: 'volume', label: EFFECT_TYPE_LABELS.volume ?? 'Volume' },
-      { type: 'gain', label: EFFECT_TYPE_LABELS.gain ?? 'Gain' },
-      { type: 'eq_band', label: EFFECT_TYPE_LABELS.eq_band ?? 'EQ Band' },
-      { type: 'compressor', label: EFFECT_TYPE_LABELS.compressor ?? 'Compressor' },
-      { type: 'limiter', label: EFFECT_TYPE_LABELS.limiter ?? 'Limiter' },
-      { type: 'noise_reduction', label: EFFECT_TYPE_LABELS.noise_reduction ?? 'Noise Reduction' },
-      { type: 'reverb', label: EFFECT_TYPE_LABELS.reverb ?? 'Reverb' },
-      { type: 'delay', label: EFFECT_TYPE_LABELS.delay ?? 'Delay' },
-    ],
-  },
-  {
-    id: 'text',
-    icon: CATEGORY_ICONS.text,
-    effects: [
-      { type: 'text_overlay', label: EFFECT_TYPE_LABELS.text_overlay ?? 'Text Overlay' },
-      { type: 'subtitle', label: EFFECT_TYPE_LABELS.subtitle ?? 'Subtitle' },
-    ],
-  },
-  {
-    id: 'ai',
-    icon: CATEGORY_ICONS.ai,
-    effects: [
-      {
-        type: 'background_removal',
-        label: EFFECT_TYPE_LABELS.background_removal ?? 'Background Removal',
-      },
-      { type: 'auto_reframe', label: EFFECT_TYPE_LABELS.auto_reframe ?? 'Auto Reframe' },
-      { type: 'face_blur', label: EFFECT_TYPE_LABELS.face_blur ?? 'Face Blur' },
-      { type: 'object_tracking', label: EFFECT_TYPE_LABELS.object_tracking ?? 'Object Tracking' },
-    ],
-  },
-  {
-    id: 'keying',
-    icon: CATEGORY_ICONS.keying,
-    effects: [
-      { type: 'chroma_key', label: EFFECT_TYPE_LABELS.chroma_key ?? 'Chroma Key' },
-      { type: 'luma_key', label: EFFECT_TYPE_LABELS.luma_key ?? 'Luma Key' },
-    ],
-  },
-];
+  const lower = label.toLowerCase();
+  const idx = lower.indexOf(query.trim().toLowerCase());
+  if (idx === -1) return label;
 
-// Total effect count (constant, computed once)
-const TOTAL_EFFECT_COUNT = EFFECT_CATEGORIES.reduce((acc, cat) => acc + cat.effects.length, 0);
+  const before = label.slice(0, idx);
+  const match = label.slice(idx, idx + query.trim().length);
+  const after = label.slice(idx + query.trim().length);
+
+  return (
+    <>
+      {before}
+      <span className="text-primary-400 font-semibold">{match}</span>
+      {after}
+    </>
+  );
+}
 
 // =============================================================================
 // Component
@@ -189,23 +64,47 @@ export const EffectsBrowser = memo(function EffectsBrowser({
   className = '',
   onEffectSelect,
 }: EffectsBrowserProps) {
-  const [searchQuery, setSearchQuery] = useState('');
+  const {
+    searchQuery,
+    setSearchQuery,
+    filteredCategories,
+    favoritesCategory,
+    hasResults,
+    toggleFavorite,
+    isFavorite,
+  } = useEffectSearch({ categories: EFFECT_CATEGORIES });
 
-  // Filter effects based on search query
-  const filteredCategories = useMemo(() => {
-    if (!searchQuery.trim()) {
-      return EFFECT_CATEGORIES;
-    }
+  const renderEffectButton = (effect: EffectEntry): ReactNode => {
+    const key = getEffectTypeKey(effect.type);
+    const favorited = isFavorite(key);
 
-    const query = searchQuery.toLowerCase();
-    return EFFECT_CATEGORIES.map((category) => ({
-      ...category,
-      effects: category.effects.filter((effect) => effect.label.toLowerCase().includes(query)),
-    })).filter((category) => category.effects.length > 0);
-  }, [searchQuery]);
-
-  // Check if any effects match the search
-  const hasResults = filteredCategories.some((cat) => cat.effects.length > 0);
+    return (
+      <div key={key} className="flex items-center group">
+        <button
+          type="button"
+          className="flex-1 text-left px-3 py-1.5 text-sm rounded transition-colors text-editor-text hover:bg-editor-hover focus-visible:ring-1 focus-visible:ring-primary-500 focus-visible:outline-none"
+          onClick={() => onEffectSelect?.(key)}
+        >
+          <HighlightedLabel label={effect.label} query={searchQuery} />
+        </button>
+        <button
+          type="button"
+          aria-label={favorited ? `Remove ${effect.label} from favorites` : `Add ${effect.label} to favorites`}
+          className={`p-1 mr-1 rounded transition-opacity focus-visible:ring-1 focus-visible:ring-primary-500 focus-visible:outline-none ${
+            favorited
+              ? 'opacity-100 text-yellow-400'
+              : 'opacity-0 group-hover:opacity-60 text-editor-text-muted hover:text-yellow-400'
+          }`}
+          onClick={(e) => {
+            e.stopPropagation();
+            toggleFavorite(key);
+          }}
+        >
+          <Star className="w-3.5 h-3.5" fill={favorited ? 'currentColor' : 'none'} />
+        </button>
+      </div>
+    );
+  };
 
   return (
     <div className={`h-full overflow-auto ${className}`} data-testid="effects-browser">
@@ -221,12 +120,13 @@ export const EffectsBrowser = memo(function EffectsBrowser({
       </div>
 
       {/* Search */}
-      <div className="p-2 border-b border-editor-border">
+      <div className="p-2 border-b border-editor-border" role="search">
         <div className="relative">
           <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-editor-text-muted" />
           <input
             type="text"
             placeholder="Search effects..."
+            aria-label="Search effects"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="w-full bg-editor-input border border-editor-border rounded pl-8 pr-2 py-1.5 text-sm text-editor-text placeholder:text-editor-text-muted focus:border-primary-500 focus:outline-none"
@@ -243,32 +143,38 @@ export const EffectsBrowser = memo(function EffectsBrowser({
             <p className="text-xs mt-1">Try a different search term</p>
           </div>
         ) : (
-          filteredCategories.map((category) => (
-            <div key={category.id}>
-              <div className="flex items-center gap-2 px-2 py-1.5 text-editor-text-muted">
-                {category.icon}
-                <span className="text-xs font-medium uppercase tracking-wider">
-                  {EFFECT_CATEGORY_LABELS[category.id]}
-                </span>
+          <>
+            {/* Favorites Category (at top when populated) */}
+            {favoritesCategory && (
+              <div data-testid="favorites-category">
+                <div className="flex items-center gap-2 px-2 py-1.5 text-yellow-400">
+                  <Star className="w-4 h-4" fill="currentColor" />
+                  <span className="text-xs font-medium uppercase tracking-wider">Favorites</span>
+                </div>
+                <div className="space-y-0.5">
+                  {favoritesCategory.effects.map(renderEffectButton)}
+                </div>
               </div>
-              <div className="space-y-0.5">
-                {category.effects.map((effect) => (
-                  <button
-                    key={typeof effect.type === 'string' ? effect.type : effect.type.custom}
-                    type="button"
-                    className="w-full text-left px-3 py-1.5 text-sm rounded transition-colors text-editor-text hover:bg-editor-hover"
-                    onClick={() =>
-                      onEffectSelect?.(
-                        typeof effect.type === 'string' ? effect.type : effect.type.custom
-                      )
-                    }
-                  >
-                    {effect.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ))
+            )}
+
+            {/* Regular Categories */}
+            {filteredCategories.map((category) => {
+              const catId = category.id as EffectCategory;
+              return (
+                <div key={category.id}>
+                  <div className="flex items-center gap-2 px-2 py-1.5 text-editor-text-muted">
+                    {CATEGORY_ICONS[catId] ?? <Wand2 className="w-4 h-4" />}
+                    <span className="text-xs font-medium uppercase tracking-wider">
+                      {EFFECT_CATEGORY_LABELS[catId] ?? category.id}
+                    </span>
+                  </div>
+                  <div className="space-y-0.5">
+                    {category.effects.map(renderEffectButton)}
+                  </div>
+                </div>
+              );
+            })}
+          </>
         )}
       </div>
 

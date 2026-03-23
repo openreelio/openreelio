@@ -1,13 +1,28 @@
 /**
  * EffectsBrowser Component Tests
  *
- * Tests for the effects browser panel that displays available effects.
- * TDD: RED phase - writing tests first
+ * Integration tests for effects browser with search and favorites.
+ * Uses real settingsStore (Testing Trophy — no mocking internal stores).
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { EffectsBrowser } from './EffectsBrowser';
+import { useSettingsStore } from '@/stores/settingsStore';
+
+// =============================================================================
+// Setup
+// =============================================================================
+
+beforeEach(() => {
+  const store = useSettingsStore.getState();
+  if (typeof (store as unknown as Record<string, unknown>)._resetInternalState === 'function') {
+    (store as unknown as Record<string, (() => void)>)._resetInternalState();
+  }
+  useSettingsStore.setState((state) => {
+    state.settings.editor.favoriteEffects = [];
+  });
+});
 
 // =============================================================================
 // Rendering Tests
@@ -105,8 +120,10 @@ describe('EffectsBrowser', () => {
       const searchInput = screen.getByPlaceholderText('Search effects...');
       fireEvent.change(searchInput, { target: { value: 'chroma' } });
 
-      expect(screen.getByText('Chroma Key')).toBeInTheDocument();
-      expect(screen.queryByText('Brightness')).not.toBeInTheDocument();
+      // Chroma Key present (effect button + star button both match role)
+      const chromaButtons = screen.getAllByRole('button', { name: /Chroma Key/i });
+      expect(chromaButtons.length).toBeGreaterThanOrEqual(1);
+      expect(screen.queryByRole('button', { name: /^Brightness$/i })).not.toBeInTheDocument();
     });
   });
 
@@ -221,8 +238,10 @@ describe('EffectsBrowser', () => {
       const searchInput = screen.getByPlaceholderText('Search effects...');
       fireEvent.change(searchInput, { target: { value: 'dissolve' } });
 
-      expect(screen.getByText('Cross Dissolve')).toBeInTheDocument();
-      expect(screen.queryByText('Brightness')).not.toBeInTheDocument();
+      // Effect button + star button both match role, use getAllByRole
+      const dissolveButtons = screen.getAllByRole('button', { name: /Cross Dissolve/i });
+      expect(dissolveButtons.length).toBeGreaterThanOrEqual(1);
+      expect(screen.queryByRole('button', { name: /^Brightness$/i })).not.toBeInTheDocument();
     });
 
     it('should be case-insensitive when searching', () => {
@@ -231,7 +250,7 @@ describe('EffectsBrowser', () => {
       const searchInput = screen.getByPlaceholderText('Search effects...');
       fireEvent.change(searchInput, { target: { value: 'WIPE' } });
 
-      expect(screen.getByText('Wipe')).toBeInTheDocument();
+      expect(screen.getByText(/Wipe/)).toBeInTheDocument();
     });
 
     it('should show empty state when no results match', () => {
@@ -256,6 +275,116 @@ describe('EffectsBrowser', () => {
       fireEvent.change(searchInput, { target: { value: '' } });
       expect(screen.getByText('Brightness')).toBeInTheDocument();
     });
+
+    it('should highlight matching text in search results', () => {
+      render(<EffectsBrowser />);
+
+      const searchInput = screen.getByPlaceholderText('Search effects...');
+      fireEvent.change(searchInput, { target: { value: 'blur' } });
+
+      const highlighted = screen.getAllByText('Blur');
+      expect(highlighted.length).toBeGreaterThan(0);
+    });
+  });
+
+  // ===========================================================================
+  // Favorites Tests
+  // ===========================================================================
+
+  describe('favorites', () => {
+    it('should not show Favorites category when no favorites exist', () => {
+      render(<EffectsBrowser />);
+
+      expect(screen.queryByTestId('favorites-category')).not.toBeInTheDocument();
+      expect(screen.queryByText('Favorites')).not.toBeInTheDocument();
+    });
+
+    it('should show star toggle button on hover for each effect', () => {
+      render(<EffectsBrowser />);
+
+      const starButtons = screen.getAllByRole('button', { name: /add .+ to favorites/i });
+      expect(starButtons.length).toBeGreaterThan(0);
+    });
+
+    it('should add effect to favorites when star is clicked', () => {
+      render(<EffectsBrowser />);
+
+      const addFavButton = screen.getByRole('button', { name: /add Brightness to favorites/i });
+      fireEvent.click(addFavButton);
+
+      expect(screen.getByTestId('favorites-category')).toBeInTheDocument();
+      expect(screen.getByText('Favorites')).toBeInTheDocument();
+    });
+
+    it('should remove effect from favorites when star is clicked again', () => {
+      render(<EffectsBrowser />);
+
+      // Add to favorites
+      const addFavButton = screen.getByRole('button', { name: /add Brightness to favorites/i });
+      fireEvent.click(addFavButton);
+      expect(screen.getByTestId('favorites-category')).toBeInTheDocument();
+
+      // Remove from favorites
+      const removeFavButtons = screen.getAllByRole('button', { name: /remove Brightness from favorites/i });
+      fireEvent.click(removeFavButtons[0]);
+      expect(screen.queryByTestId('favorites-category')).not.toBeInTheDocument();
+    });
+
+    it('should show Favorites category at top of the list', () => {
+      render(<EffectsBrowser />);
+
+      // Add favorite
+      const addFavButton = screen.getByRole('button', { name: /add Brightness to favorites/i });
+      fireEvent.click(addFavButton);
+
+      const categoriesContainer = screen.getByTestId('effects-browser');
+      const favoritesCategory = screen.getByTestId('favorites-category');
+      // Favorites should appear before Color in DOM order
+      const favPosition = Array.from(categoriesContainer.querySelectorAll('[data-testid], .text-xs.font-medium'))
+        .findIndex(el => el.getAttribute('data-testid') === 'favorites-category');
+      const colorPosition = Array.from(categoriesContainer.querySelectorAll('[data-testid], .text-xs.font-medium'))
+        .findIndex(el => el.textContent === 'Color');
+
+      expect(favoritesCategory).toBeInTheDocument();
+      expect(favPosition).toBeLessThan(colorPosition);
+    });
+
+    it('should filter favorites by search query', () => {
+      render(<EffectsBrowser />);
+
+      // Add two favorites
+      fireEvent.click(screen.getByRole('button', { name: /add Brightness to favorites/i }));
+      fireEvent.click(screen.getByRole('button', { name: /add Contrast to favorites/i }));
+
+      // Search for brightness — text split by highlight span, use button role
+      const searchInput = screen.getByPlaceholderText('Search effects...');
+      fireEvent.change(searchInput, { target: { value: 'bright' } });
+
+      // Favorites category should show and contain Brightness
+      const favCategory = screen.getByTestId('favorites-category');
+      expect(favCategory).toBeInTheDocument();
+      // Brightness appears in both favorites and color category (button roles with accessible name)
+      const brightnessButtons = screen.getAllByRole('button', { name: /Brightness/i });
+      expect(brightnessButtons.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('should persist favorites across re-renders via settings store', () => {
+      const { unmount } = render(<EffectsBrowser />);
+
+      // Add a favorite
+      fireEvent.click(screen.getByRole('button', { name: /add Gaussian Blur to favorites/i }));
+
+      // Verify it's in settings store
+      const stored = useSettingsStore.getState().settings.editor.favoriteEffects;
+      expect(stored).toContain('gaussian_blur');
+
+      // Unmount and remount
+      unmount();
+      render(<EffectsBrowser />);
+
+      // Favorites should persist
+      expect(screen.getByTestId('favorites-category')).toBeInTheDocument();
+    });
   });
 
   // ===========================================================================
@@ -279,6 +408,12 @@ describe('EffectsBrowser', () => {
       fireEvent.click(effectButton);
 
       expect(onEffectSelect).toHaveBeenCalledWith('cross_dissolve');
+    });
+
+    it('should have accessible favorite toggle labels', () => {
+      render(<EffectsBrowser />);
+
+      expect(screen.getByRole('button', { name: /add Brightness to favorites/i })).toBeInTheDocument();
     });
   });
 

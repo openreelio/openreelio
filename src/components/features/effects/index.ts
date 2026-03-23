@@ -49,3 +49,16 @@ export type { NoiseReductionControlProps } from './NoiseReductionControl';
 
 export { MotionTrackingControl } from './MotionTrackingControl';
 export type { MotionTrackingControlProps } from './MotionTrackingControl';
+
+export { PasteAttributesDialog } from './PasteAttributesDialog';
+export type { PasteAttributesDialogProps } from './PasteAttributesDialog';
+
+export { RemoveAttributesDialog } from './RemoveAttributesDialog';
+export type {
+  RemoveAttributesDialogProps,
+  RemoveAttributesResult,
+  ClipEffectEntry,
+} from './RemoveAttributesDialog';
+
+export { SaveEffectPresetDialog } from './SaveEffectPresetDialog';
+export type { SaveEffectPresetDialogProps } from './SaveEffectPresetDialog';
