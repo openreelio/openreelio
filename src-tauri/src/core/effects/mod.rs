@@ -6,6 +6,7 @@
 mod filter_builder;
 mod mask_filters;
 mod models;
+pub mod presets;
 mod qualifier_filters;
 
 pub use filter_builder::{FilterGraph, IntoFFmpegFilter};
