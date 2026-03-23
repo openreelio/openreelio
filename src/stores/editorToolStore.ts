@@ -15,6 +15,7 @@ import type {
   BlendMode,
   CaptionPosition,
   CaptionStyle,
+  CopiedClipData,
   TextClipData,
   TrackKind,
   Transform,
@@ -110,6 +111,8 @@ interface EditorToolState {
   autoScrollEnabled: boolean;
   /** Clipboard for copy/paste operations */
   clipboard: ClipboardItem[] | null;
+  /** Effects clipboard for copy/paste effects between clips (S31) */
+  effectsClipboard: CopiedClipData | null;
 }
 
 /**
@@ -140,6 +143,12 @@ interface EditorToolActions {
   clearClipboard: () => void;
   /** Get clipboard contents */
   getClipboard: () => ClipboardItem[] | null;
+  /** Store copied effects data in effects clipboard */
+  setEffectsClipboard: (data: CopiedClipData) => void;
+  /** Clear effects clipboard */
+  clearEffectsClipboard: () => void;
+  /** Get effects clipboard contents */
+  getEffectsClipboard: () => CopiedClipData | null;
   /** Reset to default state */
   reset: () => void;
 }
@@ -213,6 +222,7 @@ const initialState: EditorToolState = {
   rippleEnabled: false,
   autoScrollEnabled: true,
   clipboard: null,
+  effectsClipboard: null,
 };
 
 // =============================================================================
@@ -301,6 +311,22 @@ export const useEditorToolStore = create<EditorToolStore>()(
         return get().clipboard;
       },
 
+      setEffectsClipboard: (data: CopiedClipData) => {
+        set((state) => {
+          state.effectsClipboard = data;
+        });
+      },
+
+      clearEffectsClipboard: () => {
+        set((state) => {
+          state.effectsClipboard = null;
+        });
+      },
+
+      getEffectsClipboard: () => {
+        return get().effectsClipboard;
+      },
+
       reset: () => {
         set(() => ({ ...initialState }));
       },
@@ -314,7 +340,6 @@ export const useEditorToolStore = create<EditorToolStore>()(
  */
 export function getToolCursor(tool: EditorTool, isDragging = false): string {
   if (isDragging) {
-    if (tool === 'hand') return 'grabbing';
     return 'grabbing';
   }
   return TOOL_CONFIGS[tool].cursor;

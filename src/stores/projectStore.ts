@@ -15,7 +15,15 @@ import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
 import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
-import type { Asset, Sequence, Command, CommandResult, UndoRedoResult, ProxyStatus } from '@/types';
+import type {
+  Asset,
+  Command,
+  CommandResult,
+  Effect,
+  ProxyStatus,
+  Sequence,
+  UndoRedoResult,
+} from '@/types';
 import { createLogger } from '@/services/logger';
 // Direct imports instead of barrel to avoid bundling all utilities
 import {
@@ -95,6 +103,7 @@ interface ProjectState {
   meta: ProjectMeta | null;
   assets: Map<string, Asset>;
   sequences: Map<string, Sequence>;
+  effects: Map<string, Effect>;
   activeSequenceId: string | null;
   /** Navigation stack for compound clip sequence drilling (parent → child) */
   sequenceNavigationStack: string[];
@@ -147,6 +156,7 @@ export const useProjectStore = create<ProjectState>()(
     meta: null,
     assets: new Map(),
     sequences: new Map(),
+    effects: new Map(),
     activeSequenceId: null,
     sequenceNavigationStack: [],
     selectedAssetId: null,
@@ -179,6 +189,9 @@ export const useProjectStore = create<ProjectState>()(
 
           // Populate sequences
           state.sequences = projectState.sequences;
+
+          // Populate effects
+          state.effects = projectState.effects ?? new Map();
 
           // Set active sequence
           state.activeSequenceId = projectState.activeSequenceId;
@@ -245,6 +258,9 @@ export const useProjectStore = create<ProjectState>()(
           // Populate sequences (includes default sequence with tracks)
           state.sequences = projectState.sequences;
 
+          // Populate effects
+          state.effects = projectState.effects ?? new Map();
+
           // Set active sequence
           state.activeSequenceId = projectState.activeSequenceId;
         });
@@ -259,6 +275,7 @@ export const useProjectStore = create<ProjectState>()(
           state.meta = null;
           state.assets = new Map();
           state.sequences = new Map();
+          state.effects = new Map();
           state.activeSequenceId = null;
           state.sequenceNavigationStack = [];
           state.error = error instanceof Error ? error.message : String(error);
@@ -293,6 +310,9 @@ export const useProjectStore = create<ProjectState>()(
 
           // Populate sequences
           state.sequences = projectState.sequences;
+
+          // Populate effects
+          state.effects = projectState.effects ?? new Map();
 
           // Set active sequence
           state.activeSequenceId = projectState.activeSequenceId;
@@ -368,6 +388,7 @@ export const useProjectStore = create<ProjectState>()(
         state.meta = null;
         state.assets = new Map();
         state.sequences = new Map();
+        state.effects = new Map();
         state.activeSequenceId = null;
         state.sequenceNavigationStack = [];
         state.selectedAssetId = null;

@@ -928,7 +928,11 @@ export type CommandType =
   | 'CreateAdjustmentLayer'
   // Clip group/ungroup (S30)
   | 'GroupClips'
-  | 'UngroupClips';
+  | 'UngroupClips'
+  // Effect copy/paste (S31)
+  | 'PasteEffects'
+  | 'PasteAttributes'
+  | 'RemoveAttributes';
 
 export interface Command {
   type: CommandType;
@@ -946,6 +950,60 @@ export interface UndoRedoResult {
   success: boolean;
   canUndo: boolean;
   canRedo: boolean;
+}
+
+// =============================================================================
+// Effect Copy/Paste Types (S31)
+// =============================================================================
+
+/** Data returned by copy_clip_effects IPC — stored in frontend clipboard */
+export interface CopiedClipData {
+  sourceClipId: string;
+  effects: Effect[];
+  transform: Transform;
+  opacity: number;
+  blendMode: BlendMode;
+  speed: number;
+  reverse: boolean;
+  audio: AudioSettings;
+}
+
+/** Selection flags for paste/remove attributes dialog */
+export interface AttributeSelection {
+  effectIndices: number[];
+  transform: boolean;
+  opacity: boolean;
+  blendMode: boolean;
+  speed: boolean;
+  audioSettings: boolean;
+}
+
+// =============================================================================
+// Effect Preset Types (S31)
+// =============================================================================
+
+/** A saved effect preset with full parameter data */
+export interface EffectPreset {
+  id: string;
+  name: string;
+  description?: string;
+  effectType: EffectType;
+  category: EffectCategory;
+  params: Record<string, SimpleParamValue>;
+  keyframes?: Record<string, Keyframe[]>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Lightweight summary for listing presets (no params) */
+export interface EffectPresetSummary {
+  id: string;
+  name: string;
+  description?: string;
+  effectType: EffectType;
+  category: EffectCategory;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface StateChange {

@@ -62,6 +62,7 @@ export interface EditorSettings {
   showClipThumbnails: boolean;
   showAudioWaveforms: boolean;
   rippleEditDefault: boolean;
+  favoriteEffects: string[];
 }
 
 /** Playback settings */
@@ -248,6 +249,7 @@ const DEFAULT_SETTINGS: AppSettings = {
     showClipThumbnails: true,
     showAudioWaveforms: true,
     rippleEditDefault: false,
+    favoriteEffects: [],
   },
   playback: {
     defaultVolume: 0.8,
