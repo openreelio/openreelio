@@ -5,8 +5,9 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { invoke } from '@tauri-apps/api/core';
 import { Inspector } from './Inspector';
 import { createTextClipData, createTitleTextClipData } from '@/types';
 import type { SelectedTextClip } from './TextInspector';
@@ -17,6 +18,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 }));
 
 describe('Inspector', () => {
+  const mockedInvoke = vi.mocked(invoke);
+
   // ===========================================================================
   // Empty State Tests
   // ===========================================================================
@@ -72,6 +75,80 @@ describe('Inspector', () => {
 
     // Duration should be 10 seconds (15 - 5)
     expect(screen.getByTestId('clip-duration')).toHaveTextContent('10.00s');
+  });
+
+  it('saves a selected effect as a preset through IPC', async () => {
+    const user = userEvent.setup();
+
+    mockedInvoke.mockReset();
+    mockedInvoke.mockImplementation((command: string) => {
+      if (command === 'save_effect_preset') {
+        return Promise.resolve({
+          id: 'preset-1',
+          name: 'Brightness',
+          description: null,
+          effectType: 'brightness',
+          category: 'color',
+          params: { value: 0.5 },
+          keyframes: {},
+          createdAt: '2026-03-23T00:00:00Z',
+          updatedAt: '2026-03-23T00:00:00Z',
+        });
+      }
+
+      if (command === 'list_effect_presets') {
+        return Promise.resolve([]);
+      }
+
+      return Promise.reject(new Error(`Unhandled command: ${command}`));
+    });
+
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          name: 'Test Clip',
+          assetId: 'asset-1',
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+          },
+          effects: [
+            {
+              id: 'effect-1',
+              effectType: 'brightness',
+              enabled: true,
+              params: { value: 0.5 },
+              keyframes: {},
+              order: 0,
+            },
+          ],
+        }}
+      />,
+    );
+
+    await user.click(screen.getByTestId('effect-item-effect-1'));
+    await user.click(screen.getByTestId('save-selected-effect-preset-button'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('preset-name-input')).toHaveValue('Brightness');
+    });
+
+    await user.click(screen.getByTestId('preset-save-btn'));
+
+    await waitFor(() => {
+      expect(mockedInvoke).toHaveBeenCalledWith('save_effect_preset', {
+        name: 'Brightness',
+        description: null,
+        effectType: 'brightness',
+        params: { value: 0.5 },
+        keyframes: null,
+      });
+    });
   });
 
   // ===========================================================================
@@ -244,10 +321,7 @@ describe('Inspector', () => {
       const selectedTextClip = createTestTextClip('Original');
 
       render(
-        <Inspector
-          selectedTextClip={selectedTextClip}
-          onTextDataChange={handleTextDataChange}
-        />
+        <Inspector selectedTextClip={selectedTextClip} onTextDataChange={handleTextDataChange} />,
       );
 
       const textarea = screen.getByTestId('text-content-input');
@@ -287,12 +361,7 @@ describe('Inspector', () => {
         place: { trackId: 'track-1', timelineInSec: 0 },
       };
 
-      render(
-        <Inspector
-          selectedTextClip={selectedTextClip}
-          selectedClip={selectedClip}
-        />
-      );
+      render(<Inspector selectedTextClip={selectedTextClip} selectedClip={selectedClip} />);
 
       // Should show TextInspector, not Clip Properties
       expect(screen.getByTestId('text-inspector')).toBeInTheDocument();
@@ -305,10 +374,7 @@ describe('Inspector', () => {
       const selectedTextClip = createTestTextClip('Styled Text');
 
       render(
-        <Inspector
-          selectedTextClip={selectedTextClip}
-          onTextDataChange={handleTextDataChange}
-        />
+        <Inspector selectedTextClip={selectedTextClip} onTextDataChange={handleTextDataChange} />,
       );
 
       // Find and click Bold button
@@ -319,19 +385,14 @@ describe('Inspector', () => {
         'text-clip-1',
         expect.objectContaining({
           style: expect.objectContaining({ bold: true }),
-        })
+        }),
       );
     });
 
     it('passes readOnly prop to TextInspector', () => {
       const selectedTextClip = createTestTextClip('Read Only Text');
 
-      render(
-        <Inspector
-          selectedTextClip={selectedTextClip}
-          readOnly={true}
-        />
-      );
+      render(<Inspector selectedTextClip={selectedTextClip} readOnly={true} />);
 
       const textarea = screen.getByTestId('text-content-input');
       expect(textarea).toBeDisabled();

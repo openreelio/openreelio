@@ -20,10 +20,11 @@ import {
 } from 'lucide-react';
 // Direct import instead of barrel to avoid bundling all utilities
 import { formatDuration } from '@/utils/formatters';
-import { EffectsList } from '../effects';
+import { EffectsList, SaveEffectPresetDialog } from '../effects';
 import { BlendModePicker } from '../effects/BlendModePicker';
 import { TextInspector } from './TextInspector';
 import type { SelectedTextClip } from './TextInspector';
+import { useEffectPresets } from '@/hooks/useEffectPresets';
 import type {
   BlendMode,
   Effect,
@@ -271,6 +272,10 @@ export function Inspector({
   // ===========================================================================
 
   const [selectedEffectId, setSelectedEffectId] = useState<EffectId | undefined>();
+  const [presetSaveTarget, setPresetSaveTarget] = useState<Effect | null>(null);
+  const [presetSaveError, setPresetSaveError] = useState<string | null>(null);
+  const [isSavingPreset, setIsSavingPreset] = useState(false);
+  const { savePreset } = useEffectPresets({ autoLoad: false });
 
   // ===========================================================================
   // Computed Values
@@ -280,6 +285,27 @@ export function Inspector({
     if (!selectedClip) return null;
     return selectedClip.range.sourceOutSec - selectedClip.range.sourceInSec;
   }, [selectedClip]);
+
+  const selectedEffect = useMemo(() => {
+    if (!selectedClip || !selectedEffectId) {
+      return undefined;
+    }
+
+    return selectedClip.effects?.find((effect) => effect.id === selectedEffectId);
+  }, [selectedClip, selectedEffectId]);
+
+  useEffect(() => {
+    if (!selectedEffectId) {
+      return;
+    }
+
+    const selectedEffectStillExists = selectedClip?.effects?.some(
+      (effect) => effect.id === selectedEffectId,
+    );
+    if (!selectedEffectStillExists) {
+      setSelectedEffectId(undefined);
+    }
+  }, [selectedClip, selectedEffectId]);
 
   // ===========================================================================
   // Handlers
@@ -316,6 +342,52 @@ export function Inspector({
       onAddEffect(selectedClip.id);
     }
   }, [selectedClip, onAddEffect]);
+
+  const handleOpenSavePreset = useCallback(() => {
+    if (!selectedEffect) {
+      return;
+    }
+
+    setPresetSaveError(null);
+    setPresetSaveTarget(selectedEffect);
+  }, [selectedEffect]);
+
+  const handleCloseSavePreset = useCallback(() => {
+    if (isSavingPreset) {
+      return;
+    }
+
+    setPresetSaveError(null);
+    setPresetSaveTarget(null);
+  }, [isSavingPreset]);
+
+  const handleConfirmSavePreset = useCallback(
+    async (name: string, description: string | undefined) => {
+      if (!presetSaveTarget) {
+        return;
+      }
+
+      try {
+        setIsSavingPreset(true);
+        setPresetSaveError(null);
+        await savePreset(
+          name,
+          description,
+          presetSaveTarget.effectType,
+          presetSaveTarget.params,
+          Object.keys(presetSaveTarget.keyframes ?? {}).length > 0
+            ? presetSaveTarget.keyframes
+            : undefined,
+        );
+        setPresetSaveTarget(null);
+      } catch (error) {
+        setPresetSaveError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setIsSavingPreset(false);
+      }
+    },
+    [presetSaveTarget, savePreset],
+  );
 
   const handleBlendModeChange = useCallback(
     (mode: BlendMode) => {
@@ -456,7 +528,10 @@ export function Inspector({
               </button>
             </div>
             {selectedClip.hasTimeRemap && (
-              <div data-testid="time-remap-status" className="flex items-center gap-2 text-xs text-teal-400">
+              <div
+                data-testid="time-remap-status"
+                className="flex items-center gap-2 text-xs text-teal-400"
+              >
                 <span className="w-2 h-2 rounded-full bg-teal-400" />
                 Time Remap Active
               </div>
@@ -474,7 +549,36 @@ export function Inspector({
             onRemoveEffect={onEffectRemove ? handleEffectRemove : undefined}
             onAddEffect={onAddEffect ? handleAddEffect : undefined}
           />
+
+          {selectedEffect && !readOnly && (
+            <div className="mt-3 space-y-2">
+              <button
+                type="button"
+                className="w-full rounded border border-editor-border bg-editor-input bg-opacity-40 px-3 py-2 text-xs font-medium text-editor-text transition-colors hover:bg-opacity-70"
+                onClick={handleOpenSavePreset}
+                data-testid="save-selected-effect-preset-button"
+              >
+                Save Selected Effect as Preset
+              </button>
+              {presetSaveError && (
+                <p className="text-xs text-red-400" data-testid="inspector-preset-error">
+                  {presetSaveError}
+                </p>
+              )}
+            </div>
+          )}
         </div>
+
+        <SaveEffectPresetDialog
+          isOpen={presetSaveTarget !== null}
+          effect={presetSaveTarget}
+          saving={isSavingPreset}
+          error={presetSaveError}
+          onConfirm={(name, description) => {
+            void handleConfirmSavePreset(name, description);
+          }}
+          onCancel={handleCloseSavePreset}
+        />
       </div>
     );
   }

@@ -10,7 +10,7 @@
  */
 
 import { memo, useCallback, useRef, useEffect, useState } from 'react';
-import { Sparkles, Trash2, RotateCcw, Music, Key } from 'lucide-react';
+import { Sparkles, Trash2, RotateCcw, Music, Key, Save } from 'lucide-react';
 import type { Effect, EffectId, ParamDef, SimpleParamValue, Keyframe } from '@/types';
 import { EFFECT_TYPE_LABELS, isAudioEffect } from '@/types';
 import { ParameterEditor } from './ParameterEditor';
@@ -70,6 +70,8 @@ export interface EffectInspectorProps {
   onDelete?: (effectId: EffectId) => void;
   /** Callback when keyframes change */
   onKeyframesChange?: (effectId: EffectId, paramName: string, keyframes: Keyframe[]) => void;
+  /** Callback when user wants to save effect as preset */
+  onSaveAsPreset?: (effect: Effect) => void;
   /** Whether to show keyframe editing UI */
   showKeyframes?: boolean;
   /** Current playhead time in seconds (for keyframe positioning) */
@@ -232,6 +234,7 @@ export const EffectInspector = memo(function EffectInspector({
   onToggle,
   onDelete,
   onKeyframesChange,
+  onSaveAsPreset,
   showKeyframes = false,
   currentTime = 0,
   duration = 10,
@@ -317,6 +320,12 @@ export const EffectInspector = memo(function EffectInspector({
     if (!effectId || !onDelete) return;
     onDelete(effectId);
   }, [effectId, onDelete]);
+
+  // Handle save as preset
+  const handleSaveAsPreset = useCallback(() => {
+    if (!effect || !onSaveAsPreset) return;
+    onSaveAsPreset(effect);
+  }, [effect, onSaveAsPreset]);
 
   // Handle reset to defaults
   const handleReset = useCallback(() => {
@@ -526,17 +535,32 @@ export const EffectInspector = memo(function EffectInspector({
           Reset
         </button>
 
-        {onDelete && !readOnly && (
-          <button
-            type="button"
-            onClick={handleDelete}
-            aria-label="Delete effect"
-            className="flex items-center gap-1 px-2 py-1 text-xs text-red-400 hover:text-red-300 rounded transition-colors"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-            Delete
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {onSaveAsPreset && !readOnly && (
+            <button
+              type="button"
+              onClick={handleSaveAsPreset}
+              aria-label="Save effect as preset"
+              className="flex items-center gap-1 px-2 py-1 text-xs text-blue-400 hover:text-blue-300 rounded transition-colors"
+              data-testid="save-as-preset-btn"
+            >
+              <Save className="w-3.5 h-3.5" />
+              Save Preset
+            </button>
+          )}
+
+          {onDelete && !readOnly && (
+            <button
+              type="button"
+              onClick={handleDelete}
+              aria-label="Delete effect"
+              className="flex items-center gap-1 px-2 py-1 text-xs text-red-400 hover:text-red-300 rounded transition-colors"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Delete
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
