@@ -9,7 +9,7 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import type { Asset, Sequence } from '@/types';
+import type { Asset, Effect, Sequence } from '@/types';
 
 /**
  * Raw project state returned from the backend.
@@ -17,6 +17,7 @@ import type { Asset, Sequence } from '@/types';
 export interface BackendProjectState {
   assets: Asset[];
   sequences: Sequence[];
+  effects?: Effect[];
   activeSequenceId: string | null;
 }
 
@@ -26,12 +27,14 @@ export interface BackendProjectState {
 export interface TransformedProjectState {
   assets: Map<string, Asset>;
   sequences: Map<string, Sequence>;
+  effects?: Map<string, Effect>;
   activeSequenceId: string | null;
 }
 
 interface ProjectStateDraftLike {
   assets: Map<string, Asset>;
   sequences: Map<string, Sequence>;
+  effects: Map<string, Effect>;
   activeSequenceId: string | null;
   sequenceNavigationStack?: string[];
 }
@@ -104,9 +107,15 @@ export function transformProjectState(state: BackendProjectState): TransformedPr
     sequences.set(sequence.id, sequence);
   }
 
+  const effects = new Map<string, Effect>();
+  for (const effect of state.effects ?? []) {
+    effects.set(effect.id, effect);
+  }
+
   return {
     assets,
     sequences,
+    effects,
     activeSequenceId: state.activeSequenceId,
   };
 }
@@ -154,6 +163,7 @@ export function applyProjectState(
 
   draft.assets = state.assets;
   draft.sequences = state.sequences;
+  draft.effects = state.effects ?? new Map<string, Effect>();
 
   if (Array.isArray(draft.sequenceNavigationStack)) {
     const resolvedNavigationState = resolveSequenceNavigationState(

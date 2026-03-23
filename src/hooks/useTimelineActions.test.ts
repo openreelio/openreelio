@@ -10,6 +10,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { useTimelineActions } from './useTimelineActions';
 import { useProjectStore } from '@/stores';
 import { _resetCommandQueueForTesting } from '@/stores/projectStore';
+import { useEditorToolStore } from '@/stores/editorToolStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { probeMedia } from '@/utils/ffmpeg';
 import type { Sequence, Track, Clip, Asset } from '@/types';
@@ -169,11 +170,13 @@ describe('useTimelineActions', () => {
       meta: null,
       assets: new Map(),
       sequences: new Map(),
+      effects: new Map(),
       activeSequenceId: null,
       selectedAssetId: null,
       error: null,
       stateVersion: 0,
     });
+    useEditorToolStore.setState({ effectsClipboard: null });
   });
 
   // ===========================================================================
@@ -3777,6 +3780,122 @@ describe('useTimelineActions', () => {
       // Command was attempted
       expect(mockedInvoke).toHaveBeenCalledWith('three_point_insert', expect.any(Object));
       expect(useProjectStore.getState().error).toContain('No asset loaded in source monitor');
+    });
+  });
+
+  describe('effect paste target filtering', () => {
+    it('should skip locked clips when pasting effects and keep valid targets', async () => {
+      const unlockedClip = createMockClip({ id: 'clip_unlocked' });
+      const lockedClip = createMockClip({ id: 'clip_locked' });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [
+          createMockTrack({ id: 'track_open', clips: [unlockedClip] }),
+          createMockTrack({ id: 'track_locked', locked: true, clips: [lockedClip] }),
+        ],
+      });
+
+      useEditorToolStore.setState({
+        effectsClipboard: {
+          sourceClipId: 'clip_source',
+          effects: [{ id: 'eff-1', effectType: 'brightness', enabled: true, params: {}, keyframes: {}, order: 0 }],
+          transform: {
+            position: { x: 0, y: 0 },
+            scale: { x: 1, y: 1 },
+            rotationDeg: 0,
+            anchor: { x: 0.5, y: 0.5 },
+          },
+          opacity: 1,
+          blendMode: 'normal',
+          speed: 1,
+          reverse: false,
+          audio: { volumeDb: 0, pan: 0, muted: false },
+        } satisfies import('@/types').CopiedClipData,
+      });
+
+      mockedInvoke.mockImplementation((cmd: string) => {
+        if (cmd === 'execute_command') {
+          return Promise.resolve({
+            opId: 'op_001',
+            createdIds: [],
+            deletedIds: [],
+          });
+        }
+        if (cmd === 'get_project_state') {
+          return Promise.resolve({
+            assets: [],
+            sequences: [sequence],
+            effects: [],
+            activeSequenceId: 'seq_001',
+          });
+        }
+        return Promise.reject(new Error(`Unhandled: ${cmd}`));
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handlePasteEffects(['clip_unlocked', 'clip_locked', 'clip_unlocked']);
+      });
+
+      expect(mockedInvoke).toHaveBeenCalledWith('execute_command', {
+        commandType: 'PasteEffects',
+        payload: {
+          sequenceId: 'seq_001',
+          targetClips: [{ trackId: 'track_open', clipId: 'clip_unlocked' }],
+          sourceEffects: [
+            {
+              id: 'eff-1',
+              effectType: 'brightness',
+              enabled: true,
+              params: {},
+              keyframes: {},
+              order: 0,
+            },
+          ],
+        },
+      });
+    });
+
+    it('should not execute paste attributes when every selected target is on a locked track', async () => {
+      const lockedClip = createMockClip({ id: 'clip_locked' });
+      const sequence = createMockSequence({
+        id: 'seq_001',
+        tracks: [createMockTrack({ id: 'track_locked', locked: true, clips: [lockedClip] })],
+      });
+
+      useEditorToolStore.setState({
+        effectsClipboard: {
+          sourceClipId: 'clip_source',
+          effects: [],
+          transform: {
+            position: { x: 0, y: 0 },
+            scale: { x: 1, y: 1 },
+            rotationDeg: 0,
+            anchor: { x: 0.5, y: 0.5 },
+          },
+          opacity: 0.5,
+          blendMode: 'normal',
+          speed: 1.25,
+          reverse: false,
+          audio: { volumeDb: -3, pan: 0, muted: false },
+        } satisfies import('@/types').CopiedClipData,
+      });
+
+      const { result } = renderHook(() => useTimelineActions({ sequence }));
+
+      await act(async () => {
+        await result.current.handlePasteAttributes(['clip_locked'], {
+          effectIndices: [],
+          transform: true,
+          opacity: true,
+          blendMode: false,
+          speed: false,
+          audioSettings: false,
+        });
+      });
+
+      expect(mockedInvoke).not.toHaveBeenCalledWith('execute_command', expect.anything());
     });
   });
 });

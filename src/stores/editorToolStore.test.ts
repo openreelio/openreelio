@@ -68,3 +68,69 @@ describe('editorToolStore — editMode', () => {
     expect(useEditorToolStore.getState().editMode).toBe('overwrite');
   });
 });
+
+describe('editorToolStore — effectsClipboard', () => {
+  beforeEach(() => {
+    act(() => {
+      useEditorToolStore.getState().reset();
+    });
+  });
+
+  it('should store copied clip effects data', () => {
+    const clipboardData: import('@/types').CopiedClipData = {
+      sourceClipId: 'clip-1',
+      effects: [
+        {
+          id: 'eff-1',
+          effectType: 'brightness',
+          enabled: true,
+          params: { value: 0.5 },
+          keyframes: {},
+          order: 0,
+        },
+      ],
+      transform: {
+        position: { x: 0.5, y: 0.5 },
+        scale: { x: 1, y: 1 },
+        rotationDeg: 0,
+        anchor: { x: 0.5, y: 0.5 },
+      },
+      opacity: 0.8,
+      blendMode: 'normal',
+      speed: 1,
+      reverse: false,
+      audio: { volumeDb: 0, pan: 0, muted: false },
+    };
+
+    act(() => {
+      useEditorToolStore.getState().setEffectsClipboard(clipboardData);
+    });
+
+    expect(useEditorToolStore.getState().getEffectsClipboard()).toEqual(clipboardData);
+  });
+
+  it('should clear copied clip effects data', () => {
+    const clipboardData: import('@/types').CopiedClipData = {
+      sourceClipId: 'clip-1',
+      effects: [],
+      transform: {
+        position: { x: 0, y: 0 },
+        scale: { x: 1, y: 1 },
+        rotationDeg: 0,
+        anchor: { x: 0.5, y: 0.5 },
+      },
+      opacity: 1,
+      blendMode: 'normal',
+      speed: 1,
+      reverse: false,
+      audio: { volumeDb: 0, pan: 0, muted: false },
+    };
+
+    act(() => {
+      useEditorToolStore.getState().setEffectsClipboard(clipboardData);
+      useEditorToolStore.getState().clearEffectsClipboard();
+    });
+
+    expect(useEditorToolStore.getState().getEffectsClipboard()).toBeNull();
+  });
+});

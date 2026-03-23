@@ -569,3 +569,70 @@ pub async fn create_adjustment_layer(
         deleted_ids: result.deleted_ids,
     })
 }
+
+// =============================================================================
+// Effect Copy/Paste Operations
+// =============================================================================
+
+/// Copies all effects and pasteable attributes from a clip.
+///
+/// Returns a JSON blob containing the clip's effects (deep clones) and
+/// pasteable attributes (transform, opacity, blend mode, speed, audio).
+/// This is a read-only operation; the frontend stores the result in its clipboard.
+#[tauri::command]
+#[specta::specta]
+#[tracing::instrument(skip(state))]
+pub async fn copy_clip_effects(
+    sequence_id: String,
+    track_id: String,
+    clip_id: String,
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    let guard = state.project.lock().await;
+
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let sequence = project
+        .state
+        .sequences
+        .get(&sequence_id)
+        .ok_or_else(|| CoreError::SequenceNotFound(sequence_id.clone()).to_ipc_error())?;
+
+    let track = sequence
+        .tracks
+        .iter()
+        .find(|t| t.id == track_id)
+        .ok_or_else(|| CoreError::TrackNotFound(track_id.clone()).to_ipc_error())?;
+
+    let clip = track
+        .clips
+        .iter()
+        .find(|c| c.id == clip_id)
+        .ok_or_else(|| CoreError::ClipNotFound(clip_id.clone()).to_ipc_error())?;
+
+    // Deep-clone all effects referenced by this clip
+    let effects: Vec<serde_json::Value> = clip
+        .effects
+        .iter()
+        .filter_map(|eid| {
+            project
+                .state
+                .effects
+                .get(eid)
+                .and_then(|e| serde_json::to_value(e).ok())
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "sourceClipId": clip.id,
+        "effects": effects,
+        "transform": serde_json::to_value(&clip.transform).map_err(|e| e.to_string())?,
+        "opacity": clip.opacity,
+        "blendMode": serde_json::to_value(&clip.blend_mode).map_err(|e| e.to_string())?,
+        "speed": clip.speed,
+        "reverse": clip.reverse,
+        "audio": serde_json::to_value(&clip.audio).map_err(|e| e.to_string())?,
+    }))
+}

@@ -967,6 +967,13 @@ mod tauri_app {
                 $crate::ipc::unnest_compound_clip,
                 // Adjustment layer
                 $crate::ipc::create_adjustment_layer,
+                // Effect copy/paste
+                $crate::ipc::copy_clip_effects,
+                // Effect presets
+                $crate::ipc::save_effect_preset,
+                $crate::ipc::load_effect_preset,
+                $crate::ipc::list_effect_presets,
+                $crate::ipc::delete_effect_preset,
             ]
         };
     }
@@ -1347,6 +1354,13 @@ mod tauri_app {
             ipc::unnest_compound_clip,
             // Adjustment layer
             ipc::create_adjustment_layer,
+            // Effect copy/paste
+            ipc::copy_clip_effects,
+            // Effect presets
+            ipc::save_effect_preset,
+            ipc::load_effect_preset,
+            ipc::list_effect_presets,
+            ipc::delete_effect_preset,
         ])
         .run(tauri::generate_context!());
 

@@ -1681,6 +1681,66 @@ async createAdjustmentLayer(args: CreateAdjustmentLayerArgs) : Promise<Result<Co
 } catch (e) {
     return { status: "error", error: e  as any };
 }
+},
+/**
+ * Copies all effects and pasteable attributes from a clip.
+ * 
+ * Returns a JSON blob containing the clip's effects (deep clones) and
+ * pasteable attributes (transform, opacity, blend mode, speed, audio).
+ * This is a read-only operation; the frontend stores the result in its clipboard.
+ */
+async copyClipEffects(sequenceId: string, trackId: string, clipId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("copy_clip_effects", { sequenceId, trackId, clipId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Saves an effect's parameters as a reusable preset.
+ * 
+ * Returns the full saved preset including generated ID and timestamps.
+ */
+async saveEffectPreset(name: string, description: string | null, effectType: JsonValue, params: JsonValue, keyframes: JsonValue | null) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("save_effect_preset", { name, description, effectType, params, keyframes }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Loads a single effect preset by ID.
+ * 
+ * Returns the full preset including parameters and keyframes.
+ */
+async loadEffectPreset(presetId: string) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("load_effect_preset", { presetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Lists all saved effect presets as lightweight summaries.
+ * 
+ * Returns presets sorted alphabetically by name.
+ */
+async listEffectPresets() : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_effect_presets") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Deletes an effect preset by ID.
+ */
+async deleteEffectPreset(presetId: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_effect_preset", { presetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -3789,6 +3849,10 @@ assets: Asset[];
  * All sequences in the project
  */
 sequences: Sequence[]; 
+/**
+ * All effects in the project registry
+ */
+effects: JsonValue[]; 
 /**
  * Currently active sequence ID
  */
