@@ -168,6 +168,8 @@ pub struct ProjectStateDto {
     pub assets: Vec<crate::core::assets::Asset>,
     /// All sequences in the project
     pub sequences: Vec<crate::core::timeline::Sequence>,
+    /// All effects in the project registry
+    pub effects: Vec<serde_json::Value>,
     /// Currently active sequence ID
     pub active_sequence_id: Option<String>,
     /// Resolved text clip payloads (clipId -> TextClipData)
@@ -704,6 +706,14 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<ProjectStat
         })
         .collect();
 
+    let effects = project
+        .state
+        .effects
+        .values()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
     Ok(ProjectStateDto {
         meta: ProjectMetaDto {
             name: project.state.meta.name.clone(),
@@ -715,6 +725,7 @@ pub async fn get_project_state(state: State<'_, AppState>) -> Result<ProjectStat
         },
         assets: project.state.assets.values().cloned().collect(),
         sequences: project.state.sequences.values().cloned().collect(),
+        effects,
         active_sequence_id: project.state.active_sequence_id.clone(),
         text_clips,
         is_dirty: project.state.is_dirty,

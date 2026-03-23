@@ -776,7 +776,10 @@ pub async fn apply_edit_script(
         ToggleTrackVisibilityCommand, TrimClipCommand, UngroupClipsCommand, UnlinkClipsCommand,
         UnnestCompoundClipCommand, UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
     };
-    use crate::core::commands::{CreateAdjustmentLayerCommand, CreateCompoundClipCommand};
+    use crate::core::commands::{
+        CreateAdjustmentLayerCommand, CreateCompoundClipCommand, PasteAttributesCommand,
+        PasteEffectsCommand, RemoveAttributesCommand,
+    };
 
     let mut guard = state.project.lock().await;
 
@@ -1389,6 +1392,42 @@ pub async fn apply_edit_script(
                 if let Some(name) = p.name {
                     cmd = cmd.with_name(&name);
                 }
+                Box::new(cmd)
+            }
+            CommandPayload::PasteEffects(p) => {
+                let target_clips: Vec<(String, String)> = p
+                    .target_clips
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect();
+                Box::new(PasteEffectsCommand::new(
+                    p.sequence_id,
+                    target_clips,
+                    p.source_effects,
+                ))
+            }
+            CommandPayload::PasteAttributes(p) => {
+                let target_clips: Vec<(String, String)> = p
+                    .target_clips
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect();
+                Box::new(PasteAttributesCommand::new(
+                    p.sequence_id,
+                    target_clips,
+                    p.source_effects,
+                    p.source_attributes,
+                    p.selection,
+                ))
+            }
+            CommandPayload::RemoveAttributes(p) => {
+                let cmd = RemoveAttributesCommand::new(p.sequence_id, p.track_id, p.clip_id)
+                    .with_effect_ids(p.effect_ids)
+                    .with_reset_transform(p.reset_transform)
+                    .with_reset_opacity(p.reset_opacity)
+                    .with_reset_blend_mode(p.reset_blend_mode)
+                    .with_reset_speed(p.reset_speed)
+                    .with_reset_audio(p.reset_audio);
                 Box::new(cmd)
             }
         };

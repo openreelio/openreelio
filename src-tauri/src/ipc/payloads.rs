@@ -608,6 +608,58 @@ pub struct UpdateEffectPayload {
 }
 
 // =============================================================================
+// Effect Copy/Paste Payloads
+// =============================================================================
+
+/// Payload for pasting all copied effects onto target clips.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PasteEffectsPayload {
+    pub sequence_id: SequenceId,
+    /// Target clips to receive the pasted effects: [{trackId, clipId}]
+    pub target_clips: Vec<ClipRef>,
+    /// Serialized source effects (from copy_clip_effects IPC result)
+    pub source_effects: Vec<serde_json::Value>,
+}
+
+/// Payload for selective paste of effects and attributes.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PasteAttributesPayload {
+    pub sequence_id: SequenceId,
+    pub target_clips: Vec<ClipRef>,
+    /// All source effects (from copy_clip_effects IPC result)
+    pub source_effects: Vec<serde_json::Value>,
+    /// Source clip attributes (from copy_clip_effects IPC result)
+    pub source_attributes: crate::core::commands::ClipAttributeValues,
+    /// Which effects and attributes to paste
+    pub selection: crate::core::commands::AttributeSelection,
+}
+
+/// Payload for removing effects and/or resetting attributes on a clip.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RemoveAttributesPayload {
+    pub sequence_id: SequenceId,
+    pub track_id: TrackId,
+    pub clip_id: ClipId,
+    /// Effect IDs to remove
+    #[serde(default)]
+    pub effect_ids: Vec<EffectId>,
+    /// Which attributes to reset to defaults
+    #[serde(default)]
+    pub reset_transform: bool,
+    #[serde(default)]
+    pub reset_opacity: bool,
+    #[serde(default)]
+    pub reset_blend_mode: bool,
+    #[serde(default)]
+    pub reset_speed: bool,
+    #[serde(default)]
+    pub reset_audio: bool,
+}
+
+// =============================================================================
 // Mask Payloads
 // =============================================================================
 
@@ -1145,6 +1197,15 @@ pub enum CommandPayload {
 
     #[serde(alias = "createAdjustmentLayer", alias = "CreateAdjustmentLayer")]
     CreateAdjustmentLayer(CreateAdjustmentLayerPayload),
+
+    #[serde(alias = "pasteEffects", alias = "PasteEffects")]
+    PasteEffects(PasteEffectsPayload),
+
+    #[serde(alias = "pasteAttributes", alias = "PasteAttributes")]
+    PasteAttributes(PasteAttributesPayload),
+
+    #[serde(alias = "removeAttributes", alias = "RemoveAttributes")]
+    RemoveAttributes(RemoveAttributesPayload),
 }
 
 impl CommandPayload {
@@ -1218,7 +1279,10 @@ impl CommandPayload {
             UpdateEffectCommand, UpdateMaskCommand, UpdateTextCommand,
         };
 
-        use crate::core::commands::{CreateAdjustmentLayerCommand, CreateCompoundClipCommand};
+        use crate::core::commands::{
+            CreateAdjustmentLayerCommand, CreateCompoundClipCommand, PasteAttributesCommand,
+            PasteEffectsCommand, RemoveAttributesCommand,
+        };
 
         match self {
             CommandPayload::InsertClip(p) => {
@@ -1672,6 +1736,42 @@ impl CommandPayload {
                 if let Some(name) = p.name {
                     cmd = cmd.with_name(&name);
                 }
+                Box::new(cmd)
+            }
+            CommandPayload::PasteEffects(p) => {
+                let target_clips: Vec<(String, String)> = p
+                    .target_clips
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect();
+                Box::new(PasteEffectsCommand::new(
+                    p.sequence_id,
+                    target_clips,
+                    p.source_effects,
+                ))
+            }
+            CommandPayload::PasteAttributes(p) => {
+                let target_clips: Vec<(String, String)> = p
+                    .target_clips
+                    .into_iter()
+                    .map(|r| (r.track_id, r.clip_id))
+                    .collect();
+                Box::new(PasteAttributesCommand::new(
+                    p.sequence_id,
+                    target_clips,
+                    p.source_effects,
+                    p.source_attributes,
+                    p.selection,
+                ))
+            }
+            CommandPayload::RemoveAttributes(p) => {
+                let cmd = RemoveAttributesCommand::new(p.sequence_id, p.track_id, p.clip_id)
+                    .with_effect_ids(p.effect_ids)
+                    .with_reset_transform(p.reset_transform)
+                    .with_reset_opacity(p.reset_opacity)
+                    .with_reset_blend_mode(p.reset_blend_mode)
+                    .with_reset_speed(p.reset_speed)
+                    .with_reset_audio(p.reset_audio);
                 Box::new(cmd)
             }
         }

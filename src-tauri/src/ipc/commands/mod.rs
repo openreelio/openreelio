@@ -60,6 +60,9 @@ pub mod analysis;
 // Source monitor commands (dual-viewer, In/Out points, 3-point editing)
 pub mod source_monitor;
 
+// Effect preset commands (save/load/list/delete presets)
+pub mod effect_presets;
+
 // Agent commands (trace writing, plan execution, memory persistence)
 pub mod agent;
 
@@ -88,6 +91,9 @@ pub use analysis::*;
 
 // Re-export source monitor commands
 pub use source_monitor::*;
+
+// Re-export effect preset commands
+pub use effect_presets::*;
 
 // Re-export agent commands
 pub use agent::*;
