@@ -4,10 +4,12 @@
  * Tests for the timeline track component.
  */
 
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { Track } from './Track';
 import type { Track as TrackType, Clip as ClipType } from '@/types';
+import { useEditorToolStore } from '@/stores/editorToolStore';
+import { useProjectStore } from '@/stores/projectStore';
 
 // =============================================================================
 // Test Data
@@ -117,6 +119,17 @@ const adjacentClips: ClipType[] = [
 // =============================================================================
 
 describe('Track', () => {
+  beforeEach(() => {
+    act(() => {
+      useEditorToolStore.getState().reset();
+      useProjectStore.setState({ effects: new Map() });
+    });
+  });
+
+  afterEach(() => {
+    cleanup();
+  });
+
   // ===========================================================================
   // Rendering Tests
   // ===========================================================================
@@ -271,6 +284,124 @@ describe('Track', () => {
       fireEvent.click(await screen.findByRole('button', { name: 'Nest' }));
 
       expect(onCreateCompoundClip).toHaveBeenCalledWith(['clip_001'], 'track_001');
+    });
+
+    it('should call onCopyEffects when selected from the clip context menu', async () => {
+      const onCopyEffects = vi.fn();
+
+      render(
+        <Track
+          track={mockTrack}
+          clips={mockClips}
+          zoom={100}
+          viewportWidth={3000}
+          onCopyEffects={onCopyEffects}
+        />,
+      );
+
+      fireEvent.contextMenu(screen.getByTestId('clip-clip_001'));
+      fireEvent.click(await screen.findByRole('button', { name: /copy effects/i }));
+
+      expect(onCopyEffects).toHaveBeenCalledWith('clip_001', 'track_001');
+    });
+
+    it('should paste effects only to the context clip when it is not part of the selection', async () => {
+      const onPasteEffects = vi.fn();
+
+      act(() => {
+        useEditorToolStore.getState().setEffectsClipboard({
+          sourceClipId: 'clip-source',
+          effects: [
+            {
+              id: 'eff-clipboard',
+              effectType: 'brightness',
+              enabled: true,
+              params: {},
+              keyframes: {},
+              order: 0,
+            },
+          ],
+          transform: {
+            position: { x: 0, y: 0 },
+            scale: { x: 1, y: 1 },
+            rotationDeg: 0,
+            anchor: { x: 0.5, y: 0.5 },
+          },
+          opacity: 1,
+          blendMode: 'normal',
+          speed: 1,
+          reverse: false,
+          audio: { volumeDb: 0, pan: 0, muted: false },
+        });
+      });
+
+      render(
+        <Track
+          track={mockTrack}
+          clips={mockClips}
+          zoom={100}
+          viewportWidth={3000}
+          selectedClipIds={['clip_002']}
+          onPasteEffects={onPasteEffects}
+        />,
+      );
+
+      fireEvent.contextMenu(screen.getByTestId('clip-clip_001'));
+      fireEvent.click(await screen.findByRole('button', { name: /paste effects/i }));
+
+      expect(onPasteEffects).toHaveBeenCalledWith(['clip_001']);
+    });
+
+    it('should remove selected attributes through the clip dialog', async () => {
+      const onRemoveAttributes = vi.fn();
+      const clipsWithEffects = [
+        {
+          ...mockClips[0],
+          effects: ['effect-1'],
+        },
+      ];
+
+      act(() => {
+        useProjectStore.setState({
+          effects: new Map([
+            [
+              'effect-1',
+              {
+                id: 'effect-1',
+                effectType: 'brightness',
+                enabled: true,
+                params: {},
+                keyframes: {},
+                order: 0,
+              },
+            ],
+          ]),
+        });
+      });
+
+      render(
+        <Track
+          track={mockTrack}
+          clips={clipsWithEffects}
+          zoom={100}
+          viewportWidth={3000}
+          onRemoveAttributes={onRemoveAttributes}
+        />,
+      );
+
+      fireEvent.contextMenu(screen.getByTestId('clip-clip_001'));
+      fireEvent.click(await screen.findByRole('button', { name: 'Remove Attributes...' }));
+      fireEvent.click(screen.getByLabelText('Brightness'));
+      fireEvent.click(screen.getByLabelText('Opacity'));
+      fireEvent.click(screen.getByRole('button', { name: 'Remove' }));
+
+      expect(onRemoveAttributes).toHaveBeenCalledWith('clip_001', 'track_001', ['effect-1'], {
+        resetTransform: false,
+        resetOpacity: true,
+        resetBlendMode: false,
+        resetSpeed: false,
+        resetAudio: false,
+      });
     });
   });
 

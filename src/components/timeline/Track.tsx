@@ -18,11 +18,21 @@ import {
   VolumeX,
   type LucideIcon,
 } from 'lucide-react';
-import type { Track as TrackType, Clip as ClipType, TrackKind, SnapPoint } from '@/types';
+import {
+  EFFECT_TYPE_LABELS,
+  type AttributeSelection,
+  type Clip as ClipType,
+  type Effect,
+  type SnapPoint,
+  type Track as TrackType,
+  type TrackKind,
+} from '@/types';
 import { useVirtualizedClips } from '@/hooks/useVirtualizedClips';
 import { useTransitionZones } from '@/hooks/useTransitionZones';
 import { ContextMenu, type MenuItemOrDivider } from '@/components/ui';
 import type { TrackSwapTarget } from '@/utils/trackReorder';
+import { useEditorToolStore } from '@/stores/editorToolStore';
+import { useProjectStore } from '@/stores/projectStore';
 import {
   Clip,
   type ClipDragData,
@@ -37,6 +47,7 @@ import { useTimelineOperations } from './TimelineOperationsContext';
 import type { DropValidity } from '@/utils/dropValidity';
 import { TRACK_HEIGHT } from './constants';
 import { getTrackHeaderControls } from './trackHeaderControls';
+import { PasteAttributesDialog, RemoveAttributesDialog } from '@/components/features/effects';
 
 // =============================================================================
 // Types
@@ -143,6 +154,25 @@ interface TrackProps {
   onClipUngroup?: (clipRefs: Array<{ trackId: string; clipId: string }>) => void;
   /** Resolve the full clip group for a clip */
   resolveGroupClipRefs?: (clipId: string) => Array<{ trackId: string; clipId: string }>;
+  /** Copy effects from clip to clipboard */
+  onCopyEffects?: (clipId: string, trackId: string) => void;
+  /** Paste effects from clipboard to clips */
+  onPasteEffects?: (clipIds: string[]) => void;
+  /** Paste selected effects and clip attributes from the clipboard */
+  onPasteAttributes?: (clipIds: string[], selection: AttributeSelection) => void;
+  /** Remove selected effects and reset clip attributes */
+  onRemoveAttributes?: (
+    clipId: string,
+    trackId: string,
+    effectIds: string[],
+    resetFlags: {
+      resetTransform?: boolean;
+      resetOpacity?: boolean;
+      resetBlendMode?: boolean;
+      resetSpeed?: boolean;
+      resetAudio?: boolean;
+    },
+  ) => void;
 }
 
 // =============================================================================
@@ -169,6 +199,18 @@ const VIRTUALIZATION_BUFFER_PX = 300;
 /** Empty array constants for stable references (prevents re-renders from new array allocations) */
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_SNAP_POINTS: SnapPoint[] = [];
+
+function getEffectLabel(effect: Effect | undefined, fallbackId: string): string {
+  if (!effect) {
+    return fallbackId;
+  }
+
+  if (typeof effect.effectType === 'object' && 'custom' in effect.effectType) {
+    return effect.effectType.custom;
+  }
+
+  return EFFECT_TYPE_LABELS[effect.effectType] ?? effect.effectType;
+}
 
 // =============================================================================
 // Component
@@ -221,12 +263,24 @@ export function Track({
   onClipGroup,
   onClipUngroup,
   resolveGroupClipRefs,
+  onCopyEffects,
+  onPasteEffects,
+  onPasteAttributes,
+  onRemoveAttributes,
 }: TrackProps) {
   // Ref for measuring viewport width if not provided
   const contentRef = useRef<HTMLDivElement>(null);
   const [contextMenuPosition, setContextMenuPosition] = useState<{ x: number; y: number } | null>(
     null,
   );
+  const effectsClipboard = useEditorToolStore((state) => state.effectsClipboard);
+  const projectEffects = useProjectStore((state) => state.effects);
+  const [pasteAttributesContext, setPasteAttributesContext] = useState<{
+    clipIds: string[];
+  } | null>(null);
+  const [removeAttributesContext, setRemoveAttributesContext] = useState<{
+    clipId: string;
+  } | null>(null);
 
   // Calculate actual viewport width (use provided or measure from ref)
   const actualViewportWidth =
@@ -249,6 +303,28 @@ export function Track({
     clips.forEach((clip) => map.set(clip.id, clip));
     return map;
   }, [clips]);
+
+  const resolveEffectTargetClipIds = useCallback(
+    (clipId: string): string[] =>
+      selectedClipIds.includes(clipId) ? selectedClipIds : [clipId],
+    [selectedClipIds],
+  );
+
+  const removeDialogClipEffects = useMemo(() => {
+    if (!removeAttributesContext) {
+      return [];
+    }
+
+    const clip = clips.find((candidate) => candidate.id === removeAttributesContext.clipId);
+    if (!clip) {
+      return [];
+    }
+
+    return clip.effects.map((effectId) => ({
+      id: effectId,
+      label: getEffectLabel(projectEffects.get(effectId), effectId),
+    }));
+  }, [clips, projectEffects, removeAttributesContext]);
 
   // Handle transition zone click
   const handleTransitionZoneClick = useCallback(
@@ -420,6 +496,46 @@ export function Track({
         disabled: !onClipUngroup || !isGrouped,
       },
       { type: 'divider' as const },
+      // Effect copy/paste (S31)
+      {
+        label: 'Copy Effects',
+        shortcut: 'Ctrl+Alt+C',
+        onClick: () => {
+          if (onCopyEffects && clipId) {
+            onCopyEffects(clipId, track.id);
+          }
+          setClipContextMenu(null);
+        },
+        disabled: !onCopyEffects || !clipId,
+      },
+      {
+        label: 'Paste Effects',
+        shortcut: 'Ctrl+Alt+V',
+        onClick: () => {
+          if (onPasteEffects) {
+            onPasteEffects(resolveEffectTargetClipIds(clipId));
+          }
+          setClipContextMenu(null);
+        },
+        disabled: !onPasteEffects || !effectsClipboard || effectsClipboard.effects.length === 0,
+      },
+      {
+        label: 'Paste Attributes...',
+        onClick: () => {
+          setPasteAttributesContext({ clipIds: resolveEffectTargetClipIds(clipId) });
+          setClipContextMenu(null);
+        },
+        disabled: !onPasteAttributes || !effectsClipboard,
+      },
+      {
+        label: 'Remove Attributes...',
+        onClick: () => {
+          setRemoveAttributesContext({ clipId });
+          setClipContextMenu(null);
+        },
+        disabled: !onRemoveAttributes,
+      },
+      { type: 'divider' as const },
       // Compound clip section (only for video/overlay tracks)
       ...(isVisualTrack
         ? [
@@ -493,6 +609,12 @@ export function Track({
     onClipGroup,
     onClipUngroup,
     resolveGroupClipRefs,
+    onCopyEffects,
+    onPasteEffects,
+    onPasteAttributes,
+    onRemoveAttributes,
+    effectsClipboard,
+    resolveEffectTargetClipIds,
   ]);
 
   const handleContentContextMenu = useCallback(
@@ -775,6 +897,36 @@ export function Track({
           y={clipContextMenu.y}
           items={clipContextMenuItems}
           onClose={() => setClipContextMenu(null)}
+        />
+      )}
+
+      {pasteAttributesContext && (
+        <PasteAttributesDialog
+          isOpen
+          clipboardData={effectsClipboard}
+          onConfirm={(selection) => {
+            onPasteAttributes?.(pasteAttributesContext.clipIds, selection);
+            setPasteAttributesContext(null);
+          }}
+          onCancel={() => setPasteAttributesContext(null)}
+        />
+      )}
+
+      {removeAttributesContext && (
+        <RemoveAttributesDialog
+          isOpen
+          clipEffects={removeDialogClipEffects}
+          onConfirm={(result) => {
+            onRemoveAttributes?.(removeAttributesContext.clipId, track.id, result.effectIds, {
+              resetTransform: result.resetTransform,
+              resetOpacity: result.resetOpacity,
+              resetBlendMode: result.resetBlendMode,
+              resetSpeed: result.resetSpeed,
+              resetAudio: result.resetAudio,
+            });
+            setRemoveAttributesContext(null);
+          }}
+          onCancel={() => setRemoveAttributesContext(null)}
         />
       )}
     </>

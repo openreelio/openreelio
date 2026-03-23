@@ -56,7 +56,7 @@ import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { getSplitTargetsAtTime } from '@/utils/clipLinking';
 import { Terminal, Sliders, Sparkles, GitCompareArrows } from 'lucide-react';
-import type { BlendMode, Sequence, CaptionPosition, ClipId, TextClipData } from '@/types';
+import type { BlendMode, CaptionPosition, ClipId, Effect, Sequence, TextClipData } from '@/types';
 import type { AddTextPayload } from '@/components/features/text';
 import type { ChannelLevels } from '@/components/features/mixer';
 import type { MulticamGroup } from '@/utils/multicam';
@@ -147,7 +147,7 @@ function normalizeCaptionPositionValue(value: unknown): CaptionPosition | null {
 }
 
 export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps): JSX.Element {
-  const { selectedAssetId, assets, executeCommand } = useProjectStore();
+  const { selectedAssetId, assets, effects, executeCommand } = useProjectStore();
   const currentTime = usePlaybackStore((state) => state.currentTime);
   const { selectedClipIds, linkedSelectionEnabled } = useTimelineStore();
   const sequenceNavigationStack = useProjectStore((s) => s.sequenceNavigationStack);
@@ -389,6 +389,10 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     handleCreateAdjustmentLayer,
     handleGroupClips,
     handleUngroupClips,
+    handleCopyEffects,
+    handlePasteEffects,
+    handlePasteAttributes,
+    handleRemoveAttributes,
   } = useTimelineActions({ sequence });
 
   // Text clip operations
@@ -448,6 +452,30 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     });
   }, []);
 
+  const handleCopySelectedClipEffects = useCallback(() => {
+    if (!sequence || selectedClipIds.length !== 1) {
+      return;
+    }
+
+    const clipId = selectedClipIds[0];
+    const track = sequence.tracks.find((candidate) =>
+      candidate.clips.some((clip) => clip.id === clipId),
+    );
+    if (!track) {
+      return;
+    }
+
+    void handleCopyEffects(clipId, track.id);
+  }, [handleCopyEffects, selectedClipIds, sequence]);
+
+  const handlePasteEffectsToSelection = useCallback(() => {
+    if (selectedClipIds.length === 0) {
+      return;
+    }
+
+    void handlePasteEffects(selectedClipIds);
+  }, [handlePasteEffects, selectedClipIds]);
+
   // Global keyboard shortcuts
   useKeyboardShortcuts({
     enabled: true,
@@ -460,6 +488,8 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     onExport: () => setShowExportDialog(true),
     onMatchFrame: handleMatchFrame,
     onReverseMatchFrame: handleReverseMatchFrame,
+    onCopyEffects: handleCopySelectedClipEffects,
+    onPasteEffects: handlePasteEffectsToSelection,
     onToggleClipEnabled: () => {
       if (!sequence || selectedClipIds.length === 0) return;
       const promises: Promise<void>[] = [];
@@ -525,6 +555,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
           trackId: track.id,
           timelineInSec: clip.place.timelineInSec,
         },
+        effects: clip.effects
+          .map((effectId) => effects.get(effectId))
+          .filter((effect): effect is Effect => effect !== undefined),
         blendMode: clip.blendMode,
         speed: clip.speed,
         reverse: clip.reverse,
@@ -532,7 +565,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       };
     }
     return undefined;
-  }, [sequence, selectedClipIds, assets]);
+  }, [sequence, selectedClipIds, assets, effects]);
 
   // Blend mode operations
   const { setClipBlendMode } = useBlendMode();
@@ -987,6 +1020,10 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                       onCreateAdjustmentLayer={handleCreateAdjustmentLayer}
                       onClipGroup={handleGroupClips}
                       onClipUngroup={handleUngroupClips}
+                      onCopyEffects={handleCopyEffects}
+                      onPasteEffects={handlePasteEffects}
+                      onPasteAttributes={handlePasteAttributes}
+                      onRemoveAttributes={handleRemoveAttributes}
                       onClipDoubleClick={handleClipDoubleClick}
                     />
                   </TimelineErrorBoundary>

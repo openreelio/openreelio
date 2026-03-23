@@ -241,6 +241,10 @@ export function Timeline({
   onClipGroup,
   onClipUngroup,
   resolveGroupClipRefs,
+  onCopyEffects,
+  onPasteEffects,
+  onPasteAttributes,
+  onRemoveAttributes,
 }: TimelineProps) {
   // ===========================================================================
   // Store State - Using targeted selectors to minimize re-renders
@@ -2146,6 +2150,10 @@ export function Timeline({
                     onClipGroup={onClipGroup}
                     onClipUngroup={onClipUngroup}
                     resolveGroupClipRefs={effectiveResolveGroupClipRefs}
+                    onCopyEffects={onCopyEffects}
+                    onPasteEffects={onPasteEffects}
+                    onPasteAttributes={onPasteAttributes}
+                    onRemoveAttributes={onRemoveAttributes}
                   />
                 );
               })}

@@ -6,6 +6,7 @@
  */
 
 import type { Sequence, AssetKind, TextClipData } from '@/types';
+import type { AttributeSelection } from '@/types';
 import type { ClipboardClipData } from '@/stores/editorToolStore';
 
 // =============================================================================
@@ -341,6 +342,25 @@ export interface TimelineProps {
   onClipUngroup?: (clipRefs: Array<{ trackId: string; clipId: string }>) => void | Promise<void>;
   /** Resolve the full clip group for a clip */
   resolveGroupClipRefs?: (clipId: string) => Array<{ trackId: string; clipId: string }>;
+  /** Callback when effects should be copied from a clip */
+  onCopyEffects?: (clipId: string, trackId: string) => void | Promise<void>;
+  /** Callback when copied effects should be pasted to clips */
+  onPasteEffects?: (clipIds: string[]) => void | Promise<void>;
+  /** Callback when selected attributes should be pasted to clips */
+  onPasteAttributes?: (clipIds: string[], selection: AttributeSelection) => void | Promise<void>;
+  /** Callback when selected attributes/effects should be removed from a clip */
+  onRemoveAttributes?: (
+    clipId: string,
+    trackId: string,
+    effectIds: string[],
+    resetFlags: {
+      resetTransform?: boolean;
+      resetOpacity?: boolean;
+      resetBlendMode?: boolean;
+      resetSpeed?: boolean;
+      resetAudio?: boolean;
+    },
+  ) => void | Promise<void>;
 }
 
 // =============================================================================

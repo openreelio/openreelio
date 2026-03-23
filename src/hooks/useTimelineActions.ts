@@ -72,6 +72,7 @@ import {
   isProtectedBaseTrack,
   resolveTrackSwapTargetId,
 } from '@/utils/trackReorder';
+import { useEditorToolStore } from '@/stores/editorToolStore';
 
 const logger = createLogger('TimelineActions');
 
@@ -122,6 +123,24 @@ interface TimelineActions {
   handleCreateAdjustmentLayer: (trackId: string) => Promise<void>;
   handleGroupClips: (clipIds: string[]) => Promise<void>;
   handleUngroupClips: (clipRefs: Array<{ trackId: string; clipId: string }>) => Promise<void>;
+  handleCopyEffects: (clipId: string, trackId: string) => Promise<void>;
+  handlePasteEffects: (clipIds: string[]) => Promise<void>;
+  handlePasteAttributes: (
+    clipIds: string[],
+    selection: import('@/types').AttributeSelection,
+  ) => Promise<void>;
+  handleRemoveAttributes: (
+    clipId: string,
+    trackId: string,
+    effectIds: string[],
+    resetFlags: {
+      resetTransform?: boolean;
+      resetOpacity?: boolean;
+      resetBlendMode?: boolean;
+      resetSpeed?: boolean;
+      resetAudio?: boolean;
+    },
+  ) => Promise<void>;
 }
 
 type ExecuteTimelineCommand = (command: Command) => Promise<CommandResult>;
@@ -167,6 +186,16 @@ export interface PendingWorkspaceDropState {
   status: 'queued' | 'resolving' | 'inserting';
 }
 
+interface EffectPasteTarget {
+  trackId: string;
+  clipId: string;
+}
+
+interface ResolvedEffectPasteTargets {
+  targetClips: EffectPasteTarget[];
+  skippedLockedClipIds: string[];
+}
+
 function createWorkspaceDropId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
     return `workspace-drop-${crypto.randomUUID()}`;
@@ -200,6 +229,38 @@ function normalizeDurationSec(value: unknown): number | undefined {
   }
 
   return value;
+}
+
+function resolveUnlockedEffectPasteTargets(
+  sequence: Sequence,
+  clipIds: string[],
+): ResolvedEffectPasteTargets {
+  const targetClips: EffectPasteTarget[] = [];
+  const skippedLockedClipIds: string[] = [];
+  const visitedClipIds = new Set<string>();
+
+  for (const clipId of clipIds) {
+    if (visitedClipIds.has(clipId)) {
+      continue;
+    }
+    visitedClipIds.add(clipId);
+
+    const track = sequence.tracks.find((candidate) =>
+      candidate.clips.some((clip) => clip.id === clipId),
+    );
+    if (!track) {
+      continue;
+    }
+
+    if (track.locked) {
+      skippedLockedClipIds.push(clipId);
+      continue;
+    }
+
+    targetClips.push({ trackId: track.id, clipId });
+  }
+
+  return { targetClips, skippedLockedClipIds };
 }
 
 function normalizeOptionalTimeSec(value: unknown): number | undefined {
@@ -3105,6 +3166,152 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     [executeCommand, getCurrentSequence],
   );
 
+  // =========================================================================
+  // Effect Copy/Paste Handlers (S31)
+  // =========================================================================
+
+  const handleCopyEffects = useCallback(
+    async (clipId: string, trackId: string): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq) return;
+
+      try {
+        const data = await invoke<import('@/types').CopiedClipData>('copy_clip_effects', {
+          sequenceId: seq.id,
+          trackId,
+          clipId,
+        });
+        useEditorToolStore.getState().setEffectsClipboard(data);
+      } catch (err: unknown) {
+        logger.error('Failed to copy effects', err as Record<string, unknown>);
+      }
+    },
+    [getCurrentSequence],
+  );
+
+  const handlePasteEffects = useCallback(
+    async (clipIds: string[]): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq || clipIds.length === 0) return;
+
+      const clipboard = useEditorToolStore.getState().getEffectsClipboard();
+      if (!clipboard || clipboard.effects.length === 0) return;
+
+      const { targetClips, skippedLockedClipIds } = resolveUnlockedEffectPasteTargets(seq, clipIds);
+      if (skippedLockedClipIds.length > 0) {
+        logger.warn('Skipped locked clips while pasting effects', {
+          sequenceId: seq.id,
+          skippedClipIds: skippedLockedClipIds,
+        });
+        useToastStore.getState().addToast({
+          message:
+            skippedLockedClipIds.length === clipIds.length
+              ? 'Cannot paste effects to locked clips.'
+              : `Skipped ${skippedLockedClipIds.length} locked clip${skippedLockedClipIds.length === 1 ? '' : 's'} while pasting effects.`,
+          variant: 'warning',
+        });
+      }
+      if (targetClips.length === 0) return;
+
+      try {
+        await executeCommand({
+          type: 'PasteEffects',
+          payload: {
+            sequenceId: seq.id,
+            targetClips,
+            sourceEffects: clipboard.effects,
+          },
+        });
+      } catch (err: unknown) {
+        logger.error('Failed to paste effects', err as Record<string, unknown>);
+      }
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
+  const handlePasteAttributes = useCallback(
+    async (clipIds: string[], selection: import('@/types').AttributeSelection): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq || clipIds.length === 0) return;
+
+      const clipboard = useEditorToolStore.getState().getEffectsClipboard();
+      if (!clipboard) return;
+
+      const { targetClips, skippedLockedClipIds } = resolveUnlockedEffectPasteTargets(seq, clipIds);
+      if (skippedLockedClipIds.length > 0) {
+        logger.warn('Skipped locked clips while pasting attributes', {
+          sequenceId: seq.id,
+          skippedClipIds: skippedLockedClipIds,
+        });
+        useToastStore.getState().addToast({
+          message:
+            skippedLockedClipIds.length === clipIds.length
+              ? 'Cannot paste attributes to locked clips.'
+              : `Skipped ${skippedLockedClipIds.length} locked clip${skippedLockedClipIds.length === 1 ? '' : 's'} while pasting attributes.`,
+          variant: 'warning',
+        });
+      }
+      if (targetClips.length === 0) return;
+
+      try {
+        await executeCommand({
+          type: 'PasteAttributes',
+          payload: {
+            sequenceId: seq.id,
+            targetClips,
+            sourceEffects: clipboard.effects,
+            sourceAttributes: {
+              transform: clipboard.transform,
+              opacity: clipboard.opacity,
+              blendMode: clipboard.blendMode,
+              speed: clipboard.speed,
+              reverse: clipboard.reverse,
+              audio: clipboard.audio,
+            },
+            selection,
+          },
+        });
+      } catch (err: unknown) {
+        logger.error('Failed to paste attributes', err as Record<string, unknown>);
+      }
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
+  const handleRemoveAttributes = useCallback(
+    async (
+      clipId: string,
+      trackId: string,
+      effectIds: string[],
+      resetFlags: {
+        resetTransform?: boolean;
+        resetOpacity?: boolean;
+        resetBlendMode?: boolean;
+        resetSpeed?: boolean;
+        resetAudio?: boolean;
+      },
+    ): Promise<void> => {
+      const seq = getCurrentSequence();
+      if (!seq) return;
+
+      try {
+        await executeCommand({
+          type: 'RemoveAttributes',
+          payload: {
+            sequenceId: seq.id,
+            trackId,
+            clipId,
+            effectIds,
+            ...resetFlags,
+          },
+        });
+      } catch (err: unknown) {
+        logger.error('Failed to remove attributes', err as Record<string, unknown>);
+      }
+    },
+    [executeCommand, getCurrentSequence],
+  );
+
   return {
     handleClipMove,
     handleClipTrim,
@@ -3140,5 +3347,9 @@ export function useTimelineActions({ sequence }: UseTimelineActionsOptions): Tim
     handleCreateAdjustmentLayer,
     handleGroupClips,
     handleUngroupClips,
+    handleCopyEffects,
+    handlePasteEffects,
+    handlePasteAttributes,
+    handleRemoveAttributes,
   };
 }

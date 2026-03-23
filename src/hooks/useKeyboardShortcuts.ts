@@ -38,6 +38,8 @@ export interface UseKeyboardShortcutsOptions {
   onReverseMatchFrame?: () => void;
   onToggleClipEnabled?: () => void;
   onToggleColorComparison?: () => void;
+  onCopyEffects?: () => void;
+  onPasteEffects?: () => void;
   enabled?: boolean;
 }
 
@@ -71,6 +73,8 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
     onReverseMatchFrame,
     onToggleClipEnabled,
     onToggleColorComparison,
+    onCopyEffects,
+    onPasteEffects,
     enabled = true,
   } = options;
 
@@ -368,6 +372,20 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
         return;
       }
 
+      // Copy Effects (Ctrl+Alt+C)
+      if (key.toLowerCase() === 'c' && ctrl && e.altKey && !shiftKey) {
+        e.preventDefault();
+        if (onCopyEffects) onCopyEffects();
+        return;
+      }
+
+      // Paste Effects (Ctrl+Alt+V)
+      if (key.toLowerCase() === 'v' && ctrl && e.altKey && !shiftKey) {
+        e.preventDefault();
+        if (onPasteEffects) onPasteEffects();
+        return;
+      }
+
       // Export
       if (key.toLowerCase() === 'e' && ctrl && shiftKey) {
         e.preventDefault();
@@ -397,6 +415,8 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       onReverseMatchFrame,
       onToggleClipEnabled,
       onToggleColorComparison,
+      onCopyEffects,
+      onPasteEffects,
       undo,
       redo,
       saveProject,
@@ -460,6 +480,8 @@ export const KEYBOARD_SHORTCUTS = [
       { key: 'S', description: 'Split Clip' },
       { key: 'Delete', description: 'Delete Selected' },
       { key: 'Esc', description: 'Deselect All' },
+      { key: 'Ctrl+Alt+C', description: 'Copy Effects' },
+      { key: 'Ctrl+Alt+V', description: 'Paste Effects' },
     ],
   },
   {
