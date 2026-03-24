@@ -953,6 +953,25 @@ export interface UndoRedoResult {
 }
 
 // =============================================================================
+// Undo History Types (S32-002)
+// =============================================================================
+
+/** Lightweight summary of a single history entry */
+export interface UndoHistoryEntry {
+  opId: string;
+  commandType: string;
+  timestamp: string;
+  index: number;
+}
+
+/** Full undo/redo history state for the Undo History Panel */
+export interface UndoHistoryInfo {
+  undoEntries: UndoHistoryEntry[];
+  redoEntries: UndoHistoryEntry[];
+  currentIndex: number;
+}
+
+// =============================================================================
 // Effect Copy/Paste Types (S31)
 // =============================================================================
 

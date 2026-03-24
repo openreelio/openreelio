@@ -8,6 +8,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { useProjectStore, _resetCommandQueueForTesting } from './projectStore';
+import { useCommandPaletteStore } from './commandPaletteStore';
 import {
   createMockProjectMeta,
   createMockProjectState,
@@ -28,6 +29,8 @@ describe('projectStore', () => {
     // Reset mocks and store to initial state before each test
     resetTauriMocks();
     _resetCommandQueueForTesting();
+    useCommandPaletteStore.getState().close();
+    useCommandPaletteStore.setState({ recentActionIds: [] });
     useProjectStore.setState({
       isLoaded: false,
       isLoading: false,
@@ -340,6 +343,22 @@ describe('projectStore', () => {
       expect(state.isLoaded).toBe(false);
       expect(state.meta).toBeNull();
       expect(state.isDirty).toBe(false);
+    });
+
+    it('should close the command palette when closing a project', async () => {
+      useCommandPaletteStore.getState().open();
+      useCommandPaletteStore.getState().setSearchQuery('undo');
+      useProjectStore.setState({
+        isLoaded: true,
+        meta: createMockProjectMeta(),
+      });
+
+      mockTauriCommand('close_project', true);
+
+      await useProjectStore.getState().closeProject();
+
+      expect(useCommandPaletteStore.getState().isOpen).toBe(false);
+      expect(useCommandPaletteStore.getState().searchQuery).toBe('');
     });
   });
 
@@ -716,6 +735,40 @@ describe('projectStore', () => {
       await redo();
 
       expect(useProjectStore.getState().activeSequenceId).toBe('seq_redone');
+    });
+  });
+
+  describe('jumpToHistoryState', () => {
+    it('should jump to a history state and refresh project data', async () => {
+      const mockResult = { success: true, canUndo: true, canRedo: true };
+      mockTauriCommand('jump_to_history_state', mockResult);
+      mockTauriCommand('get_project_state', {
+        assets: [],
+        sequences: [{ id: 'seq_jump', name: 'Jumped Sequence', tracks: [] }],
+        activeSequenceId: 'seq_jump',
+      });
+
+      useProjectStore.setState({
+        isLoaded: true,
+        stateVersion: 4,
+        activeSequenceId: 'seq_original',
+      });
+
+      const result = await useProjectStore.getState().jumpToHistoryState(1);
+
+      expect(result).toEqual(mockResult);
+      expect(invoke).toHaveBeenCalledWith('jump_to_history_state', { targetIndex: 1 });
+      expect(useProjectStore.getState().activeSequenceId).toBe('seq_jump');
+      expect(useProjectStore.getState().stateVersion).toBe(5);
+      expect(useProjectStore.getState().isDirty).toBe(true);
+    });
+
+    it('should surface backend errors from history jumps', async () => {
+      mockTauriCommandError('jump_to_history_state', 'History jump failed');
+
+      await expect(useProjectStore.getState().jumpToHistoryState(3)).rejects.toThrow(
+        'History jump failed',
+      );
     });
   });
 
