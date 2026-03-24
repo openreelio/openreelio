@@ -40,6 +40,9 @@ export interface UseKeyboardShortcutsOptions {
   onToggleColorComparison?: () => void;
   onCopyEffects?: () => void;
   onPasteEffects?: () => void;
+  onToggleCommandPalette?: () => void;
+  onToggleFullscreen?: () => void;
+  onCaptureSnapshot?: () => void;
   enabled?: boolean;
 }
 
@@ -75,6 +78,9 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
     onToggleColorComparison,
     onCopyEffects,
     onPasteEffects,
+    onToggleCommandPalette,
+    onToggleFullscreen,
+    onCaptureSnapshot,
     enabled = true,
   } = options;
 
@@ -187,25 +193,43 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
   const handleKeyDown = useCallback(
     (e: KeyboardEvent) => {
       // Safety checks
-      if (!enabled || isInputElement(e.target)) return;
-
-      // Respect handlers on focused feature surfaces to avoid duplicate execution
-      if (e.defaultPrevented) {
-        if (!e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey && e.key === ' ') {
-          resetShuttle();
-        }
-        return;
-      }
+      if (!enabled) return;
       if (e.repeat) return;
 
       const { key, ctrlKey, metaKey, shiftKey } = e;
       const ctrl = ctrlKey || metaKey;
+
+      // Respect handlers on focused feature surfaces to avoid duplicate execution
+      if (e.defaultPrevented) {
+        if (!ctrlKey && !metaKey && !shiftKey && !e.altKey && key === ' ') {
+          resetShuttle();
+        }
+        return;
+      }
+
+      // Command Palette should remain globally accessible even when focus is in an input.
+      if (key.toLowerCase() === 'p' && ctrl && shiftKey) {
+        if (onToggleCommandPalette) {
+          e.preventDefault();
+          onToggleCommandPalette();
+        }
+        return;
+      }
+
+      if (isInputElement(e.target)) return;
 
       // -----------------------------------------------------------------------
       // Transport Controls (J/K/L) — delegated to useJKLShuttle
       // -----------------------------------------------------------------------
       if (shuttleKeyDown(key, ctrl, shiftKey)) {
         e.preventDefault();
+        return;
+      }
+
+      // Fullscreen toggle (backtick)
+      if (key === '`' && !ctrl && !shiftKey) {
+        e.preventDefault();
+        if (onToggleFullscreen) onToggleFullscreen();
         return;
       }
 
@@ -304,6 +328,13 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
         e.preventDefault();
         if (onRedo) onRedo();
         else if (isLoadedRef.current) void redo();
+        return;
+      }
+
+      // Snapshot capture (Ctrl+Shift+S)
+      if (key.toLowerCase() === 's' && ctrl && shiftKey) {
+        e.preventDefault();
+        if (onCaptureSnapshot) onCaptureSnapshot();
         return;
       }
 
@@ -417,6 +448,9 @@ export function useKeyboardShortcuts(options: UseKeyboardShortcutsOptions = {}):
       onToggleColorComparison,
       onCopyEffects,
       onPasteEffects,
+      onToggleCommandPalette,
+      onToggleFullscreen,
+      onCaptureSnapshot,
       undo,
       redo,
       saveProject,
@@ -488,6 +522,14 @@ export const KEYBOARD_SHORTCUTS = [
     category: 'Color',
     shortcuts: [
       { key: 'Shift+D', description: 'Toggle Before/After Color Comparison' },
+    ],
+  },
+  {
+    category: 'General',
+    shortcuts: [
+      { key: 'Ctrl+Shift+P', description: 'Command Palette' },
+      { key: '`', description: 'Toggle Fullscreen Preview' },
+      { key: 'Ctrl+Shift+S', description: 'Capture Preview Snapshot' },
     ],
   },
 ];
