@@ -315,8 +315,29 @@ async canRedo() : Promise<Result<boolean, string>> {
 }
 },
 /**
+ * Returns the full undo/redo history for display in the Undo History Panel.
+ */
+async getUndoHistory() : Promise<Result<UndoHistoryInfo, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_undo_history") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Jumps to a specific point in the undo history.
+ * Target index -1 means "initial state" (undo everything).
+ */
+async jumpToHistoryState(targetIndex: number) : Promise<Result<UndoRedoResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("jump_to_history_state", { targetIndex }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Finds all gaps between clips on a specific track.
- * 
+ *
  * Returns an ordered list of gaps (empty regions) between clips.
  * This is a read-only query — no state mutation occurs.
  */
@@ -5370,6 +5391,42 @@ typeFrequency: { [key in string]: number };
  * Most frequently used transition type
  */
 dominantType: string }
+/**
+ * Lightweight history entry for IPC transport.
+ */
+export type UndoHistoryEntry = {
+/**
+ * Operation ID
+ */
+opId: string;
+/**
+ * Command type name (e.g., "InsertClip", "SplitClip")
+ */
+commandType: string;
+/**
+ * RFC3339 timestamp
+ */
+timestamp: string;
+/**
+ * Index in the combined history list
+ */
+index: number }
+/**
+ * Summary of the full undo/redo history for the Undo History Panel.
+ */
+export type UndoHistoryInfo = {
+/**
+ * Entries in the undo stack (already applied, oldest first)
+ */
+undoEntries: UndoHistoryEntry[];
+/**
+ * Entries in the redo stack (undone, next-to-redo first)
+ */
+redoEntries: UndoHistoryEntry[];
+/**
+ * Index of the current state in the combined list (-1 = initial state)
+ */
+currentIndex: number }
 /**
  * Result of an undo or redo operation.
  */
