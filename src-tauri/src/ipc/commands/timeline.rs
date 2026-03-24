@@ -261,6 +261,105 @@ pub async fn can_redo(state: State<'_, AppState>) -> Result<bool, String> {
 }
 
 // =============================================================================
+// Undo History (S32-002)
+// =============================================================================
+
+/// Summary of the full undo/redo history for the Undo History Panel.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoHistoryInfo {
+    /// Entries in the undo stack (already applied, oldest first)
+    pub undo_entries: Vec<UndoHistoryEntry>,
+    /// Entries in the redo stack (undone, next-to-redo first)
+    pub redo_entries: Vec<UndoHistoryEntry>,
+    /// Index of the current state in the combined list (-1 = initial state)
+    pub current_index: i32,
+}
+
+/// Lightweight history entry for IPC transport.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoHistoryEntry {
+    /// Operation ID
+    pub op_id: String,
+    /// Command type name (e.g., "InsertClip", "SplitClip")
+    pub command_type: String,
+    /// RFC3339 timestamp
+    pub timestamp: String,
+    /// Index in the combined history list
+    pub index: usize,
+}
+
+/// Returns the full undo/redo history for display in the Undo History Panel.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_undo_history(state: State<'_, AppState>) -> Result<UndoHistoryInfo, String> {
+    let guard = state.project.lock().await;
+
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let undo_entries: Vec<UndoHistoryEntry> = project
+        .executor
+        .undo_history_entries()
+        .into_iter()
+        .map(|e| UndoHistoryEntry {
+            op_id: e.op_id,
+            command_type: e.command_type,
+            timestamp: e.timestamp,
+            index: e.index,
+        })
+        .collect();
+
+    let undo_len = undo_entries.len();
+
+    let redo_entries: Vec<UndoHistoryEntry> = project
+        .executor
+        .redo_history_entries()
+        .into_iter()
+        .map(|e| UndoHistoryEntry {
+            op_id: e.op_id,
+            command_type: e.command_type,
+            timestamp: e.timestamp,
+            index: e.index,
+        })
+        .collect();
+
+    Ok(UndoHistoryInfo {
+        undo_entries,
+        redo_entries,
+        current_index: undo_len as i32 - 1,
+    })
+}
+
+/// Jumps to a specific point in the undo history.
+/// Target index -1 means "initial state" (undo everything).
+#[tauri::command]
+#[specta::specta]
+pub async fn jump_to_history_state(
+    target_index: i32,
+    state: State<'_, AppState>,
+) -> Result<UndoRedoResult, String> {
+    let mut guard = state.project.lock().await;
+
+    let project = guard
+        .as_mut()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    project
+        .executor
+        .jump_to_history_index(target_index, &mut project.state)
+        .map_err(|e| e.to_ipc_error())?;
+
+    Ok(UndoRedoResult {
+        success: true,
+        can_undo: project.executor.can_undo(),
+        can_redo: project.executor.can_redo(),
+    })
+}
+
+// =============================================================================
 // Edit Point & Marker Navigation (S27-002)
 // =============================================================================
 
