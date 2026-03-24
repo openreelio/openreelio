@@ -337,7 +337,7 @@ async jumpToHistoryState(targetIndex: number) : Promise<Result<UndoRedoResult, s
 },
 /**
  * Finds all gaps between clips on a specific track.
- *
+ * 
  * Returns an ordered list of gaps (empty regions) between clips.
  * This is a read-only query — no state mutation occurs.
  */
@@ -5394,19 +5394,19 @@ dominantType: string }
 /**
  * Lightweight history entry for IPC transport.
  */
-export type UndoHistoryEntry = {
+export type UndoHistoryEntry = { 
 /**
  * Operation ID
  */
-opId: string;
+opId: string; 
 /**
  * Command type name (e.g., "InsertClip", "SplitClip")
  */
-commandType: string;
+commandType: string; 
 /**
  * RFC3339 timestamp
  */
-timestamp: string;
+timestamp: string; 
 /**
  * Index in the combined history list
  */
@@ -5414,15 +5414,15 @@ index: number }
 /**
  * Summary of the full undo/redo history for the Undo History Panel.
  */
-export type UndoHistoryInfo = {
+export type UndoHistoryInfo = { 
 /**
  * Entries in the undo stack (already applied, oldest first)
  */
-undoEntries: UndoHistoryEntry[];
+undoEntries: UndoHistoryEntry[]; 
 /**
  * Entries in the redo stack (undone, next-to-redo first)
  */
-redoEntries: UndoHistoryEntry[];
+redoEntries: UndoHistoryEntry[]; 
 /**
  * Index of the current state in the combined list (-1 = initial state)
  */
