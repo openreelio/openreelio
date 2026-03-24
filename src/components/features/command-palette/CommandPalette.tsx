@@ -38,12 +38,14 @@ function ActionItem({
   return (
     <button
       type="button"
+      tabIndex={-1}
       id={`palette-action-${action.id}`}
       className={`w-full flex items-center justify-between px-3 py-2 text-sm text-left transition-colors ${
         isSelected ? 'bg-blue-600/30 text-white' : 'text-slate-300 hover:bg-slate-700/50'
       }`}
       onClick={() => onSelect(action.id)}
       onMouseEnter={() => onHover(action.id)}
+      onFocus={() => onHover(action.id)}
       data-testid={`palette-action-${action.id}`}
       role="option"
       aria-selected={isSelected}

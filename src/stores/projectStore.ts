@@ -396,8 +396,9 @@ export const useProjectStore = create<ProjectState>()(
         state.selectedAssetId = null;
         state.isDirty = false;
         state.error = null;
-        // Reset state version for new project
-        state.stateVersion = 0;
+        // Increment (not reset) so in-flight ops from the old project
+        // see a version mismatch and abort instead of applying stale state.
+        state.stateVersion += 1;
       });
       useCommandPaletteStore.getState().close();
 

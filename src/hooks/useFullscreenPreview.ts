@@ -98,16 +98,19 @@ export function useFullscreenPreview(
   const [isFullscreen, setIsFullscreen] = useState(false);
 
   // Sync state with browser fullscreen changes (handles Escape, F11, etc.)
+  // Scoped to containerRef so other elements' fullscreen state doesn't interfere.
   useEffect(() => {
     const handleFullscreenChange = (): void => {
-      setIsFullscreen(document.fullscreenElement !== null);
+      setIsFullscreen(document.fullscreenElement === containerRef.current);
     };
 
+    // Sync initial state on mount
+    handleFullscreenChange();
     document.addEventListener('fullscreenchange', handleFullscreenChange);
     return () => {
       document.removeEventListener('fullscreenchange', handleFullscreenChange);
     };
-  }, []);
+  }, [containerRef]);
 
   const toggleFullscreen = useCallback((): void => {
     const container = containerRef.current;
@@ -115,11 +118,11 @@ export function useFullscreenPreview(
       return;
     }
 
-    if (document.fullscreenElement) {
+    if (document.fullscreenElement === container) {
       document.exitFullscreen().catch((error: unknown) => {
         logger.warn('Failed to exit fullscreen', { error });
       });
-    } else {
+    } else if (!document.fullscreenElement) {
       container.requestFullscreen().catch((error: unknown) => {
         logger.warn('Failed to enter fullscreen', { error });
       });

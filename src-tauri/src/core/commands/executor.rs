@@ -1721,7 +1721,7 @@ impl CommandExecutor {
         &mut self,
         target_index: i32,
         state: &mut ProjectState,
-    ) -> CoreResult<()> {
+    ) -> CoreResult<i32> {
         let current_index = self.undo_stack.len() as i32 - 1;
         let total = (self.undo_stack.len() + self.redo_stack.len()) as i32;
 
@@ -1733,21 +1733,31 @@ impl CommandExecutor {
         }
 
         if target_index < current_index {
-            // Need to undo (current_index - target_index) times
             let steps = (current_index - target_index) as usize;
-            for _ in 0..steps {
-                self.undo(state)?;
+            for i in 0..steps {
+                if let Err(e) = self.undo(state) {
+                    let achieved = self.undo_stack.len() as i32 - 1;
+                    return Err(CoreError::Internal(format!(
+                        "History jump failed after {} of {} undo steps (achieved index {}): {}",
+                        i, steps, achieved, e
+                    )));
+                }
             }
         } else if target_index > current_index {
-            // Need to redo (target_index - current_index) times
             let steps = (target_index - current_index) as usize;
-            for _ in 0..steps {
-                self.redo(state)?;
+            for i in 0..steps {
+                if let Err(e) = self.redo(state) {
+                    let achieved = self.undo_stack.len() as i32 - 1;
+                    return Err(CoreError::Internal(format!(
+                        "History jump failed after {} of {} redo steps (achieved index {}): {}",
+                        i, steps, achieved, e
+                    )));
+                }
             }
         }
         // target_index == current_index: no-op
 
-        Ok(())
+        Ok(self.undo_stack.len() as i32 - 1)
     }
 }
 
