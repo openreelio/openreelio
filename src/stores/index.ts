@@ -117,6 +117,14 @@ export { useUIStore } from './uiStore';
 export type { SettingsTab } from './uiStore';
 
 export {
+  useCommandPaletteStore,
+  selectIsCommandPaletteOpen,
+  selectSearchQuery,
+  selectSelectedIndex,
+} from './commandPaletteStore';
+export type { PaletteAction, ActionCategory } from './commandPaletteStore';
+
+export {
   useWorkspaceStore,
   setupWorkspaceEventListeners,
   cleanupWorkspaceEventListeners,
@@ -164,6 +172,7 @@ import { useConversationStore } from './conversationStore';
 import { usePreviewStore } from './previewStore';
 import { useAgentStore } from './agentStore';
 import { useWorkspaceStore, cleanupWorkspaceEventListeners } from './workspaceStore';
+import { useCommandPaletteStore } from './commandPaletteStore';
 
 /**
  * Reset all project-related stores to their initial state.
@@ -186,6 +195,7 @@ export function resetProjectStores(): void {
   usePreviewStore.getState().resetView();
   useAgentStore.getState().reset();
   useWorkspaceStore.getState().reset();
+  useCommandPaletteStore.getState().close();
   cleanupWorkspaceEventListeners();
 
   logger.info('All project stores reset');
