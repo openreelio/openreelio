@@ -6,7 +6,7 @@
  * and AI sidebar in a multi-panel layout.
  */
 
-import { lazy, Suspense, useCallback, useState, useEffect, useMemo } from 'react';
+import { lazy, Suspense, useCallback, useRef, useState, useEffect, useMemo } from 'react';
 import {
   MainLayout,
   Header,
@@ -45,6 +45,9 @@ import { useMulticamSession } from '@/hooks/useMulticamSession';
 import { useBlendMode } from '@/hooks/useBlendMode';
 import { useAudioDucking } from '@/hooks/useAudioDucking';
 import { useAudioScrubbing } from '@/hooks/useAudioScrubbing';
+import { useCommandPalette } from '@/hooks/useCommandPalette';
+import { useFullscreenPreview } from '@/hooks/useFullscreenPreview';
+import { CommandPalette } from '@/components/features/command-palette';
 import { useToastStore } from '@/hooks/useToast';
 import { useResponsiveSidebarState } from './hooks/useResponsiveSidebarState';
 import { dbToLinear, linearToDb } from '@/utils/audioMeter';
@@ -55,7 +58,7 @@ import { createLogger } from '@/services/logger';
 import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { getSplitTargetsAtTime } from '@/utils/clipLinking';
-import { Terminal, Sliders, Sparkles, GitCompareArrows } from 'lucide-react';
+import { Terminal, Sliders, Sparkles, GitCompareArrows, History, Camera } from 'lucide-react';
 import type { BlendMode, CaptionPosition, ClipId, Effect, Sequence, TextClipData } from '@/types';
 import type { AddTextPayload } from '@/components/features/text';
 import type { ChannelLevels } from '@/components/features/mixer';
@@ -93,6 +96,11 @@ const VideoGenerationPanel = lazy(async () => {
 const ReferenceComparisonPanel = lazy(async () => {
   const module = await import('@/components/features/comparison/ReferenceComparisonPanel');
   return { default: module.ReferenceComparisonPanel };
+});
+
+const UndoHistoryPanel = lazy(async () => {
+  const module = await import('@/components/features/history');
+  return { default: module.UndoHistoryPanel };
 });
 
 // =============================================================================
@@ -153,6 +161,11 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   const sequenceNavigationStack = useProjectStore((s) => s.sequenceNavigationStack);
   const sequences = useProjectStore((s) => s.sequences);
   const popSequence = useProjectStore((s) => s.popSequence);
+
+  // Fullscreen preview & snapshot
+  const previewContainerRef = useRef<HTMLDivElement>(null);
+  const { isFullscreen, toggleFullscreen, captureSnapshot } =
+    useFullscreenPreview(previewContainerRef);
 
   // Export dialog state
   const [showExportDialog, setShowExportDialog] = useState(false);
@@ -476,6 +489,39 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     void handlePasteEffects(selectedClipIds);
   }, [handlePasteEffects, selectedClipIds]);
 
+  // Command Palette
+  const handleToggleClipEnabledForPalette = useCallback(() => {
+    if (!sequence || selectedClipIds.length === 0) return;
+    const promises: Promise<void>[] = [];
+    for (const clipId of selectedClipIds) {
+      const track = sequence.tracks.find((t) => t.clips.some((c) => c.id === clipId));
+      if (track) {
+        promises.push(handleToggleClipEnabled(clipId, track.id));
+      }
+    }
+    if (promises.length > 0) {
+      Promise.all(promises).catch((error) => {
+        logger.error('Failed to toggle clip enabled state', { error });
+      });
+    }
+  }, [sequence, selectedClipIds, handleToggleClipEnabled]);
+
+  const commandPalette = useCommandPalette({
+    onSplitAtPlayhead: handleSplitAtPlayhead,
+    onDeleteClips: () => {
+      if (selectedClipIds.length > 0) handleDeleteClips?.(selectedClipIds);
+    },
+    onExport: () => setShowExportDialog(true),
+    onMatchFrame: handleMatchFrame,
+    onReverseMatchFrame: handleReverseMatchFrame,
+    onCopyEffects: handleCopySelectedClipEffects,
+    onPasteEffects: handlePasteEffectsToSelection,
+    onToggleClipEnabled: handleToggleClipEnabledForPalette,
+    onToggleMixer: handleToggleMixer,
+    onAddText: () => setShowAddTextDialog(true),
+    onAutoDuck: handleAutoDuck,
+  });
+
   // Global keyboard shortcuts
   useKeyboardShortcuts({
     enabled: true,
@@ -490,21 +536,10 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     onReverseMatchFrame: handleReverseMatchFrame,
     onCopyEffects: handleCopySelectedClipEffects,
     onPasteEffects: handlePasteEffectsToSelection,
-    onToggleClipEnabled: () => {
-      if (!sequence || selectedClipIds.length === 0) return;
-      const promises: Promise<void>[] = [];
-      for (const clipId of selectedClipIds) {
-        const track = sequence.tracks.find((t) => t.clips.some((c) => c.id === clipId));
-        if (track) {
-          promises.push(handleToggleClipEnabled(clipId, track.id));
-        }
-      }
-      if (promises.length > 0) {
-        Promise.all(promises).catch((error) => {
-          logger.error('Failed to toggle clip enabled state', { error });
-        });
-      }
-    },
+    onToggleCommandPalette: commandPalette.isOpen ? commandPalette.close : commandPalette.open,
+    onToggleClipEnabled: handleToggleClipEnabledForPalette,
+    onToggleFullscreen: toggleFullscreen,
+    onCaptureSnapshot: captureSnapshot,
   });
 
   // Get selected asset for inspector (memoized to prevent unnecessary re-renders)
@@ -813,6 +848,17 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       ),
     });
 
+    tabs.push({
+      id: 'history',
+      label: 'History',
+      icon: <History className="w-3 h-3" />,
+      content: (
+        <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+          <UndoHistoryPanel />
+        </Suspense>
+      ),
+    });
+
     if (videoGenEnabled) {
       tabs.push({
         id: 'videogen',
@@ -919,7 +965,10 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
               </PreviewErrorBoundary>
             </div>
             {/* Program Monitor (right) */}
-            <div className="flex-1">
+            <div
+              ref={previewContainerRef}
+              className={`flex-1 relative ${isFullscreen ? 'bg-black' : ''}`}
+            >
               <PreviewErrorBoundary
                 onError={(error) => logger.error('UnifiedPreviewPlayer error', { error })}
               >
@@ -930,6 +979,17 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                   showStats={import.meta.env.DEV}
                 />
               </PreviewErrorBoundary>
+              {/* Snapshot capture button */}
+              <button
+                type="button"
+                data-testid="snapshot-button"
+                className="absolute top-2 right-2 p-1.5 rounded bg-black/40 hover:bg-black/60 text-white/70 hover:text-white transition-colors z-10"
+                onClick={captureSnapshot}
+                title="Capture Snapshot (Ctrl+Shift+S)"
+                aria-label="Capture preview snapshot"
+              >
+                <Camera className="w-4 h-4" />
+              </button>
             </div>
           </div>
           <div className="flex-1 overflow-hidden">
@@ -1082,6 +1142,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
           currentTime={currentTime}
         />
       </Suspense>
+
+      {/* Command Palette */}
+      <CommandPalette palette={commandPalette} />
     </>
   );
 }

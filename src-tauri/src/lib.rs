@@ -817,6 +817,9 @@ mod tauri_app {
                 $crate::ipc::redo,
                 $crate::ipc::can_undo,
                 $crate::ipc::can_redo,
+                // Undo history (S32-002)
+                $crate::ipc::get_undo_history,
+                $crate::ipc::jump_to_history_state,
                 // Gap management commands (S24-004)
                 $crate::ipc::find_gaps,
                 // Edit point & marker navigation (S27-002)
@@ -1203,6 +1206,9 @@ mod tauri_app {
             ipc::redo,
             ipc::can_undo,
             ipc::can_redo,
+            // Undo history (S32-002)
+            ipc::get_undo_history,
+            ipc::jump_to_history_state,
             // Gap management commands (S24-004)
             ipc::find_gaps,
             // Edit point & marker navigation (S27-002)

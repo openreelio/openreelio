@@ -1667,6 +1667,115 @@ impl CommandExecutor {
             _ => OpKind::Batch, // Default to batch for unknown types
         }
     }
+
+    /// Returns summary info for all entries in the undo stack (oldest first)
+    pub fn undo_history_entries(&self) -> Vec<HistoryEntryInfo> {
+        self.undo_stack
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| {
+                let command_type = entry
+                    .command
+                    .lock()
+                    .ok()
+                    .map(|cmd| cmd.type_name().to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                HistoryEntryInfo {
+                    op_id: entry.op_id.clone(),
+                    command_type,
+                    timestamp: entry.timestamp.clone(),
+                    index: i,
+                }
+            })
+            .collect()
+    }
+
+    /// Returns summary info for all entries in the redo stack (next-to-redo first)
+    pub fn redo_history_entries(&self) -> Vec<HistoryEntryInfo> {
+        self.redo_stack
+            .iter()
+            .rev()
+            .enumerate()
+            .map(|(i, entry)| {
+                let command_type = entry
+                    .command
+                    .lock()
+                    .ok()
+                    .map(|cmd| cmd.type_name().to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                HistoryEntryInfo {
+                    op_id: entry.op_id.clone(),
+                    command_type,
+                    timestamp: entry.timestamp.clone(),
+                    index: self.undo_stack.len() + i,
+                }
+            })
+            .collect()
+    }
+
+    /// Jumps to a specific history state by index.
+    /// Index refers to position in the combined undo+redo list.
+    /// current_index = undo_stack.len() - 1 (last applied command).
+    /// -1 means before all commands (initial state).
+    pub fn jump_to_history_index(
+        &mut self,
+        target_index: i32,
+        state: &mut ProjectState,
+    ) -> CoreResult<i32> {
+        let current_index = self.undo_stack.len() as i32 - 1;
+        let total = (self.undo_stack.len() + self.redo_stack.len()) as i32;
+
+        if target_index < -1 || target_index >= total {
+            return Err(CoreError::Internal(format!(
+                "History index {} out of range [-1, {})",
+                target_index, total
+            )));
+        }
+
+        match target_index.cmp(&current_index) {
+            std::cmp::Ordering::Less => {
+                let steps = (current_index - target_index) as usize;
+                for i in 0..steps {
+                    if let Err(e) = self.undo(state) {
+                        let achieved = self.undo_stack.len() as i32 - 1;
+                        return Err(CoreError::Internal(format!(
+                            "History jump failed after {} of {} undo steps (achieved index {}): {}",
+                            i, steps, achieved, e
+                        )));
+                    }
+                }
+            }
+            std::cmp::Ordering::Greater => {
+                let steps = (target_index - current_index) as usize;
+                for i in 0..steps {
+                    if let Err(e) = self.redo(state) {
+                        let achieved = self.undo_stack.len() as i32 - 1;
+                        return Err(CoreError::Internal(format!(
+                            "History jump failed after {} of {} redo steps (achieved index {}): {}",
+                            i, steps, achieved, e
+                        )));
+                    }
+                }
+            }
+            std::cmp::Ordering::Equal => {} // no-op
+        }
+
+        Ok(self.undo_stack.len() as i32 - 1)
+    }
+}
+
+/// Lightweight summary of a history entry for IPC transport
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryEntryInfo {
+    /// Operation ID
+    pub op_id: String,
+    /// Command type name (e.g., "InsertClip", "SplitClip")
+    pub command_type: String,
+    /// RFC3339 timestamp
+    pub timestamp: String,
+    /// Index in the combined history list
+    pub index: usize,
 }
 
 impl Default for CommandExecutor {
@@ -3601,5 +3710,178 @@ mod tests {
         // Redo remove - should remove asset again
         executor.redo(&mut state).unwrap();
         assert!(state.assets.is_empty());
+    }
+
+    // =========================================================================
+    // Undo History (S32-002) tests
+    // =========================================================================
+
+    #[test]
+    fn test_undo_history_entries_should_return_all_undo_stack_entries_in_order() {
+        let mut executor = CommandExecutor::new();
+        let mut state = ProjectState::new("Test");
+
+        // Execute 3 commands
+        for i in 0..3 {
+            let asset = Asset::new_video(
+                &format!("test{i}.mp4"),
+                &format!("/test{i}.mp4"),
+                VideoInfo::default(),
+            );
+            executor
+                .execute(Box::new(TestAddAssetCommand { asset }), &mut state)
+                .unwrap();
+        }
+
+        let entries = executor.undo_history_entries();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].command_type, "AddAsset");
+        assert_eq!(entries[0].index, 0);
+        assert_eq!(entries[1].index, 1);
+        assert_eq!(entries[2].index, 2);
+    }
+
+    #[test]
+    fn test_redo_history_entries_should_return_undone_commands_in_redo_order() {
+        let mut executor = CommandExecutor::new();
+        let mut state = ProjectState::new("Test");
+
+        // Execute 3, undo 2
+        for i in 0..3 {
+            let asset = Asset::new_video(
+                &format!("test{i}.mp4"),
+                &format!("/test{i}.mp4"),
+                VideoInfo::default(),
+            );
+            executor
+                .execute(Box::new(TestAddAssetCommand { asset }), &mut state)
+                .unwrap();
+        }
+        executor.undo(&mut state).unwrap();
+        executor.undo(&mut state).unwrap();
+
+        let redo_entries = executor.redo_history_entries();
+        assert_eq!(redo_entries.len(), 2);
+        // Next-to-redo first (the one we undid last = test1)
+        assert_eq!(redo_entries[0].index, 1);
+        assert_eq!(redo_entries[1].index, 2);
+    }
+
+    #[test]
+    fn test_undo_history_empty_when_no_commands_executed() {
+        let executor = CommandExecutor::new();
+        assert_eq!(executor.undo_history_entries().len(), 0);
+        assert_eq!(executor.redo_history_entries().len(), 0);
+    }
+
+    #[test]
+    fn test_jump_to_history_index_should_undo_to_earlier_state() {
+        let mut executor = CommandExecutor::new();
+        let mut state = ProjectState::new("Test");
+
+        // Execute 5 commands (add 5 assets)
+        for i in 0..5 {
+            let asset = Asset::new_video(
+                &format!("test{i}.mp4"),
+                &format!("/test{i}.mp4"),
+                VideoInfo::default(),
+            );
+            executor
+                .execute(Box::new(TestAddAssetCommand { asset }), &mut state)
+                .unwrap();
+        }
+        assert_eq!(state.assets.len(), 5);
+
+        // Jump to index 2 (after 3rd command) — should undo 2 times
+        executor.jump_to_history_index(2, &mut state).unwrap();
+        assert_eq!(state.assets.len(), 3);
+        assert_eq!(executor.undo_count(), 3);
+        assert_eq!(executor.redo_count(), 2);
+    }
+
+    #[test]
+    fn test_jump_to_history_index_should_redo_to_later_state() {
+        let mut executor = CommandExecutor::new();
+        let mut state = ProjectState::new("Test");
+
+        for i in 0..5 {
+            let asset = Asset::new_video(
+                &format!("test{i}.mp4"),
+                &format!("/test{i}.mp4"),
+                VideoInfo::default(),
+            );
+            executor
+                .execute(Box::new(TestAddAssetCommand { asset }), &mut state)
+                .unwrap();
+        }
+
+        // Undo all 5
+        executor.jump_to_history_index(-1, &mut state).unwrap();
+        assert_eq!(state.assets.len(), 0);
+
+        // Jump forward to index 3 (after 4th command)
+        executor.jump_to_history_index(3, &mut state).unwrap();
+        assert_eq!(state.assets.len(), 4);
+        assert_eq!(executor.undo_count(), 4);
+        assert_eq!(executor.redo_count(), 1);
+    }
+
+    #[test]
+    fn test_jump_to_history_index_minus_one_undoes_everything() {
+        let mut executor = CommandExecutor::new();
+        let mut state = ProjectState::new("Test");
+
+        for i in 0..3 {
+            let asset = Asset::new_video(
+                &format!("test{i}.mp4"),
+                &format!("/test{i}.mp4"),
+                VideoInfo::default(),
+            );
+            executor
+                .execute(Box::new(TestAddAssetCommand { asset }), &mut state)
+                .unwrap();
+        }
+
+        executor.jump_to_history_index(-1, &mut state).unwrap();
+        assert_eq!(state.assets.len(), 0);
+        assert_eq!(executor.undo_count(), 0);
+        assert_eq!(executor.redo_count(), 3);
+    }
+
+    #[test]
+    fn test_jump_to_history_index_noop_when_already_at_target() {
+        let mut executor = CommandExecutor::new();
+        let mut state = ProjectState::new("Test");
+
+        for i in 0..3 {
+            let asset = Asset::new_video(
+                &format!("test{i}.mp4"),
+                &format!("/test{i}.mp4"),
+                VideoInfo::default(),
+            );
+            executor
+                .execute(Box::new(TestAddAssetCommand { asset }), &mut state)
+                .unwrap();
+        }
+
+        // Current index is 2, jump to 2 — no-op
+        executor.jump_to_history_index(2, &mut state).unwrap();
+        assert_eq!(state.assets.len(), 3);
+        assert_eq!(executor.undo_count(), 3);
+        assert_eq!(executor.redo_count(), 0);
+    }
+
+    #[test]
+    fn test_jump_to_history_index_rejects_out_of_range() {
+        let mut executor = CommandExecutor::new();
+        let mut state = ProjectState::new("Test");
+
+        let asset = Asset::new_video("test.mp4", "/test.mp4", VideoInfo::default());
+        executor
+            .execute(Box::new(TestAddAssetCommand { asset }), &mut state)
+            .unwrap();
+
+        assert!(executor.jump_to_history_index(5, &mut state).is_err());
+        assert!(executor.jump_to_history_index(-2, &mut state).is_err());
     }
 }

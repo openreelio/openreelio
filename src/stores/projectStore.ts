@@ -37,6 +37,7 @@ import {
 import { refreshProjectState, applyProjectState } from '@/utils/stateRefreshHelper';
 import { useWorkspaceStore, setupWorkspaceEventListeners } from '@/stores/workspaceStore';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { useCommandPaletteStore } from '@/stores/commandPaletteStore';
 
 const logger = createLogger('ProjectStore');
 
@@ -139,6 +140,7 @@ interface ProjectState {
   executeCommand: (command: Command) => Promise<CommandResult>;
   undo: () => Promise<UndoRedoResult>;
   redo: () => Promise<UndoRedoResult>;
+  jumpToHistoryState: (targetIndex: number) => Promise<UndoRedoResult>;
   canUndo: () => Promise<boolean>;
   canRedo: () => Promise<boolean>;
 }
@@ -394,9 +396,11 @@ export const useProjectStore = create<ProjectState>()(
         state.selectedAssetId = null;
         state.isDirty = false;
         state.error = null;
-        // Reset state version for new project
-        state.stateVersion = 0;
+        // Increment (not reset) so in-flight ops from the old project
+        // see a version mismatch and abort instead of applying stale state.
+        state.stateVersion += 1;
       });
+      useCommandPaletteStore.getState().close();
 
       logger.info('Project closed and state reset');
     },
@@ -689,19 +693,38 @@ export const useProjectStore = create<ProjectState>()(
      */
     undo: async () => {
       return commandQueue.enqueue(async () => {
+        const versionBefore = get().stateVersion;
+
         try {
-          logger.debug('Executing undo');
+          logger.debug('Executing undo', { version: versionBefore });
           const result = await invoke<UndoRedoResult>('undo');
 
           // Refresh state from backend after undo
           const freshState = await refreshProjectState();
 
+          let concurrentModificationDetected = false;
           set((state) => {
+            if (state.stateVersion !== versionBefore) {
+              concurrentModificationDetected = true;
+              logger.error('Concurrent modification detected in set() callback', {
+                operation: 'undo',
+                expectedVersion: versionBefore,
+                actualVersion: state.stateVersion,
+              });
+              return;
+            }
+
             state.isDirty = true;
             state.stateVersion += 1;
             state.error = null;
             applyProjectState(state, freshState);
           });
+
+          if (concurrentModificationDetected) {
+            throw new Error(
+              'Concurrent modification detected during undo. Please retry the operation.',
+            );
+          }
 
           logger.debug('Undo completed', { newVersion: get().stateVersion });
           return result;
@@ -723,19 +746,38 @@ export const useProjectStore = create<ProjectState>()(
      */
     redo: async () => {
       return commandQueue.enqueue(async () => {
+        const versionBefore = get().stateVersion;
+
         try {
-          logger.debug('Executing redo');
+          logger.debug('Executing redo', { version: versionBefore });
           const result = await invoke<UndoRedoResult>('redo');
 
           // Refresh state from backend after redo
           const freshState = await refreshProjectState();
 
+          let concurrentModificationDetected = false;
           set((state) => {
+            if (state.stateVersion !== versionBefore) {
+              concurrentModificationDetected = true;
+              logger.error('Concurrent modification detected in set() callback', {
+                operation: 'redo',
+                expectedVersion: versionBefore,
+                actualVersion: state.stateVersion,
+              });
+              return;
+            }
+
             state.isDirty = true;
             state.stateVersion += 1;
             state.error = null;
             applyProjectState(state, freshState);
           });
+
+          if (concurrentModificationDetected) {
+            throw new Error(
+              'Concurrent modification detected during redo. Please retry the operation.',
+            );
+          }
 
           logger.debug('Redo completed', { newVersion: get().stateVersion });
           return result;
@@ -749,6 +791,62 @@ export const useProjectStore = create<ProjectState>()(
           throw error;
         }
       }, 'redo');
+    },
+
+    /**
+     * Jump to a specific state in the undo history with the same queue/version
+     * guarantees as undo/redo.
+     */
+    jumpToHistoryState: async (targetIndex: number) => {
+      return commandQueue.enqueue(async () => {
+        const versionBefore = get().stateVersion;
+
+        try {
+          logger.debug('Jumping to history state', { targetIndex, version: versionBefore });
+          const result = await invoke<UndoRedoResult>('jump_to_history_state', { targetIndex });
+
+          const freshState = await refreshProjectState();
+
+          let concurrentModificationDetected = false;
+          set((state) => {
+            if (state.stateVersion !== versionBefore) {
+              concurrentModificationDetected = true;
+              logger.error('Concurrent modification detected in set() callback', {
+                operation: 'jumpToHistoryState',
+                targetIndex,
+                expectedVersion: versionBefore,
+                actualVersion: state.stateVersion,
+              });
+              return;
+            }
+
+            state.isDirty = true;
+            state.stateVersion += 1;
+            state.error = null;
+            applyProjectState(state, freshState);
+          });
+
+          if (concurrentModificationDetected) {
+            throw new Error(
+              'Concurrent modification detected during history jump. Please retry the operation.',
+            );
+          }
+
+          logger.debug('History jump completed', {
+            targetIndex,
+            newVersion: get().stateVersion,
+          });
+          return result;
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          logger.error('History jump failed', { targetIndex, error: errorMessage });
+
+          set((state) => {
+            state.error = errorMessage;
+          });
+          throw error;
+        }
+      }, `jumpToHistoryState:${targetIndex}`);
     },
 
     // Check if undo is available
