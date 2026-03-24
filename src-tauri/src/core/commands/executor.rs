@@ -1732,30 +1732,33 @@ impl CommandExecutor {
             )));
         }
 
-        if target_index < current_index {
-            let steps = (current_index - target_index) as usize;
-            for i in 0..steps {
-                if let Err(e) = self.undo(state) {
-                    let achieved = self.undo_stack.len() as i32 - 1;
-                    return Err(CoreError::Internal(format!(
-                        "History jump failed after {} of {} undo steps (achieved index {}): {}",
-                        i, steps, achieved, e
-                    )));
+        match target_index.cmp(&current_index) {
+            std::cmp::Ordering::Less => {
+                let steps = (current_index - target_index) as usize;
+                for i in 0..steps {
+                    if let Err(e) = self.undo(state) {
+                        let achieved = self.undo_stack.len() as i32 - 1;
+                        return Err(CoreError::Internal(format!(
+                            "History jump failed after {} of {} undo steps (achieved index {}): {}",
+                            i, steps, achieved, e
+                        )));
+                    }
                 }
             }
-        } else if target_index > current_index {
-            let steps = (target_index - current_index) as usize;
-            for i in 0..steps {
-                if let Err(e) = self.redo(state) {
-                    let achieved = self.undo_stack.len() as i32 - 1;
-                    return Err(CoreError::Internal(format!(
-                        "History jump failed after {} of {} redo steps (achieved index {}): {}",
-                        i, steps, achieved, e
-                    )));
+            std::cmp::Ordering::Greater => {
+                let steps = (target_index - current_index) as usize;
+                for i in 0..steps {
+                    if let Err(e) = self.redo(state) {
+                        let achieved = self.undo_stack.len() as i32 - 1;
+                        return Err(CoreError::Internal(format!(
+                            "History jump failed after {} of {} redo steps (achieved index {}): {}",
+                            i, steps, achieved, e
+                        )));
+                    }
                 }
             }
+            std::cmp::Ordering::Equal => {} // no-op
         }
-        // target_index == current_index: no-op
 
         Ok(self.undo_stack.len() as i32 - 1)
     }
