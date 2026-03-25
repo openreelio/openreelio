@@ -7,8 +7,8 @@
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { save } from '@tauri-apps/plugin-dialog';
-import { invoke } from '@tauri-apps/api/core';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
+import { commands } from '@/bindings';
 import type {
   ExportStatus,
   RenderProgressEvent,
@@ -28,6 +28,12 @@ export interface UseExportDialogProps {
   sequenceId: string | null;
   /** Sequence name for display/default filename */
   sequenceName?: string;
+  /** Whether single-export range rendering is enabled */
+  useRange?: boolean;
+  /** Range start in seconds when `useRange` is enabled */
+  inPoint?: number;
+  /** Range end in seconds when `useRange` is enabled */
+  outPoint?: number;
 }
 
 export interface UseExportDialogResult {
@@ -63,6 +69,9 @@ export function useExportDialog({
   isOpen,
   sequenceId,
   sequenceName = 'Untitled Sequence',
+  useRange = false,
+  inPoint = 0,
+  outPoint = 0,
 }: UseExportDialogProps): UseExportDialogResult {
   // ===========================================================================
   // State
@@ -87,6 +96,7 @@ export function useExportDialog({
       setOutputPath('');
       setStatus({ type: 'idle' });
       setCurrentJobId(null);
+      currentJobIdRef.current = null;
     }
   }, [isOpen]);
 
@@ -99,6 +109,12 @@ export function useExportDialog({
   // Tauri Event Listeners
   // ===========================================================================
   useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+
+    let isDisposed = false;
+
     const setupListeners = async () => {
       // Clean up previous listeners
       for (const unlisten of unlistenRefs.current) {
@@ -118,12 +134,15 @@ export function useExportDialog({
           setStatus({ type: 'exporting', progress: percent, message });
         }
       });
-      unlistenRefs.current.push(unlistenProgress);
+      if (!isDisposed) {
+        unlistenRefs.current.push(unlistenProgress);
+      }
 
       // Listen for completion events
       const unlistenComplete = await listen<RenderCompleteEvent>('render-complete', (event) => {
         const jobId = currentJobIdRef.current;
         if (jobId && event.payload.jobId === jobId) {
+          currentJobIdRef.current = null;
           setStatus({
             type: 'completed',
             outputPath: event.payload.outputPath,
@@ -132,24 +151,28 @@ export function useExportDialog({
           setCurrentJobId(null);
         }
       });
-      unlistenRefs.current.push(unlistenComplete);
+      if (!isDisposed) {
+        unlistenRefs.current.push(unlistenComplete);
+      }
 
       // Listen for error events
       const unlistenError = await listen<RenderErrorEvent>('render-error', (event) => {
         const jobId = currentJobIdRef.current;
         if (jobId && event.payload.jobId === jobId) {
+          currentJobIdRef.current = null;
           setStatus({ type: 'failed', error: event.payload.error });
           setCurrentJobId(null);
         }
       });
-      unlistenRefs.current.push(unlistenError);
+      if (!isDisposed) {
+        unlistenRefs.current.push(unlistenError);
+      }
     };
 
-    if (currentJobId) {
-      void setupListeners();
-    }
+    void setupListeners();
 
     return () => {
+      isDisposed = true;
       for (const unlisten of unlistenRefs.current) {
         if (typeof unlisten === 'function') {
           unlisten();
@@ -157,7 +180,7 @@ export function useExportDialog({
       }
       unlistenRefs.current = [];
     };
-  }, [currentJobId]);
+  }, [isOpen]);
 
   // ===========================================================================
   // Handlers
@@ -185,19 +208,27 @@ export function useExportDialog({
    */
   const handleExport = useCallback(async () => {
     if (!sequenceId || !outputPath) return;
+    if (useRange && (inPoint < 0 || inPoint >= outPoint)) {
+      setStatus({ type: 'failed', error: 'In point must be before Out point.' });
+      return;
+    }
 
     setStatus({ type: 'exporting', progress: 0, message: 'Starting export...' });
 
     try {
-      const result = await invoke<{ jobId: string; outputPath: string; status: string }>(
-        'start_render',
-        {
-          sequenceId,
-          outputPath,
-          preset: selectedPreset,
-        }
-      );
+      const res = useRange
+        ? await commands.renderRange(sequenceId, outputPath, selectedPreset, inPoint, outPoint)
+        : await commands.startRender(sequenceId, outputPath, selectedPreset);
 
+      if (res.status === 'error') {
+        setStatus({ type: 'failed', error: String(res.error) });
+        currentJobIdRef.current = null;
+        setCurrentJobId(null);
+        return;
+      }
+
+      const result = res.data;
+      currentJobIdRef.current = result.jobId;
       setCurrentJobId(result.jobId);
 
       if (result.status === 'completed') {
@@ -206,19 +237,23 @@ export function useExportDialog({
           outputPath: result.outputPath,
           duration: 0,
         });
+        currentJobIdRef.current = null;
         setCurrentJobId(null);
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       setStatus({ type: 'failed', error: errorMessage });
+      currentJobIdRef.current = null;
       setCurrentJobId(null);
     }
-  }, [sequenceId, outputPath, selectedPreset]);
+  }, [sequenceId, outputPath, selectedPreset, useRange, inPoint, outPoint]);
 
   /**
    * Reset to idle state for retry.
    */
   const handleRetry = useCallback(() => {
+    currentJobIdRef.current = null;
+    setCurrentJobId(null);
     setStatus({ type: 'idle' });
   }, []);
 
