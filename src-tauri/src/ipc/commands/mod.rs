@@ -66,6 +66,9 @@ pub mod effect_presets;
 // Agent commands (trace writing, plan execution, memory persistence)
 pub mod agent;
 
+// Interchange commands (EDL/FCPXML export)
+pub mod interchange;
+
 // Re-export all domain modules
 pub use ai_legacy::*;
 pub use asset::*;
@@ -97,3 +100,6 @@ pub use effect_presets::*;
 
 // Re-export agent commands
 pub use agent::*;
+
+// Re-export interchange commands
+pub use interchange::*;

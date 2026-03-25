@@ -835,6 +835,15 @@ mod tauri_app {
                 $crate::ipc::get_job_stats,
                 // Render commands
                 $crate::ipc::start_render,
+                $crate::ipc::render_range,
+                $crate::ipc::batch_render,
+                $crate::ipc::cancel_render,
+                $crate::ipc::export_frame,
+                $crate::ipc::export_audio_only,
+                $crate::ipc::get_available_encoders,
+                // Interchange export commands (EDL, FCPXML)
+                $crate::ipc::export_edl,
+                $crate::ipc::export_fcpxml,
                 // AI commands
                 $crate::ipc::analyze_intent,
                 $crate::ipc::create_proposal,
@@ -1224,6 +1233,15 @@ mod tauri_app {
             ipc::get_job_stats,
             // Render commands
             ipc::start_render,
+            ipc::render_range,
+            ipc::batch_render,
+            ipc::cancel_render,
+            ipc::export_frame,
+            ipc::export_audio_only,
+            ipc::get_available_encoders,
+            // Interchange export commands (EDL, FCPXML)
+            ipc::export_edl,
+            ipc::export_fcpxml,
             // AI commands
             ipc::analyze_intent,
             ipc::create_proposal,
