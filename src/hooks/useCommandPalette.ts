@@ -29,6 +29,10 @@ export interface CommandPaletteCallbacks {
   onSplitAtPlayhead?: () => void;
   onDeleteClips?: () => void;
   onExport?: () => void;
+  onExportEdl?: () => void;
+  onExportFcpxml?: () => void;
+  onExportFrame?: () => void;
+  onExportAudio?: () => void;
   onMatchFrame?: () => void;
   onReverseMatchFrame?: () => void;
   onCopyEffects?: () => void;
@@ -179,6 +183,26 @@ export function useCommandPalette(callbacks: CommandPaletteCallbacks = {}): UseC
       actions.push(action('view.export', 'Export Video', 'Export', () => cb(), 'Ctrl+Shift+E'));
     }
 
+    if (callbacks.onExportEdl) {
+      const cb = callbacks.onExportEdl;
+      actions.push(action('view.export-edl', 'Export as EDL...', 'Export', () => cb()));
+    }
+
+    if (callbacks.onExportFcpxml) {
+      const cb = callbacks.onExportFcpxml;
+      actions.push(action('view.export-fcpxml', 'Export as FCPXML...', 'Export', () => cb()));
+    }
+
+    if (callbacks.onExportFrame) {
+      const cb = callbacks.onExportFrame;
+      actions.push(action('view.export-frame', 'Export Current Frame...', 'Export', () => cb()));
+    }
+
+    if (callbacks.onExportAudio) {
+      const cb = callbacks.onExportAudio;
+      actions.push(action('view.export-audio', 'Export Audio Only...', 'Export', () => cb()));
+    }
+
     if (callbacks.onToggleMixer) {
       const cb = callbacks.onToggleMixer;
       actions.push(action('view.toggle-mixer', 'Toggle Audio Mixer', 'Audio', () => cb()));
@@ -242,7 +266,9 @@ export function useCommandPalette(callbacks: CommandPaletteCallbacks = {}): UseC
     isLoaded, undo, redo, saveProject,
     clearClipSelection, zoomIn, zoomOut, setActiveTool, openSettings,
     callbacks.onSplitAtPlayhead, callbacks.onDeleteClips,
-    callbacks.onExport, callbacks.onMatchFrame, callbacks.onReverseMatchFrame,
+    callbacks.onExport, callbacks.onExportEdl, callbacks.onExportFcpxml,
+    callbacks.onExportFrame, callbacks.onExportAudio,
+    callbacks.onMatchFrame, callbacks.onReverseMatchFrame,
     callbacks.onCopyEffects, callbacks.onPasteEffects,
     callbacks.onToggleClipEnabled, callbacks.onToggleColorComparison,
     callbacks.onToggleMixer, callbacks.onAddText, callbacks.onAutoDuck,
