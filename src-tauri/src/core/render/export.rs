@@ -3,7 +3,7 @@
 //! Handles final video export using FFmpeg.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 use tokio::sync::mpsc::Sender;
 
 use crate::core::{
-    assets::Asset,
+    assets::{Asset, AssetKind},
     commands::TEXT_ASSET_PREFIX,
     effects::{Effect, EffectCategory, EffectType, FilterGraph, IntoFFmpegFilter, ParamValue},
     ffmpeg::FFmpegRunner,
@@ -48,6 +48,177 @@ fn effective_blend_mode_for_clip(clip: &Clip, track: &Track) -> BlendMode {
 
 fn uses_non_normal_blend_mode(clip: &Clip, track: &Track) -> bool {
     effective_blend_mode_for_clip(clip, track) != BlendMode::Normal
+}
+
+fn track_included_in_export(track: &Track) -> bool {
+    match track.kind {
+        TrackKind::Video | TrackKind::Overlay | TrackKind::Caption => track.visible && !track.muted,
+        TrackKind::Audio => !track.muted,
+    }
+}
+
+fn asset_has_playable_audio(
+    asset: &Asset,
+    track_kind: &TrackKind,
+    audio_info: Option<&AssetAudioInfo>,
+) -> bool {
+    match asset.kind {
+        AssetKind::Audio => true,
+        AssetKind::Video => {
+            if matches!(track_kind, TrackKind::Audio) {
+                return true;
+            }
+
+            audio_info
+                .map(|info| info.has_audio)
+                .unwrap_or_else(|| AssetAudioInfo::from_asset(asset).has_audio)
+        }
+        _ => false,
+    }
+}
+
+fn normalize_companion_key_value(value: f64) -> String {
+    if value.is_finite() {
+        format!("{value:.6}")
+    } else {
+        "0".to_string()
+    }
+}
+
+fn create_audio_companion_key(clip: &Clip) -> String {
+    [
+        clip.asset_id.clone(),
+        normalize_companion_key_value(clip.place.timeline_in_sec),
+        normalize_companion_key_value(clip.range.source_in_sec),
+        normalize_companion_key_value(clip.range.source_out_sec),
+        normalize_companion_key_value(clip.safe_speed()),
+    ]
+    .join("|")
+}
+
+fn collect_audio_companion_keys(
+    sequence: &Sequence,
+    assets: &HashMap<String, Asset>,
+    audio_info: &HashMap<String, AssetAudioInfo>,
+) -> HashSet<String> {
+    let mut keys = HashSet::new();
+
+    for track in &sequence.tracks {
+        if track.kind != TrackKind::Audio {
+            continue;
+        }
+
+        for clip in &track.clips {
+            if !clip.enabled {
+                continue;
+            }
+
+            let Some(asset) = assets.get(&clip.asset_id) else {
+                continue;
+            };
+
+            if !asset_has_playable_audio(asset, &track.kind, audio_info.get(&clip.asset_id)) {
+                continue;
+            }
+
+            keys.insert(create_audio_companion_key(clip));
+        }
+    }
+
+    keys
+}
+
+fn clip_audio_is_suppressed_by_companion(
+    clip: &Clip,
+    track: &Track,
+    asset: &Asset,
+    audio_companion_keys: &HashSet<String>,
+) -> bool {
+    track.kind != TrackKind::Audio
+        && asset.kind == AssetKind::Video
+        && audio_companion_keys.contains(&create_audio_companion_key(clip))
+}
+
+fn clip_has_identity_transform(clip: &Clip) -> bool {
+    (clip.transform.position.x - 0.5).abs() < 0.0001
+        && (clip.transform.position.y - 0.5).abs() < 0.0001
+        && (clip.transform.scale.x - 1.0).abs() < 0.0001
+        && (clip.transform.scale.y - 1.0).abs() < 0.0001
+        && clip.transform.rotation_deg.abs() < 0.0001
+        && (clip.transform.anchor.x - 0.5).abs() < 0.0001
+        && (clip.transform.anchor.y - 0.5).abs() < 0.0001
+}
+
+fn clip_uses_unsupported_visual_composition(clip: &Clip) -> bool {
+    !is_text_clip(clip)
+        && !clip.is_adjustment_layer()
+        && (!clip_has_identity_transform(clip) || (clip.opacity - 1.0).abs() > 0.0001)
+}
+
+fn has_layered_visual_overlap(sequence: &Sequence) -> bool {
+    let mut intervals = Vec::new();
+
+    for track in &sequence.tracks {
+        if track.kind != TrackKind::Video || !track_included_in_export(track) {
+            continue;
+        }
+
+        for clip in &track.clips {
+            if !clip.enabled || clip.is_adjustment_layer() {
+                continue;
+            }
+
+            intervals.push((clip.place.timeline_in_sec, clip.place.timeline_out_sec()));
+        }
+    }
+
+    intervals.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut latest_end: Option<f64> = None;
+    for (start, end) in intervals {
+        if let Some(current_end) = latest_end {
+            if start < current_end - 0.001 {
+                return true;
+            }
+            latest_end = Some(current_end.max(end));
+        } else {
+            latest_end = Some(end);
+        }
+    }
+
+    false
+}
+
+fn sequence_has_exportable_audio(
+    sequence: &Sequence,
+    assets: &HashMap<String, Asset>,
+    audio_info: &HashMap<String, AssetAudioInfo>,
+) -> bool {
+    let audio_companion_keys = collect_audio_companion_keys(sequence, assets, audio_info);
+
+    sequence
+        .tracks
+        .iter()
+        .filter(|track| !track.muted)
+        .any(|track| {
+            track.clips.iter().any(|clip| {
+                if !clip.enabled || clip.freeze_frame || clip.audio.muted {
+                    return false;
+                }
+
+                let Some(asset) = assets.get(&clip.asset_id) else {
+                    return false;
+                };
+
+                asset_has_playable_audio(asset, &track.kind, audio_info.get(&clip.asset_id))
+                    && !clip_audio_is_suppressed_by_companion(
+                        clip,
+                        track,
+                        asset,
+                        &audio_companion_keys,
+                    )
+            })
+        })
 }
 
 // =============================================================================
@@ -157,6 +328,13 @@ pub struct ExportSettings {
     /// Tonemapping mode for HDR→SDR conversion (applied when source is HDR and output is SDR)
     #[serde(default)]
     pub tonemap_mode: Option<TonemapMode>,
+    /// Hardware acceleration mode for encoding
+    #[serde(default)]
+    pub hardware_accel: super::hardware::HardwareAccelMode,
+    /// Resolved FFmpeg encoder name (populated by IPC layer after hardware detection).
+    /// When None, falls back to software encoder for the selected video codec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_encoder_name: Option<String>,
 }
 
 impl Default for ExportSettings {
@@ -180,11 +358,24 @@ impl Default for ExportSettings {
             max_fall: None,
             bit_depth: None,
             tonemap_mode: None,
+            hardware_accel: super::hardware::HardwareAccelMode::default(),
+            resolved_encoder_name: None,
         }
     }
 }
 
 impl ExportSettings {
+    /// Get the resolved video encoder name for FFmpeg.
+    ///
+    /// Returns the pre-resolved encoder name if set (by IPC layer after detection),
+    /// otherwise falls back to software encoder for the selected video codec.
+    pub fn video_encoder_name(&self) -> String {
+        if let Some(ref name) = self.resolved_encoder_name {
+            return name.clone();
+        }
+        super::hardware::software_encoder_name(&self.video_codec)
+    }
+
     /// Create settings from a preset
     pub fn from_preset(preset: ExportPreset, output_path: PathBuf) -> Self {
         match preset {
@@ -207,6 +398,8 @@ impl ExportSettings {
                 max_fall: None,
                 bit_depth: None,
                 tonemap_mode: None,
+                hardware_accel: super::hardware::HardwareAccelMode::default(),
+                resolved_encoder_name: None,
             },
             ExportPreset::Youtube4k => Self {
                 preset: ExportPreset::Youtube4k,
@@ -227,6 +420,8 @@ impl ExportSettings {
                 max_fall: None,
                 bit_depth: None,
                 tonemap_mode: None,
+                hardware_accel: super::hardware::HardwareAccelMode::default(),
+                resolved_encoder_name: None,
             },
             ExportPreset::YoutubeShorts => Self {
                 preset: ExportPreset::YoutubeShorts,
@@ -247,6 +442,8 @@ impl ExportSettings {
                 max_fall: None,
                 bit_depth: None,
                 tonemap_mode: None,
+                hardware_accel: super::hardware::HardwareAccelMode::default(),
+                resolved_encoder_name: None,
             },
             ExportPreset::Twitter => Self {
                 preset: ExportPreset::Twitter,
@@ -267,6 +464,8 @@ impl ExportSettings {
                 max_fall: None,
                 bit_depth: None,
                 tonemap_mode: None,
+                hardware_accel: super::hardware::HardwareAccelMode::default(),
+                resolved_encoder_name: None,
             },
             ExportPreset::Instagram => Self {
                 preset: ExportPreset::Instagram,
@@ -287,6 +486,8 @@ impl ExportSettings {
                 max_fall: None,
                 bit_depth: None,
                 tonemap_mode: None,
+                hardware_accel: super::hardware::HardwareAccelMode::default(),
+                resolved_encoder_name: None,
             },
             ExportPreset::WebmVp9 => Self {
                 preset: ExportPreset::WebmVp9,
@@ -307,6 +508,8 @@ impl ExportSettings {
                 max_fall: None,
                 bit_depth: None,
                 tonemap_mode: None,
+                hardware_accel: super::hardware::HardwareAccelMode::default(),
+                resolved_encoder_name: None,
             },
             ExportPreset::ProRes => Self {
                 preset: ExportPreset::ProRes,
@@ -327,6 +530,8 @@ impl ExportSettings {
                 max_fall: None,
                 bit_depth: None,
                 tonemap_mode: None,
+                hardware_accel: super::hardware::HardwareAccelMode::default(),
+                resolved_encoder_name: None,
             },
             ExportPreset::Custom => Self {
                 preset: ExportPreset::Custom,
@@ -369,6 +574,8 @@ impl ExportSettings {
             max_fall: None,
             bit_depth: None,
             tonemap_mode: None,
+            hardware_accel: super::hardware::HardwareAccelMode::default(),
+            resolved_encoder_name: None,
         }
     }
 
@@ -573,6 +780,409 @@ pub struct ExportResult {
     pub file_size: u64,
     /// Total encoding time in seconds
     pub encoding_time_sec: f64,
+}
+
+// =============================================================================
+// Batch & Range Render Types
+// =============================================================================
+
+/// A single item in a batch render queue.
+///
+/// Each item specifies a preset and output path. Optional `in_point`/`out_point`
+/// restrict the render to a specific time range within the sequence.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchRenderItem {
+    /// Export preset identifier (e.g., "youtube_1080p")
+    pub preset: String,
+    /// Output file path for this render
+    pub output_path: String,
+    /// Optional In point in seconds for range export
+    pub in_point: Option<f64>,
+    /// Optional Out point in seconds for range export
+    pub out_point: Option<f64>,
+}
+
+/// Status of an individual render job within a batch
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderJobStatus {
+    /// Waiting in queue
+    Pending,
+    /// Currently encoding
+    Rendering,
+    /// Finished successfully
+    Completed,
+    /// Encoding failed
+    Failed,
+    /// Cancelled by user
+    Cancelled,
+}
+
+/// Result returned when a batch render is started
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchRenderResult {
+    /// Unique identifier for the entire batch
+    pub batch_id: String,
+    /// Job IDs for each item (same order as input items)
+    pub job_ids: Vec<String>,
+    /// Total number of items in the batch
+    pub total_items: u32,
+    /// Initial status ("started")
+    pub status: String,
+}
+
+/// Completion info for a single item within a batch
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BatchItemResult {
+    /// Job ID of the completed item
+    pub job_id: String,
+    /// Output file path
+    pub output_path: String,
+    /// Render status
+    pub status: RenderJobStatus,
+    /// Duration in seconds (0 if failed/cancelled)
+    pub duration_sec: f64,
+    /// File size in bytes (0 if failed/cancelled)
+    pub file_size: u64,
+    /// Encoding time in seconds (0 if failed/cancelled)
+    pub encoding_time_sec: f64,
+    /// Error message (only if status == Failed)
+    pub error: Option<String>,
+}
+
+// =============================================================================
+// Still Image & Audio-Only Export Types
+// =============================================================================
+
+/// Image format for single-frame export
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageFormat {
+    /// PNG (lossless, with alpha support)
+    Png,
+    /// JPEG (lossy, smaller file size)
+    Jpeg,
+    /// TIFF (lossless, professional format)
+    Tiff,
+}
+
+impl ImageFormat {
+    /// File extension for this format
+    pub fn extension(&self) -> &str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Tiff => "tiff",
+        }
+    }
+
+    /// FFmpeg pixel format appropriate for this image format
+    pub fn pixel_format(&self) -> &str {
+        match self {
+            Self::Png => "rgba",
+            Self::Jpeg => "yuvj420p",
+            Self::Tiff => "rgb48le",
+        }
+    }
+}
+
+/// Settings for exporting a single frame from a sequence
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameExportSettings {
+    /// Time position in seconds to capture the frame
+    pub time_sec: f64,
+    /// Output image format
+    pub format: ImageFormat,
+    /// Output file path
+    pub output_path: PathBuf,
+    /// Optional JPEG quality (1-31, lower = better; only used for JPEG)
+    pub quality: Option<u8>,
+}
+
+impl FrameExportSettings {
+    /// Validate frame export settings
+    pub fn validate(&self) -> Result<(), ExportError> {
+        if self.time_sec.is_nan() || self.time_sec.is_infinite() {
+            return Err(ExportError::InvalidSettings(
+                "Time position must be a finite number".to_string(),
+            ));
+        }
+        if self.time_sec < 0.0 {
+            return Err(ExportError::InvalidSettings(
+                "Time position must be non-negative".to_string(),
+            ));
+        }
+
+        if let Some(q) = self.quality {
+            if q == 0 || q > 31 {
+                return Err(ExportError::InvalidSettings(
+                    "JPEG quality must be between 1 and 31".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Result of a single-frame export
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameExportResult {
+    /// Output file path
+    pub output_path: PathBuf,
+    /// File size in bytes
+    pub file_size: u64,
+    /// Image format used
+    pub format: ImageFormat,
+    /// Width of the exported image in pixels
+    pub width: u32,
+    /// Height of the exported image in pixels
+    pub height: u32,
+}
+
+/// Audio export format
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioExportFormat {
+    /// WAV (uncompressed PCM)
+    Wav,
+    /// MP3 (lossy, widely compatible)
+    Mp3,
+    /// FLAC (lossless compression)
+    Flac,
+}
+
+impl AudioExportFormat {
+    /// File extension for this format
+    pub fn extension(&self) -> &str {
+        match self {
+            Self::Wav => "wav",
+            Self::Mp3 => "mp3",
+            Self::Flac => "flac",
+        }
+    }
+
+    /// FFmpeg audio codec name for this format
+    pub fn codec(&self) -> &str {
+        match self {
+            Self::Wav => "pcm_s16le",
+            Self::Mp3 => "libmp3lame",
+            Self::Flac => "flac",
+        }
+    }
+
+    /// Default bitrate for lossy formats (None for lossless)
+    pub fn default_bitrate(&self) -> Option<&str> {
+        match self {
+            Self::Wav | Self::Flac => None,
+            Self::Mp3 => Some("320k"),
+        }
+    }
+}
+
+/// Settings for exporting audio only from a sequence
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioExportSettings {
+    /// Output audio format
+    pub format: AudioExportFormat,
+    /// Output file path
+    pub output_path: PathBuf,
+    /// Optional audio bitrate (e.g., "192k", "320k") — only for lossy formats
+    pub bitrate: Option<String>,
+    /// Optional sample rate in Hz (e.g., 44100, 48000)
+    pub sample_rate: Option<u32>,
+    /// Optional start time in seconds for range export
+    pub start_time: Option<f64>,
+    /// Optional end time in seconds for range export
+    pub end_time: Option<f64>,
+}
+
+impl AudioExportSettings {
+    /// Validate audio export settings
+    pub fn validate(&self) -> Result<(), ExportError> {
+        if let Some(t) = self.start_time {
+            if t.is_nan() || t.is_infinite() {
+                return Err(ExportError::InvalidSettings(
+                    "Start time must be a finite number".to_string(),
+                ));
+            }
+        }
+        if let Some(t) = self.end_time {
+            if t.is_nan() || t.is_infinite() {
+                return Err(ExportError::InvalidSettings(
+                    "End time must be a finite number".to_string(),
+                ));
+            }
+        }
+        if let (Some(start), Some(end)) = (self.start_time, self.end_time) {
+            if end <= start {
+                return Err(ExportError::InvalidSettings(
+                    "End time must be greater than start time".to_string(),
+                ));
+            }
+        }
+
+        if let Some(sr) = self.sample_rate {
+            if sr == 0 || sr > 192_000 {
+                return Err(ExportError::InvalidSettings(
+                    "Sample rate must be between 1 and 192000 Hz".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Convert to ExportSettings for reuse with the existing render pipeline
+    pub fn to_export_settings(&self) -> ExportSettings {
+        let bitrate = self
+            .bitrate
+            .clone()
+            .or_else(|| self.format.default_bitrate().map(String::from));
+
+        ExportSettings {
+            preset: ExportPreset::Custom,
+            output_path: self.output_path.clone(),
+            video_codec: VideoCodec::Copy,
+            // Note: audio_codec here is a placeholder for the ExportSettings struct.
+            // export_audio_only() strips all -c:a args and replaces them using
+            // AudioExportFormat::codec() which returns the correct codec name.
+            audio_codec: match self.format {
+                AudioExportFormat::Wav => AudioCodec::Pcm,
+                AudioExportFormat::Mp3 => AudioCodec::Mp3,
+                AudioExportFormat::Flac => AudioCodec::Copy,
+            },
+            width: None,
+            height: None,
+            video_bitrate: None,
+            audio_bitrate: bitrate,
+            fps: None,
+            crf: None,
+            two_pass: false,
+            start_time: self.start_time,
+            end_time: self.end_time,
+            hdr_mode: HdrMode::Sdr,
+            max_cll: None,
+            max_fall: None,
+            bit_depth: None,
+            tonemap_mode: None,
+            hardware_accel: super::hardware::HardwareAccelMode::Cpu,
+            resolved_encoder_name: None,
+        }
+    }
+}
+
+/// Result of an audio-only export
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioExportResult {
+    /// Output file path
+    pub output_path: PathBuf,
+    /// Duration in seconds
+    pub duration_sec: f64,
+    /// File size in bytes
+    pub file_size: u64,
+    /// Audio format used
+    pub format: AudioExportFormat,
+    /// Total encoding time in seconds
+    pub encoding_time_sec: f64,
+}
+
+// =============================================================================
+// Render Job Registry (Cancel Support)
+// =============================================================================
+
+use std::sync::LazyLock;
+use tokio::sync::{oneshot, Mutex as TokioMutex};
+
+/// Global registry of active render jobs for cancellation support.
+///
+/// Each entry maps a job ID to a oneshot sender that, when sent, signals
+/// the render task to abort (kill the FFmpeg child process).
+static RENDER_JOB_CANCEL_REGISTRY: LazyLock<TokioMutex<HashMap<String, oneshot::Sender<()>>>> =
+    LazyLock::new(|| TokioMutex::new(HashMap::new()));
+
+/// Register a render job's cancel sender in the global registry.
+pub async fn register_render_job(job_id: &str, cancel_tx: oneshot::Sender<()>) {
+    let mut guard = RENDER_JOB_CANCEL_REGISTRY.lock().await;
+    guard.insert(job_id.to_string(), cancel_tx);
+}
+
+/// Cancel a render job by ID. Returns true if the job was found and cancelled.
+pub async fn cancel_render_job(job_id: &str) -> bool {
+    let mut guard = RENDER_JOB_CANCEL_REGISTRY.lock().await;
+    if let Some(cancel_tx) = guard.remove(job_id) {
+        let _ = cancel_tx.send(());
+        true
+    } else {
+        false
+    }
+}
+
+/// Remove a render job from the registry (called on completion).
+pub async fn unregister_render_job(job_id: &str) {
+    let mut guard = RENDER_JOB_CANCEL_REGISTRY.lock().await;
+    guard.remove(job_id);
+}
+
+fn insert_output_option_args(
+    args: &mut Vec<String>,
+    output_options: impl IntoIterator<Item = String>,
+) -> Result<(), ExportError> {
+    let output_path = args.pop().ok_or_else(|| {
+        ExportError::InvalidSettings("No output path in FFmpeg arguments".to_string())
+    })?;
+
+    args.extend(output_options);
+    args.push(output_path);
+
+    Ok(())
+}
+
+fn append_output_time_range_args(
+    args: &mut Vec<String>,
+    start_time: Option<f64>,
+    end_time: Option<f64>,
+) {
+    if let Some(start) = start_time {
+        args.push("-ss".to_string());
+        args.push(start.to_string());
+    }
+
+    if let Some(end) = end_time {
+        args.push("-t".to_string());
+        args.push(match start_time {
+            Some(start) => (end - start).to_string(),
+            None => end.to_string(),
+        });
+    }
+}
+
+fn effective_export_duration(
+    sequence: &Sequence,
+    start_time: Option<f64>,
+    end_time: Option<f64>,
+) -> f64 {
+    let full_duration = sequence
+        .tracks
+        .iter()
+        .flat_map(|track| track.clips.iter())
+        .filter(|clip| clip.enabled)
+        .map(|clip| clip.place.timeline_out_sec())
+        .fold(0.0_f64, f64::max);
+
+    let normalized_start = start_time.unwrap_or(0.0).max(0.0).min(full_duration);
+
+    match end_time {
+        Some(end) => (end.max(0.0).min(full_duration) - normalized_start).max(0.0),
+        None => (full_duration - normalized_start).max(0.0),
+    }
 }
 
 /// Export error
@@ -1021,12 +1631,61 @@ fn apply_audio_fades(
     label
 }
 
-fn master_volume_db_to_linear(master_volume_db: f32) -> f64 {
-    if master_volume_db <= -60.0 {
+fn volume_db_to_linear(volume_db: f32) -> f64 {
+    if volume_db <= -60.0 {
         0.0
     } else {
-        10.0_f64.powf(master_volume_db as f64 / 20.0)
+        10.0_f64.powf(volume_db as f64 / 20.0)
     }
+}
+
+fn apply_audio_mix_settings(
+    clip: &Clip,
+    track: &Track,
+    input_index: usize,
+    current_label: &str,
+    filter_complex: &mut String,
+) -> String {
+    let mut current_label = current_label.to_string();
+
+    let clip_linear_gain = if clip.audio.has_volume_automation() {
+        1.0
+    } else {
+        volume_db_to_linear(clip.audio.volume_db.clamp(-60.0, 6.0))
+    };
+    let track_linear_gain = track.volume.clamp(0.0, 2.0) as f64;
+    let combined_gain = clip_linear_gain * track_linear_gain;
+
+    if (combined_gain - 1.0).abs() >= 0.0001 {
+        let gain_label = format!("again{}", input_index);
+        filter_complex.push_str(&format!(
+            "[{}]volume={:.6}[{}];",
+            current_label, combined_gain, gain_label
+        ));
+        current_label = gain_label;
+    }
+
+    let pan = clip.audio.pan.clamp(-1.0, 1.0) as f64;
+    if pan.abs() >= 0.0001 {
+        let pan_label = format!("apan{}", input_index);
+        filter_complex.push_str(&format!(
+            "[{}]aformat=channel_layouts=stereo,stereotools=balance_in={:.4}:bmode_in=power[{}];",
+            current_label, pan, pan_label
+        ));
+        current_label = pan_label;
+    }
+
+    let delay_ms = (clip.place.timeline_in_sec.max(0.0) * 1000.0).round() as u64;
+    if delay_ms > 0 {
+        let delay_label = format!("adel{}", input_index);
+        filter_complex.push_str(&format!(
+            "[{}]adelay=delays={}:all=1[{}];",
+            current_label, delay_ms, delay_label
+        ));
+        current_label = delay_label;
+    }
+
+    current_label
 }
 
 fn append_master_audio_output(
@@ -1047,7 +1706,7 @@ fn append_master_audio_output(
     } else {
         filter_complex.push_str(&audio_streams.join(""));
         filter_complex.push_str(&format!(
-            "concat=n={}:v=0:a=1{}",
+            "amix=inputs={}:duration=longest:dropout_transition=0:normalize=0{}",
             audio_streams.len(),
             BASE_AUDIO_LABEL
         ));
@@ -1062,7 +1721,7 @@ fn append_master_audio_output(
     filter_complex.push_str(&format!(
         "{}volume={:.6}{}",
         BASE_AUDIO_LABEL,
-        master_volume_db_to_linear(clamped_master_volume_db),
+        volume_db_to_linear(clamped_master_volume_db),
         FINAL_AUDIO_LABEL
     ));
 
@@ -1484,6 +2143,10 @@ fn collect_enabled_clips_sorted(sequence: &Sequence) -> Vec<(&Clip, &Track)> {
     let mut all_clips: Vec<(&Clip, &Track)> = Vec::new();
 
     for track in &sequence.tracks {
+        if !track_included_in_export(track) {
+            continue;
+        }
+
         for clip in &track.clips {
             if !clip.enabled {
                 continue;
@@ -1627,13 +2290,7 @@ impl ExportEngine {
         input_path: &Path,
         settings: &ExportSettings,
     ) -> Vec<String> {
-        let video_codec = match settings.video_codec {
-            VideoCodec::H264 => "libx264",
-            VideoCodec::H265 => "libx265",
-            VideoCodec::Vp9 => "libvpx-vp9",
-            VideoCodec::ProRes => "prores_ks",
-            VideoCodec::Copy => "copy",
-        };
+        let video_codec = settings.video_encoder_name();
 
         let audio_codec = match settings.audio_codec {
             AudioCodec::Aac => "aac",
@@ -1647,7 +2304,7 @@ impl ExportEngine {
             "-i".to_string(),
             input_path.to_string_lossy().to_string(),
             "-c:v".to_string(),
-            video_codec.to_string(),
+            video_codec.clone(),
             "-c:a".to_string(),
             audio_codec.to_string(),
         ];
@@ -1670,11 +2327,10 @@ impl ExportEngine {
             args.push(bitrate.clone());
         }
 
-        // CRF
+        // Quality settings (CRF for software, CQ/QP for hardware encoders)
         if let Some(crf) = settings.crf {
             if matches!(settings.video_codec, VideoCodec::H264 | VideoCodec::H265) {
-                args.push("-crf".to_string());
-                args.push(crf.to_string());
+                args.extend(super::hardware::resolve_quality_args(&video_codec, crf));
             }
         }
 
@@ -1687,22 +2343,7 @@ impl ExportEngine {
             args.push(fps.to_string());
         }
 
-        // Start time
-        if let Some(start) = settings.start_time {
-            args.push("-ss".to_string());
-            args.push(start.to_string());
-        }
-
-        // End time / duration
-        if let Some(end) = settings.end_time {
-            if let Some(start) = settings.start_time {
-                args.push("-t".to_string());
-                args.push((end - start).to_string());
-            } else {
-                args.push("-t".to_string());
-                args.push(end.to_string());
-            }
-        }
+        append_output_time_range_args(&mut args, settings.start_time, settings.end_time);
 
         // Overwrite output
         args.push("-y".to_string());
@@ -1787,6 +2428,7 @@ impl ExportEngine {
         let mut video_streams = Vec::new();
         let mut audio_streams = Vec::new();
         let mut video_transitions: Vec<Option<&Effect>> = Vec::new();
+        let audio_companion_keys = collect_audio_companion_keys(sequence, assets, audio_info);
 
         // Collect enabled clips sorted by timeline position.
         let all_clips = collect_enabled_clips_sorted(sequence);
@@ -1872,13 +2514,14 @@ impl ExportEngine {
                 .map_err(ExportError::InvalidSettings)?;
 
             // Check if this asset has audio
-            let clip_has_audio = audio_info
-                .get(&clip.asset_id)
-                .map(|info| info.has_audio)
-                .unwrap_or_else(|| {
-                    // Fallback: check asset metadata
-                    AssetAudioInfo::from_asset(asset).has_audio
-                });
+            let clip_has_audio =
+                asset_has_playable_audio(asset, &track.kind, audio_info.get(&clip.asset_id))
+                    && !clip_audio_is_suppressed_by_companion(
+                        clip,
+                        track,
+                        asset,
+                        &audio_companion_keys,
+                    );
 
             // Add input (using validated path)
             args.push("-i".to_string());
@@ -1931,7 +2574,7 @@ impl ExportEngine {
 
                     // Audio processing: ONLY if this asset has audio
                     // Freeze frame clips have muted audio, so skip
-                    if clip_has_audio && !clip.freeze_frame {
+                    if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
                         let audio_trim_label = format!("atrim{}", input_index);
                         let audio_out_label = format!("a{}", input_index);
 
@@ -1954,12 +2597,20 @@ impl ExportEngine {
                             ));
                         }
 
-                        audio_streams.push(format!("[{}]", audio_out_label));
+                        let mixed_audio_label = apply_audio_mix_settings(
+                            clip,
+                            track,
+                            input_index,
+                            &audio_out_label,
+                            &mut filter_complex,
+                        );
+
+                        audio_streams.push(format!("[{}]", mixed_audio_label));
                     }
                 }
                 TrackKind::Audio => {
                     // Audio-only track processing
-                    if clip_has_audio && !clip.freeze_frame {
+                    if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
                         let audio_trim_label = format!("atrim{}", input_index);
                         let audio_out_label = format!("a{}", input_index);
 
@@ -1982,7 +2633,15 @@ impl ExportEngine {
                             ));
                         }
 
-                        audio_streams.push(format!("[{}]", audio_out_label));
+                        let mixed_audio_label = apply_audio_mix_settings(
+                            clip,
+                            track,
+                            input_index,
+                            &audio_out_label,
+                            &mut filter_complex,
+                        );
+
+                        audio_streams.push(format!("[{}]", mixed_audio_label));
                     }
                 }
                 _ => {
@@ -2088,15 +2747,10 @@ impl ExportEngine {
             args.push(final_audio_label.to_string());
         }
 
-        // Video codec
+        // Video codec (resolved: may use GPU encoder)
+        let video_encoder = settings.video_encoder_name();
         args.push("-c:v".to_string());
-        args.push(match settings.video_codec {
-            VideoCodec::H264 => "libx264".to_string(),
-            VideoCodec::H265 => "libx265".to_string(),
-            VideoCodec::Vp9 => "libvpx-vp9".to_string(),
-            VideoCodec::ProRes => "prores_ks".to_string(),
-            VideoCodec::Copy => "copy".to_string(),
-        });
+        args.push(video_encoder.clone());
 
         // Audio codec ONLY if we have audio
         if final_audio_label.is_some() {
@@ -2124,15 +2778,17 @@ impl ExportEngine {
             }
         }
 
+        // Quality args (CRF for software, CQ/QP for hardware encoders)
         if let Some(crf) = settings.crf {
             if matches!(settings.video_codec, VideoCodec::H264 | VideoCodec::H265) {
-                args.push("-crf".to_string());
-                args.push(crf.to_string());
+                args.extend(super::hardware::resolve_quality_args(&video_encoder, crf));
             }
         }
 
         // HDR metadata (color primaries, transfer, colorspace, x265 params)
         args.extend(settings.hdr_args());
+
+        append_output_time_range_args(&mut args, settings.start_time, settings.end_time);
 
         // Overwrite
         args.push("-y".to_string());
@@ -2160,6 +2816,7 @@ impl ExportEngine {
             &std::collections::HashMap::new(),
             settings,
             progress_tx,
+            None,
         )
         .await
     }
@@ -2176,6 +2833,7 @@ impl ExportEngine {
     /// * `effects` - Map of effect ID to Effect (for looking up clip effects)
     /// * `settings` - Export settings
     /// * `progress_tx` - Optional channel for progress updates
+    /// * `cancel_rx` - Optional oneshot receiver to cancel the export mid-encode
     pub async fn export_sequence_with_effects(
         &self,
         sequence: &Sequence,
@@ -2183,6 +2841,7 @@ impl ExportEngine {
         effects: &std::collections::HashMap<String, Effect>,
         settings: &ExportSettings,
         progress_tx: Option<Sender<ExportProgress>>,
+        cancel_rx: Option<oneshot::Receiver<()>>,
     ) -> Result<ExportResult, ExportError> {
         use std::process::Stdio;
         use tokio::io::{AsyncBufReadExt, BufReader};
@@ -2204,24 +2863,13 @@ impl ExportEngine {
 
         // Calculate total duration from enabled clips only so progress/ETA
         // are accurate when trailing clips are disabled.
-        let total_duration: f64 = sequence
-            .tracks
-            .iter()
-            .flat_map(|t| t.clips.iter())
-            .filter(|c| c.enabled)
-            .map(|c| c.place.timeline_out_sec())
-            .fold(0.0, f64::max);
+        let total_duration =
+            effective_export_duration(sequence, settings.start_time, settings.end_time);
         let fps = settings.fps.unwrap_or(30.0);
         let total_frames = (total_duration * fps) as u64;
 
-        // Add progress output to stdout for real-time tracking
-        // Insert before output path (last argument)
-        let output_path_arg = args.pop().ok_or_else(|| {
-            ExportError::InvalidSettings("No output path in FFmpeg arguments".to_string())
-        })?;
-        args.push("-progress".to_string());
-        args.push("pipe:1".to_string());
-        args.push(output_path_arg);
+        // Add progress output to stdout for real-time tracking.
+        insert_output_option_args(&mut args, ["-progress".to_string(), "pipe:1".to_string()])?;
 
         // Send initial progress
         if let Some(ref tx) = progress_tx {
@@ -2303,11 +2951,27 @@ impl ExportEngine {
             }
         }
 
-        // Wait for FFmpeg to complete
-        let status = child
-            .wait()
-            .await
-            .map_err(|e| ExportError::FFmpegFailed(format!("Failed to wait for FFmpeg: {}", e)))?;
+        // Wait for FFmpeg to complete, or cancel if requested
+        let status = if let Some(cancel_rx) = cancel_rx {
+            tokio::select! {
+                result = child.wait() => {
+                    result.map_err(|e| ExportError::FFmpegFailed(
+                        format!("Failed to wait for FFmpeg: {}", e),
+                    ))?
+                }
+                _ = cancel_rx => {
+                    // Cancel signal received — kill the FFmpeg child process
+                    let _ = child.kill().await;
+                    // Clean up partial output file
+                    let _ = tokio::fs::remove_file(&settings.output_path).await;
+                    return Err(ExportError::Cancelled);
+                }
+            }
+        } else {
+            child.wait().await.map_err(|e| {
+                ExportError::FFmpegFailed(format!("Failed to wait for FFmpeg: {}", e))
+            })?
+        };
 
         if !status.success() {
             // Get stderr from the drain task
@@ -2473,6 +3137,372 @@ impl ExportEngine {
             file_size,
             encoding_time_sec: start_time.elapsed().as_secs_f64(),
         })
+    }
+
+    /// Export a single frame from a sequence at the given timestamp.
+    ///
+    /// Finds the topmost visible clip at `time_sec`, resolves its source asset,
+    /// and extracts the corresponding frame via FFmpeg. The exported image
+    /// respects the clip's source offset so the correct frame is captured.
+    ///
+    /// # Arguments
+    ///
+    /// * `sequence` - The sequence containing clips
+    /// * `assets` - Map of asset ID to Asset
+    /// * `settings` - Frame export settings (time, format, output path)
+    pub async fn export_frame(
+        &self,
+        sequence: &Sequence,
+        assets: &HashMap<String, Asset>,
+        settings: &FrameExportSettings,
+    ) -> Result<FrameExportResult, ExportError> {
+        settings.validate()?;
+
+        // Find the topmost visible video clip at the requested time
+        let (clip, asset) = self
+            .find_topmost_clip_at_time(sequence, assets, settings.time_sec)
+            .ok_or_else(|| {
+                ExportError::InvalidSettings(format!(
+                    "No visible clip found at time {:.3}s",
+                    settings.time_sec
+                ))
+            })?;
+
+        // Calculate the source time within the asset, accounting for
+        // the clip's timeline position and source offset.
+        let clip_relative_time = settings.time_sec - clip.place.timeline_in_sec;
+        let speed = clip.speed as f64;
+        let source_time = clip.range.source_in_sec + (clip_relative_time * speed);
+
+        // Resolve asset path
+        let asset_path = Path::new(&asset.uri);
+        if !asset_path.exists() {
+            return Err(ExportError::InvalidSettings(format!(
+                "Asset file not found: {}",
+                asset.uri
+            )));
+        }
+
+        // Build FFmpeg args for single-frame extraction
+        let quality = settings.quality.unwrap_or(2);
+        let time_str = format!("{:.3}", source_time);
+        let output_str = settings.output_path.to_string_lossy().to_string();
+        let input_str = asset_path.to_string_lossy().to_string();
+
+        let mut args = vec![
+            "-hide_banner".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-nostdin".to_string(),
+            "-ss".to_string(),
+            time_str,
+            "-i".to_string(),
+            input_str,
+            "-frames:v".to_string(),
+            "1".to_string(),
+        ];
+
+        // Format-specific arguments
+        match settings.format {
+            ImageFormat::Png => {
+                args.extend([
+                    "-c:v".to_string(),
+                    "png".to_string(),
+                    "-pix_fmt".to_string(),
+                    "rgba".to_string(),
+                ]);
+            }
+            ImageFormat::Jpeg => {
+                args.extend([
+                    "-c:v".to_string(),
+                    "mjpeg".to_string(),
+                    "-q:v".to_string(),
+                    quality.to_string(),
+                ]);
+            }
+            ImageFormat::Tiff => {
+                args.extend([
+                    "-c:v".to_string(),
+                    "tiff".to_string(),
+                    "-pix_fmt".to_string(),
+                    "rgb48le".to_string(),
+                ]);
+            }
+        }
+
+        args.extend(["-y".to_string(), output_str]);
+
+        // Create output directory if needed
+        if let Some(parent) = settings.output_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+        }
+
+        // Run FFmpeg
+        let ffmpeg_path = &self.ffmpeg.info().ffmpeg_path;
+        let mut cmd = tokio::process::Command::new(ffmpeg_path);
+        configure_tokio_command(&mut cmd);
+        let output = cmd
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| ExportError::FFmpegFailed(format!("Failed to spawn FFmpeg: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ExportError::FFmpegFailed(format!(
+                "Frame export failed: {}",
+                stderr
+            )));
+        }
+
+        // Read output file metadata
+        let metadata = tokio::fs::metadata(&settings.output_path).await?;
+        let file_size = metadata.len();
+
+        // The frame is extracted at the source asset's native resolution.
+        // Use asset video dimensions if available, otherwise fall back to sequence canvas.
+        let (width, height) = if let Some(ref video) = asset.video {
+            (video.width, video.height)
+        } else {
+            (sequence.format.canvas.width, sequence.format.canvas.height)
+        };
+
+        Ok(FrameExportResult {
+            output_path: settings.output_path.clone(),
+            file_size,
+            format: settings.format.clone(),
+            width,
+            height,
+        })
+    }
+
+    /// Export audio only from a sequence (no video).
+    ///
+    /// Renders all audio tracks in the sequence to a single audio file,
+    /// mixed down to stereo. Uses the existing complex filter graph for
+    /// audio composition but strips all video processing.
+    ///
+    /// # Arguments
+    ///
+    /// * `sequence` - The sequence containing clips
+    /// * `assets` - Map of asset ID to Asset
+    /// * `effects` - Map of effect ID to Effect
+    /// * `settings` - Audio export settings (format, output path, bitrate, etc.)
+    /// * `progress_tx` - Optional channel for progress updates
+    /// * `cancel_rx` - Optional oneshot receiver to cancel the export
+    pub async fn export_audio_only(
+        &self,
+        sequence: &Sequence,
+        assets: &HashMap<String, Asset>,
+        effects: &HashMap<String, Effect>,
+        settings: &AudioExportSettings,
+        progress_tx: Option<Sender<ExportProgress>>,
+        cancel_rx: Option<oneshot::Receiver<()>>,
+    ) -> Result<AudioExportResult, ExportError> {
+        use std::process::Stdio;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+
+        settings.validate()?;
+
+        // Verify at least one clip has audio
+        let audio_info = self.probe_assets_for_audio(sequence, assets).await;
+        let has_any_audio = sequence_has_exportable_audio(sequence, assets, &audio_info);
+
+        if !has_any_audio {
+            return Err(ExportError::InvalidSettings(
+                "No audio tracks found in sequence".to_string(),
+            ));
+        }
+
+        let start_time = std::time::Instant::now();
+
+        // Convert to video export settings, then build args using existing pipeline
+        let export_settings = settings.to_export_settings();
+
+        let mut args = self.build_complex_filter_args_with_audio_info(
+            sequence,
+            assets,
+            effects,
+            &audio_info,
+            &export_settings,
+        )?;
+
+        // Replace video-related args: strip video, keep audio only
+        // Remove any -c:v, -pix_fmt, -b:v, -crf, -r arguments
+        let stripped_output_args = ["-c:v", "-pix_fmt", "-b:v", "-crf", "-r", "-c:a", "-b:a"];
+        let mut i = 0;
+        while i < args.len() {
+            if stripped_output_args.iter().any(|prefix| args[i] == *prefix) {
+                args.remove(i); // Remove the flag
+                if i < args.len() {
+                    args.remove(i); // Remove the value
+                }
+            } else {
+                i += 1;
+            }
+        }
+
+        let mut output_options = vec![
+            "-vn".to_string(),
+            "-c:a".to_string(),
+            settings.format.codec().to_string(),
+        ];
+
+        if let Some(ref bitrate) = settings.bitrate {
+            output_options.push("-b:a".to_string());
+            output_options.push(bitrate.clone());
+        } else if let Some(default_br) = settings.format.default_bitrate() {
+            output_options.push("-b:a".to_string());
+            output_options.push(default_br.to_string());
+        }
+
+        if let Some(sr) = settings.sample_rate {
+            output_options.push("-ar".to_string());
+            output_options.push(sr.to_string());
+        }
+
+        output_options.push("-progress".to_string());
+        output_options.push("pipe:1".to_string());
+        insert_output_option_args(&mut args, output_options)?;
+
+        // Create output directory if needed
+        if let Some(parent) = settings.output_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+        }
+
+        // Calculate total duration for progress
+        let duration = effective_export_duration(sequence, settings.start_time, settings.end_time);
+        let total_frames = (duration * sequence.format.fps.as_f64()).ceil() as u64;
+
+        // Run FFmpeg with progress tracking
+        let ffmpeg_path = &self.ffmpeg.info().ffmpeg_path;
+        let mut cmd = tokio::process::Command::new(ffmpeg_path);
+        configure_tokio_command(&mut cmd);
+        cmd.args(&args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| ExportError::FFmpegFailed(format!("Failed to spawn FFmpeg: {}", e)))?;
+
+        let stdout = child.stdout.take();
+        let stderr_handle = child.stderr.take();
+
+        // Progress tracking task
+        let progress_handle = if let (Some(stdout), Some(tx)) = (stdout, progress_tx) {
+            Some(tokio::spawn(async move {
+                let reader = BufReader::new(stdout);
+                let mut lines = reader.lines();
+                let mut progress_data = FFmpegProgressData::default();
+
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if parse_ffmpeg_progress_line(&line, &mut progress_data) {
+                        let progress =
+                            calculate_export_progress(&progress_data, duration, total_frames);
+                        let _ = tx.send(progress).await;
+                    }
+                }
+            }))
+        } else {
+            None
+        };
+
+        // Wait for completion or cancellation
+        let result = if let Some(cancel_rx) = cancel_rx {
+            tokio::select! {
+                status = child.wait() => {
+                    status.map_err(|e| ExportError::FFmpegFailed(e.to_string()))
+                }
+                _ = cancel_rx => {
+                    let _ = child.kill().await;
+                    let _ = tokio::fs::remove_file(&settings.output_path).await;
+                    return Err(ExportError::Cancelled);
+                }
+            }
+        } else {
+            child
+                .wait()
+                .await
+                .map_err(|e| ExportError::FFmpegFailed(e.to_string()))
+        };
+
+        if let Some(handle) = progress_handle {
+            let _ = handle.await;
+        }
+
+        let status = result?;
+        if !status.success() {
+            let stderr_content = if let Some(stderr) = stderr_handle {
+                let mut buf = String::new();
+                let mut reader = BufReader::new(stderr);
+                let _ = tokio::io::AsyncReadExt::read_to_string(&mut reader, &mut buf).await;
+                buf
+            } else {
+                String::new()
+            };
+            return Err(ExportError::FFmpegFailed(format!(
+                "Audio export failed: {}",
+                stderr_content
+            )));
+        }
+
+        let metadata = tokio::fs::metadata(&settings.output_path).await?;
+        let file_size = metadata.len();
+
+        Ok(AudioExportResult {
+            output_path: settings.output_path.clone(),
+            duration_sec: duration,
+            file_size,
+            format: settings.format.clone(),
+            encoding_time_sec: start_time.elapsed().as_secs_f64(),
+        })
+    }
+
+    /// Find the topmost visible video clip at a given time position.
+    ///
+    /// Iterates video tracks from top to bottom (highest index first) and
+    /// returns the first enabled clip that covers the requested time.
+    fn find_topmost_clip_at_time<'a>(
+        &self,
+        sequence: &'a Sequence,
+        assets: &'a HashMap<String, Asset>,
+        time_sec: f64,
+    ) -> Option<(&'a Clip, &'a Asset)> {
+        // Lower track indices render above higher indices in preview/export.
+        for track in &sequence.tracks {
+            if !track.is_video() || !track_included_in_export(track) {
+                continue;
+            }
+
+            for clip in &track.clips {
+                if !clip.enabled {
+                    continue;
+                }
+
+                // Skip text clips — they have no file-backed asset
+                if is_text_clip(clip) {
+                    continue;
+                }
+
+                // Skip adjustment layers
+                if clip.is_adjustment_layer() {
+                    continue;
+                }
+
+                if clip.place.contains(time_sec) {
+                    if let Some(asset) = assets.get(&clip.asset_id) {
+                        return Some((clip, asset));
+                    }
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -2642,7 +3672,7 @@ pub fn validate_export_settings(
     sequence: &Sequence,
     assets: &std::collections::HashMap<String, Asset>,
     effects: &std::collections::HashMap<String, Effect>,
-    settings: &ExportSettings,
+    _settings: &ExportSettings,
 ) -> ExportValidation {
     let mut validation = ExportValidation::valid();
 
@@ -2650,6 +3680,7 @@ pub fn validate_export_settings(
     let total_clips: usize = sequence
         .tracks
         .iter()
+        .filter(|track| track_included_in_export(track))
         .map(|track| track.clips.iter().filter(|clip| clip.enabled).count())
         .sum();
     if total_clips == 0 {
@@ -2657,10 +3688,19 @@ pub fn validate_export_settings(
         return validation;
     }
 
+    let has_enabled_overlay_clips = sequence.tracks.iter().any(|track| {
+        track.kind == TrackKind::Overlay
+            && track_included_in_export(track)
+            && track.clips.iter().any(|clip| clip.enabled)
+    });
+    if has_enabled_overlay_clips {
+        validation.add_error("Overlay tracks are not supported in final render export yet");
+    }
+
     let visual_clip_count: usize = sequence
         .tracks
         .iter()
-        .filter(|track| track.kind == TrackKind::Video)
+        .filter(|track| track.kind == TrackKind::Video && track_included_in_export(track))
         .map(|track| {
             track
                 .clips
@@ -2670,12 +3710,18 @@ pub fn validate_export_settings(
         })
         .sum();
     if visual_clip_count == 0 {
-        validation.add_error("Sequence has no visual clips to export");
+        if !has_enabled_overlay_clips {
+            validation.add_error("Sequence has no visual clips to export");
+        }
         return validation;
     }
 
     // Check all clip assets exist (except virtual text clips) and are safe to read.
     for track in &sequence.tracks {
+        if !track_included_in_export(track) {
+            continue;
+        }
+
         if matches!(track.kind, TrackKind::Caption | TrackKind::Overlay) {
             // Caption/overlay tracks are currently excluded from final render composition.
             // Skip file-based asset validation for these tracks.
@@ -2691,6 +3737,13 @@ pub fn validate_export_settings(
                 validation.add_error(format!(
                     "Blend mode export is not supported yet for clip '{}' on track '{}'",
                     clip.id, track.name
+                ));
+            }
+
+            if track.kind == TrackKind::Video && clip_uses_unsupported_visual_composition(clip) {
+                validation.add_error(format!(
+                    "Clip '{}' uses transform or opacity settings that final render export does not support yet",
+                    clip.id
                 ));
             }
 
@@ -2734,23 +3787,19 @@ pub fn validate_export_settings(
         }
     }
 
-    // Check output directory exists
-    if let Some(parent) = settings.output_path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            validation.add_error(format!(
-                "Output directory does not exist: {}",
-                parent.display()
-            ));
-        }
-    }
-
     // Check for timeline gaps (warning, not error)
     let gaps = detect_timeline_gaps(sequence);
     if !gaps.is_empty() {
         validation.add_warning(format!(
-            "Timeline has {} gap(s). Black frames will be inserted.",
+            "Timeline has {} gap(s). Final render does not preserve gaps yet; insert filler clips before export.",
             gaps.len()
         ));
+    }
+
+    if has_layered_visual_overlap(sequence) {
+        validation.add_error(
+            "Final render export does not support simultaneous layered video clips yet".to_string(),
+        );
     }
 
     validation
@@ -2791,6 +3840,7 @@ pub fn build_complex_filter_args_with_audio_info(
     let mut filter_complex = String::new();
     let mut video_streams = Vec::new();
     let mut audio_streams = Vec::new();
+    let audio_companion_keys = collect_audio_companion_keys(sequence, assets, audio_info);
 
     // Collect enabled clips sorted by timeline position.
     let all_clips = collect_enabled_clips_sorted(sequence);
@@ -2905,10 +3955,14 @@ pub fn build_complex_filter_args_with_audio_info(
         })?;
 
         // Check if this asset has audio
-        let clip_has_audio = audio_info
-            .get(&clip.asset_id)
-            .map(|info| info.has_audio)
-            .unwrap_or_else(|| AssetAudioInfo::from_asset(asset).has_audio);
+        let clip_has_audio =
+            asset_has_playable_audio(asset, &track.kind, audio_info.get(&clip.asset_id))
+                && !clip_audio_is_suppressed_by_companion(
+                    clip,
+                    track,
+                    asset,
+                    &audio_companion_keys,
+                );
 
         // Validate asset URI before passing to FFmpeg
         let validated_path = validate_local_input_path(&asset.uri, "Asset file")
@@ -2955,7 +4009,7 @@ pub fn build_complex_filter_args_with_audio_info(
 
                 video_streams.push(format!("[{}]", video_out_label));
 
-                if clip_has_audio && !clip.freeze_frame {
+                if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
                     let audio_trim_label = format!("atrim{}", input_index);
                     let audio_out_label = format!("a{}", input_index);
 
@@ -2978,11 +4032,19 @@ pub fn build_complex_filter_args_with_audio_info(
                         ));
                     }
 
-                    audio_streams.push(format!("[{}]", audio_out_label));
+                    let mixed_audio_label = apply_audio_mix_settings(
+                        clip,
+                        track,
+                        input_index,
+                        &audio_out_label,
+                        &mut filter_complex,
+                    );
+
+                    audio_streams.push(format!("[{}]", mixed_audio_label));
                 }
             }
             TrackKind::Audio => {
-                if clip_has_audio && !clip.freeze_frame {
+                if clip_has_audio && !clip.freeze_frame && !clip.audio.muted {
                     let audio_trim_label = format!("atrim{}", input_index);
                     let audio_out_label = format!("a{}", input_index);
 
@@ -3005,7 +4067,15 @@ pub fn build_complex_filter_args_with_audio_info(
                         ));
                     }
 
-                    audio_streams.push(format!("[{}]", audio_out_label));
+                    let mixed_audio_label = apply_audio_mix_settings(
+                        clip,
+                        track,
+                        input_index,
+                        &audio_out_label,
+                        &mut filter_complex,
+                    );
+
+                    audio_streams.push(format!("[{}]", mixed_audio_label));
                 }
             }
             _ => {}
@@ -3070,14 +4140,10 @@ pub fn build_complex_filter_args_with_audio_info(
         args.push(final_audio_label.to_string());
     }
 
+    // Video codec (resolved: may use GPU encoder)
+    let video_encoder = settings.video_encoder_name();
     args.push("-c:v".to_string());
-    args.push(match settings.video_codec {
-        VideoCodec::H264 => "libx264".to_string(),
-        VideoCodec::H265 => "libx265".to_string(),
-        VideoCodec::Vp9 => "libvpx-vp9".to_string(),
-        VideoCodec::ProRes => "prores_ks".to_string(),
-        VideoCodec::Copy => "copy".to_string(),
-    });
+    args.push(video_encoder.clone());
 
     if final_audio_label.is_some() {
         args.push("-c:a".to_string());
@@ -3102,12 +4168,14 @@ pub fn build_complex_filter_args_with_audio_info(
         }
     }
 
+    // Quality args (CRF for software, CQ/QP for hardware encoders)
     if let Some(crf) = settings.crf {
         if matches!(settings.video_codec, VideoCodec::H264 | VideoCodec::H265) {
-            args.push("-crf".to_string());
-            args.push(crf.to_string());
+            args.extend(super::hardware::resolve_quality_args(&video_encoder, crf));
         }
     }
+
+    append_output_time_range_args(&mut args, settings.start_time, settings.end_time);
 
     args.push("-y".to_string());
     args.push(settings.output_path.to_string_lossy().to_string());
@@ -3123,7 +4191,7 @@ pub fn detect_timeline_gaps(sequence: &Sequence) -> Vec<TimelineGap> {
     let mut intervals: Vec<(f64, f64)> = Vec::new();
 
     for track in &sequence.tracks {
-        if track.kind != TrackKind::Video {
+        if track.kind != TrackKind::Video || !track_included_in_export(track) {
             continue;
         }
 
@@ -3581,6 +4649,230 @@ mod tests {
             .errors
             .iter()
             .any(|error| error.to_lowercase().contains("blend mode export")));
+    }
+
+    #[test]
+    fn test_validation_rejects_clip_transform_or_opacity_that_export_cannot_render() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+        use crate::core::Point2D;
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+
+        let mut clip = Clip::new("video_asset")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.transform.position = Point2D::new(0.25, 0.75);
+        clip.opacity = 0.8;
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_transform.mp4");
+        let mut assets = HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_transform.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.to_lowercase().contains("transform or opacity")),
+            "Expected unsupported transform/opacity validation error. Got: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn test_validation_rejects_overlay_tracks_for_final_render() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track, TrackKind};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut overlay_track = Track::new("Overlay 1", TrackKind::Overlay);
+        overlay_track.add_clip(
+            Clip::new("overlay_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(overlay_track);
+
+        let overlay_path = create_temp_media_file("validation_overlay.mp4");
+        let mut assets = std::collections::HashMap::new();
+        let mut overlay_asset = Asset::new_video(
+            "validation_overlay.mp4",
+            &overlay_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        overlay_asset.id = "overlay_asset".to_string();
+        assets.insert("overlay_asset".to_string(), overlay_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(!validation.is_valid);
+        assert!(validation
+            .errors
+            .iter()
+            .any(|error| error.to_lowercase().contains("overlay tracks")));
+    }
+
+    #[test]
+    fn test_validation_ignores_hidden_overlay_tracks() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track, TrackKind};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut overlay_track = Track::new("Overlay 1", TrackKind::Overlay);
+        overlay_track.visible = false;
+        overlay_track.add_clip(
+            Clip::new("overlay_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(overlay_track);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            !validation
+                .errors
+                .iter()
+                .any(|error| error.to_lowercase().contains("overlay tracks")),
+            "Hidden overlay tracks should not block export. Got: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn test_validation_rejects_simultaneous_layered_video_clips() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut top_track = Track::new_video("Video 1");
+        top_track.add_clip(
+            Clip::new("asset_top")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(top_track);
+
+        let mut bottom_track = Track::new_video("Video 2");
+        bottom_track.add_clip(
+            Clip::new("asset_bottom")
+                .with_source_range(0.0, 5.0)
+                .place_at(2.0),
+        );
+        sequence.add_track(bottom_track);
+
+        let top_path = create_temp_media_file("validation_layered_top.mp4");
+        let mut top_asset = Asset::new_video(
+            "validation_layered_top.mp4",
+            &top_path,
+            VideoInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_file_size(5_000_000);
+        top_asset.id = "asset_top".to_string();
+
+        let bottom_path = create_temp_media_file("validation_layered_bottom.mp4");
+        let mut bottom_asset = Asset::new_video(
+            "validation_layered_bottom.mp4",
+            &bottom_path,
+            VideoInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_file_size(5_000_000);
+        bottom_asset.id = "asset_bottom".to_string();
+
+        let mut assets = HashMap::new();
+        assets.insert(top_asset.id.clone(), top_asset);
+        assets.insert(bottom_asset.id.clone(), bottom_asset);
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &ExportSettings::default(),
+        );
+
+        assert!(
+            validation
+                .errors
+                .iter()
+                .any(|error| error.to_lowercase().contains("simultaneous layered video")),
+            "Expected layered video validation error. Got: {:?}",
+            validation.errors
+        );
+    }
+
+    #[test]
+    fn test_validation_allows_missing_output_directory_when_export_can_create_it() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(
+            Clip::new("video_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("validation_create_dir.mp4");
+        let mut assets = std::collections::HashMap::new();
+        let mut video_asset = Asset::new_video(
+            "validation_create_dir.mp4",
+            &video_path,
+            VideoInfo::default(),
+        )
+        .with_duration(3.0)
+        .with_file_size(3_000_000);
+        video_asset.id = "video_asset".to_string();
+        assets.insert("video_asset".to_string(), video_asset);
+
+        let mut settings = ExportSettings::default();
+        settings.output_path = temp_dir.path().join("exports/final/out.mp4");
+
+        let validation = validate_export_settings(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &settings,
+        );
+
+        assert!(
+            validation.is_valid,
+            "Expected missing output directories to be allowed. Got: {validation:?}"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -4148,6 +5440,68 @@ mod tests {
     }
 
     #[test]
+    fn test_build_filter_ignores_hidden_video_tracks() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut hidden_track = Track::new_video("Hidden Video");
+        hidden_track.visible = false;
+        hidden_track.add_clip(
+            Clip::new("hidden_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(hidden_track);
+
+        let mut visible_track = Track::new_video("Visible Video");
+        visible_track.add_clip(
+            Clip::new("visible_asset")
+                .with_source_range(0.0, 3.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(visible_track);
+
+        let hidden_path = create_temp_media_file("hidden_track.mp4");
+        let mut hidden_asset =
+            Asset::new_video("hidden_track.mp4", &hidden_path, VideoInfo::default())
+                .with_duration(3.0)
+                .with_file_size(3_000_000);
+        hidden_asset.id = "hidden_asset".to_string();
+
+        let visible_path = create_temp_media_file("visible_track.mp4");
+        let mut visible_asset =
+            Asset::new_video("visible_track.mp4", &visible_path, VideoInfo::default())
+                .with_duration(3.0)
+                .with_file_size(3_000_000);
+        visible_asset.id = "visible_asset".to_string();
+
+        let mut assets = HashMap::new();
+        assets.insert(hidden_asset.id.clone(), hidden_asset);
+        assets.insert(visible_asset.id.clone(), visible_asset);
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &HashMap::new(),
+            &ExportSettings::default(),
+        )
+        .expect("hidden visual tracks should be ignored");
+
+        let args_str = args.join(" ");
+        assert!(
+            !args_str.contains(&hidden_path),
+            "Hidden track asset should not be exported. Got: {args_str}"
+        );
+        assert!(
+            args_str.contains(&visible_path),
+            "Visible track asset should be exported. Got: {args_str}"
+        );
+    }
+
+    #[test]
     fn test_build_filter_burns_in_caption_track() {
         use crate::core::assets::VideoInfo;
         use crate::core::timeline::{Clip, SequenceFormat, Track};
@@ -4287,6 +5641,183 @@ mod tests {
             filter_complex.contains("[outa_base]volume=0.501187[outa]"),
             "Expected master gain filter in audio output chain. Got: {}",
             filter_complex
+        );
+    }
+
+    #[test]
+    fn test_build_filter_uses_timeline_audio_mix_for_gaps() {
+        use crate::core::assets::{AudioInfo, VideoInfo};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(
+            Clip::new("asset1")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        track.add_clip(
+            Clip::new("asset2")
+                .with_source_range(0.0, 5.0)
+                .place_at(8.0),
+        );
+        sequence.add_track(track);
+
+        let path1 = create_temp_media_file("gap_audio_1.mp4");
+        let mut asset1 = Asset::new_video("gap_audio_1.mp4", &path1, VideoInfo::default())
+            .with_duration(5.0)
+            .with_file_size(5_000_000);
+        asset1.id = "asset1".to_string();
+        asset1.audio = Some(AudioInfo::default());
+
+        let path2 = create_temp_media_file("gap_audio_2.mp4");
+        let mut asset2 = Asset::new_video("gap_audio_2.mp4", &path2, VideoInfo::default())
+            .with_duration(5.0)
+            .with_file_size(5_000_000);
+        asset2.id = "asset2".to_string();
+        asset2.audio = Some(AudioInfo::default());
+
+        let mut assets = HashMap::new();
+        assets.insert(asset1.id.clone(), asset1);
+        assets.insert(asset2.id.clone(), asset2);
+
+        let mut audio_info = HashMap::new();
+        audio_info.insert("asset1".to_string(), AssetAudioInfo { has_audio: true });
+        audio_info.insert("asset2".to_string(), AssetAudioInfo { has_audio: true });
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &audio_info,
+            &ExportSettings::default(),
+        )
+        .expect("timeline audio mix should build");
+
+        let filter_complex = args
+            .windows(2)
+            .find_map(|window| (window[0] == "-filter_complex").then_some(window[1].as_str()))
+            .unwrap();
+
+        assert!(
+            filter_complex.contains("adelay=delays=8000:all=1"),
+            "Expected delayed audio placement for downstream clip. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("amix=inputs=2"),
+            "Expected audio timeline mix instead of concat. Got: {filter_complex}"
+        );
+    }
+
+    #[test]
+    fn test_build_filter_applies_clip_track_audio_gain_and_pan() {
+        use crate::core::assets::{AudioInfo, VideoInfo};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        track.volume = 0.5;
+
+        let mut clip = Clip::new("asset1")
+            .with_source_range(0.0, 3.0)
+            .place_at(0.0);
+        clip.audio.volume_db = -6.0;
+        clip.audio.pan = 0.25;
+        track.add_clip(clip);
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("audio_gain_pan.mp4");
+        let mut asset = Asset::new_video("audio_gain_pan.mp4", &video_path, VideoInfo::default())
+            .with_duration(3.0)
+            .with_file_size(3_000_000);
+        asset.id = "asset1".to_string();
+        asset.audio = Some(AudioInfo::default());
+
+        let mut assets = HashMap::new();
+        assets.insert(asset.id.clone(), asset);
+
+        let mut audio_info = HashMap::new();
+        audio_info.insert("asset1".to_string(), AssetAudioInfo { has_audio: true });
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &audio_info,
+            &ExportSettings::default(),
+        )
+        .expect("audio gain/pan filters should build");
+
+        let filter_complex = args
+            .windows(2)
+            .find_map(|window| (window[0] == "-filter_complex").then_some(window[1].as_str()))
+            .unwrap();
+
+        assert!(
+            filter_complex.contains("volume=0.250594"),
+            "Expected combined clip/track gain in audio filter. Got: {filter_complex}"
+        );
+        assert!(
+            filter_complex.contains("stereotools=balance_in=0.2500:bmode_in=power"),
+            "Expected stereo pan filter in audio chain. Got: {filter_complex}"
+        );
+    }
+
+    #[test]
+    fn test_build_filter_suppresses_video_audio_when_audio_companion_exists_even_if_muted() {
+        use crate::core::assets::{AudioInfo, VideoInfo};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let video_clip = Clip::new("shared_asset")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        let mut video_track = Track::new_video("Video 1");
+        video_track.add_clip(video_clip);
+        sequence.add_track(video_track);
+
+        let companion_clip = Clip::new("shared_asset")
+            .with_source_range(0.0, 5.0)
+            .place_at(0.0);
+        let mut audio_track = Track::new_audio("Audio 1");
+        audio_track.muted = true;
+        audio_track.add_clip(companion_clip);
+        sequence.add_track(audio_track);
+
+        let video_path = create_temp_media_file("audio_companion.mp4");
+        let mut asset = Asset::new_video("audio_companion.mp4", &video_path, VideoInfo::default())
+            .with_duration(5.0)
+            .with_file_size(5_000_000);
+        asset.id = "shared_asset".to_string();
+        asset.audio = Some(AudioInfo::default());
+
+        let mut assets = HashMap::new();
+        assets.insert(asset.id.clone(), asset);
+
+        let mut audio_info = HashMap::new();
+        audio_info.insert(
+            "shared_asset".to_string(),
+            AssetAudioInfo { has_audio: true },
+        );
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &HashMap::new(),
+            &audio_info,
+            &ExportSettings::default(),
+        )
+        .expect("audio companion suppression should build");
+
+        let args_str = args.join(" ");
+        assert!(
+            !args_str.contains("-c:a"),
+            "Muted companion track should still suppress duplicated video audio. Got: {args_str}"
+        );
+        assert!(
+            !args_str.contains("[outa]"),
+            "Expected no mixed audio output when companion suppression removes the only audible stream. Got: {args_str}"
         );
     }
 
@@ -5078,6 +6609,82 @@ mod tests {
             "Should include outline width. Got: {}",
             args_str
         );
+    }
+
+    #[test]
+    fn test_find_topmost_clip_at_time_prefers_lower_track_index_and_skips_hidden_tracks() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::ffmpeg::{FFmpegInfo, FFmpegRunner};
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+
+        let mut hidden_top_track = Track::new_video("Hidden Top");
+        hidden_top_track.visible = false;
+        hidden_top_track.add_clip(
+            Clip::new("hidden_asset")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(hidden_top_track);
+
+        let mut visible_top_track = Track::new_video("Visible Top");
+        visible_top_track.add_clip(
+            Clip::new("visible_top_asset")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(visible_top_track);
+
+        let mut back_track = Track::new_video("Back");
+        back_track.add_clip(
+            Clip::new("back_asset")
+                .with_source_range(0.0, 5.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(back_track);
+
+        let hidden_path = create_temp_media_file("frame_hidden.mp4");
+        let mut hidden_asset =
+            Asset::new_video("frame_hidden.mp4", &hidden_path, VideoInfo::default())
+                .with_duration(5.0)
+                .with_file_size(5_000_000);
+        hidden_asset.id = "hidden_asset".to_string();
+
+        let visible_top_path = create_temp_media_file("frame_visible_top.mp4");
+        let mut visible_top_asset = Asset::new_video(
+            "frame_visible_top.mp4",
+            &visible_top_path,
+            VideoInfo::default(),
+        )
+        .with_duration(5.0)
+        .with_file_size(5_000_000);
+        visible_top_asset.id = "visible_top_asset".to_string();
+
+        let back_path = create_temp_media_file("frame_back.mp4");
+        let mut back_asset = Asset::new_video("frame_back.mp4", &back_path, VideoInfo::default())
+            .with_duration(5.0)
+            .with_file_size(5_000_000);
+        back_asset.id = "back_asset".to_string();
+
+        let mut assets = HashMap::new();
+        assets.insert(hidden_asset.id.clone(), hidden_asset);
+        assets.insert(visible_top_asset.id.clone(), visible_top_asset);
+        assets.insert(back_asset.id.clone(), back_asset);
+
+        let engine = ExportEngine::new(FFmpegRunner::new(FFmpegInfo {
+            ffmpeg_path: PathBuf::from("/usr/bin/ffmpeg"),
+            ffprobe_path: PathBuf::from("/usr/bin/ffprobe"),
+            version: "test".to_string(),
+            is_bundled: false,
+        }));
+
+        let (clip, asset) = engine
+            .find_topmost_clip_at_time(&sequence, &assets, 1.0)
+            .expect("expected a visible topmost clip");
+
+        assert_eq!(clip.asset_id, "visible_top_asset");
+        assert_eq!(asset.id, "visible_top_asset");
     }
 
     // =========================================================================
@@ -5924,5 +7531,575 @@ mod tests {
             "should contain atempo for avg speed: {filter}"
         );
         assert_eq!(result_label, "aspd0");
+    }
+
+    // -------------------------------------------------------------------------
+    // Batch & Range Render Types Tests (BDD)
+    // -------------------------------------------------------------------------
+
+    /// Feature: Batch Render Item
+    /// Scenario: should serialize with camelCase field names for frontend
+    #[test]
+    fn batch_render_item_should_serialize_with_camel_case() {
+        let item = BatchRenderItem {
+            preset: "youtube_1080p".to_string(),
+            output_path: "/tmp/output.mp4".to_string(),
+            in_point: Some(1.5),
+            out_point: Some(10.0),
+        };
+
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"inPoint\""), "should use camelCase: {json}");
+        assert!(
+            json.contains("\"outPoint\""),
+            "should use camelCase: {json}"
+        );
+        assert!(
+            json.contains("\"outputPath\""),
+            "should use camelCase: {json}"
+        );
+    }
+
+    /// Feature: Batch Render Item
+    /// Scenario: should round-trip through JSON when range is omitted
+    #[test]
+    fn batch_render_item_should_round_trip_without_range() {
+        let item = BatchRenderItem {
+            preset: "prores".to_string(),
+            output_path: "/export/final.mov".to_string(),
+            in_point: None,
+            out_point: None,
+        };
+
+        let json = serde_json::to_string(&item).unwrap();
+        let deserialized: BatchRenderItem = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(deserialized.preset, "prores");
+        assert_eq!(deserialized.output_path, "/export/final.mov");
+        assert!(deserialized.in_point.is_none());
+        assert!(deserialized.out_point.is_none());
+    }
+
+    /// Feature: Batch Render Result
+    /// Scenario: should serialize job IDs and total items for frontend consumption
+    #[test]
+    fn batch_render_result_should_serialize_job_ids() {
+        let result = BatchRenderResult {
+            batch_id: "batch_001".to_string(),
+            job_ids: vec![
+                "job_a".to_string(),
+                "job_b".to_string(),
+                "job_c".to_string(),
+            ],
+            total_items: 3,
+            status: "started".to_string(),
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"batchId\""), "should use camelCase: {json}");
+        assert!(json.contains("\"jobIds\""), "should use camelCase: {json}");
+        assert!(
+            json.contains("\"totalItems\":3"),
+            "should include total: {json}"
+        );
+    }
+
+    /// Feature: Render Job Status
+    /// Scenario: should serialize as snake_case strings
+    #[test]
+    fn render_job_status_should_serialize_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&RenderJobStatus::Pending).unwrap(),
+            "\"pending\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RenderJobStatus::Rendering).unwrap(),
+            "\"rendering\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RenderJobStatus::Completed).unwrap(),
+            "\"completed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RenderJobStatus::Failed).unwrap(),
+            "\"failed\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RenderJobStatus::Cancelled).unwrap(),
+            "\"cancelled\""
+        );
+    }
+
+    /// Feature: Cancel Render Job Registry
+    /// Scenario: should register and cancel a render job
+    #[tokio::test]
+    async fn cancel_registry_should_register_and_cancel_job() {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        register_render_job("test_job_cancel_1", tx).await;
+
+        // Cancel should succeed
+        assert!(cancel_render_job("test_job_cancel_1").await);
+
+        // The receiver should be triggered
+        assert!(rx.await.is_ok());
+
+        // Second cancel should fail (already removed)
+        assert!(!cancel_render_job("test_job_cancel_1").await);
+    }
+
+    /// Feature: Cancel Render Job Registry
+    /// Scenario: should return false when cancelling non-existent job
+    #[tokio::test]
+    async fn cancel_registry_should_return_false_for_unknown_job() {
+        assert!(!cancel_render_job("nonexistent_job_xyz").await);
+    }
+
+    /// Feature: Cancel Render Job Registry
+    /// Scenario: should unregister job on completion without triggering cancel
+    #[tokio::test]
+    async fn cancel_registry_should_unregister_on_completion() {
+        let (tx, _rx) = tokio::sync::oneshot::channel::<()>();
+        register_render_job("test_job_complete_1", tx).await;
+
+        // Unregister (simulating job completion)
+        unregister_render_job("test_job_complete_1").await;
+
+        // Cancel should now return false
+        assert!(!cancel_render_job("test_job_complete_1").await);
+    }
+
+    /// Feature: Batch Item Result
+    /// Scenario: should serialize completed item with file info
+    #[test]
+    fn batch_item_result_should_serialize_completed_item() {
+        let item = BatchItemResult {
+            job_id: "job_1".to_string(),
+            output_path: "/tmp/out.mp4".to_string(),
+            status: RenderJobStatus::Completed,
+            duration_sec: 30.5,
+            file_size: 1024 * 1024 * 50,
+            encoding_time_sec: 12.3,
+            error: None,
+        };
+
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"completed\""));
+        assert!(json.contains("\"durationSec\":30.5"));
+        assert!(json.contains("\"fileSize\":52428800"));
+        assert!(!json.contains("\"error\":\""));
+    }
+
+    /// Feature: Batch Item Result
+    /// Scenario: should serialize failed item with error message
+    #[test]
+    fn batch_item_result_should_serialize_failed_item() {
+        let item = BatchItemResult {
+            job_id: "job_2".to_string(),
+            output_path: "/tmp/failed.mp4".to_string(),
+            status: RenderJobStatus::Failed,
+            duration_sec: 0.0,
+            file_size: 0,
+            encoding_time_sec: 0.0,
+            error: Some("FFmpeg execution failed: codec error".to_string()),
+        };
+
+        let json = serde_json::to_string(&item).unwrap();
+        assert!(json.contains("\"failed\""));
+        assert!(json.contains("codec error"));
+    }
+
+    /// Feature: Range Export via ExportSettings
+    /// Scenario: should set start_time and end_time for partial export
+    #[test]
+    fn export_settings_should_support_range_via_start_end_time() {
+        let mut settings = ExportSettings::from_preset(
+            ExportPreset::Youtube1080p,
+            std::path::PathBuf::from("/tmp/range.mp4"),
+        );
+        settings.start_time = Some(5.0);
+        settings.end_time = Some(15.0);
+
+        assert_eq!(settings.start_time, Some(5.0));
+        assert_eq!(settings.end_time, Some(15.0));
+        // The FFmpeg args builder uses these for -ss/-t parameters
+    }
+
+    /// Feature: Range Export
+    /// Scenario: should include output range args in complex export builds
+    #[test]
+    fn complex_export_args_should_include_output_range_args() {
+        use crate::core::assets::VideoInfo;
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(
+            Clip::new("asset1")
+                .with_source_range(0.0, 20.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(track);
+
+        let video_path = create_temp_media_file("range_args.mp4");
+        let mut asset = Asset::new_video("range_args.mp4", &video_path, VideoInfo::default())
+            .with_duration(20.0)
+            .with_file_size(10_000_000);
+        asset.id = "asset1".to_string();
+
+        let mut assets = std::collections::HashMap::new();
+        assets.insert("asset1".to_string(), asset);
+
+        let mut settings = ExportSettings::default();
+        settings.output_path = std::path::PathBuf::from("/tmp/range.mp4");
+        settings.start_time = Some(5.0);
+        settings.end_time = Some(15.0);
+
+        let args = build_complex_filter_args_with_audio_info(
+            &sequence,
+            &assets,
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+            &settings,
+        )
+        .expect("range export args should build");
+
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == "-ss" && window[1] == "5"),
+            "Expected output seek flag in args. Got: {:?}",
+            args
+        );
+        assert!(
+            args.windows(2)
+                .any(|window| window[0] == "-t" && window[1] == "10"),
+            "Expected output duration flag in args. Got: {:?}",
+            args
+        );
+    }
+
+    /// Feature: Range Export Progress
+    /// Scenario: should calculate export duration from the selected range
+    #[test]
+    fn effective_export_duration_should_respect_range_selection() {
+        use crate::core::timeline::{Clip, SequenceFormat, Track};
+
+        let mut sequence = Sequence::new("Test", SequenceFormat::youtube_1080());
+        let mut track = Track::new_video("Video 1");
+        track.add_clip(
+            Clip::new("asset1")
+                .with_source_range(0.0, 20.0)
+                .place_at(0.0),
+        );
+        sequence.add_track(track);
+
+        assert!((effective_export_duration(&sequence, Some(5.0), Some(15.0)) - 10.0).abs() < 0.01);
+        assert!((effective_export_duration(&sequence, Some(5.0), None) - 15.0).abs() < 0.01);
+    }
+
+    // =========================================================================
+    // Still Image Export Tests
+    // =========================================================================
+
+    /// Feature: Image Format
+    /// Scenario: should return correct extension for each format
+    #[test]
+    fn image_format_should_return_correct_extension() {
+        assert_eq!(ImageFormat::Png.extension(), "png");
+        assert_eq!(ImageFormat::Jpeg.extension(), "jpg");
+        assert_eq!(ImageFormat::Tiff.extension(), "tiff");
+    }
+
+    /// Feature: Image Format
+    /// Scenario: should return correct pixel format for each format
+    #[test]
+    fn image_format_should_return_correct_pixel_format() {
+        assert_eq!(ImageFormat::Png.pixel_format(), "rgba");
+        assert_eq!(ImageFormat::Jpeg.pixel_format(), "yuvj420p");
+        assert_eq!(ImageFormat::Tiff.pixel_format(), "rgb48le");
+    }
+
+    /// Feature: Image Format
+    /// Scenario: should serialize/deserialize as snake_case
+    #[test]
+    fn image_format_should_roundtrip_json() {
+        let formats = vec![ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Tiff];
+        for fmt in &formats {
+            let json = serde_json::to_string(fmt).unwrap();
+            let deserialized: ImageFormat = serde_json::from_str(&json).unwrap();
+            assert_eq!(&deserialized, fmt);
+        }
+
+        // Verify snake_case serialization
+        assert_eq!(serde_json::to_string(&ImageFormat::Png).unwrap(), "\"png\"");
+        assert_eq!(
+            serde_json::to_string(&ImageFormat::Jpeg).unwrap(),
+            "\"jpeg\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ImageFormat::Tiff).unwrap(),
+            "\"tiff\""
+        );
+    }
+
+    /// Feature: Frame Export Settings
+    /// Scenario: should reject negative time position
+    #[test]
+    fn frame_export_settings_should_reject_negative_time() {
+        let settings = FrameExportSettings {
+            time_sec: -1.0,
+            format: ImageFormat::Png,
+            output_path: PathBuf::from("/tmp/frame.png"),
+            quality: None,
+        };
+        let result = settings.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("non-negative"));
+    }
+
+    /// Feature: Frame Export Settings
+    /// Scenario: should reject invalid JPEG quality
+    #[test]
+    fn frame_export_settings_should_reject_invalid_jpeg_quality() {
+        let settings = FrameExportSettings {
+            time_sec: 1.0,
+            format: ImageFormat::Jpeg,
+            output_path: PathBuf::from("/tmp/frame.jpg"),
+            quality: Some(0),
+        };
+        assert!(settings.validate().is_err());
+
+        let settings_too_high = FrameExportSettings {
+            quality: Some(32),
+            ..settings
+        };
+        assert!(settings_too_high.validate().is_err());
+    }
+
+    /// Feature: Frame Export Settings
+    /// Scenario: should accept valid settings
+    #[test]
+    fn frame_export_settings_should_accept_valid_settings() {
+        let settings = FrameExportSettings {
+            time_sec: 5.5,
+            format: ImageFormat::Png,
+            output_path: std::env::temp_dir().join("frame.png"),
+            quality: None,
+        };
+        assert!(settings.validate().is_ok());
+    }
+
+    /// Feature: Frame Export Settings
+    /// Scenario: should allow creating a missing output directory
+    #[test]
+    fn frame_export_settings_should_allow_missing_output_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let settings = FrameExportSettings {
+            time_sec: 5.5,
+            format: ImageFormat::Png,
+            output_path: temp_dir.path().join("frames/stills/frame.png"),
+            quality: None,
+        };
+        assert!(settings.validate().is_ok());
+    }
+
+    /// Feature: Frame Export Result
+    /// Scenario: should serialize to camelCase JSON
+    #[test]
+    fn frame_export_result_should_serialize_to_camel_case() {
+        let result = FrameExportResult {
+            output_path: PathBuf::from("/tmp/frame.png"),
+            file_size: 1024,
+            format: ImageFormat::Png,
+            width: 1920,
+            height: 1080,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"outputPath\""));
+        assert!(json.contains("\"fileSize\""));
+        assert!(json.contains("\"width\""));
+        assert!(json.contains("\"height\""));
+    }
+
+    // =========================================================================
+    // Audio-Only Export Tests
+    // =========================================================================
+
+    /// Feature: Audio Export Format
+    /// Scenario: should return correct extension for each format
+    #[test]
+    fn audio_export_format_should_return_correct_extension() {
+        assert_eq!(AudioExportFormat::Wav.extension(), "wav");
+        assert_eq!(AudioExportFormat::Mp3.extension(), "mp3");
+        assert_eq!(AudioExportFormat::Flac.extension(), "flac");
+    }
+
+    /// Feature: Audio Export Format
+    /// Scenario: should return correct FFmpeg codec for each format
+    #[test]
+    fn audio_export_format_should_return_correct_codec() {
+        assert_eq!(AudioExportFormat::Wav.codec(), "pcm_s16le");
+        assert_eq!(AudioExportFormat::Mp3.codec(), "libmp3lame");
+        assert_eq!(AudioExportFormat::Flac.codec(), "flac");
+    }
+
+    /// Feature: Audio Export Format
+    /// Scenario: should return default bitrate only for lossy formats
+    #[test]
+    fn audio_export_format_should_return_default_bitrate_only_for_lossy() {
+        assert!(AudioExportFormat::Wav.default_bitrate().is_none());
+        assert!(AudioExportFormat::Flac.default_bitrate().is_none());
+        assert_eq!(AudioExportFormat::Mp3.default_bitrate(), Some("320k"));
+    }
+
+    /// Feature: Audio Export Format
+    /// Scenario: should serialize/deserialize as snake_case
+    #[test]
+    fn audio_export_format_should_roundtrip_json() {
+        let formats = vec![
+            AudioExportFormat::Wav,
+            AudioExportFormat::Mp3,
+            AudioExportFormat::Flac,
+        ];
+        for fmt in &formats {
+            let json = serde_json::to_string(fmt).unwrap();
+            let deserialized: AudioExportFormat = serde_json::from_str(&json).unwrap();
+            assert_eq!(&deserialized, fmt);
+        }
+    }
+
+    /// Feature: Audio Export Settings
+    /// Scenario: should reject end_time <= start_time
+    #[test]
+    fn audio_export_settings_should_reject_invalid_range() {
+        let settings = AudioExportSettings {
+            format: AudioExportFormat::Wav,
+            output_path: PathBuf::from("/tmp/audio.wav"),
+            bitrate: None,
+            sample_rate: None,
+            start_time: Some(10.0),
+            end_time: Some(5.0),
+        };
+        let result = settings.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("greater than start"));
+    }
+
+    /// Feature: Audio Export Settings
+    /// Scenario: should reject invalid sample rate
+    #[test]
+    fn audio_export_settings_should_reject_invalid_sample_rate() {
+        let settings = AudioExportSettings {
+            format: AudioExportFormat::Wav,
+            output_path: std::env::temp_dir().join("audio.wav"),
+            bitrate: None,
+            sample_rate: Some(0),
+            start_time: None,
+            end_time: None,
+        };
+        assert!(settings.validate().is_err());
+
+        let settings_too_high = AudioExportSettings {
+            sample_rate: Some(200_000),
+            ..settings
+        };
+        assert!(settings_too_high.validate().is_err());
+    }
+
+    /// Feature: Audio Export Settings
+    /// Scenario: should convert to ExportSettings with correct audio codec
+    #[test]
+    fn audio_export_settings_should_convert_to_export_settings() {
+        let settings = AudioExportSettings {
+            format: AudioExportFormat::Mp3,
+            output_path: PathBuf::from("/tmp/audio.mp3"),
+            bitrate: Some("256k".to_string()),
+            sample_rate: Some(44100),
+            start_time: None,
+            end_time: None,
+        };
+        let export = settings.to_export_settings();
+
+        assert_eq!(export.audio_codec, AudioCodec::Mp3);
+        assert_eq!(export.audio_bitrate, Some("256k".to_string()));
+        assert_eq!(export.preset, ExportPreset::Custom);
+        assert!(export.video_bitrate.is_none());
+        assert!(export.fps.is_none());
+    }
+
+    /// Feature: Audio Export Settings
+    /// Scenario: should use default bitrate when none specified
+    #[test]
+    fn audio_export_settings_should_use_default_bitrate_when_none() {
+        let settings = AudioExportSettings {
+            format: AudioExportFormat::Mp3,
+            output_path: PathBuf::from("/tmp/audio.mp3"),
+            bitrate: None,
+            sample_rate: None,
+            start_time: None,
+            end_time: None,
+        };
+        let export = settings.to_export_settings();
+        assert_eq!(export.audio_bitrate, Some("320k".to_string()));
+    }
+
+    /// Feature: Audio Export Settings
+    /// Scenario: should accept valid WAV settings with no bitrate
+    #[test]
+    fn audio_export_settings_should_accept_valid_wav() {
+        let settings = AudioExportSettings {
+            format: AudioExportFormat::Wav,
+            output_path: std::env::temp_dir().join("audio.wav"),
+            bitrate: None,
+            sample_rate: Some(48000),
+            start_time: None,
+            end_time: None,
+        };
+        assert!(settings.validate().is_ok());
+
+        let export = settings.to_export_settings();
+        assert_eq!(export.audio_codec, AudioCodec::Pcm);
+        assert!(export.audio_bitrate.is_none());
+    }
+
+    /// Feature: Audio Export Settings
+    /// Scenario: should allow creating a missing output directory
+    #[test]
+    fn audio_export_settings_should_allow_missing_output_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let settings = AudioExportSettings {
+            format: AudioExportFormat::Wav,
+            output_path: temp_dir.path().join("audio/output/final.wav"),
+            bitrate: None,
+            sample_rate: Some(48000),
+            start_time: None,
+            end_time: None,
+        };
+        assert!(settings.validate().is_ok());
+    }
+
+    /// Feature: Audio Export Result
+    /// Scenario: should serialize to camelCase JSON
+    #[test]
+    fn audio_export_result_should_serialize_to_camel_case() {
+        let result = AudioExportResult {
+            output_path: PathBuf::from("/tmp/audio.wav"),
+            duration_sec: 120.5,
+            file_size: 204800,
+            format: AudioExportFormat::Wav,
+            encoding_time_sec: 3.2,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"outputPath\""));
+        assert!(json.contains("\"durationSec\""));
+        assert!(json.contains("\"fileSize\""));
+        assert!(json.contains("\"encodingTimeSec\""));
+
+        // Round-trip
+        let deserialized: AudioExportResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.file_size, 204800);
+        assert!((deserialized.duration_sec - 120.5).abs() < 0.01);
     }
 }
