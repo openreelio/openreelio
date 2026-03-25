@@ -319,7 +319,7 @@ pub fn truncate_reel_name(name: &str, max_len: usize) -> String {
     // CMX 3600 reel names: max 8 characters, uppercase, alphanumeric + underscore
     let cleaned: String = name
         .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
         .take(max_len)
         .collect();
 

@@ -101,7 +101,7 @@ pub fn export_edl(
 
     // Write events
     for event in &events {
-        write_event(&mut output, event);
+        write_event(&mut output, event, fps);
     }
 
     Ok((output, event_count, track_count))
@@ -237,7 +237,7 @@ fn build_track_events(
 // =============================================================================
 
 /// Writes a single EDL event to the output string.
-fn write_event(output: &mut String, event: &EdlEvent) {
+fn write_event(output: &mut String, event: &EdlEvent, fps: &Ratio) {
     // Main event line: ###  REELNAME CHANNEL EDIT_TYPE SRC_IN SRC_OUT REC_IN REC_OUT
     let _ = writeln!(
         output,
@@ -252,10 +252,11 @@ fn write_event(output: &mut String, event: &EdlEvent) {
         event.record_out,
     );
 
-    // Speed change comment
+    // Speed change comment (M2 line: speed expressed as fps)
     if let Some(speed) = event.speed {
-        let speed_percent = speed * 100.0;
-        let _ = writeln!(output, "M2   {} {:.1}", event.reel_name, speed_percent);
+        let fps_float = fps.as_f64();
+        let speed_fps = speed as f64 * fps_float;
+        let _ = writeln!(output, "M2   {} {:.1}", event.reel_name, speed_fps);
     }
 
     // Clip name comment
@@ -518,9 +519,9 @@ mod tests {
         // When: exporting to EDL
         let (edl, _, _) = export_edl(&seq, &assets).expect("EDL export should succeed");
 
-        // Then: should include M2 speed comment
+        // Then: should include M2 speed comment (speed in fps: 2x at 24fps = 48.0)
         assert!(edl.contains("M2"));
-        assert!(edl.contains("200.0")); // 2x speed = 200%
+        assert!(edl.contains("48.0"));
     }
 
     #[test]
