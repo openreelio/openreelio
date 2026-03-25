@@ -4859,8 +4859,10 @@ mod tests {
         video_asset.id = "video_asset".to_string();
         assets.insert("video_asset".to_string(), video_asset);
 
-        let mut settings = ExportSettings::default();
-        settings.output_path = temp_dir.path().join("exports/final/out.mp4");
+        let settings = ExportSettings {
+            output_path: temp_dir.path().join("exports/final/out.mp4"),
+            ..ExportSettings::default()
+        };
 
         let validation = validate_export_settings(
             &sequence,
@@ -7749,10 +7751,12 @@ mod tests {
         let mut assets = std::collections::HashMap::new();
         assets.insert("asset1".to_string(), asset);
 
-        let mut settings = ExportSettings::default();
-        settings.output_path = std::path::PathBuf::from("/tmp/range.mp4");
-        settings.start_time = Some(5.0);
-        settings.end_time = Some(15.0);
+        let settings = ExportSettings {
+            output_path: std::path::PathBuf::from("/tmp/range.mp4"),
+            start_time: Some(5.0),
+            end_time: Some(15.0),
+            ..ExportSettings::default()
+        };
 
         let args = build_complex_filter_args_with_audio_info(
             &sequence,
