@@ -123,3 +123,88 @@ export interface RenderErrorEvent {
   /** Error message */
   error: string;
 }
+
+// =============================================================================
+// Batch Render Types
+// =============================================================================
+
+/** Status of an individual render item in the queue */
+export type RenderQueueItemStatus = 'pending' | 'rendering' | 'completed' | 'failed' | 'cancelled';
+
+/** A single item in the render queue (frontend state) */
+export interface RenderQueueItem {
+  /** Unique job ID */
+  jobId: string;
+  /** Export preset ID */
+  presetId: string;
+  /** Display name of the preset */
+  presetName: string;
+  /** Output file path */
+  outputPath: string;
+  /** Current status */
+  status: RenderQueueItemStatus;
+  /** Progress percentage (0-100) */
+  progress: number;
+  /** Optional In point in seconds for range export */
+  inPoint?: number;
+  /** Optional Out point in seconds for range export */
+  outPoint?: number;
+  /** Error message (only when status === 'failed') */
+  error?: string;
+}
+
+/** Batch render progress event payload from Tauri backend */
+export interface BatchRenderProgressEvent {
+  /** Batch identifier */
+  batchId: string;
+  /** Current item's job ID */
+  jobId: string;
+  /** Current item index (0-based) */
+  currentItem: number;
+  /** Total items in batch */
+  totalItems: number;
+  /** Per-item progress (0-100) */
+  itemPercent: number;
+  /** Overall batch progress (0-100) */
+  batchPercent: number;
+  /** Encoding FPS */
+  fps: number;
+  /** Estimated time remaining */
+  etaSeconds: number;
+  /** Status message */
+  message: string;
+}
+
+/** Batch item completion event payload from Tauri backend */
+export interface BatchItemCompleteEvent {
+  /** Batch identifier */
+  batchId: string;
+  /** Item's job ID */
+  jobId: string;
+  /** Item index (0-based) */
+  itemIndex: number;
+  /** Total items in batch */
+  totalItems: number;
+  /** Final status */
+  status: 'completed' | 'failed' | 'cancelled';
+  /** Output file path */
+  outputPath: string;
+  /** Duration in seconds (only when completed) */
+  durationSec?: number;
+  /** File size in bytes (only when completed) */
+  fileSize?: number;
+  /** Encoding time in seconds (only when completed) */
+  encodingTimeSec?: number;
+  /** Error message (only when failed) */
+  error?: string;
+}
+
+/** Batch render completion event payload from Tauri backend */
+export interface BatchRenderCompleteEvent {
+  /** Batch identifier */
+  batchId: string;
+  /** Total items processed */
+  totalItems: number;
+  /** Results for each item */
+  results: BatchItemCompleteEvent[];
+}

@@ -1361,6 +1361,7 @@ impl JobProcessor {
                     &effects,
                     &settings,
                     Some(progress_tx),
+                    None,
                 )
                 .await;
 
@@ -1580,6 +1581,7 @@ impl JobProcessor {
                     &effects,
                     &settings,
                     Some(progress_tx),
+                    None,
                 )
                 .await;
 

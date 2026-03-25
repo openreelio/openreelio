@@ -47,6 +47,7 @@ import { useAudioDucking } from '@/hooks/useAudioDucking';
 import { useAudioScrubbing } from '@/hooks/useAudioScrubbing';
 import { useCommandPalette } from '@/hooks/useCommandPalette';
 import { useFullscreenPreview } from '@/hooks/useFullscreenPreview';
+import { useInterchangeExport } from '@/hooks/useInterchangeExport';
 import { CommandPalette } from '@/components/features/command-palette';
 import { useToastStore } from '@/hooks/useToast';
 import { useResponsiveSidebarState } from './hooks/useResponsiveSidebarState';
@@ -67,6 +68,8 @@ import { isTextClip, hasActiveTimeRemap } from '@/types';
 
 const logger = createLogger('EditorView');
 const AI_AUTO_COLLAPSE_BREAKPOINT = 1440;
+/** FFmpeg JPEG quality (1=best, 31=worst). Default: 2 for high quality frame export. */
+const JPEG_EXPORT_QUALITY = 2;
 const BOTTOM_PANEL_LOADING_FALLBACK = (
   <div className="flex h-full items-center justify-center text-xs text-editor-text-muted">
     Loading panel...
@@ -169,6 +172,14 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
 
   // Export dialog state
   const [showExportDialog, setShowExportDialog] = useState(false);
+
+  // Interchange export (EDL/FCPXML) — uses native file dialog directly
+  const {
+    status: interchangeExportStatus,
+    exportEdl: startEdlExport,
+    exportFcpxml: startFcpxmlExport,
+    reset: resetInterchangeExport,
+  } = useInterchangeExport();
 
   // Add Text dialog state
   const [showAddTextDialog, setShowAddTextDialog] = useState(false);
@@ -280,6 +291,30 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       });
     }
   }, [sequence, selectedClipIds, applyDucking]);
+
+  useEffect(() => {
+    if (interchangeExportStatus.type === 'completed') {
+      const formatLabel =
+        interchangeExportStatus.result.format === 'fcpxml'
+          ? 'FCPXML'
+          : interchangeExportStatus.result.format.toUpperCase();
+
+      useToastStore.getState().addToast({
+        message: `Exported ${formatLabel} to ${interchangeExportStatus.result.outputPath}`,
+        variant: 'success',
+      });
+      resetInterchangeExport();
+      return;
+    }
+
+    if (interchangeExportStatus.type === 'failed') {
+      useToastStore.getState().addToast({
+        message: interchangeExportStatus.error,
+        variant: 'error',
+      });
+      resetInterchangeExport();
+    }
+  }, [interchangeExportStatus, resetInterchangeExport]);
 
   // Audio playback integration
   // The hook handles audio scheduling, volume control, and clip synchronization
@@ -506,12 +541,29 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     }
   }, [sequence, selectedClipIds, handleToggleClipEnabled]);
 
+  // Interchange export handlers (EDL/FCPXML) — defined before useCommandPalette
+  const handleExportEdl = useCallback(() => {
+    if (sequence?.id && sequence?.name) {
+      void startEdlExport(sequence.id, sequence.name);
+    }
+  }, [sequence?.id, sequence?.name, startEdlExport]);
+
+  const handleExportFcpxml = useCallback(() => {
+    if (sequence?.id && sequence?.name) {
+      void startFcpxmlExport(sequence.id, sequence.name);
+    }
+  }, [sequence?.id, sequence?.name, startFcpxmlExport]);
+
   const commandPalette = useCommandPalette({
     onSplitAtPlayhead: handleSplitAtPlayhead,
     onDeleteClips: () => {
       if (selectedClipIds.length > 0) handleDeleteClips?.(selectedClipIds);
     },
     onExport: () => setShowExportDialog(true),
+    onExportEdl: handleExportEdl,
+    onExportFcpxml: handleExportFcpxml,
+    onExportFrame: () => void handleExportFrame(),
+    onExportAudio: () => void handleExportAudio(),
     onMatchFrame: handleMatchFrame,
     onReverseMatchFrame: handleReverseMatchFrame,
     onCopyEffects: handleCopySelectedClipEffects,
@@ -757,6 +809,103 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     setShowExportDialog(false);
   }, []);
 
+  // Frame export handler
+  const handleExportFrame = useCallback(async () => {
+    if (!sequence?.id) return;
+
+    try {
+      const { save: showSaveDialog } = await import('@tauri-apps/plugin-dialog');
+      const outputPath = await showSaveDialog({
+        title: 'Export Current Frame',
+        defaultPath: `frame_${Math.floor(currentTime * 1000)}ms.png`,
+        filters: [
+          { name: 'PNG Image', extensions: ['png'] },
+          { name: 'JPEG Image', extensions: ['jpg', 'jpeg'] },
+          { name: 'TIFF Image', extensions: ['tiff', 'tif'] },
+        ],
+      });
+
+      if (!outputPath) return;
+
+      // Determine format from extension
+      const ext = outputPath.split('.').pop()?.toLowerCase() ?? 'png';
+      const format = ext === 'jpg' || ext === 'jpeg' ? 'jpeg' : ext === 'tif' || ext === 'tiff' ? 'tiff' : 'png';
+
+      const result = await commands.exportFrame(
+        sequence.id,
+        currentTime,
+        format,
+        outputPath,
+        format === 'jpeg' ? JPEG_EXPORT_QUALITY : null,
+      );
+
+      if (result.status === 'ok') {
+        useToastStore.getState().addToast({
+          variant: 'success',
+          message: `Frame exported to ${result.data.outputPath}`,
+        });
+      } else {
+        useToastStore.getState().addToast({
+          variant: 'error',
+          message: `Frame export failed: ${result.error}`,
+        });
+      }
+    } catch (error) {
+      useToastStore.getState().addToast({
+        variant: 'error',
+        message: `Frame export failed: ${String(error)}`,
+      });
+    }
+  }, [sequence?.id, currentTime]);
+
+  // Audio-only export handler
+  const handleExportAudio = useCallback(async () => {
+    if (!sequence?.id) return;
+
+    try {
+      const { save: showSaveDialog } = await import('@tauri-apps/plugin-dialog');
+      const outputPath = await showSaveDialog({
+        title: 'Export Audio Only',
+        defaultPath: `${sequence.name ?? 'audio'}_audio.wav`,
+        filters: [
+          { name: 'WAV Audio', extensions: ['wav'] },
+          { name: 'MP3 Audio', extensions: ['mp3'] },
+          { name: 'FLAC Audio', extensions: ['flac'] },
+        ],
+      });
+
+      if (!outputPath) return;
+
+      const ext = outputPath.split('.').pop()?.toLowerCase() ?? 'wav';
+      const format = ext === 'mp3' ? 'mp3' : ext === 'flac' ? 'flac' : 'wav';
+
+      const result = await commands.exportAudioOnly(
+        sequence.id,
+        format,
+        outputPath,
+        null,
+        null,
+      );
+
+      if (result.status === 'ok') {
+        useToastStore.getState().addToast({
+          variant: 'info',
+          message: `Audio export started: ${outputPath}`,
+        });
+      } else {
+        useToastStore.getState().addToast({
+          variant: 'error',
+          message: `Audio export failed: ${result.error}`,
+        });
+      }
+    } catch (error) {
+      useToastStore.getState().addToast({
+        variant: 'error',
+        message: `Audio export failed: ${String(error)}`,
+      });
+    }
+  }, [sequence?.id, sequence?.name]);
+
   // Add Text handlers
   const handleOpenAddText = useCallback(() => {
     setShowAddTextDialog(true);
@@ -881,6 +1030,10 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
         header={
           <Header
             onExport={handleOpenExport}
+            onExportEdl={handleExportEdl}
+            onExportFcpxml={handleExportFcpxml}
+            onExportFrame={() => void handleExportFrame()}
+            onExportAudio={() => void handleExportAudio()}
             version={appVersion}
             utilityActions={
               <HeaderPopoverAction

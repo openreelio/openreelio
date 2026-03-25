@@ -77,19 +77,29 @@ describe('useCommandPalette', () => {
     it('should include settings actions', () => {
       const { result } = renderHook(() => useCommandPalette());
 
-      const settingsActions = result.current.filteredActions.filter((a) => a.id.startsWith('settings.'));
+      const settingsActions = result.current.filteredActions.filter((a) =>
+        a.id.startsWith('settings.'),
+      );
       expect(settingsActions.length).toBeGreaterThanOrEqual(5);
     });
 
     it('should include callback-based actions when provided', () => {
       const onExport = vi.fn();
+      const onExportEdl = vi.fn();
+      const onExportFcpxml = vi.fn();
+      const onExportFrame = vi.fn();
+      const onExportAudio = vi.fn();
       const onMatchFrame = vi.fn();
       const { result } = renderHook(() =>
-        useCommandPalette({ onExport, onMatchFrame }),
+        useCommandPalette({ onExport, onExportEdl, onExportFcpxml, onExportFrame, onExportAudio, onMatchFrame }),
       );
 
       const ids = result.current.filteredActions.map((a) => a.id);
       expect(ids).toContain('view.export');
+      expect(ids).toContain('view.export-edl');
+      expect(ids).toContain('view.export-fcpxml');
+      expect(ids).toContain('view.export-frame');
+      expect(ids).toContain('view.export-audio');
       expect(ids).toContain('source.match-frame');
     });
 
@@ -202,6 +212,22 @@ describe('useCommandPalette', () => {
       // requestAnimationFrame defers execution; poll until it fires
       await waitFor(() => {
         expect(onExport).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('should execute interchange export callbacks when invoked', async () => {
+      const onExportEdl = vi.fn();
+      const onExportFcpxml = vi.fn();
+      const { result } = renderHook(() => useCommandPalette({ onExportEdl, onExportFcpxml }));
+
+      act(() => {
+        result.current.executeAction('view.export-edl');
+        result.current.executeAction('view.export-fcpxml');
+      });
+
+      await waitFor(() => {
+        expect(onExportEdl).toHaveBeenCalledTimes(1);
+        expect(onExportFcpxml).toHaveBeenCalledTimes(1);
       });
     });
   });

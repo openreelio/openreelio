@@ -452,6 +452,116 @@ async startRender(sequenceId: string, outputPath: string, preset: string) : Prom
 }
 },
 /**
+ * Starts a render export of a specific time range within the sequence.
+ * 
+ * Uses `in_point` and `out_point` (in seconds) to restrict the export
+ * to a portion of the timeline. Reports progress via Tauri events.
+ */
+async renderRange(sequenceId: string, outputPath: string, preset: string, inPoint: number, outPoint: number) : Promise<Result<RenderStartResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("render_range", { sequenceId, outputPath, preset, inPoint, outPoint }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Starts a batch render that processes multiple export items sequentially.
+ * 
+ * Each item can have its own preset, output path, and optional range.
+ * Progress and completion events are emitted per-item and for the overall batch.
+ * 
+ * # Events emitted
+ * - `batch-render-progress`: Per-item progress with batch-level context
+ * - `batch-item-complete`: Fired when a single item finishes (success/fail/cancel)
+ * - `batch-render-complete`: Fired when all items in the batch are done
+ */
+async batchRender(sequenceId: string, items: BatchRenderItemDto[]) : Promise<Result<BatchRenderStartResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("batch_render", { sequenceId, items }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Cancels a render job by its job ID.
+ * 
+ * Works for both single renders and individual items within a batch.
+ * If the job is currently encoding, the FFmpeg process is killed.
+ */
+async cancelRender(jobId: string) : Promise<Result<CancelRenderResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cancel_render", { jobId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Exports a single frame from a sequence at the specified time position.
+ * 
+ * Captures the topmost visible video clip at the given time and saves it
+ * as a still image (PNG, JPEG, or TIFF).
+ */
+async exportFrame(sequenceId: string, timeSec: number, format: string, outputPath: string, quality: number | null) : Promise<Result<FrameExportResultDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_frame", { sequenceId, timeSec, format, outputPath, quality }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Exports audio only from a sequence (no video).
+ * 
+ * Renders all audio tracks mixed down to a single audio file.
+ * Supports WAV, MP3, and FLAC output formats. Reports progress via
+ * Tauri events using the same `render-progress` event pattern.
+ */
+async exportAudioOnly(sequenceId: string, format: string, outputPath: string, bitrate: string | null, sampleRate: number | null) : Promise<Result<RenderStartResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_audio_only", { sequenceId, format, outputPath, bitrate, sampleRate }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Detect available hardware video encoders (NVENC, QSV, AMF, VideoToolbox).
+ * 
+ * Probes the FFmpeg installation for GPU-accelerated encoders.
+ * Returns information about which hardware backends are available.
+ */
+async getAvailableEncoders() : Promise<Result<AvailableEncoders, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_available_encoders") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Exports a sequence to CMX 3600 EDL format.
+ * 
+ * Generates an industry-standard EDL file that can be imported into
+ * Premiere Pro, DaVinci Resolve, and other NLEs.
+ */
+async exportEdl(sequenceId: string, outputPath: string) : Promise<Result<InterchangeExportResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_edl", { sequenceId, outputPath }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Exports a sequence to Final Cut Pro XML (FCPXML v1.11) format.
+ * 
+ * Generates an FCPXML file compatible with Final Cut Pro,
+ * DaVinci Resolve, and other NLEs that support FCPXML import.
+ */
+async exportFcpxml(sequenceId: string, outputPath: string) : Promise<Result<InterchangeExportResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("export_fcpxml", { sequenceId, outputPath }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Analyzes user intent and generates an EditScript
  */
 async analyzeIntent(intent: string, context: AIContextDto) : Promise<Result<EditScriptDto, string>> {
@@ -2545,6 +2655,58 @@ codec: string;
 bitrate: number | null }
 export type AutoSaveSettingsDto = { enabled: boolean; intervalSeconds: number; backupCount: number }
 /**
+ * Result of probing available hardware encoders
+ */
+export type AvailableEncoders = { 
+/**
+ * List of detected hardware encoder backends
+ */
+hardware: HardwareEncoderInfo[]; 
+/**
+ * Whether any hardware encoder is available
+ */
+hasHardware: boolean }
+/**
+ * A single item in a batch render request (IPC DTO).
+ */
+export type BatchRenderItemDto = { 
+/**
+ * Export preset identifier (e.g., "youtube_1080p")
+ */
+preset: string; 
+/**
+ * Output file path for this render
+ */
+outputPath: string; 
+/**
+ * Optional In point in seconds for range export
+ */
+inPoint: number | null; 
+/**
+ * Optional Out point in seconds for range export
+ */
+outPoint: number | null }
+/**
+ * Result returned when a batch render is started.
+ */
+export type BatchRenderStartResult = { 
+/**
+ * Unique identifier for the entire batch
+ */
+batchId: string; 
+/**
+ * Job IDs for each item (same order as input items)
+ */
+jobIds: string[]; 
+/**
+ * Total number of items in the batch
+ */
+totalItems: number; 
+/**
+ * Initial status ("started")
+ */
+status: string }
+/**
  * Blend mode for video tracks and clips
  */
 export type BlendMode = "normal" | "multiply" | "screen" | "overlay" | "add" | "subtract" | "darken" | "lighten" | "colorBurn" | "colorDodge" | "linearBurn" | "linearDodge" | "softLight" | "hardLight" | "vividLight" | "linearLight" | "pinLight" | "difference" | "exclusion"
@@ -2620,6 +2782,18 @@ export type CameraAngle =
  * Unable to determine (local fallback)
  */
 "unknown"
+/**
+ * Result of a render cancellation request.
+ */
+export type CancelRenderResult = { 
+/**
+ * The job ID that was cancelled
+ */
+jobId: string; 
+/**
+ * Whether the job was found and cancelled
+ */
+cancelled: boolean }
 /**
  * Canvas size
  */
@@ -3271,6 +3445,30 @@ motionDirection: MotionDirection;
  */
 visualComplexity: number }
 /**
+ * Result of a single-frame export.
+ */
+export type FrameExportResultDto = { 
+/**
+ * Output file path
+ */
+outputPath: string; 
+/**
+ * File size in bytes
+ */
+fileSize: number; 
+/**
+ * Image format used ("png", "jpeg", "tiff")
+ */
+format: string; 
+/**
+ * Width of the exported image in pixels
+ */
+width: number; 
+/**
+ * Height of the exported image in pixels
+ */
+height: number }
+/**
  * Describes a gap (empty region) between clips on a track.
  */
 export type GapInfo = { 
@@ -3300,6 +3498,54 @@ annotation: AssetAnnotation | null;
  */
 status: AnalysisStatus }
 /**
+ * Hardware encoder backend
+ */
+export type HardwareAccelMode = 
+/**
+ * Automatically detect and use best available GPU encoder
+ */
+"auto" | 
+/**
+ * Force CPU-only software encoding
+ */
+"cpu" | 
+/**
+ * NVIDIA NVENC
+ */
+"nvenc" | 
+/**
+ * Intel Quick Sync Video
+ */
+"qsv" | 
+/**
+ * AMD AMF (Advanced Media Framework)
+ */
+"amf" | 
+/**
+ * Apple VideoToolbox (macOS only)
+ */
+"video_toolbox"
+/**
+ * Information about a detected hardware encoder
+ */
+export type HardwareEncoderInfo = { 
+/**
+ * The encoder backend identifier
+ */
+backend: HardwareAccelMode; 
+/**
+ * Human-readable display name
+ */
+displayName: string; 
+/**
+ * FFmpeg encoder name for H.264 (e.g., "h264_nvenc")
+ */
+h264Encoder: string; 
+/**
+ * FFmpeg encoder name for H.265/HEVC (e.g., "hevc_nvenc")
+ */
+h265Encoder: string }
+/**
  * History (undo/redo) state event payload.
  */
 export type HistoryChangedEvent = { 
@@ -3319,6 +3565,46 @@ undoCount: number;
  * Number of operations in redo stack
  */
 redoCount: number }
+/**
+ * Result of an interchange format export operation
+ */
+export type InterchangeExportResult = { 
+/**
+ * Output file path
+ */
+outputPath: string; 
+/**
+ * Format exported
+ */
+format: InterchangeFormat; 
+/**
+ * Number of events/clips exported
+ */
+eventCount: number; 
+/**
+ * Number of tracks processed
+ */
+trackCount: number; 
+/**
+ * Sequence duration in seconds
+ */
+durationSec: number }
+/**
+ * Supported interchange export formats
+ */
+export type InterchangeFormat = 
+/**
+ * CMX 3600 Edit Decision List
+ */
+"edl" | 
+/**
+ * Final Cut Pro XML (FCPXML v1.11)
+ */
+"fcpxml" | 
+/**
+ * OpenTimelineIO (not yet implemented)
+ */
+"otio"
 /**
  * Job completed event payload.
  */

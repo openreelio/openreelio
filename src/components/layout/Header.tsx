@@ -5,7 +5,7 @@
  * and optional utility actions.
  */
 
-import { X, Save, FolderOpen, Download, Search, Settings, Loader2 } from 'lucide-react';
+import { X, Save, FolderOpen, Download, Search, Settings, Loader2, FileText, FileCode, Camera, Music } from 'lucide-react';
 import { UndoRedoButtons } from '@/components/ui';
 import { SearchPanel } from '@/components/features/search';
 import { SettingsDialog } from '@/components/features/settings';
@@ -16,6 +16,7 @@ import { createLogger } from '@/services/logger';
 import { SaveStatusBadge, type SaveStatus } from './SaveStatusBadge';
 import { UnsavedChangesDialog } from './UnsavedChangesDialog';
 import type { AssetSearchResultItem } from '@/hooks/useSearch';
+import { HeaderPopoverAction } from './HeaderPopoverAction';
 
 const logger = createLogger('Header');
 
@@ -32,6 +33,14 @@ interface HeaderProps {
   showToolbar?: boolean;
   /** Export button click handler */
   onExport?: () => void;
+  /** Export as EDL click handler */
+  onExportEdl?: () => void;
+  /** Export as FCPXML click handler */
+  onExportFcpxml?: () => void;
+  /** Export current frame as still image */
+  onExportFrame?: () => void;
+  /** Export audio only */
+  onExportAudio?: () => void;
   /** Callback when a search result is selected */
   onSearchResultSelect?: (result: AssetSearchResultItem) => void;
   /** Optional utility actions rendered in the header */
@@ -47,6 +56,10 @@ export function Header({
   version = '0.1.0',
   showToolbar = true,
   onExport,
+  onExportEdl,
+  onExportFcpxml,
+  onExportFrame,
+  onExportAudio,
   onSearchResultSelect,
   utilityActions,
 }: HeaderProps) {
@@ -260,15 +273,64 @@ export function Header({
                 )}
               </button>
 
-              {/* Export Button */}
-              {onExport && (
-                <button
-                  onClick={onExport}
-                  className="rounded p-1.5 text-editor-text-muted transition-colors hover:bg-editor-bg hover:text-primary-400"
-                  title="Export video"
+              {/* Export Menu */}
+              {(onExport || onExportEdl || onExportFcpxml || onExportFrame || onExportAudio) && (
+                <HeaderPopoverAction
+                  label="Export"
+                  icon={<Download className="h-4 w-4" />}
+                  panelClassName="w-[220px] p-1"
                 >
-                  <Download className="h-4 w-4" />
-                </button>
+                  <div className="flex flex-col gap-0.5">
+                    {onExport && (
+                      <button
+                        onClick={onExport}
+                        className="flex items-center gap-2 rounded px-3 py-2 text-left text-sm text-editor-text transition-colors hover:bg-editor-bg"
+                      >
+                        <Download className="h-4 w-4 text-editor-text-muted" />
+                        Export Video
+                      </button>
+                    )}
+                    {onExportEdl && (
+                      <button
+                        onClick={onExportEdl}
+                        className="flex items-center gap-2 rounded px-3 py-2 text-left text-sm text-editor-text transition-colors hover:bg-editor-bg"
+                      >
+                        <FileText className="h-4 w-4 text-editor-text-muted" />
+                        Export as EDL...
+                      </button>
+                    )}
+                    {onExportFcpxml && (
+                      <button
+                        onClick={onExportFcpxml}
+                        className="flex items-center gap-2 rounded px-3 py-2 text-left text-sm text-editor-text transition-colors hover:bg-editor-bg"
+                      >
+                        <FileCode className="h-4 w-4 text-editor-text-muted" />
+                        Export as FCPXML...
+                      </button>
+                    )}
+                    {(onExportFrame || onExportAudio) && (onExport || onExportEdl || onExportFcpxml) && (
+                      <div className="my-0.5 h-px bg-editor-border" />
+                    )}
+                    {onExportFrame && (
+                      <button
+                        onClick={onExportFrame}
+                        className="flex items-center gap-2 rounded px-3 py-2 text-left text-sm text-editor-text transition-colors hover:bg-editor-bg"
+                      >
+                        <Camera className="h-4 w-4 text-editor-text-muted" />
+                        Export Current Frame...
+                      </button>
+                    )}
+                    {onExportAudio && (
+                      <button
+                        onClick={onExportAudio}
+                        className="flex items-center gap-2 rounded px-3 py-2 text-left text-sm text-editor-text transition-colors hover:bg-editor-bg"
+                      >
+                        <Music className="h-4 w-4 text-editor-text-muted" />
+                        Export Audio Only...
+                      </button>
+                    )}
+                  </div>
+                </HeaderPopoverAction>
               )}
 
               <div className="h-4 w-px bg-editor-border" />

@@ -15,6 +15,7 @@ pub mod ffmpeg;
 pub mod fs;
 pub mod generative;
 pub mod indexing;
+pub mod interchange;
 pub mod jobs;
 pub mod masks;
 pub mod performance;
