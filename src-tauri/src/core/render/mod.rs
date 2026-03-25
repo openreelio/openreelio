@@ -8,9 +8,14 @@
 //! - `hdr`: HDR workflow support (color spaces, tonemapping, metadata)
 
 mod export;
+pub mod hardware;
 pub mod hdr;
 
 pub use export::*;
+pub use hardware::{
+    detect_available_encoders, is_hardware_encoder, resolve_quality_args, resolve_video_encoder,
+    software_encoder_name, AvailableEncoders, HardwareAccelMode, HardwareEncoderInfo,
+};
 
 // HDR re-exports
 pub use hdr::{
