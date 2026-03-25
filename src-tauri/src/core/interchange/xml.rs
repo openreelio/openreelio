@@ -390,8 +390,10 @@ fn write_spine(
         }
     }
 
-    // Audio tracks as separate clips with lane offset
-    let audio_lane_start = video_tracks.len();
+    // Audio tracks: when no video tracks exist, the first audio track becomes the
+    // primary spine (lane 0 with gap handling). Remaining audio tracks use lane offsets.
+    let first_audio_is_primary = video_tracks.is_empty();
+
     for (lane_offset, (_track_idx, track)) in audio_tracks.iter().enumerate() {
         let mut clips: Vec<_> = track.clips.iter().filter(|c| c.enabled).collect();
         clips.sort_by(|a, b| {
@@ -406,10 +408,34 @@ fn write_spine(
         }
         track_count += 1;
 
-        let lane = audio_lane_start + lane_offset;
-        for clip in &clips {
-            write_audio_clip_element(output, clip, asset_resource_map, fps, lane)?;
-            event_count += 1;
+        if first_audio_is_primary && lane_offset == 0 {
+            // Primary spine: insert gaps and emit clips without explicit lane attribute
+            let mut current_time = 0.0f64;
+            for clip in &clips {
+                if clip.place.timeline_in_sec > current_time + 0.001 {
+                    let gap_duration = clip.place.timeline_in_sec - current_time;
+                    writeln!(
+                        output,
+                        r#"            <gap offset="{}" duration="{}" start="0/1s"/>"#,
+                        rational_time(current_time, fps),
+                        rational_time(gap_duration, fps),
+                    )
+                    .map_err(|e| e.to_string())?;
+                }
+                write_clip_element(output, clip, asset_resource_map, fps, 0)?;
+                event_count += 1;
+                current_time = clip.place.timeline_out_sec();
+            }
+        } else {
+            let lane = if first_audio_is_primary {
+                lane_offset // lanes 1, 2, ... (primary is lane 0)
+            } else {
+                video_tracks.len() + lane_offset // after video lanes
+            };
+            for clip in &clips {
+                write_audio_clip_element(output, clip, asset_resource_map, fps, lane)?;
+                event_count += 1;
+            }
         }
     }
 
