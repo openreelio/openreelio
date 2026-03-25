@@ -46,6 +46,7 @@ export function ExportDialog({
   }, [isOpen]);
 
   const renderQueue = useRenderQueue({ sequenceId, sequenceName });
+  const { isBatchRendering, resetQueue } = renderQueue;
   const {
     selectedPreset, setSelectedPreset, outputPath,
     status, isExporting, showSettings, canExport,
@@ -62,19 +63,19 @@ export function ExportDialog({
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === 'Escape' && status.type === 'idle' && !renderQueue.isBatchRendering) {
+      if (e.key === 'Escape' && status.type === 'idle' && !isBatchRendering) {
         onClose();
       }
     },
-    [onClose, status.type, renderQueue.isBatchRendering]
+    [onClose, status.type, isBatchRendering]
   );
 
   const handleClose = useCallback(() => {
-    if (status.type !== 'exporting' && !renderQueue.isBatchRendering) {
-      renderQueue.resetQueue();
+    if (status.type !== 'exporting' && !isBatchRendering) {
+      resetQueue();
       onClose();
     }
-  }, [onClose, status.type, renderQueue.isBatchRendering, renderQueue.resetQueue]);
+  }, [onClose, status.type, isBatchRendering, resetQueue]);
 
   if (!isOpen) return null;
 
