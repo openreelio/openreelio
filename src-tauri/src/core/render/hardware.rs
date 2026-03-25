@@ -108,11 +108,24 @@ pub fn detect_available_encoders(ffmpeg_path: &Path) -> AvailableEncoders {
                 _ => continue,
             };
 
+            // Verify H.265 encoder independently — older GPUs or driver versions
+            // may support H.264 hardware encoding but not H.265.
+            let verified_h265 = if encoder_list.contains(h265_enc) {
+                h265_enc.to_string()
+            } else {
+                tracing::info!(
+                    "{} H.265 encoder ({}) not found, will fall back to software for HEVC",
+                    display_name,
+                    h265_enc
+                );
+                String::new()
+            };
+
             hardware.push(HardwareEncoderInfo {
                 backend,
                 display_name: display_name.to_string(),
                 h264_encoder: h264_enc.to_string(),
-                h265_encoder: h265_enc.to_string(),
+                h265_encoder: verified_h265,
             });
         }
     }
@@ -182,11 +195,18 @@ pub fn resolve_video_encoder(
     };
 
     match target_backend {
-        Some(info) => match codec {
-            VideoCodec::H264 => info.h264_encoder.clone(),
-            VideoCodec::H265 => info.h265_encoder.clone(),
-            _ => unreachable!(),
-        },
+        Some(info) => {
+            let encoder = match codec {
+                VideoCodec::H264 => &info.h264_encoder,
+                VideoCodec::H265 => &info.h265_encoder,
+                _ => unreachable!(),
+            };
+            // Fall back to software if the specific codec encoder was not verified
+            if encoder.is_empty() {
+                return software_encoder_name(codec);
+            }
+            encoder.clone()
+        }
         None => {
             // No matching hardware encoder available — fallback to software
             if *hw_mode != HardwareAccelMode::Auto {
