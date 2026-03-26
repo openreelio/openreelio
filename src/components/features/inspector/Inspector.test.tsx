@@ -151,6 +151,45 @@ describe('Inspector', () => {
     });
   });
 
+  it('renders the selected effect inspector after choosing an effect', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <Inspector
+        selectedClip={{
+          id: 'clip-1',
+          sequenceId: 'seq-1',
+          name: 'Test Clip',
+          assetId: 'asset-1',
+          range: {
+            sourceInSec: 0,
+            sourceOutSec: 10,
+          },
+          place: {
+            trackId: 'track-1',
+            timelineInSec: 0,
+          },
+          effects: [
+            {
+              id: 'effect-1',
+              effectType: 'brightness',
+              enabled: true,
+              params: { value: 0.5 },
+              keyframes: {},
+              order: 0,
+            },
+          ],
+        }}
+        onEffectChange={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByTestId('effect-item-effect-1'));
+
+    expect(screen.getByTestId('effect-inspector')).toBeInTheDocument();
+    expect(screen.getByLabelText('Brightness')).toBeInTheDocument();
+  });
+
   // ===========================================================================
   // Asset Selection Tests
   // ===========================================================================
