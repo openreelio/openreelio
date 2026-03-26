@@ -80,6 +80,25 @@ describe('useEffectParamDefs', () => {
       expect(result.current.find((p) => p.name === 'width')).toBeDefined();
       expect(result.current.find((p) => p.name === 'height')).toBeDefined();
     });
+
+    it('should return param defs for stabilize effect', () => {
+      const effect = createEffect('stabilize');
+      const { result } = renderHook(() => useEffectParamDefs(effect));
+
+      expect(result.current.find((p) => p.name === 'smoothing')).toBeDefined();
+      expect(result.current.find((p) => p.name === 'crop_mode')).toBeDefined();
+      expect(result.current.find((p) => p.name === 'zoom')).toBeDefined();
+    });
+
+    it('should return backend-aligned param defs for auto reframe effect', () => {
+      const effect = createEffect('auto_reframe');
+      const { result } = renderHook(() => useEffectParamDefs(effect));
+
+      expect(result.current.find((p) => p.name === 'target_aspect')).toBeDefined();
+      expect(result.current.find((p) => p.name === 'smoothing')).toBeDefined();
+      expect(result.current.find((p) => p.name === 'zoom')).toBeDefined();
+      expect(result.current.find((p) => p.name === 'detection_mode')).toBeDefined();
+    });
   });
 
   describe('transition effects', () => {

@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   getEffectParamDefs,
+  getEffectDefaultParamValues,
   AUDIO_EFFECT_PARAM_DEFS,
   VIDEO_EFFECT_PARAM_DEFS,
   TRANSITION_EFFECT_PARAM_DEFS,
@@ -197,6 +198,29 @@ describe('Video Effect Parameters', () => {
     });
   });
 
+  describe('stabilize', () => {
+    it('should define smoothing, crop_mode, and zoom parameters', () => {
+      const params = VIDEO_EFFECT_PARAM_DEFS.stabilize;
+      expect(params).toBeDefined();
+
+      expect(params.find((p) => p.name === 'smoothing')).toBeDefined();
+      expect(params.find((p) => p.name === 'crop_mode')).toBeDefined();
+      expect(params.find((p) => p.name === 'zoom')).toBeDefined();
+    });
+  });
+
+  describe('auto_reframe', () => {
+    it('should define backend-aligned smart reframe parameters', () => {
+      const params = VIDEO_EFFECT_PARAM_DEFS.auto_reframe;
+      expect(params).toBeDefined();
+
+      expect(params.find((p) => p.name === 'target_aspect')).toBeDefined();
+      expect(params.find((p) => p.name === 'smoothing')).toBeDefined();
+      expect(params.find((p) => p.name === 'zoom')).toBeDefined();
+      expect(params.find((p) => p.name === 'detection_mode')).toBeDefined();
+    });
+  });
+
   // ===========================================================================
   // Keying Effects
   // ===========================================================================
@@ -375,5 +399,26 @@ describe('getEffectParamDefs', () => {
     ];
 
     allParams.forEach(expectValidParamDef);
+  });
+});
+
+describe('getEffectDefaultParamValues', () => {
+  it('should include internal stabilize analysis state when resetting', () => {
+    expect(getEffectDefaultParamValues('stabilize')).toEqual({
+      smoothing: 10,
+      crop_mode: 'crop',
+      zoom: 0,
+      analysis_path: '',
+    });
+  });
+
+  it('should include internal smart reframe analysis state when resetting', () => {
+    expect(getEffectDefaultParamValues('auto_reframe')).toEqual({
+      target_aspect: '9:16',
+      smoothing: 30,
+      zoom: 0,
+      detection_mode: 'center',
+      analysis_data: '',
+    });
   });
 });
