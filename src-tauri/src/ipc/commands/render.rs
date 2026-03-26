@@ -1152,18 +1152,21 @@ pub async fn stabilize_clip(
 
     // Create output directory for transforms file
     let stab_dir = project_path.join(".openreelio").join("stabilize");
-    tokio::fs::create_dir_all(&stab_dir).await.map_err(|e| {
-        format!("Failed to create stabilization directory: {}", e)
-    })?;
+    tokio::fs::create_dir_all(&stab_dir)
+        .await
+        .map_err(|e| format!("Failed to create stabilization directory: {}", e))?;
 
     let transforms_path = stab_dir.join(format!("{}.trf", clip_id));
 
     // Emit initial progress
-    let _ = app_handle.emit("stabilize-progress", serde_json::json!({
-        "clipId": clip_id,
-        "progress": 0,
-        "phase": "analyzing"
-    }));
+    let _ = app_handle.emit(
+        "stabilize-progress",
+        serde_json::json!({
+            "clipId": clip_id,
+            "progress": 0,
+            "phase": "analyzing"
+        }),
+    );
 
     // Pass 1: vidstabdetect — analyze motion and generate transforms file
     let mut cmd = tokio::process::Command::new(&ffmpeg.info().ffmpeg_path);
@@ -1184,11 +1187,15 @@ pub async fn stabilize_clip(
     let output = cmd
         .args([
             "-hide_banner",
-            "-loglevel", "warning",
+            "-loglevel",
+            "warning",
             "-nostdin",
-            "-i", &source_path,
-            "-vf", &detect_filter,
-            "-f", "null",
+            "-i",
+            &source_path,
+            "-vf",
+            &detect_filter,
+            "-f",
+            "null",
             "-y",
             "-",
         ])
@@ -1199,11 +1206,14 @@ pub async fn stabilize_clip(
         .map_err(|e| format!("Failed to run vidstabdetect: {}", e))?;
 
     // Emit completion of analysis
-    let _ = app_handle.emit("stabilize-progress", serde_json::json!({
-        "clipId": clip_id,
-        "progress": 90,
-        "phase": "applying"
-    }));
+    let _ = app_handle.emit(
+        "stabilize-progress",
+        serde_json::json!({
+            "clipId": clip_id,
+            "progress": 90,
+            "phase": "applying"
+        }),
+    );
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1212,15 +1222,20 @@ pub async fn stabilize_clip(
 
     // Verify transforms file was created
     if !transforms_path.exists() {
-        return Err("Stabilization analysis completed but no transforms file was generated".to_string());
+        return Err(
+            "Stabilization analysis completed but no transforms file was generated".to_string(),
+        );
     }
 
     // Emit completion
-    let _ = app_handle.emit("stabilize-progress", serde_json::json!({
-        "clipId": clip_id,
-        "progress": 100,
-        "phase": "complete"
-    }));
+    let _ = app_handle.emit(
+        "stabilize-progress",
+        serde_json::json!({
+            "clipId": clip_id,
+            "progress": 100,
+            "phase": "complete"
+        }),
+    );
 
     Ok(StabilizeResult {
         transforms_path: transforms_path.to_string_lossy().to_string(),
@@ -1389,11 +1404,16 @@ pub async fn smart_reframe(
 
     let probe_output = probe_cmd
         .args([
-            "-v", "quiet",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-show_entries", "format=duration",
-            "-of", "json",
+            "-v",
+            "quiet",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
             &source_path,
         ])
         .stdout(std::process::Stdio::piped())
@@ -1420,7 +1440,9 @@ pub async fn smart_reframe(
         .as_str()
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or_else(|| {
-            tracing::warn!("Could not determine video duration; keyframe generation may be incomplete");
+            tracing::warn!(
+                "Could not determine video duration; keyframe generation may be incomplete"
+            );
             0.0
         });
 
@@ -1443,11 +1465,15 @@ pub async fn smart_reframe(
     let scene_output = scene_cmd
         .args([
             "-hide_banner",
-            "-loglevel", "quiet",
+            "-loglevel",
+            "quiet",
             "-nostdin",
-            "-i", &source_path,
-            "-vf", "select='gt(scene,0.3)',showinfo",
-            "-f", "null",
+            "-i",
+            &source_path,
+            "-vf",
+            "select='gt(scene,0.3)',showinfo",
+            "-f",
+            "null",
             "-y",
             "-",
         ])

@@ -320,9 +320,9 @@ impl IntoFFmpegFilter for Effect {
             EffectType::AutoReframe => "crop",
 
             // AI effects - not directly supported in FFmpeg
-            EffectType::BackgroundRemoval
-            | EffectType::FaceBlur
-            | EffectType::ObjectTracking => "null",
+            EffectType::BackgroundRemoval | EffectType::FaceBlur | EffectType::ObjectTracking => {
+                "null"
+            }
 
             // Custom effects
             EffectType::Custom(_) => "null",
@@ -1351,9 +1351,7 @@ impl Effect {
     /// - `zoom`: Percentage zoom to hide borders (-100 to 100, default: 0)
     /// - `analysis_path`: Internal path to the .trf transforms file
     fn build_stabilize_filter(&self) -> String {
-        let analysis_path = self
-            .get_string("analysis_path")
-            .unwrap_or_default();
+        let analysis_path = self.get_string("analysis_path").unwrap_or_default();
 
         // Without an analysis file, the transform filter cannot run
         if analysis_path.is_empty() {
@@ -1421,9 +1419,7 @@ impl Effect {
     /// - `detection_mode`: "center" or "auto"
     /// - `analysis_data`: JSON-encoded crop keyframes
     fn build_auto_reframe_filter(&self) -> String {
-        let analysis_data = self
-            .get_string("analysis_data")
-            .unwrap_or_default();
+        let analysis_data = self.get_string("analysis_data").unwrap_or_default();
 
         // Without analysis data, the reframe filter cannot run
         if analysis_data.is_empty() {
@@ -1461,7 +1457,10 @@ impl Effect {
             Some(kfs) if !kfs.is_empty() => kfs,
             _ => {
                 // No keyframes — use static center crop
-                return format!("crop={}:{}:(iw-{})/2:(ih-{})/2", final_w, final_h, final_w, final_h);
+                return format!(
+                    "crop={}:{}:(iw-{})/2:(ih-{})/2",
+                    final_w, final_h, final_w, final_h
+                );
             }
         };
 
@@ -1472,8 +1471,16 @@ impl Effect {
             return format!("crop={}:{}:{}:{}", final_w, final_h, x, y);
         }
 
-        let x_expr = format!("({})+{}", Self::build_lerp_expression(keyframes, "x"), x_offset);
-        let y_expr = format!("({})+{}", Self::build_lerp_expression(keyframes, "y"), y_offset);
+        let x_expr = format!(
+            "({})+{}",
+            Self::build_lerp_expression(keyframes, "x"),
+            x_offset
+        );
+        let y_expr = format!(
+            "({})+{}",
+            Self::build_lerp_expression(keyframes, "y"),
+            y_offset
+        );
 
         format!("crop={}:{}:'{}':'{}'", final_w, final_h, x_expr, y_expr)
     }
@@ -1530,7 +1537,11 @@ impl Effect {
             } else {
                 expr.push_str(&format!(
                     "\\,if(lt(t\\,{:.2})\\,{}+{}*(t-{:.2})/{:.2}",
-                    t1, v0, v1 - v0, t0, dt
+                    t1,
+                    v0,
+                    v1 - v0,
+                    t0,
+                    dt
                 ));
             }
             depth += 1;
@@ -5147,10 +5158,7 @@ mod tests {
             "crop_h": 1080,
             "keyframes": [{"t": 0.0, "x": 656, "y": 0}]
         });
-        effect.set_param(
-            "analysis_data",
-            ParamValue::String(data.to_string()),
-        );
+        effect.set_param("analysis_data", ParamValue::String(data.to_string()));
         // When we build the filter
         let filter = effect.to_filter_body();
         // Then it should produce a static crop at the keyframe position
@@ -5174,10 +5182,7 @@ mod tests {
                 {"t": 5.0, "x": 700, "y": 0}
             ]
         });
-        effect.set_param(
-            "analysis_data",
-            ParamValue::String(data.to_string()),
-        );
+        effect.set_param("analysis_data", ParamValue::String(data.to_string()));
         // When we build the filter
         let filter = effect.to_filter_body();
         // Then it should contain crop with dynamic expressions
@@ -5203,10 +5208,7 @@ mod tests {
             "crop_h": 1000,
             "keyframes": [{"t": 0.0, "x": 100, "y": 100}]
         });
-        effect.set_param(
-            "analysis_data",
-            ParamValue::String(data.to_string()),
-        );
+        effect.set_param("analysis_data", ParamValue::String(data.to_string()));
         effect.set_param("zoom", ParamValue::Float(20.0));
         // When we build the filter
         let filter = effect.to_filter_body();
@@ -5228,10 +5230,7 @@ mod tests {
             "crop_h": 1000,
             "keyframes": [{"t": 0.0, "x": 0, "y": 0}]
         });
-        effect.set_param(
-            "analysis_data",
-            ParamValue::String(data.to_string()),
-        );
+        effect.set_param("analysis_data", ParamValue::String(data.to_string()));
         effect.set_param("zoom", ParamValue::Float(80.0));
         // When we build the filter
         let filter = effect.to_filter_body();
@@ -5253,10 +5252,7 @@ mod tests {
             "crop_h": 1080,
             "keyframes": []
         });
-        effect.set_param(
-            "analysis_data",
-            ParamValue::String(data.to_string()),
-        );
+        effect.set_param("analysis_data", ParamValue::String(data.to_string()));
         // When we build the filter
         let filter = effect.to_filter_body();
         // Then it should fall back to center crop
@@ -5327,10 +5323,7 @@ mod tests {
             "crop_h": 1080,
             "keyframes": [{"t": 0.0, "x": 0, "y": 0}]
         });
-        effect.set_param(
-            "analysis_data",
-            ParamValue::String(data.to_string()),
-        );
+        effect.set_param("analysis_data", ParamValue::String(data.to_string()));
         // When we build the filter
         let filter = effect.to_filter_body();
         // Then it should return null
