@@ -1368,10 +1368,12 @@ impl Effect {
         let crop_mode = self
             .get_string("crop_mode")
             .unwrap_or_else(|| "crop".to_string());
-        let crop_val = match crop_mode.as_str() {
-            "none" => "keep",
-            "dynamic" => "dynamic",
-            _ => "black",
+        // FFmpeg vidstabtransform only accepts "keep" or "black" for the crop param.
+        // "dynamic" mode is achieved via optzoom=2 (adaptive zoom to hide borders).
+        let (crop_val, optzoom) = match crop_mode.as_str() {
+            "none" => ("keep", 0),
+            "dynamic" => ("black", 2),
+            _ => ("black", 1),
         };
 
         let zoom = self.get_float("zoom").unwrap_or(0.0).clamp(-100.0, 100.0);
@@ -1382,8 +1384,8 @@ impl Effect {
             .replace('\'', "\\'");
 
         format!(
-            "vidstabtransform=input='{}':smoothing={}:crop={}:zoom={:.1}:interpol=bilinear",
-            escaped_path, smoothing, crop_val, zoom
+            "vidstabtransform=input='{}':smoothing={}:crop={}:optzoom={}:zoom={:.1}:interpol=bilinear",
+            escaped_path, smoothing, crop_val, optzoom, zoom
         )
     }
 
@@ -1449,6 +1451,12 @@ impl Effect {
         let final_w = (((crop_w as f64) * zoom_factor).round() as i64).max(2) & !1;
         let final_h = (((crop_h as f64) * zoom_factor).round() as i64).max(2) & !1;
 
+        // When zoom shrinks the crop window, offset keyframe positions so the
+        // zoom is applied around the analyzed center rather than shifting the
+        // crop toward the top-left corner.
+        let x_offset = (crop_w - final_w) / 2;
+        let y_offset = (crop_h - final_h) / 2;
+
         let keyframes = match parsed["keyframes"].as_array() {
             Some(kfs) if !kfs.is_empty() => kfs,
             _ => {
@@ -1459,13 +1467,13 @@ impl Effect {
 
         // Build piecewise linear interpolation expression for x and y
         if keyframes.len() == 1 {
-            let x = keyframes[0]["x"].as_i64().unwrap_or(0);
-            let y = keyframes[0]["y"].as_i64().unwrap_or(0);
+            let x = keyframes[0]["x"].as_i64().unwrap_or(0) + x_offset;
+            let y = keyframes[0]["y"].as_i64().unwrap_or(0) + y_offset;
             return format!("crop={}:{}:{}:{}", final_w, final_h, x, y);
         }
 
-        let x_expr = Self::build_lerp_expression(keyframes, "x");
-        let y_expr = Self::build_lerp_expression(keyframes, "y");
+        let x_expr = format!("({})+{}", Self::build_lerp_expression(keyframes, "x"), x_offset);
+        let y_expr = format!("({})+{}", Self::build_lerp_expression(keyframes, "y"), y_offset);
 
         format!("crop={}:{}:'{}':'{}'", final_w, final_h, x_expr, y_expr)
     }
@@ -4999,8 +5007,8 @@ mod tests {
             filter
         );
         assert!(
-            filter.contains("crop=black"),
-            "Expected crop=black for 'crop' mode, got: {}",
+            filter.contains("crop=black:optzoom=1"),
+            "Expected crop=black:optzoom=1 for 'crop' mode, got: {}",
             filter
         );
         assert!(
@@ -5026,8 +5034,8 @@ mod tests {
 
         let filter = effect.to_filter_body();
         assert!(
-            filter.contains("crop=keep"),
-            "Expected crop=keep for 'none' mode, got: {}",
+            filter.contains("crop=keep:optzoom=0"),
+            "Expected crop=keep:optzoom=0 for 'none' mode, got: {}",
             filter
         );
     }
@@ -5043,8 +5051,8 @@ mod tests {
 
         let filter = effect.to_filter_body();
         assert!(
-            filter.contains("crop=dynamic"),
-            "Expected crop=dynamic, got: {}",
+            filter.contains("crop=black:optzoom=2"),
+            "Expected crop=black:optzoom=2 for 'dynamic' mode, got: {}",
             filter
         );
     }
@@ -5203,9 +5211,10 @@ mod tests {
         // When we build the filter
         let filter = effect.to_filter_body();
         // Then crop dimensions should be reduced by 20% (1000 * 0.8 = 800)
+        // Center offset: (1000-800)/2 = 100, so x=100+100=200, y=100+100=200
         assert!(
-            filter.contains("crop=800:800:"),
-            "Expected zoomed dimensions 800x800, got: {}",
+            filter.contains("crop=800:800:200:200"),
+            "Expected zoomed crop 800x800 with center offset, got: {}",
             filter
         );
     }
@@ -5227,9 +5236,10 @@ mod tests {
         // When we build the filter
         let filter = effect.to_filter_body();
         // Then zoom should clamp to 50% (1000 * 0.5 = 500)
+        // Center offset: (1000-500)/2 = 250, so x=0+250=250, y=0+250=250
         assert!(
-            filter.contains("crop=500:500:"),
-            "Expected clamped zoom 500x500, got: {}",
+            filter.contains("crop=500:500:250:250"),
+            "Expected clamped zoom 500x500 with center offset, got: {}",
             filter
         );
     }

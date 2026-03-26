@@ -93,20 +93,34 @@ export const SmartReframePanel = memo(function SmartReframePanel({
   const effectiveAnalysisData = analysisData || localAnalysisData;
   const isAnalyzed = effectiveAnalysisData.length > 0;
 
+  // Invalidate stale analysis data when key parameters change — the cached
+  // keyframes were computed for the previous settings and would produce
+  // incorrect crop geometry if reused with different values.
+  const invalidateAnalysis = useCallback(() => {
+    setLocalAnalysisData('');
+    onChange('analysis_data', '');
+  }, [onChange]);
+
   const handleAspectChange = useCallback(
     (value: string) => {
+      if (value !== latestValuesRef.current.targetAspect) {
+        invalidateAnalysis();
+      }
       latestValuesRef.current.targetAspect = value;
       onChange('target_aspect', value);
     },
-    [onChange]
+    [invalidateAnalysis, onChange]
   );
 
   const handleSmoothingChange = useCallback(
     (value: number) => {
+      if (value !== latestValuesRef.current.smoothing) {
+        invalidateAnalysis();
+      }
       latestValuesRef.current.smoothing = value;
       onChange('smoothing', value);
     },
-    [onChange]
+    [invalidateAnalysis, onChange]
   );
 
   const handleZoomChange = useCallback(

@@ -1419,7 +1419,10 @@ pub async fn smart_reframe(
     let duration = probe_json["format"]["duration"]
         .as_str()
         .and_then(|s| s.parse::<f64>().ok())
-        .unwrap_or(0.0);
+        .unwrap_or_else(|| {
+            tracing::warn!("Could not determine video duration; keyframe generation may be incomplete");
+            0.0
+        });
 
     // Step 2: Calculate crop dimensions
     let (crop_w, crop_h) = calculate_crop_dimensions(source_w, source_h, target_w, target_h);
@@ -1479,6 +1482,10 @@ pub async fn smart_reframe(
             }
         }
     }
+
+    // Ensure chronological order — FFmpeg showinfo is expected to emit in
+    // order, but we sort defensively to handle edge cases.
+    scene_times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
     let _ = app_handle.emit(
         "reframe-progress",

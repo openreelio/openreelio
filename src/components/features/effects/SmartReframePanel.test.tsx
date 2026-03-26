@@ -103,6 +103,62 @@ describe('SmartReframePanel', () => {
     expect(mockOnChange).toHaveBeenCalledWith('target_aspect', '1:1');
   });
 
+  it('should invalidate analysis_data when target aspect ratio changes', () => {
+    const params = {
+      ...defaultParams,
+      analysis_data: '{"crop_w":608,"crop_h":1080,"keyframes":[]}',
+    };
+    render(
+      <SmartReframePanel
+        params={params}
+        onChange={mockOnChange}
+        clipContext={clipContext}
+      />
+    );
+
+    fireEvent.click(screen.getByTestId('aspect-1-1'));
+    expect(mockOnChange).toHaveBeenCalledWith('analysis_data', '');
+    expect(mockOnChange).toHaveBeenCalledWith('target_aspect', '1:1');
+  });
+
+  it('should invalidate analysis_data when smoothing changes', () => {
+    const params = {
+      ...defaultParams,
+      analysis_data: '{"crop_w":608,"crop_h":1080,"keyframes":[]}',
+    };
+    render(
+      <SmartReframePanel
+        params={params}
+        onChange={mockOnChange}
+        clipContext={clipContext}
+      />
+    );
+
+    fireEvent.change(screen.getByLabelText('Smoothing'), {
+      target: { value: '50' },
+    });
+    expect(mockOnChange).toHaveBeenCalledWith('analysis_data', '');
+    expect(mockOnChange).toHaveBeenCalledWith('smoothing', 50);
+  });
+
+  it('should not invalidate analysis_data when selecting the same aspect ratio', () => {
+    const params = {
+      ...defaultParams,
+      analysis_data: '{"crop_w":608,"crop_h":1080,"keyframes":[]}',
+    };
+    render(
+      <SmartReframePanel
+        params={params}
+        onChange={mockOnChange}
+        clipContext={clipContext}
+      />
+    );
+
+    fireEvent.click(screen.getByTestId('aspect-9-16'));
+    expect(mockOnChange).not.toHaveBeenCalledWith('analysis_data', '');
+    expect(mockOnChange).toHaveBeenCalledWith('target_aspect', '9:16');
+  });
+
   it('should mark only the selected aspect ratio as pressed', () => {
     const params = { ...defaultParams, target_aspect: '4:5' };
     render(

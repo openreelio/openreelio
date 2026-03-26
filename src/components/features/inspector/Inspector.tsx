@@ -599,7 +599,7 @@ export function Inspector({
               onChange={handleEffectChange}
               onToggle={handleEffectToggle}
               onDelete={handleEffectRemove}
-              readOnly={readOnly}
+              readOnly={readOnly || !onEffectChange}
               className="mt-3 h-auto rounded border border-editor-border bg-editor-bg bg-opacity-40"
             />
           )}
