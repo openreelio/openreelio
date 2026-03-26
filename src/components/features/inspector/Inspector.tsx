@@ -22,9 +22,11 @@ import {
 import { formatDuration } from '@/utils/formatters';
 import { EffectsList, SaveEffectPresetDialog } from '../effects';
 import { BlendModePicker } from '../effects/BlendModePicker';
+import { EffectInspector } from '../effects/EffectInspector';
 import { TextInspector } from './TextInspector';
 import type { SelectedTextClip } from './TextInspector';
 import { useEffectPresets } from '@/hooks/useEffectPresets';
+import { useEffectParamDefs } from '@/hooks/useEffectParamDefs';
 import type {
   BlendMode,
   Effect,
@@ -33,6 +35,7 @@ import type {
   CaptionPosition,
   TextClipData,
   ClipId,
+  SimpleParamValue,
 } from '@/types';
 
 // =============================================================================
@@ -42,6 +45,7 @@ import type {
 /** Clip selection data */
 export interface SelectedClip {
   id: string;
+  sequenceId?: string;
   name: string;
   assetId: string;
   range: {
@@ -113,6 +117,8 @@ export interface InspectorProps {
   onCaptionChange?: (captionId: string, property: string, value: unknown) => void;
   /** Callback when an effect is toggled */
   onEffectToggle?: (clipId: string, effectId: EffectId, enabled: boolean) => void;
+  /** Callback when effect params change */
+  onEffectChange?: (effectId: EffectId, params: Record<string, SimpleParamValue>) => void;
   /** Callback when an effect is removed */
   onEffectRemove?: (clipId: string, effectId: EffectId) => void;
   /** Callback when add effect is requested */
@@ -263,6 +269,7 @@ export function Inspector({
   onTextDataChange,
   onCaptionChange,
   onEffectToggle,
+  onEffectChange,
   onEffectRemove,
   onAddEffect,
   readOnly = false,
@@ -293,6 +300,7 @@ export function Inspector({
 
     return selectedClip.effects?.find((effect) => effect.id === selectedEffectId);
   }, [selectedClip, selectedEffectId]);
+  const selectedEffectParamDefs = useEffectParamDefs(selectedEffect ?? null);
 
   useEffect(() => {
     if (!selectedEffectId) {
@@ -342,6 +350,13 @@ export function Inspector({
       onAddEffect(selectedClip.id);
     }
   }, [selectedClip, onAddEffect]);
+
+  const handleEffectChange = useCallback(
+    (effectId: EffectId, params: Record<string, SimpleParamValue>) => {
+      onEffectChange?.(effectId, params);
+    },
+    [onEffectChange],
+  );
 
   const handleOpenSavePreset = useCallback(() => {
     if (!selectedEffect) {
@@ -566,6 +581,27 @@ export function Inspector({
                 </p>
               )}
             </div>
+          )}
+
+          {selectedEffect && (
+            <EffectInspector
+              effect={selectedEffect}
+              paramDefs={selectedEffectParamDefs}
+              clipContext={
+                selectedClip.sequenceId
+                  ? {
+                      sequenceId: selectedClip.sequenceId,
+                      trackId: selectedClip.place.trackId,
+                      clipId: selectedClip.id,
+                    }
+                  : undefined
+              }
+              onChange={handleEffectChange}
+              onToggle={handleEffectToggle}
+              onDelete={handleEffectRemove}
+              readOnly={readOnly || !onEffectChange}
+              className="mt-3 h-auto rounded border border-editor-border bg-editor-bg bg-opacity-40"
+            />
           )}
         </div>
 

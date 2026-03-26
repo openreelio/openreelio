@@ -266,6 +266,9 @@ pub enum EffectType {
     // Audio Metering
     LoudnessNormalize,
 
+    // Stabilization
+    Stabilize,
+
     // AI
     BackgroundRemoval,
     AutoReframe,
@@ -292,7 +295,9 @@ impl EffectType {
             | Self::TemperatureTint
             | Self::Lut => EffectCategory::Color,
 
-            Self::Crop | Self::Flip | Self::Mirror | Self::Rotate => EffectCategory::Transform,
+            Self::Crop | Self::Flip | Self::Mirror | Self::Rotate | Self::Stabilize => {
+                EffectCategory::Transform
+            }
 
             Self::GaussianBlur
             | Self::BoxBlur
@@ -741,6 +746,36 @@ impl Effect {
                     ParamValue::String("summary".to_string()),
                 ); // Output format
             }
+            EffectType::Stabilize => {
+                // Video stabilization via FFmpeg vidstab (two-pass)
+                params.insert("smoothing".to_string(), ParamValue::Float(10.0)); // Smoothing strength (1-100)
+                params.insert(
+                    "crop_mode".to_string(),
+                    ParamValue::String("crop".to_string()),
+                ); // "none", "crop", "dynamic"
+                params.insert("zoom".to_string(), ParamValue::Float(0.0)); // Zoom to hide borders (-100 to 100)
+                params.insert(
+                    "analysis_path".to_string(),
+                    ParamValue::String(String::new()),
+                ); // Internal: path to .trf transforms file
+            }
+            EffectType::AutoReframe => {
+                // AI smart reframe — crop to target aspect ratio with subject tracking
+                params.insert(
+                    "target_aspect".to_string(),
+                    ParamValue::String("9:16".to_string()),
+                ); // Target aspect ratio: "9:16", "1:1", "4:5", "4:3"
+                params.insert("smoothing".to_string(), ParamValue::Float(30.0)); // Crop motion smoothing (1-100)
+                params.insert("zoom".to_string(), ParamValue::Float(0.0)); // Additional zoom percentage (0-50)
+                params.insert(
+                    "detection_mode".to_string(),
+                    ParamValue::String("center".to_string()),
+                ); // Subject detection: "center", "auto"
+                params.insert(
+                    "analysis_data".to_string(),
+                    ParamValue::String(String::new()),
+                ); // Internal: JSON-encoded crop keyframes from analysis
+            }
             _ => {}
         }
 
@@ -860,6 +895,17 @@ impl Effect {
                 ParamDef::float("target_lra", "Target LRA", 11.0, 1.0, 50.0),
                 ParamDef::float("target_tp", "Target True Peak", -1.0, -9.0, 0.0),
                 ParamDef::string("print_format", "Print Format", "summary"),
+            ],
+            EffectType::Stabilize => vec![
+                ParamDef::float("smoothing", "Smoothing", 10.0, 1.0, 100.0),
+                ParamDef::string("crop_mode", "Crop Mode", "crop"),
+                ParamDef::float("zoom", "Zoom", 0.0, -100.0, 100.0),
+            ],
+            EffectType::AutoReframe => vec![
+                ParamDef::string("target_aspect", "Target Aspect Ratio", "9:16"),
+                ParamDef::float("smoothing", "Smoothing", 30.0, 1.0, 100.0),
+                ParamDef::float("zoom", "Zoom", 0.0, 0.0, 50.0),
+                ParamDef::string("detection_mode", "Detection Mode", "center"),
             ],
             _ => vec![],
         }

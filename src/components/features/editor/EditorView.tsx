@@ -60,7 +60,16 @@ import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { getSplitTargetsAtTime } from '@/utils/clipLinking';
 import { Terminal, Sliders, Sparkles, GitCompareArrows, History, Camera } from 'lucide-react';
-import type { BlendMode, CaptionPosition, ClipId, Effect, Sequence, TextClipData } from '@/types';
+import type {
+  BlendMode,
+  CaptionPosition,
+  ClipId,
+  Effect,
+  EffectId,
+  Sequence,
+  SimpleParamValue,
+  TextClipData,
+} from '@/types';
 import type { AddTextPayload } from '@/components/features/text';
 import type { ChannelLevels } from '@/components/features/mixer';
 import type { MulticamGroup } from '@/utils/multicam';
@@ -632,6 +641,7 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       const asset = assets.get(clip.assetId);
       return {
         id: clip.id,
+        sequenceId: sequence.id,
         name: asset?.name ?? clip.assetId,
         assetId: clip.assetId,
         range: {
@@ -662,6 +672,61 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       setClipBlendMode(trackId, clipId, blendMode);
     },
     [setClipBlendMode],
+  );
+
+  const handleEffectChange = useCallback(
+    (effectId: EffectId, params: Record<string, SimpleParamValue>) => {
+      void executeCommand({
+        type: 'UpdateEffect',
+        payload: {
+          effectId,
+          params,
+        },
+      }).catch((error) => {
+        logger.error('Failed to update effect params', { effectId, error });
+      });
+    },
+    [executeCommand],
+  );
+
+  const handleEffectToggle = useCallback(
+    (_clipId: string, effectId: EffectId, enabled: boolean) => {
+      void executeCommand({
+        type: 'UpdateEffect',
+        payload: {
+          effectId,
+          enabled,
+        },
+      }).catch((error) => {
+        logger.error('Failed to toggle effect', { effectId, enabled, error });
+      });
+    },
+    [executeCommand],
+  );
+
+  const handleEffectRemove = useCallback(
+    (clipId: string, effectId: EffectId) => {
+      if (!sequence || !inspectorClip) {
+        logger.warn('Skipped remove effect without active clip context', {
+          clipId,
+          effectId,
+        });
+        return;
+      }
+
+      void executeCommand({
+        type: 'RemoveEffect',
+        payload: {
+          sequenceId: sequence.id,
+          trackId: inspectorClip.place.trackId,
+          clipId,
+          effectId,
+        },
+      }).catch((error) => {
+        logger.error('Failed to remove effect', { clipId, effectId, error });
+      });
+    },
+    [executeCommand, inspectorClip, sequence],
   );
 
   // Get selected caption for inspector
@@ -1084,6 +1149,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
                   onFreezeFrame={handleCreateFreezeFrame}
                   onTextDataChange={onTextDataChange}
                   onCaptionChange={onCaptionChange}
+                  onEffectChange={handleEffectChange}
+                  onEffectToggle={handleEffectToggle}
+                  onEffectRemove={handleEffectRemove}
                 />
               </InspectorErrorBoundary>
             </Sidebar>

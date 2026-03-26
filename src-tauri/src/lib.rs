@@ -841,6 +841,10 @@ mod tauri_app {
                 $crate::ipc::export_frame,
                 $crate::ipc::export_audio_only,
                 $crate::ipc::get_available_encoders,
+                // Stabilization command
+                $crate::ipc::stabilize_clip,
+                // Smart reframe command
+                $crate::ipc::smart_reframe,
                 // Interchange export commands (EDL, FCPXML)
                 $crate::ipc::export_edl,
                 $crate::ipc::export_fcpxml,
@@ -1239,6 +1243,10 @@ mod tauri_app {
             ipc::export_frame,
             ipc::export_audio_only,
             ipc::get_available_encoders,
+            // Stabilization command
+            ipc::stabilize_clip,
+            // Smart reframe command
+            ipc::smart_reframe,
             // Interchange export commands (EDL, FCPXML)
             ipc::export_edl,
             ipc::export_fcpxml,

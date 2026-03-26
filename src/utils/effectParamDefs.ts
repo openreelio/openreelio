@@ -5,7 +5,7 @@
  * Used by EffectInspector and ParameterEditor to render appropriate controls.
  */
 
-import type { ParamDef, EffectType } from '@/types';
+import type { ParamDef, EffectType, SimpleParamValue } from '@/types';
 
 // =============================================================================
 // Audio Effect Parameter Definitions
@@ -369,6 +369,31 @@ export const VIDEO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
     },
   ],
 
+  stabilize: [
+    {
+      name: 'smoothing',
+      label: 'Smoothing',
+      default: { type: 'float', value: 10 },
+      min: 1,
+      max: 100,
+      step: 1,
+    },
+    {
+      name: 'crop_mode',
+      label: 'Crop Mode',
+      default: { type: 'string', value: 'crop' },
+      options: ['crop', 'none', 'dynamic'],
+    },
+    {
+      name: 'zoom',
+      label: 'Zoom',
+      default: { type: 'float', value: 0 },
+      min: -100,
+      max: 100,
+      step: 1,
+    },
+  ],
+
   flip: [
     {
       name: 'horizontal',
@@ -645,19 +670,34 @@ export const VIDEO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
 
   auto_reframe: [
     {
-      name: 'aspect_ratio',
+      name: 'target_aspect',
       label: 'Target Aspect Ratio',
       default: { type: 'string', value: '9:16' },
       inputType: 'select',
-      options: ['16:9', '9:16', '1:1', '4:3', '4:5'],
+      options: ['9:16', '1:1', '4:5', '4:3'],
     },
     {
-      name: 'speed',
-      label: 'Tracking Speed',
-      default: { type: 'float', value: 0.5 },
+      name: 'smoothing',
+      label: 'Smoothing',
+      default: { type: 'float', value: 30 },
+      min: 1,
+      max: 100,
+      step: 1,
+    },
+    {
+      name: 'zoom',
+      label: 'Zoom',
+      default: { type: 'float', value: 0 },
       min: 0,
-      max: 1,
-      step: 0.01,
+      max: 50,
+      step: 1,
+    },
+    {
+      name: 'detection_mode',
+      label: 'Detection Mode',
+      default: { type: 'string', value: 'center' },
+      inputType: 'select',
+      options: ['center', 'auto'],
     },
   ],
 
@@ -1105,6 +1145,41 @@ export function getEffectParamDefs(effectType: EffectType): ParamDef[] {
   // Single lookup in combined table
   const defs = ALL_EFFECT_PARAM_DEFS[effectType];
   return safeParamDefs(defs);
+}
+
+/**
+ * Get the default parameter payload for resetting an effect.
+ * Includes internal analysis fields that should be cleared but are not exposed
+ * as editable controls in the inspector UI.
+ */
+export function getEffectDefaultParamValues(
+  effectType: EffectType,
+): Record<string, SimpleParamValue> {
+  const defaults = Object.fromEntries(
+    getEffectParamDefs(effectType).map((paramDef) => [
+      paramDef.name,
+      paramDef.default.value as SimpleParamValue,
+    ]),
+  );
+
+  if (typeof effectType !== 'string') {
+    return defaults;
+  }
+
+  switch (effectType) {
+    case 'stabilize':
+      return {
+        ...defaults,
+        analysis_path: '',
+      };
+    case 'auto_reframe':
+      return {
+        ...defaults,
+        analysis_data: '',
+      };
+    default:
+      return defaults;
+  }
 }
 
 /**

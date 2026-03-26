@@ -36,6 +36,7 @@ const ALL_STRING_EFFECT_TYPES: EffectType[] = [
   'flip',
   'mirror',
   'rotate',
+  'stabilize',
   // Blur/Sharpen
   'gaussian_blur',
   'box_blur',
