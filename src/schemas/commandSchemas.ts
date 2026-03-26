@@ -92,6 +92,7 @@ export const EffectType = z.enum([
   'flip',
   'mirror',
   'rotate',
+  'stabilize',
   // Blur/Sharpen
   'gaussian_blur',
   'box_blur',

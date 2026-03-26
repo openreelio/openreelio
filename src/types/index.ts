@@ -1246,6 +1246,7 @@ export type EffectType =
   | 'flip'
   | 'mirror'
   | 'rotate'
+  | 'stabilize'
   // Blur/Sharpen
   | 'gaussian_blur'
   | 'box_blur'
@@ -1431,6 +1432,7 @@ export function getEffectCategory(effectType: EffectType): EffectCategory {
     case 'flip':
     case 'mirror':
     case 'rotate':
+    case 'stabilize':
       return 'transform';
 
     case 'gaussian_blur':
@@ -1527,6 +1529,7 @@ export const EFFECT_TYPE_LABELS: Partial<Record<string, string>> = {
   flip: 'Flip',
   mirror: 'Mirror',
   rotate: 'Rotate',
+  stabilize: 'Stabilize',
   gaussian_blur: 'Gaussian Blur',
   box_blur: 'Box Blur',
   motion_blur: 'Motion Blur',

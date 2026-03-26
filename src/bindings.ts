@@ -536,6 +536,41 @@ async getAvailableEncoders() : Promise<Result<AvailableEncoders, string>> {
 }
 },
 /**
+ * Run video stabilization analysis on a clip.
+ * 
+ * This performs the analysis pass only:
+ * 1. `vidstabdetect` — analyzes motion and writes transforms to a .trf file
+ * 
+ * Persisting the returned `transforms_path` onto the selected Stabilize effect
+ * must still happen through the normal effect command pipeline so the project
+ * remains event-sourced and undoable.
+ * 
+ * Progress is reported via `stabilize-progress` Tauri events.
+ */
+async stabilizeClip(args: StabilizeClipArgs) : Promise<Result<StabilizeResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("stabilize_clip", { args }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Run AI smart reframe analysis on a clip.
+ * 
+ * Analyzes the video to determine optimal crop positions for the target
+ * aspect ratio. Uses scene detection to identify scene boundaries and
+ * generates smooth crop keyframes.
+ * 
+ * Progress is reported via `reframe-progress` Tauri events.
+ */
+async smartReframe(args: SmartReframeArgs) : Promise<Result<SmartReframeResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("smart_reframe", { args }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Exports a sequence to CMX 3600 EDL format.
  * 
  * Generates an industry-standard EDL file that can be imported into
@@ -4812,6 +4847,34 @@ startSec: number;
  */
 endSec: number }
 /**
+ * Arguments for the smart_reframe command.
+ */
+export type SmartReframeArgs = { sequenceId: string; trackId: string; clipId: string; 
+/**
+ * Target aspect ratio (e.g., "9:16", "1:1", "4:5", "4:3")
+ */
+targetAspect: string; 
+/**
+ * Crop motion smoothing (1-100, default: 30)
+ */
+smoothing: number; 
+/**
+ * Additional zoom percentage (0-50, default: 0)
+ */
+zoom: number }
+/**
+ * Result of smart reframe analysis.
+ */
+export type SmartReframeResult = { 
+/**
+ * JSON-encoded analysis data with crop keyframes
+ */
+analysisData: string; 
+/**
+ * Computed crop dimensions
+ */
+cropWidth: number; cropHeight: number }
+/**
  * Response DTO for source monitor state.
  */
 export type SourceMonitorStateDto = { 
@@ -4835,6 +4898,18 @@ playheadSec: number;
  * Marked duration (out - in) if both points are set, otherwise null.
  */
 markedDuration: number | null }
+/**
+ * Arguments for the stabilize_clip command.
+ */
+export type StabilizeClipArgs = { sequenceId: string; trackId: string; clipId: string; smoothing: number; cropMode: string; zoom: number }
+/**
+ * Result of stabilization analysis.
+ */
+export type StabilizeResult = { 
+/**
+ * Path to the generated transforms file
+ */
+transformsPath: string }
 /**
  * State change types for event broadcasting.
  */

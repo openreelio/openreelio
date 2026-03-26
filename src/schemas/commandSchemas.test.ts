@@ -1077,6 +1077,7 @@ describe('commandSchemas', () => {
       'flip',
       'mirror',
       'rotate',
+      'stabilize',
       // Blur/Sharpen
       'gaussian_blur',
       'box_blur',
@@ -1126,15 +1127,15 @@ describe('commandSchemas', () => {
       'loudness_normalize',
     ];
 
-    it('should validate all 53 effect types', () => {
+    it('should validate all 54 effect types', () => {
       for (const effect of allEffectTypes) {
         const result = EffectType.safeParse(effect);
         expect(result.success, `EffectType should accept '${effect}'`).toBe(true);
       }
     });
 
-    it('should have exactly 53 valid values', () => {
-      expect(EffectType.options).toHaveLength(53);
+    it('should have exactly 54 valid values', () => {
+      expect(EffectType.options).toHaveLength(54);
     });
 
     it('should reject legacy camelCase effect types', () => {
@@ -1149,6 +1150,7 @@ describe('commandSchemas', () => {
       expect(EffectType.safeParse('blend_mode').success).toBe(true);
       expect(EffectType.safeParse('opacity').success).toBe(true);
       expect(EffectType.safeParse('loudness_normalize').success).toBe(true);
+      expect(EffectType.safeParse('stabilize').success).toBe(true);
     });
   });
 
