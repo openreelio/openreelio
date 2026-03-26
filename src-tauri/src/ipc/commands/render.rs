@@ -1047,3 +1047,525 @@ pub async fn get_available_encoders(
         &info.ffmpeg_path,
     ))
 }
+
+// =============================================================================
+// Video Stabilization
+// =============================================================================
+
+/// Arguments for the stabilize_clip command.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct StabilizeClipArgs {
+    pub sequence_id: String,
+    pub track_id: String,
+    pub clip_id: String,
+    pub smoothing: f64,
+    pub crop_mode: String,
+    pub zoom: f64,
+}
+
+/// Result of stabilization analysis.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct StabilizeResult {
+    /// Path to the generated transforms file
+    pub transforms_path: String,
+}
+
+/// Run video stabilization analysis on a clip.
+///
+/// This performs the analysis pass only:
+/// 1. `vidstabdetect` — analyzes motion and writes transforms to a .trf file
+///
+/// Persisting the returned `transforms_path` onto the selected Stabilize effect
+/// must still happen through the normal effect command pipeline so the project
+/// remains event-sourced and undoable.
+///
+/// Progress is reported via `stabilize-progress` Tauri events.
+#[tauri::command]
+#[specta::specta]
+pub async fn stabilize_clip(
+    args: StabilizeClipArgs,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+    app_handle: tauri::AppHandle,
+) -> Result<StabilizeResult, String> {
+    use tauri::Emitter;
+
+    let StabilizeClipArgs {
+        sequence_id,
+        track_id,
+        clip_id,
+        smoothing: _,
+        crop_mode,
+        zoom: _,
+    } = args;
+
+    // Validate crop_mode
+    let valid_modes = ["none", "crop", "dynamic"];
+    if !valid_modes.contains(&crop_mode.as_str()) {
+        return Err(format!(
+            "Invalid crop_mode '{}'. Must be one of: none, crop, dynamic",
+            crop_mode
+        ));
+    }
+
+    // Get clip source path and project path
+    let (source_path, project_path): (String, std::path::PathBuf) = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| "No project is currently open".to_string())?;
+
+        let sequence = project
+            .state
+            .sequences
+            .get(&sequence_id)
+            .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?;
+
+        let track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .ok_or_else(|| format!("Track not found: {}", track_id))?;
+
+        let clip = track
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .ok_or_else(|| format!("Clip not found: {}", clip_id))?;
+
+        let asset = project
+            .state
+            .assets
+            .get(&clip.asset_id)
+            .ok_or_else(|| format!("Asset not found: {}", clip.asset_id))?;
+
+        (asset.uri.clone(), project.path.clone())
+    };
+
+    // Get FFmpeg runner
+    let ffmpeg_guard = ffmpeg_state.read().await;
+    let ffmpeg = ffmpeg_guard.runner().ok_or_else(|| {
+        "FFmpeg not initialized. Please install FFmpeg and restart the application.".to_string()
+    })?;
+
+    // Create output directory for transforms file
+    let stab_dir = project_path.join(".openreelio").join("stabilize");
+    tokio::fs::create_dir_all(&stab_dir).await.map_err(|e| {
+        format!("Failed to create stabilization directory: {}", e)
+    })?;
+
+    let transforms_path = stab_dir.join(format!("{}.trf", clip_id));
+
+    // Emit initial progress
+    let _ = app_handle.emit("stabilize-progress", serde_json::json!({
+        "clipId": clip_id,
+        "progress": 0,
+        "phase": "analyzing"
+    }));
+
+    // Pass 1: vidstabdetect — analyze motion and generate transforms file
+    let mut cmd = tokio::process::Command::new(&ffmpeg.info().ffmpeg_path);
+    crate::core::process::configure_tokio_command(&mut cmd);
+
+    // FFmpeg filter escaping: backslashes to forward slashes, then escape
+    // special characters (\, :, ') per FFmpeg's libavfilter quoting rules.
+    let escaped_path = transforms_path
+        .to_string_lossy()
+        .replace('\\', "/")
+        .replace(':', "\\:")
+        .replace('\'', "\\'");
+    let detect_filter = format!(
+        "vidstabdetect=shakiness=10:accuracy=15:result='{}'",
+        escaped_path
+    );
+
+    let output = cmd
+        .args([
+            "-hide_banner",
+            "-loglevel", "warning",
+            "-nostdin",
+            "-i", &source_path,
+            "-vf", &detect_filter,
+            "-f", "null",
+            "-y",
+            "-",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run vidstabdetect: {}", e))?;
+
+    // Emit completion of analysis
+    let _ = app_handle.emit("stabilize-progress", serde_json::json!({
+        "clipId": clip_id,
+        "progress": 90,
+        "phase": "applying"
+    }));
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Stabilization analysis failed: {}", stderr));
+    }
+
+    // Verify transforms file was created
+    if !transforms_path.exists() {
+        return Err("Stabilization analysis completed but no transforms file was generated".to_string());
+    }
+
+    // Emit completion
+    let _ = app_handle.emit("stabilize-progress", serde_json::json!({
+        "clipId": clip_id,
+        "progress": 100,
+        "phase": "complete"
+    }));
+
+    Ok(StabilizeResult {
+        transforms_path: transforms_path.to_string_lossy().to_string(),
+    })
+}
+
+// =============================================================================
+// AI Smart Reframe
+// =============================================================================
+
+/// Arguments for the smart_reframe command.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartReframeArgs {
+    pub sequence_id: String,
+    pub track_id: String,
+    pub clip_id: String,
+    /// Target aspect ratio (e.g., "9:16", "1:1", "4:5", "4:3")
+    pub target_aspect: String,
+    /// Crop motion smoothing (1-100, default: 30)
+    pub smoothing: f64,
+    /// Additional zoom percentage (0-50, default: 0)
+    pub zoom: f64,
+}
+
+/// Result of smart reframe analysis.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SmartReframeResult {
+    /// JSON-encoded analysis data with crop keyframes
+    pub analysis_data: String,
+    /// Computed crop dimensions
+    pub crop_width: u32,
+    pub crop_height: u32,
+}
+
+/// Parse an aspect ratio string ("W:H") into (width, height) integers.
+fn parse_aspect_ratio(aspect: &str) -> Result<(u32, u32), String> {
+    let parts: Vec<&str> = aspect.split(':').collect();
+    if parts.len() != 2 {
+        return Err(format!(
+            "Invalid aspect ratio '{}'. Expected format 'W:H' (e.g., '9:16')",
+            aspect
+        ));
+    }
+    let w: u32 = parts[0]
+        .parse()
+        .map_err(|_| format!("Invalid aspect width '{}'", parts[0]))?;
+    let h: u32 = parts[1]
+        .parse()
+        .map_err(|_| format!("Invalid aspect height '{}'", parts[1]))?;
+    if w == 0 || h == 0 {
+        return Err("Aspect ratio dimensions must be non-zero".to_string());
+    }
+    Ok((w, h))
+}
+
+/// Calculate crop dimensions to fit the target aspect ratio within source dimensions.
+/// Returns (crop_width, crop_height) that maintain the target aspect ratio while
+/// being as large as possible within the source frame.
+fn calculate_crop_dimensions(
+    source_w: u32,
+    source_h: u32,
+    target_w: u32,
+    target_h: u32,
+) -> (u32, u32) {
+    let target_ratio = target_w as f64 / target_h as f64;
+    let source_ratio = source_w as f64 / source_h as f64;
+
+    if source_ratio > target_ratio {
+        // Source is wider than target — crop width, keep height
+        let crop_h = source_h;
+        let crop_w = ((source_h as f64) * target_ratio).round() as u32;
+        // Ensure even dimensions for codec compatibility
+        (crop_w & !1, crop_h & !1)
+    } else {
+        // Source is taller than target — crop height, keep width
+        let crop_w = source_w;
+        let crop_h = ((source_w as f64) / target_ratio).round() as u32;
+        (crop_w & !1, crop_h & !1)
+    }
+}
+
+/// Run AI smart reframe analysis on a clip.
+///
+/// Analyzes the video to determine optimal crop positions for the target
+/// aspect ratio. Uses scene detection to identify scene boundaries and
+/// generates smooth crop keyframes.
+///
+/// Progress is reported via `reframe-progress` Tauri events.
+#[tauri::command]
+#[specta::specta]
+pub async fn smart_reframe(
+    args: SmartReframeArgs,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+    app_handle: tauri::AppHandle,
+) -> Result<SmartReframeResult, String> {
+    use tauri::Emitter;
+
+    let SmartReframeArgs {
+        sequence_id,
+        track_id,
+        clip_id,
+        target_aspect,
+        smoothing,
+        zoom: _,
+    } = args;
+
+    // Validate target aspect ratio
+    let (target_w, target_h) = parse_aspect_ratio(&target_aspect)?;
+
+    // Get clip source path
+    let source_path: String = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| "No project is currently open".to_string())?;
+
+        let sequence = project
+            .state
+            .sequences
+            .get(&sequence_id)
+            .ok_or_else(|| format!("Sequence not found: {}", sequence_id))?;
+
+        let track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .ok_or_else(|| format!("Track not found: {}", track_id))?;
+
+        let clip = track
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .ok_or_else(|| format!("Clip not found: {}", clip_id))?;
+
+        let asset = project
+            .state
+            .assets
+            .get(&clip.asset_id)
+            .ok_or_else(|| format!("Asset not found: {}", clip.asset_id))?;
+
+        asset.uri.clone()
+    };
+
+    // Get FFmpeg runner (for ffprobe access)
+    let ffmpeg_guard = ffmpeg_state.read().await;
+    let ffmpeg = ffmpeg_guard.runner().ok_or_else(|| {
+        "FFmpeg not initialized. Please install FFmpeg and restart the application.".to_string()
+    })?;
+
+    // Emit initial progress
+    let _ = app_handle.emit(
+        "reframe-progress",
+        serde_json::json!({
+            "clipId": clip_id,
+            "progress": 0,
+            "phase": "probing"
+        }),
+    );
+
+    // Step 1: Probe source dimensions via ffprobe
+    let mut probe_cmd = tokio::process::Command::new(&ffmpeg.info().ffprobe_path);
+    crate::core::process::configure_tokio_command(&mut probe_cmd);
+
+    let probe_output = probe_cmd
+        .args([
+            "-v", "quiet",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-show_entries", "format=duration",
+            "-of", "json",
+            &source_path,
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run ffprobe: {}", e))?;
+
+    if !probe_output.status.success() {
+        let stderr = String::from_utf8_lossy(&probe_output.stderr);
+        return Err(format!("ffprobe failed: {}", stderr));
+    }
+
+    let probe_json: serde_json::Value = serde_json::from_slice(&probe_output.stdout)
+        .map_err(|e| format!("Failed to parse ffprobe output: {}", e))?;
+
+    let source_w = probe_json["streams"][0]["width"]
+        .as_u64()
+        .ok_or("Could not determine video width")? as u32;
+    let source_h = probe_json["streams"][0]["height"]
+        .as_u64()
+        .ok_or("Could not determine video height")? as u32;
+    let duration = probe_json["format"]["duration"]
+        .as_str()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0);
+
+    // Step 2: Calculate crop dimensions
+    let (crop_w, crop_h) = calculate_crop_dimensions(source_w, source_h, target_w, target_h);
+
+    let _ = app_handle.emit(
+        "reframe-progress",
+        serde_json::json!({
+            "clipId": clip_id,
+            "progress": 20,
+            "phase": "detecting_scenes"
+        }),
+    );
+
+    // Step 3: Scene detection via FFmpeg
+    let mut scene_cmd = tokio::process::Command::new(&ffmpeg.info().ffmpeg_path);
+    crate::core::process::configure_tokio_command(&mut scene_cmd);
+
+    let scene_output = scene_cmd
+        .args([
+            "-hide_banner",
+            "-loglevel", "quiet",
+            "-nostdin",
+            "-i", &source_path,
+            "-vf", "select='gt(scene,0.3)',showinfo",
+            "-f", "null",
+            "-y",
+            "-",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run scene detection: {}", e))?;
+
+    // Check scene detection exit status — non-zero means FFmpeg encountered an
+    // error (e.g., unsupported codec or corrupt file).  We treat this as a
+    // non-fatal condition and fall back to a single center keyframe.
+    if !scene_output.status.success() {
+        tracing::warn!(
+            "Scene detection exited with status {}; falling back to center crop",
+            scene_output.status
+        );
+    }
+
+    // Parse scene change timestamps from showinfo output
+    let scene_stderr = String::from_utf8_lossy(&scene_output.stderr);
+    let mut scene_times: Vec<f64> = Vec::new();
+    for line in scene_stderr.lines() {
+        if let Some(pts_idx) = line.find("pts_time:") {
+            let rest = &line[pts_idx + 9..];
+            if let Some(end) = rest.find(|c: char| c.is_whitespace()) {
+                if let Ok(t) = rest[..end].parse::<f64>() {
+                    scene_times.push(t);
+                }
+            } else if let Ok(t) = rest.trim().parse::<f64>() {
+                scene_times.push(t);
+            }
+        }
+    }
+
+    let _ = app_handle.emit(
+        "reframe-progress",
+        serde_json::json!({
+            "clipId": clip_id,
+            "progress": 60,
+            "phase": "computing_keyframes"
+        }),
+    );
+
+    // Step 4: Generate crop keyframes
+    // TODO: Currently all keyframes use the static center position because
+    // subject tracking / ROI detection is not yet implemented.  Once a
+    // detection backend (e.g., face detection via OpenCV or a vision model)
+    // is available, each scene segment should receive a per-scene (x, y)
+    // offset based on the detected subject region.
+    let center_x = ((source_w as i64) - (crop_w as i64)) / 2;
+    let center_y = ((source_h as i64) - (crop_h as i64)) / 2;
+    let center_x = center_x.max(0);
+    let center_y = center_y.max(0);
+
+    let mut keyframes: Vec<serde_json::Value> = Vec::new();
+
+    if scene_times.is_empty() {
+        // No scene changes detected — single center keyframe
+        keyframes.push(serde_json::json!({"t": 0.0, "x": center_x, "y": center_y}));
+    } else {
+        // Add keyframe at start
+        keyframes.push(serde_json::json!({"t": 0.0, "x": center_x, "y": center_y}));
+
+        // For each scene change, add a keyframe at the center position
+        // With smoothing applied, crop transitions will be smooth
+        let smooth_factor = smoothing.clamp(1.0, 100.0) / 100.0;
+        let transition_time = 0.5 * smooth_factor; // Transition duration in seconds
+
+        for scene_t in &scene_times {
+            if *scene_t <= 0.0 || *scene_t >= duration {
+                continue;
+            }
+            // Pre-transition keyframe (hold current position)
+            let pre_t = (scene_t - transition_time).max(0.0);
+            if pre_t > 0.0 {
+                keyframes.push(serde_json::json!({"t": pre_t, "x": center_x, "y": center_y}));
+            }
+            // Post-transition keyframe
+            keyframes.push(serde_json::json!({"t": *scene_t, "x": center_x, "y": center_y}));
+        }
+
+        // Add keyframe at end
+        if duration > 0.0 {
+            keyframes.push(serde_json::json!({"t": duration, "x": center_x, "y": center_y}));
+        }
+    }
+
+    // Deduplicate keyframes at the same timestamp
+    keyframes.dedup_by(|a, b| {
+        let ta = a["t"].as_f64().unwrap_or(-1.0);
+        let tb = b["t"].as_f64().unwrap_or(-2.0);
+        (ta - tb).abs() < 0.01
+    });
+
+    // Build analysis data JSON
+    let analysis_data = serde_json::json!({
+        "crop_w": crop_w,
+        "crop_h": crop_h,
+        "source_w": source_w,
+        "source_h": source_h,
+        "target_aspect": target_aspect,
+        "scene_count": scene_times.len(),
+        "keyframes": keyframes,
+    });
+
+    let analysis_json = analysis_data.to_string();
+
+    // Emit completion
+    let _ = app_handle.emit(
+        "reframe-progress",
+        serde_json::json!({
+            "clipId": clip_id,
+            "progress": 100,
+            "phase": "complete"
+        }),
+    );
+
+    Ok(SmartReframeResult {
+        analysis_data: analysis_json,
+        crop_width: crop_w,
+        crop_height: crop_h,
+    })
+}
