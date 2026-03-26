@@ -62,3 +62,9 @@ export type {
 
 export { SaveEffectPresetDialog } from './SaveEffectPresetDialog';
 export type { SaveEffectPresetDialogProps } from './SaveEffectPresetDialog';
+
+export { StabilizePanel } from './StabilizePanel';
+export type { StabilizePanelProps } from './StabilizePanel';
+
+export { SmartReframePanel } from './SmartReframePanel';
+export type { SmartReframePanelProps } from './SmartReframePanel';

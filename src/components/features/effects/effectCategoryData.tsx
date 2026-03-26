@@ -83,6 +83,7 @@ export const EFFECT_CATEGORIES: CategoryWithIcon[] = [
       { type: 'flip', label: EFFECT_TYPE_LABELS.flip ?? 'Flip' },
       { type: 'mirror', label: EFFECT_TYPE_LABELS.mirror ?? 'Mirror' },
       { type: 'rotate', label: EFFECT_TYPE_LABELS.rotate ?? 'Rotate' },
+      { type: 'stabilize', label: EFFECT_TYPE_LABELS.stabilize ?? 'Stabilize' },
     ],
   },
   {

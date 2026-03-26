@@ -102,6 +102,43 @@ const mockWipeParamDefs: ParamDef[] = [
   createParamDef('duration', 'Duration', { type: 'float', value: 1.0 }, { min: 0.1, max: 10, step: 0.1 }),
 ];
 
+const mockStabilizeEffect: Effect = {
+  id: 'effect_004',
+  effectType: 'stabilize',
+  enabled: true,
+  params: { smoothing: 10, crop_mode: 'crop', zoom: 0, analysis_path: '' },
+  keyframes: {},
+  order: 0,
+};
+
+const mockStabilizeParamDefs: ParamDef[] = [
+  createParamDef('smoothing', 'Smoothing', { type: 'float', value: 10 }, { min: 1, max: 100, step: 1 }),
+  createParamDef('crop_mode', 'Crop Mode', { type: 'string', value: 'crop' }),
+  createParamDef('zoom', 'Zoom', { type: 'float', value: 0 }, { min: -100, max: 100, step: 1 }),
+];
+
+const mockAutoReframeEffect: Effect = {
+  id: 'effect_005',
+  effectType: 'auto_reframe',
+  enabled: true,
+  params: {
+    target_aspect: '4:5',
+    smoothing: 45,
+    zoom: 12,
+    detection_mode: 'auto',
+    analysis_data: '{"crop_w":608,"crop_h":1080,"keyframes":[]}',
+  },
+  keyframes: {},
+  order: 0,
+};
+
+const mockAutoReframeParamDefs: ParamDef[] = [
+  createParamDef('target_aspect', 'Target Aspect Ratio', { type: 'string', value: '9:16' }),
+  createParamDef('smoothing', 'Smoothing', { type: 'float', value: 30 }, { min: 1, max: 100, step: 1 }),
+  createParamDef('zoom', 'Zoom', { type: 'float', value: 0 }, { min: 0, max: 50, step: 1 }),
+  createParamDef('detection_mode', 'Detection Mode', { type: 'string', value: 'center' }),
+];
+
 // =============================================================================
 // Rendering Tests
 // =============================================================================
@@ -157,6 +194,19 @@ describe('EffectInspector', () => {
 
       expect(screen.getByText('Radius')).toBeInTheDocument();
       expect(screen.getByText('Sigma')).toBeInTheDocument();
+    });
+
+    it('should pass clip context through to the stabilize panel', () => {
+      render(
+        <EffectInspector
+          effect={mockStabilizeEffect}
+          paramDefs={mockStabilizeParamDefs}
+          clipContext={{ sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1' }}
+          onChange={vi.fn()}
+        />
+      );
+
+      expect(screen.getByTestId('analyze-button')).toBeEnabled();
     });
   });
 
@@ -382,6 +432,50 @@ describe('EffectInspector', () => {
       expect(onChange).toHaveBeenCalledWith('effect_002', {
         radius: 5, // Default value from paramDef
         sigma: 1.0, // Default value from paramDef
+      });
+    });
+
+    it('should clear stabilize analysis state when reset is clicked', () => {
+      const onChange = vi.fn();
+      render(
+        <EffectInspector
+          effect={{
+            ...mockStabilizeEffect,
+            params: { smoothing: 25, crop_mode: 'dynamic', zoom: 8, analysis_path: '/tmp/test.trf' },
+          }}
+          paramDefs={mockStabilizeParamDefs}
+          onChange={onChange}
+        />
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: /reset to defaults/i }));
+
+      expect(onChange).toHaveBeenCalledWith('effect_004', {
+        smoothing: 10,
+        crop_mode: 'crop',
+        zoom: 0,
+        analysis_path: '',
+      });
+    });
+
+    it('should clear smart reframe analysis state when reset is clicked', () => {
+      const onChange = vi.fn();
+      render(
+        <EffectInspector
+          effect={mockAutoReframeEffect}
+          paramDefs={mockAutoReframeParamDefs}
+          onChange={onChange}
+        />
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: /reset to defaults/i }));
+
+      expect(onChange).toHaveBeenCalledWith('effect_005', {
+        target_aspect: '9:16',
+        smoothing: 30,
+        zoom: 0,
+        detection_mode: 'center',
+        analysis_data: '',
       });
     });
   });

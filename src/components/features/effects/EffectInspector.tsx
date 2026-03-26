@@ -18,6 +18,9 @@ import { KeyframeEditor } from './KeyframeEditor';
 import { ColorWheelsPanel, type ColorWheelsValues, type ColorWheelsParamName } from './ColorWheelsPanel';
 import { ChromaKeyControl } from './ChromaKeyControl';
 import { ColorCurvesPanel, TemperatureTintPanel } from '@/components/features/color';
+import { getEffectDefaultParamValues } from '@/utils/effectParamDefs';
+import { StabilizePanel } from './StabilizePanel';
+import { SmartReframePanel } from './SmartReframePanel';
 import type { ChromaKeyParams } from '@/hooks/useChromaKey';
 
 // =============================================================================
@@ -26,6 +29,7 @@ import type { ChromaKeyParams } from '@/hooks/useChromaKey';
 
 /** Debounce delay for parameter changes (ms) */
 const PARAM_CHANGE_DEBOUNCE_MS = 16; // ~1 frame at 60fps
+const IMMEDIATE_EFFECT_PARAMS = new Set(['analysis_data', 'analysis_path']);
 
 // =============================================================================
 // Validation Helpers
@@ -62,6 +66,12 @@ export interface EffectInspectorProps {
   effect: Effect | null;
   /** Parameter definitions for the effect type */
   paramDefs: ParamDef[];
+  /** Clip context for effect actions that require source clip access */
+  clipContext?: {
+    sequenceId: string;
+    trackId: string;
+    clipId: string;
+  };
   /** Callback when parameter values change */
   onChange: (effectId: EffectId, params: Record<string, SimpleParamValue>) => void;
   /** Callback when effect enabled state changes */
@@ -206,6 +216,20 @@ function isTemperatureTintEffect(effectType: Effect['effectType']): boolean {
 }
 
 /**
+ * Check if an effect is a Stabilize effect.
+ */
+function isStabilizeEffect(effectType: Effect['effectType']): boolean {
+  return effectType === 'stabilize';
+}
+
+/**
+ * Check if an effect is an AutoReframe (Smart Reframe) effect.
+ */
+function isAutoReframeEffect(effectType: Effect['effectType']): boolean {
+  return effectType === 'auto_reframe';
+}
+
+/**
  * Converts effect params to ChromaKeyParams for the ChromaKeyControl.
  * Maps backend param names (key_color, similarity, blend) to frontend names.
  */
@@ -230,6 +254,7 @@ function paramsToChromaKeyParams(
 export const EffectInspector = memo(function EffectInspector({
   effect,
   paramDefs,
+  clipContext,
   onChange,
   onToggle,
   onDelete,
@@ -290,6 +315,20 @@ export const EffectInspector = memo(function EffectInspector({
       // Accumulate pending changes
       pendingChangesRef.current[paramName] = validatedValue;
 
+      // Analysis outputs must be persisted immediately and should flush any
+      // pending interactive edits that logically belong to the same effect update.
+      if (IMMEDIATE_EFFECT_PARAMS.has(paramName)) {
+        if (debounceTimerRef.current) {
+          clearTimeout(debounceTimerRef.current);
+        }
+
+        const currentParams = latestParamsRef.current ?? {};
+        const newParams = { ...currentParams, ...pendingChangesRef.current };
+        pendingChangesRef.current = {};
+        onChange(effectId, newParams);
+        return;
+      }
+
       // Clear existing timer
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
@@ -329,19 +368,14 @@ export const EffectInspector = memo(function EffectInspector({
 
   // Handle reset to defaults
   const handleReset = useCallback(() => {
-    if (!effectId) return;
+    if (!effectId || !effect) return;
     // Clear any pending debounced changes
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current);
     }
     pendingChangesRef.current = {};
-
-    const defaultParams: Record<string, SimpleParamValue> = {};
-    paramDefs.forEach((paramDef) => {
-      defaultParams[paramDef.name] = getDefaultValue(paramDef);
-    });
-    onChange(effectId, defaultParams);
-  }, [effectId, paramDefs, onChange]);
+    onChange(effectId, getEffectDefaultParamValues(effect.effectType));
+  }, [effect, effectId, onChange]);
 
   // Toggle keyframe editor expansion for a parameter
   const handleToggleKeyframeEditor = useCallback((paramName: string) => {
@@ -471,6 +505,24 @@ export const EffectInspector = memo(function EffectInspector({
             onChange={(paramName: string, value: SimpleParamValue) => {
               handleParamChange(paramName, value);
             }}
+            readOnly={readOnly}
+          />
+        ) : isStabilizeEffect(effect.effectType) ? (
+          <StabilizePanel
+            params={effectParams ?? {}}
+            onChange={(paramName: string, value: SimpleParamValue) => {
+              handleParamChange(paramName, value);
+            }}
+            clipContext={clipContext}
+            readOnly={readOnly}
+          />
+        ) : isAutoReframeEffect(effect.effectType) ? (
+          <SmartReframePanel
+            params={effectParams ?? {}}
+            onChange={(paramName: string, value: SimpleParamValue) => {
+              handleParamChange(paramName, value);
+            }}
+            clipContext={clipContext}
             readOnly={readOnly}
           />
         ) : paramDefs.length === 0 ? (
