@@ -1710,7 +1710,7 @@ mod tests {
 
         // When/Then: each backend is a valid FFmpeg hwaccel value
         for backend in &backends {
-            let args = vec!["-hwaccel".to_string(), backend.to_string()];
+            let args = ["-hwaccel".to_string(), backend.to_string()];
             assert_eq!(args[1], *backend);
         }
     }

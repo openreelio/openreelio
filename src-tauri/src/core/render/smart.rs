@@ -329,8 +329,10 @@ mod tests {
         // Given smart render disabled
         let seq = make_sequence(10.0);
         let effects = HashMap::new();
-        let mut config = RenderCacheConfig::default();
-        config.smart_render_enabled = false;
+        let config = RenderCacheConfig {
+            smart_render_enabled: false,
+            ..Default::default()
+        };
         let tmp = tempfile::tempdir().unwrap();
 
         let mut manifest = RenderCacheManifest::new("seq1", 10.0, 5.0, &seq, &effects);
