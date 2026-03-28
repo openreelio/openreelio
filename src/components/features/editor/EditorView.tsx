@@ -59,7 +59,7 @@ import { createLogger } from '@/services/logger';
 import { startPlayheadBackendSync } from '@/services/playheadBackendSync';
 import { isVideoGenerationEnabled } from '@/config/featureFlags';
 import { getSplitTargetsAtTime } from '@/utils/clipLinking';
-import { Terminal, Sliders, Sparkles, GitCompareArrows, History, Camera } from 'lucide-react';
+import { Terminal, Sliders, Sparkles, GitCompareArrows, History, Camera, FileText } from 'lucide-react';
 import type {
   BlendMode,
   CaptionPosition,
@@ -113,6 +113,11 @@ const ReferenceComparisonPanel = lazy(async () => {
 const UndoHistoryPanel = lazy(async () => {
   const module = await import('@/components/features/history');
   return { default: module.UndoHistoryPanel };
+});
+
+const TranscriptEditorPanel = lazy(async () => {
+  const module = await import('@/components/features/transcript');
+  return { default: module.TranscriptEditor };
 });
 
 // =============================================================================
@@ -1069,6 +1074,17 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
       content: (
         <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
           <UndoHistoryPanel />
+        </Suspense>
+      ),
+    });
+
+    tabs.push({
+      id: 'transcript',
+      label: 'Transcript',
+      icon: <FileText className="w-3 h-3" />,
+      content: (
+        <Suspense fallback={BOTTOM_PANEL_LOADING_FALLBACK}>
+          <TranscriptEditorPanel />
         </Suspense>
       ),
     });
