@@ -106,6 +106,7 @@ export interface AutoSaveSettings {
 /** Performance settings */
 export interface PerformanceSettings {
   hardwareAcceleration: boolean;
+  gpuDeviceId: string | null;
   proxyGeneration: boolean;
   proxyResolution: '720p' | '480p' | '360p';
   maxConcurrentJobs: number;
@@ -281,6 +282,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   },
   performance: {
     hardwareAcceleration: true,
+    gpuDeviceId: null,
     proxyGeneration: true,
     proxyResolution: '720p',
     maxConcurrentJobs: 4,
