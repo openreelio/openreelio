@@ -841,6 +841,12 @@ mod tauri_app {
                 $crate::ipc::export_frame,
                 $crate::ipc::export_audio_only,
                 $crate::ipc::get_available_encoders,
+                $crate::ipc::detect_gpu_devices,
+                $crate::ipc::get_available_decoders,
+                // Render cache commands
+                $crate::ipc::get_cache_status,
+                $crate::ipc::clear_render_cache,
+                $crate::ipc::render_preview_cache,
                 // Stabilization command
                 $crate::ipc::stabilize_clip,
                 // Smart reframe command
@@ -948,6 +954,7 @@ mod tauri_app {
                 $crate::ipc::get_current_version,
                 $crate::ipc::relaunch_app,
                 $crate::ipc::download_and_install_update,
+                $crate::ipc::get_system_metrics,
                 // Workspace commands
                 $crate::ipc::scan_workspace,
                 $crate::ipc::get_workspace_tree,
@@ -1251,6 +1258,12 @@ mod tauri_app {
             ipc::export_frame,
             ipc::export_audio_only,
             ipc::get_available_encoders,
+            ipc::detect_gpu_devices,
+            ipc::get_available_decoders,
+            // Render cache commands
+            ipc::get_cache_status,
+            ipc::clear_render_cache,
+            ipc::render_preview_cache,
             // Stabilization command
             ipc::stabilize_clip,
             // Smart reframe command
@@ -1359,6 +1372,7 @@ mod tauri_app {
             ipc::get_current_version,
             ipc::relaunch_app,
             ipc::download_and_install_update,
+            ipc::get_system_metrics,
             // Workspace commands
             ipc::scan_workspace,
             ipc::get_workspace_tree,

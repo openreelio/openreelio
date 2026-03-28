@@ -7,3 +7,5 @@
 
 export { MemoryProfiler } from './MemoryProfiler';
 export type { MemoryProfilerProps } from './MemoryProfiler';
+export { PerformancePanel } from './PerformancePanel';
+export type { PerformancePanelProps } from './PerformancePanel';

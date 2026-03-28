@@ -40,8 +40,10 @@ import { useSlideEdit } from '@/hooks/useSlideEdit';
 import { useRollEdit } from '@/hooks/useRollEdit';
 import { useEdgeAutoScroll } from '@/hooks/useEdgeAutoScroll';
 import { useTimelinePan } from '@/hooks/useTimelinePan';
+import { useRenderCache } from '@/hooks/useRenderCache';
 import { createLogger } from '@/services/logger';
 import { TimeRuler } from './TimeRuler';
+import { CacheStatusBar } from './CacheStatusBar';
 import { Track } from './Track';
 import { CaptionTrack } from './CaptionTrack';
 import { Playhead, PLAYHEAD_LINE_HIT_AREA_WIDTH, PLAYHEAD_RULER_HEIGHT } from './Playhead';
@@ -564,6 +566,8 @@ export function Timeline({
   const maxScrollX = Math.max(0, duration * zoom - viewportWidth + TRACK_HEADER_WIDTH);
   const maxScrollY = Math.max(0, (sequence?.tracks.length ?? 0) * TRACK_HEIGHT - viewportHeight);
   const isHandToolActive = activeTool === 'hand';
+
+  const { segments: cacheSegments } = useRenderCache();
 
   const { isPanning, handleMouseDown: handlePanMouseDown } = useTimelinePan({
     scrollX,
@@ -2053,6 +2057,16 @@ export function Timeline({
               </div>
             </div>
           </div>
+
+          {/* Render cache indicator */}
+          {cacheSegments.length > 0 && (
+            <CacheStatusBar
+              segments={cacheSegments}
+              duration={duration}
+              zoom={zoom}
+              scrollX={scrollX}
+            />
+          )}
 
           {/* Tracks area */}
           <div

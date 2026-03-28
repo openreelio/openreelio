@@ -5,7 +5,18 @@
  */
 
 import { useEffect, useRef, useCallback } from 'react';
-import { X, Settings2, Palette, Keyboard, RotateCcw, Bot, Shield, Wrench, Play } from 'lucide-react';
+import {
+  X,
+  Settings2,
+  Palette,
+  Keyboard,
+  RotateCcw,
+  Bot,
+  Shield,
+  Wrench,
+  Play,
+  Gauge,
+} from 'lucide-react';
 import { useSettings } from '@/hooks/useSettings';
 import { useUIStore } from '@/stores';
 import { GeneralSettings } from './sections/GeneralSettings';
@@ -15,6 +26,7 @@ import { AISettingsSection } from './sections/AISettingsSection';
 import { AgentPermissionsSection } from './sections/AgentPermissionsSection';
 import { DeveloperSettings } from './sections/DeveloperSettings';
 import { PlaybackSettings } from './sections/PlaybackSettings';
+import { PerformanceSettings } from './sections/PerformanceSettings';
 
 // =============================================================================
 // Types
@@ -25,7 +37,15 @@ export interface SettingsDialogProps {
   onClose: () => void;
 }
 
-type TabId = 'general' | 'playback' | 'appearance' | 'shortcuts' | 'ai' | 'permissions' | 'developer';
+type TabId =
+  | 'general'
+  | 'playback'
+  | 'performance'
+  | 'appearance'
+  | 'shortcuts'
+  | 'ai'
+  | 'permissions'
+  | 'developer';
 
 interface Tab {
   id: TabId;
@@ -40,6 +60,7 @@ interface Tab {
 const TABS: Tab[] = [
   { id: 'general', label: 'General', icon: <Settings2 className="w-4 h-4" /> },
   { id: 'playback', label: 'Playback', icon: <Play className="w-4 h-4" /> },
+  { id: 'performance', label: 'Performance', icon: <Gauge className="w-4 h-4" /> },
   { id: 'appearance', label: 'Appearance', icon: <Palette className="w-4 h-4" /> },
   { id: 'shortcuts', label: 'Shortcuts', icon: <Keyboard className="w-4 h-4" /> },
   { id: 'ai', label: 'AI', icon: <Bot className="w-4 h-4" /> },
@@ -59,10 +80,12 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
   const {
     general,
     playback,
+    performance,
     appearance,
     ai,
     updateGeneral,
     updatePlayback,
+    updatePerformance,
     updateAppearance,
     updateAI,
     resetSettings,
@@ -91,7 +114,7 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
         onClose();
       }
     },
-    [onClose]
+    [onClose],
   );
 
   const handleReset = useCallback(async () => {
@@ -104,28 +127,35 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
     (values: Parameters<typeof updateGeneral>[0]) => {
       void updateGeneral(values);
     },
-    [updateGeneral]
+    [updateGeneral],
   );
 
   const handlePlaybackUpdate = useCallback(
     (values: Parameters<typeof updatePlayback>[0]) => {
       void updatePlayback(values);
     },
-    [updatePlayback]
+    [updatePlayback],
   );
 
   const handleAppearanceUpdate = useCallback(
     (values: Parameters<typeof updateAppearance>[0]) => {
       void updateAppearance(values);
     },
-    [updateAppearance]
+    [updateAppearance],
+  );
+
+  const handlePerformanceUpdate = useCallback(
+    (values: Parameters<typeof updatePerformance>[0]) => {
+      void updatePerformance(values);
+    },
+    [updatePerformance],
   );
 
   const handleAIUpdate = useCallback(
     (values: Parameters<typeof updateAI>[0]) => {
       void updateAI(values);
     },
-    [updateAI]
+    [updateAI],
   );
 
   if (!isOpen) {
@@ -170,9 +200,10 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
                 onClick={() => setActiveTab(tab.id)}
                 className={`
                   w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-colors
-                  ${activeTab === tab.id
-                    ? 'bg-primary-500/10 text-primary-400'
-                    : 'text-editor-text-muted hover:bg-editor-bg hover:text-editor-text'
+                  ${
+                    activeTab === tab.id
+                      ? 'bg-primary-500/10 text-primary-400'
+                      : 'text-editor-text-muted hover:bg-editor-bg hover:text-editor-text'
                   }
                 `}
               >
@@ -214,6 +245,14 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
               />
             )}
 
+            {activeTab === 'performance' && (
+              <PerformanceSettings
+                settings={performance}
+                onUpdate={handlePerformanceUpdate}
+                disabled={isSaving}
+              />
+            )}
+
             {activeTab === 'appearance' && (
               <AppearanceSettings
                 settings={appearance}
@@ -225,11 +264,7 @@ export function SettingsDialog({ isOpen, onClose }: SettingsDialogProps) {
             {activeTab === 'shortcuts' && <ShortcutsSettings />}
 
             {activeTab === 'ai' && (
-              <AISettingsSection
-                settings={ai}
-                onUpdate={handleAIUpdate}
-                disabled={isSaving}
-              />
+              <AISettingsSection settings={ai} onUpdate={handleAIUpdate} disabled={isSaving} />
             )}
 
             {activeTab === 'permissions' && <AgentPermissionsSection />}

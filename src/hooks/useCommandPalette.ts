@@ -105,7 +105,9 @@ function action(
 // Hook
 // =============================================================================
 
-export function useCommandPalette(callbacks: CommandPaletteCallbacks = {}): UseCommandPaletteReturn {
+export function useCommandPalette(
+  callbacks: CommandPaletteCallbacks = {},
+): UseCommandPaletteReturn {
   const {
     isOpen,
     searchQuery,
@@ -135,15 +137,51 @@ export function useCommandPalette(callbacks: CommandPaletteCallbacks = {}): UseC
       action('transport.play-pause', 'Play / Pause', 'Transport', () => togglePlayback(), 'Space'),
       action('transport.go-to-start', 'Go to Timeline Start', 'Transport', () => seek(0), 'Home'),
       action('transport.go-to-end', 'Go to Timeline End', 'Transport', () => seek(duration), 'End'),
-      action('transport.previous-frame', 'Previous Frame', 'Transport', () => stepBackward(PLAYBACK.TARGET_FPS), 'Left'),
-      action('transport.next-frame', 'Next Frame', 'Transport', () => stepForward(PLAYBACK.TARGET_FPS), 'Right'),
+      action(
+        'transport.previous-frame',
+        'Previous Frame',
+        'Transport',
+        () => stepBackward(PLAYBACK.TARGET_FPS),
+        'Left',
+      ),
+      action(
+        'transport.next-frame',
+        'Next Frame',
+        'Transport',
+        () => stepForward(PLAYBACK.TARGET_FPS),
+        'Right',
+      ),
     );
 
     // --- Edit Actions ---
     actions.push(
-      action('edit.undo', 'Undo', 'Edit', () => { if (isLoaded) void undo(); }, 'Ctrl+Z'),
-      action('edit.redo', 'Redo', 'Edit', () => { if (isLoaded) void redo(); }, 'Ctrl+Shift+Z'),
-      action('edit.save', 'Save Project', 'Edit', () => { if (isLoaded) void saveProject(); }, 'Ctrl+S'),
+      action(
+        'edit.undo',
+        'Undo',
+        'Edit',
+        () => {
+          if (isLoaded) void undo();
+        },
+        'Ctrl+Z',
+      ),
+      action(
+        'edit.redo',
+        'Redo',
+        'Edit',
+        () => {
+          if (isLoaded) void redo();
+        },
+        'Ctrl+Shift+Z',
+      ),
+      action(
+        'edit.save',
+        'Save Project',
+        'Edit',
+        () => {
+          if (isLoaded) void saveProject();
+        },
+        'Ctrl+S',
+      ),
       action('edit.deselect', 'Deselect All', 'Edit', () => clearClipSelection(), 'Esc'),
     );
 
@@ -169,7 +207,9 @@ export function useCommandPalette(callbacks: CommandPaletteCallbacks = {}): UseC
 
     if (callbacks.onToggleClipEnabled) {
       const cb = callbacks.onToggleClipEnabled;
-      actions.push(action('edit.toggle-enabled', 'Toggle Clip Enabled', 'Edit', () => cb(), 'Shift+E'));
+      actions.push(
+        action('edit.toggle-enabled', 'Toggle Clip Enabled', 'Edit', () => cb(), 'Shift+E'),
+      );
     }
 
     // --- View Actions ---
@@ -221,7 +261,15 @@ export function useCommandPalette(callbacks: CommandPaletteCallbacks = {}): UseC
 
     if (callbacks.onReverseMatchFrame) {
       const cb = callbacks.onReverseMatchFrame;
-      actions.push(action('source.reverse-match-frame', 'Reverse Match Frame', 'Source', () => cb(), 'Shift+F'));
+      actions.push(
+        action(
+          'source.reverse-match-frame',
+          'Reverse Match Frame',
+          'Source',
+          () => cb(),
+          'Shift+F',
+        ),
+      );
     }
 
     // --- Tool Actions ---
@@ -240,7 +288,15 @@ export function useCommandPalette(callbacks: CommandPaletteCallbacks = {}): UseC
     // --- Effects Actions ---
     if (callbacks.onToggleColorComparison) {
       const cb = callbacks.onToggleColorComparison;
-      actions.push(action('effects.color-comparison', 'Toggle Before/After Color Comparison', 'Effects', () => cb(), 'Shift+D'));
+      actions.push(
+        action(
+          'effects.color-comparison',
+          'Toggle Before/After Color Comparison',
+          'Effects',
+          () => cb(),
+          'Shift+D',
+        ),
+      );
     }
 
     // --- Audio Actions ---
@@ -254,24 +310,53 @@ export function useCommandPalette(callbacks: CommandPaletteCallbacks = {}): UseC
       action('settings.open', 'Open Settings', 'Settings', () => openSettings(), 'Ctrl+,'),
       action('settings.general', 'Settings: General', 'Settings', () => openSettings('general')),
       action('settings.playback', 'Settings: Playback', 'Settings', () => openSettings('playback')),
-      action('settings.appearance', 'Settings: Appearance', 'Settings', () => openSettings('appearance')),
-      action('settings.shortcuts', 'Settings: Keyboard Shortcuts', 'Settings', () => openSettings('shortcuts')),
+      action('settings.performance', 'Settings: Performance', 'Settings', () =>
+        openSettings('performance'),
+      ),
+      action('settings.appearance', 'Settings: Appearance', 'Settings', () =>
+        openSettings('appearance'),
+      ),
+      action('settings.shortcuts', 'Settings: Keyboard Shortcuts', 'Settings', () =>
+        openSettings('shortcuts'),
+      ),
       action('settings.ai', 'Settings: AI', 'Settings', () => openSettings('ai')),
-      action('settings.developer', 'Settings: Developer', 'Settings', () => openSettings('developer')),
+      action('settings.developer', 'Settings: Developer', 'Settings', () =>
+        openSettings('developer'),
+      ),
     );
 
     return actions;
   }, [
-    togglePlayback, seek, duration, stepForward, stepBackward,
-    isLoaded, undo, redo, saveProject,
-    clearClipSelection, zoomIn, zoomOut, setActiveTool, openSettings,
-    callbacks.onSplitAtPlayhead, callbacks.onDeleteClips,
-    callbacks.onExport, callbacks.onExportEdl, callbacks.onExportFcpxml,
-    callbacks.onExportFrame, callbacks.onExportAudio,
-    callbacks.onMatchFrame, callbacks.onReverseMatchFrame,
-    callbacks.onCopyEffects, callbacks.onPasteEffects,
-    callbacks.onToggleClipEnabled, callbacks.onToggleColorComparison,
-    callbacks.onToggleMixer, callbacks.onAddText, callbacks.onAutoDuck,
+    togglePlayback,
+    seek,
+    duration,
+    stepForward,
+    stepBackward,
+    isLoaded,
+    undo,
+    redo,
+    saveProject,
+    clearClipSelection,
+    zoomIn,
+    zoomOut,
+    setActiveTool,
+    openSettings,
+    callbacks.onSplitAtPlayhead,
+    callbacks.onDeleteClips,
+    callbacks.onExport,
+    callbacks.onExportEdl,
+    callbacks.onExportFcpxml,
+    callbacks.onExportFrame,
+    callbacks.onExportAudio,
+    callbacks.onMatchFrame,
+    callbacks.onReverseMatchFrame,
+    callbacks.onCopyEffects,
+    callbacks.onPasteEffects,
+    callbacks.onToggleClipEnabled,
+    callbacks.onToggleColorComparison,
+    callbacks.onToggleMixer,
+    callbacks.onAddText,
+    callbacks.onAutoDuck,
   ]);
 
   // Filter actions based on search query

@@ -536,6 +536,69 @@ async getAvailableEncoders() : Promise<Result<AvailableEncoders, string>> {
 }
 },
 /**
+ * Detect GPU devices and return acceleration status.
+ * 
+ * Probes FFmpeg for hardware decoders (`-hwaccels`) and encoders (`-encoders`),
+ * builds a list of GPU devices, and returns the current acceleration state.
+ */
+async detectGpuDevices() : Promise<Result<GpuAccelerationStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("detect_gpu_devices") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Get available hardware decoders.
+ * 
+ * Probes FFmpeg for supported hardware acceleration backends.
+ */
+async getAvailableDecoders() : Promise<Result<AvailableDecoders, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_available_decoders") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Get render cache status for the active sequence.
+ * 
+ * Returns per-segment cache state for the timeline indicator bar.
+ */
+async getCacheStatus() : Promise<Result<RenderCacheStatus, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_cache_status") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Clear render cache for the active sequence.
+ * 
+ * Removes all cached segment files and the manifest.
+ */
+async clearRenderCache() : Promise<Result<ClearCacheResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("clear_render_cache") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Render preview cache for the active sequence.
+ * 
+ * Triggers background rendering of uncached segments. Returns the cache
+ * status immediately; rendering progress is reported via Tauri events.
+ * If a previous cache render is still running it is cancelled first.
+ */
+async renderPreviewCache() : Promise<Result<RenderCacheJobResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("render_preview_cache") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Run video stabilization analysis on a clip.
  * 
  * This performs the analysis pass only:
@@ -1508,6 +1571,23 @@ async relaunchApp() : Promise<void> {
 async downloadAndInstallUpdate() : Promise<Result<boolean, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("download_and_install_update") };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Collects real-time system metrics using the sysinfo crate.
+ * 
+ * CPU readings require at least two consecutive calls (the persistent
+ * `SYSTEM_METRICS` instance ensures the baseline exists across polls).
+ * 
+ * The work is offloaded via `spawn_blocking` so that OS calls like
+ * `refresh_processes` and disk enumeration never stall the async
+ * IPC runtime.
+ */
+async getSystemMetrics() : Promise<Result<SystemMetricsDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_system_metrics") };
 } catch (e) {
     return { status: "error", error: e  as any };
 }
@@ -2774,6 +2854,18 @@ codec: string;
 bitrate: number | null }
 export type AutoSaveSettingsDto = { enabled: boolean; intervalSeconds: number; backupCount: number }
 /**
+ * Result of probing available hardware decoders
+ */
+export type AvailableDecoders = { 
+/**
+ * List of detected hardware decoder backends
+ */
+hardware: HardwareDecoderInfo[]; 
+/**
+ * Whether any hardware decoder is available
+ */
+hasHardware: boolean }
+/**
  * Result of probing available hardware encoders
  */
 export type AvailableEncoders = { 
@@ -2849,6 +2941,46 @@ width: number;
  * Normalized height (0.0 - 1.0)
  */
 height: number }
+/**
+ * State of a single cache segment
+ */
+export type CacheSegmentState = 
+/**
+ * Not yet rendered
+ */
+"empty" | 
+/**
+ * Previously cached but invalidated by an edit
+ */
+"stale" | 
+/**
+ * Currently being rendered
+ */
+"rendering" | 
+/**
+ * Fully rendered and valid
+ */
+"cached" | 
+/**
+ * Rendering failed
+ */
+"error"
+/**
+ * Minimal per-segment info for the timeline cache indicator bar
+ */
+export type CacheSegmentStatusDto = { 
+/**
+ * Start time in seconds
+ */
+startSec: number; 
+/**
+ * End time in seconds
+ */
+endSec: number; 
+/**
+ * Segment state
+ */
+state: CacheSegmentState }
 /**
  * Cache usage statistics.
  */
@@ -2965,6 +3097,18 @@ count: number;
  * Total duration of detected regions in seconds
  */
 totalDurationSec: number }
+/**
+ * Result of clearing render cache
+ */
+export type ClearCacheResult = { 
+/**
+ * Sequence whose cache was cleared
+ */
+sequenceId: string; 
+/**
+ * Whether the operation succeeded
+ */
+cleared: boolean }
 /**
  * Clip (media segment on timeline)
  */
@@ -3488,7 +3632,7 @@ contentMap: ContentSegment[];
  * Camera pattern analysis per shot (from analysis bundle)
  */
 cameraPatterns: FrameAnalysis[] }
-export type EditorSettingsDto = { defaultTimelineZoom: number; snapToGrid: boolean; snapTolerance: number; showClipThumbnails: boolean; showAudioWaveforms: boolean; rippleEditDefault: boolean }
+export type EditorSettingsDto = { defaultTimelineZoom: number; snapToGrid: boolean; snapTolerance: number; showClipThumbnails: boolean; showAudioWaveforms: boolean; rippleEditDefault: boolean; favoriteEffects: string[] }
 /**
  * Summary information for listing ESDs without loading full documents
  */
@@ -3705,6 +3849,54 @@ annotation: AssetAnnotation | null;
  */
 status: AnalysisStatus }
 /**
+ * GPU acceleration status
+ */
+export type GpuAccelerationStatus = { 
+/**
+ * Whether GPU acceleration is enabled in settings
+ */
+enabled: boolean; 
+/**
+ * Detected GPU devices
+ */
+devices: GpuDeviceDto[]; 
+/**
+ * Active device ID (if any)
+ */
+activeDeviceId: string | null; 
+/**
+ * Available hardware decoders
+ */
+availableDecoders: AvailableDecoders; 
+/**
+ * Available hardware encoders
+ */
+availableEncoders: AvailableEncoders }
+/**
+ * GPU device information returned to the frontend
+ */
+export type GpuDeviceDto = { 
+/**
+ * Unique device ID
+ */
+id: string; 
+/**
+ * Device name (e.g., "NVIDIA GPU")
+ */
+name: string; 
+/**
+ * Vendor name
+ */
+vendor: string; 
+/**
+ * Whether both encode and decode are supported
+ */
+hasEncode: boolean; hasDecode: boolean; 
+/**
+ * Whether this is the primary/active device
+ */
+isPrimary: boolean }
+/**
  * Hardware encoder backend
  */
 export type HardwareAccelMode = 
@@ -3732,6 +3924,58 @@ export type HardwareAccelMode =
  * Apple VideoToolbox (macOS only)
  */
 "video_toolbox"
+/**
+ * Hardware decoder backend for video decoding acceleration
+ */
+export type HardwareDecoderBackend = 
+/**
+ * NVIDIA CUDA (CUVID)
+ */
+"cuda" | 
+/**
+ * Direct3D 11 Video Acceleration (Windows)
+ */
+"d_3d_1_1va" | 
+/**
+ * DXVA2 (Windows, legacy)
+ */
+"dxva_2" | 
+/**
+ * Intel Quick Sync Video
+ */
+"qsv" | 
+/**
+ * Video Acceleration API (Linux)
+ */
+"vaapi" | 
+/**
+ * Video Decode and Presentation API for Unix (Linux, legacy)
+ */
+"vdpau" | 
+/**
+ * Apple VideoToolbox (macOS)
+ */
+"video_toolbox" | 
+/**
+ * Vulkan Video
+ */
+"vulkan"
+/**
+ * Information about a detected hardware decoder
+ */
+export type HardwareDecoderInfo = { 
+/**
+ * The decoder backend
+ */
+backend: HardwareDecoderBackend; 
+/**
+ * Human-readable display name
+ */
+displayName: string; 
+/**
+ * FFmpeg hwaccel name (used with `-hwaccel <name>`)
+ */
+hwaccelName: string }
 /**
  * Information about a detected hardware encoder
  */
@@ -4137,7 +4381,7 @@ normalizedDuration: number }
  * A content part within a message (text, tool call, tool result, etc.).
  */
 export type PartDto = { id: string; messageId: string; sortOrder: number; partType: string; dataJson: string; compactedAt: number | null }
-export type PerformanceSettingsDto = { hardwareAcceleration: boolean; proxyGeneration: boolean; proxyResolution: string; maxConcurrentJobs: number; memoryLimitMb: number; cacheSizeMb: number }
+export type PerformanceSettingsDto = { hardwareAcceleration: boolean; gpuDeviceId: string | null; proxyGeneration: boolean; proxyResolution: string; maxConcurrentJobs: number; memoryLimitMb: number; cacheSizeMb: number }
 /**
  * Risk level for plan steps.
  */
@@ -4562,6 +4806,82 @@ regions: DetectedRegion[];
  * Inward padding in seconds to apply to each region boundary (default: 0.05)
  */
 paddingSec: number }
+/**
+ * Result of starting a render cache job
+ */
+export type RenderCacheJobResult = { 
+/**
+ * Sequence being cached
+ */
+sequenceId: string; 
+/**
+ * Total segments in the timeline
+ */
+totalSegments: number; 
+/**
+ * Number of segments that need rendering
+ */
+segmentsToRender: number; 
+/**
+ * Job status
+ */
+status: RenderCacheJobStatus }
+/**
+ * Status of a render cache job
+ */
+export type RenderCacheJobStatus = 
+/**
+ * Cache rendering has been started in the background
+ */
+"started" | 
+/**
+ * All segments are already cached; no rendering needed
+ */
+"already_cached"
+/**
+ * Cache status information returned to the frontend
+ */
+export type RenderCacheStatus = { 
+/**
+ * Whether render cache is enabled
+ */
+enabled: boolean; 
+/**
+ * Sequence ID this status is for
+ */
+sequenceId: string; 
+/**
+ * Total number of segments
+ */
+totalSegments: number; 
+/**
+ * Number of fully cached segments
+ */
+cachedSegments: number; 
+/**
+ * Number of stale segments needing re-render
+ */
+staleSegments: number; 
+/**
+ * Number of segments currently rendering
+ */
+renderingSegments: number; 
+/**
+ * Completion percentage (0.0 - 100.0)
+ */
+completionPercent: number; 
+/**
+ * Total cached file size in bytes
+ */
+totalCachedBytes: number; 
+/**
+ * Maximum allowed cache size in bytes
+ */
+maxCacheBytes: number; 
+/**
+ * Per-segment status for timeline indicator
+ */
+segmentStates: CacheSegmentStatusDto[] }
 /**
  * Result of starting a render export job.
  */
@@ -5453,6 +5773,46 @@ usedBytes: number;
  * Usage percentage (0-100)
  */
 usagePercent: number }
+/**
+ * Real-time system metrics snapshot for the performance monitoring panel.
+ */
+export type SystemMetricsDto = { 
+/**
+ * Global CPU usage percentage (0.0 - 100.0)
+ */
+cpuUsagePercent: number; 
+/**
+ * Total physical RAM in bytes
+ */
+ramTotalBytes: number; 
+/**
+ * Used RAM in bytes
+ */
+ramUsedBytes: number; 
+/**
+ * Process RSS (resident set size) in bytes
+ */
+processMemoryBytes: number; 
+/**
+ * Disk read bytes since last query (current process only)
+ */
+diskReadBytes: number; 
+/**
+ * Disk write bytes since last query (current process only)
+ */
+diskWriteBytes: number; 
+/**
+ * Total disk space in bytes
+ */
+diskTotalBytes: number; 
+/**
+ * Available disk space in bytes
+ */
+diskAvailableBytes: number; 
+/**
+ * Number of logical CPU cores
+ */
+cpuCoreCount: number }
 /**
  * Pacing tempo classification based on mean shot duration
  */

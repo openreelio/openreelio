@@ -3,11 +3,16 @@
 //! Provides GPU-accelerated decoding, encoding, and effects processing.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use crate::core::render::{
+    detect_available_decoders, detect_available_encoders, resolve_best_decoder, AvailableDecoders,
+    AvailableEncoders, HardwareAccelMode, HardwareDecoderBackend,
+};
 use crate::core::{CoreError, CoreResult};
 
 /// GPU device vendor
@@ -432,21 +437,81 @@ impl GpuAccelerator {
         }
     }
 
-    /// Detects available GPU devices
+    /// Detects available GPU devices using mock data (for testing only)
+    #[cfg(test)]
     pub async fn detect_devices(&self) -> CoreResult<Vec<GpuDevice>> {
-        // In real implementation, this would query actual hardware
-        // For now, return a mock device
         let mock_device = GpuDevice::mock("Mock GPU", GpuVendor::Nvidia);
 
         let mut devices = self.devices.write().await;
         devices.clear();
         devices.push(mock_device.clone());
 
-        // Auto-select primary device
         let mut active = self.active_device.write().await;
         *active = Some(mock_device.id.clone());
 
         Ok(devices.clone())
+    }
+
+    /// Detects available GPU devices by probing FFmpeg for hardware capabilities
+    ///
+    /// Queries FFmpeg for supported hardware decoders (`-hwaccels`) and encoders
+    /// (`-encoders`), then builds GPU device entries grouped by vendor.
+    pub async fn detect_devices_from_ffmpeg(
+        &self,
+        ffmpeg_path: &Path,
+    ) -> CoreResult<Vec<GpuDevice>> {
+        // Run synchronous FFmpeg subprocess probes on a blocking thread
+        // to avoid stalling the tokio async runtime.
+        let ffmpeg_path_owned = ffmpeg_path.to_path_buf();
+        let (available_decoders, available_encoders) = tokio::task::spawn_blocking(move || {
+            let decoders = detect_available_decoders(&ffmpeg_path_owned);
+            let encoders = detect_available_encoders(&ffmpeg_path_owned);
+            (decoders, encoders)
+        })
+        .await
+        .map_err(|e| CoreError::Internal(format!("FFmpeg probe task failed: {e}")))?;
+
+        let devices = build_gpu_devices_from_probes(&available_decoders, &available_encoders);
+
+        if devices.is_empty() {
+            tracing::info!("No GPU hardware acceleration detected, using software fallback");
+        } else {
+            tracing::info!(
+                "Detected {} GPU device(s): {}",
+                devices.len(),
+                devices
+                    .iter()
+                    .map(|d| format!("{} ({})", d.name, d.vendor))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+
+        let mut dev = self.devices.write().await;
+        dev.clear();
+        dev.extend(devices.iter().cloned());
+
+        // Auto-select primary device
+        let mut active = self.active_device.write().await;
+        *active = devices.first().map(|d| d.id.clone());
+
+        // Clear stale VRAM allocations from the previous device inventory
+        self.vram_allocations.write().await.clear();
+
+        Ok(devices)
+    }
+
+    /// Registers pre-built device list (for testing or manual override)
+    pub async fn register_devices(&self, devices: Vec<GpuDevice>) {
+        let mut dev = self.devices.write().await;
+        dev.clear();
+        dev.extend(devices.iter().cloned());
+
+        let mut active = self.active_device.write().await;
+        *active = devices.first().map(|d| d.id.clone());
+
+        // Clear stale VRAM allocations from the previous device inventory
+        self.vram_allocations.write().await.clear();
     }
 
     /// Gets available devices
@@ -650,6 +715,251 @@ impl Default for GpuAccelerator {
     }
 }
 
+// =============================================================================
+// GPU Device Detection from FFmpeg Probes
+// =============================================================================
+
+/// Default VRAM estimate when actual VRAM cannot be queried.
+/// Platform-specific VRAM detection requires vendor APIs (NVML, DXGI, etc.)
+/// which is a future enhancement. 4 GB is a conservative default.
+const DEFAULT_VRAM_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+/// Map a decoder backend to a GPU vendor
+fn vendor_from_decoder(backend: &HardwareDecoderBackend) -> GpuVendor {
+    match backend {
+        HardwareDecoderBackend::Cuda => GpuVendor::Nvidia,
+        HardwareDecoderBackend::Qsv => GpuVendor::Intel,
+        HardwareDecoderBackend::VideoToolbox => GpuVendor::Apple,
+        HardwareDecoderBackend::Vaapi | HardwareDecoderBackend::Vdpau => {
+            // VAAPI/VDPAU can be any vendor on Linux; cannot distinguish without platform APIs
+            GpuVendor::Unknown
+        }
+        HardwareDecoderBackend::Vulkan => GpuVendor::Unknown,
+        HardwareDecoderBackend::D3d11va | HardwareDecoderBackend::Dxva2 => {
+            // D3D11VA/DXVA2 can be any vendor; cannot distinguish without DXGI
+            GpuVendor::Unknown
+        }
+    }
+}
+
+/// Map a hardware accel mode (from encoder detection) to a GPU vendor
+fn vendor_from_encoder(mode: &HardwareAccelMode) -> Option<GpuVendor> {
+    match mode {
+        HardwareAccelMode::Nvenc => Some(GpuVendor::Nvidia),
+        HardwareAccelMode::Qsv => Some(GpuVendor::Intel),
+        HardwareAccelMode::Amf => Some(GpuVendor::Amd),
+        HardwareAccelMode::VideoToolbox => Some(GpuVendor::Apple),
+        HardwareAccelMode::Auto | HardwareAccelMode::Cpu => None,
+    }
+}
+
+/// Map a vendor to their preferred hardware encoder
+fn encoder_for_vendor(vendor: &GpuVendor) -> HardwareEncoder {
+    match vendor {
+        GpuVendor::Nvidia => HardwareEncoder::Nvenc,
+        GpuVendor::Amd => HardwareEncoder::Amf,
+        GpuVendor::Intel => HardwareEncoder::Qsv,
+        GpuVendor::Apple => HardwareEncoder::VideoToolbox,
+        GpuVendor::Unknown => HardwareEncoder::Software,
+    }
+}
+
+/// Map a vendor to their preferred hardware decoder
+fn decoder_for_vendor(vendor: &GpuVendor) -> HardwareDecoder {
+    match vendor {
+        GpuVendor::Nvidia => HardwareDecoder::Cuvid,
+        GpuVendor::Amd => HardwareDecoder::Amf,
+        GpuVendor::Intel => HardwareDecoder::Qsv,
+        GpuVendor::Apple => HardwareDecoder::VideoToolbox,
+        GpuVendor::Unknown => HardwareDecoder::Software,
+    }
+}
+
+/// Returns a stable, deterministic ID for the given GPU vendor.
+///
+/// IDs are per-vendor, not per-device: a system with two NVIDIA GPUs will
+/// produce a single device entry with id `"gpu-nvidia"`.  This is intentional
+/// because FFmpeg probe results are aggregated by vendor (we detect *encoder
+/// backends*, not individual PCI devices).
+fn stable_gpu_device_id(vendor: GpuVendor) -> String {
+    let slug = match vendor {
+        GpuVendor::Nvidia => "nvidia",
+        GpuVendor::Amd => "amd",
+        GpuVendor::Intel => "intel",
+        GpuVendor::Apple => "apple",
+        GpuVendor::Unknown => "unknown",
+    };
+
+    format!("gpu-{}", slug)
+}
+
+fn hardware_mode_for_encoder(encoder: HardwareEncoder) -> HardwareAccelMode {
+    match encoder {
+        HardwareEncoder::Nvenc => HardwareAccelMode::Nvenc,
+        HardwareEncoder::Amf => HardwareAccelMode::Amf,
+        HardwareEncoder::Qsv => HardwareAccelMode::Qsv,
+        HardwareEncoder::VideoToolbox => HardwareAccelMode::VideoToolbox,
+        HardwareEncoder::Software => HardwareAccelMode::Auto,
+    }
+}
+
+/// Resolve the active GPU device ID using persisted preference and current probe results.
+pub fn resolve_active_gpu_device_id(
+    enabled: bool,
+    preferred_device_id: Option<&str>,
+    devices: &[GpuDevice],
+) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+
+    preferred_device_id
+        .and_then(|id| {
+            devices
+                .iter()
+                .find(|device| device.id == id)
+                .map(|_| id.to_string())
+        })
+        .or_else(|| {
+            devices
+                .iter()
+                .find(|device| device.is_primary)
+                .or_else(|| devices.first())
+                .map(|device| device.id.clone())
+        })
+}
+
+/// Resolve which hardware acceleration mode export/rendering should use.
+pub fn resolve_hardware_accel_mode(
+    enabled: bool,
+    preferred_device_id: Option<&str>,
+    devices: &[GpuDevice],
+) -> HardwareAccelMode {
+    if !enabled {
+        return HardwareAccelMode::Cpu;
+    }
+
+    resolve_active_gpu_device_id(enabled, preferred_device_id, devices)
+        .and_then(|active_id| devices.iter().find(|device| device.id == active_id))
+        .map(|device| hardware_mode_for_encoder(device.preferred_encoder))
+        .unwrap_or_default()
+}
+
+/// Build GPU device list from FFmpeg decoder and encoder probe results
+///
+/// Groups detected backends by vendor and creates one `GpuDevice` per vendor.
+/// Uses encoder detection to disambiguate vendor when decoder detection is ambiguous
+/// (e.g., D3D11VA could be any vendor, but NVENC confirms NVIDIA presence).
+pub fn build_gpu_devices_from_probes(
+    decoders: &AvailableDecoders,
+    encoders: &AvailableEncoders,
+) -> Vec<GpuDevice> {
+    let mut vendor_set: HashMap<GpuVendor, (Vec<GpuCapability>, Option<HardwareDecoder>)> =
+        HashMap::new();
+
+    // Phase 1: Gather vendors from encoder detection (most specific)
+    for enc_info in &encoders.hardware {
+        if let Some(vendor) = vendor_from_encoder(&enc_info.backend) {
+            let entry = vendor_set
+                .entry(vendor)
+                .or_insert_with(|| (Vec::new(), None));
+            if !entry.0.contains(&GpuCapability::HardwareEncode) {
+                entry.0.push(GpuCapability::HardwareEncode);
+            }
+        }
+    }
+
+    // Phase 2: Gather vendors from decoder detection
+    let best_decoder = resolve_best_decoder(decoders);
+    for dec_info in &decoders.hardware {
+        let vendor = vendor_from_decoder(&dec_info.backend);
+        // Ambiguous decoder backends (D3D11VA, VAAPI) return Unknown vendor.
+        // When exactly one specific vendor is known from encoder detection, it
+        // is safe to attribute the decode capability to that vendor. When
+        // multiple vendors exist, we cannot determine which GPU the system-level
+        // decoder targets, so skip to avoid incorrect hardware decoder selection
+        // (e.g. emitting CUDA args when only VAAPI was detected).
+        if vendor == GpuVendor::Unknown && vendor_set.len() > 1 {
+            continue;
+        }
+        if vendor == GpuVendor::Unknown && vendor_set.len() == 1 {
+            // Single known vendor — attribute decode capability to it
+            for (_, (caps, _)) in vendor_set.iter_mut() {
+                if !caps.contains(&GpuCapability::HardwareDecode) {
+                    caps.push(GpuCapability::HardwareDecode);
+                }
+            }
+            continue;
+        }
+
+        let entry = vendor_set
+            .entry(vendor)
+            .or_insert_with(|| (Vec::new(), None));
+        if !entry.0.contains(&GpuCapability::HardwareDecode) {
+            entry.0.push(GpuCapability::HardwareDecode);
+        }
+        // Track the decoder backend for this vendor
+        let decoder = match dec_info.backend {
+            HardwareDecoderBackend::Cuda => HardwareDecoder::Cuvid,
+            HardwareDecoderBackend::Qsv => HardwareDecoder::Qsv,
+            HardwareDecoderBackend::VideoToolbox => HardwareDecoder::VideoToolbox,
+            HardwareDecoderBackend::Vaapi => HardwareDecoder::Vaapi,
+            // VDPAU is a legacy NVIDIA Linux API — we prefer CUDA for decode, so
+            // treat VDPAU-only systems as software-fallback for our purposes.
+            HardwareDecoderBackend::Vdpau => HardwareDecoder::Software,
+            HardwareDecoderBackend::D3d11va => HardwareDecoder::D3d11va,
+            HardwareDecoderBackend::Dxva2 => HardwareDecoder::D3d11va,
+            // Vulkan Video is not yet widely supported in FFmpeg filter chains;
+            // map to software until our pipeline supports vulkan hwframes.
+            HardwareDecoderBackend::Vulkan => HardwareDecoder::Software,
+        };
+        if entry.1.is_none() {
+            entry.1 = Some(decoder);
+        }
+    }
+
+    // Phase 3: Build GpuDevice entries
+    let mut devices: Vec<GpuDevice> = vendor_set
+        .into_iter()
+        .map(|(vendor, (capabilities, detected_decoder))| {
+            let preferred_encoder = encoder_for_vendor(&vendor);
+            let preferred_decoder = detected_decoder.unwrap_or_else(|| decoder_for_vendor(&vendor));
+
+            let name = format!("{} GPU", vendor);
+            let is_primary = best_decoder
+                .map(|d| vendor_from_decoder(&d.backend) == vendor)
+                .unwrap_or(false);
+
+            GpuDevice {
+                id: stable_gpu_device_id(vendor),
+                name,
+                vendor,
+                vram_total: DEFAULT_VRAM_BYTES,
+                vram_available: DEFAULT_VRAM_BYTES * 3 / 4,
+                compute_capability: None,
+                capabilities,
+                preferred_encoder,
+                preferred_decoder,
+                is_primary,
+            }
+        })
+        .collect();
+
+    // Sort: primary first, then by vendor priority (NVIDIA > AMD > Intel > Apple > Unknown)
+    devices.sort_by_key(|d| {
+        let vendor_priority = match d.vendor {
+            GpuVendor::Nvidia => 0,
+            GpuVendor::Amd => 1,
+            GpuVendor::Intel => 2,
+            GpuVendor::Apple => 3,
+            GpuVendor::Unknown => 4,
+        };
+        (!d.is_primary, vendor_priority)
+    });
+
+    devices
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -657,6 +967,9 @@ impl Default for GpuAccelerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::render::{
+        AvailableDecoders, AvailableEncoders, HardwareDecoderBackend, HardwareDecoderInfo,
+    };
 
     // ========================================================================
     // GpuVendor Tests
@@ -867,5 +1180,253 @@ mod tests {
         // Try to allocate more than limit (80% of 8GB = 6.4GB)
         let result = accel.allocate_vram("op1", 7 * 1024 * 1024 * 1024).await;
         assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // BDD: Feature: GPU Device Detection from FFmpeg Probes
+    // ========================================================================
+
+    #[test]
+    fn should_build_nvidia_device_from_cuda_decoder_and_nvenc_encoder() {
+        // Given: FFmpeg reports cuda decoder and nvenc encoder
+        let decoders = AvailableDecoders {
+            hardware: vec![HardwareDecoderInfo {
+                backend: HardwareDecoderBackend::Cuda,
+                display_name: "NVIDIA CUDA".to_string(),
+                hwaccel_name: "cuda".to_string(),
+            }],
+            has_hardware: true,
+        };
+        let encoders = AvailableEncoders {
+            hardware: vec![crate::core::render::HardwareEncoderInfo {
+                backend: HardwareAccelMode::Nvenc,
+                display_name: "NVIDIA NVENC".to_string(),
+                h264_encoder: "h264_nvenc".to_string(),
+                h265_encoder: "hevc_nvenc".to_string(),
+            }],
+            has_hardware: true,
+        };
+
+        // When: building GPU devices
+        let devices = build_gpu_devices_from_probes(&decoders, &encoders);
+
+        // Then: one NVIDIA device with decode + encode
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].vendor, GpuVendor::Nvidia);
+        assert_eq!(devices[0].preferred_encoder, HardwareEncoder::Nvenc);
+        assert_eq!(devices[0].preferred_decoder, HardwareDecoder::Cuvid);
+        assert!(devices[0].supports(GpuCapability::HardwareDecode));
+        assert!(devices[0].supports(GpuCapability::HardwareEncode));
+    }
+
+    #[test]
+    fn should_build_multiple_devices_for_different_vendors() {
+        // Given: NVIDIA and Intel detected
+        let decoders = AvailableDecoders {
+            hardware: vec![
+                HardwareDecoderInfo {
+                    backend: HardwareDecoderBackend::Cuda,
+                    display_name: "NVIDIA CUDA".to_string(),
+                    hwaccel_name: "cuda".to_string(),
+                },
+                HardwareDecoderInfo {
+                    backend: HardwareDecoderBackend::Qsv,
+                    display_name: "Intel Quick Sync Video".to_string(),
+                    hwaccel_name: "qsv".to_string(),
+                },
+            ],
+            has_hardware: true,
+        };
+        let encoders = AvailableEncoders {
+            hardware: vec![
+                crate::core::render::HardwareEncoderInfo {
+                    backend: HardwareAccelMode::Nvenc,
+                    display_name: "NVIDIA NVENC".to_string(),
+                    h264_encoder: "h264_nvenc".to_string(),
+                    h265_encoder: "hevc_nvenc".to_string(),
+                },
+                crate::core::render::HardwareEncoderInfo {
+                    backend: HardwareAccelMode::Qsv,
+                    display_name: "Intel QSV".to_string(),
+                    h264_encoder: "h264_qsv".to_string(),
+                    h265_encoder: "hevc_qsv".to_string(),
+                },
+            ],
+            has_hardware: true,
+        };
+
+        // When: building GPU devices
+        let devices = build_gpu_devices_from_probes(&decoders, &encoders);
+
+        // Then: two devices, NVIDIA first (higher priority)
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].vendor, GpuVendor::Nvidia);
+        assert_eq!(devices[1].vendor, GpuVendor::Intel);
+    }
+
+    #[test]
+    fn should_return_empty_when_no_gpu_detected() {
+        // Given: no hardware acceleration available
+        let decoders = AvailableDecoders {
+            hardware: Vec::new(),
+            has_hardware: false,
+        };
+        let encoders = AvailableEncoders {
+            hardware: Vec::new(),
+            has_hardware: false,
+        };
+
+        // When: building GPU devices
+        let devices = build_gpu_devices_from_probes(&decoders, &encoders);
+
+        // Then: no devices returned
+        assert!(devices.is_empty());
+    }
+
+    #[test]
+    fn should_assign_d3d11va_to_known_vendor_from_encoder() {
+        // Given: d3d11va decoder (ambiguous vendor) and nvenc encoder (NVIDIA)
+        let decoders = AvailableDecoders {
+            hardware: vec![HardwareDecoderInfo {
+                backend: HardwareDecoderBackend::D3d11va,
+                display_name: "D3D11VA".to_string(),
+                hwaccel_name: "d3d11va".to_string(),
+            }],
+            has_hardware: true,
+        };
+        let encoders = AvailableEncoders {
+            hardware: vec![crate::core::render::HardwareEncoderInfo {
+                backend: HardwareAccelMode::Nvenc,
+                display_name: "NVIDIA NVENC".to_string(),
+                h264_encoder: "h264_nvenc".to_string(),
+                h265_encoder: "hevc_nvenc".to_string(),
+            }],
+            has_hardware: true,
+        };
+
+        // When: building GPU devices
+        let devices = build_gpu_devices_from_probes(&decoders, &encoders);
+
+        // Then: NVIDIA device gets both encode and decode capabilities
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].vendor, GpuVendor::Nvidia);
+        assert!(devices[0].supports(GpuCapability::HardwareEncode));
+        assert!(devices[0].supports(GpuCapability::HardwareDecode));
+    }
+
+    #[test]
+    fn should_set_default_vram_for_detected_devices() {
+        // Given: a detected NVIDIA GPU
+        let decoders = AvailableDecoders {
+            hardware: vec![HardwareDecoderInfo {
+                backend: HardwareDecoderBackend::Cuda,
+                display_name: "NVIDIA CUDA".to_string(),
+                hwaccel_name: "cuda".to_string(),
+            }],
+            has_hardware: true,
+        };
+        let encoders = AvailableEncoders {
+            hardware: Vec::new(),
+            has_hardware: false,
+        };
+
+        // When: building GPU devices
+        let devices = build_gpu_devices_from_probes(&decoders, &encoders);
+
+        // Then: default VRAM is set (4 GB)
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].vram_total, DEFAULT_VRAM_BYTES);
+        assert!(devices[0].vram_available > 0);
+    }
+
+    #[tokio::test]
+    async fn should_register_devices_and_auto_select_primary() {
+        // Given: a GpuAccelerator
+        let accel = GpuAccelerator::new();
+        let device1 = GpuDevice::mock("GPU 1", GpuVendor::Nvidia);
+        let device2 = GpuDevice::mock("GPU 2", GpuVendor::Intel);
+        let id1 = device1.id.clone();
+
+        // When: registering devices
+        accel.register_devices(vec![device1, device2]).await;
+
+        // Then: first device is auto-selected
+        let active = accel.get_active_device().await;
+        assert!(active.is_some());
+        assert_eq!(active.unwrap().id, id1);
+        assert_eq!(accel.get_devices().await.len(), 2);
+    }
+
+    #[test]
+    fn should_keep_gpu_device_ids_stable_across_repeated_probes() {
+        let decoders = AvailableDecoders {
+            hardware: vec![HardwareDecoderInfo {
+                backend: HardwareDecoderBackend::Cuda,
+                display_name: "NVIDIA CUDA".to_string(),
+                hwaccel_name: "cuda".to_string(),
+            }],
+            has_hardware: true,
+        };
+        let encoders = AvailableEncoders {
+            hardware: vec![crate::core::render::HardwareEncoderInfo {
+                backend: HardwareAccelMode::Nvenc,
+                display_name: "NVIDIA NVENC".to_string(),
+                h264_encoder: "h264_nvenc".to_string(),
+                h265_encoder: "hevc_nvenc".to_string(),
+            }],
+            has_hardware: true,
+        };
+
+        let first = build_gpu_devices_from_probes(&decoders, &encoders);
+        let second = build_gpu_devices_from_probes(&decoders, &encoders);
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+        assert_eq!(first[0].id, "gpu-nvidia");
+        assert_eq!(first[0].id, second[0].id);
+    }
+
+    #[test]
+    fn should_resolve_selected_device_to_matching_hardware_accel_mode() {
+        let devices = vec![
+            GpuDevice {
+                id: "gpu-intel".to_string(),
+                name: "Intel GPU".to_string(),
+                vendor: GpuVendor::Intel,
+                vram_total: DEFAULT_VRAM_BYTES,
+                vram_available: DEFAULT_VRAM_BYTES,
+                compute_capability: None,
+                capabilities: vec![GpuCapability::HardwareEncode],
+                preferred_encoder: HardwareEncoder::Qsv,
+                preferred_decoder: HardwareDecoder::Qsv,
+                is_primary: false,
+            },
+            GpuDevice {
+                id: "gpu-nvidia".to_string(),
+                name: "NVIDIA GPU".to_string(),
+                vendor: GpuVendor::Nvidia,
+                vram_total: DEFAULT_VRAM_BYTES,
+                vram_available: DEFAULT_VRAM_BYTES,
+                compute_capability: None,
+                capabilities: vec![GpuCapability::HardwareEncode],
+                preferred_encoder: HardwareEncoder::Nvenc,
+                preferred_decoder: HardwareDecoder::Cuvid,
+                is_primary: true,
+            },
+        ];
+
+        let mode = resolve_hardware_accel_mode(true, Some("gpu-intel"), &devices);
+
+        assert_eq!(mode, HardwareAccelMode::Qsv);
+    }
+
+    #[test]
+    fn should_fallback_to_cpu_mode_when_hardware_acceleration_disabled() {
+        let devices = vec![GpuDevice::mock("Test GPU", GpuVendor::Nvidia)];
+
+        let mode = resolve_hardware_accel_mode(false, Some(&devices[0].id), &devices);
+
+        assert_eq!(mode, HardwareAccelMode::Cpu);
+        assert!(resolve_active_gpu_device_id(false, Some(&devices[0].id), &devices).is_none());
     }
 }
