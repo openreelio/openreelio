@@ -934,8 +934,9 @@ pub fn enforce_cache_limit(
             if file_removed {
                 // Subtract this segment's size from the running total instead of
                 // recalculating across all segments (avoids O(n*m) cost).
-                manifest.total_cached_bytes =
-                    manifest.total_cached_bytes.saturating_sub(segment.file_size_bytes);
+                manifest.total_cached_bytes = manifest
+                    .total_cached_bytes
+                    .saturating_sub(segment.file_size_bytes);
                 segment.state = CacheSegmentState::Empty;
                 segment.cached_file = None;
                 segment.file_size_bytes = 0;

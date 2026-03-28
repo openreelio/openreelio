@@ -2166,10 +2166,7 @@ pub async fn render_preview_cache(
 
             if let Some(parent) = seg_output.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
-                    tracing::warn!(
-                        "Failed to create cache directory {}: {e}",
-                        parent.display()
-                    );
+                    tracing::warn!("Failed to create cache directory {}: {e}", parent.display());
                 }
             }
 
