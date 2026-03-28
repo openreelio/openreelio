@@ -1598,6 +1598,28 @@ export interface SnapPoint {
 export * from './hdr';
 
 // =============================================================================
+// Cleanup Detection Types (S35-002)
+// =============================================================================
+
+/** Classification of a detected cleanup region */
+export type RegionType = 'silence' | 'filler_word';
+
+/** A time region detected for potential removal */
+export interface DetectedRegion {
+  startSec: number;
+  endSec: number;
+  regionType: RegionType;
+  label: string;
+}
+
+/** Result of a cleanup detection operation */
+export interface CleanupDetectionResult {
+  regions: DetectedRegion[];
+  count: number;
+  totalDurationSec: number;
+}
+
+// =============================================================================
 // Qualifier Types (re-export)
 // =============================================================================
 
