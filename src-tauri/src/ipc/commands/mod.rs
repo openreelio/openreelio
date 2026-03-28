@@ -69,6 +69,9 @@ pub mod agent;
 // Interchange commands (EDL/FCPXML export)
 pub mod interchange;
 
+// Transcript-based editing commands (S35-001)
+pub mod transcript_editing;
+
 // Re-export all domain modules
 pub use ai_legacy::*;
 pub use asset::*;
@@ -103,3 +106,6 @@ pub use agent::*;
 
 // Re-export interchange commands
 pub use interchange::*;
+
+// Re-export transcript editing commands
+pub use transcript_editing::*;
