@@ -1907,6 +1907,90 @@ async deleteEffectPreset(presetId: string) : Promise<Result<null, string>> {
 } catch (e) {
     return { status: "error", error: e  as any };
 }
+},
+/**
+ * Returns word-level timing estimates for an asset's transcript.
+ * 
+ * Loads transcript segments from the analysis bundle, then splits each
+ * segment into words with linearly interpolated start/end times.
+ */
+async getTranscriptWords(assetId: string) : Promise<Result<TranscriptWord[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_transcript_words", { assetId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Deletes a time range from a clip using split + ripple delete.
+ * 
+ * Converts source-relative times to timeline positions, splits the clip
+ * at boundaries, and ripple-deletes the middle section. Each sub-operation
+ * is a separate undoable command.
+ */
+async deleteTranscriptRange(args: DeleteTranscriptRangeArgs) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_transcript_range", { args }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Reorders a transcript segment by extracting it and inserting at a new position.
+ * 
+ * Splits the clip at segment boundaries, ripple-deletes the segment,
+ * then inserts it at the target position using insert edit.
+ */
+async reorderTranscriptSegment(args: ReorderTranscriptSegmentArgs) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("reorder_transcript_segment", { args }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Detects silence regions in an asset's audio with custom sensitivity.
+ * 
+ * Runs FFmpeg's `silencedetect` filter with the specified threshold and
+ * minimum duration. Falls back to cached analysis data only when the request
+ * matches the cached threshold and can be satisfied by duration filtering.
+ */
+async detectSilenceRegions(args: DetectSilenceArgs) : Promise<Result<CleanupDetectionResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("detect_silence_regions", { args }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Detects filler words in an asset's transcript.
+ * 
+ * Loads the transcript (from analysis bundle or index DB), then scans
+ * for configurable filler word patterns. Multi-word patterns like
+ * "you know" are supported.
+ */
+async detectFillerWords(args: DetectFillerWordsArgs) : Promise<Result<CleanupDetectionResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("detect_filler_words", { args }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Removes multiple detected regions from a clip via batch ripple delete.
+ * 
+ * Regions are processed in reverse chronological order so that each
+ * deletion does not shift the positions of earlier regions. Each region
+ * is padded inward by `padding_sec` to preserve natural breath sounds.
+ * 
+ * All operations are individually undoable.
+ */
+async removeDetectedRegions(args: RemoveDetectedRegionsArgs) : Promise<Result<JsonValue, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("remove_detected_regions", { args }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -2866,6 +2950,22 @@ text: string;
  */
 speaker: string | null }
 /**
+ * Result of a cleanup detection operation.
+ */
+export type CleanupDetectionResult = { 
+/**
+ * Detected regions (before padding)
+ */
+regions: DetectedRegion[]; 
+/**
+ * Total count of detected regions
+ */
+count: number; 
+/**
+ * Total duration of detected regions in seconds
+ */
+totalDurationSec: number }
+/**
  * Clip (media segment on timeline)
  */
 export type Clip = { id: string; assetId: string; 
@@ -3172,6 +3272,78 @@ export type CreateCompoundClipArgs = { sequenceId: string; trackId: string; clip
  * Status of credentials for each provider
  */
 export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google: boolean; seedance: boolean }
+/**
+ * Arguments for deleting a transcript time range from a clip.
+ */
+export type DeleteTranscriptRangeArgs = { 
+/**
+ * Sequence containing the clip
+ */
+sequenceId: string; 
+/**
+ * Track containing the clip
+ */
+trackId: string; 
+/**
+ * Clip to operate on
+ */
+clipId: string; 
+/**
+ * Start time in source-relative seconds
+ */
+startSec: number; 
+/**
+ * End time in source-relative seconds
+ */
+endSec: number }
+/**
+ * Arguments for detecting filler words in a transcript.
+ */
+export type DetectFillerWordsArgs = { 
+/**
+ * Asset ID whose transcript to scan
+ */
+assetId: string; 
+/**
+ * Custom filler word list (if empty, uses defaults)
+ */
+customWords: string[] }
+/**
+ * Arguments for detecting silence regions in an asset's audio.
+ */
+export type DetectSilenceArgs = { 
+/**
+ * Asset ID to analyze
+ */
+assetId: string; 
+/**
+ * Silence threshold in dB (e.g., -30.0). Lower = more sensitive.
+ */
+thresholdDb: number; 
+/**
+ * Minimum silence duration in seconds (e.g., 0.3)
+ */
+minDurationSec: number }
+/**
+ * A time region detected for potential removal
+ */
+export type DetectedRegion = { 
+/**
+ * Start time in seconds (source-relative)
+ */
+startSec: number; 
+/**
+ * End time in seconds (source-relative)
+ */
+endSec: number; 
+/**
+ * Classification of the region
+ */
+regionType: RegionType; 
+/**
+ * Human-readable label (e.g., "um", "silence")
+ */
+label: string }
 /**
  * Response for download_generated_video
  */
@@ -4355,6 +4527,42 @@ num: number;
  */
 den: number }
 /**
+ * Classification of a detected cleanup region
+ */
+export type RegionType = 
+/**
+ * Detected silence
+ */
+"silence" | 
+/**
+ * Detected filler word
+ */
+"filler_word"
+/**
+ * Arguments for batch-removing detected regions from a clip.
+ */
+export type RemoveDetectedRegionsArgs = { 
+/**
+ * Sequence containing the clip
+ */
+sequenceId: string; 
+/**
+ * Track containing the clip
+ */
+trackId: string; 
+/**
+ * Clip to operate on
+ */
+clipId: string; 
+/**
+ * Regions to remove (source-relative time ranges)
+ */
+regions: DetectedRegion[]; 
+/**
+ * Inward padding in seconds to apply to each region boundary (default: 0.05)
+ */
+paddingSec: number }
+/**
  * Result of starting a render export job.
  */
 export type RenderStartResult = { 
@@ -4370,6 +4578,34 @@ outputPath: string;
  * Initial status ("started")
  */
 status: string }
+/**
+ * Arguments for reordering a transcript segment within a clip.
+ */
+export type ReorderTranscriptSegmentArgs = { 
+/**
+ * Sequence containing the clip
+ */
+sequenceId: string; 
+/**
+ * Track containing the clip
+ */
+trackId: string; 
+/**
+ * Clip to operate on
+ */
+clipId: string; 
+/**
+ * Start of the segment to move (source-relative seconds)
+ */
+sourceStartSec: number; 
+/**
+ * End of the segment to move (source-relative seconds)
+ */
+sourceEndSec: number; 
+/**
+ * Target position to insert at (timeline-relative seconds)
+ */
+targetPositionSec: number }
 /**
  * External requirement for an EditScript (e.g., asset to fetch).
  */
@@ -5642,6 +5878,41 @@ confidence: number;
 language?: string | null; 
 /**
  * Speaker ID (if speaker diarization is enabled)
+ */
+speakerId?: string | null }
+/**
+ * A single word with estimated timing derived from transcript segments.
+ * 
+ * Word-level timing is estimated by linearly interpolating within each
+ * segment's time range based on whitespace-delimited word count.
+ */
+export type TranscriptWord = { 
+/**
+ * The word text
+ */
+text: string; 
+/**
+ * Estimated start time in seconds (source-relative)
+ */
+startSec: number; 
+/**
+ * Estimated end time in seconds (source-relative)
+ */
+endSec: number; 
+/**
+ * Index of the parent segment in the transcript
+ */
+segmentIndex: number; 
+/**
+ * Index of this word within its parent segment
+ */
+wordIndex: number; 
+/**
+ * Confidence inherited from parent segment (0.0 - 1.0)
+ */
+confidence: number; 
+/**
+ * Speaker ID inherited from parent segment
  */
 speakerId?: string | null }
 /**
