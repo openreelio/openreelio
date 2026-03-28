@@ -127,6 +127,23 @@ impl AudioProfiler {
         Ok(parse_silence_regions(&stderr))
     }
 
+    /// Detects silence regions with custom threshold and minimum duration.
+    ///
+    /// Unlike `detect_silence()` which uses fixed defaults (-40dB / 0.5s),
+    /// this allows callers to specify sensitivity for cleanup workflows.
+    pub async fn detect_silence_custom(
+        &self,
+        video_path: &Path,
+        threshold_db: f64,
+        min_duration_sec: f64,
+    ) -> CoreResult<Vec<SilenceRegion>> {
+        let threshold = format!("{}dB", threshold_db.clamp(-90.0, 0.0));
+        let duration = format!("{:.3}", min_duration_sec.clamp(0.01, 30.0));
+        let filter = format!("silencedetect=n={}:d={}", threshold, duration);
+        let stderr = self.run_ffmpeg_filter(video_path, &filter).await?;
+        Ok(parse_silence_regions(&stderr))
+    }
+
     // =========================================================================
     // Loudness & Peak Extraction
     // =========================================================================
