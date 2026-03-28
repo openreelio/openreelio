@@ -77,12 +77,17 @@ export const TranscriptWord: React.FC<TranscriptWordProps> = React.memo(
           ]
             .filter(Boolean)
             .join(' ')}
-          onClick={() => onClick(index)}
+          onClick={() => {
+            if (!readOnly) onClick(index);
+          }}
           onMouseDown={(e) => {
             if (e.button === 0 && !readOnly) onMouseDown(index);
           }}
-          onMouseEnter={() => onMouseEnter(index)}
+          onMouseEnter={() => {
+            if (!readOnly) onMouseEnter(index);
+          }}
           onKeyDown={(e) => {
+            if (readOnly) return;
             if (e.key === 'Enter' || e.key === ' ') {
               e.preventDefault();
               onClick(index);

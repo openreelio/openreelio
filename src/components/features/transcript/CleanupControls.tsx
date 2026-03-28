@@ -119,8 +119,8 @@ export const CleanupControls: React.FC<CleanupControlsProps> = ({
             </span>
             <button
               onClick={handleRemove}
-              disabled={isRemoving || readOnly}
-              className="flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-red-600/20 text-red-400 hover:bg-red-600/30 disabled:opacity-50 ml-auto"
+              disabled={isProcessing || readOnly}
+              className="flex items-center gap-1 px-2 py-0.5 rounded text-xs bg-red-600/20 text-red-400 hover:bg-red-600/30 disabled:opacity-50 disabled:cursor-not-allowed ml-auto"
               title="Remove all detected regions"
               aria-label={`Remove ${detectedRegions.length} detected regions`}
             >
@@ -133,7 +133,8 @@ export const CleanupControls: React.FC<CleanupControlsProps> = ({
             </button>
             <button
               onClick={onClearDetection}
-              className="p-1 text-neutral-500 hover:text-neutral-300"
+              disabled={isProcessing}
+              className="p-1 text-neutral-500 hover:text-neutral-300 disabled:opacity-50 disabled:cursor-not-allowed"
               title="Clear detection"
               aria-label="Clear detection results"
             >

@@ -295,7 +295,8 @@ pub fn source_to_timeline(
     clip_speed: f64,
     clip_tl_end: f64,
 ) -> f64 {
-    let tl = clip_timeline_in + (source_time - clip_source_in) / clip_speed;
+    let safe_speed = if clip_speed > 0.0 { clip_speed } else { 1.0 };
+    let tl = clip_timeline_in + (source_time - clip_source_in) / safe_speed;
     tl.max(clip_timeline_in).min(clip_tl_end)
 }
 

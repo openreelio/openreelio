@@ -137,6 +137,12 @@ impl AudioProfiler {
         threshold_db: f64,
         min_duration_sec: f64,
     ) -> CoreResult<Vec<SilenceRegion>> {
+        if !threshold_db.is_finite() || !min_duration_sec.is_finite() {
+            return Err(CoreError::ValidationError(
+                "threshold_db and min_duration_sec must be finite values".to_string(),
+            ));
+        }
+
         let threshold = format!("{}dB", threshold_db.clamp(-90.0, 0.0));
         let duration = format!("{:.3}", min_duration_sec.clamp(0.01, 30.0));
         let filter = format!("silencedetect=n={}:d={}", threshold, duration);

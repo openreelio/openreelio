@@ -196,14 +196,18 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
     [visibleWords, clipInfo, seek],
   );
 
+  // Serialization guard to prevent duplicate destructive IPC calls
+  const mutationInFlightRef = useRef(false);
+
   // Delete the selected word range
   const deleteSelection = useCallback(async () => {
-    if (!selection || !clipInfo) return;
+    if (mutationInFlightRef.current || !selection || !clipInfo) return;
 
     const startWord = visibleWords[selection.startIndex];
     const endWord = visibleWords[selection.endIndex];
     if (!startWord || !endWord) return;
 
+    mutationInFlightRef.current = true;
     setError(null);
     try {
       await invoke('delete_transcript_range', {
@@ -215,27 +219,33 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
           endSec: endWord.endSec,
         },
       });
-      setSelection(null);
-      setLoadTrigger((t) => t + 1); // Trigger reload after edit
+      if (isMountedRef.current) {
+        setSelection(null);
+        setLoadTrigger((t) => t + 1); // Trigger reload after edit
+      }
 
       // Refresh project state after timeline modifications
       const freshState = await refreshProjectState();
-      useProjectStore.setState((state) => {
-        state.isDirty = true;
-        state.stateVersion += 1;
-        applyProjectState(state, freshState);
-      });
+      if (isMountedRef.current) {
+        useProjectStore.setState((state) => {
+          state.isDirty = true;
+          state.stateVersion += 1;
+          applyProjectState(state, freshState);
+        });
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error('Failed to delete transcript range', { error: msg });
       if (isMountedRef.current) setError(msg);
+    } finally {
+      mutationInFlightRef.current = false;
     }
   }, [selection, visibleWords, clipInfo]);
 
   // Reorder: move selected range to target word position
   const reorderToPosition = useCallback(
     async (targetWordIndex: number) => {
-      if (!selection || !clipInfo) return;
+      if (mutationInFlightRef.current || !selection || !clipInfo) return;
 
       const startWord = visibleWords[selection.startIndex];
       const endWord = visibleWords[selection.endIndex];
@@ -246,6 +256,7 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
       const targetTimelineSec =
         clipInfo.timelineInSec + (targetWord.startSec - clipInfo.sourceInSec) / clipInfo.speed;
 
+      mutationInFlightRef.current = true;
       setError(null);
       try {
         await invoke('reorder_transcript_segment', {
@@ -258,20 +269,26 @@ export function useTranscriptEditing(): UseTranscriptEditingReturn {
             targetPositionSec: targetTimelineSec,
           },
         });
-        setSelection(null);
-        setLoadTrigger((t) => t + 1);
+        if (isMountedRef.current) {
+          setSelection(null);
+          setLoadTrigger((t) => t + 1);
+        }
 
         // Refresh project state after timeline modifications
         const freshState = await refreshProjectState();
-        useProjectStore.setState((state) => {
-          state.isDirty = true;
-          state.stateVersion += 1;
-          applyProjectState(state, freshState);
-        });
+        if (isMountedRef.current) {
+          useProjectStore.setState((state) => {
+            state.isDirty = true;
+            state.stateVersion += 1;
+            applyProjectState(state, freshState);
+          });
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error('Failed to reorder transcript segment', { error: msg });
         if (isMountedRef.current) setError(msg);
+      } finally {
+        mutationInFlightRef.current = false;
       }
     },
     [selection, visibleWords, clipInfo],

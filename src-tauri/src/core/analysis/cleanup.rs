@@ -200,7 +200,7 @@ pub fn detect_filler_words(
     }
 
     // Sort by start time (should already be sorted, but ensure)
-    matches.sort_by(|a, b| a.start_sec.partial_cmp(&b.start_sec).unwrap());
+    matches.sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
     matches
 }
 
@@ -312,7 +312,7 @@ pub fn merge_adjacent_regions(
     }
 
     let mut sorted: Vec<DetectedRegion> = regions.to_vec();
-    sorted.sort_by(|a, b| a.start_sec.partial_cmp(&b.start_sec).unwrap());
+    sorted.sort_by(|a, b| a.start_sec.total_cmp(&b.start_sec));
 
     let mut merged = vec![sorted[0].clone()];
 
@@ -335,7 +335,7 @@ pub fn merge_adjacent_regions(
 /// Removing regions from end-to-start ensures earlier regions' positions
 /// remain valid after each removal.
 pub fn sort_regions_for_removal(regions: &mut [DetectedRegion]) {
-    regions.sort_by(|a, b| b.start_sec.partial_cmp(&a.start_sec).unwrap());
+    regions.sort_by(|a, b| b.start_sec.total_cmp(&a.start_sec));
 }
 
 // =============================================================================

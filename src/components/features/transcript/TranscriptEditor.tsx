@@ -40,11 +40,12 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
     [seekToWord, isDragging]
   );
 
-  // Mouse down → start selection
+  // Mouse down → start selection (also creates single-word selection)
   const handleMouseDown = useCallback((index: number) => {
     dragStartRef.current = index;
     setIsDragging(true);
-  }, []);
+    setSelection({ startIndex: index, endIndex: index });
+  }, [setSelection]);
 
   // Mouse enter during drag → extend selection
   const handleMouseEnter = useCallback(
@@ -181,7 +182,9 @@ export const TranscriptEditor: React.FC<TranscriptEditorProps> = ({
             onMouseDown={handleMouseDown}
             onMouseEnter={handleMouseEnter}
             readOnly={readOnly}
-            isMarkedForRemoval={cleanup.isTimeInDetectedRegion(word.startSec)}
+            isMarkedForRemoval={cleanup.detectedRegions.some(
+              (region) => word.endSec > region.startSec && word.startSec < region.endSec,
+            )}
           />
         ))}
       </div>
