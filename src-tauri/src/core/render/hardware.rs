@@ -281,6 +281,215 @@ pub fn is_hardware_encoder(encoder_name: &str) -> bool {
 }
 
 // =============================================================================
+// Hardware Decoder Detection
+// =============================================================================
+
+/// Hardware decoder backend for video decoding acceleration
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum HardwareDecoderBackend {
+    /// NVIDIA CUDA (CUVID)
+    Cuda,
+    /// Direct3D 11 Video Acceleration (Windows)
+    D3d11va,
+    /// DXVA2 (Windows, legacy)
+    Dxva2,
+    /// Intel Quick Sync Video
+    Qsv,
+    /// Video Acceleration API (Linux)
+    Vaapi,
+    /// Video Decode and Presentation API for Unix (Linux, legacy)
+    Vdpau,
+    /// Apple VideoToolbox (macOS)
+    VideoToolbox,
+    /// Vulkan Video
+    Vulkan,
+}
+
+impl HardwareDecoderBackend {
+    /// FFmpeg `-hwaccel` argument value
+    pub fn hwaccel_name(&self) -> &'static str {
+        match self {
+            HardwareDecoderBackend::Cuda => "cuda",
+            HardwareDecoderBackend::D3d11va => "d3d11va",
+            HardwareDecoderBackend::Dxva2 => "dxva2",
+            HardwareDecoderBackend::Qsv => "qsv",
+            HardwareDecoderBackend::Vaapi => "vaapi",
+            HardwareDecoderBackend::Vdpau => "vdpau",
+            HardwareDecoderBackend::VideoToolbox => "videotoolbox",
+            HardwareDecoderBackend::Vulkan => "vulkan",
+        }
+    }
+
+    /// Human-readable display name
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            HardwareDecoderBackend::Cuda => "NVIDIA CUDA",
+            HardwareDecoderBackend::D3d11va => "Direct3D 11 Video Acceleration",
+            HardwareDecoderBackend::Dxva2 => "DXVA2",
+            HardwareDecoderBackend::Qsv => "Intel Quick Sync Video",
+            HardwareDecoderBackend::Vaapi => "VA-API",
+            HardwareDecoderBackend::Vdpau => "VDPAU",
+            HardwareDecoderBackend::VideoToolbox => "Apple VideoToolbox",
+            HardwareDecoderBackend::Vulkan => "Vulkan Video",
+        }
+    }
+}
+
+/// Information about a detected hardware decoder
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct HardwareDecoderInfo {
+    /// The decoder backend
+    pub backend: HardwareDecoderBackend,
+    /// Human-readable display name
+    pub display_name: String,
+    /// FFmpeg hwaccel name (used with `-hwaccel <name>`)
+    pub hwaccel_name: String,
+}
+
+/// Result of probing available hardware decoders
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct AvailableDecoders {
+    /// List of detected hardware decoder backends
+    pub hardware: Vec<HardwareDecoderInfo>,
+    /// Whether any hardware decoder is available
+    pub has_hardware: bool,
+}
+
+/// Known hardware decoder definitions (ffmpeg hwaccel name → backend)
+const HARDWARE_DECODERS: &[(&str, HardwareDecoderBackend)] = &[
+    ("cuda", HardwareDecoderBackend::Cuda),
+    ("d3d11va", HardwareDecoderBackend::D3d11va),
+    ("dxva2", HardwareDecoderBackend::Dxva2),
+    ("qsv", HardwareDecoderBackend::Qsv),
+    ("vaapi", HardwareDecoderBackend::Vaapi),
+    ("vdpau", HardwareDecoderBackend::Vdpau),
+    ("videotoolbox", HardwareDecoderBackend::VideoToolbox),
+    ("vulkan", HardwareDecoderBackend::Vulkan),
+];
+
+/// Detect available hardware decoders by probing FFmpeg
+///
+/// Runs `ffmpeg -hwaccels` and parses the output to find GPU-accelerated
+/// decoding backends supported by the installed FFmpeg build.
+pub fn detect_available_decoders(ffmpeg_path: &Path) -> AvailableDecoders {
+    let hwaccel_list = match query_ffmpeg_hwaccels(ffmpeg_path) {
+        Ok(output) => output,
+        Err(e) => {
+            tracing::warn!("Failed to probe FFmpeg hwaccels: {}", e);
+            return AvailableDecoders {
+                hardware: Vec::new(),
+                has_hardware: false,
+            };
+        }
+    };
+
+    let hardware = parse_hwaccel_output(&hwaccel_list);
+    let has_hardware = !hardware.is_empty();
+
+    AvailableDecoders {
+        hardware,
+        has_hardware,
+    }
+}
+
+/// Parse `ffmpeg -hwaccels` output into detected decoder backends
+///
+/// Output format:
+/// ```text
+/// Hardware acceleration methods:
+/// cuda
+/// d3d11va
+/// qsv
+/// ```
+fn parse_hwaccel_output(output: &str) -> Vec<HardwareDecoderInfo> {
+    let mut decoders = Vec::new();
+
+    for line in output.lines() {
+        let trimmed = line.trim();
+        // Skip header line and empty lines
+        if trimmed.is_empty() || trimmed.starts_with("Hardware") {
+            continue;
+        }
+
+        for (hwaccel_name, backend) in HARDWARE_DECODERS {
+            if trimmed == *hwaccel_name {
+                decoders.push(HardwareDecoderInfo {
+                    backend: backend.clone(),
+                    display_name: backend.display_name().to_string(),
+                    hwaccel_name: hwaccel_name.to_string(),
+                });
+                break;
+            }
+        }
+    }
+
+    decoders
+}
+
+/// Query FFmpeg for the list of supported hardware acceleration methods
+fn query_ffmpeg_hwaccels(ffmpeg_path: &Path) -> Result<String, String> {
+    let output = Command::new(ffmpeg_path)
+        .args(["-hwaccels", "-hide_banner"])
+        .output()
+        .map_err(|e| format!("Failed to execute ffmpeg: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if stdout.is_empty() && !stderr.is_empty() {
+        return Err(format!("FFmpeg hwaccel probe failed: {}", stderr));
+    }
+
+    Ok(stdout)
+}
+
+/// Resolve the best hardware decoder for the current platform
+///
+/// Prioritizes decoders by platform and performance:
+/// - Windows: CUDA > D3D11VA > QSV > DXVA2
+/// - Linux: CUDA > VAAPI > QSV > VDPAU
+/// - macOS: VideoToolbox
+pub fn resolve_best_decoder(available: &AvailableDecoders) -> Option<&HardwareDecoderInfo> {
+    if !available.has_hardware {
+        return None;
+    }
+
+    // Priority order for decoder selection
+    let priority: &[HardwareDecoderBackend] = if cfg!(target_os = "macos") {
+        &[HardwareDecoderBackend::VideoToolbox]
+    } else if cfg!(target_os = "windows") {
+        &[
+            HardwareDecoderBackend::Cuda,
+            HardwareDecoderBackend::D3d11va,
+            HardwareDecoderBackend::Qsv,
+            HardwareDecoderBackend::Vulkan,
+            HardwareDecoderBackend::Dxva2,
+        ]
+    } else {
+        // Linux
+        &[
+            HardwareDecoderBackend::Cuda,
+            HardwareDecoderBackend::Vaapi,
+            HardwareDecoderBackend::Qsv,
+            HardwareDecoderBackend::Vulkan,
+            HardwareDecoderBackend::Vdpau,
+        ]
+    };
+
+    for target in priority {
+        if let Some(decoder) = available.hardware.iter().find(|d| &d.backend == target) {
+            return Some(decoder);
+        }
+    }
+
+    // Fallback: return first available
+    available.hardware.first()
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -485,5 +694,172 @@ mod tests {
         assert!(!is_hardware_encoder("libx264"));
         assert!(!is_hardware_encoder("libx265"));
         assert!(!is_hardware_encoder("copy"));
+    }
+
+    // -------------------------------------------------------------------------
+    // BDD: Feature: Hardware Decoder Detection
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn should_parse_cuda_and_d3d11va_from_hwaccel_output() {
+        // Given: ffmpeg -hwaccels output listing cuda and d3d11va
+        let output = "Hardware acceleration methods:\ncuda\nd3d11va\n";
+
+        // When: parsing the hwaccel output
+        let decoders = parse_hwaccel_output(output);
+
+        // Then: both backends are detected
+        assert_eq!(decoders.len(), 2);
+        assert_eq!(decoders[0].backend, HardwareDecoderBackend::Cuda);
+        assert_eq!(decoders[0].hwaccel_name, "cuda");
+        assert_eq!(decoders[1].backend, HardwareDecoderBackend::D3d11va);
+        assert_eq!(decoders[1].hwaccel_name, "d3d11va");
+    }
+
+    #[test]
+    fn should_parse_all_known_decoder_backends() {
+        // Given: ffmpeg output with all known backends
+        let output = "Hardware acceleration methods:\ncuda\nd3d11va\ndxva2\nqsv\nvaapi\nvdpau\nvideotoolbox\nvulkan\n";
+
+        // When: parsing
+        let decoders = parse_hwaccel_output(output);
+
+        // Then: all 8 backends detected
+        assert_eq!(decoders.len(), 8);
+    }
+
+    #[test]
+    fn should_return_empty_when_no_hwaccels_available() {
+        // Given: ffmpeg output with only the header, no backends
+        let output = "Hardware acceleration methods:\n";
+
+        // When: parsing
+        let decoders = parse_hwaccel_output(output);
+
+        // Then: no decoders detected
+        assert!(decoders.is_empty());
+    }
+
+    #[test]
+    fn should_skip_unknown_hwaccel_backends() {
+        // Given: output with known and unknown backends
+        let output = "Hardware acceleration methods:\ncuda\nfuture_backend\nqsv\n";
+
+        // When: parsing
+        let decoders = parse_hwaccel_output(output);
+
+        // Then: only known backends are returned
+        assert_eq!(decoders.len(), 2);
+        assert_eq!(decoders[0].backend, HardwareDecoderBackend::Cuda);
+        assert_eq!(decoders[1].backend, HardwareDecoderBackend::Qsv);
+    }
+
+    #[test]
+    fn should_handle_whitespace_in_hwaccel_output() {
+        // Given: output with extra whitespace
+        let output = "Hardware acceleration methods:\n  cuda  \n  d3d11va  \n\n";
+
+        // When: parsing
+        let decoders = parse_hwaccel_output(output);
+
+        // Then: backends detected despite whitespace
+        assert_eq!(decoders.len(), 2);
+    }
+
+    #[test]
+    fn should_provide_correct_display_names_for_decoders() {
+        // Given/When: checking display names
+        assert_eq!(HardwareDecoderBackend::Cuda.display_name(), "NVIDIA CUDA");
+        assert_eq!(
+            HardwareDecoderBackend::D3d11va.display_name(),
+            "Direct3D 11 Video Acceleration"
+        );
+        assert_eq!(
+            HardwareDecoderBackend::Qsv.display_name(),
+            "Intel Quick Sync Video"
+        );
+        assert_eq!(
+            HardwareDecoderBackend::VideoToolbox.display_name(),
+            "Apple VideoToolbox"
+        );
+    }
+
+    #[test]
+    fn should_provide_correct_hwaccel_names_for_decoders() {
+        // Given/When: checking FFmpeg hwaccel names
+        assert_eq!(HardwareDecoderBackend::Cuda.hwaccel_name(), "cuda");
+        assert_eq!(HardwareDecoderBackend::D3d11va.hwaccel_name(), "d3d11va");
+        assert_eq!(HardwareDecoderBackend::Vaapi.hwaccel_name(), "vaapi");
+        assert_eq!(
+            HardwareDecoderBackend::VideoToolbox.hwaccel_name(),
+            "videotoolbox"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // BDD: Feature: Best Decoder Resolution
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn should_resolve_best_decoder_by_platform_priority() {
+        // Given: cuda and qsv available
+        let available = AvailableDecoders {
+            hardware: vec![
+                HardwareDecoderInfo {
+                    backend: HardwareDecoderBackend::Qsv,
+                    display_name: "Intel Quick Sync Video".to_string(),
+                    hwaccel_name: "qsv".to_string(),
+                },
+                HardwareDecoderInfo {
+                    backend: HardwareDecoderBackend::Cuda,
+                    display_name: "NVIDIA CUDA".to_string(),
+                    hwaccel_name: "cuda".to_string(),
+                },
+            ],
+            has_hardware: true,
+        };
+
+        // When: resolving best decoder (on Windows/Linux, CUDA is preferred over QSV)
+        let best = resolve_best_decoder(&available);
+
+        // Then: CUDA is selected (higher priority on Windows/Linux)
+        assert!(best.is_some());
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(best.unwrap().backend, HardwareDecoderBackend::Cuda);
+    }
+
+    #[test]
+    fn should_return_none_when_no_decoders_available() {
+        // Given: no hardware decoders
+        let available = AvailableDecoders {
+            hardware: Vec::new(),
+            has_hardware: false,
+        };
+
+        // When: resolving best decoder
+        let best = resolve_best_decoder(&available);
+
+        // Then: None returned
+        assert!(best.is_none());
+    }
+
+    #[test]
+    fn should_fallback_to_first_available_decoder() {
+        // Given: only an uncommon decoder available
+        let available = AvailableDecoders {
+            hardware: vec![HardwareDecoderInfo {
+                backend: HardwareDecoderBackend::Vdpau,
+                display_name: "VDPAU".to_string(),
+                hwaccel_name: "vdpau".to_string(),
+            }],
+            has_hardware: true,
+        };
+
+        // When: resolving (VDPAU is low priority on all platforms)
+        let best = resolve_best_decoder(&available);
+
+        // Then: returns the only available decoder
+        assert!(best.is_some());
+        assert_eq!(best.unwrap().backend, HardwareDecoderBackend::Vdpau);
     }
 }
