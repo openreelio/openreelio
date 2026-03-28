@@ -921,10 +921,7 @@ pub fn enforce_cache_limit(
                 match std::fs::remove_file(&full_path) {
                     Ok(()) => file_removed = true,
                     Err(e) => {
-                        tracing::warn!(
-                            "Failed to evict cache file {}: {e}",
-                            full_path.display()
-                        );
+                        tracing::warn!("Failed to evict cache file {}: {e}", full_path.display());
                     }
                 }
             } else {

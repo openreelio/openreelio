@@ -349,7 +349,10 @@ mod tests {
             wrapped,
             "hwdownload,format=nv12,gblur=sigma=5,crop=1920:1080:0:0"
         );
-        assert!(!ctx.is_frames_on_gpu(), "frames_on_gpu should be false after hwdownload");
+        assert!(
+            !ctx.is_frames_on_gpu(),
+            "frames_on_gpu should be false after hwdownload"
+        );
     }
 
     #[test]
