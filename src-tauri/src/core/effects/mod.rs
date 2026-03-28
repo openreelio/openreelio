@@ -4,12 +4,14 @@
 //! Includes FFmpeg filter generation for rendering effects.
 
 mod filter_builder;
+pub mod gpu_filters;
 mod mask_filters;
 mod models;
 pub mod presets;
 mod qualifier_filters;
 
 pub use filter_builder::{FilterGraph, IntoFFmpegFilter};
+pub use gpu_filters::{GpuFilterBackend, GpuFilterContext};
 pub use mask_filters::{
     apply_effect_through_mask, mask_group_to_alpha_expression, mask_to_alpha_filter,
     MaskFilterBuilder,
