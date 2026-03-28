@@ -1,0 +1,314 @@
+/**
+ * useTranscriptEditing Hook
+ *
+ * Provides transcript-driven editing: word-level timing, playhead-synced
+ * highlighting, selection-based deletion, and segment reordering.
+ */
+
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { createLogger } from '@/services/logger';
+import { usePlaybackStore } from '@/stores/playbackStore';
+import { useProjectStore } from '@/stores/projectStore';
+import { useTimelineStore } from '@/stores/timelineStore';
+import { applyProjectState, refreshProjectState } from '@/utils/stateRefreshHelper';
+
+const logger = createLogger('useTranscriptEditing');
+
+// =============================================================================
+// Types
+// =============================================================================
+
+/** A word with estimated timing from the backend */
+export interface TranscriptWord {
+  text: string;
+  startSec: number;
+  endSec: number;
+  segmentIndex: number;
+  wordIndex: number;
+  confidence: number;
+  speakerId?: string | null;
+}
+
+/** Word selection range for editing operations */
+export interface WordSelection {
+  startIndex: number;
+  endIndex: number;
+}
+
+/** Return type of the hook */
+export interface UseTranscriptEditingReturn {
+  /** Words with timing that overlap the selected clip's source range */
+  words: TranscriptWord[];
+  /** Whether words are currently loading */
+  isLoading: boolean;
+  /** Error message if loading or operation failed */
+  error: string | null;
+  /** Index of the word currently under the playhead */
+  activeWordIndex: number;
+  /** Current word selection range */
+  selection: WordSelection | null;
+  /** The asset ID of the clip being edited */
+  assetId: string | null;
+
+  /** Set the word selection range */
+  setSelection: (selection: WordSelection | null) => void;
+  /** Seek playhead to a word's start time */
+  seekToWord: (wordIndex: number) => void;
+  /** Delete the selected word range from the timeline */
+  deleteSelection: () => Promise<void>;
+  /** Reorder: move selected range to a target word position */
+  reorderToPosition: (targetWordIndex: number) => Promise<void>;
+  /** Reload transcript words */
+  reload: () => void;
+}
+
+// =============================================================================
+// Hook Implementation
+// =============================================================================
+
+export function useTranscriptEditing(): UseTranscriptEditingReturn {
+  const isMountedRef = useRef(true);
+  const [words, setWords] = useState<TranscriptWord[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [selection, setSelection] = useState<WordSelection | null>(null);
+  const [loadTrigger, setLoadTrigger] = useState(0);
+
+  const currentTime = usePlaybackStore((s) => s.currentTime);
+  const seek = usePlaybackStore((s) => s.seek);
+  const selectedClipIds = useTimelineStore((s) => s.selectedClipIds);
+  const activeSequenceId = useProjectStore((s) => s.activeSequenceId);
+  const sequences = useProjectStore((s) => s.sequences);
+
+  // Resolve the selected clip's asset ID and clip metadata
+  const clipInfo = useMemo(() => {
+    if (selectedClipIds.length !== 1) return null;
+    const clipId = selectedClipIds[0];
+
+    if (!activeSequenceId) return null;
+
+    const seq = sequences.get(activeSequenceId);
+    if (!seq) return null;
+
+    for (const track of seq.tracks) {
+      const clip = track.clips.find((c) => c.id === clipId);
+      if (clip) {
+        return {
+          clipId: clip.id,
+          assetId: clip.assetId,
+          trackId: track.id,
+          sequenceId: activeSequenceId,
+          sourceInSec: clip.range.sourceInSec,
+          sourceOutSec: clip.range.sourceOutSec,
+          speed: clip.speed,
+          timelineInSec: clip.place.timelineInSec,
+        };
+      }
+    }
+    return null;
+  }, [selectedClipIds, activeSequenceId, sequences]);
+
+  useEffect(() => {
+    setSelection(null);
+  }, [clipInfo?.clipId]);
+
+  // Load transcript words when clip selection changes
+  useEffect(() => {
+    if (!clipInfo) {
+      setWords([]);
+      setError(null);
+      return;
+    }
+
+    let cancelled = false;
+    setIsLoading(true);
+    setError(null);
+
+    invoke<TranscriptWord[]>('get_transcript_words', {
+      assetId: clipInfo.assetId,
+    })
+      .then((result) => {
+        if (!cancelled && isMountedRef.current) {
+          setWords(result);
+          setIsLoading(false);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled && isMountedRef.current) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.warn('Failed to load transcript words', { error: msg });
+          setWords([]);
+          setError(msg);
+          setIsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [clipInfo?.assetId, loadTrigger]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  const visibleWords = useMemo(() => {
+    if (!clipInfo) {
+      return [];
+    }
+
+    return words.filter(
+      (word) => word.endSec > clipInfo.sourceInSec && word.startSec < clipInfo.sourceOutSec,
+    );
+  }, [words, clipInfo]);
+
+  // Find the active word index based on playhead position
+  const activeWordIndex = useMemo(() => {
+    if (visibleWords.length === 0 || !clipInfo) return -1;
+
+    // Convert timeline time to source time
+    const sourceTime =
+      clipInfo.sourceInSec + (currentTime - clipInfo.timelineInSec) * clipInfo.speed;
+
+    for (let i = 0; i < visibleWords.length; i++) {
+      if (sourceTime >= visibleWords[i].startSec && sourceTime < visibleWords[i].endSec) {
+        return i;
+      }
+    }
+    return -1;
+  }, [visibleWords, currentTime, clipInfo]);
+
+  // Seek playhead to a word's start time
+  const seekToWord = useCallback(
+    (wordIndex: number) => {
+      if (wordIndex < 0 || wordIndex >= visibleWords.length || !clipInfo) return;
+      const word = visibleWords[wordIndex];
+      // Convert source time to timeline time
+      const timelineTime =
+        clipInfo.timelineInSec + (word.startSec - clipInfo.sourceInSec) / clipInfo.speed;
+      seek(timelineTime, 'transcript-word');
+    },
+    [visibleWords, clipInfo, seek],
+  );
+
+  // Serialization guard to prevent duplicate destructive IPC calls
+  const mutationInFlightRef = useRef(false);
+
+  // Delete the selected word range
+  const deleteSelection = useCallback(async () => {
+    if (mutationInFlightRef.current || !selection || !clipInfo) return;
+
+    const startWord = visibleWords[selection.startIndex];
+    const endWord = visibleWords[selection.endIndex];
+    if (!startWord || !endWord) return;
+
+    mutationInFlightRef.current = true;
+    setError(null);
+    try {
+      await invoke('delete_transcript_range', {
+        args: {
+          sequenceId: clipInfo.sequenceId,
+          trackId: clipInfo.trackId,
+          clipId: clipInfo.clipId,
+          startSec: startWord.startSec,
+          endSec: endWord.endSec,
+        },
+      });
+      if (isMountedRef.current) {
+        setSelection(null);
+        setLoadTrigger((t) => t + 1); // Trigger reload after edit
+      }
+
+      // Refresh project state after timeline modifications
+      const freshState = await refreshProjectState();
+      if (isMountedRef.current) {
+        useProjectStore.setState((state) => {
+          state.isDirty = true;
+          state.stateVersion += 1;
+          applyProjectState(state, freshState);
+        });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error('Failed to delete transcript range', { error: msg });
+      if (isMountedRef.current) setError(msg);
+    } finally {
+      mutationInFlightRef.current = false;
+    }
+  }, [selection, visibleWords, clipInfo]);
+
+  // Reorder: move selected range to target word position
+  const reorderToPosition = useCallback(
+    async (targetWordIndex: number) => {
+      if (mutationInFlightRef.current || !selection || !clipInfo) return;
+
+      const startWord = visibleWords[selection.startIndex];
+      const endWord = visibleWords[selection.endIndex];
+      const targetWord = visibleWords[targetWordIndex];
+      if (!startWord || !endWord || !targetWord) return;
+
+      // Convert target word's source time to timeline position
+      const targetTimelineSec =
+        clipInfo.timelineInSec + (targetWord.startSec - clipInfo.sourceInSec) / clipInfo.speed;
+
+      mutationInFlightRef.current = true;
+      setError(null);
+      try {
+        await invoke('reorder_transcript_segment', {
+          args: {
+            sequenceId: clipInfo.sequenceId,
+            trackId: clipInfo.trackId,
+            clipId: clipInfo.clipId,
+            sourceStartSec: startWord.startSec,
+            sourceEndSec: endWord.endSec,
+            targetPositionSec: targetTimelineSec,
+          },
+        });
+        if (isMountedRef.current) {
+          setSelection(null);
+          setLoadTrigger((t) => t + 1);
+        }
+
+        // Refresh project state after timeline modifications
+        const freshState = await refreshProjectState();
+        if (isMountedRef.current) {
+          useProjectStore.setState((state) => {
+            state.isDirty = true;
+            state.stateVersion += 1;
+            applyProjectState(state, freshState);
+          });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error('Failed to reorder transcript segment', { error: msg });
+        if (isMountedRef.current) setError(msg);
+      } finally {
+        mutationInFlightRef.current = false;
+      }
+    },
+    [selection, visibleWords, clipInfo],
+  );
+
+  const reload = useCallback(() => {
+    setLoadTrigger((t) => t + 1);
+  }, []);
+
+  return {
+    words: visibleWords,
+    isLoading,
+    error,
+    activeWordIndex,
+    selection,
+    assetId: clipInfo?.assetId ?? null,
+    setSelection,
+    seekToWord,
+    deleteSelection,
+    reorderToPosition,
+    reload,
+  };
+}

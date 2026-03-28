@@ -990,6 +990,14 @@ mod tauri_app {
                 $crate::ipc::load_effect_preset,
                 $crate::ipc::list_effect_presets,
                 $crate::ipc::delete_effect_preset,
+                // Transcript-based editing (S35-001)
+                $crate::ipc::get_transcript_words,
+                $crate::ipc::delete_transcript_range,
+                $crate::ipc::reorder_transcript_segment,
+                // Cleanup detection (S35-002)
+                $crate::ipc::detect_silence_regions,
+                $crate::ipc::detect_filler_words,
+                $crate::ipc::remove_detected_regions,
             ]
         };
     }
@@ -1393,6 +1401,14 @@ mod tauri_app {
             ipc::load_effect_preset,
             ipc::list_effect_presets,
             ipc::delete_effect_preset,
+            // Transcript-based editing (S35-001)
+            ipc::get_transcript_words,
+            ipc::delete_transcript_range,
+            ipc::reorder_transcript_segment,
+            // Cleanup detection (S35-002)
+            ipc::detect_silence_regions,
+            ipc::detect_filler_words,
+            ipc::remove_detected_regions,
         ])
         .run(tauri::generate_context!());
 

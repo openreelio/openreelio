@@ -223,6 +223,104 @@ impl TranscriptSegment {
 }
 
 // =============================================================================
+// Transcript Word (word-level timing)
+// =============================================================================
+
+/// A single word with estimated timing derived from transcript segments.
+///
+/// Word-level timing is estimated by linearly interpolating within each
+/// segment's time range based on whitespace-delimited word count.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptWord {
+    /// The word text
+    pub text: String,
+    /// Estimated start time in seconds (source-relative)
+    pub start_sec: f64,
+    /// Estimated end time in seconds (source-relative)
+    pub end_sec: f64,
+    /// Index of the parent segment in the transcript
+    pub segment_index: usize,
+    /// Index of this word within its parent segment
+    pub word_index: usize,
+    /// Confidence inherited from parent segment (0.0 - 1.0)
+    pub confidence: f64,
+    /// Speaker ID inherited from parent segment
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<String>,
+}
+
+/// Estimate per-word timing from transcript segments using linear interpolation.
+///
+/// Each segment's duration is divided equally among its whitespace-delimited
+/// words. This provides approximate word timing suitable for UI highlighting
+/// and click-to-seek functionality.
+pub fn estimate_word_timings(segments: &[TranscriptSegment]) -> Vec<TranscriptWord> {
+    let mut words = Vec::new();
+    for (seg_idx, segment) in segments.iter().enumerate() {
+        let seg_words: Vec<&str> = segment.text.split_whitespace().collect();
+        if seg_words.is_empty() {
+            continue;
+        }
+        let duration = segment.end_sec - segment.start_sec;
+        let word_duration = duration / seg_words.len() as f64;
+        for (word_idx, word_text) in seg_words.iter().enumerate() {
+            let start = segment.start_sec + (word_idx as f64 * word_duration);
+            let end = (start + word_duration).min(segment.end_sec);
+            words.push(TranscriptWord {
+                text: word_text.to_string(),
+                start_sec: start,
+                end_sec: end,
+                segment_index: seg_idx,
+                word_index: word_idx,
+                confidence: segment.confidence,
+                speaker_id: segment.speaker_id.clone(),
+            });
+        }
+    }
+    words
+}
+
+// =============================================================================
+// Transcript Timeline Helpers
+// =============================================================================
+
+/// Convert source-relative time to timeline position for a given clip.
+///
+/// Clamps the result to the clip's timeline boundaries.
+pub fn source_to_timeline(
+    source_time: f64,
+    clip_source_in: f64,
+    clip_timeline_in: f64,
+    clip_speed: f64,
+    clip_tl_end: f64,
+) -> f64 {
+    let safe_speed = if clip_speed > 0.0 { clip_speed } else { 1.0 };
+    let tl = clip_timeline_in + (source_time - clip_source_in) / safe_speed;
+    tl.max(clip_timeline_in).min(clip_tl_end)
+}
+
+/// Re-bases a target insertion point after a source segment has been removed
+/// by a ripple delete.
+///
+/// - If target is before the removed range: unchanged.
+/// - If target is after the removed range: shifted left by removed duration.
+/// - If target is inside the removed range: clamped to the removal start.
+pub fn adjust_insert_target_after_removal(
+    target_position_sec: f64,
+    removed_start_sec: f64,
+    removed_end_sec: f64,
+) -> f64 {
+    if target_position_sec <= removed_start_sec {
+        return target_position_sec;
+    }
+    if target_position_sec >= removed_end_sec {
+        return target_position_sec - (removed_end_sec - removed_start_sec);
+    }
+    removed_start_sec
+}
+
+// =============================================================================
 // Object Detection
 // =============================================================================
 
@@ -1095,5 +1193,157 @@ mod tests {
             let json = serde_json::to_string(&status).unwrap();
             assert_eq!(json, expected, "AnalysisStatus::{:?}", status);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // TranscriptWord / estimate_word_timings Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn should_estimate_word_timings_single_segment() {
+        let segments = vec![TranscriptSegment::new(
+            0.0,
+            3.0,
+            "Hello beautiful world",
+            0.95,
+        )];
+        let words = estimate_word_timings(&segments);
+
+        assert_eq!(words.len(), 3);
+        assert_eq!(words[0].text, "Hello");
+        assert!((words[0].start_sec - 0.0).abs() < 0.001);
+        assert!((words[0].end_sec - 1.0).abs() < 0.001);
+        assert_eq!(words[1].text, "beautiful");
+        assert!((words[1].start_sec - 1.0).abs() < 0.001);
+        assert_eq!(words[2].text, "world");
+        assert!((words[2].start_sec - 2.0).abs() < 0.001);
+        assert!((words[2].end_sec - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_estimate_word_timings_multiple_segments() {
+        let segments = vec![
+            TranscriptSegment::new(0.0, 2.0, "first segment", 0.9),
+            TranscriptSegment::new(2.5, 5.5, "second much longer segment", 0.85),
+        ];
+        let words = estimate_word_timings(&segments);
+
+        assert_eq!(words.len(), 6);
+        assert_eq!(words[0].segment_index, 0);
+        assert_eq!(words[0].word_index, 0);
+        assert!((words[0].end_sec - 1.0).abs() < 0.001);
+        assert_eq!(words[2].segment_index, 1);
+        assert_eq!(words[2].word_index, 0);
+        assert!((words[2].start_sec - 2.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_handle_empty_segments_for_word_timing() {
+        assert!(estimate_word_timings(&[]).is_empty());
+    }
+
+    #[test]
+    fn should_handle_empty_text_in_word_timing() {
+        let segments = vec![TranscriptSegment::new(0.0, 1.0, "", 0.5)];
+        assert!(estimate_word_timings(&segments).is_empty());
+    }
+
+    #[test]
+    fn should_handle_whitespace_only_in_word_timing() {
+        let segments = vec![TranscriptSegment::new(0.0, 1.0, "   \t  ", 0.5)];
+        assert!(estimate_word_timings(&segments).is_empty());
+    }
+
+    #[test]
+    fn should_preserve_speaker_in_word_timing() {
+        let segments =
+            vec![TranscriptSegment::new(0.0, 1.0, "hello", 0.99).with_speaker("speaker_1")];
+        let words = estimate_word_timings(&segments);
+        assert_eq!(words.len(), 1);
+        assert!((words[0].confidence - 0.99).abs() < 0.001);
+        assert_eq!(words[0].speaker_id, Some("speaker_1".to_string()));
+    }
+
+    #[test]
+    fn should_handle_single_word_in_word_timing() {
+        let segments = vec![TranscriptSegment::new(5.0, 6.5, "word", 0.8)];
+        let words = estimate_word_timings(&segments);
+        assert_eq!(words.len(), 1);
+        assert!((words[0].start_sec - 5.0).abs() < 0.001);
+        assert!((words[0].end_sec - 6.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn should_json_roundtrip_transcript_word() {
+        let word = TranscriptWord {
+            text: "hello".to_string(),
+            start_sec: 1.5,
+            end_sec: 2.0,
+            segment_index: 0,
+            word_index: 0,
+            confidence: 0.95,
+            speaker_id: Some("s1".to_string()),
+        };
+        let json = serde_json::to_string(&word).unwrap();
+        let parsed: TranscriptWord = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.text, "hello");
+        assert!((parsed.start_sec - 1.5).abs() < 0.001);
+        assert_eq!(parsed.speaker_id, Some("s1".to_string()));
+    }
+
+    // -------------------------------------------------------------------------
+    // source_to_timeline / adjust_insert_target_after_removal Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn source_to_timeline_should_convert_basic_position() {
+        // source=7.0, clip_src_in=5.0, clip_tl_in=10.0, speed=1.0, clip_tl_end=20.0
+        let pos = source_to_timeline(7.0, 5.0, 10.0, 1.0, 20.0);
+        assert!((pos - 12.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn source_to_timeline_should_clamp_to_clip_end() {
+        let pos = source_to_timeline(15.0, 5.0, 10.0, 2.0, 14.0);
+        assert_eq!(pos, 14.0);
+    }
+
+    #[test]
+    fn source_to_timeline_should_clamp_to_clip_start() {
+        let pos = source_to_timeline(2.0, 5.0, 10.0, 1.0, 20.0);
+        assert_eq!(pos, 10.0);
+    }
+
+    #[test]
+    fn source_to_timeline_should_account_for_speed() {
+        // speed=2.0 means source plays at double speed, so timeline duration is halved
+        let pos = source_to_timeline(9.0, 5.0, 10.0, 2.0, 20.0);
+        assert!((pos - 12.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn adjust_target_should_leave_before_removed_range() {
+        assert_eq!(adjust_insert_target_after_removal(2.5, 4.0, 7.0), 2.5);
+    }
+
+    #[test]
+    fn adjust_target_should_shift_after_removed_range() {
+        assert_eq!(adjust_insert_target_after_removal(12.0, 4.0, 7.0), 9.0);
+    }
+
+    #[test]
+    fn adjust_target_should_clamp_inside_removed_range() {
+        assert_eq!(adjust_insert_target_after_removal(5.0, 4.0, 7.0), 4.0);
+    }
+
+    #[test]
+    fn adjust_target_should_handle_boundary_at_start() {
+        assert_eq!(adjust_insert_target_after_removal(4.0, 4.0, 7.0), 4.0);
+    }
+
+    #[test]
+    fn adjust_target_should_handle_boundary_at_end() {
+        // target == removed_end: shifted by full duration
+        assert_eq!(adjust_insert_target_after_removal(7.0, 4.0, 7.0), 4.0);
     }
 }
