@@ -873,12 +873,22 @@ pub fn build_gpu_devices_from_probes(
     let best_decoder = resolve_best_decoder(decoders);
     for dec_info in &decoders.hardware {
         let vendor = vendor_from_decoder(&dec_info.backend);
-        // Skip Unknown vendors entirely when we already have specific vendors
-        // from encoder detection. Ambiguous backends (D3D11VA, VAAPI) cannot be
-        // reliably attributed to a vendor, so fanning decode capability to all
-        // vendors would produce incorrect hardware decoder selection on multi-GPU
-        // systems (e.g. CUDA args emitted for a VAAPI-only backend).
-        if vendor == GpuVendor::Unknown && !vendor_set.is_empty() {
+        // Ambiguous decoder backends (D3D11VA, VAAPI) return Unknown vendor.
+        // When exactly one specific vendor is known from encoder detection, it
+        // is safe to attribute the decode capability to that vendor. When
+        // multiple vendors exist, we cannot determine which GPU the system-level
+        // decoder targets, so skip to avoid incorrect hardware decoder selection
+        // (e.g. emitting CUDA args when only VAAPI was detected).
+        if vendor == GpuVendor::Unknown && vendor_set.len() > 1 {
+            continue;
+        }
+        if vendor == GpuVendor::Unknown && vendor_set.len() == 1 {
+            // Single known vendor — attribute decode capability to it
+            for (_, (caps, _)) in vendor_set.iter_mut() {
+                if !caps.contains(&GpuCapability::HardwareDecode) {
+                    caps.push(GpuCapability::HardwareDecode);
+                }
+            }
             continue;
         }
 
