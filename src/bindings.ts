@@ -589,6 +589,7 @@ async clearRenderCache() : Promise<Result<ClearCacheResult, string>> {
  * 
  * Triggers background rendering of uncached segments. Returns the cache
  * status immediately; rendering progress is reported via Tauri events.
+ * If a previous cache render is still running it is cancelled first.
  */
 async renderPreviewCache() : Promise<Result<RenderCacheJobResult, string>> {
     try {
@@ -1576,6 +1577,13 @@ async downloadAndInstallUpdate() : Promise<Result<boolean, string>> {
 },
 /**
  * Collects real-time system metrics using the sysinfo crate.
+ * 
+ * CPU readings require at least two consecutive calls (the persistent
+ * `SYSTEM_METRICS` instance ensures the baseline exists across polls).
+ * 
+ * The work is offloaded via `spawn_blocking` so that OS calls like
+ * `refresh_processes` and disk enumeration never stall the async
+ * IPC runtime.
  */
 async getSystemMetrics() : Promise<Result<SystemMetricsDto, string>> {
     try {
@@ -5786,11 +5794,11 @@ ramUsedBytes: number;
  */
 processMemoryBytes: number; 
 /**
- * Disk read bytes since last query (cumulative for all disks)
+ * Disk read bytes since last query (current process only)
  */
 diskReadBytes: number; 
 /**
- * Disk write bytes since last query (cumulative for all disks)
+ * Disk write bytes since last query (current process only)
  */
 diskWriteBytes: number; 
 /**
