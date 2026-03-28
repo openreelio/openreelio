@@ -85,6 +85,9 @@ dirs = "5.0"
 fs2 = "0.4"
 hostname = "0.4"
 
+# System metrics (CPU, RAM, Disk I/O)
+sysinfo = "0.32"
+
 # Type export for TypeScript bindings (Code-as-Documentation)
 specta = { version = "2.0.0-rc.20", features = ["derive", "serde_json"] }
 tauri-specta = { version = "2.0.0-rc.20", features = ["derive", "typescript"], optional = true }

@@ -266,6 +266,10 @@ pub struct EditorSettings {
     /// Ripple edit by default
     #[serde(default)]
     pub ripple_edit_default: bool,
+
+    /// User's favorite effects for quick access
+    #[serde(default)]
+    pub favorite_effects: Vec<String>,
 }
 
 impl Default for EditorSettings {
@@ -277,6 +281,7 @@ impl Default for EditorSettings {
             show_clip_thumbnails: true,
             show_audio_waveforms: true,
             ripple_edit_default: false,
+            favorite_effects: Vec::new(),
         }
     }
 }
@@ -479,6 +484,10 @@ pub struct PerformanceSettings {
     #[serde(default = "default_true")]
     pub hardware_acceleration: bool,
 
+    /// Preferred GPU device ID (None = auto-select best available)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_device_id: Option<String>,
+
     /// Proxy generation enabled
     #[serde(default = "default_true")]
     pub proxy_generation: bool,
@@ -504,6 +513,7 @@ impl Default for PerformanceSettings {
     fn default() -> Self {
         Self {
             hardware_acceleration: true,
+            gpu_device_id: None,
             proxy_generation: true,
             proxy_resolution: default_proxy_resolution(),
             max_concurrent_jobs: default_max_jobs(),

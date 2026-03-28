@@ -112,6 +112,7 @@ pub struct EditorSettingsDto {
     pub show_clip_thumbnails: bool,
     pub show_audio_waveforms: bool,
     pub ripple_edit_default: bool,
+    pub favorite_effects: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Type)]
@@ -161,6 +162,7 @@ pub struct AutoSaveSettingsDto {
 #[serde(rename_all = "camelCase")]
 pub struct PerformanceSettingsDto {
     pub hardware_acceleration: bool,
+    pub gpu_device_id: Option<String>,
     pub proxy_generation: bool,
     pub proxy_resolution: String,
     pub max_concurrent_jobs: u32,
@@ -262,6 +264,7 @@ impl From<AppSettings> for AppSettingsDto {
                 show_clip_thumbnails: s.editor.show_clip_thumbnails,
                 show_audio_waveforms: s.editor.show_audio_waveforms,
                 ripple_edit_default: s.editor.ripple_edit_default,
+                favorite_effects: s.editor.favorite_effects,
             },
             playback: PlaybackSettingsDto {
                 default_volume: s.playback.default_volume,
@@ -293,6 +296,7 @@ impl From<AppSettings> for AppSettingsDto {
             },
             performance: PerformanceSettingsDto {
                 hardware_acceleration: s.performance.hardware_acceleration,
+                gpu_device_id: s.performance.gpu_device_id,
                 proxy_generation: s.performance.proxy_generation,
                 proxy_resolution: s.performance.proxy_resolution,
                 max_concurrent_jobs: s.performance.max_concurrent_jobs,
@@ -370,6 +374,7 @@ impl From<AppSettingsDto> for AppSettings {
                 show_clip_thumbnails: dto.editor.show_clip_thumbnails,
                 show_audio_waveforms: dto.editor.show_audio_waveforms,
                 ripple_edit_default: dto.editor.ripple_edit_default,
+                favorite_effects: dto.editor.favorite_effects,
             },
             playback: PlaybackSettings {
                 default_volume: dto.playback.default_volume,
@@ -401,6 +406,7 @@ impl From<AppSettingsDto> for AppSettings {
             },
             performance: PerformanceSettings {
                 hardware_acceleration: dto.performance.hardware_acceleration,
+                gpu_device_id: dto.performance.gpu_device_id,
                 proxy_generation: dto.performance.proxy_generation,
                 proxy_resolution: dto.performance.proxy_resolution,
                 max_concurrent_jobs: dto.performance.max_concurrent_jobs,
@@ -992,4 +998,161 @@ pub async fn download_and_install_update(app: tauri::AppHandle) -> Result<bool, 
 
     tracing::info!("Update installed successfully, restart required");
     Ok(true)
+}
+
+// =============================================================================
+// System Metrics for Performance Monitoring Panel
+// =============================================================================
+
+/// Real-time system metrics snapshot for the performance monitoring panel.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct SystemMetricsDto {
+    /// Global CPU usage percentage (0.0 - 100.0)
+    pub cpu_usage_percent: f64,
+    /// Total physical RAM in bytes
+    pub ram_total_bytes: u64,
+    /// Used RAM in bytes
+    pub ram_used_bytes: u64,
+    /// Process RSS (resident set size) in bytes
+    pub process_memory_bytes: u64,
+    /// Disk read bytes since last query (cumulative for all disks)
+    pub disk_read_bytes: u64,
+    /// Disk write bytes since last query (cumulative for all disks)
+    pub disk_write_bytes: u64,
+    /// Total disk space in bytes
+    pub disk_total_bytes: u64,
+    /// Available disk space in bytes
+    pub disk_available_bytes: u64,
+    /// Number of logical CPU cores
+    pub cpu_core_count: u32,
+}
+
+/// Persistent sysinfo::System shared across metric polls.
+///
+/// `sysinfo` requires calling `refresh_cpu_usage()` on the **same** instance
+/// across consecutive calls to produce meaningful CPU readings — the first
+/// call on a fresh `System` always returns 0%.  We keep a single `Mutex`-
+/// wrapped instance so successive IPC polls get real deltas.
+static SYSTEM_METRICS: std::sync::LazyLock<std::sync::Mutex<sysinfo::System>> =
+    std::sync::LazyLock::new(|| {
+        let mut sys = sysinfo::System::new();
+        // Seed the first baseline so the *second* call already has a delta.
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+        std::sync::Mutex::new(sys)
+    });
+
+/// Collects real-time system metrics using the sysinfo crate.
+///
+/// CPU readings require at least two consecutive calls (the persistent
+/// `SYSTEM_METRICS` instance ensures the baseline exists across polls).
+///
+/// The work is offloaded via `spawn_blocking` so that OS calls like
+/// `refresh_processes` and disk enumeration never stall the async
+/// IPC runtime.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_system_metrics() -> Result<SystemMetricsDto, String> {
+    tokio::task::spawn_blocking(|| {
+        use sysinfo::Disks;
+
+        let mut sys = SYSTEM_METRICS
+            .lock()
+            .map_err(|e| format!("Failed to lock system metrics: {}", e))?;
+
+        sys.refresh_cpu_usage();
+        sys.refresh_memory();
+
+        // CPU: global average across all cores
+        let cpu_usage = sys.global_cpu_usage() as f64;
+
+        // RAM
+        let ram_total = sys.total_memory();
+        let ram_used = sys.used_memory();
+
+        // Process metrics (current process)
+        let pid = sysinfo::get_current_pid().ok();
+        let (process_memory, disk_read, disk_write) = pid
+            .and_then(|p| {
+                sys.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[p]), true);
+                sys.process(p).map(|proc| {
+                    let disk_usage = proc.disk_usage();
+                    (
+                        proc.memory(),
+                        disk_usage.read_bytes,
+                        disk_usage.written_bytes,
+                    )
+                })
+            })
+            .unwrap_or((0, 0, 0));
+
+        // Drop the lock before disk probing (no sysinfo::System needed)
+        let cpu_cores = sys.cpus().len() as u32;
+        drop(sys);
+
+        // Disk space (global) — does not require System instance
+        let disks = Disks::new_with_refreshed_list();
+        let mut disk_total: u64 = 0;
+        let mut disk_available: u64 = 0;
+        for disk in disks.list() {
+            disk_total += disk.total_space();
+            disk_available += disk.available_space();
+        }
+
+        Ok(SystemMetricsDto {
+            cpu_usage_percent: cpu_usage,
+            ram_total_bytes: ram_total,
+            ram_used_bytes: ram_used,
+            process_memory_bytes: process_memory,
+            disk_read_bytes: disk_read,
+            disk_write_bytes: disk_write,
+            disk_total_bytes: disk_total,
+            disk_available_bytes: disk_available,
+            cpu_core_count: cpu_cores,
+        })
+    })
+    .await
+    .map_err(|e| format!("System metrics task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod system_metrics_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn should_return_valid_system_metrics() {
+        let result = get_system_metrics().await;
+        assert!(result.is_ok(), "get_system_metrics should succeed");
+        let metrics = result.unwrap();
+
+        // CPU cores should be at least 1
+        assert!(
+            metrics.cpu_core_count >= 1,
+            "should detect at least 1 CPU core"
+        );
+        // RAM total should be non-zero
+        assert!(metrics.ram_total_bytes > 0, "total RAM should be > 0");
+        // Used RAM should not exceed total
+        assert!(
+            metrics.ram_used_bytes <= metrics.ram_total_bytes,
+            "used RAM should not exceed total"
+        );
+        // CPU usage should be in valid range
+        assert!(
+            metrics.cpu_usage_percent >= 0.0 && metrics.cpu_usage_percent <= 100.0,
+            "CPU usage should be 0-100%"
+        );
+    }
+
+    #[tokio::test]
+    async fn should_detect_disk_space() {
+        let metrics = get_system_metrics().await.unwrap();
+        // At least one disk should exist
+        assert!(metrics.disk_total_bytes > 0, "should detect disk space");
+        assert!(
+            metrics.disk_available_bytes <= metrics.disk_total_bytes,
+            "available disk should not exceed total"
+        );
+    }
 }
