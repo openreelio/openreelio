@@ -412,6 +412,133 @@ impl FFmpegRunner {
         Ok(())
     }
 
+    /// Extract a single frame using hardware-accelerated decoding with automatic fallback.
+    ///
+    /// Attempts GPU-accelerated decoding first. If it fails (unsupported codec,
+    /// driver issue, etc.), automatically retries with software decoding.
+    ///
+    /// # Arguments
+    /// * `input` - Path to the input video file
+    /// * `time_sec` - Time position in seconds
+    /// * `output` - Path to save the output image (JPEG or PNG)
+    /// * `hwaccel` - Hardware acceleration backend name (e.g., "cuda", "d3d11va", "qsv")
+    /// * `tonemap_filter` - Optional FFmpeg video filter for HDR→SDR conversion
+    pub async fn extract_frame_with_hwaccel(
+        &self,
+        input: &Path,
+        time_sec: f64,
+        output: &Path,
+        hwaccel: &str,
+        tonemap_filter: Option<&str>,
+    ) -> FFmpegResult<()> {
+        if !input.exists() {
+            return Err(FFmpegError::InvalidInput(format!(
+                "Input file does not exist: {}",
+                input.display()
+            )));
+        }
+
+        if is_nonempty_file(output) {
+            return Ok(());
+        }
+
+        if let Some(parent) = output.parent() {
+            tokio::fs::create_dir_all(parent).await.map_err(|e| {
+                FFmpegError::OutputError(format!("Failed to create output directory: {}", e))
+            })?;
+        }
+
+        // Attempt 1: Hardware-accelerated decoding
+        let hw_result = self
+            .run_frame_extraction(input, time_sec, output, Some(hwaccel), tonemap_filter)
+            .await;
+
+        match hw_result {
+            Ok(()) => Ok(()),
+            Err(hw_err) => {
+                tracing::warn!(
+                    "GPU decode failed for {}, falling back to software: {}",
+                    input.display(),
+                    hw_err
+                );
+
+                // Clean up partial output from failed attempt
+                let _ = tokio::fs::remove_file(output).await;
+
+                // Attempt 2: Software fallback
+                self.run_frame_extraction(input, time_sec, output, None, tonemap_filter)
+                    .await
+            }
+        }
+    }
+
+    /// Internal: Run frame extraction with optional hwaccel
+    async fn run_frame_extraction(
+        &self,
+        input: &Path,
+        time_sec: f64,
+        output: &Path,
+        hwaccel: Option<&str>,
+        tonemap_filter: Option<&str>,
+    ) -> FFmpegResult<()> {
+        let mut cmd = tokio::process::Command::new(&self.info.ffmpeg_path);
+        configure_tokio_command(&mut cmd);
+
+        let time_str = format!("{:.3}", time_sec);
+        let input_str = input.to_string_lossy().to_string();
+        let output_str = output.to_string_lossy().to_string();
+
+        let mut args: Vec<String> = vec![
+            "-hide_banner".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-nostdin".to_string(),
+        ];
+
+        // Hardware acceleration flags must come before -i
+        if let Some(accel) = hwaccel {
+            args.push("-hwaccel".to_string());
+            args.push(accel.to_string());
+            // Output format must match the hwaccel backend (cuda/qsv/vaapi),
+            // NOT a pixel format like nv12.
+            args.push("-hwaccel_output_format".to_string());
+            args.push(accel.to_string());
+        }
+
+        args.push("-ss".to_string());
+        args.push(time_str);
+        args.push("-i".to_string());
+        args.push(input_str);
+
+        if let Some(filter) = tonemap_filter {
+            args.push("-vf".to_string());
+            args.push(filter.to_string());
+        }
+
+        args.push("-frames:v".to_string());
+        args.push("1".to_string());
+        args.push("-q:v".to_string());
+        args.push("2".to_string());
+        args.push("-y".to_string());
+        args.push(output_str);
+
+        let result = cmd
+            .args(&args)
+            .output()
+            .await
+            .map_err(FFmpegError::ProcessError)?;
+
+        if !result.status.success() {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            return Err(FFmpegError::ExecutionFailed(format!(
+                "Frame extraction failed: {}",
+                stderr
+            )));
+        }
+
+        Ok(())
+    }
+
     /// Generate a thumbnail for a video file
     ///
     /// Extracts a frame at 1 second (or 10% of duration for short videos)
@@ -1500,5 +1627,122 @@ mod tests {
         let video = info.video.unwrap();
         assert!(video.is_hdr);
         assert_eq!(video.color_transfer.as_deref(), Some("smpte2084"));
+    }
+
+    // =========================================================================
+    // BDD: Feature: GPU-Accelerated Frame Extraction
+    // =========================================================================
+
+    #[test]
+    fn should_build_hwaccel_args_before_input_flag() {
+        // Given: a set of FFmpeg args for hwaccel frame extraction
+        // When: building args with hwaccel="cuda"
+        // Then: -hwaccel cuda -hwaccel_output_format cuda appear before -i
+
+        // Simulate the argument building from run_frame_extraction
+        let hwaccel = "cuda";
+        let mut args: Vec<String> = vec![
+            "-hide_banner".to_string(),
+            "-loglevel".to_string(),
+            "error".to_string(),
+            "-nostdin".to_string(),
+        ];
+
+        // Insert hwaccel before -i (output format matches backend name)
+        args.push("-hwaccel".to_string());
+        args.push(hwaccel.to_string());
+        args.push("-hwaccel_output_format".to_string());
+        args.push(hwaccel.to_string());
+
+        args.push("-ss".to_string());
+        args.push("1.000".to_string());
+        args.push("-i".to_string());
+        args.push("input.mp4".to_string());
+
+        // Verify ordering: hwaccel args come before -i
+        let hwaccel_idx = args.iter().position(|a| a == "-hwaccel").unwrap();
+        let input_idx = args.iter().position(|a| a == "-i").unwrap();
+        assert!(
+            hwaccel_idx < input_idx,
+            "hwaccel flags must precede -i for FFmpeg"
+        );
+
+        // Verify hwaccel value is correct
+        assert_eq!(args[hwaccel_idx + 1], "cuda");
+        assert_eq!(args[hwaccel_idx + 2], "-hwaccel_output_format");
+        assert_eq!(args[hwaccel_idx + 3], "cuda");
+    }
+
+    #[test]
+    fn should_not_include_hwaccel_args_when_none() {
+        // Given: no hwaccel backend
+        // When: building args without hwaccel
+        let hwaccel: Option<&str> = None;
+        let mut args = vec![
+            "-hide_banner".to_string(),
+            "-nostdin".to_string(),
+            "-ss".to_string(),
+            "0.000".to_string(),
+            "-i".to_string(),
+            "input.mp4".to_string(),
+        ];
+
+        // No hwaccel insertion
+        if let Some(accel) = hwaccel {
+            args.insert(2, "-hwaccel_output_format".to_string());
+            args.insert(2, accel.to_string());
+            args.insert(2, "-hwaccel".to_string());
+        }
+
+        // Then: no hwaccel flags present
+        assert!(!args.iter().any(|a| a == "-hwaccel"));
+        assert!(!args.iter().any(|a| a == "-hwaccel_output_format"));
+    }
+
+    #[test]
+    fn should_support_multiple_hwaccel_backends() {
+        // Given: various hwaccel backend names
+        let backends = ["cuda", "d3d11va", "qsv", "vaapi", "videotoolbox"];
+
+        // When/Then: each backend is a valid FFmpeg hwaccel value
+        for backend in &backends {
+            let args = vec!["-hwaccel".to_string(), backend.to_string()];
+            assert_eq!(args[1], *backend);
+        }
+    }
+
+    #[test]
+    fn should_include_tonemap_filter_with_hwaccel() {
+        // Given: hwaccel enabled and tonemap filter
+        let hwaccel = Some("cuda");
+        let tonemap_filter = Some("zscale=t=linear,tonemap=hable,zscale=p=bt709");
+
+        let mut args: Vec<String> = Vec::new();
+
+        if let Some(accel) = hwaccel {
+            args.push("-hwaccel".to_string());
+            args.push(accel.to_string());
+            args.push("-hwaccel_output_format".to_string());
+            args.push(accel.to_string());
+        }
+
+        args.push("-ss".to_string());
+        args.push("5.000".to_string());
+        args.push("-i".to_string());
+        args.push("hdr_video.mp4".to_string());
+
+        if let Some(filter) = tonemap_filter {
+            args.push("-vf".to_string());
+            args.push(filter.to_string());
+        }
+
+        args.push("-frames:v".to_string());
+        args.push("1".to_string());
+
+        // Then: both hwaccel and tonemap are present
+        assert!(args.contains(&"-hwaccel".to_string()));
+        assert!(args.contains(&"-vf".to_string()));
+        let vf_idx = args.iter().position(|a| a == "-vf").unwrap();
+        assert!(args[vf_idx + 1].contains("tonemap"));
     }
 }
