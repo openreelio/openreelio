@@ -23,6 +23,7 @@
 //! ```
 
 pub mod audio;
+pub mod cleanup;
 pub mod dtw;
 pub mod ducking;
 pub mod esd;
