@@ -78,7 +78,7 @@ impl fmt::Display for CacheSegmentState {
 pub type SegmentFingerprint = u64;
 
 /// Computes a deterministic fingerprint for a clip's render-affecting properties.
-/// UI-only properties (label, color, caption_style) are excluded.
+/// UI-only properties (label, color) are excluded.
 fn fingerprint_clip(clip: &Clip, hasher: &mut impl Hasher) {
     clip.id.hash(hasher);
     clip.asset_id.hash(hasher);
@@ -140,6 +140,14 @@ fn fingerprint_clip(clip: &Clip, hasher: &mut impl Hasher) {
             tracing::warn!("Failed to serialize volume_keyframes for fingerprint: {e}");
             "volume_kf_serialize_error".hash(hasher);
         }
+    }
+
+    // Caption style & position affect rendered subtitle appearance
+    if let Some(ref style) = clip.caption_style {
+        format!("{}", style).hash(hasher);
+    }
+    if let Some(ref position) = clip.caption_position {
+        format!("{}", position).hash(hasher);
     }
 
     // Adjustment layer / compound
@@ -834,13 +842,30 @@ pub fn cleanup_stale_files(project_dir: &Path, manifest: &mut RenderCacheManifes
             if let Some(ref file) = segment.cached_file {
                 let full_path = seq_dir.join(file);
                 if full_path.exists() {
-                    freed += segment.file_size_bytes;
-                    let _ = std::fs::remove_file(&full_path);
+                    match std::fs::remove_file(&full_path) {
+                        Ok(()) => {
+                            freed += segment.file_size_bytes;
+                            segment.cached_file = None;
+                            segment.file_size_bytes = 0;
+                            segment.state = CacheSegmentState::Empty;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to remove stale cache file {}: {e}",
+                                full_path.display()
+                            );
+                            // Leave segment untouched so size tracking stays accurate
+                        }
+                    }
+                } else {
+                    // File already gone — reset segment
+                    segment.cached_file = None;
+                    segment.file_size_bytes = 0;
+                    segment.state = CacheSegmentState::Empty;
                 }
+            } else {
+                segment.state = CacheSegmentState::Empty;
             }
-            segment.cached_file = None;
-            segment.file_size_bytes = 0;
-            segment.state = CacheSegmentState::Empty;
         }
     }
 
@@ -890,18 +915,32 @@ pub fn enforce_cache_limit(
         }
 
         if let Some(segment) = manifest.segments.iter_mut().find(|s| s.index == idx) {
+            let mut file_removed = false;
             if let Some(ref file) = segment.cached_file {
                 let full_path = seq_dir.join(file);
-                let _ = std::fs::remove_file(&full_path);
+                match std::fs::remove_file(&full_path) {
+                    Ok(()) => file_removed = true,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to evict cache file {}: {e}",
+                            full_path.display()
+                        );
+                    }
+                }
+            } else {
+                file_removed = true; // No file to remove
             }
-            // Subtract this segment's size from the running total instead of
-            // recalculating across all segments (avoids O(n*m) cost).
-            manifest.total_cached_bytes =
-                manifest.total_cached_bytes.saturating_sub(segment.file_size_bytes);
-            segment.state = CacheSegmentState::Empty;
-            segment.cached_file = None;
-            segment.file_size_bytes = 0;
-            evicted += 1;
+
+            if file_removed {
+                // Subtract this segment's size from the running total instead of
+                // recalculating across all segments (avoids O(n*m) cost).
+                manifest.total_cached_bytes =
+                    manifest.total_cached_bytes.saturating_sub(segment.file_size_bytes);
+                segment.state = CacheSegmentState::Empty;
+                segment.cached_file = None;
+                segment.file_size_bytes = 0;
+                evicted += 1;
+            }
         }
     }
 

@@ -55,6 +55,11 @@ impl GpuFilterContext {
         self.backend != GpuFilterBackend::None
     }
 
+    /// Whether frames are currently in GPU memory
+    pub fn is_frames_on_gpu(&self) -> bool {
+        self.frames_on_gpu
+    }
+
     /// Get the active backend
     pub fn backend(&self) -> &GpuFilterBackend {
         &self.backend
@@ -165,7 +170,7 @@ impl GpuFilterContext {
     /// Only prepends `hwdownload` when frames are actually on the GPU (i.e. after
     /// hwaccel decode or an explicit `upload_filter()` call).  If frames are
     /// already on the CPU this returns the filter chain unchanged.
-    pub fn wrap_cpu_filters(&self, cpu_filters: &str) -> String {
+    pub fn wrap_cpu_filters(&mut self, cpu_filters: &str) -> String {
         if !self.is_gpu_active() || cpu_filters.is_empty() || !self.frames_on_gpu {
             return cpu_filters.to_string();
         }
@@ -178,6 +183,7 @@ impl GpuFilterContext {
             GpuFilterBackend::None => return cpu_filters.to_string(),
         };
 
+        self.frames_on_gpu = false;
         format!("{},{}", download, cpu_filters)
     }
 
@@ -338,17 +344,18 @@ mod tests {
         // When: wrapping CPU filters
         let wrapped = ctx.wrap_cpu_filters("gblur=sigma=5,crop=1920:1080:0:0");
 
-        // Then: hwdownload prepended
+        // Then: hwdownload prepended and frames_on_gpu reset
         assert_eq!(
             wrapped,
             "hwdownload,format=nv12,gblur=sigma=5,crop=1920:1080:0:0"
         );
+        assert!(!ctx.is_frames_on_gpu(), "frames_on_gpu should be false after hwdownload");
     }
 
     #[test]
     fn should_not_wrap_cpu_filters_when_frames_on_cpu() {
         // Given: CUDA backend active but frames are still on CPU
-        let ctx = GpuFilterContext::with_backend(GpuFilterBackend::Cuda);
+        let mut ctx = GpuFilterContext::with_backend(GpuFilterBackend::Cuda);
 
         // When: wrapping CPU filters
         let wrapped = ctx.wrap_cpu_filters("gblur=sigma=5,crop=1920:1080:0:0");
@@ -359,14 +366,14 @@ mod tests {
 
     #[test]
     fn should_not_wrap_empty_filter_string() {
-        let ctx = GpuFilterContext::with_backend(GpuFilterBackend::Cuda);
+        let mut ctx = GpuFilterContext::with_backend(GpuFilterBackend::Cuda);
         let wrapped = ctx.wrap_cpu_filters("");
         assert_eq!(wrapped, "");
     }
 
     #[test]
     fn should_pass_through_cpu_filters_when_no_gpu() {
-        let ctx = GpuFilterContext::cpu_only();
+        let mut ctx = GpuFilterContext::cpu_only();
         let wrapped = ctx.wrap_cpu_filters("gblur=sigma=5");
         assert_eq!(wrapped, "gblur=sigma=5");
     }

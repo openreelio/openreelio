@@ -129,7 +129,9 @@ export const PerformancePanel = memo(function PerformancePanel({
     );
   }
 
-  const ramPercent = system ? (system.ramUsedBytes / system.ramTotalBytes) * 100 : 0;
+  const ramPercent = system && system.ramTotalBytes > 0
+    ? (system.ramUsedBytes / system.ramTotalBytes) * 100
+    : 0;
   const diskPercent = system && system.diskTotalBytes > 0
     ? ((system.diskTotalBytes - system.diskAvailableBytes) / system.diskTotalBytes) * 100
     : 0;

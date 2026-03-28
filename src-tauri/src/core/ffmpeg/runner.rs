@@ -499,10 +499,14 @@ impl FFmpegRunner {
         if let Some(accel) = hwaccel {
             args.push("-hwaccel".to_string());
             args.push(accel.to_string());
-            // Output format must match the hwaccel backend (cuda/qsv/vaapi),
-            // NOT a pixel format like nv12.
+            // Output format must match the hwaccel backend name that FFmpeg expects.
+            // d3d11va requires "d3d11" as the output format, not "d3d11va".
+            let output_format = match accel {
+                "d3d11va" => "d3d11",
+                other => other,
+            };
             args.push("-hwaccel_output_format".to_string());
-            args.push(accel.to_string());
+            args.push(output_format.to_string());
         }
 
         args.push("-ss".to_string());

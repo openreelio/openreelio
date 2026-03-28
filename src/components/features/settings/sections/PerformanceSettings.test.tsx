@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PerformanceSettings } from './PerformanceSettings';
 import type { PerformanceSettings as PerformanceSettingsType } from '@/stores/settingsStore';
 import { DESKTOP_RUNTIME_TEST_FLAG } from '@/services/runtimeEnvironment';
@@ -24,6 +24,10 @@ const baseSettings: PerformanceSettingsType = {
 };
 
 describe('PerformanceSettings', () => {
+  afterEach(() => {
+    delete globalThis[DESKTOP_RUNTIME_TEST_FLAG];
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     globalThis[DESKTOP_RUNTIME_TEST_FLAG] = true;

@@ -118,7 +118,7 @@ export function PerformanceSettings({
             value={settings.maxConcurrentJobs}
             onChange={(e) =>
               onUpdate({
-                maxConcurrentJobs: Math.max(1, Number.parseInt(e.target.value || '1', 10)),
+                maxConcurrentJobs: Math.max(1, Number.parseInt(e.target.value, 10) || 1),
               })
             }
             disabled={disabled}
@@ -157,11 +157,10 @@ export function PerformanceSettings({
             type="number"
             min={128}
             value={settings.cacheSizeMb}
-            onChange={(e) =>
-              onUpdate({
-                cacheSizeMb: Math.max(128, Number.parseInt(e.target.value || '128', 10)),
-              })
-            }
+            onChange={(e) => {
+              const value = Number.parseInt(e.target.value, 10);
+              onUpdate({ cacheSizeMb: Number.isNaN(value) ? 128 : Math.max(128, value) });
+            }}
             disabled={disabled}
             className="w-full px-3 py-2 bg-editor-bg border border-editor-border rounded-lg text-editor-text focus:outline-none focus:ring-2 focus:ring-primary-500/50 disabled:opacity-50"
           />

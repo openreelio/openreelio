@@ -495,6 +495,9 @@ impl GpuAccelerator {
         let mut active = self.active_device.write().await;
         *active = devices.first().map(|d| d.id.clone());
 
+        // Clear stale VRAM allocations from the previous device inventory
+        self.vram_allocations.write().await.clear();
+
         Ok(devices)
     }
 
@@ -506,6 +509,9 @@ impl GpuAccelerator {
 
         let mut active = self.active_device.write().await;
         *active = devices.first().map(|d| d.id.clone());
+
+        // Clear stale VRAM allocations from the previous device inventory
+        self.vram_allocations.write().await.clear();
     }
 
     /// Gets available devices
@@ -867,14 +873,12 @@ pub fn build_gpu_devices_from_probes(
     let best_decoder = resolve_best_decoder(decoders);
     for dec_info in &decoders.hardware {
         let vendor = vendor_from_decoder(&dec_info.backend);
-        // Skip Unknown vendors if we already have specific vendors from encoder detection
+        // Skip Unknown vendors entirely when we already have specific vendors
+        // from encoder detection. Ambiguous backends (D3D11VA, VAAPI) cannot be
+        // reliably attributed to a vendor, so fanning decode capability to all
+        // vendors would produce incorrect hardware decoder selection on multi-GPU
+        // systems (e.g. CUDA args emitted for a VAAPI-only backend).
         if vendor == GpuVendor::Unknown && !vendor_set.is_empty() {
-            // Assign D3D11VA/VAAPI capability to all known vendors
-            for (_, (caps, _)) in vendor_set.iter_mut() {
-                if !caps.contains(&GpuCapability::HardwareDecode) {
-                    caps.push(GpuCapability::HardwareDecode);
-                }
-            }
             continue;
         }
 

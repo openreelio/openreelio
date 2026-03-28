@@ -132,6 +132,8 @@ export function useRenderCache(): UseRenderCacheReturn {
           'render-cache-progress',
           (event) => {
             setProgress(event.payload.percent);
+            // Refresh full status so CacheStatusBar updates per-segment
+            void refreshStatus();
           },
         );
 

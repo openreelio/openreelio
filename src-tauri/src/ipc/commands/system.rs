@@ -1016,9 +1016,9 @@ pub struct SystemMetricsDto {
     pub ram_used_bytes: u64,
     /// Process RSS (resident set size) in bytes
     pub process_memory_bytes: u64,
-    /// Disk read bytes since last query (cumulative for all disks)
+    /// Disk read bytes since last query (current process only)
     pub disk_read_bytes: u64,
-    /// Disk write bytes since last query (cumulative for all disks)
+    /// Disk write bytes since last query (current process only)
     pub disk_write_bytes: u64,
     /// Total disk space in bytes
     pub disk_total_bytes: u64,

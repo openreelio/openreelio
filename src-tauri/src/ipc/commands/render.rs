@@ -2081,6 +2081,7 @@ pub async fn render_preview_cache(
         use tauri::Manager;
 
         let engine = ExportEngine::new(ffmpeg_runner);
+        let mut completed_normally = true;
 
         for (completed, (idx, start_sec, end_sec)) in segment_ranges.iter().enumerate() {
             // Re-load manifest to get latest state
@@ -2094,6 +2095,7 @@ pub async fn render_preview_cache(
                             job_seq_id
                         ),
                     );
+                    completed_normally = false;
                     break;
                 }
                 Err(error) => {
@@ -2101,6 +2103,7 @@ pub async fn render_preview_cache(
                         "render-cache-error",
                         format!("Failed to reload cache manifest: {error}"),
                     );
+                    completed_normally = false;
                     break;
                 }
             };
@@ -2119,6 +2122,7 @@ pub async fn render_preview_cache(
                                     "Sequence {} removed during cache render",
                                     job_seq_id
                                 );
+                                completed_normally = false;
                                 break;
                             }
                         };
@@ -2140,6 +2144,7 @@ pub async fn render_preview_cache(
                     }
                     None => {
                         tracing::warn!("Project closed during cache render");
+                        completed_normally = false;
                         break;
                     }
                 }
@@ -2198,6 +2203,7 @@ pub async fn render_preview_cache(
                             job_seq_id
                         ),
                     );
+                    completed_normally = false;
                     break;
                 }
                 Err(error) => {
@@ -2205,6 +2211,7 @@ pub async fn render_preview_cache(
                         "render-cache-error",
                         format!("Failed to reload cache manifest: {error}"),
                     );
+                    completed_normally = false;
                     break;
                 }
             };
@@ -2257,13 +2264,17 @@ pub async fn render_preview_cache(
             );
         }
 
-        // Emit completion
-        let _ = app_handle.emit(
-            "render-cache-complete",
-            serde_json::json!({
-                "sequenceId": job_seq_id,
-            }),
-        );
+        // Only emit completion when all segments rendered successfully.
+        // Error paths set completed_normally = false and already emitted
+        // render-cache-error, so the UI won't misinterpret a failure as success.
+        if completed_normally {
+            let _ = app_handle.emit(
+                "render-cache-complete",
+                serde_json::json!({
+                    "sequenceId": job_seq_id,
+                }),
+            );
+        }
     });
 
     // Store the abort handle so the next render call can cancel this one.

@@ -109,6 +109,12 @@ impl SmartRenderPlan {
 
 /// Creates a smart render plan by analyzing the cache manifest.
 /// Refreshes fingerprints first to detect any changes since the last cache.
+///
+/// NOTE: Currently, CopyFromCache decisions are based solely on content
+/// fingerprint equality and do not verify export profile compatibility
+/// (codec, container, quality). Callers should ensure cached segments
+/// were produced with compatible export settings, or partition cache
+/// directories per export profile. This is tracked as a future enhancement.
 pub fn plan_smart_render(
     manifest: &mut RenderCacheManifest,
     sequence: &Sequence,
