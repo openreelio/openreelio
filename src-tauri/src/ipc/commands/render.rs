@@ -110,6 +110,82 @@ fn parse_export_preset(preset: &str) -> ExportPreset {
     }
 }
 
+/// Cached FFmpeg hardware probe results (decoders + encoders).
+///
+/// FFmpeg encoder/decoder availability does not change within a session,
+/// so we probe once and reuse. This avoids spawning FFmpeg subprocesses
+/// on every export or batch item.
+struct HardwareProbeResults {
+    encoders: crate::core::render::AvailableEncoders,
+    devices: Vec<crate::core::performance::gpu::GpuDevice>,
+}
+
+/// Probe FFmpeg for hardware encoder/decoder availability.
+///
+/// Runs the blocking FFmpeg subprocesses on a dedicated blocking thread
+/// to avoid stalling the tokio async runtime.
+async fn probe_hardware(ffmpeg_path: &std::path::Path) -> Result<HardwareProbeResults, String> {
+    use crate::core::performance::gpu::build_gpu_devices_from_probes;
+
+    let ffmpeg_owned = ffmpeg_path.to_path_buf();
+    let (decoders, encoders) = tokio::task::spawn_blocking(move || {
+        let d = crate::core::render::detect_available_decoders(&ffmpeg_owned);
+        let e = crate::core::render::detect_available_encoders(&ffmpeg_owned);
+        (d, e)
+    })
+    .await
+    .map_err(|e| format!("FFmpeg probe task failed: {e}"))?;
+
+    let devices = build_gpu_devices_from_probes(&decoders, &encoders);
+    Ok(HardwareProbeResults { encoders, devices })
+}
+
+fn apply_hardware_preferences(
+    app: &tauri::AppHandle,
+    probe: &HardwareProbeResults,
+    export_settings: &mut crate::core::render::ExportSettings,
+) -> Result<(), String> {
+    use crate::core::performance::gpu::resolve_hardware_accel_mode;
+    use crate::core::settings::SettingsManager;
+
+    let app_data_dir = super::system::get_app_data_dir(app)?;
+    let manager = SettingsManager::new(app_data_dir);
+    let app_settings = manager.load();
+
+    export_settings.hardware_accel = resolve_hardware_accel_mode(
+        app_settings.performance.hardware_acceleration,
+        app_settings.performance.gpu_device_id.as_deref(),
+        &probe.devices,
+    );
+    export_settings.resolved_encoder_name = Some(crate::core::render::resolve_video_encoder(
+        &export_settings.video_codec,
+        &export_settings.hardware_accel,
+        &probe.encoders,
+    ));
+
+    tracing::info!(
+        "Resolved video encoder: {} (hardware_accel={:?}, preferred_gpu={:?})",
+        export_settings
+            .resolved_encoder_name
+            .as_deref()
+            .unwrap_or("unknown"),
+        export_settings.hardware_accel,
+        app_settings.performance.gpu_device_id
+    );
+
+    Ok(())
+}
+
+/// Convenience wrapper: probe hardware and apply preferences in one step.
+async fn resolve_export_hardware_preferences(
+    app: &tauri::AppHandle,
+    ffmpeg_path: &std::path::Path,
+    export_settings: &mut crate::core::render::ExportSettings,
+) -> Result<(), String> {
+    let probe = probe_hardware(ffmpeg_path).await?;
+    apply_hardware_preferences(app, &probe, export_settings)
+}
+
 // =============================================================================
 // Commands
 // =============================================================================
@@ -193,22 +269,8 @@ pub async fn start_render(
     // Create export settings using validated path
     let mut settings = ExportSettings::from_preset(export_preset, validated_output_path.clone());
 
-    // Resolve hardware encoder (Auto mode: use best available GPU, fallback to CPU)
-    let available_encoders =
-        crate::core::render::detect_available_encoders(&ffmpeg.info().ffmpeg_path);
-    settings.resolved_encoder_name = Some(crate::core::render::resolve_video_encoder(
-        &settings.video_codec,
-        &settings.hardware_accel,
-        &available_encoders,
-    ));
-    tracing::info!(
-        "Resolved video encoder: {} (hardware_accel={:?})",
-        settings
-            .resolved_encoder_name
-            .as_deref()
-            .unwrap_or("unknown"),
-        settings.hardware_accel
-    );
+    resolve_export_hardware_preferences(&app_handle, &ffmpeg.info().ffmpeg_path, &mut settings)
+        .await?;
 
     // Validate export settings before starting
     let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
@@ -399,14 +461,8 @@ pub async fn render_range(
     settings.start_time = Some(in_point);
     settings.end_time = Some(out_point);
 
-    // Resolve hardware encoder
-    let available_encoders =
-        crate::core::render::detect_available_encoders(&ffmpeg.info().ffmpeg_path);
-    settings.resolved_encoder_name = Some(crate::core::render::resolve_video_encoder(
-        &settings.video_codec,
-        &settings.hardware_accel,
-        &available_encoders,
-    ));
+    resolve_export_hardware_preferences(&app_handle, &ffmpeg.info().ffmpeg_path, &mut settings)
+        .await?;
 
     let validation = validate_export_settings(&sequence, &assets, &effects, &settings);
     if !validation.is_valid {
@@ -601,15 +657,10 @@ pub async fn batch_render(
         "FFmpeg not initialized. Please install FFmpeg and restart the application.".to_string()
     })?;
 
-    // Resolve hardware encoder for all batch items
-    let available_encoders =
-        crate::core::render::detect_available_encoders(&ffmpeg.info().ffmpeg_path);
+    // Probe hardware once for the entire batch instead of per-item
+    let hw_probe = probe_hardware(&ffmpeg.info().ffmpeg_path).await?;
     for (settings, _) in &mut validated_items {
-        settings.resolved_encoder_name = Some(crate::core::render::resolve_video_encoder(
-            &settings.video_codec,
-            &settings.hardware_accel,
-            &available_encoders,
-        ));
+        apply_hardware_preferences(&app_handle, &hw_probe, settings)?;
     }
 
     // Generate batch ID and per-item job IDs
@@ -1601,4 +1652,653 @@ pub async fn smart_reframe(
         crop_width: crop_w,
         crop_height: crop_h,
     })
+}
+
+// =============================================================================
+// GPU Acceleration
+// =============================================================================
+
+/// GPU device information returned to the frontend
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuDeviceDto {
+    /// Unique device ID
+    pub id: String,
+    /// Device name (e.g., "NVIDIA GPU")
+    pub name: String,
+    /// Vendor name
+    pub vendor: String,
+    /// Whether both encode and decode are supported
+    pub has_encode: bool,
+    pub has_decode: bool,
+    /// Whether this is the primary/active device
+    pub is_primary: bool,
+}
+
+/// GPU acceleration status
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuAccelerationStatus {
+    /// Whether GPU acceleration is enabled in settings
+    pub enabled: bool,
+    /// Detected GPU devices
+    pub devices: Vec<GpuDeviceDto>,
+    /// Active device ID (if any)
+    pub active_device_id: Option<String>,
+    /// Available hardware decoders
+    pub available_decoders: crate::core::render::AvailableDecoders,
+    /// Available hardware encoders
+    pub available_encoders: crate::core::render::AvailableEncoders,
+}
+
+/// Detect GPU devices and return acceleration status.
+///
+/// Probes FFmpeg for hardware decoders (`-hwaccels`) and encoders (`-encoders`),
+/// builds a list of GPU devices, and returns the current acceleration state.
+#[tauri::command]
+#[specta::specta]
+pub async fn detect_gpu_devices(
+    app: tauri::AppHandle,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+) -> Result<GpuAccelerationStatus, String> {
+    use crate::core::performance::gpu::GpuCapability;
+    use crate::core::settings::SettingsManager;
+
+    let ffmpeg_guard = ffmpeg_state.read().await;
+    let ffmpeg = ffmpeg_guard.runner().ok_or_else(|| {
+        "FFmpeg not initialized. Please install FFmpeg and restart the application.".to_string()
+    })?;
+
+    let info = ffmpeg.info();
+
+    // Probe FFmpeg for decoders and encoders (blocking subprocess calls)
+    let ffmpeg_path = info.ffmpeg_path.clone();
+    let (available_decoders, available_encoders) = tokio::task::spawn_blocking(move || {
+        let decoders = crate::core::render::detect_available_decoders(&ffmpeg_path);
+        let encoders = crate::core::render::detect_available_encoders(&ffmpeg_path);
+        (decoders, encoders)
+    })
+    .await
+    .map_err(|e| format!("GPU detection task failed: {}", e))?;
+
+    // Build GPU device list
+    let devices = crate::core::performance::gpu::build_gpu_devices_from_probes(
+        &available_decoders,
+        &available_encoders,
+    );
+
+    // Read settings for enabled status
+    let app_data_dir = super::system::get_app_data_dir(&app)?;
+    let manager = SettingsManager::new(app_data_dir);
+    let settings = manager.load();
+    let enabled = settings.performance.hardware_acceleration;
+    let preferred_id = settings.performance.gpu_device_id.clone();
+
+    // Determine active device
+    let active_device_id = crate::core::performance::gpu::resolve_active_gpu_device_id(
+        enabled,
+        preferred_id.as_deref(),
+        &devices,
+    );
+
+    let device_dtos: Vec<GpuDeviceDto> = devices
+        .iter()
+        .map(|d| GpuDeviceDto {
+            id: d.id.clone(),
+            name: d.name.clone(),
+            vendor: d.vendor.to_string(),
+            has_encode: d.supports(GpuCapability::HardwareEncode),
+            has_decode: d.supports(GpuCapability::HardwareDecode),
+            is_primary: d.is_primary,
+        })
+        .collect();
+
+    Ok(GpuAccelerationStatus {
+        enabled,
+        devices: device_dtos,
+        active_device_id,
+        available_decoders,
+        available_encoders,
+    })
+}
+
+/// Get available hardware decoders.
+///
+/// Probes FFmpeg for supported hardware acceleration backends.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_available_decoders(
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+) -> Result<crate::core::render::AvailableDecoders, String> {
+    let ffmpeg_guard = ffmpeg_state.read().await;
+    let ffmpeg = ffmpeg_guard.runner().ok_or_else(|| {
+        "FFmpeg not initialized. Please install FFmpeg and restart the application.".to_string()
+    })?;
+
+    let info = ffmpeg.info();
+    let ffmpeg_path = info.ffmpeg_path.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::core::render::detect_available_decoders(&ffmpeg_path)
+    })
+    .await
+    .map_err(|e| format!("Decoder detection task failed: {}", e))
+}
+
+// =============================================================================
+// Render Cache Commands
+// =============================================================================
+
+/// Get render cache status for the active sequence.
+///
+/// Returns per-segment cache state for the timeline indicator bar.
+#[tauri::command]
+#[specta::specta]
+pub async fn get_cache_status(
+    state: State<'_, AppState>,
+    app: tauri::AppHandle,
+) -> Result<crate::core::render::RenderCacheStatus, String> {
+    use crate::core::render::cache::{load_manifest, RenderCacheManifest, RenderCacheStatus};
+
+    let guard = state.project.lock().await;
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let seq_id = project
+        .state
+        .active_sequence_id
+        .as_ref()
+        .ok_or_else(|| "No active sequence".to_string())?;
+
+    let sequence = project
+        .state
+        .sequences
+        .get(seq_id)
+        .ok_or_else(|| format!("Sequence not found: {seq_id}"))?;
+
+    let effects: std::collections::HashMap<String, crate::core::effects::Effect> = project
+        .state
+        .effects
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    let config = resolve_cache_config(&app);
+
+    let mut manifest = load_manifest(&project.path, seq_id)
+        .map_err(|e| format!("Failed to load cache manifest: {e}"))?
+        .unwrap_or_else(|| {
+            RenderCacheManifest::new(
+                seq_id,
+                sequence.duration(),
+                config.segment_duration_sec,
+                sequence,
+                &effects,
+            )
+        });
+
+    reconcile_cache_manifest(&mut manifest, &project.path, sequence, &effects, &config)?;
+
+    Ok(RenderCacheStatus::from_manifest(&manifest, &config))
+}
+
+/// Clear render cache for the active sequence.
+///
+/// Removes all cached segment files and the manifest.
+#[tauri::command]
+#[specta::specta]
+pub async fn clear_render_cache(state: State<'_, AppState>) -> Result<ClearCacheResult, String> {
+    use crate::core::render::cache::clear_sequence_cache;
+
+    let guard = state.project.lock().await;
+    let project = guard
+        .as_ref()
+        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+    let seq_id = project
+        .state
+        .active_sequence_id
+        .as_ref()
+        .ok_or_else(|| "No active sequence".to_string())?;
+
+    clear_sequence_cache(&project.path, seq_id)
+        .map_err(|e| format!("Failed to clear render cache: {e}"))?;
+
+    Ok(ClearCacheResult {
+        sequence_id: seq_id.clone(),
+        cleared: true,
+    })
+}
+
+/// Result of clearing render cache
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearCacheResult {
+    /// Sequence whose cache was cleared
+    pub sequence_id: String,
+    /// Whether the operation succeeded
+    pub cleared: bool,
+}
+
+/// Resolves render cache configuration from app settings.
+fn resolve_cache_config(app: &tauri::AppHandle) -> crate::core::render::RenderCacheConfig {
+    use crate::core::render::cache::RenderCacheConfig;
+    use crate::core::settings::SettingsManager;
+
+    let app_data_dir = match super::system::get_app_data_dir(app) {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!("Failed to resolve app data dir for cache config, using defaults: {e}");
+            return RenderCacheConfig::default();
+        }
+    };
+    let manager = SettingsManager::new(app_data_dir);
+    let settings = manager.load();
+    RenderCacheConfig::from_cache_size_mb(settings.performance.cache_size_mb)
+}
+
+fn cleanup_orphaned_cache_files(
+    project_path: &std::path::Path,
+    sequence_id: &str,
+    files: &[String],
+) {
+    if files.is_empty() {
+        return;
+    }
+
+    let seq_dir = crate::core::render::sequence_cache_dir(project_path, sequence_id);
+    for file in files {
+        let file_path = seq_dir.join(file);
+        if let Err(error) = std::fs::remove_file(&file_path) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    "Failed to remove orphaned render cache file {}: {}",
+                    file_path.display(),
+                    error
+                );
+            }
+        }
+    }
+}
+
+fn reconcile_cache_manifest(
+    manifest: &mut crate::core::render::RenderCacheManifest,
+    project_path: &std::path::Path,
+    sequence: &crate::core::timeline::Sequence,
+    effects: &std::collections::HashMap<String, crate::core::effects::Effect>,
+    config: &crate::core::render::RenderCacheConfig,
+) -> Result<(), String> {
+    let sync = manifest.reconcile_with_sequence(
+        sequence.duration(),
+        config.segment_duration_sec,
+        sequence,
+        effects,
+    );
+
+    cleanup_orphaned_cache_files(project_path, &manifest.sequence_id, &sync.orphaned_files);
+
+    if sync.changed {
+        crate::core::render::save_manifest(project_path, manifest)
+            .map_err(|error| format!("Failed to save cache manifest: {error}"))?;
+    }
+
+    Ok(())
+}
+
+/// Abort handle for the active cache render task.
+///
+/// Starting a new cache render aborts any in-flight background task so that
+/// only one cache render is active at a time.
+static ACTIVE_CACHE_RENDER: std::sync::LazyLock<
+    std::sync::Mutex<Option<tokio::task::AbortHandle>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+/// Render preview cache for the active sequence.
+///
+/// Triggers background rendering of uncached segments. Returns the cache
+/// status immediately; rendering progress is reported via Tauri events.
+/// If a previous cache render is still running it is cancelled first.
+#[tauri::command]
+#[specta::specta]
+pub async fn render_preview_cache(
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+    app_handle: tauri::AppHandle,
+) -> Result<RenderCacheJobResult, String> {
+    use crate::core::render::cache::{
+        cleanup_stale_files, enforce_cache_limit, load_manifest, save_manifest, RenderCacheManifest,
+    };
+    use crate::core::render::ExportEngine;
+    use tauri::Emitter;
+
+    let config = resolve_cache_config(&app_handle);
+
+    // Gather project data
+    let (sequence, effects, project_path, seq_id) = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+
+        let seq_id = project
+            .state
+            .active_sequence_id
+            .as_ref()
+            .ok_or_else(|| "No active sequence".to_string())?
+            .clone();
+
+        let sequence = project
+            .state
+            .sequences
+            .get(&seq_id)
+            .ok_or_else(|| format!("Sequence not found: {seq_id}"))?
+            .clone();
+
+        let effects: std::collections::HashMap<String, crate::core::effects::Effect> = project
+            .state
+            .effects
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+
+        (sequence, effects, project.path.clone(), seq_id)
+    };
+
+    // Load or create manifest
+    let mut manifest = load_manifest(&project_path, &seq_id)
+        .map_err(|e| format!("Failed to load cache manifest: {e}"))?
+        .unwrap_or_else(|| {
+            RenderCacheManifest::new(
+                &seq_id,
+                sequence.duration(),
+                config.segment_duration_sec,
+                &sequence,
+                &effects,
+            )
+        });
+
+    reconcile_cache_manifest(&mut manifest, &project_path, &sequence, &effects, &config)?;
+    cleanup_stale_files(&project_path, &mut manifest);
+
+    // Find segments that need rendering
+    let pending_indices: Vec<u32> = manifest
+        .segments
+        .iter()
+        .filter(|s| s.needs_render())
+        .map(|s| s.index)
+        .collect();
+
+    let total_pending = pending_indices.len() as u32;
+
+    if total_pending == 0 {
+        return Ok(RenderCacheJobResult {
+            sequence_id: seq_id,
+            total_segments: manifest.segments.len() as u32,
+            segments_to_render: 0,
+            status: RenderCacheJobStatus::AlreadyCached,
+        });
+    }
+
+    // Save initial manifest state
+    save_manifest(&project_path, &manifest)
+        .map_err(|error| format!("Failed to save cache manifest: {error}"))?;
+
+    // Collect segment time ranges before spawning (avoids borrow issues)
+    let segment_ranges: Vec<(u32, f64, f64)> = pending_indices
+        .iter()
+        .filter_map(|idx| {
+            manifest
+                .segments
+                .iter()
+                .find(|s| s.index == *idx)
+                .map(|s| (s.index, s.start_sec, s.end_sec))
+        })
+        .collect();
+
+    let total_segments = manifest.segments.len() as u32;
+
+    // Clone FFmpegRunner before spawning (State<'_> cannot be moved into spawn)
+    let ffmpeg_runner = {
+        let ffmpeg_guard = ffmpeg_state.read().await;
+        ffmpeg_guard
+            .runner()
+            .ok_or("FFmpeg not initialized")?
+            .clone()
+    };
+
+    let job_seq_id = seq_id.clone();
+    let cache_config = config.clone();
+
+    // Cancel any in-flight cache render before starting a new one.
+    if let Ok(mut handle) = ACTIVE_CACHE_RENDER.lock() {
+        if let Some(previous) = handle.take() {
+            previous.abort();
+            tracing::info!("Aborted previous cache render task");
+        }
+    }
+
+    let join_handle = tokio::spawn(async move {
+        use tauri::Manager;
+
+        let engine = ExportEngine::new(ffmpeg_runner);
+
+        for (completed, (idx, start_sec, end_sec)) in segment_ranges.iter().enumerate() {
+            // Re-load manifest to get latest state
+            let mut current_manifest = match load_manifest(&project_path, &job_seq_id) {
+                Ok(Some(m)) => m,
+                Ok(None) => {
+                    let _ = app_handle.emit(
+                        "render-cache-error",
+                        format!(
+                            "Cache manifest disappeared while rendering sequence {}",
+                            job_seq_id
+                        ),
+                    );
+                    break;
+                }
+                Err(error) => {
+                    let _ = app_handle.emit(
+                        "render-cache-error",
+                        format!("Failed to reload cache manifest: {error}"),
+                    );
+                    break;
+                }
+            };
+
+            // Re-acquire fresh project state for each segment to avoid rendering
+            // with stale data if the user edits the timeline during cache rendering.
+            let (fresh_sequence, fresh_assets, fresh_effects) = {
+                let app_state = app_handle.state::<crate::AppState>();
+                let guard = app_state.project.lock().await;
+                match guard.as_ref() {
+                    Some(project) => {
+                        let seq = match project.state.sequences.get(&job_seq_id) {
+                            Some(s) => s.clone(),
+                            None => {
+                                tracing::warn!(
+                                    "Sequence {} removed during cache render",
+                                    job_seq_id
+                                );
+                                break;
+                            }
+                        };
+                        let a: std::collections::HashMap<String, crate::core::assets::Asset> =
+                            project
+                                .state
+                                .assets
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                        let e: std::collections::HashMap<String, crate::core::effects::Effect> =
+                            project
+                                .state
+                                .effects
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect();
+                        (seq, a, e)
+                    }
+                    None => {
+                        tracing::warn!("Project closed during cache render");
+                        break;
+                    }
+                }
+            };
+
+            // Mark rendering
+            if let Some(segment) = current_manifest
+                .segments
+                .iter_mut()
+                .find(|s| s.index == *idx)
+            {
+                segment.state = crate::core::render::CacheSegmentState::Rendering;
+            }
+            let _ = save_manifest(&project_path, &current_manifest);
+
+            // Build segment export settings
+            let seg_output =
+                crate::core::render::segment_cache_file(&project_path, &job_seq_id, *idx);
+
+            if let Some(parent) = seg_output.parent() {
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    tracing::warn!(
+                        "Failed to create cache directory {}: {e}",
+                        parent.display()
+                    );
+                }
+            }
+
+            let seg_settings = crate::core::render::ExportSettings {
+                output_path: seg_output.clone(),
+                start_time: Some(*start_sec),
+                end_time: Some(*end_sec),
+                ..crate::core::render::ExportSettings::default()
+            };
+
+            // Render with fresh data
+            let result = engine
+                .export_sequence_with_effects(
+                    &fresh_sequence,
+                    &fresh_assets,
+                    &fresh_effects,
+                    &seg_settings,
+                    None,
+                    None,
+                )
+                .await;
+
+            // Update manifest
+            let mut updated_manifest = match load_manifest(&project_path, &job_seq_id) {
+                Ok(Some(m)) => m,
+                Ok(None) => {
+                    let _ = app_handle.emit(
+                        "render-cache-error",
+                        format!(
+                            "Cache manifest disappeared while finalizing sequence {}",
+                            job_seq_id
+                        ),
+                    );
+                    break;
+                }
+                Err(error) => {
+                    let _ = app_handle.emit(
+                        "render-cache-error",
+                        format!("Failed to reload cache manifest: {error}"),
+                    );
+                    break;
+                }
+            };
+
+            match result {
+                Ok(export_result) => {
+                    updated_manifest.mark_segment_cached(
+                        *idx,
+                        seg_output
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string(),
+                        export_result.file_size,
+                    );
+                    enforce_cache_limit(
+                        &project_path,
+                        &mut updated_manifest,
+                        cache_config.max_cache_bytes,
+                    );
+                }
+                Err(error) => {
+                    if let Some(seg) = updated_manifest
+                        .segments
+                        .iter_mut()
+                        .find(|s| s.index == *idx)
+                    {
+                        seg.state = crate::core::render::CacheSegmentState::Error;
+                        seg.cached_file = None;
+                        seg.file_size_bytes = 0;
+                    }
+                    let _ = app_handle.emit(
+                        "render-cache-error",
+                        format!("Failed to render cache segment {}: {}", idx, error),
+                    );
+                }
+            }
+
+            let _ = save_manifest(&project_path, &updated_manifest);
+
+            // Emit progress
+            let _ = app_handle.emit(
+                "render-cache-progress",
+                serde_json::json!({
+                    "sequenceId": job_seq_id,
+                    "completedSegments": completed + 1,
+                    "totalSegments": total_pending,
+                    "percent": ((completed + 1) as f64 / total_pending as f64) * 100.0,
+                }),
+            );
+        }
+
+        // Emit completion
+        let _ = app_handle.emit(
+            "render-cache-complete",
+            serde_json::json!({
+                "sequenceId": job_seq_id,
+            }),
+        );
+    });
+
+    // Store the abort handle so the next render call can cancel this one.
+    if let Ok(mut handle) = ACTIVE_CACHE_RENDER.lock() {
+        *handle = Some(join_handle.abort_handle());
+    }
+
+    Ok(RenderCacheJobResult {
+        sequence_id: seq_id,
+        total_segments,
+        segments_to_render: total_pending,
+        status: RenderCacheJobStatus::Started,
+    })
+}
+
+/// Status of a render cache job
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum RenderCacheJobStatus {
+    /// Cache rendering has been started in the background
+    Started,
+    /// All segments are already cached; no rendering needed
+    AlreadyCached,
+}
+
+/// Result of starting a render cache job
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderCacheJobResult {
+    /// Sequence being cached
+    pub sequence_id: String,
+    /// Total segments in the timeline
+    pub total_segments: u32,
+    /// Number of segments that need rendering
+    pub segments_to_render: u32,
+    /// Job status
+    pub status: RenderCacheJobStatus,
 }
