@@ -104,6 +104,8 @@ export function useDockableAIPanel({
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.repeat) return;
+
       if ((event.ctrlKey || event.metaKey) && event.key === '/') {
         event.preventDefault();
         toggle();

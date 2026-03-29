@@ -45,7 +45,7 @@ export function GpuDeviceSelector({
   const tauriRuntime = isDesktopRuntimeAvailable();
 
   const refreshGpuStatus = useCallback(async () => {
-    if (disabled) {
+    if (disabled || !hardwareAcceleration) {
       setIsDetecting(false);
       return;
     }
@@ -74,15 +74,15 @@ export function GpuDeviceSelector({
     } finally {
       setIsDetecting(false);
     }
-  }, [disabled, tauriRuntime]);
+  }, [disabled, hardwareAcceleration, tauriRuntime]);
 
   useEffect(() => {
-    if (disabled) {
+    if (disabled || !hardwareAcceleration) {
       return;
     }
 
     void refreshGpuStatus();
-  }, [disabled, refreshGpuStatus]);
+  }, [disabled, hardwareAcceleration, refreshGpuStatus]);
 
   const detectedDevices = useMemo(() => gpuStatus?.devices ?? [], [gpuStatus]);
   const selectedDeviceMissing = Boolean(

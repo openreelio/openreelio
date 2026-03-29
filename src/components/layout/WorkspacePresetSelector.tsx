@@ -94,6 +94,8 @@ export function WorkspacePresetSelector(): React.JSX.Element {
       if (e.key === 'Enter') {
         handleSave();
       } else if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
         setIsSaving(false);
         setSaveName('');
       }

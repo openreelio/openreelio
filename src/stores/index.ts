@@ -226,7 +226,7 @@ export function resetProjectStores(): void {
   useAgentStore.getState().reset();
   useWorkspaceStore.getState().reset();
   useCommandPaletteStore.getState().close();
-  useWorkspaceLayoutStore.getState().resetLayout();
+  useWorkspaceLayoutStore.getState().clearTransientState();
   cleanupWorkspaceEventListeners();
 
   logger.info('All project stores reset');

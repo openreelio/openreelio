@@ -358,6 +358,8 @@ interface WorkspaceLayoutActions {
   endDrag: () => void;
   /** Reset to default layout */
   resetLayout: () => void;
+  /** Clear transient drag state without resetting the persisted layout */
+  clearTransientState: () => void;
   /** Apply a workspace preset by ID */
   applyPreset: (presetId: string) => void;
   /** Save the current layout as a custom preset */
@@ -451,12 +453,14 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
       toggleZoneCollapse: (zoneId) => {
         set((state) => {
           state.layout.zones[zoneId].collapsed = !state.layout.zones[zoneId].collapsed;
+          state.activePresetId = null;
         });
       },
 
       setZoneCollapsed: (zoneId, collapsed) => {
         set((state) => {
           state.layout.zones[zoneId].collapsed = collapsed;
+          state.activePresetId = null;
         });
       },
 
@@ -467,6 +471,7 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
             MIN_ZONE_SIZES.sidebarWidth,
             MAX_ZONE_SIZES.sidebarWidth,
           );
+          state.activePresetId = null;
         });
       },
 
@@ -477,6 +482,7 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
             MIN_ZONE_SIZES.sidebarWidth,
             MAX_ZONE_SIZES.sidebarWidth,
           );
+          state.activePresetId = null;
         });
       },
 
@@ -487,6 +493,7 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
             MIN_ZONE_SIZES.centerSplitMin,
             MIN_ZONE_SIZES.centerSplitMax,
           );
+          state.activePresetId = null;
         });
       },
 
@@ -497,6 +504,7 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
             MIN_ZONE_SIZES.bottomHeight,
             MAX_ZONE_SIZES.bottomHeight,
           );
+          state.activePresetId = null;
         });
       },
 
@@ -521,6 +529,13 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
           state.isDragging = false;
           state.draggedPanelId = null;
           state.activePresetId = null;
+        });
+      },
+
+      clearTransientState: () => {
+        set((state) => {
+          state.isDragging = false;
+          state.draggedPanelId = null;
         });
       },
 

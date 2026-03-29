@@ -62,15 +62,20 @@ export function ResizeHandle({
         }
       };
 
-      const handlePointerUp = (): void => {
+      const finishDrag = (): void => {
+        if (!isDragging.current) return;
         isDragging.current = false;
         onResizeEnd?.();
         document.removeEventListener('pointermove', handlePointerMove);
-        document.removeEventListener('pointerup', handlePointerUp);
+        document.removeEventListener('pointerup', finishDrag);
+        document.removeEventListener('pointercancel', finishDrag);
+        target.removeEventListener('lostpointercapture', finishDrag);
       };
 
       document.addEventListener('pointermove', handlePointerMove);
-      document.addEventListener('pointerup', handlePointerUp);
+      document.addEventListener('pointerup', finishDrag);
+      document.addEventListener('pointercancel', finishDrag);
+      target.addEventListener('lostpointercapture', finishDrag);
     },
     [onResize, onResizeEnd, orientation],
   );

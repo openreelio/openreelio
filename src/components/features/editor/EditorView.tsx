@@ -183,7 +183,9 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
   const { selectedAssetId, assets, effects, executeCommand } = useProjectStore();
   const currentTime = usePlaybackStore((state) => state.currentTime);
   const { selectedClipIds, linkedSelectionEnabled } = useTimelineStore();
-  const workspaceLayout = useWorkspaceLayoutStore((state) => state.layout);
+  const aiPanelZoneId = useWorkspaceLayoutStore(
+    (state) => findPanelZone(state.layout, 'ai-assistant') ?? 'right',
+  );
   const sequenceNavigationStack = useProjectStore((s) => s.sequenceNavigationStack);
   const sequences = useProjectStore((s) => s.sequences);
   const popSequence = useProjectStore((s) => s.popSequence);
@@ -220,7 +222,6 @@ export function EditorView({ sequence, appVersion = '0.1.0' }: EditorViewProps):
     autoCollapseBreakpoint: AI_AUTO_COLLAPSE_BREAKPOINT,
     initialWidth: 320,
   });
-  const aiPanelZoneId = findPanelZone(workspaceLayout, 'ai-assistant') ?? 'right';
   const aiSidebarLayoutMode = aiPanelZoneId === 'right' ? 'sidebar' : 'panel';
 
   // Multicam session state

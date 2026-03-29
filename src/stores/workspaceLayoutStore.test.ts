@@ -378,6 +378,43 @@ describe('WorkspaceLayoutStore', () => {
         store.setActivePanel('right', 'ai-assistant');
         expect(useWorkspaceLayoutStore.getState().activePresetId).toBe('editing');
       });
+
+      it('should clear activePresetId when resizing zones', () => {
+        const store = useWorkspaceLayoutStore.getState();
+        store.applyPreset('editing');
+        expect(useWorkspaceLayoutStore.getState().activePresetId).toBe('editing');
+
+        store.setLeftWidth(400);
+        expect(useWorkspaceLayoutStore.getState().activePresetId).toBeNull();
+      });
+
+      it('should clear activePresetId when toggling zone collapse', () => {
+        const store = useWorkspaceLayoutStore.getState();
+        store.applyPreset('editing');
+        expect(useWorkspaceLayoutStore.getState().activePresetId).toBe('editing');
+
+        store.toggleZoneCollapse('left');
+        expect(useWorkspaceLayoutStore.getState().activePresetId).toBeNull();
+      });
+    });
+
+    describe('clearTransientState', () => {
+      it('should clear drag state without resetting layout', () => {
+        const store = useWorkspaceLayoutStore.getState();
+        store.applyPreset('color');
+        store.setLeftWidth(400);
+        store.startDrag('explorer');
+
+        expect(useWorkspaceLayoutStore.getState().isDragging).toBe(true);
+        expect(useWorkspaceLayoutStore.getState().layout.sizes.leftWidth).toBe(400);
+
+        store.clearTransientState();
+
+        expect(useWorkspaceLayoutStore.getState().isDragging).toBe(false);
+        expect(useWorkspaceLayoutStore.getState().draggedPanelId).toBeNull();
+        // Layout should be preserved
+        expect(useWorkspaceLayoutStore.getState().layout.sizes.leftWidth).toBe(400);
+      });
     });
 
     describe('saveCustomPreset', () => {
