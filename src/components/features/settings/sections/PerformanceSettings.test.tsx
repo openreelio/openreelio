@@ -138,4 +138,12 @@ describe('PerformanceSettings', () => {
       expect(input).toBeDisabled();
     }
   });
+
+  it('should skip GPU detection when disabled prop is true', () => {
+    render(
+      <PerformanceSettings settings={baseSettings} onUpdate={vi.fn()} disabled />,
+    );
+
+    expect(commands.detectGpuDevices).not.toHaveBeenCalled();
+  });
 });
