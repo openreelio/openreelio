@@ -36,6 +36,8 @@ export interface AISidebarProps {
   width?: number;
   /** Callback when width changes */
   onWidthChange?: (width: number) => void;
+  /** Layout mode for docked placements outside the right sidebar */
+  layoutMode?: 'sidebar' | 'panel';
 }
 
 // =============================================================================
@@ -47,9 +49,11 @@ export function AISidebar({
   onToggle,
   width = DEFAULT_WIDTH,
   onWidthChange,
+  layoutMode = 'sidebar',
 }: AISidebarProps) {
   const resizeHandleRef = useRef<HTMLDivElement>(null);
   const isResizingRef = useRef(false);
+  const isSidebarMode = layoutMode === 'sidebar';
 
   // New Chat handler, registered by AgenticSidebarContent
   const [newChatHandler, setNewChatHandler] = useState<{
@@ -78,19 +82,6 @@ export function AISidebar({
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  // Handle keyboard shortcut (Ctrl+/ or Cmd+/)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === '/') {
-        e.preventDefault();
-        onToggle();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [onToggle]);
 
   // Handle resize
   const handleResizeStart = useCallback(
@@ -140,13 +131,20 @@ export function AISidebar({
     <aside
       data-testid="ai-sidebar"
       aria-label="AI Assistant Sidebar"
-      className={`flex flex-col bg-editor-bg border-l border-editor-border transition-all duration-200 ease-in-out relative ${
-        collapsed ? 'w-0' : ''
+      className={`relative flex h-full min-h-0 flex-col bg-editor-bg transition-all duration-200 ease-in-out ${
+        isSidebarMode ? 'border-l border-editor-border' : 'min-w-0 w-full'
+      } ${collapsed ? 'w-0' : ''
       }`}
-      style={collapsed ? { overflow: 'visible' } : { width: `${width}px` }}
+      style={
+        collapsed
+          ? { overflow: 'visible' }
+          : isSidebarMode
+            ? { width: `${width}px` }
+            : { width: '100%' }
+      }
     >
       {/* Expand button - visible when collapsed */}
-      {collapsed && (
+      {collapsed && isSidebarMode && (
         <button
           type="button"
           onClick={onToggle}
@@ -160,7 +158,7 @@ export function AISidebar({
         </button>
       )}
       {/* Resize handle */}
-      {!collapsed && (
+      {!collapsed && isSidebarMode && onWidthChange && (
         <div
           ref={resizeHandleRef}
           data-testid="resize-handle"

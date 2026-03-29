@@ -145,6 +145,35 @@ export { usePreviewStore, MIN_ZOOM, MAX_ZOOM, ZOOM_STEP, ZOOM_PRESETS } from './
 export type { ZoomMode, PreviewState, PreviewActions, PreviewStore } from './previewStore';
 
 export {
+  useWorkspaceLayoutStore,
+  PANEL_REGISTRY,
+  WORKSPACE_PRESETS,
+  createDefaultLayout,
+  findPanelZone,
+  findPreset,
+  MIN_ZONE_SIZES,
+  MAX_ZONE_SIZES,
+  selectLayout,
+  selectZone,
+  selectZoneSizes,
+  selectIsDragging,
+  selectDraggedPanelId,
+  selectActivePresetId,
+  selectCustomPresets,
+  selectAllPresets,
+} from './workspaceLayoutStore';
+export type {
+  PanelId,
+  DockZoneId,
+  DockZone,
+  ZoneSizes,
+  WorkspaceLayout,
+  PanelMeta,
+  WorkspacePreset,
+  WorkspaceLayoutStore,
+} from './workspaceLayoutStore';
+
+export {
   useAgentStore,
   useHasActiveSession,
   useCurrentPhase,
@@ -173,6 +202,7 @@ import { usePreviewStore } from './previewStore';
 import { useAgentStore } from './agentStore';
 import { useWorkspaceStore, cleanupWorkspaceEventListeners } from './workspaceStore';
 import { useCommandPaletteStore } from './commandPaletteStore';
+import { useWorkspaceLayoutStore } from './workspaceLayoutStore';
 
 /**
  * Reset all project-related stores to their initial state.
@@ -196,6 +226,7 @@ export function resetProjectStores(): void {
   useAgentStore.getState().reset();
   useWorkspaceStore.getState().reset();
   useCommandPaletteStore.getState().close();
+  useWorkspaceLayoutStore.getState().clearTransientState();
   cleanupWorkspaceEventListeners();
 
   logger.info('All project stores reset');
