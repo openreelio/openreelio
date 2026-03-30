@@ -17,7 +17,7 @@ import { ParameterEditor } from './ParameterEditor';
 import { KeyframeEditor } from './KeyframeEditor';
 import { ColorWheelsPanel, type ColorWheelsValues, type ColorWheelsParamName } from './ColorWheelsPanel';
 import { ChromaKeyControl } from './ChromaKeyControl';
-import { ColorCurvesPanel, TemperatureTintPanel } from '@/components/features/color';
+import { ColorCurvesPanel, TemperatureTintPanel, PowerWindowSection, ColorMatchSection } from '@/components/features/color';
 import { getEffectDefaultParamValues } from '@/utils/effectParamDefs';
 import { StabilizePanel } from './StabilizePanel';
 import { SmartReframePanel } from './SmartReframePanel';
@@ -227,6 +227,29 @@ function isStabilizeEffect(effectType: Effect['effectType']): boolean {
  */
 function isAutoReframeEffect(effectType: Effect['effectType']): boolean {
   return effectType === 'auto_reframe';
+}
+
+/** Color effect types that support Power Window masks */
+const POWER_WINDOW_EFFECT_TYPES = new Set([
+  'color_wheels',
+  'curves',
+  'temperature_tint',
+  'brightness',
+  'contrast',
+  'saturation',
+  'hue',
+  'color_balance',
+  'gamma',
+  'levels',
+  'hsl_qualifier',
+  'lut',
+]);
+
+/**
+ * Check if an effect type supports power window masking.
+ */
+function supportsPowerWindows(effectType: Effect['effectType']): boolean {
+  return typeof effectType === 'string' && POWER_WINDOW_EFFECT_TYPES.has(effectType);
 }
 
 /**
@@ -573,6 +596,25 @@ export const EffectInspector = memo(function EffectInspector({
           ))
         )}
       </div>
+
+      {/* Power Windows Section (for color effects) */}
+      {effect && supportsPowerWindows(effect.effectType) && (
+        <div className="px-3 pb-1">
+          <PowerWindowSection
+            effect={effect}
+            clipContext={clipContext}
+            readOnly={readOnly}
+          />
+        </div>
+      )}
+
+      {/* Color Match Section (for color effects) */}
+      {effect && supportsPowerWindows(effect.effectType) && (
+        <ColorMatchSection
+          clipContext={clipContext}
+          readOnly={readOnly}
+        />
+      )}
 
       {/* Actions */}
       <div className="flex items-center justify-between p-3 border-t border-editor-border">
