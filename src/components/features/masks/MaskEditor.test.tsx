@@ -134,6 +134,12 @@ describe('MaskEditor', () => {
       const ellipseButton = screen.getByRole('button', { name: /ellipse/i });
       expect(ellipseButton).toHaveClass('bg-blue-600');
     });
+
+    it('should expose the gradient tool in the toolbar', () => {
+      render(<MaskEditor {...defaultProps} />);
+
+      expect(screen.getByRole('button', { name: /gradient/i })).toBeInTheDocument();
+    });
   });
 
   // ===========================================================================
@@ -153,6 +159,69 @@ describe('MaskEditor', () => {
           payload: expect.any(Object),
         });
       });
+    });
+
+    it('should add a gradient mask when the gradient tool is active', async () => {
+      render(<MaskEditor {...defaultProps} />);
+
+      fireEvent.click(screen.getByRole('button', { name: /gradient/i }));
+      fireEvent.click(screen.getByRole('button', { name: /add mask/i }));
+
+      await waitFor(() => {
+        expect(mockInvoke).toHaveBeenCalledWith('execute_command', {
+          commandType: 'AddMask',
+          payload: expect.objectContaining({
+            shape: expect.objectContaining({
+              type: 'gradient',
+              gradientType: 'linear',
+            }),
+          }),
+        });
+      });
+    });
+
+    it('should preserve the drawn rectangle geometry when creating from the canvas', async () => {
+      render(<MaskEditor {...defaultProps} canvasWidth={800} canvasHeight={450} />);
+
+      const canvas = screen.getByTestId('mask-canvas');
+
+      fireEvent.mouseDown(canvas, { clientX: 100, clientY: 100 });
+      fireEvent.mouseMove(canvas, { clientX: 300, clientY: 200 });
+      fireEvent.mouseUp(canvas, { clientX: 300, clientY: 200 });
+
+      await waitFor(() => {
+        expect(mockInvoke).toHaveBeenCalledWith(
+          'execute_command',
+          expect.objectContaining({
+            commandType: 'AddMask',
+          })
+        );
+      });
+
+      const addMaskCall = mockInvoke.mock.calls.find(
+        ([command]) => command === 'execute_command'
+      );
+      const shape = (
+        addMaskCall?.[1] as
+          | {
+              payload?: {
+                shape?: {
+                  type?: string;
+                  x?: number;
+                  y?: number;
+                  width?: number;
+                  height?: number;
+                };
+              };
+            }
+          | undefined
+      )?.payload?.shape;
+
+      expect(shape?.type).toBe('rectangle');
+      expect(shape?.x).toBeCloseTo(0.25, 5);
+      expect(shape?.y).toBeCloseTo(1 / 3, 5);
+      expect(shape?.width).toBeCloseTo(0.25, 5);
+      expect(shape?.height).toBeCloseTo(100 / 450, 5);
     });
   });
 
