@@ -18,6 +18,7 @@ import {
   Circle,
   Triangle,
   Spline,
+  Blend,
 } from 'lucide-react';
 import type { Mask, MaskId, MaskShape } from '@/types';
 
@@ -63,6 +64,8 @@ function getMaskIcon(shape: MaskShape) {
       return <Triangle size={14} data-testid="mask-icon-polygon" />;
     case 'bezier':
       return <Spline size={14} data-testid="mask-icon-bezier" />;
+    case 'gradient':
+      return <Blend size={14} data-testid="mask-icon-gradient" />;
     default:
       return <Square size={14} data-testid="mask-icon-unknown" />;
   }

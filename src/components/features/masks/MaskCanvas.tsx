@@ -2,7 +2,7 @@
  * MaskCanvas Component
  *
  * SVG-based canvas for drawing and editing masks.
- * Supports rectangle, ellipse, polygon, and bezier shapes.
+ * Supports rectangle, ellipse, polygon, bezier, and gradient shapes.
  *
  * @module components/features/masks/MaskCanvas
  */
@@ -276,6 +276,38 @@ function BezierShape({
   );
 }
 
+function GradientShape({
+  mask,
+  width,
+  height,
+  isSelected,
+  onClick,
+  onMouseDown,
+}: ShapeRendererProps) {
+  const shape = mask.shape as Extract<MaskShape, { type: 'gradient' }>;
+  const x1 = toPixels(shape.start.x, width);
+  const y1 = toPixels(shape.start.y, height);
+  const x2 = toPixels(shape.end.x, width);
+  const y2 = toPixels(shape.end.y, height);
+
+  return (
+    <line
+      data-testid={`mask-shape-${mask.id}`}
+      className={`mask-shape ${isSelected ? 'selected' : ''} ${!mask.enabled ? 'disabled' : ''}`}
+      x1={x1}
+      y1={y1}
+      x2={x2}
+      y2={y2}
+      stroke={isSelected ? SELECTED_STROKE_COLOR : MASK_STROKE_COLOR}
+      strokeWidth={isSelected ? 6 : 4}
+      strokeLinecap="round"
+      style={{ opacity: mask.enabled ? mask.opacity : 0.3 }}
+      onClick={onClick}
+      onMouseDown={onMouseDown}
+    />
+  );
+}
+
 // =============================================================================
 // Selection Handles
 // =============================================================================
@@ -392,6 +424,22 @@ function DrawingPreview({ tool, startPoint, currentPoint }: DrawingPreviewProps)
         fill="rgba(59, 130, 246, 0.1)"
         stroke={MASK_STROKE_COLOR}
         strokeWidth={1}
+        strokeDasharray="4 2"
+      />
+    );
+  }
+
+  if (tool === 'gradient') {
+    return (
+      <line
+        data-testid="drawing-preview"
+        x1={startPoint.x}
+        y1={startPoint.y}
+        x2={currentPoint.x}
+        y2={currentPoint.y}
+        stroke={MASK_STROKE_COLOR}
+        strokeWidth={3}
+        strokeLinecap="round"
         strokeDasharray="4 2"
       />
     );
@@ -519,6 +567,18 @@ export function MaskCanvas({
             x: currentDragState.originalShape.x + dx,
             y: currentDragState.originalShape.y + dy,
           };
+        } else if (currentDragState.originalShape.type === 'gradient') {
+          updatedShape = {
+            ...currentDragState.originalShape,
+            start: {
+              x: currentDragState.originalShape.start.x + dx,
+              y: currentDragState.originalShape.start.y + dy,
+            },
+            end: {
+              x: currentDragState.originalShape.end.x + dx,
+              y: currentDragState.originalShape.end.y + dy,
+            },
+          };
         } else {
           updatedShape = currentDragState.originalShape;
         }
@@ -542,9 +602,17 @@ export function MaskCanvas({
       if (currentDrawState.isDrawing && currentDrawState.startPoint && currentDrawState.currentPoint) {
         const w = Math.abs(currentDrawState.currentPoint.x - currentDrawState.startPoint.x);
         const h = Math.abs(currentDrawState.currentPoint.y - currentDrawState.startPoint.y);
+        const dx = currentDrawState.currentPoint.x - currentDrawState.startPoint.x;
+        const dy = currentDrawState.currentPoint.y - currentDrawState.startPoint.y;
+        const lineLength = Math.hypot(dx, dy);
 
         // Only create mask if it's large enough
-        if (w >= MIN_SHAPE_SIZE && h >= MIN_SHAPE_SIZE) {
+        if (
+          (activeTool === 'gradient' && lineLength >= MIN_SHAPE_SIZE) ||
+          ((activeTool === 'rectangle' || activeTool === 'ellipse') &&
+            w >= MIN_SHAPE_SIZE &&
+            h >= MIN_SHAPE_SIZE)
+        ) {
           const minX = Math.min(currentDrawState.startPoint.x, currentDrawState.currentPoint.x);
           const minY = Math.min(currentDrawState.startPoint.y, currentDrawState.currentPoint.y);
 
@@ -567,6 +635,20 @@ export function MaskCanvas({
               radiusX: toNormalized(w / 2, width),
               radiusY: toNormalized(h / 2, height),
               rotation: 0,
+            };
+            onMaskCreateRef.current(shape);
+          } else if (activeTool === 'gradient') {
+            const shape: MaskShape = {
+              type: 'gradient',
+              start: {
+                x: toNormalized(currentDrawState.startPoint.x, width),
+                y: toNormalized(currentDrawState.startPoint.y, height),
+              },
+              end: {
+                x: toNormalized(currentDrawState.currentPoint.x, width),
+                y: toNormalized(currentDrawState.currentPoint.y, height),
+              },
+              gradientType: 'linear',
             };
             onMaskCreateRef.current(shape);
           }
@@ -720,6 +802,9 @@ export function MaskCanvas({
             break;
           case 'bezier':
             ShapeComponent = BezierShape;
+            break;
+          case 'gradient':
+            ShapeComponent = GradientShape;
             break;
           default:
             return null;
