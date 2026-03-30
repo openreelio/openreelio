@@ -117,11 +117,16 @@ pub struct ColorCorrection {
 ///
 /// The CDF is normalized to [0.0, 1.0]. Empty histograms produce a linear ramp.
 fn compute_cdf(histogram: &[f64]) -> Vec<f64> {
+    if histogram.is_empty() {
+        return Vec::new();
+    }
+
     let total: f64 = histogram.iter().sum();
     if total < MIN_PIXEL_THRESHOLD {
         // Degenerate case: return linear identity mapping
+        let denom = histogram.len().saturating_sub(1).max(1) as f64;
         return (0..histogram.len())
-            .map(|i| i as f64 / (histogram.len() - 1).max(1) as f64)
+            .map(|i| i as f64 / denom)
             .collect();
     }
 
@@ -361,6 +366,15 @@ async fn run_signalstats(ffmpeg_path: &Path, frame_path: &Path) -> CoreResult<Si
         .output()
         .await
         .map_err(|e| CoreError::Internal(format!("Failed to run signalstats: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CoreError::Internal(format!(
+            "signalstats failed for {}: {}",
+            frame_path.display(),
+            stderr.trim()
+        )));
+    }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     parse_signalstats_output(&stderr)

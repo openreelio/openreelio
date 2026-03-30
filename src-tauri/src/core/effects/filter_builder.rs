@@ -23,6 +23,7 @@ use super::{
     mask_filters::apply_effect_through_mask_group, parse_curve_points,
     parse_curve_points_with_fallback, sample_curve_at, CurvePoint, Effect, EffectType,
 };
+use tracing::warn;
 
 // =============================================================================
 // Advanced Curve Helpers (Hue vs Hue, Hue vs Sat)
@@ -1859,6 +1860,16 @@ impl FilterGraph {
                         &next_label,
                     )
                 }
+            } else if has_masks {
+                // Masks are enabled but dimensions are missing — cannot compute mask
+                // regions. Skip the effect rather than applying it globally, which
+                // would contradict the user's localized intent.
+                warn!(
+                    "Effect '{:?}' has enabled masks but FilterGraph has no dimensions; \
+                     skipping to avoid unintended global application",
+                    effect.effect_type
+                );
+                format!("[{current_label}]null[{next_label}]")
             } else {
                 effect.to_filter_string(&current_label, &next_label)
             };
@@ -1924,6 +1935,13 @@ impl FilterGraph {
                         &next_label,
                     )
                 }
+            } else if has_masks {
+                warn!(
+                    "Effect '{:?}' has enabled masks but FilterGraph has no dimensions; \
+                     skipping to avoid unintended global application",
+                    effect.effect_type
+                );
+                format!("[{current_label}]null[{next_label}]")
             } else {
                 let filter_body = effect.to_filter_body();
                 if filter_body.is_empty() {
@@ -5433,7 +5451,7 @@ mod tests {
     }
 
     #[test]
-    fn should_fallback_to_normal_filter_when_no_dimensions_set() {
+    fn should_skip_masked_effect_when_no_dimensions_set() {
         use crate::core::masks::{Mask, MaskGroup, MaskShape, RectMask};
 
         let mut effect = Effect::new(EffectType::Contrast);
@@ -5443,14 +5461,16 @@ mod tests {
         masks.add(Mask::new(MaskShape::Rectangle(RectMask::default())));
         effect.masks = masks;
 
-        // No dimensions set
+        // No dimensions set — masks present but unresolvable
         let mut graph = FilterGraph::new();
         graph.add_effect(effect);
 
         let result = graph.to_video_filter_complex("0:v", "out");
 
-        // Without dimensions, cannot generate mask filters — falls back to normal
+        // Without dimensions, the effect should be skipped (null) rather than
+        // applied globally, which would contradict the user's localized intent
         assert!(!result.contains("split"), "Should NOT use masks without dimensions");
-        assert!(result.contains("eq="), "Should still apply the effect");
+        assert!(result.contains("null"), "Should produce null filter");
+        assert!(!result.contains("eq="), "Should NOT apply effect globally");
     }
 }
