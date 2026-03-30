@@ -932,6 +932,8 @@ mod tauri_app {
                 $crate::ipc::delete_esd,
                 // Style transfer commands (ADR-050)
                 $crate::ipc::apply_editing_style,
+                // Color match (S38-002)
+                $crate::ipc::auto_color_match,
                 // Settings
                 $crate::ipc::get_settings,
                 $crate::ipc::set_settings,
@@ -1350,6 +1352,8 @@ mod tauri_app {
             ipc::delete_esd,
             // Style transfer commands (ADR-050)
             ipc::apply_editing_style,
+            // Color match (S38-002)
+            ipc::auto_color_match,
             // Settings
             ipc::get_settings,
             ipc::set_settings,

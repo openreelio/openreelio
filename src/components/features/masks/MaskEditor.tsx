@@ -122,7 +122,7 @@ export function MaskEditor({
     async (shape: MaskShape) => {
       if (!disabled) {
         try {
-          await addMask(shape.type);
+          await addMask(shape);
           // Switch to select mode after creating
           setActiveTool('select');
         } catch (err) {

@@ -1395,6 +1395,23 @@ async applyEditingStyle(esdId: string, sourceAssetId: string) : Promise<Result<S
 }
 },
 /**
+ * Automatically matches a target clip's color to a reference clip.
+ * 
+ * Extracts representative frames from both clips, analyzes their color profiles
+ * via FFmpeg, computes a histogram-matched correction, and applies the result
+ * as a Curves effect on the target clip.
+ * 
+ * The generated effect is fully editable — the user can tweak the R/G/B curves
+ * in the effect inspector after the match is applied.
+ */
+async autoColorMatch(referenceClipId: string, targetClipId: string, sequenceId: string) : Promise<Result<ColorMatchResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("auto_color_match", { referenceClipId, targetClipId, sequenceId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Gets application settings
  */
 async getSettings() : Promise<Result<AppSettingsDto, string>> {
@@ -3248,6 +3265,29 @@ b: number;
  * Alpha (0.0 ~ 1.0, optional)
  */
 a?: number | null }
+/**
+ * Result of an auto color match operation.
+ * 
+ * Contains the created effect ID and the computed correction details
+ * so the frontend can report success and optionally display the adjustments.
+ */
+export type ColorMatchResult = { 
+/**
+ * ID of the Curves effect created on the target clip
+ */
+effectId: string; 
+/**
+ * Brightness offset applied (-1.0 to 1.0)
+ */
+brightnessOffset: number; 
+/**
+ * Saturation multiplier applied
+ */
+saturationMultiplier: number; 
+/**
+ * Temperature shift estimate (negative=cooler, positive=warmer)
+ */
+temperatureShift: number }
 /**
  * Result of executing an edit command.
  */

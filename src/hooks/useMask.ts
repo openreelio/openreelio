@@ -15,6 +15,7 @@ import type {
   MaskId,
   MaskShape,
   MaskBlendMode,
+  GradientType,
   Point2D,
   BezierPoint,
   CommandResult,
@@ -112,6 +113,9 @@ export type PolygonMaskShape = Extract<MaskShape, { type: 'polygon' }>;
 /** Bezier mask shape with type discriminant */
 export type BezierMaskShape = Extract<MaskShape, { type: 'bezier' }>;
 
+/** Gradient mask shape with type discriminant */
+export type GradientMaskShape = Extract<MaskShape, { type: 'gradient' }>;
+
 // =============================================================================
 // Shape Factory Functions
 // =============================================================================
@@ -189,6 +193,23 @@ export function createBezierMask(
     type: 'bezier',
     points: points ?? defaultCurve,
     closed,
+  };
+}
+
+/**
+ * Creates a gradient mask shape for soft power windows.
+ * Default creates a horizontal linear gradient from left-center to right-center.
+ */
+export function createGradientMask(
+  start?: Point2D,
+  end?: Point2D,
+  gradientType: GradientType = 'linear'
+): GradientMaskShape {
+  return {
+    type: 'gradient',
+    start: start ?? { x: 0.25, y: 0.5 },
+    end: end ?? { x: 0.75, y: 0.5 },
+    gradientType,
   };
 }
 

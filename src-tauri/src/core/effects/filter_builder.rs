@@ -20,9 +20,10 @@
 
 use super::{
     curve_points_to_ffmpeg, default_flat_curve, is_flat_identity_curve, is_identity_curve,
-    parse_curve_points, parse_curve_points_with_fallback, sample_curve_at, CurvePoint, Effect,
-    EffectType,
+    mask_filters::apply_effect_through_mask_group, parse_curve_points,
+    parse_curve_points_with_fallback, sample_curve_at, CurvePoint, Effect, EffectType,
 };
+use tracing::warn;
 
 // =============================================================================
 // Advanced Curve Helpers (Hue vs Hue, Hue vs Sat)
@@ -358,7 +359,7 @@ impl IntoFFmpegFilter for Effect {
 
 impl Effect {
     /// Builds the FFmpeg filter parameters string
-    fn build_filter_params(&self) -> String {
+    pub(crate) fn build_filter_params(&self) -> String {
         match &self.effect_type {
             // Color effects
             EffectType::Brightness => self.build_brightness_filter(),
@@ -1768,12 +1769,33 @@ impl Effect {
 pub struct FilterGraph {
     /// List of effects in order
     effects: Vec<Effect>,
+    /// Video width in pixels (for mask calculations)
+    width: Option<i32>,
+    /// Video height in pixels (for mask calculations)
+    height: Option<i32>,
 }
 
 impl FilterGraph {
     /// Creates a new empty filter graph
     pub fn new() -> Self {
-        Self { effects: vec![] }
+        Self {
+            effects: vec![],
+            width: None,
+            height: None,
+        }
+    }
+
+    /// Sets video dimensions for mask-aware filter generation
+    pub fn with_dimensions(mut self, width: i32, height: i32) -> Self {
+        self.width = Some(width);
+        self.height = Some(height);
+        self
+    }
+
+    /// Sets video dimensions on an existing filter graph
+    pub fn set_dimensions(&mut self, width: i32, height: i32) {
+        self.width = Some(width);
+        self.height = Some(height);
     }
 
     /// Adds an effect to the graph
@@ -1822,7 +1844,36 @@ impl FilterGraph {
                 format!("v{}", i)
             };
 
-            let filter = effect.to_filter_string(&current_label, &next_label);
+            // Check if this effect has power window masks and dimensions are available
+            let has_masks = effect.masks.has_enabled_masks();
+            let filter = if let (true, Some(w), Some(h)) = (has_masks, self.width, self.height) {
+                let effect_body = effect.build_filter_params();
+                if effect_body.is_empty() || !effect.enabled || !effect.is_ffmpeg_compatible() {
+                    format!("[{current_label}]null[{next_label}]")
+                } else {
+                    apply_effect_through_mask_group(
+                        &effect.masks,
+                        &effect_body,
+                        w,
+                        h,
+                        &current_label,
+                        &next_label,
+                    )
+                }
+            } else if has_masks {
+                // Masks are enabled but dimensions are missing — cannot compute mask
+                // regions. Skip the effect rather than applying it globally, which
+                // would contradict the user's localized intent.
+                warn!(
+                    "Effect '{:?}' has enabled masks but FilterGraph has no dimensions; \
+                     skipping to avoid unintended global application",
+                    effect.effect_type
+                );
+                format!("[{current_label}]null[{next_label}]")
+            } else {
+                effect.to_filter_string(&current_label, &next_label)
+            };
+
             filters.push(filter);
             current_label = next_label;
         }
@@ -1866,16 +1917,42 @@ impl FilterGraph {
                 format!("{}_{}", output_label, i)
             };
 
-            let filter_body = effect.to_filter_body();
-            if filter_body.is_empty() {
-                filters.push(format!("[{current_label}]null[{next_label}]"));
+            // Check if this effect has power window masks and dimensions are available
+            let has_masks = effect.masks.has_enabled_masks();
+            let filter = if let (true, Some(w), Some(h)) = (has_masks, self.width, self.height) {
+                let effect_body = effect.build_filter_params();
+                if effect_body.is_empty() || !effect.enabled || !effect.is_ffmpeg_compatible() {
+                    format!("[{current_label}]null[{next_label}]")
+                } else {
+                    // For timed mask effects, append enable clause to the effect body
+                    let enabled_body = add_enable_to_each_filter(&effect_body, &enable_clause);
+                    apply_effect_through_mask_group(
+                        &effect.masks,
+                        &enabled_body,
+                        w,
+                        h,
+                        &current_label,
+                        &next_label,
+                    )
+                }
+            } else if has_masks {
+                warn!(
+                    "Effect '{:?}' has enabled masks but FilterGraph has no dimensions; \
+                     skipping to avoid unintended global application",
+                    effect.effect_type
+                );
+                format!("[{current_label}]null[{next_label}]")
             } else {
-                // Apply enable clause to each sub-filter individually.
-                // filter_body can be a comma-separated chain (e.g. "chromakey=...,boxblur=...").
-                // FFmpeg requires enable on EACH filter in the chain, not just the last one.
-                let enabled_body = add_enable_to_each_filter(&filter_body, &enable_clause);
-                filters.push(format!("[{current_label}]{enabled_body}[{next_label}]"));
-            }
+                let filter_body = effect.to_filter_body();
+                if filter_body.is_empty() {
+                    format!("[{current_label}]null[{next_label}]")
+                } else {
+                    let enabled_body = add_enable_to_each_filter(&filter_body, &enable_clause);
+                    format!("[{current_label}]{enabled_body}[{next_label}]")
+                }
+            };
+
+            filters.push(filter);
             current_label = next_label;
         }
 
@@ -5328,5 +5405,84 @@ mod tests {
         let filter = effect.to_filter_body();
         // Then it should return null
         assert_eq!(filter, "null");
+    }
+
+    // =========================================================================
+    // FilterGraph Power Window Integration Tests
+    // =========================================================================
+
+    #[test]
+    fn should_generate_masked_filter_when_effect_has_masks_and_dimensions() {
+        use crate::core::masks::{EllipseMask, Mask, MaskGroup, MaskShape};
+
+        let mut effect = Effect::new(EffectType::Brightness);
+        effect.set_param("brightness", ParamValue::Float(0.1));
+
+        let mut masks = MaskGroup::new();
+        masks.add(Mask::new(MaskShape::Ellipse(EllipseMask::circle(
+            0.5, 0.5, 0.3,
+        ))));
+        effect.masks = masks;
+
+        let mut graph = FilterGraph::new().with_dimensions(1920, 1080);
+        graph.add_effect(effect);
+
+        let result = graph.to_video_filter_complex("0:v", "out");
+
+        assert!(
+            result.contains("split"),
+            "Should split input for mask compositing"
+        );
+        assert!(
+            result.contains("overlay"),
+            "Should use overlay for compositing"
+        );
+        assert!(result.contains("geq="), "Should use geq for mask alpha");
+        assert!(result.contains("eq="), "Should contain brightness filter");
+    }
+
+    #[test]
+    fn should_generate_normal_filter_when_no_masks_present() {
+        let mut effect = Effect::new(EffectType::Brightness);
+        effect.set_param("brightness", ParamValue::Float(0.1));
+
+        let mut graph = FilterGraph::new().with_dimensions(1920, 1080);
+        graph.add_effect(effect);
+
+        let result = graph.to_video_filter_complex("0:v", "out");
+
+        assert!(!result.contains("split"), "Should NOT split without masks");
+        assert!(
+            !result.contains("overlay"),
+            "Should NOT overlay without masks"
+        );
+        assert!(result.contains("eq="), "Should still contain effect filter");
+    }
+
+    #[test]
+    fn should_skip_masked_effect_when_no_dimensions_set() {
+        use crate::core::masks::{Mask, MaskGroup, MaskShape, RectMask};
+
+        let mut effect = Effect::new(EffectType::Contrast);
+        effect.set_param("contrast", ParamValue::Float(1.5));
+
+        let mut masks = MaskGroup::new();
+        masks.add(Mask::new(MaskShape::Rectangle(RectMask::default())));
+        effect.masks = masks;
+
+        // No dimensions set — masks present but unresolvable
+        let mut graph = FilterGraph::new();
+        graph.add_effect(effect);
+
+        let result = graph.to_video_filter_complex("0:v", "out");
+
+        // Without dimensions, the effect should be skipped (null) rather than
+        // applied globally, which would contradict the user's localized intent
+        assert!(
+            !result.contains("split"),
+            "Should NOT use masks without dimensions"
+        );
+        assert!(result.contains("null"), "Should produce null filter");
+        assert!(!result.contains("eq="), "Should NOT apply effect globally");
     }
 }

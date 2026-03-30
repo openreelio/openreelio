@@ -11,6 +11,14 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { EffectInspector } from './EffectInspector';
 import type { Effect, ParamDef, ParamValue } from '@/types';
 
+// Mock color feature sections — they have dedicated test suites and use hooks
+// (useMask, useProjectStore, useTimelineStore) that cause re-render loops
+// when rendered without full app context.
+vi.mock('@/components/features/color', () => ({
+  PowerWindowSection: () => null,
+  ColorMatchSection: () => null,
+}));
+
 // Mock useChromaKey hook (used by ChromaKeyControl)
 vi.mock('@/hooks/useChromaKey', () => ({
   useChromaKey: ({ initialParams, onChange }: { initialParams?: Record<string, unknown>; onChange?: (p: Record<string, unknown>) => void }) => ({

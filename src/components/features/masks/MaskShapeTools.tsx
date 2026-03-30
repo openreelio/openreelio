@@ -1,13 +1,13 @@
 /**
  * MaskShapeTools Component
  *
- * Toolbar for selecting mask drawing tools (select, rectangle, ellipse, polygon, bezier).
+ * Toolbar for selecting mask drawing tools (select, rectangle, ellipse, polygon, bezier, gradient).
  *
  * @module components/features/masks/MaskShapeTools
  */
 
 import React, { useCallback } from 'react';
-import { MousePointer2, Square, Circle, Triangle, Spline } from 'lucide-react';
+import { MousePointer2, Square, Circle, Triangle, Spline, Blend } from 'lucide-react';
 import type { MaskTool } from '@/hooks/useMaskEditor';
 
 // =============================================================================
@@ -70,6 +70,12 @@ const TOOL_CONFIGS: ToolConfig[] = [
     label: 'Bezier',
     icon: <Spline size={16} />,
     shortcut: 'B',
+  },
+  {
+    id: 'gradient',
+    label: 'Gradient',
+    icon: <Blend size={16} />,
+    shortcut: 'G',
   },
 ];
 

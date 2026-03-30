@@ -2358,14 +2358,20 @@ impl ExportEngine {
     ///
     /// If effects have keyframes, they are resolved at the midpoint of the clip
     /// duration since FFmpeg filters cannot animate parameters directly.
+    /// Dimensions are used for mask-aware (power window) filter generation.
     fn build_clip_filter_graph(
         &self,
         clip: &Clip,
         effects: &std::collections::HashMap<String, Effect>,
+        width: Option<u32>,
+        height: Option<u32>,
     ) -> FilterGraph {
         use crate::core::effects::EffectType;
 
         let mut graph = FilterGraph::new();
+        if let (Some(w), Some(h)) = (width, height) {
+            graph.set_dimensions(w as i32, h as i32);
+        }
 
         // Calculate midpoint of clip for keyframe interpolation
         // FFmpeg filters use static values, so we use the midpoint as representative
@@ -2449,7 +2455,12 @@ impl ExportEngine {
         let mut adjustment_layer_effects: Vec<(FilterGraph, f64, f64)> = Vec::new();
         for (clip, _track) in &all_clips {
             if clip.is_adjustment_layer() && !clip.effects.is_empty() {
-                let graph = self.build_clip_filter_graph(clip, effects);
+                let graph = self.build_clip_filter_graph(
+                    clip,
+                    effects,
+                    Some(output_width),
+                    Some(output_height),
+                );
                 if graph.has_video_effects() {
                     let start = clip.place.timeline_in_sec;
                     let end = clip.place.timeline_out_sec();
@@ -2527,8 +2538,13 @@ impl ExportEngine {
             args.push("-i".to_string());
             args.push(validated_path.to_string_lossy().to_string());
 
-            // Build FilterGraph for this clip's effects
-            let clip_filter_graph = self.build_clip_filter_graph(clip, effects);
+            // Build FilterGraph for this clip's effects (with dimensions for mask support)
+            let clip_filter_graph = self.build_clip_filter_graph(
+                clip,
+                effects,
+                Some(output_width),
+                Some(output_height),
+            );
 
             // Build tonemapping filter if needed (HDR source → SDR output)
             let source_hdr_metadata = hdr_metadata_for_asset(asset);
@@ -3856,8 +3872,11 @@ pub fn build_complex_filter_args_with_audio_info(
     fn build_clip_filter_graph_standalone(
         clip: &Clip,
         effects: &std::collections::HashMap<String, Effect>,
+        width: u32,
+        height: u32,
     ) -> FilterGraph {
         let mut graph = FilterGraph::new();
+        graph.set_dimensions(width as i32, height as i32);
 
         // Calculate midpoint for keyframe interpolation
         let clip_duration = clip.range.source_out_sec - clip.range.source_in_sec;
@@ -3895,7 +3914,8 @@ pub fn build_complex_filter_args_with_audio_info(
     let mut adjustment_layer_effects: Vec<(FilterGraph, f64, f64)> = Vec::new();
     for (clip, _track) in &all_clips {
         if clip.is_adjustment_layer() && !clip.effects.is_empty() {
-            let graph = build_clip_filter_graph_standalone(clip, effects);
+            let graph =
+                build_clip_filter_graph_standalone(clip, effects, output_width, output_height);
             if graph.has_video_effects() {
                 let start = clip.place.timeline_in_sec;
                 let end = clip.place.timeline_out_sec();
@@ -3972,8 +3992,9 @@ pub fn build_complex_filter_args_with_audio_info(
         args.push("-i".to_string());
         args.push(validated_path.to_string_lossy().to_string());
 
-        // Build FilterGraph for this clip's effects
-        let clip_filter_graph = build_clip_filter_graph_standalone(clip, effects);
+        // Build FilterGraph for this clip's effects (with dimensions for mask support)
+        let clip_filter_graph =
+            build_clip_filter_graph_standalone(clip, effects, output_width, output_height);
         let source_hdr_metadata = hdr_metadata_for_asset(asset);
         let tonemap_filter = settings.build_tonemap_video_filter(&source_hdr_metadata);
 

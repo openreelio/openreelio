@@ -17,6 +17,13 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }));
 
+// Mock color feature sections — they have dedicated test suites and use hooks
+// that cause re-render loops when rendered without full app context.
+vi.mock('@/components/features/color', () => ({
+  PowerWindowSection: () => null,
+  ColorMatchSection: () => null,
+}));
+
 describe('Inspector', () => {
   const mockedInvoke = vi.mocked(invoke);
 

@@ -24,6 +24,7 @@ import {
   createEllipseMask,
   createPolygonMask,
   createBezierMask,
+  createGradientMask,
 } from './useMask';
 import { createLogger } from '@/services/logger';
 
@@ -33,7 +34,7 @@ const logger = createLogger('useMaskEditor');
 // Types
 // =============================================================================
 
-export type MaskTool = 'select' | 'rectangle' | 'ellipse' | 'polygon' | 'bezier';
+export type MaskTool = 'select' | 'rectangle' | 'ellipse' | 'polygon' | 'bezier' | 'gradient';
 
 export interface UseMaskEditorOptions {
   /** The clip these masks belong to */
@@ -65,8 +66,8 @@ export interface UseMaskEditorResult {
   selectMask: (id: MaskId) => void;
   /** Clear selection */
   clearSelection: () => void;
-  /** Add a new mask */
-  addMask: (type: MaskShape['type'], name?: string) => Promise<MaskId | null>;
+  /** Add a new mask from a tool preset or a fully defined drawn shape */
+  addMask: (input: MaskShape['type'] | MaskShape, name?: string) => Promise<MaskId | null>;
   /** Update a mask (syncs to backend) */
   updateMask: (id: MaskId, updates: Partial<Mask>) => Promise<boolean>;
   /** Update a mask locally (no backend sync) */
@@ -106,6 +107,8 @@ function createDefaultShape(type: MaskShape['type']): MaskShape {
       return createPolygonMask();
     case 'bezier':
       return createBezierMask();
+    case 'gradient':
+      return createGradientMask();
     default:
       return createRectangleMask();
   }
@@ -176,8 +179,13 @@ function isValidMaskShape(value: unknown): value is MaskShape {
     shape.type === 'rectangle' ||
     shape.type === 'ellipse' ||
     shape.type === 'polygon' ||
-    shape.type === 'bezier'
+    shape.type === 'bezier' ||
+    shape.type === 'gradient'
   );
+}
+
+function resolveMaskShape(input: MaskShape['type'] | MaskShape): MaskShape {
+  return typeof input === 'string' ? createDefaultShape(input) : input;
 }
 
 function normalizeFetchedMask(raw: unknown): Mask | null {
@@ -322,15 +330,15 @@ export function useMaskEditor({
   // ---------------------------------------------------------------------------
 
   const addMask = useCallback(
-    async (type: MaskShape['type'], name?: string): Promise<MaskId | null> => {
+    async (input: MaskShape['type'] | MaskShape, name?: string): Promise<MaskId | null> => {
       beginOperation();
       setError(null);
 
       try {
-        const shape = createDefaultShape(type);
+        const shape = resolveMaskShape(input);
         const maskName = name ?? generateMaskName(masksRef.current);
 
-        logger.debug('Adding mask', { effectId, type, name: maskName });
+        logger.debug('Adding mask', { effectId, type: shape.type, name: maskName });
 
         const result = await invoke<CommandResult>('execute_command', {
           commandType: 'AddMask',

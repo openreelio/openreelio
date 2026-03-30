@@ -54,6 +54,24 @@ const createEllipseMask = (id: string): Mask => ({
   locked: false,
 });
 
+const createGradientMask = (id: string): Mask => ({
+  id,
+  name: `Mask ${id}`,
+  shape: {
+    type: 'gradient',
+    start: { x: 0.2, y: 0.5 },
+    end: { x: 0.8, y: 0.5 },
+    gradientType: 'linear',
+  },
+  inverted: false,
+  feather: 0,
+  opacity: 1,
+  expansion: 0,
+  blendMode: 'add',
+  enabled: true,
+  locked: false,
+});
+
 // =============================================================================
 // Test Suite
 // =============================================================================
@@ -139,6 +157,23 @@ describe('MaskCanvas', () => {
       );
 
       expect(screen.getByTestId('mask-shape-ellipse-1')).toBeInTheDocument();
+    });
+
+    it('should render gradient mask', () => {
+      const masks = [createGradientMask('gradient-1')];
+
+      render(
+        <MaskCanvas
+          masks={masks}
+          selectedMaskId={null}
+          activeTool="select"
+          onMaskSelect={mockOnMaskSelect}
+          onMaskUpdate={mockOnMaskUpdate}
+          onMaskCreate={mockOnMaskCreate}
+        />
+      );
+
+      expect(screen.getByTestId('mask-shape-gradient-1')).toBeInTheDocument();
     });
 
     it('should render multiple masks', () => {
@@ -346,6 +381,35 @@ describe('MaskCanvas', () => {
       );
     });
 
+    it('should create gradient mask on mouseup after drawing a line', () => {
+      render(
+        <MaskCanvas
+          masks={[]}
+          selectedMaskId={null}
+          activeTool="gradient"
+          onMaskSelect={mockOnMaskSelect}
+          onMaskUpdate={mockOnMaskUpdate}
+          onMaskCreate={mockOnMaskCreate}
+          width={800}
+          height={450}
+        />
+      );
+
+      const canvas = screen.getByTestId('mask-canvas');
+
+      fireEvent.mouseDown(canvas, { clientX: 100, clientY: 100 });
+      fireEvent.mouseMove(document, { clientX: 320, clientY: 100 });
+      fireEvent.mouseUp(document);
+
+      expect(mockOnMaskCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'gradient',
+          start: expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }),
+          end: expect.objectContaining({ x: expect.any(Number), y: expect.any(Number) }),
+        })
+      );
+    });
+
     it('should cancel drawing on escape key', () => {
       render(
         <MaskCanvas
@@ -404,6 +468,36 @@ describe('MaskCanvas', () => {
         'mask-1',
         expect.objectContaining({
           shape: expect.objectContaining({ type: 'rectangle' }),
+        })
+      );
+    });
+
+    it('should call onMaskUpdate when dragging a gradient mask', () => {
+      const masks = [createGradientMask('mask-1')];
+
+      render(
+        <MaskCanvas
+          masks={masks}
+          selectedMaskId="mask-1"
+          activeTool="select"
+          onMaskSelect={mockOnMaskSelect}
+          onMaskUpdate={mockOnMaskUpdate}
+          onMaskCreate={mockOnMaskCreate}
+          width={800}
+          height={450}
+        />
+      );
+
+      const maskShape = screen.getByTestId('mask-shape-mask-1');
+
+      fireEvent.mouseDown(maskShape, { clientX: 160, clientY: 225 });
+      fireEvent.mouseMove(document, { clientX: 220, clientY: 245 });
+      fireEvent.mouseUp(document);
+
+      expect(mockOnMaskUpdate).toHaveBeenCalledWith(
+        'mask-1',
+        expect.objectContaining({
+          shape: expect.objectContaining({ type: 'gradient' }),
         })
       );
     });

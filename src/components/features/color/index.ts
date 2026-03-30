@@ -17,3 +17,11 @@ export type { TemperatureTintPanelProps } from './TemperatureTintPanel';
 // Before/After Color Comparison
 export { ColorComparisonOverlay } from './ColorComparisonOverlay';
 export type { ColorComparisonOverlayProps } from './ColorComparisonOverlay';
+
+// Power Windows (Mask + Color Correction)
+export { PowerWindowSection } from './PowerWindowSection';
+export type { PowerWindowSectionProps } from './PowerWindowSection';
+
+// Color Match (Auto Shot Matching)
+export { ColorMatchSection } from './ColorMatchSection';
+export type { ColorMatchSectionProps } from './ColorMatchSection';

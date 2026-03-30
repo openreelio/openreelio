@@ -30,6 +30,7 @@ describe('MaskShapeTools', () => {
       expect(screen.getByRole('button', { name: /ellipse/i })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /polygon/i })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /bezier/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /gradient/i })).toBeInTheDocument();
     });
 
     it('should render with testid', () => {
@@ -110,6 +111,15 @@ describe('MaskShapeTools', () => {
 
       fireEvent.click(screen.getByRole('button', { name: /bezier/i }));
       expect(mockOnToolChange).toHaveBeenCalledWith('bezier');
+    });
+
+    it('should call onToolChange when clicking gradient', () => {
+      render(
+        <MaskShapeTools activeTool="rectangle" onToolChange={mockOnToolChange} />
+      );
+
+      fireEvent.click(screen.getByRole('button', { name: /gradient/i }));
+      expect(mockOnToolChange).toHaveBeenCalledWith('gradient');
     });
   });
 

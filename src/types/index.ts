@@ -122,12 +122,23 @@ export interface BezierMask {
   closed: boolean; // Open or closed path
 }
 
+/** Gradient type for gradient masks */
+export type GradientType = 'linear' | 'radial';
+
+/** Gradient mask shape for soft power windows */
+export interface GradientMask {
+  start: Point2D; // Start point (normalized 0.0-1.0)
+  end: Point2D; // End point (normalized 0.0-1.0)
+  gradientType: GradientType; // Linear or radial
+}
+
 /** Discriminated union for mask shapes */
 export type MaskShape =
   | ({ type: 'rectangle' } & RectMask)
   | ({ type: 'ellipse' } & EllipseMask)
   | { type: 'polygon'; points: Point2D[] }
-  | { type: 'bezier'; points: BezierPoint[]; closed: boolean };
+  | { type: 'bezier'; points: BezierPoint[]; closed: boolean }
+  | ({ type: 'gradient' } & GradientMask);
 
 /** Mask blend mode for combining multiple masks */
 export type MaskBlendMode = 'add' | 'subtract' | 'intersect' | 'difference';
