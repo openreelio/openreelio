@@ -28,7 +28,8 @@
 //! ```
 
 use crate::core::masks::{
-    BezierMask, EllipseMask, Mask, MaskBlendMode, MaskGroup, MaskShape, PolygonMask, RectMask,
+    BezierMask, EllipseMask, GradientMask, GradientType, Mask, MaskBlendMode, MaskGroup,
+    MaskShape, PolygonMask, RectMask,
 };
 
 // =============================================================================
@@ -336,6 +337,75 @@ fn evaluate_bezier_segment(
 }
 
 // =============================================================================
+// Gradient Mask Filter
+// =============================================================================
+
+impl MaskFilterBuilder for GradientMask {
+    fn to_alpha_expression(&self, width: i32, height: i32) -> String {
+        let w = width.max(MIN_DIMENSION) as f64;
+        let h = height.max(MIN_DIMENSION) as f64;
+
+        // Convert normalized coordinates to pixel values
+        let sx = self.start.x * w;
+        let sy = self.start.y * h;
+        let ex = self.end.x * w;
+        let ey = self.end.y * h;
+
+        match self.gradient_type {
+            GradientType::Linear => {
+                // Linear gradient: alpha varies along the direction from start to end.
+                // t = dot(P - S, E - S) / |E - S|^2, clamped to [0, 1]
+                // alpha = t * 255
+                let dx = ex - sx;
+                let dy = ey - sy;
+                let len_sq = dx * dx + dy * dy;
+
+                if len_sq < 1e-6 {
+                    return ALPHA_OPAQUE.to_string();
+                }
+
+                // t = ((X-sx)*dx + (Y-sy)*dy) / len_sq
+                // clip(t * 255, 0, 255)
+                format!(
+                    "clip(((X-{sx:.1})*{dx:.4}+(Y-{sy:.1})*{dy:.4})/{len_sq:.4}*{scale},0,{scale})",
+                    sx = sx,
+                    sy = sy,
+                    dx = dx,
+                    dy = dy,
+                    len_sq = len_sq,
+                    scale = ALPHA_OPAQUE
+                )
+            }
+            GradientType::Radial => {
+                // Radial gradient: alpha varies with distance from center (start).
+                // radius = distance(start, end)
+                // d = distance(P, start) / radius, clamped to [0, 1]
+                // alpha = (1 - d) * 255  (opaque at center, transparent at edge)
+                let dx = ex - sx;
+                let dy = ey - sy;
+                let radius_sq = dx * dx + dy * dy;
+
+                if radius_sq < 1e-6 {
+                    return ALPHA_OPAQUE.to_string();
+                }
+
+                let radius = radius_sq.sqrt();
+
+                // d = sqrt((X-sx)^2 + (Y-sy)^2) / radius
+                // alpha = clip((1 - d) * 255, 0, 255)
+                format!(
+                    "clip((1-sqrt(pow(X-{sx:.1},2)+pow(Y-{sy:.1},2))/{radius:.4})*{scale},0,{scale})",
+                    sx = sx,
+                    sy = sy,
+                    radius = radius,
+                    scale = ALPHA_OPAQUE
+                )
+            }
+        }
+    }
+}
+
+// =============================================================================
 // MaskShape Filter
 // =============================================================================
 
@@ -346,6 +416,7 @@ impl MaskFilterBuilder for MaskShape {
             MaskShape::Ellipse(e) => e.to_alpha_expression(width, height),
             MaskShape::Polygon(p) => p.to_alpha_expression(width, height),
             MaskShape::Bezier(b) => b.to_alpha_expression(width, height),
+            MaskShape::Gradient(g) => g.to_alpha_expression(width, height),
         }
     }
 }
@@ -458,7 +529,7 @@ pub fn apply_effect_through_mask(
 
     format!(
         "[{input}]split[_orig_{input}][_eff_{input}];\
-         [{input}_eff]{effect}[_effected_{input}];\
+         [_eff_{input}]{effect}[_effected_{input}];\
          [_orig_{input}]{alpha},format=rgba[_masked_{input}];\
          [_masked_{input}][_effected_{input}]overlay=format=auto[{output}]",
         input = input_label,
@@ -466,6 +537,75 @@ pub fn apply_effect_through_mask(
         alpha = alpha_filter,
         output = output_label
     )
+}
+
+/// Generates FFmpeg filter for applying an effect through a mask group
+///
+/// Uses the combined alpha expression from all enabled masks in the group.
+/// Handles feathering via boxblur on the alpha channel.
+///
+/// Pattern:
+/// ```text
+/// [input] split [orig][eff];
+/// [eff] <effect> [corrected];
+/// [corrected] format=rgba, geq=a='<mask_alpha>' [masked];
+///   (if feathering: split alpha, blur, alphamerge)
+/// [orig][masked] overlay [output]
+/// ```
+pub fn apply_effect_through_mask_group(
+    group: &MaskGroup,
+    effect_filter: &str,
+    width: i32,
+    height: i32,
+    input_label: &str,
+    output_label: &str,
+) -> String {
+    if !group.has_enabled_masks() || effect_filter == "null" || effect_filter.is_empty() {
+        return format!("[{input_label}]null[{output_label}]");
+    }
+
+    let alpha_expr = mask_group_to_alpha_expression(group, width, height);
+    let max_feather = group.max_feather();
+
+    // Unique label prefix to avoid collisions in complex filter graphs
+    let pfx = format!("pw_{}", output_label.replace([':', '[', ']'], "_"));
+
+    if max_feather > 0.001 {
+        // With feathering: need split → blur alpha → alphamerge
+        let blur_radius = (max_feather * MAX_FEATHER_RADIUS as f64) as i32;
+        let blur_radius = blur_radius.clamp(1, MAX_FEATHER_RADIUS);
+
+        format!(
+            "[{input}]split[_orig_{pfx}][_eff_{pfx}];\
+             [_eff_{pfx}]{effect}[_corrected_{pfx}];\
+             [_corrected_{pfx}]format=rgba,\
+             geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='{alpha}',\
+             split[_rgb_{pfx}][_a_{pfx}];\
+             [_a_{pfx}]alphaextract,boxblur={blur}:{blur}[_soft_{pfx}];\
+             [_rgb_{pfx}][_soft_{pfx}]alphamerge[_masked_{pfx}];\
+             [_orig_{pfx}][_masked_{pfx}]overlay=format=auto[{output}]",
+            input = input_label,
+            pfx = pfx,
+            effect = effect_filter,
+            alpha = alpha_expr,
+            blur = blur_radius,
+            output = output_label
+        )
+    } else {
+        // Without feathering: direct geq on corrected stream
+        format!(
+            "[{input}]split[_orig_{pfx}][_eff_{pfx}];\
+             [_eff_{pfx}]{effect}[_corrected_{pfx}];\
+             [_corrected_{pfx}]format=rgba,\
+             geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='{alpha}'[_masked_{pfx}];\
+             [_orig_{pfx}][_masked_{pfx}]overlay=format=auto[{output}]",
+            input = input_label,
+            pfx = pfx,
+            effect = effect_filter,
+            alpha = alpha_expr,
+            output = output_label
+        )
+    }
 }
 
 /// Generates FFmpeg filter for a mask group (multiple masks combined)
@@ -493,6 +633,15 @@ pub fn mask_group_to_alpha_expression(group: &MaskGroup, width: i32, height: i32
     if enabled_masks.len() == 1 {
         let mask = enabled_masks[0];
         let mut expr = mask.shape.to_alpha_expression(width, height);
+        if mask.opacity < 1.0 {
+            let opacity_factor = (mask.opacity * ALPHA_OPAQUE as f64) as i32;
+            expr = format!(
+                "({expr})*{opacity}/{scale}",
+                expr = expr,
+                opacity = opacity_factor,
+                scale = ALPHA_OPAQUE
+            );
+        }
         if mask.inverted {
             expr = format!("({}-({}))", ALPHA_OPAQUE, expr);
         }
@@ -504,6 +653,16 @@ pub fn mask_group_to_alpha_expression(group: &MaskGroup, width: i32, height: i32
 
     for mask in enabled_masks {
         let mut mask_expr = mask.shape.to_alpha_expression(width, height);
+
+        if mask.opacity < 1.0 {
+            let opacity_factor = (mask.opacity * ALPHA_OPAQUE as f64) as i32;
+            mask_expr = format!(
+                "({expr})*{opacity}/{scale}",
+                expr = mask_expr,
+                opacity = opacity_factor,
+                scale = ALPHA_OPAQUE
+            );
+        }
 
         if mask.inverted {
             mask_expr = format!("({}-({}))", ALPHA_OPAQUE, mask_expr);
@@ -528,7 +687,7 @@ fn combine_mask_expressions(expr1: &str, expr2: &str, mode: &MaskBlendMode) -> S
         }
         MaskBlendMode::Subtract => {
             // Subtract: expr1 minus expr2, clamped to 0
-            format!("max(0,({})-({})", expr1, expr2)
+            format!("max(0,({})-({}))", expr1, expr2)
         }
         MaskBlendMode::Intersect => {
             // Intersection: min of both alphas
@@ -536,7 +695,7 @@ fn combine_mask_expressions(expr1: &str, expr2: &str, mode: &MaskBlendMode) -> S
         }
         MaskBlendMode::Difference => {
             // XOR-like: areas that are in one but not both
-            format!("abs(({})-({})", expr1, expr2)
+            format!("abs(({})-({}))", expr1, expr2)
         }
     }
 }
@@ -787,6 +946,60 @@ mod tests {
     }
 
     #[test]
+    fn test_gradient_linear_should_produce_clip_expression() {
+        let gradient = GradientMask::linear(
+            crate::core::masks::Point2D::new(0.25, 0.5),
+            crate::core::masks::Point2D::new(0.75, 0.5),
+        );
+        let expr = gradient.to_alpha_expression(TEST_WIDTH, TEST_HEIGHT);
+
+        assert!(expr.contains("clip("), "Linear gradient should use clip for clamping");
+        assert!(expr.contains("255"), "Should scale to 8-bit alpha range");
+        assert!(expr.contains("X-"), "Should reference X coordinate");
+    }
+
+    #[test]
+    fn test_gradient_radial_should_produce_sqrt_expression() {
+        let gradient = GradientMask::radial(
+            crate::core::masks::Point2D::new(0.5, 0.5),
+            crate::core::masks::Point2D::new(0.5, 0.0),
+        );
+        let expr = gradient.to_alpha_expression(TEST_WIDTH, TEST_HEIGHT);
+
+        assert!(expr.contains("sqrt("), "Radial gradient should compute distance");
+        assert!(expr.contains("pow("), "Should use pow for squared distances");
+        assert!(expr.contains("clip("), "Should clamp output");
+    }
+
+    #[test]
+    fn test_gradient_degenerate_same_points_should_return_opaque() {
+        let gradient = GradientMask {
+            start: crate::core::masks::Point2D::new(0.5, 0.5),
+            end: crate::core::masks::Point2D::new(0.5, 0.5),
+            gradient_type: GradientType::Linear,
+        };
+        let expr = gradient.to_alpha_expression(TEST_WIDTH, TEST_HEIGHT);
+
+        assert_eq!(expr, "255", "Degenerate gradient should be fully opaque");
+    }
+
+    #[test]
+    fn test_gradient_via_mask_shape_enum() {
+        let shape = MaskShape::Gradient(GradientMask::default());
+        let expr = shape.to_alpha_expression(TEST_WIDTH, TEST_HEIGHT);
+
+        assert!(expr.contains("clip("), "Gradient via enum should work");
+    }
+
+    #[test]
+    fn test_gradient_mask_filter_with_inversion() {
+        let mask = Mask::new(MaskShape::Gradient(GradientMask::default())).inverted();
+        let filter = mask_to_alpha_filter(&mask, TEST_WIDTH, TEST_HEIGHT);
+
+        assert!(filter.contains("255-("), "Inverted gradient should subtract from 255");
+    }
+
+    #[test]
     fn test_mask_shape_rectangle_via_enum() {
         let shape = MaskShape::Rectangle(RectMask::default());
         let expr = shape.to_alpha_expression(TEST_WIDTH, TEST_HEIGHT);
@@ -829,5 +1042,174 @@ mod tests {
         // Should not panic with zero dimensions
         let expr = rect.to_alpha_expression(0, 0);
         assert!(!expr.is_empty(), "Should handle zero dimensions safely");
+    }
+
+    // =========================================================================
+    // Power Window (apply_effect_through_mask_group) BDD Tests
+    // =========================================================================
+
+    #[test]
+    fn should_produce_split_overlay_chain_when_mask_group_has_enabled_mask() {
+        let mut group = MaskGroup::new();
+        group.add(Mask::new(MaskShape::Ellipse(EllipseMask::circle(0.5, 0.5, 0.25))));
+
+        let result = apply_effect_through_mask_group(
+            &group,
+            "colorbalance=rs=0.2:gs=-0.1",
+            TEST_WIDTH,
+            TEST_HEIGHT,
+            "v0",
+            "v1",
+        );
+
+        assert!(result.contains("split"), "Should split input for mask compositing");
+        assert!(result.contains("colorbalance"), "Should contain the effect filter");
+        assert!(result.contains("geq="), "Should generate mask alpha via geq");
+        assert!(result.contains("overlay=format=auto"), "Should composite via overlay");
+    }
+
+    #[test]
+    fn should_include_boxblur_when_mask_has_feathering() {
+        let mut group = MaskGroup::new();
+        group.add(
+            Mask::new(MaskShape::Rectangle(RectMask::default()))
+                .with_feather(0.3),
+        );
+
+        let result = apply_effect_through_mask_group(
+            &group,
+            "eq=brightness=0.1",
+            TEST_WIDTH,
+            TEST_HEIGHT,
+            "in",
+            "out",
+        );
+
+        assert!(result.contains("boxblur"), "Feathered mask should include blur");
+        assert!(result.contains("alphaextract"), "Should extract alpha for blur");
+        assert!(result.contains("alphamerge"), "Should merge blurred alpha back");
+    }
+
+    #[test]
+    fn should_not_include_boxblur_when_feather_is_zero() {
+        let mut group = MaskGroup::new();
+        group.add(Mask::new(MaskShape::Rectangle(RectMask::default())));
+
+        let result = apply_effect_through_mask_group(
+            &group,
+            "eq=contrast=1.5",
+            TEST_WIDTH,
+            TEST_HEIGHT,
+            "in",
+            "out",
+        );
+
+        assert!(!result.contains("boxblur"), "Zero feather should skip blur");
+        assert!(!result.contains("alphaextract"), "Should not extract alpha");
+    }
+
+    #[test]
+    fn should_return_null_passthrough_when_no_enabled_masks() {
+        let mut group = MaskGroup::new();
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        mask.enabled = false;
+        group.add(mask);
+
+        let result = apply_effect_through_mask_group(
+            &group,
+            "eq=brightness=0.1",
+            TEST_WIDTH,
+            TEST_HEIGHT,
+            "in",
+            "out",
+        );
+
+        assert!(
+            result.contains("null"),
+            "Disabled masks should produce passthrough"
+        );
+        assert!(
+            !result.contains("split"),
+            "Should not split with no active masks"
+        );
+    }
+
+    #[test]
+    fn should_return_null_passthrough_for_null_effect() {
+        let mut group = MaskGroup::new();
+        group.add(Mask::new(MaskShape::Rectangle(RectMask::default())));
+
+        let result = apply_effect_through_mask_group(
+            &group,
+            "null",
+            TEST_WIDTH,
+            TEST_HEIGHT,
+            "in",
+            "out",
+        );
+
+        assert!(result.contains("null"), "Null effect should passthrough");
+    }
+
+    #[test]
+    fn should_combine_multiple_masks_in_alpha_expression() {
+        let mut group = MaskGroup::new();
+        group.add(Mask::new(MaskShape::Rectangle(RectMask::new(0.25, 0.5, 0.3, 0.3))));
+        let mut mask2 = Mask::new(MaskShape::Ellipse(EllipseMask::circle(0.75, 0.5, 0.2)));
+        mask2.blend_mode = MaskBlendMode::Add;
+        group.add(mask2);
+
+        let result = apply_effect_through_mask_group(
+            &group,
+            "curves=master='0/0 0.5/0.6 1/1'",
+            TEST_WIDTH,
+            TEST_HEIGHT,
+            "in",
+            "out",
+        );
+
+        assert!(result.contains("max("), "Add blend should combine masks with max()");
+        assert!(result.contains("curves="), "Should contain the effect");
+    }
+
+    #[test]
+    fn should_produce_inverted_alpha_when_mask_is_inverted() {
+        let mut group = MaskGroup::new();
+        group.add(
+            Mask::new(MaskShape::Rectangle(RectMask::default())).inverted(),
+        );
+
+        let result = apply_effect_through_mask_group(
+            &group,
+            "eq=brightness=0.2",
+            TEST_WIDTH,
+            TEST_HEIGHT,
+            "in",
+            "out",
+        );
+
+        assert!(
+            result.contains("255-("),
+            "Inverted mask should negate alpha expression"
+        );
+    }
+
+    #[test]
+    fn should_use_gradient_alpha_in_power_window() {
+        let mut group = MaskGroup::new();
+        group.add(Mask::new(MaskShape::Gradient(GradientMask::default())));
+
+        let result = apply_effect_through_mask_group(
+            &group,
+            "colorbalance=rs=0.1",
+            TEST_WIDTH,
+            TEST_HEIGHT,
+            "in",
+            "out",
+        );
+
+        assert!(result.contains("clip("), "Gradient mask should produce clip() expression");
+        assert!(result.contains("colorbalance"), "Should include the effect");
+        assert!(result.contains("overlay"), "Should composite via overlay");
     }
 }
