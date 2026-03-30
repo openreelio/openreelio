@@ -629,13 +629,13 @@ mod tests {
     fn should_shift_dark_target_toward_bright_reference() {
         // Given a dark target (concentrated at low values) and bright reference
         let mut target_hist = vec![0.0; 256];
-        for i in 0..64 {
-            target_hist[i] = 100.0;
+        for item in target_hist.iter_mut().take(64) {
+            *item = 100.0;
         }
 
         let mut reference_hist = vec![0.0; 256];
-        for i in 192..256 {
-            reference_hist[i] = 100.0;
+        for item in reference_hist.iter_mut().take(256).skip(192) {
+            *item = 100.0;
         }
 
         // When computing the transfer function
@@ -655,8 +655,8 @@ mod tests {
         let target_hist = vec![10.0; 256]; // Uniform across full range
 
         let mut reference_hist = vec![0.0; 256];
-        for i in 100..156 {
-            reference_hist[i] = 46.0; // Concentrated in mid-range
+        for item in reference_hist.iter_mut().take(156).skip(100) {
+            *item = 46.0; // Concentrated in mid-range
         }
 
         // When computing the transfer function
@@ -989,9 +989,7 @@ mod tests {
     fn should_estimate_correct_percentile_from_histogram() {
         // Given a histogram with known distribution
         let mut histogram = vec![0.0; 256];
-        for i in 0..256 {
-            histogram[i] = 1.0; // Uniform
-        }
+        histogram.fill(1.0); // Uniform
 
         // When estimating 50th percentile
         let p50 = estimate_percentile(&histogram, 0.50);
