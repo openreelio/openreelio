@@ -1,7 +1,7 @@
 //! Mask System Module
 //!
 //! Provides shape-based masking for selective effects application.
-//! Supports rectangle, ellipse, polygon, and bezier curve masks.
+//! Supports rectangle, ellipse, polygon, bezier curve, and gradient masks.
 //!
 //! # Example
 //!
@@ -337,6 +337,79 @@ impl BezierMask {
 }
 
 // =============================================================================
+// Gradient Mask
+// =============================================================================
+
+/// Gradient type for gradient masks
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GradientType {
+    /// Linear gradient along a line between start and end points
+    #[default]
+    Linear,
+    /// Radial gradient emanating from start point with radius to end point
+    Radial,
+}
+
+/// Gradient mask shape for soft power windows
+///
+/// Creates a smooth alpha transition between fully opaque and fully transparent.
+/// For linear gradients: alpha varies along the perpendicular to the start→end line.
+/// For radial gradients: alpha varies with distance from the start point.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GradientMask {
+    /// Start point of the gradient (normalized 0.0-1.0)
+    pub start: Point2D,
+    /// End point of the gradient (normalized 0.0-1.0)
+    pub end: Point2D,
+    /// Gradient type (linear or radial)
+    #[serde(default)]
+    pub gradient_type: GradientType,
+}
+
+impl Default for GradientMask {
+    fn default() -> Self {
+        Self {
+            start: Point2D::new(0.25, 0.5),
+            end: Point2D::new(0.75, 0.5),
+            gradient_type: GradientType::Linear,
+        }
+    }
+}
+
+impl GradientMask {
+    /// Creates a new linear gradient mask
+    pub fn linear(start: Point2D, end: Point2D) -> Self {
+        Self {
+            start,
+            end,
+            gradient_type: GradientType::Linear,
+        }
+    }
+
+    /// Creates a new radial gradient mask
+    pub fn radial(center: Point2D, edge: Point2D) -> Self {
+        Self {
+            start: center,
+            end: edge,
+            gradient_type: GradientType::Radial,
+        }
+    }
+
+    /// Validates the gradient mask
+    pub fn validate(&self) -> Result<(), String> {
+        let dx = self.end.x - self.start.x;
+        let dy = self.end.y - self.start.y;
+        let dist_sq = dx * dx + dy * dy;
+        if dist_sq < 1e-10 {
+            return Err("Gradient start and end points must be different".to_string());
+        }
+        Ok(())
+    }
+}
+
+// =============================================================================
 // Mask Shape Enum
 // =============================================================================
 
@@ -352,6 +425,8 @@ pub enum MaskShape {
     Polygon(PolygonMask),
     /// Bezier curve mask
     Bezier(BezierMask),
+    /// Gradient mask (linear or radial soft transition)
+    Gradient(GradientMask),
 }
 
 impl Default for MaskShape {
@@ -368,6 +443,7 @@ impl MaskShape {
             Self::Ellipse(e) => e.validate(),
             Self::Polygon(p) => p.validate(),
             Self::Bezier(b) => b.validate(),
+            Self::Gradient(g) => g.validate(),
         }
     }
 
@@ -378,6 +454,7 @@ impl MaskShape {
             Self::Ellipse(_) => "ellipse",
             Self::Polygon(_) => "polygon",
             Self::Bezier(_) => "bezier",
+            Self::Gradient(_) => "gradient",
         }
     }
 }
@@ -560,6 +637,20 @@ impl MaskGroup {
         self.masks.is_empty()
     }
 
+    /// Returns true if any mask in the group is enabled
+    pub fn has_enabled_masks(&self) -> bool {
+        self.masks.iter().any(|m| m.enabled)
+    }
+
+    /// Returns the maximum feather value across all enabled masks
+    pub fn max_feather(&self) -> f64 {
+        self.masks
+            .iter()
+            .filter(|m| m.enabled)
+            .map(|m| m.feather)
+            .fold(0.0_f64, f64::max)
+    }
+
     /// Validates all masks in the group
     pub fn validate(&self) -> Result<(), String> {
         for mask in &self.masks {
@@ -702,6 +793,60 @@ mod tests {
     }
 
     #[test]
+    fn test_gradient_mask_default() {
+        let gradient = GradientMask::default();
+        assert_eq!(gradient.start.x, 0.25);
+        assert_eq!(gradient.end.x, 0.75);
+        assert_eq!(gradient.gradient_type, GradientType::Linear);
+    }
+
+    #[test]
+    fn test_gradient_mask_linear_factory() {
+        let gradient =
+            GradientMask::linear(Point2D::new(0.0, 0.5), Point2D::new(1.0, 0.5));
+        assert_eq!(gradient.gradient_type, GradientType::Linear);
+        assert_eq!(gradient.start.x, 0.0);
+        assert_eq!(gradient.end.x, 1.0);
+    }
+
+    #[test]
+    fn test_gradient_mask_radial_factory() {
+        let gradient =
+            GradientMask::radial(Point2D::new(0.5, 0.5), Point2D::new(0.5, 0.0));
+        assert_eq!(gradient.gradient_type, GradientType::Radial);
+    }
+
+    #[test]
+    fn test_gradient_mask_validate_valid() {
+        let gradient = GradientMask::default();
+        assert!(gradient.validate().is_ok());
+    }
+
+    #[test]
+    fn test_gradient_mask_validate_same_points_rejected() {
+        let gradient = GradientMask::linear(
+            Point2D::new(0.5, 0.5),
+            Point2D::new(0.5, 0.5),
+        );
+        assert!(
+            gradient.validate().is_err(),
+            "Same start and end points should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_gradient_mask_serialization() {
+        let gradient = GradientMask::default();
+        let shape = MaskShape::Gradient(gradient);
+        let json = serde_json::to_string(&shape).unwrap();
+        assert!(json.contains("\"type\":\"gradient\""));
+        assert!(json.contains("\"gradientType\":\"linear\""));
+
+        let deserialized: MaskShape = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.type_name(), "gradient");
+    }
+
+    #[test]
     fn test_mask_shape_type_name() {
         assert_eq!(
             MaskShape::Rectangle(RectMask::default()).type_name(),
@@ -718,6 +863,10 @@ mod tests {
         assert_eq!(
             MaskShape::Bezier(BezierMask::default()).type_name(),
             "bezier"
+        );
+        assert_eq!(
+            MaskShape::Gradient(GradientMask::default()).type_name(),
+            "gradient"
         );
     }
 
