@@ -28,8 +28,8 @@
 //! ```
 
 use crate::core::masks::{
-    BezierMask, EllipseMask, GradientMask, GradientType, Mask, MaskBlendMode, MaskGroup,
-    MaskShape, PolygonMask, RectMask,
+    BezierMask, EllipseMask, GradientMask, GradientType, Mask, MaskBlendMode, MaskGroup, MaskShape,
+    PolygonMask, RectMask,
 };
 
 // =============================================================================
@@ -953,7 +953,10 @@ mod tests {
         );
         let expr = gradient.to_alpha_expression(TEST_WIDTH, TEST_HEIGHT);
 
-        assert!(expr.contains("clip("), "Linear gradient should use clip for clamping");
+        assert!(
+            expr.contains("clip("),
+            "Linear gradient should use clip for clamping"
+        );
         assert!(expr.contains("255"), "Should scale to 8-bit alpha range");
         assert!(expr.contains("X-"), "Should reference X coordinate");
     }
@@ -966,8 +969,14 @@ mod tests {
         );
         let expr = gradient.to_alpha_expression(TEST_WIDTH, TEST_HEIGHT);
 
-        assert!(expr.contains("sqrt("), "Radial gradient should compute distance");
-        assert!(expr.contains("pow("), "Should use pow for squared distances");
+        assert!(
+            expr.contains("sqrt("),
+            "Radial gradient should compute distance"
+        );
+        assert!(
+            expr.contains("pow("),
+            "Should use pow for squared distances"
+        );
         assert!(expr.contains("clip("), "Should clamp output");
     }
 
@@ -996,7 +1005,10 @@ mod tests {
         let mask = Mask::new(MaskShape::Gradient(GradientMask::default())).inverted();
         let filter = mask_to_alpha_filter(&mask, TEST_WIDTH, TEST_HEIGHT);
 
-        assert!(filter.contains("255-("), "Inverted gradient should subtract from 255");
+        assert!(
+            filter.contains("255-("),
+            "Inverted gradient should subtract from 255"
+        );
     }
 
     #[test]
@@ -1051,7 +1063,9 @@ mod tests {
     #[test]
     fn should_produce_split_overlay_chain_when_mask_group_has_enabled_mask() {
         let mut group = MaskGroup::new();
-        group.add(Mask::new(MaskShape::Ellipse(EllipseMask::circle(0.5, 0.5, 0.25))));
+        group.add(Mask::new(MaskShape::Ellipse(EllipseMask::circle(
+            0.5, 0.5, 0.25,
+        ))));
 
         let result = apply_effect_through_mask_group(
             &group,
@@ -1062,19 +1076,28 @@ mod tests {
             "v1",
         );
 
-        assert!(result.contains("split"), "Should split input for mask compositing");
-        assert!(result.contains("colorbalance"), "Should contain the effect filter");
-        assert!(result.contains("geq="), "Should generate mask alpha via geq");
-        assert!(result.contains("overlay=format=auto"), "Should composite via overlay");
+        assert!(
+            result.contains("split"),
+            "Should split input for mask compositing"
+        );
+        assert!(
+            result.contains("colorbalance"),
+            "Should contain the effect filter"
+        );
+        assert!(
+            result.contains("geq="),
+            "Should generate mask alpha via geq"
+        );
+        assert!(
+            result.contains("overlay=format=auto"),
+            "Should composite via overlay"
+        );
     }
 
     #[test]
     fn should_include_boxblur_when_mask_has_feathering() {
         let mut group = MaskGroup::new();
-        group.add(
-            Mask::new(MaskShape::Rectangle(RectMask::default()))
-                .with_feather(0.3),
-        );
+        group.add(Mask::new(MaskShape::Rectangle(RectMask::default())).with_feather(0.3));
 
         let result = apply_effect_through_mask_group(
             &group,
@@ -1085,9 +1108,18 @@ mod tests {
             "out",
         );
 
-        assert!(result.contains("boxblur"), "Feathered mask should include blur");
-        assert!(result.contains("alphaextract"), "Should extract alpha for blur");
-        assert!(result.contains("alphamerge"), "Should merge blurred alpha back");
+        assert!(
+            result.contains("boxblur"),
+            "Feathered mask should include blur"
+        );
+        assert!(
+            result.contains("alphaextract"),
+            "Should extract alpha for blur"
+        );
+        assert!(
+            result.contains("alphamerge"),
+            "Should merge blurred alpha back"
+        );
     }
 
     #[test]
@@ -1139,14 +1171,8 @@ mod tests {
         let mut group = MaskGroup::new();
         group.add(Mask::new(MaskShape::Rectangle(RectMask::default())));
 
-        let result = apply_effect_through_mask_group(
-            &group,
-            "null",
-            TEST_WIDTH,
-            TEST_HEIGHT,
-            "in",
-            "out",
-        );
+        let result =
+            apply_effect_through_mask_group(&group, "null", TEST_WIDTH, TEST_HEIGHT, "in", "out");
 
         assert!(result.contains("null"), "Null effect should passthrough");
     }
@@ -1154,7 +1180,9 @@ mod tests {
     #[test]
     fn should_combine_multiple_masks_in_alpha_expression() {
         let mut group = MaskGroup::new();
-        group.add(Mask::new(MaskShape::Rectangle(RectMask::new(0.25, 0.5, 0.3, 0.3))));
+        group.add(Mask::new(MaskShape::Rectangle(RectMask::new(
+            0.25, 0.5, 0.3, 0.3,
+        ))));
         let mut mask2 = Mask::new(MaskShape::Ellipse(EllipseMask::circle(0.75, 0.5, 0.2)));
         mask2.blend_mode = MaskBlendMode::Add;
         group.add(mask2);
@@ -1168,16 +1196,17 @@ mod tests {
             "out",
         );
 
-        assert!(result.contains("max("), "Add blend should combine masks with max()");
+        assert!(
+            result.contains("max("),
+            "Add blend should combine masks with max()"
+        );
         assert!(result.contains("curves="), "Should contain the effect");
     }
 
     #[test]
     fn should_produce_inverted_alpha_when_mask_is_inverted() {
         let mut group = MaskGroup::new();
-        group.add(
-            Mask::new(MaskShape::Rectangle(RectMask::default())).inverted(),
-        );
+        group.add(Mask::new(MaskShape::Rectangle(RectMask::default())).inverted());
 
         let result = apply_effect_through_mask_group(
             &group,
@@ -1208,7 +1237,10 @@ mod tests {
             "out",
         );
 
-        assert!(result.contains("clip("), "Gradient mask should produce clip() expression");
+        assert!(
+            result.contains("clip("),
+            "Gradient mask should produce clip() expression"
+        );
         assert!(result.contains("colorbalance"), "Should include the effect");
         assert!(result.contains("overlay"), "Should composite via overlay");
     }

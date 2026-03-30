@@ -5429,8 +5429,14 @@ mod tests {
 
         let result = graph.to_video_filter_complex("0:v", "out");
 
-        assert!(result.contains("split"), "Should split input for mask compositing");
-        assert!(result.contains("overlay"), "Should use overlay for compositing");
+        assert!(
+            result.contains("split"),
+            "Should split input for mask compositing"
+        );
+        assert!(
+            result.contains("overlay"),
+            "Should use overlay for compositing"
+        );
         assert!(result.contains("geq="), "Should use geq for mask alpha");
         assert!(result.contains("eq="), "Should contain brightness filter");
     }
@@ -5446,7 +5452,10 @@ mod tests {
         let result = graph.to_video_filter_complex("0:v", "out");
 
         assert!(!result.contains("split"), "Should NOT split without masks");
-        assert!(!result.contains("overlay"), "Should NOT overlay without masks");
+        assert!(
+            !result.contains("overlay"),
+            "Should NOT overlay without masks"
+        );
         assert!(result.contains("eq="), "Should still contain effect filter");
     }
 
@@ -5469,7 +5478,10 @@ mod tests {
 
         // Without dimensions, the effect should be skipped (null) rather than
         // applied globally, which would contradict the user's localized intent
-        assert!(!result.contains("split"), "Should NOT use masks without dimensions");
+        assert!(
+            !result.contains("split"),
+            "Should NOT use masks without dimensions"
+        );
         assert!(result.contains("null"), "Should produce null filter");
         assert!(!result.contains("eq="), "Should NOT apply effect globally");
     }

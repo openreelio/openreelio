@@ -125,9 +125,7 @@ fn compute_cdf(histogram: &[f64]) -> Vec<f64> {
     if total < MIN_PIXEL_THRESHOLD {
         // Degenerate case: return linear identity mapping
         let denom = histogram.len().saturating_sub(1).max(1) as f64;
-        return (0..histogram.len())
-            .map(|i| i as f64 / denom)
-            .collect();
+        return (0..histogram.len()).map(|i| i as f64 / denom).collect();
     }
 
     let mut cdf = Vec::with_capacity(histogram.len());
@@ -502,15 +500,16 @@ async fn parse_histogram_from_signalstats(
 /// Computes RGB histograms from raw RGB24 pixel data.
 ///
 /// Each pixel is 3 consecutive bytes: R, G, B.
-fn compute_histograms_from_raw_rgb(
-    raw_data: &[u8],
-) -> CoreResult<(Vec<f64>, Vec<f64>, Vec<f64>)> {
+fn compute_histograms_from_raw_rgb(raw_data: &[u8]) -> CoreResult<(Vec<f64>, Vec<f64>, Vec<f64>)> {
     let mut hist_r = vec![0.0_f64; HISTOGRAM_BINS];
     let mut hist_g = vec![0.0_f64; HISTOGRAM_BINS];
     let mut hist_b = vec![0.0_f64; HISTOGRAM_BINS];
 
     if raw_data.len() < 3 {
-        debug!("Raw pixel data too small ({} bytes), returning empty histograms", raw_data.len());
+        debug!(
+            "Raw pixel data too small ({} bytes), returning empty histograms",
+            raw_data.len()
+        );
         return Ok((hist_r, hist_g, hist_b));
     }
 
@@ -568,13 +567,23 @@ mod tests {
 
         // Then the CDF should be monotonically increasing and end at 1.0
         assert_eq!(cdf.len(), 256);
-        assert!((cdf[0] - 1.0 / 3.0).abs() < 0.01, "CDF at 0 should be ~0.333");
-        assert!((cdf[128] - 2.0 / 3.0).abs() < 0.01, "CDF at 128 should be ~0.667");
+        assert!(
+            (cdf[0] - 1.0 / 3.0).abs() < 0.01,
+            "CDF at 0 should be ~0.333"
+        );
+        assert!(
+            (cdf[128] - 2.0 / 3.0).abs() < 0.01,
+            "CDF at 128 should be ~0.667"
+        );
         assert!((cdf[255] - 1.0).abs() < 0.001, "CDF at 255 should be 1.0");
 
         // CDF should be non-decreasing
         for i in 1..cdf.len() {
-            assert!(cdf[i] >= cdf[i - 1], "CDF must be non-decreasing at index {}", i);
+            assert!(
+                cdf[i] >= cdf[i - 1],
+                "CDF must be non-decreasing at index {}",
+                i
+            );
         }
     }
 
