@@ -3914,7 +3914,8 @@ pub fn build_complex_filter_args_with_audio_info(
     let mut adjustment_layer_effects: Vec<(FilterGraph, f64, f64)> = Vec::new();
     for (clip, _track) in &all_clips {
         if clip.is_adjustment_layer() && !clip.effects.is_empty() {
-            let graph = build_clip_filter_graph_standalone(clip, effects, output_width, output_height);
+            let graph =
+                build_clip_filter_graph_standalone(clip, effects, output_width, output_height);
             if graph.has_video_effects() {
                 let start = clip.place.timeline_in_sec;
                 let end = clip.place.timeline_out_sec();
@@ -3992,7 +3993,8 @@ pub fn build_complex_filter_args_with_audio_info(
         args.push(validated_path.to_string_lossy().to_string());
 
         // Build FilterGraph for this clip's effects (with dimensions for mask support)
-        let clip_filter_graph = build_clip_filter_graph_standalone(clip, effects, output_width, output_height);
+        let clip_filter_graph =
+            build_clip_filter_graph_standalone(clip, effects, output_width, output_height);
         let source_hdr_metadata = hdr_metadata_for_asset(asset);
         let tonemap_filter = settings.build_tonemap_video_filter(&source_hdr_metadata);
 

@@ -20,7 +20,9 @@ use std::time::Duration;
 
 use tauri::State;
 
-use crate::core::analysis::color_match::{analyze_frame_color, compute_color_correction, ColorCorrection};
+use crate::core::analysis::color_match::{
+    analyze_frame_color, compute_color_correction, ColorCorrection,
+};
 use crate::core::analysis::esd::{self, EditingStyleDocument, EsdGenerator, EsdSummary};
 use crate::core::analysis::style_planner::{StylePlanResult, StylePlanner, StylePlanningContext};
 use crate::core::analysis::{AnalysisBundle, AnalysisJobRunner, AnalysisOptions, VideoMetadata};
@@ -397,8 +399,7 @@ fn resolve_clip_context(
                     .ok_or_else(|| format!("Asset not found: {}", clip.asset_id))?;
 
                 // Use the midpoint of the clip's source range as the representative frame
-                let midpoint =
-                    (clip.range.source_in_sec + clip.range.source_out_sec) / 2.0;
+                let midpoint = (clip.range.source_in_sec + clip.range.source_out_sec) / 2.0;
 
                 return Ok(ClipContext {
                     asset_uri: asset.uri.clone(),
@@ -410,7 +411,10 @@ fn resolve_clip_context(
         }
     }
 
-    Err(format!("Clip not found in sequence {}: {}", sequence_id, clip_id))
+    Err(format!(
+        "Clip not found in sequence {}: {}",
+        sequence_id, clip_id
+    ))
 }
 
 /// Automatically matches a target clip's color to a reference clip.

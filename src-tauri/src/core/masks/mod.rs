@@ -802,8 +802,7 @@ mod tests {
 
     #[test]
     fn test_gradient_mask_linear_factory() {
-        let gradient =
-            GradientMask::linear(Point2D::new(0.0, 0.5), Point2D::new(1.0, 0.5));
+        let gradient = GradientMask::linear(Point2D::new(0.0, 0.5), Point2D::new(1.0, 0.5));
         assert_eq!(gradient.gradient_type, GradientType::Linear);
         assert_eq!(gradient.start.x, 0.0);
         assert_eq!(gradient.end.x, 1.0);
@@ -811,8 +810,7 @@ mod tests {
 
     #[test]
     fn test_gradient_mask_radial_factory() {
-        let gradient =
-            GradientMask::radial(Point2D::new(0.5, 0.5), Point2D::new(0.5, 0.0));
+        let gradient = GradientMask::radial(Point2D::new(0.5, 0.5), Point2D::new(0.5, 0.0));
         assert_eq!(gradient.gradient_type, GradientType::Radial);
     }
 
@@ -824,10 +822,7 @@ mod tests {
 
     #[test]
     fn test_gradient_mask_validate_same_points_rejected() {
-        let gradient = GradientMask::linear(
-            Point2D::new(0.5, 0.5),
-            Point2D::new(0.5, 0.5),
-        );
+        let gradient = GradientMask::linear(Point2D::new(0.5, 0.5), Point2D::new(0.5, 0.5));
         assert!(
             gradient.validate().is_err(),
             "Same start and end points should be rejected"
