@@ -851,6 +851,8 @@ mod tauri_app {
                 $crate::ipc::stabilize_clip,
                 // Smart reframe command
                 $crate::ipc::smart_reframe,
+                // Point tracking command
+                $crate::ipc::track_point,
                 // Interchange export commands (EDL, FCPXML)
                 $crate::ipc::export_edl,
                 $crate::ipc::export_fcpxml,
@@ -1270,6 +1272,8 @@ mod tauri_app {
             ipc::stabilize_clip,
             // Smart reframe command
             ipc::smart_reframe,
+            // Point tracking command
+            ipc::track_point,
             // Interchange export commands (EDL, FCPXML)
             ipc::export_edl,
             ipc::export_fcpxml,

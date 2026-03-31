@@ -727,6 +727,7 @@ mod tests {
     // Integration test: execute plan against real ProjectState
     // =========================================================================
 
+    #[cfg(feature = "gui")]
     #[test]
     fn integration_execute_plan_against_real_state() {
         use crate::core::assets::{Asset, VideoInfo};

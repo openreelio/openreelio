@@ -776,6 +776,19 @@ impl Effect {
                     ParamValue::String(String::new()),
                 ); // Internal: JSON-encoded crop keyframes from analysis
             }
+            EffectType::ObjectTracking => {
+                // Point tracking — NCC template matching across video frames
+                params.insert("template_size".to_string(), ParamValue::Float(25.0)); // Template patch size in pixels (15-50)
+                params.insert("search_area_size".to_string(), ParamValue::Float(100.0)); // Search area size in pixels (50-200)
+                params.insert("confidence_threshold".to_string(), ParamValue::Float(0.75)); // Min confidence to continue tracking (0.5-1.0)
+                params.insert("origin_x".to_string(), ParamValue::Float(-1.0)); // -1.0 = not set; normalized 0-1 when set
+                params.insert("origin_y".to_string(), ParamValue::Float(-1.0)); // -1.0 = not set; normalized 0-1 when set
+                params.insert("start_frame".to_string(), ParamValue::Int(0)); // Frame to start tracking from
+                params.insert(
+                    "tracking_data".to_string(),
+                    ParamValue::String(String::new()),
+                ); // Internal: JSON-encoded Vec<TrackPointData>
+            }
             _ => {}
         }
 
@@ -906,6 +919,11 @@ impl Effect {
                 ParamDef::float("smoothing", "Smoothing", 30.0, 1.0, 100.0),
                 ParamDef::float("zoom", "Zoom", 0.0, 0.0, 50.0),
                 ParamDef::string("detection_mode", "Detection Mode", "center"),
+            ],
+            EffectType::ObjectTracking => vec![
+                ParamDef::float("template_size", "Template Size", 25.0, 15.0, 50.0),
+                ParamDef::float("search_area_size", "Search Area", 100.0, 50.0, 200.0),
+                ParamDef::float("confidence_threshold", "Min Confidence", 0.75, 0.5, 1.0),
             ],
             _ => vec![],
         }
