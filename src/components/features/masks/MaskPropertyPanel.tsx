@@ -7,7 +7,8 @@
  */
 
 import React, { useCallback } from 'react';
-import type { Mask, MaskBlendMode } from '@/types';
+import type { Mask, MaskBlendMode, MaskKeyframe } from '@/types';
+import { MaskKeyframeEditor } from './MaskKeyframeEditor';
 
 // =============================================================================
 // Types
@@ -20,6 +21,14 @@ export interface MaskPropertyPanelProps {
   onChange: (mask: Mask) => void;
   /** Whether controls are disabled */
   disabled?: boolean;
+  /** Current playhead time in seconds (enables keyframe editor) */
+  currentTime?: number;
+  /** Clip duration in seconds */
+  duration?: number;
+  /** Whether tracking data is available for linking */
+  hasTrackingData?: boolean;
+  /** Called to link mask to tracking data */
+  onLinkTracking?: () => void;
   /** Additional CSS class */
   className?: string;
 }
@@ -106,6 +115,10 @@ export function MaskPropertyPanel({
   mask,
   onChange,
   disabled = false,
+  currentTime,
+  duration,
+  hasTrackingData = false,
+  onLinkTracking,
   className = '',
 }: MaskPropertyPanelProps) {
   const isDisabled = disabled || Boolean(mask?.locked);
@@ -139,6 +152,14 @@ export function MaskPropertyPanel({
   const handleInvertChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       updateProperty('inverted', e.target.checked);
+    },
+    [updateProperty]
+  );
+
+  // Handle keyframe updates
+  const handleKeyframesChange = useCallback(
+    (keyframes: MaskKeyframe[]) => {
+      updateProperty('keyframes', keyframes);
     },
     [updateProperty]
   );
@@ -263,6 +284,21 @@ export function MaskPropertyPanel({
           />
         </div>
       </div>
+
+      {/* Mask Keyframe Editor */}
+      {currentTime !== undefined && duration !== undefined && duration > 0 && (
+        <div className="border-t border-zinc-700">
+          <MaskKeyframeEditor
+            mask={mask}
+            currentTime={currentTime}
+            duration={duration}
+            onKeyframesChange={handleKeyframesChange}
+            hasTrackingData={hasTrackingData}
+            onLinkTracking={onLinkTracking}
+            disabled={isDisabled}
+          />
+        </div>
+      )}
     </div>
   );
 }

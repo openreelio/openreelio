@@ -10,6 +10,7 @@
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import type { Mask, MaskId, MaskShape, Point2D } from '@/types';
 import type { MaskTool } from '@/hooks/useMaskEditor';
+import { resolveShapeAtTime } from '@/utils/maskInterpolation';
 
 // =============================================================================
 // Types
@@ -36,6 +37,8 @@ export interface MaskCanvasProps {
   onMaskDelete?: (id: MaskId) => void;
   /** Whether interactions are disabled */
   disabled?: boolean;
+  /** Current playhead time for animated masks (seconds) */
+  currentTime?: number;
   /** Additional CSS classes */
   className?: string;
 }
@@ -463,6 +466,7 @@ export function MaskCanvas({
   onMaskCreate,
   onMaskDelete,
   disabled = false,
+  currentTime,
   className = '',
 }: MaskCanvasProps) {
   const svgRef = useRef<SVGSVGElement>(null);
@@ -777,11 +781,14 @@ export function MaskCanvas({
         fill="transparent"
       />
 
-      {/* Render masks */}
+      {/* Render masks (with time-resolved shapes for animated masks) */}
       {masks.map((mask) => {
+        const resolvedMask = (currentTime !== undefined && mask.keyframes && mask.keyframes.length > 0)
+          ? { ...mask, shape: resolveShapeAtTime(mask.shape, mask.keyframes, currentTime) }
+          : mask;
         const isSelected = mask.id === selectedMaskId;
         const commonProps: ShapeRendererProps = {
-          mask,
+          mask: resolvedMask,
           width,
           height,
           isSelected,
@@ -790,7 +797,7 @@ export function MaskCanvas({
         };
 
         let ShapeComponent: React.FC<ShapeRendererProps>;
-        switch (mask.shape.type) {
+        switch (resolvedMask.shape.type) {
           case 'rectangle':
             ShapeComponent = RectangleShape;
             break;
