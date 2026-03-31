@@ -65,6 +65,18 @@ function clampNormalized(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
+/** Parse a numeric value with fallback, treating 0 as valid */
+function finiteOr(raw: unknown, fallback: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+/** Parse a numeric value requiring > 0, with fallback */
+function positiveOr(raw: unknown, fallback: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 /** Build MotionTrack from effect params */
 function buildTrackFromParams(
   params: Record<string, SimpleParamValue>,
@@ -74,9 +86,9 @@ function buildTrackFromParams(
 
   track.settings = {
     ...DEFAULT_TRACKING_SETTINGS,
-    patternSize: Number(params.template_size) || 25,
-    searchAreaSize: Number(params.search_area_size) || 100,
-    confidenceThreshold: Number(params.confidence_threshold) || 0.75,
+    patternSize: positiveOr(params.template_size, 25),
+    searchAreaSize: positiveOr(params.search_area_size, 100),
+    confidenceThreshold: finiteOr(params.confidence_threshold, 0.75),
   };
 
   const originX = Number(params.origin_x);
@@ -132,9 +144,9 @@ export function PointTrackingPanel({
         ...prev,
         settings: {
           ...DEFAULT_TRACKING_SETTINGS,
-          patternSize: Number(params.template_size) || 25,
-          searchAreaSize: Number(params.search_area_size) || 100,
-          confidenceThreshold: Number(params.confidence_threshold) || 0.75,
+          patternSize: positiveOr(params.template_size, 25),
+          searchAreaSize: positiveOr(params.search_area_size, 100),
+          confidenceThreshold: finiteOr(params.confidence_threshold, 0.75),
         },
         points,
       };
@@ -200,14 +212,20 @@ export function PointTrackingPanel({
         }
 
         const point = prev.points[0];
-        const updatedPoint = axis === 'x' ? { ...point, x: nextValue } : { ...point, y: nextValue };
+        const updatedPoint = axis === 'x'
+          ? { ...point, x: nextValue, keyframes: [] }
+          : { ...point, y: nextValue, keyframes: [] };
 
         return { ...prev, points: [updatedPoint] };
       });
 
       onChange(axis === 'x' ? 'origin_x' : 'origin_y', nextValue);
+      // Invalidate stale tracking data — the old path was relative to the
+      // previous origin, so it would shift the mask incorrectly.
+      onChange('tracking_data', '');
+      clearResult();
     },
-    [onChange],
+    [onChange, clearResult],
   );
 
   const handleStartTracking = useCallback(async () => {

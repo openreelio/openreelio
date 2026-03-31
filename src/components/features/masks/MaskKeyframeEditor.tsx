@@ -10,7 +10,7 @@
 import React, { useCallback, useMemo } from 'react';
 import { ChevronLeft, ChevronRight, Plus, Trash2, Link } from 'lucide-react';
 import type { Mask, MaskKeyframe, Easing } from '@/types';
-import { cloneMaskShape } from '@/utils/maskInterpolation';
+import { cloneMaskShape, resolveShapeAtTime } from '@/utils/maskInterpolation';
 
 // =============================================================================
 // Types
@@ -25,6 +25,8 @@ export interface MaskKeyframeEditorProps {
   duration: number;
   /** Called when keyframes are updated */
   onKeyframesChange: (keyframes: MaskKeyframe[]) => void;
+  /** Called when navigating to a keyframe time (prev/next buttons) */
+  onNavigate?: (time: number) => void;
   /** Called to link mask to tracking data */
   onLinkTracking?: () => void;
   /** Whether tracking is available */
@@ -59,6 +61,7 @@ export function MaskKeyframeEditor({
   currentTime,
   duration,
   onKeyframesChange,
+  onNavigate,
   onLinkTracking,
   hasTrackingData = false,
   disabled = false,
@@ -73,12 +76,17 @@ export function MaskKeyframeEditor({
     [keyframes, currentTime],
   );
 
-  // Add keyframe at current time with current shape
+  // Add keyframe at current time with the currently visible (interpolated) shape
   const handleAddKeyframe = useCallback(() => {
     if (disabled || keyframeAtCurrentTime) return;
+    // Use the interpolated shape at currentTime so mid-animation keyframes
+    // capture the visible pose, not the static base shape.
+    const visibleShape = keyframes.length > 0
+      ? resolveShapeAtTime(mask.shape, keyframes, currentTime)
+      : cloneMaskShape(mask.shape);
     const newKf: MaskKeyframe = {
       timeOffset: currentTime,
-      shape: cloneMaskShape(mask.shape),
+      shape: visibleShape,
       easing: 'linear',
     };
     const updated = [...keyframes, newKf].sort((a, b) => a.timeOffset - b.timeOffset);
@@ -97,27 +105,20 @@ export function MaskKeyframeEditor({
   // Navigate to previous keyframe
   const handlePrevKeyframe = useCallback(() => {
     const prev = keyframes.filter((kf) => kf.timeOffset < currentTime - TIME_TOLERANCE);
-    if (prev.length > 0) {
-      // Trigger a navigation event - parent should update playhead
+    if (prev.length > 0 && onNavigate) {
       const target = prev[prev.length - 1];
-      // We don't have direct playhead control; emit the time via a custom approach
-      // For now, this is a UI-only indicator
-      window.dispatchEvent(
-        new CustomEvent('mask-keyframe-navigate', { detail: { time: target.timeOffset } }),
-      );
+      onNavigate(target.timeOffset);
     }
-  }, [keyframes, currentTime]);
+  }, [keyframes, currentTime, onNavigate]);
 
   // Navigate to next keyframe
   const handleNextKeyframe = useCallback(() => {
     const next = keyframes.filter((kf) => kf.timeOffset > currentTime + TIME_TOLERANCE);
-    if (next.length > 0) {
+    if (next.length > 0 && onNavigate) {
       const target = next[0];
-      window.dispatchEvent(
-        new CustomEvent('mask-keyframe-navigate', { detail: { time: target.timeOffset } }),
-      );
+      onNavigate(target.timeOffset);
     }
-  }, [keyframes, currentTime]);
+  }, [keyframes, currentTime, onNavigate]);
 
   // Update easing for a specific keyframe
   const handleEasingChange = useCallback(

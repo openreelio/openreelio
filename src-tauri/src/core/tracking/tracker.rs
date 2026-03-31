@@ -138,7 +138,8 @@ pub async fn extract_frames_grayscale(
 /// Crop a square template patch from a grayscale frame.
 ///
 /// Clamps to frame boundaries when the template would extend outside the frame.
-/// Returns the template pixels and the actual top-left (x, y) used.
+/// Returns `(template_pixels, actual_w, actual_h, crop_x0, crop_y0)` so that
+/// callers know where the tracked point sits within the extracted patch.
 pub fn extract_template(
     frame: &[u8],
     frame_width: u32,
@@ -146,7 +147,7 @@ pub fn extract_template(
     center_x: u32,
     center_y: u32,
     size: u32,
-) -> (Vec<u8>, u32, u32) {
+) -> (Vec<u8>, u32, u32, u32, u32) {
     let half = size / 2;
 
     // Clamp to frame bounds
@@ -166,7 +167,7 @@ pub fn extract_template(
         }
     }
 
-    (template, actual_w, actual_h)
+    (template, actual_w, actual_h, x0, y0)
 }
 
 // ---------------------------------------------------------------------------
@@ -460,7 +461,7 @@ pub fn track_frames(
     cy = cy.min(frame_height.saturating_sub(1));
 
     // Extract initial template
-    let (mut template, mut tpl_w, mut tpl_h) = extract_template(
+    let (mut template, mut tpl_w, mut tpl_h, tpl_x0, tpl_y0) = extract_template(
         &frames[0],
         frame_width,
         frame_height,
@@ -468,6 +469,11 @@ pub fn track_frames(
         cy,
         config.template_size,
     );
+    // Offset of the tracked point within the template patch.
+    // When the template is fully inside the frame this equals (tpl_w/2, tpl_h/2),
+    // but near edges the crop is asymmetric so we must track the real offset.
+    let mut point_in_tpl_x = cx - tpl_x0;
+    let mut point_in_tpl_y = cy - tpl_y0;
 
     let mut points = Vec::with_capacity(frames.len());
 
@@ -503,9 +509,22 @@ pub fn track_frames(
             break;
         }
 
+        // Correct NCC center result for asymmetric template crops near edges.
+        // ncc_match returns (top_left_x + half_tw, top_left_y + half_th) which
+        // equals the center of the matched patch. The actual tracked point may
+        // be offset from that center when the template was cropped at a boundary.
+        let half_tw = tpl_w / 2;
+        let half_th = tpl_h / 2;
+        let corrected_x = (bx as i32 - half_tw as i32 + point_in_tpl_x as i32)
+            .max(0)
+            .min(frame_width as i32 - 1) as u32;
+        let corrected_y = (by as i32 - half_th as i32 + point_in_tpl_y as i32)
+            .max(0)
+            .min(frame_height as i32 - 1) as u32;
+
         // Record tracked position (normalized)
-        let norm_x = bx as f64 / frame_width as f64;
-        let norm_y = by as f64 / frame_height as f64;
+        let norm_x = corrected_x as f64 / frame_width as f64;
+        let norm_y = corrected_y as f64 / frame_height as f64;
         points.push(TrackPointData {
             frame: start_frame_index + i,
             x: norm_x,
@@ -514,8 +533,8 @@ pub fn track_frames(
         });
 
         // Update search center for next frame
-        cx = bx;
-        cy = by;
+        cx = corrected_x;
+        cy = corrected_y;
         last_tracked_frame_in_loop = i;
 
         // Template drift correction: refresh template periodically
@@ -523,7 +542,7 @@ pub fn track_frames(
             && i as u32 % config.template_refresh_interval == 0
             && conf >= config.template_refresh_min_confidence
         {
-            let (new_tpl, new_w, new_h) = extract_template(
+            let (new_tpl, new_w, new_h, rx0, ry0) = extract_template(
                 frame,
                 frame_width,
                 frame_height,
@@ -534,6 +553,8 @@ pub fn track_frames(
             template = new_tpl;
             tpl_w = new_w;
             tpl_h = new_h;
+            point_in_tpl_x = cx - rx0;
+            point_in_tpl_y = cy - ry0;
         }
 
         // Report progress
@@ -598,10 +619,12 @@ mod tests {
         // Given a 100x100 frame with a bright dot at (50,50)
         let frame = frame_with_dot(100, 100, 50, 50, 10);
         // When extracting a 10x10 template centered at (50,50)
-        let (tpl, w, h) = extract_template(&frame, 100, 100, 50, 50, 10);
+        let (tpl, w, h, x0, y0) = extract_template(&frame, 100, 100, 50, 50, 10);
         // Then the template should be 10x10
         assert_eq!(w, 10);
         assert_eq!(h, 10);
+        assert_eq!(x0, 45);
+        assert_eq!(y0, 45);
         assert_eq!(tpl.len(), 100);
         // And it should contain the bright dot pixels
         assert!(
@@ -615,7 +638,7 @@ mod tests {
         // Given a 100x100 frame
         let frame = uniform_frame(100, 100, 128);
         // When extracting a 20x20 template at corner (0,0)
-        let (tpl, w, h) = extract_template(&frame, 100, 100, 0, 0, 20);
+        let (tpl, w, h, _x0, _y0) = extract_template(&frame, 100, 100, 0, 0, 20);
         // Then template should be clamped to valid region (10x10 since half=10, 0-10)
         assert!(w <= 20);
         assert!(h <= 20);
@@ -627,7 +650,7 @@ mod tests {
         // Given a 100x100 frame
         let frame = uniform_frame(100, 100, 128);
         // When extracting a 20x20 template near bottom-right (99,99)
-        let (tpl, w, h) = extract_template(&frame, 100, 100, 99, 99, 20);
+        let (tpl, w, h, _x0, _y0) = extract_template(&frame, 100, 100, 99, 99, 20);
         // Then template should be clamped but non-empty
         assert!(w > 0);
         assert!(h > 0);
@@ -644,7 +667,7 @@ mod tests {
         // Template is 20x20, so it captures the dot plus surrounding dark area
         let frame = frame_with_dot(200, 200, 80, 60, 8);
         // And a 20x20 template extracted from that position (captures dot + background)
-        let (tpl, tw, th) = extract_template(&frame, 200, 200, 80, 60, 20);
+        let (tpl, tw, th, _, _) = extract_template(&frame, 200, 200, 80, 60, 20);
         // When running NCC match with search area 50
         let (bx, by, conf) = ncc_match(&NccMatchParams {
             frame: &frame,
@@ -667,7 +690,7 @@ mod tests {
     fn should_find_shifted_dot() {
         // Given a 20x20 template from dot at (80,60) — larger than the 8px dot
         let frame_orig = frame_with_dot(200, 200, 80, 60, 8);
-        let (tpl, tw, th) = extract_template(&frame_orig, 200, 200, 80, 60, 20);
+        let (tpl, tw, th, _, _) = extract_template(&frame_orig, 200, 200, 80, 60, 20);
         // And a new frame where the dot moved to (90,65)
         let frame_moved = frame_with_dot(200, 200, 90, 65, 8);
         // When matching in the new frame searching around (80,60) with large area
@@ -700,7 +723,7 @@ mod tests {
         let frame = uniform_frame(200, 200, 128);
         // And a template with a distinctive bright dot (dot=8px, template=20px)
         let tpl_frame = frame_with_dot(200, 200, 100, 100, 8);
-        let (tpl, tw, th) = extract_template(&tpl_frame, 200, 200, 100, 100, 20);
+        let (tpl, tw, th, _, _) = extract_template(&tpl_frame, 200, 200, 100, 100, 20);
         // When running NCC match on the uniform frame
         let (_bx, _by, conf) = ncc_match(&NccMatchParams {
             frame: &frame,

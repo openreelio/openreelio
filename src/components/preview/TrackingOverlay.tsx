@@ -120,14 +120,14 @@ export function TrackingOverlay({
       )}
 
       {/* Individual tracked points */}
-      {pixelPoints.map((pt) => (
+      {pixelPoints.map((pt, index) => (
         <circle
-          key={pt.time}
+          key={`${pt.time}-${index}`}
           cx={pt.px}
           cy={pt.py}
           r={POINT_RADIUS}
           fill="#4ECDC4"
-          fillOpacity={pt.confidence * 0.8}
+          fillOpacity={Math.max(0, Math.min(1, pt.confidence)) * 0.8}
           stroke="none"
         />
       ))}

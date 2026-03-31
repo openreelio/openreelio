@@ -138,8 +138,24 @@ fn lerp_point2d(a: &Point2D, b: &Point2D, t: f64) -> Point2D {
 fn lerp_optional_point(a: &Option<Point2D>, b: &Option<Point2D>, t: f64) -> Option<Point2D> {
     match (a, b) {
         (Some(pa), Some(pb)) => Some(lerp_point2d(pa, pb, t)),
-        (Some(pa), None) => Some(lerp_point2d(pa, &Point2D::new(0.0, 0.0), t)),
-        (None, Some(pb)) => Some(lerp_point2d(&Point2D::new(0.0, 0.0), pb, t)),
+        (Some(pa), None) => {
+            if t <= 0.0 {
+                Some(pa.clone())
+            } else if t >= 1.0 {
+                None
+            } else {
+                Some(lerp_point2d(pa, &Point2D::new(0.0, 0.0), t))
+            }
+        }
+        (None, Some(pb)) => {
+            if t <= 0.0 {
+                None
+            } else if t >= 1.0 {
+                Some(pb.clone())
+            } else {
+                Some(lerp_point2d(&Point2D::new(0.0, 0.0), pb, t))
+            }
+        }
         (None, None) => None,
     }
 }

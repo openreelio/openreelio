@@ -39,7 +39,7 @@ import type { ChromaKeyParams } from '@/hooks/useChromaKey';
 
 /** Debounce delay for parameter changes (ms) */
 const PARAM_CHANGE_DEBOUNCE_MS = 16; // ~1 frame at 60fps
-const IMMEDIATE_EFFECT_PARAMS = new Set(['analysis_data', 'analysis_path']);
+const IMMEDIATE_EFFECT_PARAMS = new Set(['analysis_data', 'analysis_path', 'tracking_data']);
 
 // =============================================================================
 // Validation Helpers
