@@ -15,12 +15,22 @@ import type { Effect, EffectId, ParamDef, SimpleParamValue, Keyframe } from '@/t
 import { EFFECT_TYPE_LABELS, isAudioEffect } from '@/types';
 import { ParameterEditor } from './ParameterEditor';
 import { KeyframeEditor } from './KeyframeEditor';
-import { ColorWheelsPanel, type ColorWheelsValues, type ColorWheelsParamName } from './ColorWheelsPanel';
+import {
+  ColorWheelsPanel,
+  type ColorWheelsValues,
+  type ColorWheelsParamName,
+} from './ColorWheelsPanel';
 import { ChromaKeyControl } from './ChromaKeyControl';
-import { ColorCurvesPanel, TemperatureTintPanel, PowerWindowSection, ColorMatchSection } from '@/components/features/color';
+import {
+  ColorCurvesPanel,
+  TemperatureTintPanel,
+  PowerWindowSection,
+  ColorMatchSection,
+} from '@/components/features/color';
 import { getEffectDefaultParamValues } from '@/utils/effectParamDefs';
 import { StabilizePanel } from './StabilizePanel';
 import { SmartReframePanel } from './SmartReframePanel';
+import { PointTrackingPanel } from './PointTrackingPanel';
 import type { ChromaKeyParams } from '@/hooks/useChromaKey';
 
 // =============================================================================
@@ -112,9 +122,8 @@ function getDefaultValue(paramDef: ParamDef): SimpleParamValue {
   }
 
   // Infer type from default.type if available
-  const paramType = paramDef?.default && 'type' in paramDef.default
-    ? paramDef.default.type
-    : undefined;
+  const paramType =
+    paramDef?.default && 'type' in paramDef.default ? paramDef.default.type : undefined;
 
   // Return type-appropriate defaults based on paramDef.default.type
   switch (paramType) {
@@ -166,7 +175,7 @@ const DEFAULT_COLOR_WHEELS: ColorWheelsValues = {
  * Falls back to defaults for missing values.
  */
 function paramsToColorWheelsValues(
-  params: Record<string, SimpleParamValue> | undefined
+  params: Record<string, SimpleParamValue> | undefined,
 ): ColorWheelsValues {
   if (!params) return DEFAULT_COLOR_WHEELS;
 
@@ -229,6 +238,13 @@ function isAutoReframeEffect(effectType: Effect['effectType']): boolean {
   return effectType === 'auto_reframe';
 }
 
+/**
+ * Check if an effect is an ObjectTracking (Point Tracking) effect.
+ */
+function isObjectTrackingEffect(effectType: Effect['effectType']): boolean {
+  return effectType === 'object_tracking';
+}
+
 /** Color effect types that support Power Window masks */
 const POWER_WINDOW_EFFECT_TYPES = new Set([
   'color_wheels',
@@ -257,7 +273,7 @@ function supportsPowerWindows(effectType: Effect['effectType']): boolean {
  * Maps backend param names (key_color, similarity, blend) to frontend names.
  */
 function paramsToChromaKeyParams(
-  params: Record<string, SimpleParamValue> | undefined
+  params: Record<string, SimpleParamValue> | undefined,
 ): Partial<ChromaKeyParams> {
   if (!params) return {};
 
@@ -323,7 +339,7 @@ export const EffectInspector = memo(function EffectInspector({
       const value = effectParams[paramDef.name];
       return value !== undefined ? value : getDefaultValue(paramDef);
     },
-    [effectParams]
+    [effectParams],
   );
 
   // Handle parameter change with debouncing and validation
@@ -332,7 +348,7 @@ export const EffectInspector = memo(function EffectInspector({
       if (!effectId) return;
 
       // Find param definition for validation
-      const paramDef = paramDefs.find(p => p.name === paramName);
+      const paramDef = paramDefs.find((p) => p.name === paramName);
       const validatedValue = paramDef ? validateParamValue(value, paramDef) : value;
 
       // Accumulate pending changes
@@ -365,7 +381,7 @@ export const EffectInspector = memo(function EffectInspector({
         onChange(effectId, newParams);
       }, PARAM_CHANGE_DEBOUNCE_MS);
     },
-    [effectId, paramDefs, onChange]
+    [effectId, paramDefs, onChange],
   );
 
   // Stable reference to effect enabled state
@@ -419,7 +435,7 @@ export const EffectInspector = memo(function EffectInspector({
       if (!effectId || !onKeyframesChange) return;
       onKeyframesChange(effectId, paramName, keyframes);
     },
-    [effectId, onKeyframesChange]
+    [effectId, onKeyframesChange],
   );
 
   // Check if a parameter has keyframes
@@ -429,7 +445,7 @@ export const EffectInspector = memo(function EffectInspector({
       const kf = effectKeyframes[paramName];
       return kf !== undefined && kf.length > 0;
     },
-    [effectKeyframes]
+    [effectKeyframes],
   );
 
   // Check if keyframe editor should be shown for a parameter
@@ -437,7 +453,7 @@ export const EffectInspector = memo(function EffectInspector({
     (paramName: string): boolean => {
       return hasKeyframes(paramName) || expandedKeyframes.has(paramName);
     },
-    [hasKeyframes, expandedKeyframes]
+    [hasKeyframes, expandedKeyframes],
   );
 
   // Empty state
@@ -548,6 +564,16 @@ export const EffectInspector = memo(function EffectInspector({
             clipContext={clipContext}
             readOnly={readOnly}
           />
+        ) : isObjectTrackingEffect(effect.effectType) ? (
+          <PointTrackingPanel
+            params={effectParams ?? {}}
+            onChange={(paramName: string, value: SimpleParamValue) => {
+              handleParamChange(paramName, value);
+            }}
+            clipContext={clipContext}
+            currentTime={currentTime}
+            readOnly={readOnly}
+          />
         ) : paramDefs.length === 0 ? (
           <p className="text-sm text-editor-text-muted text-center py-4">
             No configurable parameters
@@ -600,20 +626,13 @@ export const EffectInspector = memo(function EffectInspector({
       {/* Power Windows Section (for color effects) */}
       {effect && supportsPowerWindows(effect.effectType) && (
         <div className="px-3 pb-1">
-          <PowerWindowSection
-            effect={effect}
-            clipContext={clipContext}
-            readOnly={readOnly}
-          />
+          <PowerWindowSection effect={effect} clipContext={clipContext} readOnly={readOnly} />
         </div>
       )}
 
       {/* Color Match Section (for color effects) */}
       {effect && supportsPowerWindows(effect.effectType) && (
-        <ColorMatchSection
-          clipContext={clipContext}
-          readOnly={readOnly}
-        />
+        <ColorMatchSection clipContext={clipContext} readOnly={readOnly} />
       )}
 
       {/* Actions */}

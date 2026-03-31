@@ -68,3 +68,6 @@ export type { StabilizePanelProps } from './StabilizePanel';
 
 export { SmartReframePanel } from './SmartReframePanel';
 export type { SmartReframePanelProps } from './SmartReframePanel';
+
+export { PointTrackingPanel } from './PointTrackingPanel';
+export type { PointTrackingPanelProps } from './PointTrackingPanel';
