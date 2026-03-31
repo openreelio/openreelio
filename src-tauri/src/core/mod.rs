@@ -31,6 +31,7 @@ pub mod shapes;
 pub mod template;
 pub mod text;
 pub mod timeline;
+pub mod tracking;
 pub mod update;
 pub mod workspace;
 
