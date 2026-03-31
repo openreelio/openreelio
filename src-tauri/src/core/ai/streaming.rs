@@ -1341,7 +1341,7 @@ pub async fn abort_ai_stream(_stream_id: String) -> Result<(), String> {
 // Tests
 // =============================================================================
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ai-providers", feature = "gui"))]
 mod tests {
     use super::*;
 

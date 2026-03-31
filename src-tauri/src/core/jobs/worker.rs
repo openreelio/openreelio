@@ -22,7 +22,7 @@ use tauri::Manager;
 use tokio::sync::Notify;
 use tokio::sync::{mpsc, oneshot};
 
-#[cfg(any(test, feature = "gui"))]
+#[cfg(feature = "gui")]
 use crate::core::jobs::JobType;
 #[cfg(feature = "gui")]
 use crate::core::{

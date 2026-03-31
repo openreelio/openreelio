@@ -23,3 +23,7 @@ export type { MaskListProps } from './MaskList';
 // Property Panel
 export { MaskPropertyPanel } from './MaskPropertyPanel';
 export type { MaskPropertyPanelProps } from './MaskPropertyPanel';
+
+// Keyframe Editor
+export { MaskKeyframeEditor } from './MaskKeyframeEditor';
+export type { MaskKeyframeEditorProps } from './MaskKeyframeEditor';

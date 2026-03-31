@@ -143,6 +143,13 @@ export type MaskShape =
 /** Mask blend mode for combining multiple masks */
 export type MaskBlendMode = 'add' | 'subtract' | 'intersect' | 'difference';
 
+/** A keyframe for mask shape animation */
+export interface MaskKeyframe {
+  timeOffset: number; // Seconds from clip start
+  shape: MaskShape; // Complete shape snapshot at this keyframe
+  easing: Easing; // Easing function to next keyframe
+}
+
 /** Complete mask definition */
 export interface Mask {
   id: MaskId;
@@ -155,6 +162,8 @@ export interface Mask {
   blendMode: MaskBlendMode;
   enabled: boolean;
   locked: boolean;
+  keyframes?: MaskKeyframe[]; // Shape animation keyframes
+  trackingSourceId?: string; // Reference to tracking effect ID
 }
 
 /** Group of masks applied to an effect */

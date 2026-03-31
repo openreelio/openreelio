@@ -634,6 +634,22 @@ async smartReframe(args: SmartReframeArgs) : Promise<Result<SmartReframeResult, 
 }
 },
 /**
+ * Run point tracking analysis on a clip.
+ * 
+ * Uses NCC (Normalized Cross-Correlation) template matching to track
+ * a user-selected point across video frames. The tracking data is returned
+ * as JSON and should be stored in the ObjectTracking effect params.
+ * 
+ * Progress is reported via `track-point-progress` Tauri events.
+ */
+async trackPoint(args: TrackPointArgs) : Promise<Result<TrackPointResult, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("track_point", { args }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Exports a sequence to CMX 3600 EDL format.
  * 
  * Generates an industry-standard EDL file that can be imported into
@@ -6224,6 +6240,50 @@ sequenceId: string | null }
  * Track type/kind enumeration
  */
 export type TrackKind = "video" | "audio" | "caption" | "overlay"
+/**
+ * Arguments for the track_point command.
+ */
+export type TrackPointArgs = { sequenceId: string; trackId: string; clipId: string; 
+/**
+ * Frame index to start tracking from (0-based).
+ */
+startFrame: number; 
+/**
+ * Normalized X coordinate of the point to track (0.0–1.0).
+ */
+x: number; 
+/**
+ * Normalized Y coordinate of the point to track (0.0–1.0).
+ */
+y: number; 
+/**
+ * Template patch size in pixels. Default: 25.
+ */
+templateSize: number | null; 
+/**
+ * Search area size in pixels. Default: 100.
+ */
+searchAreaSize: number | null; 
+/**
+ * Minimum confidence threshold (0.0–1.0). Default: 0.75.
+ */
+confidenceThreshold: number | null }
+/**
+ * Result of point tracking analysis.
+ */
+export type TrackPointResult = { 
+/**
+ * JSON-encoded tracking data (Vec<TrackPointData>).
+ */
+trackingData: string; 
+/**
+ * Number of frames successfully tracked.
+ */
+pointsCount: number; 
+/**
+ * Average confidence score across all tracked points.
+ */
+averageConfidence: number }
 /**
  * Search result for a transcript segment.
  */

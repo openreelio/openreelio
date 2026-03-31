@@ -221,6 +221,17 @@ describe('Video Effect Parameters', () => {
     });
   });
 
+  describe('object_tracking', () => {
+    it('should define backend-aligned point tracking parameters', () => {
+      const params = VIDEO_EFFECT_PARAM_DEFS.object_tracking;
+      expect(params).toBeDefined();
+
+      expect(params.find((p) => p.name === 'template_size')).toBeDefined();
+      expect(params.find((p) => p.name === 'search_area_size')).toBeDefined();
+      expect(params.find((p) => p.name === 'confidence_threshold')).toBeDefined();
+    });
+  });
+
   // ===========================================================================
   // Keying Effects
   // ===========================================================================
@@ -419,6 +430,18 @@ describe('getEffectDefaultParamValues', () => {
       zoom: 0,
       detection_mode: 'center',
       analysis_data: '',
+    });
+  });
+
+  it('should include internal point tracking state when resetting', () => {
+    expect(getEffectDefaultParamValues('object_tracking')).toEqual({
+      template_size: 25,
+      search_area_size: 100,
+      confidence_threshold: 0.75,
+      origin_x: -1,
+      origin_y: -1,
+      start_frame: 0,
+      tracking_data: '',
     });
   });
 });

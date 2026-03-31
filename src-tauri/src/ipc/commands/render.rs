@@ -7,7 +7,7 @@ use specta::Type;
 use tauri::State;
 
 use crate::core::{
-    fs::{default_export_allowed_roots, validate_scoped_output_path},
+    fs::{default_export_allowed_roots, validate_local_input_path, validate_scoped_output_path},
     render::{
         cancel_render_job, register_render_job, unregister_render_job, AudioExportFormat,
         ExportError, ExportPreset, ImageFormat,
@@ -2309,4 +2309,238 @@ pub struct RenderCacheJobResult {
     pub segments_to_render: u32,
     /// Job status
     pub status: RenderCacheJobStatus,
+}
+
+// =============================================================================
+// Point Tracking
+// =============================================================================
+
+/// Arguments for the track_point command.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackPointArgs {
+    pub sequence_id: String,
+    pub track_id: String,
+    pub clip_id: String,
+    /// Frame index to start tracking from (0-based).
+    pub start_frame: usize,
+    /// Normalized X coordinate of the point to track (0.0–1.0).
+    pub x: f64,
+    /// Normalized Y coordinate of the point to track (0.0–1.0).
+    pub y: f64,
+    /// Template patch size in pixels. Default: 25.
+    pub template_size: Option<u32>,
+    /// Search area size in pixels. Default: 100.
+    pub search_area_size: Option<u32>,
+    /// Minimum confidence threshold (0.0–1.0). Default: 0.75.
+    pub confidence_threshold: Option<f64>,
+}
+
+/// Result of point tracking analysis.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackPointResult {
+    /// JSON-encoded tracking data (Vec<TrackPointData>).
+    pub tracking_data: String,
+    /// Number of frames successfully tracked.
+    pub points_count: usize,
+    /// Average confidence score across all tracked points.
+    pub average_confidence: f64,
+}
+
+/// Run point tracking analysis on a clip.
+///
+/// Uses NCC (Normalized Cross-Correlation) template matching to track
+/// a user-selected point across video frames. The tracking data is returned
+/// as JSON and should be stored in the ObjectTracking effect params.
+///
+/// Progress is reported via `track-point-progress` Tauri events.
+#[tauri::command]
+#[specta::specta]
+pub async fn track_point(
+    args: TrackPointArgs,
+    state: State<'_, AppState>,
+    ffmpeg_state: State<'_, crate::core::ffmpeg::SharedFFmpegState>,
+    app_handle: tauri::AppHandle,
+) -> Result<TrackPointResult, String> {
+    use crate::core::tracking::models::TrackingConfig;
+    use crate::core::tracking::tracker;
+    use tauri::Emitter;
+
+    let TrackPointArgs {
+        sequence_id,
+        track_id,
+        clip_id,
+        start_frame,
+        x,
+        y,
+        template_size,
+        search_area_size,
+        confidence_threshold,
+    } = args;
+
+    // Validate coordinates
+    let valid_range = 0.0..=1.0;
+    if !valid_range.contains(&x) || !valid_range.contains(&y) {
+        return Err("Point coordinates must be in 0.0–1.0 range".to_string());
+    }
+
+    // Resolve clip source path and metadata
+    let (source_path, video_width, video_height, fps, clip_source_in_sec, clip_total_frames) = {
+        let guard = state.project.lock().await;
+        let project = guard
+            .as_ref()
+            .ok_or_else(|| "No project is currently open".to_string())?;
+
+        let sequence = project
+            .state
+            .sequences
+            .get(&sequence_id)
+            .ok_or_else(|| format!("Sequence not found: {sequence_id}"))?;
+
+        let track = sequence
+            .tracks
+            .iter()
+            .find(|t| t.id == track_id)
+            .ok_or_else(|| format!("Track not found: {track_id}"))?;
+
+        let clip = track
+            .clips
+            .iter()
+            .find(|c| c.id == clip_id)
+            .ok_or_else(|| format!("Clip not found: {clip_id}"))?;
+
+        let asset = project
+            .state
+            .assets
+            .get(&clip.asset_id)
+            .ok_or_else(|| format!("Asset not found: {}", clip.asset_id))?;
+
+        let (width, height, fps) = if let Some(ref video) = asset.video {
+            (video.width, video.height, video.fps.as_f64())
+        } else {
+            (1920, 1080, sequence.format.fps.as_f64())
+        };
+        let asset_duration_sec = asset.duration_sec.ok_or_else(|| {
+            "Asset has no known duration; cannot determine frame range for tracking".to_string()
+        })?;
+        let source_in_sec = clip.range.source_in_sec.clamp(0.0, asset_duration_sec);
+        let source_out_sec = clip
+            .range
+            .source_out_sec
+            .clamp(source_in_sec, asset_duration_sec);
+        let clip_duration_sec = source_out_sec - source_in_sec;
+        if clip_duration_sec <= 0.0 {
+            return Err(format!("Clip has no trackable source range: {clip_id}"));
+        }
+        let frames = ((clip_duration_sec * fps).ceil() as usize).max(1);
+
+        (asset.uri.clone(), width, height, fps, source_in_sec, frames)
+    };
+
+    // Validate start_frame against clip-local frame count
+    if start_frame >= clip_total_frames {
+        return Err(format!(
+            "start_frame ({start_frame}) exceeds clip frames ({clip_total_frames})"
+        ));
+    }
+
+    let source = validate_local_input_path(&source_path, "Tracking source file")?;
+
+    // Get FFmpeg runner
+    let ffmpeg_guard = ffmpeg_state.read().await;
+    let ffmpeg = ffmpeg_guard.runner().ok_or_else(|| {
+        "FFmpeg not initialized. Please install FFmpeg and restart the application.".to_string()
+    })?;
+
+    // Build tracking config
+    let config = TrackingConfig {
+        template_size: template_size.unwrap_or(25),
+        search_area_size: search_area_size.unwrap_or(100),
+        confidence_threshold: confidence_threshold.unwrap_or(0.75),
+        ..TrackingConfig::default()
+    };
+
+    // Emit initial progress
+    let _ = app_handle.emit(
+        "track-point-progress",
+        serde_json::json!({
+            "clipId": clip_id,
+            "progress": 0,
+            "phase": "tracking"
+        }),
+    );
+
+    // Set up progress channel
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<f32>(32);
+
+    // Forward progress to Tauri events in a background task
+    let clip_id_clone = clip_id.clone();
+    let app_handle_clone = app_handle.clone();
+    let progress_forwarder = tokio::spawn(async move {
+        while let Some(progress) = progress_rx.recv().await {
+            let _ = app_handle_clone.emit(
+                "track-point-progress",
+                serde_json::json!({
+                    "clipId": clip_id_clone,
+                    "progress": progress.round() as u32,
+                    "phase": "tracking"
+                }),
+            );
+        }
+    });
+
+    // Run tracking
+    let ffmpeg_path = ffmpeg.info().ffmpeg_path.clone();
+
+    let result = tracker::track_point(
+        &crate::core::tracking::tracker::TrackPointInput {
+            ffmpeg_path: &ffmpeg_path,
+            video_path: &source,
+            start_frame,
+            origin_x: x,
+            origin_y: y,
+            video_width,
+            video_height,
+            fps,
+            clip_source_in_sec,
+            clip_total_frames,
+        },
+        &config,
+        Some(&progress_tx),
+    )
+    .await
+    .map_err(|e| format!("Tracking failed: {e}"))?;
+
+    // Clean up progress channel
+    drop(progress_tx);
+    let _ = progress_forwarder.await;
+
+    // Compute stats
+    let points_count = result.points.len();
+    let average_confidence = if points_count > 0 {
+        result.points.iter().map(|p| p.confidence).sum::<f64>() / points_count as f64
+    } else {
+        0.0
+    };
+
+    // Serialize tracking data
+    let tracking_data = serde_json::to_string(&result.points)
+        .map_err(|e| format!("Failed to serialize tracking data: {e}"))?;
+
+    // Emit completion
+    let _ = app_handle.emit(
+        "track-point-progress",
+        serde_json::json!({
+            "clipId": clip_id,
+            "progress": 100,
+            "phase": "complete"
+        }),
+    );
+
+    Ok(TrackPointResult {
+        tracking_data,
+        points_count,
+        average_confidence,
+    })
 }

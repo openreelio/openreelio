@@ -39,6 +39,14 @@ export interface MaskEditorProps {
   disabled?: boolean;
   /** Compact layout mode */
   compact?: boolean;
+  /** Current playhead time in seconds */
+  currentTime?: number;
+  /** Clip duration in seconds */
+  duration?: number;
+  /** Whether tracking data is available for mask linking */
+  hasTrackingData?: boolean;
+  /** Called to link the selected mask to tracking data */
+  onLinkTracking?: () => void;
   /** Additional CSS classes */
   className?: string;
   /** Called when masks change */
@@ -59,6 +67,10 @@ export function MaskEditor({
   canvasHeight = 360,
   disabled = false,
   compact = false,
+  currentTime,
+  duration,
+  hasTrackingData = false,
+  onLinkTracking,
   className = '',
   onMasksChange,
 }: MaskEditorProps) {
@@ -102,7 +114,7 @@ export function MaskEditor({
         setActiveTool(tool);
       }
     },
-    [disabled, setActiveTool]
+    [disabled, setActiveTool],
   );
 
   const handleMaskSelect = useCallback(
@@ -115,7 +127,7 @@ export function MaskEditor({
         }
       }
     },
-    [disabled, selectMask, clearSelection]
+    [disabled, selectMask, clearSelection],
   );
 
   const handleMaskCreate = useCallback(
@@ -131,7 +143,7 @@ export function MaskEditor({
         }
       }
     },
-    [disabled, addMask, setActiveTool]
+    [disabled, addMask, setActiveTool],
   );
 
   const handleMaskUpdate = useCallback(
@@ -146,7 +158,7 @@ export function MaskEditor({
         }
       }
     },
-    [disabled, updateMask, masks, onMasksChange]
+    [disabled, updateMask, masks, onMasksChange],
   );
 
   const handleMaskDelete = useCallback(
@@ -161,7 +173,7 @@ export function MaskEditor({
         }
       }
     },
-    [disabled, deleteMask, masks, onMasksChange]
+    [disabled, deleteMask, masks, onMasksChange],
   );
 
   const handleToggleEnabled = useCallback(
@@ -170,7 +182,7 @@ export function MaskEditor({
         await toggleEnabled(id);
       }
     },
-    [disabled, toggleEnabled]
+    [disabled, toggleEnabled],
   );
 
   const handleToggleLocked = useCallback(
@@ -179,7 +191,7 @@ export function MaskEditor({
         await toggleLocked(id);
       }
     },
-    [disabled, toggleLocked]
+    [disabled, toggleLocked],
   );
 
   const handleAddMaskClick = useCallback(async () => {
@@ -197,7 +209,7 @@ export function MaskEditor({
         await updateMask(selectedMaskId, updatedMask);
       }
     },
-    [disabled, selectedMaskId, updateMaskLocal, updateMask]
+    [disabled, selectedMaskId, updateMaskLocal, updateMask],
   );
 
   // ---------------------------------------------------------------------------
@@ -263,6 +275,7 @@ export function MaskEditor({
             activeTool={activeTool}
             width={canvasWidth}
             height={canvasHeight}
+            currentTime={currentTime}
             onMaskSelect={handleMaskSelect}
             onMaskUpdate={handleMaskUpdate}
             onMaskCreate={handleMaskCreate}
@@ -295,6 +308,10 @@ export function MaskEditor({
                 mask={selectedMask}
                 onChange={handlePropertyChange}
                 disabled={disabled}
+                currentTime={currentTime}
+                duration={duration}
+                hasTrackingData={hasTrackingData}
+                onLinkTracking={onLinkTracking}
               />
             </div>
           )}

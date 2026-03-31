@@ -18,9 +18,12 @@
 //! }));
 //! ```
 
+pub mod interpolation;
+
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
+use crate::core::effects::Easing;
 use crate::core::MaskId;
 
 /// Generates a new unique mask ID
@@ -478,6 +481,42 @@ pub enum MaskBlendMode {
     Difference,
 }
 
+/// A keyframe for mask shape animation.
+///
+/// Stores a complete mask shape snapshot at a point in time, enabling
+/// smooth interpolation between shapes across the clip duration.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MaskKeyframe {
+    /// Time offset from clip start (seconds)
+    pub time_offset: f64,
+    /// Complete mask shape at this keyframe
+    pub shape: MaskShape,
+    /// Easing function to next keyframe
+    #[serde(default)]
+    pub easing: Easing,
+}
+
+impl MaskKeyframe {
+    /// Creates a new mask keyframe with linear easing
+    pub fn new(time_offset: f64, shape: MaskShape) -> Self {
+        Self {
+            time_offset,
+            shape,
+            easing: Easing::Linear,
+        }
+    }
+
+    /// Creates a mask keyframe with specified easing
+    pub fn with_easing(time_offset: f64, shape: MaskShape, easing: Easing) -> Self {
+        Self {
+            time_offset,
+            shape,
+            easing,
+        }
+    }
+}
+
 /// Mask instance with all properties
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -509,6 +548,12 @@ pub struct Mask {
     /// Whether mask is locked from editing
     #[serde(default)]
     pub locked: bool,
+    /// Shape keyframes for animation over time
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keyframes: Vec<MaskKeyframe>,
+    /// Reference to tracking effect ID that drives this mask's animation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tracking_source_id: Option<String>,
 }
 
 fn default_one() -> f64 {
@@ -519,8 +564,9 @@ impl Mask {
     /// Creates a new mask with default properties
     pub fn new(shape: MaskShape) -> Self {
         let id = generate_mask_id();
+        let short = id.get(..4).unwrap_or(&id);
         Self {
-            name: format!("Mask {}", &id[..4]),
+            name: format!("Mask {short}"),
             id,
             shape,
             inverted: false,
@@ -530,13 +576,16 @@ impl Mask {
             blend_mode: MaskBlendMode::Add,
             enabled: true,
             locked: false,
+            keyframes: Vec::new(),
+            tracking_source_id: None,
         }
     }
 
     /// Creates a mask with a specific ID
     pub fn with_id(id: MaskId, shape: MaskShape) -> Self {
+        let short = id.get(..4).unwrap_or(&id);
         Self {
-            name: format!("Mask {}", &id[..4]),
+            name: format!("Mask {short}"),
             id,
             shape,
             inverted: false,
@@ -546,6 +595,8 @@ impl Mask {
             blend_mode: MaskBlendMode::Add,
             enabled: true,
             locked: false,
+            keyframes: Vec::new(),
+            tracking_source_id: None,
         }
     }
 
@@ -567,6 +618,132 @@ impl Mask {
         self
     }
 
+    /// Returns the interpolated shape at a given time offset.
+    ///
+    /// If no keyframes exist, returns the base shape.
+    /// If time is before all keyframes, returns the first keyframe's shape.
+    /// If time is after all keyframes, returns the last keyframe's shape.
+    /// Otherwise interpolates between the surrounding keyframes.
+    pub fn shape_at_time(&self, time_offset: f64) -> MaskShape {
+        if self.keyframes.is_empty() {
+            return self.shape.clone();
+        }
+
+        let kfs = &self.keyframes;
+
+        // Before first keyframe
+        if time_offset <= kfs[0].time_offset {
+            return kfs[0].shape.clone();
+        }
+
+        // After last keyframe
+        if time_offset >= kfs[kfs.len() - 1].time_offset {
+            return kfs[kfs.len() - 1].shape.clone();
+        }
+
+        // Find surrounding keyframes
+        for i in 0..kfs.len() - 1 {
+            let kf_a = &kfs[i];
+            let kf_b = &kfs[i + 1];
+            if time_offset >= kf_a.time_offset && time_offset <= kf_b.time_offset {
+                let duration = kf_b.time_offset - kf_a.time_offset;
+                if duration <= 0.0 {
+                    return kf_a.shape.clone();
+                }
+                let raw_t = (time_offset - kf_a.time_offset) / duration;
+                let t = interpolation::apply_easing(raw_t, &kf_a.easing);
+                return interpolation::interpolate_mask_shape(&kf_a.shape, &kf_b.shape, t);
+            }
+        }
+
+        // Fallback (should not reach)
+        self.shape.clone()
+    }
+
+    /// Inserts or replaces a keyframe at the given time offset (sorted by time).
+    ///
+    /// Returns the previous keyframe at that time if one existed (within tolerance).
+    pub fn set_keyframe(&mut self, keyframe: MaskKeyframe) -> Option<MaskKeyframe> {
+        const TIME_TOLERANCE: f64 = 0.001;
+        let time = keyframe.time_offset;
+
+        // Replace existing keyframe at the same time
+        if let Some(pos) = self
+            .keyframes
+            .iter()
+            .position(|kf| (kf.time_offset - time).abs() < TIME_TOLERANCE)
+        {
+            let old = std::mem::replace(&mut self.keyframes[pos], keyframe);
+            return Some(old);
+        }
+
+        // Insert in sorted order
+        let insert_pos = self
+            .keyframes
+            .iter()
+            .position(|kf| kf.time_offset > time)
+            .unwrap_or(self.keyframes.len());
+        self.keyframes.insert(insert_pos, keyframe);
+        None
+    }
+
+    /// Removes a keyframe at the given time offset (within tolerance).
+    ///
+    /// Returns the removed keyframe if found.
+    pub fn remove_keyframe(&mut self, time_offset: f64) -> Option<MaskKeyframe> {
+        const TIME_TOLERANCE: f64 = 0.001;
+        if let Some(pos) = self
+            .keyframes
+            .iter()
+            .position(|kf| (kf.time_offset - time_offset).abs() < TIME_TOLERANCE)
+        {
+            Some(self.keyframes.remove(pos))
+        } else {
+            None
+        }
+    }
+
+    /// Returns true if this mask has animation keyframes
+    pub fn is_animated(&self) -> bool {
+        !self.keyframes.is_empty()
+    }
+
+    /// Generates mask keyframes from tracking data.
+    ///
+    /// Each tracked point's position delta (relative to the tracking origin)
+    /// is applied as a translation to the mask's base shape.
+    /// This drives the mask to follow the tracked object across frames.
+    pub fn apply_tracking_data(
+        &mut self,
+        tracking_points: &[crate::core::tracking::models::TrackPointData],
+        origin_x: f64,
+        origin_y: f64,
+        fps: f64,
+        tracking_source_id: String,
+    ) {
+        use crate::core::tracking::models::TrackPointData;
+
+        let keyframes: Vec<MaskKeyframe> = tracking_points
+            .iter()
+            .map(|pt: &TrackPointData| {
+                let dx = pt.x - origin_x;
+                let dy = pt.y - origin_y;
+                let time = pt.frame as f64 / fps;
+                let translated = interpolation::translate_shape(&self.shape, dx, dy);
+                MaskKeyframe::new(time, translated)
+            })
+            .collect();
+
+        self.keyframes = keyframes;
+        self.tracking_source_id = Some(tracking_source_id);
+    }
+
+    /// Clears tracking link and all generated keyframes
+    pub fn clear_tracking(&mut self) {
+        self.keyframes.clear();
+        self.tracking_source_id = None;
+    }
+
     /// Validates the mask
     pub fn validate(&self) -> Result<(), String> {
         self.shape.validate()?;
@@ -579,6 +756,16 @@ impl Mask {
         }
         if self.expansion < -1.0 || self.expansion > 1.0 {
             return Err(format!("Invalid expansion value: {}", self.expansion));
+        }
+
+        // Validate keyframes are sorted by time
+        for window in self.keyframes.windows(2) {
+            if window[1].time_offset < window[0].time_offset {
+                return Err("Mask keyframes must be sorted by time_offset".to_string());
+            }
+        }
+        for kf in &self.keyframes {
+            kf.shape.validate()?;
         }
 
         Ok(())
@@ -945,5 +1132,389 @@ mod tests {
         let ellipse_shape = MaskShape::Ellipse(EllipseMask::circle(0.5, 0.5, 0.2));
         let json = serde_json::to_string(&ellipse_shape).unwrap();
         assert!(json.contains("\"type\":\"ellipse\""));
+    }
+
+    // =========================================================================
+    // BDD Tests: Animated Mask Paths (TASK-S39-002)
+    // =========================================================================
+
+    const EPSILON: f64 = 1e-6;
+
+    fn approx_eq(a: f64, b: f64, msg: &str) {
+        assert!((a - b).abs() < EPSILON, "{msg}: expected {b}, got {a}");
+    }
+
+    // -- Feature: shape_at_time returns correct interpolated shape --
+
+    #[test]
+    fn should_return_base_shape_when_no_keyframes_exist() {
+        // Given a mask with no keyframes
+        let mask = Mask::new(MaskShape::Rectangle(RectMask::new(0.3, 0.3, 0.4, 0.4)));
+
+        // When calling shape_at_time at any time
+        let shape = mask.shape_at_time(1.0);
+
+        // Then the base shape should be returned
+        if let MaskShape::Rectangle(r) = shape {
+            approx_eq(r.x, 0.3, "base x");
+            approx_eq(r.y, 0.3, "base y");
+        } else {
+            panic!("Expected Rectangle");
+        }
+    }
+
+    #[test]
+    fn should_return_first_keyframe_shape_before_first_keyframe_time() {
+        // Given a mask with keyframes starting at t=1.0
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        mask.keyframes = vec![
+            MaskKeyframe::new(1.0, MaskShape::Rectangle(RectMask::new(0.3, 0.3, 0.4, 0.4))),
+            MaskKeyframe::new(3.0, MaskShape::Rectangle(RectMask::new(0.7, 0.7, 0.4, 0.4))),
+        ];
+
+        // When calling shape_at_time before the first keyframe
+        let shape = mask.shape_at_time(0.0);
+
+        // Then the first keyframe shape should be returned
+        if let MaskShape::Rectangle(r) = shape {
+            approx_eq(r.x, 0.3, "first kf x");
+        } else {
+            panic!("Expected Rectangle");
+        }
+    }
+
+    #[test]
+    fn should_return_last_keyframe_shape_after_last_keyframe_time() {
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        mask.keyframes = vec![
+            MaskKeyframe::new(0.0, MaskShape::Rectangle(RectMask::new(0.3, 0.3, 0.4, 0.4))),
+            MaskKeyframe::new(2.0, MaskShape::Rectangle(RectMask::new(0.7, 0.7, 0.4, 0.4))),
+        ];
+
+        let shape = mask.shape_at_time(5.0);
+
+        if let MaskShape::Rectangle(r) = shape {
+            approx_eq(r.x, 0.7, "last kf x");
+        } else {
+            panic!("Expected Rectangle");
+        }
+    }
+
+    #[test]
+    fn should_interpolate_between_keyframes_at_midpoint() {
+        // Given a mask with two rectangle keyframes
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        mask.keyframes = vec![
+            MaskKeyframe::new(0.0, MaskShape::Rectangle(RectMask::new(0.2, 0.2, 0.4, 0.4))),
+            MaskKeyframe::new(2.0, MaskShape::Rectangle(RectMask::new(0.8, 0.8, 0.4, 0.4))),
+        ];
+
+        // When calling shape_at_time at the midpoint
+        let shape = mask.shape_at_time(1.0);
+
+        // Then the position should be interpolated
+        if let MaskShape::Rectangle(r) = shape {
+            approx_eq(r.x, 0.5, "interpolated x");
+            approx_eq(r.y, 0.5, "interpolated y");
+        } else {
+            panic!("Expected Rectangle");
+        }
+    }
+
+    #[test]
+    fn should_interpolate_with_three_keyframes() {
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        mask.keyframes = vec![
+            MaskKeyframe::new(0.0, MaskShape::Rectangle(RectMask::new(0.0, 0.5, 0.4, 0.4))),
+            MaskKeyframe::new(1.0, MaskShape::Rectangle(RectMask::new(0.5, 0.5, 0.4, 0.4))),
+            MaskKeyframe::new(2.0, MaskShape::Rectangle(RectMask::new(1.0, 0.5, 0.4, 0.4))),
+        ];
+
+        // Between kf0 and kf1
+        let shape = mask.shape_at_time(0.5);
+        if let MaskShape::Rectangle(r) = shape {
+            approx_eq(r.x, 0.25, "first segment midpoint");
+        } else {
+            panic!("Expected Rectangle");
+        }
+
+        // Between kf1 and kf2
+        let shape = mask.shape_at_time(1.5);
+        if let MaskShape::Rectangle(r) = shape {
+            approx_eq(r.x, 0.75, "second segment midpoint");
+        } else {
+            panic!("Expected Rectangle");
+        }
+    }
+
+    #[test]
+    fn should_apply_easing_to_interpolation() {
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        mask.keyframes = vec![
+            MaskKeyframe::with_easing(
+                0.0,
+                MaskShape::Rectangle(RectMask::new(0.0, 0.5, 0.4, 0.4)),
+                crate::core::effects::Easing::EaseIn,
+            ),
+            MaskKeyframe::new(2.0, MaskShape::Rectangle(RectMask::new(1.0, 0.5, 0.4, 0.4))),
+        ];
+
+        // EaseIn at t=0.5 (midpoint): raw_t=0.5, eased = 0.5^2 = 0.25
+        let shape = mask.shape_at_time(1.0);
+        if let MaskShape::Rectangle(r) = shape {
+            approx_eq(r.x, 0.25, "ease-in at midpoint");
+        } else {
+            panic!("Expected Rectangle");
+        }
+    }
+
+    // -- Feature: set_keyframe management --
+
+    #[test]
+    fn should_insert_keyframe_in_sorted_order() {
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+
+        mask.set_keyframe(MaskKeyframe::new(
+            2.0,
+            MaskShape::Rectangle(RectMask::new(0.8, 0.5, 0.4, 0.4)),
+        ));
+        mask.set_keyframe(MaskKeyframe::new(
+            0.0,
+            MaskShape::Rectangle(RectMask::new(0.2, 0.5, 0.4, 0.4)),
+        ));
+        mask.set_keyframe(MaskKeyframe::new(
+            1.0,
+            MaskShape::Rectangle(RectMask::new(0.5, 0.5, 0.4, 0.4)),
+        ));
+
+        assert_eq!(mask.keyframes.len(), 3);
+        approx_eq(mask.keyframes[0].time_offset, 0.0, "first kf time");
+        approx_eq(mask.keyframes[1].time_offset, 1.0, "second kf time");
+        approx_eq(mask.keyframes[2].time_offset, 2.0, "third kf time");
+    }
+
+    #[test]
+    fn should_replace_keyframe_at_same_time() {
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        mask.set_keyframe(MaskKeyframe::new(
+            1.0,
+            MaskShape::Rectangle(RectMask::new(0.3, 0.5, 0.4, 0.4)),
+        ));
+
+        let old = mask.set_keyframe(MaskKeyframe::new(
+            1.0,
+            MaskShape::Rectangle(RectMask::new(0.7, 0.5, 0.4, 0.4)),
+        ));
+
+        assert!(old.is_some(), "Should return replaced keyframe");
+        assert_eq!(mask.keyframes.len(), 1, "Should not duplicate");
+        if let MaskShape::Rectangle(r) = &mask.keyframes[0].shape {
+            approx_eq(r.x, 0.7, "new x");
+        }
+    }
+
+    // -- Feature: remove_keyframe --
+
+    #[test]
+    fn should_remove_keyframe_at_time() {
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        mask.set_keyframe(MaskKeyframe::new(
+            0.0,
+            MaskShape::Rectangle(RectMask::default()),
+        ));
+        mask.set_keyframe(MaskKeyframe::new(
+            1.0,
+            MaskShape::Rectangle(RectMask::default()),
+        ));
+
+        let removed = mask.remove_keyframe(1.0);
+        assert!(removed.is_some());
+        assert_eq!(mask.keyframes.len(), 1);
+    }
+
+    #[test]
+    fn should_return_none_when_removing_nonexistent_keyframe() {
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        let removed = mask.remove_keyframe(5.0);
+        assert!(removed.is_none());
+    }
+
+    // -- Feature: is_animated --
+
+    #[test]
+    fn should_report_not_animated_without_keyframes() {
+        let mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        assert!(!mask.is_animated());
+    }
+
+    #[test]
+    fn should_report_animated_with_keyframes() {
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        mask.set_keyframe(MaskKeyframe::new(
+            0.0,
+            MaskShape::Rectangle(RectMask::default()),
+        ));
+        assert!(mask.is_animated());
+    }
+
+    // -- Feature: tracking data to mask keyframes --
+
+    #[test]
+    fn should_generate_keyframes_from_tracking_data() {
+        use crate::core::tracking::models::TrackPointData;
+
+        // Given a base rectangle mask at (0.5, 0.5)
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::new(0.5, 0.5, 0.3, 0.3)));
+
+        // And tracking data with 3 points moving right
+        let tracking = vec![
+            TrackPointData {
+                frame: 0,
+                x: 0.5,
+                y: 0.5,
+                confidence: 1.0,
+            },
+            TrackPointData {
+                frame: 15,
+                x: 0.55,
+                y: 0.5,
+                confidence: 0.95,
+            },
+            TrackPointData {
+                frame: 30,
+                x: 0.6,
+                y: 0.5,
+                confidence: 0.9,
+            },
+        ];
+
+        // When applying tracking data at 30fps
+        mask.apply_tracking_data(&tracking, 0.5, 0.5, 30.0, "track-001".to_string());
+
+        // Then 3 keyframes should be created
+        assert_eq!(mask.keyframes.len(), 3);
+        assert_eq!(mask.tracking_source_id.as_deref(), Some("track-001"));
+
+        // First keyframe: no delta (origin), t=0.0
+        approx_eq(mask.keyframes[0].time_offset, 0.0, "kf0 time");
+        if let MaskShape::Rectangle(r) = &mask.keyframes[0].shape {
+            approx_eq(r.x, 0.5, "kf0 x (no delta)");
+        }
+
+        // Second keyframe: dx=0.05, t=0.5s
+        approx_eq(mask.keyframes[1].time_offset, 0.5, "kf1 time");
+        if let MaskShape::Rectangle(r) = &mask.keyframes[1].shape {
+            approx_eq(r.x, 0.55, "kf1 x (shifted)");
+        }
+
+        // Third keyframe: dx=0.1, t=1.0s
+        approx_eq(mask.keyframes[2].time_offset, 1.0, "kf2 time");
+        if let MaskShape::Rectangle(r) = &mask.keyframes[2].shape {
+            approx_eq(r.x, 0.6, "kf2 x (shifted)");
+        }
+    }
+
+    #[test]
+    fn should_clear_tracking_data() {
+        use crate::core::tracking::models::TrackPointData;
+
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::new(0.5, 0.5, 0.3, 0.3)));
+        let tracking = vec![TrackPointData {
+            frame: 0,
+            x: 0.5,
+            y: 0.5,
+            confidence: 1.0,
+        }];
+        mask.apply_tracking_data(&tracking, 0.5, 0.5, 30.0, "track-002".to_string());
+        assert!(mask.is_animated());
+
+        mask.clear_tracking();
+        assert!(!mask.is_animated());
+        assert!(mask.tracking_source_id.is_none());
+    }
+
+    // -- Feature: MaskKeyframe serialization --
+
+    #[test]
+    fn should_serialize_mask_keyframe_round_trip() {
+        let kf = MaskKeyframe::with_easing(
+            1.5,
+            MaskShape::Ellipse(EllipseMask::circle(0.5, 0.5, 0.2)),
+            crate::core::effects::Easing::EaseInOut,
+        );
+        let json = serde_json::to_string(&kf).unwrap();
+        let restored: MaskKeyframe = serde_json::from_str(&json).unwrap();
+        approx_eq(restored.time_offset, 1.5, "time_offset");
+        assert_eq!(restored.easing, crate::core::effects::Easing::EaseInOut);
+        assert_eq!(restored.shape.type_name(), "ellipse");
+    }
+
+    #[test]
+    fn should_serialize_animated_mask_with_keyframes() {
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        mask.set_keyframe(MaskKeyframe::new(
+            0.0,
+            MaskShape::Rectangle(RectMask::new(0.2, 0.2, 0.4, 0.4)),
+        ));
+        mask.set_keyframe(MaskKeyframe::new(
+            2.0,
+            MaskShape::Rectangle(RectMask::new(0.8, 0.8, 0.4, 0.4)),
+        ));
+
+        let json = serde_json::to_string(&mask).unwrap();
+        assert!(
+            json.contains("\"keyframes\""),
+            "JSON should contain keyframes"
+        );
+
+        let restored: Mask = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.keyframes.len(), 2);
+    }
+
+    #[test]
+    fn should_omit_empty_keyframes_in_serialization() {
+        let mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        let json = serde_json::to_string(&mask).unwrap();
+        assert!(
+            !json.contains("\"keyframes\""),
+            "Empty keyframes should be omitted"
+        );
+        assert!(
+            !json.contains("\"trackingSourceId\""),
+            "None trackingSourceId should be omitted"
+        );
+    }
+
+    // -- Feature: validate animated mask --
+
+    #[test]
+    fn should_validate_keyframe_sort_order() {
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        // Manually insert unsorted keyframes (bypassing set_keyframe)
+        mask.keyframes = vec![
+            MaskKeyframe::new(2.0, MaskShape::Rectangle(RectMask::default())),
+            MaskKeyframe::new(1.0, MaskShape::Rectangle(RectMask::default())),
+        ];
+        assert!(
+            mask.validate().is_err(),
+            "Unsorted keyframes should fail validation"
+        );
+    }
+
+    #[test]
+    fn should_validate_keyframe_shapes() {
+        let mut mask = Mask::new(MaskShape::Rectangle(RectMask::default()));
+        // Invalid polygon (less than 3 points) inside keyframe
+        mask.keyframes = vec![MaskKeyframe::new(
+            0.0,
+            MaskShape::Polygon(PolygonMask::new(vec![
+                Point2D::new(0.0, 0.0),
+                Point2D::new(1.0, 1.0),
+            ])),
+        )];
+        assert!(
+            mask.validate().is_err(),
+            "Invalid keyframe shape should fail validation"
+        );
     }
 }
