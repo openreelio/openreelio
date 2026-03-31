@@ -703,18 +703,26 @@ export const VIDEO_EFFECT_PARAM_DEFS: Record<string, ParamDef[]> = {
 
   object_tracking: [
     {
-      name: 'confidence',
-      label: 'Detection Confidence',
-      default: { type: 'float', value: 0.7 },
-      min: 0.1,
-      max: 1,
-      step: 0.01,
+      name: 'template_size',
+      label: 'Template Size',
+      default: { type: 'float', value: 25 },
+      min: 15,
+      max: 50,
+      step: 1,
     },
     {
-      name: 'smooth',
-      label: 'Smoothing',
-      default: { type: 'float', value: 0.5 },
-      min: 0,
+      name: 'search_area_size',
+      label: 'Search Area',
+      default: { type: 'float', value: 100 },
+      min: 50,
+      max: 200,
+      step: 1,
+    },
+    {
+      name: 'confidence_threshold',
+      label: 'Min Confidence',
+      default: { type: 'float', value: 0.75 },
+      min: 0.5,
       max: 1,
       step: 0.01,
     },
@@ -1176,6 +1184,14 @@ export function getEffectDefaultParamValues(
       return {
         ...defaults,
         analysis_data: '',
+      };
+    case 'object_tracking':
+      return {
+        ...defaults,
+        origin_x: -1,
+        origin_y: -1,
+        start_frame: 0,
+        tracking_data: '',
       };
     default:
       return defaults;
