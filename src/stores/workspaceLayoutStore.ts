@@ -338,6 +338,8 @@ interface WorkspaceLayoutState {
 interface WorkspaceLayoutActions {
   /** Move a panel from its current zone to a target zone */
   movePanel: (panelId: PanelId, targetZoneId: DockZoneId) => void;
+  /** Restore a panel into the layout when it is missing from all zones */
+  restorePanel: (panelId: PanelId, targetZoneId?: DockZoneId) => void;
   /** Set the active (visible) panel in a zone */
   setActivePanel: (zoneId: DockZoneId, panelId: PanelId) => void;
   /** Toggle zone collapsed state */
@@ -394,6 +396,57 @@ export function findPanelZone(
   return null;
 }
 
+function normalizeZone(zone: DockZone): void {
+  const seen = new Set<PanelId>();
+  zone.panelIds = zone.panelIds.filter((panelId): panelId is PanelId => {
+    if (!(panelId in PANEL_REGISTRY)) {
+      return false;
+    }
+    if (seen.has(panelId)) {
+      return false;
+    }
+    seen.add(panelId);
+    return true;
+  });
+
+  if (zone.activePanelId && !zone.panelIds.includes(zone.activePanelId)) {
+    zone.activePanelId = zone.panelIds[0] ?? null;
+  }
+}
+
+function ensurePanelInLayout(
+  layout: WorkspaceLayout,
+  panelId: PanelId,
+  targetZoneId: DockZoneId = 'right',
+): DockZoneId {
+  const existingZoneId = findPanelZone(layout, panelId);
+  if (existingZoneId) {
+    return existingZoneId;
+  }
+
+  const targetZone = layout.zones[targetZoneId];
+  if (!targetZone.panelIds.includes(panelId)) {
+    targetZone.panelIds.push(panelId);
+  }
+  if (!targetZone.activePanelId) {
+    targetZone.activePanelId = panelId;
+  }
+
+  return targetZoneId;
+}
+
+function normalizeWorkspaceLayout(layout: WorkspaceLayout): WorkspaceLayout {
+  const normalized = JSON.parse(JSON.stringify(layout)) as WorkspaceLayout;
+
+  for (const zone of Object.values(normalized.zones)) {
+    normalizeZone(zone);
+  }
+
+  ensurePanelInLayout(normalized, 'ai-assistant', 'right');
+
+  return normalized;
+}
+
 // =============================================================================
 // Store
 // =============================================================================
@@ -402,7 +455,7 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
   persist(
     immer((set, get) => ({
       // Initial state
-      layout: createDefaultLayout(),
+      layout: normalizeWorkspaceLayout(createDefaultLayout()),
       isDragging: false,
       draggedPanelId: null,
       activePresetId: null,
@@ -437,6 +490,24 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
           }
 
           // Structural change clears active preset
+          state.activePresetId = null;
+        });
+      },
+
+      restorePanel: (panelId, targetZoneId = 'right') => {
+        set((state) => {
+          const existingZoneId = findPanelZone(state.layout, panelId);
+          if (existingZoneId) {
+            return;
+          }
+
+          const zone = state.layout.zones[targetZoneId];
+          if (!zone.panelIds.includes(panelId)) {
+            zone.panelIds.push(panelId);
+          }
+          if (!zone.activePanelId) {
+            zone.activePanelId = panelId;
+          }
           state.activePresetId = null;
         });
       },
@@ -524,7 +595,7 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
 
       resetLayout: () => {
         set((state) => {
-          const defaultLayout = createDefaultLayout();
+          const defaultLayout = normalizeWorkspaceLayout(createDefaultLayout());
           state.layout = defaultLayout;
           state.isDragging = false;
           state.draggedPanelId = null;
@@ -545,7 +616,7 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
           if (!preset) return;
 
           // Deep copy the preset layout to avoid shared references
-          state.layout = JSON.parse(JSON.stringify(preset.layout));
+          state.layout = normalizeWorkspaceLayout(preset.layout);
           state.activePresetId = presetId;
           state.isDragging = false;
           state.draggedPanelId = null;
@@ -614,8 +685,23 @@ export const useWorkspaceLayoutStore = create<WorkspaceLayoutStore>()(
           const state = persisted as { layout: WorkspaceLayout };
           return {
             ...state,
+            layout: normalizeWorkspaceLayout(state.layout),
             activePresetId: null,
             customPresets: [],
+          };
+        }
+
+        if (persisted && typeof persisted === 'object' && 'layout' in persisted) {
+          const state = persisted as {
+            layout: WorkspaceLayout;
+            activePresetId?: string | null;
+            customPresets?: WorkspacePreset[];
+          };
+          return {
+            ...state,
+            layout: normalizeWorkspaceLayout(state.layout),
+            activePresetId: state.activePresetId ?? null,
+            customPresets: state.customPresets ?? [],
           };
         }
         return persisted;

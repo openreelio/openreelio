@@ -45,6 +45,7 @@ export function useDockableAIPanel({
   const layout = useWorkspaceLayoutStore((state) => state.layout);
   const setActivePanel = useWorkspaceLayoutStore((state) => state.setActivePanel);
   const setZoneCollapsed = useWorkspaceLayoutStore((state) => state.setZoneCollapsed);
+  const restorePanel = useWorkspaceLayoutStore((state) => state.restorePanel);
 
   const aiZoneId = useMemo(
     () => findPanelZone(layout, AI_PANEL_ID) ?? DEFAULT_AI_ZONE,
@@ -70,28 +71,34 @@ export function useDockableAIPanel({
   }, [layout]);
 
   const openAiPanel = useCallback(() => {
-    if (!aiZone.panelIds.includes(AI_PANEL_ID)) {
-      return;
+    let targetZoneId = findPanelZone(useWorkspaceLayoutStore.getState().layout, AI_PANEL_ID);
+    if (!targetZoneId) {
+      restorePanel(AI_PANEL_ID, DEFAULT_AI_ZONE);
+      targetZoneId = findPanelZone(useWorkspaceLayoutStore.getState().layout, AI_PANEL_ID)
+        ?? DEFAULT_AI_ZONE;
     }
 
-    setActivePanel(aiZoneId, AI_PANEL_ID);
-    setZoneCollapsed(aiZoneId, false);
-  }, [aiZone.panelIds, aiZoneId, setActivePanel, setZoneCollapsed]);
+    setActivePanel(targetZoneId, AI_PANEL_ID);
+    setZoneCollapsed(targetZoneId, false);
+  }, [restorePanel, setActivePanel, setZoneCollapsed]);
 
   const closeAiPanel = useCallback(() => {
+    const currentLayout = useWorkspaceLayoutStore.getState().layout;
+    const currentZoneId = findPanelZone(currentLayout, AI_PANEL_ID) ?? DEFAULT_AI_ZONE;
+    const currentZone = currentLayout.zones[currentZoneId];
     const fallbackPanelId = getFallbackPanel(
-      aiZone.panelIds,
-      lastNonAiPanelByZoneRef.current[aiZoneId],
+      currentZone.panelIds,
+      lastNonAiPanelByZoneRef.current[currentZoneId],
     );
 
     if (fallbackPanelId) {
-      setActivePanel(aiZoneId, fallbackPanelId);
-      setZoneCollapsed(aiZoneId, false);
+      setActivePanel(currentZoneId, fallbackPanelId);
+      setZoneCollapsed(currentZoneId, false);
       return;
     }
 
-    setZoneCollapsed(aiZoneId, true);
-  }, [aiZone.panelIds, aiZoneId, setActivePanel, setZoneCollapsed]);
+    setZoneCollapsed(currentZoneId, true);
+  }, [setActivePanel, setZoneCollapsed]);
 
   const toggle = useCallback(() => {
     if (isOpen) {
@@ -119,19 +126,31 @@ export function useDockableAIPanel({
   }, [toggle]);
 
   useEffect(() => {
+    let previousWidth = window.innerWidth;
+
     const handleResize = () => {
-      if (window.innerWidth < autoCollapseBreakpoint && isOpen) {
+      const currentWidth = window.innerWidth;
+      const crossedBelowBreakpoint =
+        previousWidth >= autoCollapseBreakpoint && currentWidth < autoCollapseBreakpoint;
+      previousWidth = currentWidth;
+
+      const currentLayout = useWorkspaceLayoutStore.getState().layout;
+      const currentZoneId = findPanelZone(currentLayout, AI_PANEL_ID) ?? DEFAULT_AI_ZONE;
+      const currentZone = currentLayout.zones[currentZoneId];
+      const isCurrentlyOpen =
+        currentZone.activePanelId === AI_PANEL_ID && !currentZone.collapsed;
+
+      if (crossedBelowBreakpoint && isCurrentlyOpen) {
         closeAiPanel();
       }
     };
 
-    handleResize();
     window.addEventListener('resize', handleResize);
 
     return () => {
       window.removeEventListener('resize', handleResize);
     };
-  }, [autoCollapseBreakpoint, closeAiPanel, isOpen]);
+  }, [autoCollapseBreakpoint, closeAiPanel]);
 
   return {
     isOpen,

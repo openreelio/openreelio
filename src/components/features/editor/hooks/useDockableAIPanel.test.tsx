@@ -86,6 +86,59 @@ describe('useDockableAIPanel', () => {
     expect(useWorkspaceLayoutStore.getState().layout.zones.right.activePanelId).toBe('inspector');
   });
 
+  it('should allow manually opening the AI panel on a narrow viewport', () => {
+    setViewportWidth(900);
+
+    const { result } = renderHook(() =>
+      useDockableAIPanel({ autoCollapseBreakpoint: 1200 }),
+    );
+
+    act(() => {
+      result.current.toggle();
+    });
+
+    expect(result.current.isOpen).toBe(true);
+    expect(useWorkspaceLayoutStore.getState().layout.zones.right.activePanelId).toBe('ai-assistant');
+    expect(useWorkspaceLayoutStore.getState().layout.zones.right.collapsed).toBe(false);
+  });
+
+  it('should restore the AI panel into the default zone when missing from the layout', () => {
+    useWorkspaceLayoutStore.setState((state) => ({
+      ...state,
+      layout: {
+        ...state.layout,
+        zones: {
+          ...state.layout.zones,
+          right: {
+            ...state.layout.zones.right,
+            panelIds: state.layout.zones.right.panelIds.filter((panelId) => panelId !== 'ai-assistant'),
+            activePanelId: 'inspector',
+          },
+          bottom: {
+            ...state.layout.zones.bottom,
+            panelIds: state.layout.zones.bottom.panelIds.filter((panelId) => panelId !== 'ai-assistant'),
+            activePanelId: state.layout.zones.bottom.activePanelId === 'ai-assistant'
+              ? 'comparison'
+              : state.layout.zones.bottom.activePanelId,
+          },
+        },
+      },
+    }));
+
+    const { result } = renderHook(() =>
+      useDockableAIPanel({ autoCollapseBreakpoint: 1200 }),
+    );
+
+    act(() => {
+      result.current.toggle();
+    });
+
+    const { layout } = useWorkspaceLayoutStore.getState();
+    expect(layout.zones.right.panelIds).toContain('ai-assistant');
+    expect(layout.zones.right.activePanelId).toBe('ai-assistant');
+    expect(result.current.isOpen).toBe(true);
+  });
+
   it('should target the zone that currently owns the AI panel', () => {
     const store = useWorkspaceLayoutStore.getState();
     store.movePanel('ai-assistant', 'bottom');
