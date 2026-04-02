@@ -34,14 +34,20 @@ export interface ChatInputAreaProps {
 function getPhaseLabel(phase: string, stopState: 'idle' | 'stopping'): string {
   if (stopState === 'stopping') return 'Stopping...';
   switch (phase) {
+    case 'streaming':
+      return 'Responding...';
     case 'thinking':
       return 'Thinking...';
     case 'planning':
       return 'Planning...';
     case 'awaiting_approval':
       return 'Awaiting approval';
+    case 'awaiting_tool_permission':
+      return 'Awaiting tool permission';
     case 'executing':
       return 'Executing...';
+    case 'executing_tools':
+      return 'Executing tools...';
     case 'observing':
       return 'Observing results...';
     default:

@@ -14,11 +14,16 @@ export { ThinkingIndicator, type ThinkingIndicatorProps } from './ThinkingIndica
 export { PlanViewer, type PlanViewerProps } from './PlanViewer';
 export { ActionFeed, type ActionFeedProps } from './ActionFeed';
 export { AgenticChat, type AgenticChatProps } from './AgenticChat';
+export { AgentLoopChat, type AgentLoopChatProps } from './AgentLoopChat';
 export { ChatMessageList, type ChatMessageListProps } from './ChatMessageList';
 export { ChatInputArea, type ChatInputAreaProps } from './ChatInputArea';
 
 // Integration components (Phase 8)
 export { AgenticSidebarContent, type AgenticSidebarContentProps } from './AgenticSidebarContent';
+export {
+  AgentSessionResumeHistoryPanel,
+  type AgentSessionResumeHistoryPanelProps,
+} from './AgentSessionResumeHistoryPanel';
 
 // Enhanced prompt input (Phase 4 - Rich Chat UI)
 export { PromptInput, type PromptInputProps } from './PromptInput';

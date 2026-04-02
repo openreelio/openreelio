@@ -1,19 +1,23 @@
 /**
  * AgenticSidebarContent Component
  *
- * Content for the AI sidebar. Always uses the agentic engine.
- * Uses useAgenticLoopWithStores for real store integration.
+ * Content for the AI sidebar.
+ * Switches between the legacy TPAO runtime and the fast AgentLoop runtime.
  */
 
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 import { AgenticChat, type AgenticChatHandle } from './AgenticChat';
+import { AgentLoopChat } from './AgentLoopChat';
+import { AgentSessionRecoveryPanel } from './AgentSessionRecoveryPanel';
+import { AgentSessionResumeHistoryPanel } from './AgentSessionResumeHistoryPanel';
+import { AgentSessionRecoveryStatus } from './AgentSessionRecoveryStatus';
 import { SessionList } from './SessionList';
 import { createTauriLLMAdapter } from '@/agents/engine/adapters/llm/TauriLLMAdapter';
 import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRegistryAdapter';
 import { createBackendToolExecutor } from '@/agents/engine/adapters/tools/BackendToolExecutor';
 import { globalToolRegistry } from '@/agents';
-import { isBackendToolsEnabled } from '@/config/featureFlags';
+import { isAgentLoopEnabled, isBackendToolsEnabled } from '@/config/featureFlags';
 import { useNewChat } from '@/hooks/useNewChat';
 import { createLogger } from '@/services/logger';
 
@@ -69,6 +73,7 @@ export function AgenticSidebarContent({
   // ===========================================================================
 
   const chatHandleRef = useRef<AgenticChatHandle>(null);
+  const useFastLoop = isAgentLoopEnabled();
 
   const abortCurrentSession = useCallback(() => {
     chatHandleRef.current?.abort();
@@ -145,18 +150,34 @@ export function AgenticSidebarContent({
             )}
           </button>
           <span className="text-xs text-text-tertiary ml-2">AI Chat</span>
+          <AgentSessionRecoveryStatus />
         </div>
+        <AgentSessionRecoveryPanel />
+        <AgentSessionResumeHistoryPanel />
 
-        <AgenticChat
-          ref={chatHandleRef}
-          llmClient={llmClient}
-          toolExecutor={toolExecutor}
-          onSubmit={handleSubmit}
-          onComplete={handleComplete}
-          onError={handleError}
-          placeholder="Describe what you want to edit..."
-          className="flex-1"
-        />
+        {useFastLoop ? (
+          <AgentLoopChat
+            ref={chatHandleRef}
+            llmClient={llmClient}
+            toolExecutor={toolExecutor}
+            onSubmit={handleSubmit}
+            onComplete={handleComplete}
+            onError={handleError}
+            placeholder="Describe what you want to edit..."
+            className="flex-1"
+          />
+        ) : (
+          <AgenticChat
+            ref={chatHandleRef}
+            llmClient={llmClient}
+            toolExecutor={toolExecutor}
+            onSubmit={handleSubmit}
+            onComplete={handleComplete}
+            onError={handleError}
+            placeholder="Describe what you want to edit..."
+            className="flex-1"
+          />
+        )}
       </div>
     </div>
   );

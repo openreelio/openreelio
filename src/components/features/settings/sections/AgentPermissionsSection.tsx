@@ -90,8 +90,8 @@ export function AgentPermissionsSection() {
         Agent Permissions
       </h3>
       <p className="text-xs text-editor-text-muted mb-4">
-        Control which tools the AI agent can use without asking.
-        Patterns support wildcards (e.g., <code className="bg-surface-elevated px-1 rounded">get_*</code>).
+        Control which capabilities the AI agent can use without asking.
+        Rules accept legacy tool wildcards such as <code className="bg-surface-elevated px-1 rounded">get_*</code> and canonical subjects such as <code className="bg-surface-elevated px-1 rounded">timeline.clip.*</code>.
       </p>
 
       {/* Presets */}
@@ -125,7 +125,7 @@ export function AgentPermissionsSection() {
       {/* Rules list */}
       <div className="mb-4">
         <label className="text-xs font-medium text-editor-text-muted block mb-2">
-          Rules (last match wins)
+          Rules (session overrides global, then exact and more-specific matches)
         </label>
         <div className="space-y-1 max-h-60 overflow-y-auto">
           {globalRules.map((rule) => {
@@ -173,7 +173,7 @@ export function AgentPermissionsSection() {
           value={newPattern}
           onChange={(e) => setNewPattern(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Pattern (e.g., split_*)"
+          placeholder="Pattern (e.g., split_* or timeline.clip.*)"
           className="flex-1 px-3 py-1.5 text-xs bg-surface-elevated border border-border-subtle rounded-lg text-editor-text placeholder-editor-text-muted focus:outline-none focus:ring-1 focus:ring-primary-500/50"
           data-testid="new-rule-pattern"
         />
