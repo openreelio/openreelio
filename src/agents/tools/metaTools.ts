@@ -5,13 +5,16 @@
  * maintaining full editing capability. Each meta-tool dispatches to
  * the underlying individual tool via the global tool registry.
  *
- * Meta-tool mapping:
+ * Prompt-visible meta-tool mapping:
  * 1. query    - analysis + media analysis tools (22 tools)
  * 2. edit     - editing tools (20 tools)
  * 3. audio    - audio tools (6 tools)
  * 4. effects  - effect + transition tools (8 tools)
  * 5. text     - caption tools (4 tools)
- * 6. execute_plan - batch execution of multiple steps sequentially
+ *
+ * Legacy compatibility:
+ * - execute_plan remains registered for transitional callers, but should not
+ *   be part of the default tool surface shown to the model.
  */
 
 import { globalToolRegistry, type ToolDefinition } from '../ToolRegistry';
@@ -57,6 +60,7 @@ async function dispatchToTool(
   // Forward all args except 'action' to the underlying tool
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { action: _action, ...toolArgs } = args;
+  const normalizedArgs = normalizeMetaToolArgs(metaToolName, action, toolArgs);
 
   const toolDef = globalToolRegistry.get(action);
   if (!toolDef) {
@@ -67,12 +71,50 @@ async function dispatchToTool(
   }
 
   try {
-    return await globalToolRegistry.execute(action, toolArgs, {});
+    return await globalToolRegistry.execute(action, normalizedArgs, {});
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error(`Meta-tool ${metaToolName} dispatch failed`, { action, error: msg });
     return { success: false, error: `${action} failed: ${msg}` };
   }
+}
+
+function normalizeMetaToolArgs(
+  metaToolName: string,
+  action: string,
+  toolArgs: Record<string, unknown>,
+): Record<string, unknown> {
+  if (metaToolName !== 'edit') {
+    return toolArgs;
+  }
+
+  const normalized = { ...toolArgs };
+
+  if (
+    (action === 'insert_clip' || action === 'insert_clip_from_file') &&
+    normalized.timelineStart === undefined &&
+    typeof normalized.timelineIn === 'number'
+  ) {
+    normalized.timelineStart = normalized.timelineIn;
+  }
+
+  if (
+    action === 'split_clip' &&
+    normalized.splitTime === undefined &&
+    typeof normalized.atTimelineSec === 'number'
+  ) {
+    normalized.splitTime = normalized.atTimelineSec;
+  }
+
+  if (
+    action === 'insert_clip_from_file' &&
+    typeof normalized.file !== 'string' &&
+    typeof normalized.filePath === 'string'
+  ) {
+    normalized.file = normalized.filePath;
+  }
+
+  return normalized;
 }
 
 // =============================================================================
@@ -153,20 +195,42 @@ const META_TOOLS: ToolDefinition[] = [
         trackId: { type: 'string', description: 'Track ID' },
         clipId: { type: 'string', description: 'Clip ID' },
         assetId: { type: 'string', description: 'Asset ID to insert' },
+        timelineStart: {
+          type: 'number',
+          description: 'Timeline position in seconds where the clip should start',
+        },
         newTimelineIn: { type: 'number', description: 'New timeline position in seconds' },
         newSourceIn: { type: 'number', description: 'New source in point in seconds' },
         newSourceOut: { type: 'number', description: 'New source out point in seconds' },
         splitTime: { type: 'number', description: 'Split position in seconds' },
+        startTime: { type: 'number', description: 'Range start or caption start in seconds' },
+        endTime: { type: 'number', description: 'Range end or caption end in seconds' },
+        duration: { type: 'number', description: 'Duration in seconds where relevant' },
+        frameTime: { type: 'number', description: 'Frame source/timeline time in seconds' },
+        trimEnd: { type: 'number', description: 'New trim end in seconds for ripple edits' },
+        rollAmount: { type: 'number', description: 'Cut adjustment amount in seconds' },
+        offsetSeconds: { type: 'number', description: 'Slip offset in seconds' },
+        slideAmount: { type: 'number', description: 'Slide amount in seconds' },
         speed: { type: 'number', description: 'Speed multiplier (e.g. 2.0)' },
         reverse: { type: 'boolean', description: 'Reverse playback' },
         newTrackId: { type: 'string', description: 'Target track for cross-track moves' },
+        leftClipId: { type: 'string', description: 'Clip before the cut point for roll edits' },
+        rightClipId: { type: 'string', description: 'Clip after the cut point for roll edits' },
         kind: { type: 'string', description: 'Track type: video, audio, caption, overlay' },
         name: { type: 'string', description: 'Track or marker name' },
+        label: { type: 'string', description: 'Marker or UI label text' },
         esdId: { type: 'string', description: 'Editing Style Document ID' },
         sourceAssetId: { type: 'string', description: 'Source asset ID for style transfer' },
         time: { type: 'number', description: 'Timeline position in seconds' },
         color: { type: 'string', description: 'Marker color' },
-        filePath: { type: 'string', description: 'File path for insert_clip_from_file' },
+        file: {
+          type: 'string',
+          description: 'Workspace-relative file name/path for insert_clip_from_file',
+        },
+        filePath: {
+          type: 'string',
+          description: 'Legacy alias for file. Prefer canonical file.',
+        },
       },
       required: ['action'],
     },
@@ -404,10 +468,26 @@ export function unregisterMetaTools(): void {
 
 /** Pre-computed meta-tool names (static after module load). */
 const META_TOOL_NAMES: readonly string[] = META_TOOLS.map((t) => t.name);
+const LEGACY_META_TOOL_NAMES = new Set(['execute_plan']);
+const VISIBLE_META_TOOL_NAMES: readonly string[] = META_TOOL_NAMES.filter(
+  (name) => !LEGACY_META_TOOL_NAMES.has(name),
+);
 
 /**
  * Get the names of all meta-tools.
  */
 export function getMetaToolNames(): readonly string[] {
   return META_TOOL_NAMES;
+}
+
+/**
+ * Get the meta-tools that should be visible to the default runtime prompt
+ * surface. Legacy compatibility tools remain registered but hidden.
+ */
+export function getVisibleMetaToolNames(): readonly string[] {
+  return VISIBLE_META_TOOL_NAMES;
+}
+
+export function isLegacyMetaToolName(name: string): boolean {
+  return LEGACY_META_TOOL_NAMES.has(name);
 }
