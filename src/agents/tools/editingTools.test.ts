@@ -192,6 +192,34 @@ describe('editingTools — extended tools', () => {
     });
   });
 
+  describe('split_clip', () => {
+    it('should expose newClipId in the tool result contract', async () => {
+      vi.mocked(useProjectStore.getState).mockReturnValue({
+        isLoaded: true,
+        meta: { id: 'project-1', name: 'Test' },
+        executeCommand: vi
+          .fn()
+          .mockResolvedValue({ opId: 'op-split', success: true, createdIds: ['clip-2'] }),
+      } as unknown as ReturnType<typeof useProjectStore.getState>);
+
+      const tool = globalToolRegistry.get('split_clip');
+      const result = await tool!.handler(
+        { sequenceId: 'seq-1', trackId: 'track-1', clipId: 'clip-1', splitTime: 5 },
+        CTX,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.result).toEqual(
+        expect.objectContaining({
+          opId: 'op-split',
+          createdIds: ['clip-2'],
+          sourceClipId: 'clip-1',
+          newClipId: 'clip-2',
+        }),
+      );
+    });
+  });
+
   describe('freeze_frame', () => {
     it('should be registered with category clip', () => {
       const tool = globalToolRegistry.get('freeze_frame');
