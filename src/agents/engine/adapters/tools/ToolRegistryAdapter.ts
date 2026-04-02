@@ -16,6 +16,9 @@ import type {
 } from '../../ports/IToolExecutor';
 import type { RiskLevel, ValidationResult, SideEffect } from '../../core/types';
 import { ToolRegistry, type ToolDefinition as LegacyToolDef } from '@/agents/ToolRegistry';
+import { isMetaToolsEnabled } from '@/config/featureFlags';
+import { getVisibleMetaToolNames } from '@/agents/tools/metaTools';
+import { getWorkspaceToolNames } from '@/agents/tools/workspaceTools';
 import {
   getAssetCatalogSnapshot,
   getSelectionContext,
@@ -260,8 +263,15 @@ export class ToolRegistryAdapter implements IToolExecutor {
     const tools = category
       ? this.registry.listByCategory(category as Parameters<typeof this.registry.listByCategory>[0])
       : this.registry.listAll();
+    const infos = tools.map((tool) => this.toToolInfo(tool));
 
-    return tools.map((tool) => this.toToolInfo(tool));
+    if (!category && isMetaToolsEnabled()) {
+      const visibleNames = new Set([...getVisibleMetaToolNames(), ...getWorkspaceToolNames()]);
+      const filtered = infos.filter((tool) => visibleNames.has(tool.name));
+      return filtered.length > 0 ? filtered : infos;
+    }
+
+    return infos;
   }
 
   /**

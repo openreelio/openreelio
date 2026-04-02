@@ -4,7 +4,7 @@
  * Tests for the Execute phase of the agentic loop.
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   Executor,
   createExecutor,
@@ -16,7 +16,7 @@ import {
   type MockToolExecutor,
 } from '../adapters/tools/MockToolExecutor';
 import type { Plan } from '../core/types';
-import type { ExecutionContext } from '../ports/IToolExecutor';
+import type { BatchExecutionRequest, ExecutionContext } from '../ports/IToolExecutor';
 import {
   ToolExecutionError,
   ExecutionTimeoutError,
@@ -109,6 +109,60 @@ describe('Executor', () => {
       const executions = mockToolExecutor.getCapturedExecutions();
       expect(executions[0].toolName).toBe('split_clip');
       expect(executions[1].toolName).toBe('move_clip');
+    });
+
+    it('should converge backend-capable multi-step mutations into one atomic batch lane', async () => {
+      const atomicExecutor = mockToolExecutor as MockToolExecutor & {
+        canExecuteBatchAtomically: (request: BatchExecutionRequest) => boolean;
+      };
+      atomicExecutor.canExecuteBatchAtomically = () => true;
+
+      const batchSpy = vi.spyOn(atomicExecutor, 'executeBatch');
+      executor = createExecutor(atomicExecutor);
+
+      const multiStepPlan: Plan = {
+        goal: 'Split and move clip',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'split_clip',
+            args: { clipId: 'clip-1', position: 5 },
+            description: 'Split clip',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+          {
+            id: 'step-2',
+            tool: 'move_clip',
+            args: { clipId: 'clip-1b', position: 10 },
+            description: 'Move clip',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+            dependsOn: ['step-1'],
+          },
+        ],
+        estimatedTotalDuration: 200,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo all',
+      };
+
+      const result = await executor.execute(multiStepPlan, executionContext);
+
+      expect(result.success).toBe(true);
+      expect(result.completedSteps).toHaveLength(2);
+      expect(result.toolCallsUsed).toBe(2);
+      expect(batchSpy).toHaveBeenCalledTimes(1);
+      expect(batchSpy).toHaveBeenCalledWith(
+        {
+          tools: [
+            { name: 'split_clip', args: { clipId: 'clip-1', position: 5 } },
+            { name: 'move_clip', args: { clipId: 'clip-1b', position: 10 } },
+          ],
+          mode: 'sequential',
+          stopOnError: true,
+        },
+        executionContext,
+      );
     });
 
     it('should execute independent steps in parallel', async () => {
@@ -406,6 +460,105 @@ describe('Executor', () => {
       expect(result.failedSteps).toHaveLength(1);
       expect(result.failedSteps[0]?.result.error).toContain('Unable to resolve reference');
       expect(mockToolExecutor.getExecutionsFor('insert_clip')).toHaveLength(0);
+    });
+
+    it('should keep orchestration plans with step references on the per-step execution path', async () => {
+      const atomicExecutor = mockToolExecutor as MockToolExecutor & {
+        canExecuteBatchAtomically: (request: BatchExecutionRequest) => boolean;
+      };
+      atomicExecutor.canExecuteBatchAtomically = () => true;
+
+      const batchSpy = vi.spyOn(atomicExecutor, 'executeBatch');
+      executor = createExecutor(atomicExecutor);
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'check_generation_status',
+          description: 'Check generation status',
+          category: 'analysis',
+          riskLevel: 'low',
+          supportsUndo: false,
+          parallelizable: true,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            jobId: { type: 'string' },
+          },
+        },
+        required: ['jobId'],
+        result: {
+          success: true,
+          data: {
+            assetId: 'asset-generated-1',
+          },
+          duration: 10,
+        },
+      });
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'insert_clip',
+          description: 'Insert generated clip',
+          category: 'editing',
+          riskLevel: 'low',
+          supportsUndo: true,
+          parallelizable: false,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            sequenceId: { type: 'string' },
+            trackId: { type: 'string' },
+            assetId: { type: 'string' },
+            timelineStart: { type: 'number' },
+          },
+        },
+        required: ['sequenceId', 'trackId', 'assetId', 'timelineStart'],
+        result: {
+          success: true,
+          data: { clipId: 'clip-1' },
+          duration: 10,
+        },
+      });
+
+      const orchestrationPlan: Plan = {
+        goal: 'Place generated asset on timeline',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'check_generation_status',
+            args: { jobId: 'job-123' },
+            description: 'Read generation output',
+            riskLevel: 'low',
+            estimatedDuration: 50,
+          },
+          {
+            id: 'step-2',
+            tool: 'insert_clip',
+            args: {
+              sequenceId: 'sequence-1',
+              trackId: 'track-1',
+              assetId: { $fromStep: 'step-1', $path: 'data.assetId' },
+              timelineStart: 12,
+            },
+            description: 'Insert generated asset',
+            riskLevel: 'low',
+            estimatedDuration: 120,
+            dependsOn: ['step-1'],
+          },
+        ],
+        estimatedTotalDuration: 170,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo insert',
+      };
+
+      const result = await executor.execute(orchestrationPlan, executionContext);
+
+      expect(result.success).toBe(true);
+      expect(batchSpy).not.toHaveBeenCalled();
+      expect(mockToolExecutor.getExecutionsFor('check_generation_status')).toHaveLength(1);
+      expect(mockToolExecutor.getExecutionsFor('insert_clip')).toHaveLength(1);
     });
   });
 
