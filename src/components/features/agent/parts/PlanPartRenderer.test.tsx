@@ -45,6 +45,13 @@ describe('PlanPartRenderer', () => {
     expect(screen.getByText('Split the clip at 5 seconds')).toBeInTheDocument();
   });
 
+  it('should keep step details collapsed by default', () => {
+    render(<PlanPartRenderer part={mockPlanPart} />);
+
+    expect(screen.queryByText('Split the selected clip')).not.toBeInTheDocument();
+    expect(screen.queryByText('Select the new clip')).not.toBeInTheDocument();
+  });
+
   it('should show step count', () => {
     render(<PlanPartRenderer part={mockPlanPart} />);
 
@@ -94,8 +101,11 @@ describe('PlanPartRenderer', () => {
     expect(screen.queryByTestId('plan-reject-btn')).not.toBeInTheDocument();
   });
 
-  it('should display step descriptions', () => {
+  it('should display step descriptions after expanding the plan', async () => {
+    const user = userEvent.setup();
     render(<PlanPartRenderer part={mockPlanPart} />);
+
+    await user.click(screen.getByRole('button', { name: /Plan/i }));
 
     expect(screen.getByText('Split the selected clip')).toBeInTheDocument();
     expect(screen.getByText('Select the new clip')).toBeInTheDocument();

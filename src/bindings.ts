@@ -852,6 +852,146 @@ async getAiSession(sessionId: string) : Promise<Result<SessionWithMessagesDto, s
 }
 },
 /**
+ * Creates an agent session kernel row on top of the shared conversation database.
+ */
+async createAgentSession(input: CreateAgentSessionInputDto) : Promise<Result<AgentSessionDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_agent_session", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Returns the session kernel header together with the persisted run ledger.
+ */
+async getAgentSession(sessionId: string) : Promise<Result<AgentSessionDetailDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_agent_session", { sessionId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Starts a new run and atomically marks the owning session as active.
+ */
+async startAgentRun(input: StartAgentRunInput) : Promise<Result<AgentRunDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_agent_run", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Advances an agent run phase and keeps the session header in sync.
+ */
+async updateAgentRunPhase(input: UpdateAgentRunPhaseInput) : Promise<Result<AgentRunDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_agent_run_phase", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Creates a delegation record linking a parent run/session to a child session.
+ */
+async createAgentDelegationRecord(input: CreateDelegationRecordInput) : Promise<Result<DelegationRecordDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_agent_delegation_record", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Updates a delegation record as work progresses or merges back.
+ */
+async updateAgentDelegationRecord(input: UpdateDelegationRecordInput) : Promise<Result<DelegationRecordDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("update_agent_delegation_record", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Lists delegation records that touch the given session.
+ */
+async listAgentDelegationRecords(sessionId: string) : Promise<Result<DelegationRecordDto[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_agent_delegation_records", { sessionId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Records a permission or approval decision and bumps the session permission version.
+ */
+async recordAgentPermissionDecision(input: RecordPermissionDecisionInput) : Promise<Result<PermissionDecisionDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("record_agent_permission_decision", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Lists persisted permission decisions for a session.
+ */
+async listAgentPermissionDecisions(sessionId: string) : Promise<Result<PermissionDecisionDto[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_agent_permission_decisions", { sessionId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Records a compaction event and synchronizes session compaction metadata.
+ */
+async recordAgentCompaction(input: RecordCompactionInput) : Promise<Result<CompactionRecordDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("record_agent_compaction", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Lists persisted compaction records for a session.
+ */
+async listAgentCompactions(sessionId: string) : Promise<Result<CompactionRecordDto[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_agent_compactions", { sessionId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Creates a durable resume checkpoint and updates the session cursor metadata.
+ */
+async createAgentResumeCheckpoint(input: CreateResumeCheckpointInput) : Promise<Result<ResumeCheckpointDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("create_agent_resume_checkpoint", { input }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Marks a resume checkpoint as consumed and updates session resume metadata.
+ */
+async consumeAgentResumeCheckpoint(checkpointId: string) : Promise<Result<ResumeCheckpointDto, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("consume_agent_resume_checkpoint", { checkpointId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
+ * Lists persisted resume checkpoints for a session.
+ */
+async listAgentResumeCheckpoints(sessionId: string) : Promise<Result<ResumeCheckpointDto[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_agent_resume_checkpoints", { sessionId }) };
+} catch (e) {
+    return { status: "error", error: e  as any };
+}
+},
+/**
  * Saves a message and all its parts to the database in a single transaction.
  */
 async saveAiMessage(input: SaveMessageInput) : Promise<Result<MessageDto, string>> {
@@ -2284,6 +2424,22 @@ errorMessage?: string | null;
  */
 executionTimeMs: number }
 /**
+ * Persisted orchestration run for an agent session.
+ */
+export type AgentRunDto = { id: string; sessionId: string; runtimeKind: string; trigger: string; inputMessageId: string | null; outputMessageId: string | null; phase: string; iteration: number; maxIterations: number; toolCallsUsed: number; maxToolCalls: number; plannedStepCount: number; completedStepCount: number; traceId: string | null; rollbackReportJson: string | null; errorCode: string | null; errorMessage: string | null; startedAt: number; updatedAt: number; endedAt: number | null }
+/**
+ * Session kernel detail with run ledger.
+ */
+export type AgentSessionDetailDto = { session: AgentSessionDto; runs: AgentRunDto[] }
+/**
+ * Agent session header aligned with the frontend session kernel vocabulary.
+ */
+export type AgentSessionDto = { id: string; projectId: string; sequenceId: string | null; title: string; status: string; runtimeKind: string; agentProfileId: string; sessionMode: string; lineage: AgentSessionLineageDto; currentRunId: string | null; currentPlanId: string | null; pendingApprovalId: string | null; activeCheckpointId: string | null; permissionStateVersion: number; compactionVersion: number; resumeCursorVersion: number; latestSummaryMessageId: string | null; lastCompactedAt: number | null; lastResumedAt: number | null; modelProvider: string | null; modelId: string | null; createdAt: number; updatedAt: number; completedAt: number | null }
+/**
+ * Lineage metadata for an agent session kernel.
+ */
+export type AgentSessionLineageDto = { parentSessionId: string | null; branchFromSessionId: string | null; rootSessionId: string }
+/**
  * Aggregated results from all analysis sub-jobs for a single asset.
  * 
  * This is the primary output artifact of the analysis pipeline.
@@ -3321,6 +3477,10 @@ createdIds: string[];
  */
 deletedIds: string[] }
 /**
+ * Persisted compaction record DTO aligned with the frontend session kernel vocabulary.
+ */
+export type CompactionRecordDto = { id: string; sessionId: string; runId: string | null; tier: string; trigger: string; summaryMessageId: string | null; sourceMessageCount: number; retainedMessageCount: number; estimatedTokensSaved: number | null; continuationSummaryJson: string | null; stateRehydrationJson: string | null; createdAt: number }
+/**
  * Response for configure_seedance_provider
  */
 export type ConfigureSeedanceProviderResponse = { isAvailable: boolean }
@@ -3465,13 +3625,29 @@ breakdown: CostBreakdownItem[] }
  */
 export type CreateAdjustmentLayerArgs = { sequenceId: string; trackId: string; position: number; duration: number; name: string | null }
 /**
+ * Input payload for creating an agent session kernel row.
+ */
+export type CreateAgentSessionInputDto = { projectId: string; sequenceId: string | null; title: string | null; runtimeKind: string | null; agentProfileId: string | null; sessionMode: string | null; parentSessionId: string | null; branchFromSessionId: string | null; rootSessionId: string | null; modelProvider: string | null; modelId: string | null; id: string | null }
+/**
  * Arguments for creating a compound clip from selected clips.
  */
 export type CreateCompoundClipArgs = { sequenceId: string; trackId: string; clipIds: string[]; name: string | null }
 /**
+ * Input payload for creating a delegation record.
+ */
+export type CreateDelegationRecordInput = { id: string | null; parentSessionId: string; childSessionId: string; parentRunId: string; agentProfileId: string; delegatedGoal: string; contextPacketJson: string; allowedToolsDeltaJson: string | null; permissionSnapshotJson: string | null; status: string | null; mergeStatus: string | null; summaryMessageId: string | null; resultJson: string | null; errorMessage: string | null; completedAt: number | null }
+/**
+ * Input payload for creating a resume checkpoint.
+ */
+export type CreateResumeCheckpointInput = { id: string | null; sessionId: string; runId: string | null; checkpointKind: string; status: string | null; resumeCursorJson: string; sessionStateJson: string; pendingWorkJson: string | null; createdAt: number | null }
+/**
  * Status of credentials for each provider
  */
 export type CredentialStatusDto = { openai: boolean; anthropic: boolean; google: boolean; seedance: boolean }
+/**
+ * Persisted delegation DTO aligned with the frontend session kernel vocabulary.
+ */
+export type DelegationRecordDto = { id: string; parentSessionId: string; childSessionId: string; parentRunId: string; agentProfileId: string; delegatedGoal: string; contextPacketJson: string; allowedToolsDeltaJson: string | null; permissionSnapshotJson: string | null; status: string; mergeStatus: string; summaryMessageId: string | null; resultJson: string | null; errorMessage: string | null; createdAt: number; updatedAt: number; completedAt: number | null }
 /**
  * Arguments for deleting a transcript time range from a clip.
  */
@@ -4439,6 +4615,10 @@ normalizedDuration: number }
 export type PartDto = { id: string; messageId: string; sortOrder: number; partType: string; dataJson: string; compactedAt: number | null }
 export type PerformanceSettingsDto = { hardwareAcceleration: boolean; gpuDeviceId: string | null; proxyGeneration: boolean; proxyResolution: string; maxConcurrentJobs: number; memoryLimitMb: number; cacheSizeMb: number }
 /**
+ * Persisted permission decision DTO aligned with the frontend session kernel vocabulary.
+ */
+export type PermissionDecisionDto = { id: string; sessionId: string; runId: string | null; stepId: string | null; subjectType: string; subject: string; action: string; source: string; reason: string | null; createdAt: number }
+/**
  * Risk level for plan steps.
  */
 export type PlanRiskLevel = "low" | "medium" | "high" | "critical"
@@ -4827,6 +5007,14 @@ num: number;
  */
 den: number }
 /**
+ * Input payload for recording a compaction event.
+ */
+export type RecordCompactionInput = { id: string | null; sessionId: string; runId: string | null; tier: string; trigger: string; summaryMessageId: string | null; sourceMessageCount: number; retainedMessageCount: number; estimatedTokensSaved: number | null; continuationSummaryJson: string | null; stateRehydrationJson: string | null; createdAt: number | null }
+/**
+ * Input payload for recording a permission decision.
+ */
+export type RecordPermissionDecisionInput = { id: string | null; sessionId: string; runId: string | null; stepId: string | null; subjectType: string; subject: string; action: string; source: string; reason: string | null; createdAt: number | null }
+/**
  * Classification of a detected cleanup region
  */
 export type RegionType = 
@@ -5002,6 +5190,10 @@ provider: string | null;
  * Additional parameters
  */
 params: JsonValue | null }
+/**
+ * Persisted resume checkpoint DTO aligned with the frontend session kernel vocabulary.
+ */
+export type ResumeCheckpointDto = { id: string; sessionId: string; runId: string | null; checkpointKind: string; status: string; resumeCursorJson: string; sessionStateJson: string; pendingWorkJson: string | null; createdAt: number; consumedAt: number | null }
 /**
  * Result of a reverse match frame operation.
  */
@@ -5522,6 +5714,10 @@ export type StabilizeResult = {
  * Path to the generated transforms file
  */
 transformsPath: string }
+/**
+ * Input payload for starting a new agent run.
+ */
+export type StartAgentRunInput = { sessionId: string; runtimeKind: string | null; trigger: string | null; maxIterations: number | null; maxToolCalls: number | null; plannedStepCount: number | null; inputMessageId: string | null; traceId: string | null; id: string | null }
 /**
  * State change types for event broadcasting.
  */
@@ -6540,9 +6736,17 @@ canRedo: boolean }
  */
 export type UnnestCompoundClipArgs = { sequenceId: string; trackId: string; clipId: string }
 /**
+ * Input payload for updating an agent run phase and syncing session state.
+ */
+export type UpdateAgentRunPhaseInput = { runId: string; phase: string; toolCallsUsed: number | null; plannedStepCount: number | null; completedStepCount: number | null; outputMessageId: string | null; rollbackReportJson: string | null; errorCode: string | null; errorMessage: string | null; currentPlanId: string | null; pendingApprovalId: string | null; activeCheckpointId: string | null; permissionStateVersion: number | null; compactionVersion: number | null; resumeCursorVersion: number | null; lastCompactedAt: number | null; lastResumedAt: number | null; endedAt: number | null }
+/**
  * DTO for update check result
  */
 export type UpdateCheckResultDto = { status: string; version: string | null; notes: string | null; date: string | null; message: string | null }
+/**
+ * Input payload for updating a delegation record.
+ */
+export type UpdateDelegationRecordInput = { id: string; status: string | null; mergeStatus: string | null; summaryMessageId: string | null; resultJson: string | null; errorMessage: string | null; completedAt: number | null }
 /**
  * Result of validating an EditScript.
  */

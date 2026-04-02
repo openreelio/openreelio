@@ -132,6 +132,76 @@ describe('buildOrchestrationPlaybook', () => {
     });
   });
 
+  it('creates insert-and-segment playbook with chained split references', () => {
+    const thought: Thought = {
+      understanding: "Insert '20240921_214806_1.mp4' into the timeline and split it into 5-second segments",
+      requirements: ['insert asset', 'split into 5-second segments'],
+      uncertainties: [],
+      approach: 'Insert the named clip, then split each following 5-second boundary',
+      needsMoreInfo: false,
+    };
+
+    const context = createContext({
+      availableAssets: [
+        {
+          id: 'asset-video-target',
+          name: '20240921_214806_1.mp4',
+          type: 'video',
+          duration: 16,
+        },
+      ],
+    });
+    const toolExecutor = createToolExecutor(['insert_clip', 'split_clip']);
+    const match = buildOrchestrationPlaybook(thought, context, toolExecutor);
+
+    expect(match).not.toBeNull();
+    expect(match?.id).toBe('insert_and_segment');
+    expect(match?.plan.steps).toHaveLength(4);
+
+    const firstSplit = match?.plan.steps[1];
+    const secondSplit = match?.plan.steps[2];
+    const thirdSplit = match?.plan.steps[3];
+
+    expect(firstSplit?.args.clipId).toMatchObject({
+      $fromStep: 'playbook_insert_segment_source',
+      $path: 'data.clipId',
+    });
+    expect(firstSplit?.args.splitTime).toBe(17);
+    expect(secondSplit?.args.clipId).toMatchObject({
+      $fromStep: 'playbook_split_segment_1',
+      $path: 'data.newClipId',
+    });
+    expect(secondSplit?.dependsOn).toEqual(['playbook_split_segment_1']);
+    expect(thirdSplit?.args.clipId).toMatchObject({
+      $fromStep: 'playbook_split_segment_2',
+      $path: 'data.newClipId',
+    });
+    expect(thirdSplit?.dependsOn).toEqual(['playbook_split_segment_2']);
+  });
+
+  it('returns null for insert-and-segment requests when the target asset has no duration', () => {
+    const thought: Thought = {
+      understanding: "Insert '20240921_214806_1.mp4' into the timeline and split it into 5-second segments",
+      requirements: ['insert asset', 'split into 5-second segments'],
+      uncertainties: [],
+      approach: 'Insert the named clip, then split each following 5-second boundary',
+      needsMoreInfo: false,
+    };
+
+    const context = createContext({
+      availableAssets: [
+        {
+          id: 'asset-video-target',
+          name: '20240921_214806_1.mp4',
+          type: 'video',
+        },
+      ],
+    });
+    const toolExecutor = createToolExecutor(['insert_clip', 'split_clip']);
+
+    expect(buildOrchestrationPlaybook(thought, context, toolExecutor)).toBeNull();
+  });
+
   it('returns null when required tracks/tools are missing', () => {
     const thought: Thought = {
       understanding: 'Add B-roll, music, and subtitles',

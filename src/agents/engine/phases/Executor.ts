@@ -13,7 +13,12 @@
  * - Create execution records
  */
 
-import type { IToolExecutor, ExecutionContext, ToolExecutionResult } from '../ports/IToolExecutor';
+import type {
+  IToolExecutor,
+  ExecutionContext,
+  ToolExecutionResult,
+  BatchExecutionRequest,
+} from '../ports/IToolExecutor';
 import type { Plan, PlanStep } from '../core/types';
 import {
   ToolExecutionError,
@@ -23,7 +28,11 @@ import {
   ToolBudgetExceededError,
 } from '../core/errors';
 import { DoomLoopDetector } from '../core/DoomLoopDetector';
-import { getValueAtReferencePath, resolveStepValueReferences } from '../core/stepReferences';
+import {
+  collectStepValueReferences,
+  getValueAtReferencePath,
+  resolveStepValueReferences,
+} from '../core/stepReferences';
 import { isRetryableToolFailure } from './executionFailureUtils';
 
 // =============================================================================
@@ -228,6 +237,29 @@ export class Executor {
 
       // Get execution order based on dependencies
       const executionOrder = this.getExecutionOrder(plan.steps);
+
+      const atomicBatchResult = await this.tryExecuteAtomicBatch(
+        executionOrder,
+        context,
+        onProgress,
+        limits,
+        consumeToolCallBudget,
+        startTime,
+      );
+
+      if (atomicBatchResult) {
+        this.emitProgress(onProgress, {
+          phase: this.isAborted ? 'aborted' : 'completed',
+          totalSteps: plan.steps.length,
+          completedCount: atomicBatchResult.completedSteps.length,
+          failedCount: atomicBatchResult.failedSteps.length,
+        });
+
+        return {
+          ...atomicBatchResult,
+          toolCallsUsed,
+        };
+      }
 
       for (let i = 0; i < executionOrder.length; i++) {
         if (this.isAborted) {
@@ -437,6 +469,181 @@ export class Executor {
   // ===========================================================================
   // Private Methods - Step Execution
   // ===========================================================================
+
+  private buildAtomicBatchRequest(steps: PlanStep[]): BatchExecutionRequest {
+    return {
+      tools: steps.map((step) => ({
+        name: step.tool,
+        args: step.args,
+      })),
+      mode: 'sequential',
+      stopOnError: true,
+    };
+  }
+
+  private canExecutePlanAsAtomicBatch(steps: PlanStep[]): boolean {
+    if (steps.length < 2 || !this.config.stopOnError || this.config.parallelExecution) {
+      return false;
+    }
+
+    if (steps.some((step) => step.optional || step.fallback)) {
+      return false;
+    }
+
+    if (steps.some((step) => collectStepValueReferences(step.args).length > 0)) {
+      return false;
+    }
+
+    if (typeof this.toolExecutor.canExecuteBatchAtomically !== 'function') {
+      return false;
+    }
+
+    return this.toolExecutor.canExecuteBatchAtomically(this.buildAtomicBatchRequest(steps));
+  }
+
+  private async tryExecuteAtomicBatch(
+    steps: PlanStep[],
+    context: ExecutionContext,
+    onProgress: ((progress: ExecutionProgress) => void) | undefined,
+    limits: ExecutionLimits,
+    consumeToolCallBudget: (step: PlanStep) => void,
+    startTime: number,
+  ): Promise<Omit<ExecutionResult, 'toolCallsUsed'> | null> {
+    if (!this.canExecutePlanAsAtomicBatch(steps)) {
+      return null;
+    }
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+
+      if (limits.onBeforeStep) {
+        const decision = await limits.onBeforeStep(step);
+        if (decision === 'deny') {
+          const deniedRecord: StepExecutionRecord = {
+            stepId: step.id,
+            tool: step.tool,
+            args: step.args,
+            result: {
+              success: false,
+              error: `Permission denied for tool: ${step.tool}`,
+              duration: 0,
+            },
+            startTime: Date.now(),
+            endTime: Date.now(),
+            retryCount: 0,
+          };
+
+          this.emitProgress(onProgress, {
+            phase: 'step_started',
+            stepId: step.id,
+            stepIndex: i,
+            totalSteps: steps.length,
+            completedCount: 0,
+            failedCount: 0,
+            message: step.description,
+          });
+
+          this.emitProgress(onProgress, {
+            phase: 'step_failed',
+            stepId: step.id,
+            stepIndex: i,
+            totalSteps: steps.length,
+            completedCount: 0,
+            failedCount: 1,
+            message: deniedRecord.result.error,
+            result: deniedRecord.result,
+          });
+
+          return {
+            success: false,
+            completedSteps: [],
+            failedSteps: [deniedRecord],
+            totalDuration: Date.now() - startTime,
+            aborted: this.isAborted,
+          };
+        }
+      }
+
+      consumeToolCallBudget(step);
+    }
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      this.emitProgress(onProgress, {
+        phase: 'step_started',
+        stepId: step.id,
+        stepIndex: i,
+        totalSteps: steps.length,
+        completedCount: 0,
+        failedCount: 0,
+        message: step.description,
+      });
+    }
+
+    const batchResult = await this.toolExecutor.executeBatch(
+      this.buildAtomicBatchRequest(steps),
+      context,
+    );
+
+    const completedSteps: StepExecutionRecord[] = [];
+    const failedSteps: StepExecutionRecord[] = [];
+    let syntheticTimeCursor = startTime;
+
+    for (let i = 0; i < steps.length; i++) {
+      const step = steps[i];
+      const toolResult = batchResult.results[i]?.result ?? {
+        success: false,
+        error: 'Step not executed',
+        duration: 0,
+      };
+      const startAt = syntheticTimeCursor;
+      const endAt = startAt + Math.max(0, Math.round(toolResult.duration));
+      syntheticTimeCursor = endAt;
+
+      const record: StepExecutionRecord = {
+        stepId: step.id,
+        tool: step.tool,
+        args: step.args,
+        result: toolResult,
+        startTime: startAt,
+        endTime: endAt,
+        retryCount: 0,
+      };
+
+      if (toolResult.success) {
+        completedSteps.push(record);
+        this.emitProgress(onProgress, {
+          phase: 'step_completed',
+          stepId: step.id,
+          stepIndex: i,
+          totalSteps: steps.length,
+          completedCount: completedSteps.length,
+          failedCount: failedSteps.length,
+          result: toolResult,
+        });
+      } else {
+        failedSteps.push(record);
+        this.emitProgress(onProgress, {
+          phase: 'step_failed',
+          stepId: step.id,
+          stepIndex: i,
+          totalSteps: steps.length,
+          completedCount: completedSteps.length,
+          failedCount: failedSteps.length,
+          message: toolResult.error,
+          result: toolResult,
+        });
+      }
+    }
+
+    return {
+      success: batchResult.success && failedSteps.length === 0 && !this.isAborted,
+      completedSteps,
+      failedSteps,
+      totalDuration: Date.now() - startTime,
+      aborted: this.isAborted,
+    };
+  }
 
   private createFailedRecordFromError(step: PlanStep, error: Error): StepExecutionRecord {
     const now = Date.now();

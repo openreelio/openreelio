@@ -193,6 +193,12 @@ const TOOL_DEFS: TestToolDef[] = [
     category: 'utility',
     parameters: { type: 'object', properties: {} },
   },
+  {
+    name: 'execute_plan',
+    description: 'Execute a legacy sequential edit plan',
+    category: 'utility',
+    parameters: { type: 'object', properties: {} },
+  },
 ];
 
 const CONTEXT: ExecutionContext = {
@@ -240,7 +246,11 @@ describe('BackendToolExecutor', () => {
       );
 
       expect(result.success).toBe(true);
-      expect(result.data).toEqual({ clipId: 'new-clip' });
+      expect(result.data).toEqual({
+        clipId: 'new-clip',
+        sourceClipId: 'clip-1',
+        newClipId: null,
+      });
       expect(result.undoable).toBe(true);
 
       // Verify backend IPC was called
@@ -298,6 +308,101 @@ describe('BackendToolExecutor', () => {
         }),
       });
       expect(frontend.execute).not.toHaveBeenCalled();
+    });
+
+    it('should route backend-safe edit meta-tool actions to backend IPC', async () => {
+      const extendedTools = [
+        ...TOOL_DEFS,
+        { name: 'edit', description: 'Editing meta-tool', category: 'timeline', parameters: {} },
+      ];
+      const extendedFrontend = createMockFrontendExecutor(extendedTools);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'plan-edit-1',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [{ stepId: 'step-1', success: true, data: { ok: true }, durationMs: 6 }],
+        operationIds: ['op-edit-1'],
+        executionTimeMs: 6,
+      });
+
+      const result = await extendedBackend.execute(
+        'edit',
+        { action: 'split_clip', clipId: 'clip-1', atTimelineSec: 5 },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          goal: 'Execute split_clip',
+          steps: [
+            expect.objectContaining({
+              toolName: 'splitClip',
+              params: { clipId: 'clip-1', atTimelineSec: 5 },
+            }),
+          ],
+        }),
+      });
+      expect(extendedFrontend.execute).not.toHaveBeenCalled();
+    });
+
+    it('should normalize backend split results into the chained newClipId contract', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'plan-split-contract',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [
+          {
+            stepId: 'step-1',
+            success: true,
+            data: { operationId: 'op-1', createdIds: ['clip-2'] },
+            durationMs: 5,
+          },
+        ],
+        operationIds: ['op-1'],
+        executionTimeMs: 5,
+      });
+
+      const result = await backend.execute(
+        'split_clip',
+        { clipId: 'clip-1', splitTime: 5 },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({
+        operationId: 'op-1',
+        createdIds: ['clip-2'],
+        sourceClipId: 'clip-1',
+        newClipId: 'clip-2',
+      });
+    });
+
+    it('should keep frontend-only edit meta-tool actions on the frontend executor', async () => {
+      const extendedTools = [
+        ...TOOL_DEFS,
+        { name: 'edit', description: 'Editing meta-tool', category: 'timeline', parameters: {} },
+      ];
+      const extendedFrontend = createMockFrontendExecutor(extendedTools);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      const result = await extendedBackend.execute(
+        'edit',
+        { action: 'rename_track', sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(extendedFrontend.execute).toHaveBeenCalledWith(
+        'edit',
+        { action: 'rename_track', sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+        CONTEXT,
+      );
+      expect(mockInvoke).not.toHaveBeenCalled();
     });
 
     it('should route transition orchestration tool to frontend executor', async () => {
@@ -403,11 +508,284 @@ describe('BackendToolExecutor', () => {
       expect(result.error).toContain('IPC channel closed');
     });
 
+    it('should promote backend-safe legacy execute_plan batches to backend atomic execution', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'legacy-plan-1',
+        success: true,
+        totalSteps: 2,
+        stepsCompleted: 2,
+        stepResults: [
+          {
+            stepId: 'split-step',
+            success: true,
+            data: { leftClipId: 'clip-1a', rightClipId: 'clip-1b' },
+            durationMs: 5,
+          },
+          {
+            stepId: 'move-step',
+            success: true,
+            data: { clipId: 'clip-2', timelineIn: 8 },
+            durationMs: 7,
+          },
+        ],
+        operationIds: ['op-1', 'op-2'],
+        executionTimeMs: 12,
+      });
+
+      const result = await backend.execute(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'split-step',
+              toolName: 'split_clip',
+              params: { clipId: 'clip-1', splitTime: 5 },
+            },
+            {
+              id: 'move-step',
+              toolName: 'move_clip',
+              params: { clipId: 'clip-2', newTimelineIn: 8 },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.undoable).toBe(true);
+      expect(result.data).toEqual({
+        stepsExecuted: 2,
+        stepResults: [
+          {
+            stepId: 'split-step',
+            success: true,
+            data: { leftClipId: 'clip-1a', rightClipId: 'clip-1b' },
+            error: undefined,
+          },
+          {
+            stepId: 'move-step',
+            success: true,
+            data: { clipId: 'clip-2', timelineIn: 8 },
+            error: undefined,
+          },
+        ],
+      });
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          goal: expect.stringContaining('legacy execute_plan'),
+          sessionId: 'session-1',
+          steps: [
+            expect.objectContaining({
+              id: 'split-step',
+              toolName: 'splitClip',
+              params: { clipId: 'clip-1', splitTime: 5 },
+              dependsOn: [],
+            }),
+            expect.objectContaining({
+              id: 'move-step',
+              toolName: 'moveClip',
+              params: { clipId: 'clip-2', newTimelineIn: 8 },
+              dependsOn: ['split-step'],
+            }),
+          ],
+        }),
+      });
+      expect(frontend.execute).not.toHaveBeenCalled();
+    });
+
+    it('should fall back to frontend execute_plan when a legacy batch contains a frontend-only step', async () => {
+      const result = await backend.execute(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'split-step',
+              toolName: 'split_clip',
+              params: { clipId: 'clip-1', splitTime: 5 },
+            },
+            {
+              id: 'transition-step',
+              toolName: 'add_transition',
+              params: { clipId: 'clip-1b', transitionType: 'dissolve' },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual({
+        frontend: true,
+        tool: 'execute_plan',
+        args: {
+          steps: [
+            {
+              id: 'split-step',
+              toolName: 'split_clip',
+              params: { clipId: 'clip-1', splitTime: 5 },
+            },
+            {
+              id: 'transition-step',
+              toolName: 'add_transition',
+              params: { clipId: 'clip-1b', transitionType: 'dissolve' },
+            },
+          ],
+        },
+      });
+      expect(frontend.execute).toHaveBeenCalledWith(
+        'execute_plan',
+        {
+          steps: [
+            {
+              id: 'split-step',
+              toolName: 'split_clip',
+              params: { clipId: 'clip-1', splitTime: 5 },
+            },
+            {
+              id: 'transition-step',
+              toolName: 'add_transition',
+              params: { clipId: 'clip-1b', transitionType: 'dissolve' },
+            },
+          ],
+        },
+        CONTEXT,
+      );
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should fall back to frontend execute_plan when legacy backend promotion expansion throws', async () => {
+      registerCompoundExpander('ripple_edit', () => {
+        throw new Error('Invalid ripple request');
+      });
+
+      const extendedTools = [
+        ...TOOL_DEFS,
+        { name: 'ripple_edit', description: 'Ripple edit', category: 'clip', parameters: {} },
+      ];
+      const extendedFrontend = createMockFrontendExecutor(extendedTools);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+      const args = {
+        steps: [
+          {
+            id: 'ripple-step',
+            toolName: 'ripple_edit',
+            params: { clipId: 'clip-1', trimEnd: 4 },
+          },
+        ],
+      };
+
+      try {
+        const result = await extendedBackend.execute('execute_plan', args, CONTEXT);
+
+        expect(result).toMatchObject({
+          success: true,
+          data: {
+            frontend: true,
+            tool: 'execute_plan',
+            args,
+          },
+        });
+        expect(extendedFrontend.execute).toHaveBeenCalledWith('execute_plan', args, CONTEXT);
+        expect(mockInvoke).not.toHaveBeenCalled();
+      } finally {
+        unregisterCompoundExpander('ripple_edit');
+      }
+    });
+
     it('should route unknown tool to frontend (falls through when no definition)', async () => {
       await backend.execute('unknown_tool', {}, CONTEXT);
 
       // isBackendTool returns false for unknown tools, so it goes to frontend
       expect(frontend.execute).toHaveBeenCalledWith('unknown_tool', {}, CONTEXT);
+    });
+
+    it('should promote backend-safe legacy execute_plan batches to backend atomic execution', async () => {
+      const extendedTools = [
+        ...TOOL_DEFS,
+        {
+          name: 'execute_plan',
+          description: 'Legacy execute plan meta-tool',
+          category: 'timeline',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      const extendedFrontend = createMockFrontendExecutor(extendedTools);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'legacy-plan-1',
+        success: true,
+        totalSteps: 2,
+        stepsCompleted: 2,
+        stepResults: [
+          { stepId: 'step-a', success: true, data: { split: true }, durationMs: 5 },
+          { stepId: 'step-b', success: true, data: { moved: true }, durationMs: 4 },
+        ],
+        operationIds: ['op-1', 'op-2'],
+        executionTimeMs: 9,
+      });
+
+      const result = await extendedBackend.execute(
+        'execute_plan',
+        {
+          steps: [
+            { id: 'step-a', toolName: 'split_clip', params: { clipId: 'clip-1', atTimelineSec: 5 } },
+            { id: 'step-b', toolName: 'move_clip', params: { clipId: 'clip-2', newTimelineIn: 8 } },
+          ],
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.undoable).toBe(true);
+      expect(result.data).toEqual({
+        stepsExecuted: 2,
+        stepResults: [
+          { stepId: 'step-a', success: true, data: { split: true }, error: undefined },
+          { stepId: 'step-b', success: true, data: { moved: true }, error: undefined },
+        ],
+      });
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          goal: expect.stringContaining('Promote legacy execute_plan'),
+          steps: [
+            expect.objectContaining({ id: 'step-a', toolName: 'splitClip' }),
+            expect.objectContaining({ id: 'step-b', toolName: 'moveClip' }),
+          ],
+        }),
+      });
+      expect(extendedFrontend.execute).not.toHaveBeenCalled();
+    });
+
+    it('should fall back to frontend execute_plan when the legacy batch includes frontend-only tools', async () => {
+      const extendedTools = [
+        ...TOOL_DEFS,
+        {
+          name: 'execute_plan',
+          description: 'Legacy execute plan meta-tool',
+          category: 'timeline',
+          parameters: { type: 'object', properties: {} },
+        },
+      ];
+      const extendedFrontend = createMockFrontendExecutor(extendedTools);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      const args = {
+        steps: [
+          { id: 'step-a', toolName: 'split_clip', params: { clipId: 'clip-1', atTimelineSec: 5 } },
+          {
+            id: 'step-b',
+            toolName: 'rename_track',
+            params: { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+          },
+        ],
+      };
+
+      const result = await extendedBackend.execute('execute_plan', args, CONTEXT);
+
+      expect(result.success).toBe(true);
+      expect(extendedFrontend.execute).toHaveBeenCalledWith('execute_plan', args, CONTEXT);
+      expect(mockInvoke).not.toHaveBeenCalled();
     });
   });
 
@@ -416,18 +794,29 @@ describe('BackendToolExecutor', () => {
   // ===========================================================================
 
   describe('batch execution', () => {
-    it('should separate editing and analysis tools in batch', async () => {
+    it('should execute mixed backend/frontend batch in original order', async () => {
+      // Backend tools execute individually via execute() for order preservation
       mockInvoke.mockResolvedValueOnce({
-        planId: 'batch-1',
+        planId: 'single-1',
         success: true,
-        totalSteps: 2,
-        stepsCompleted: 2,
+        totalSteps: 1,
+        stepsCompleted: 1,
         stepResults: [
           { stepId: 'step-1', success: true, data: { ok: true }, durationMs: 5 },
-          { stepId: 'step-2', success: true, data: { ok: true }, durationMs: 5 },
         ],
-        operationIds: ['op-1', 'op-2'],
-        executionTimeMs: 10,
+        operationIds: ['op-1'],
+        executionTimeMs: 5,
+      });
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'single-2',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [
+          { stepId: 'step-1', success: true, data: { ok: true }, durationMs: 5 },
+        ],
+        operationIds: ['op-2'],
+        executionTimeMs: 5,
       });
 
       const result = await backend.executeBatch(
@@ -444,27 +833,83 @@ describe('BackendToolExecutor', () => {
       );
 
       expect(result.success).toBe(true);
-      // 2 backend + 1 frontend = 3 results
+      // 2 backend (per-tool) + 1 frontend = 3 results
       expect(result.successCount).toBe(3);
       expect(result.failureCount).toBe(0);
+      // Results preserve original request order
+      expect(result.results).toHaveLength(3);
+      expect(result.results[0].tool).toBe('split_clip');
+      expect(result.results[1].tool).toBe('move_clip');
+      expect(result.results[2].tool).toBe('analyze_video');
+    });
 
-      // Backend received a 2-step plan (split_clip + move_clip)
-      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
-        plan: expect.objectContaining({
-          steps: expect.arrayContaining([
-            expect.objectContaining({ toolName: 'splitClip' }),
-            expect.objectContaining({ toolName: 'moveClip' }),
-          ]),
-        }),
+    it('should batch backend-safe edit meta-tool actions through one backend plan', async () => {
+      const extendedTools = [
+        ...TOOL_DEFS,
+        { name: 'edit', description: 'Editing meta-tool', category: 'timeline', parameters: {} },
+      ];
+      const extendedFrontend = createMockFrontendExecutor(extendedTools);
+      const extendedBackend = createBackendToolExecutor(extendedFrontend);
+
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'batch-edit-1',
+        success: true,
+        totalSteps: 2,
+        stepsCompleted: 2,
+        stepResults: [
+          { stepId: 'step-1', success: true, data: { split: true }, durationMs: 4 },
+          { stepId: 'step-2', success: true, data: { moved: true }, durationMs: 5 },
+        ],
+        operationIds: ['op-1', 'op-2'],
+        executionTimeMs: 9,
       });
 
-      // Frontend received the analysis tool
-      expect(frontend.executeBatch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tools: [{ name: 'analyze_video', args: { assetId: 'a1' } }],
-        }),
+      const result = await extendedBackend.executeBatch(
+        {
+          tools: [
+            { name: 'edit', args: { action: 'split_clip', clipId: 'c1', atTimelineSec: 5 } },
+            { name: 'edit', args: { action: 'move_clip', clipId: 'c2', newTimelineIn: 8 } },
+          ],
+          mode: 'sequential',
+          stopOnError: true,
+        },
         CONTEXT,
       );
+
+      expect(result.success).toBe(true);
+      expect(result.successCount).toBe(2);
+      expect(result.failureCount).toBe(0);
+      expect(result.results).toEqual([
+        {
+          tool: 'edit',
+          result: expect.objectContaining({
+            success: true,
+            data: { split: true },
+          }),
+        },
+        {
+          tool: 'edit',
+          result: expect.objectContaining({
+            success: true,
+            data: { moved: true },
+          }),
+        },
+      ]);
+      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
+        plan: expect.objectContaining({
+          steps: [
+            expect.objectContaining({
+              toolName: 'splitClip',
+              params: { clipId: 'c1', atTimelineSec: 5 },
+            }),
+            expect.objectContaining({
+              toolName: 'moveClip',
+              params: { clipId: 'c2', newTimelineIn: 8 },
+            }),
+          ],
+        }),
+      });
+      expect(extendedFrontend.executeBatch).not.toHaveBeenCalled();
     });
 
     it('should handle backend batch failure with rollback', async () => {
@@ -531,7 +976,7 @@ describe('BackendToolExecutor', () => {
     it('should delegate getAvailableTools to frontend', () => {
       const tools = backend.getAvailableTools();
       expect(frontend.getAvailableTools).toHaveBeenCalled();
-      expect(tools.length).toBe(9);
+      expect(tools.length).toBe(10);
     });
 
     it('should delegate getToolDefinition to frontend', () => {

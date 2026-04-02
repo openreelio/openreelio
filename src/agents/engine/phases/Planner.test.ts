@@ -698,6 +698,32 @@ describe('Planner', () => {
       expect(systemMessage?.content).toContain('"$fromStep"');
     });
 
+    it('should include canonical edit arg names and step-output contracts in the planning prompt', async () => {
+      const mockPlan: Plan = {
+        goal: 'Prompt capture',
+        steps: [],
+        estimatedTotalDuration: 0,
+        requiresApproval: false,
+        rollbackStrategy: 'N/A',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await planner.plan(sampleThought, context);
+
+      const request = mockLLM.getLastRequest();
+      const systemMessage = request?.messages.find((m) => m.role === 'system');
+
+      expect(systemMessage?.content).toContain('timelineStart');
+      expect(systemMessage?.content).toContain('splitTime');
+      expect(systemMessage?.content).toContain('file');
+      expect(systemMessage?.content).toContain('data.clipId');
+      expect(systemMessage?.content).toContain('data.newClipId');
+      expect(systemMessage?.content).toContain('timelineIn');
+      expect(systemMessage?.content).toContain('atTimelineSec');
+      expect(systemMessage?.content).toContain('filePath');
+    });
+
     it('should include language policy instructions in planning prompt', async () => {
       const mockPlan: Plan = {
         goal: 'Plan with language policy',

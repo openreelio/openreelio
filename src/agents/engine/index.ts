@@ -93,6 +93,54 @@ export {
   buildOrchestrationPlaybook,
 } from './core/orchestrationPlaybooks';
 
+export {
+  type AgentSessionStatus,
+  type AgentRuntimeKind,
+  type AgentSessionMode,
+  type AgentRunTrigger,
+  type AgentRunPhase,
+  type PermissionSubjectType,
+  type PermissionDecisionAction,
+  type PermissionDecisionSource,
+  type DelegationStatus,
+  type DelegationMergeStatus,
+  type CompactionTier,
+  type CompactionTrigger,
+  type ResumeCheckpointKind,
+  type ResumeCheckpointStatus,
+  type AgentSessionLineage,
+  type AgentSession,
+  type AgentRun,
+  type DelegationRecord,
+  type PermissionDecision,
+  type CompactionRecord,
+  type ResumeCheckpoint,
+  type CreateAgentSessionInput,
+  type CreateAgentRunInput,
+  createAgentSession,
+  createAgentRun,
+} from './core/agentSession';
+
+export {
+  type AgentSessionSnapshot,
+  type StartPersistedAgentRunInput,
+  type UpdatePersistedAgentRunPhaseInput,
+  type CreatePersistedDelegationRecordInput,
+  type UpdatePersistedDelegationRecordInput,
+  type CreatePersistedPermissionDecisionInput,
+  type CreatePersistedCompactionInput,
+  type CreatePersistedResumeCheckpointInput,
+  AgentSessionBackend,
+  createAgentSessionBackend,
+  hydrateAgentRun,
+  hydrateAgentSession,
+  hydrateAgentSessionSnapshot,
+  hydrateDelegationRecord,
+  hydratePermissionDecision,
+  hydrateCompactionRecord,
+  hydrateResumeCheckpoint,
+} from './core/agentSessionBackend';
+
 // =============================================================================
 // Errors
 // =============================================================================

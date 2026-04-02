@@ -167,6 +167,13 @@ export interface IToolExecutor {
   ): Promise<BatchExecutionResult>;
 
   /**
+   * Whether the executor can preserve atomic mutation semantics for the given
+   * batch request. Executors that do not implement an authoritative batch lane
+   * should omit this method.
+   */
+  canExecuteBatchAtomically?(request: BatchExecutionRequest): boolean;
+
+  /**
    * Get list of available tools
    *
    * @param category - Optional category filter

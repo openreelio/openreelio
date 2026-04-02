@@ -22,14 +22,20 @@ import type { IToolExecutor } from '@/agents/engine/ports/IToolExecutor';
 import type { AgentContext } from '@/agents/engine/core/types';
 import type { TokenUsage, ConversationMessage } from '@/agents/engine/core/conversation';
 import { createEmptyContext, createLanguagePolicy } from '@/agents/engine/core/types';
+import {
+  buildCompactionPayload,
+  buildResumeCheckpointPayload,
+} from '@/agents/engine/core/recoveryPersistence';
 import { isAgentLoopEnabled } from '@/config/featureFlags';
 import { useConversationStore } from '@/stores/conversationStore';
 import { usePermissionStore } from '@/stores/permissionStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores';
+import { useAgentSessionStore } from '@/stores/agentSessionStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { globalToolRegistry } from '@/agents';
+import { persistPermissionAudit } from '@/agents/engine/core/permissionAudit';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('useAgentLoop');
@@ -97,15 +103,23 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
   // Refs
   const loopRef = useRef<AgentLoop | null>(null);
   const runGuardRef = useRef(false);
+  const abortNotifiedRef = useRef(false);
   const toolPermissionResolverRef = useRef<{
     resolve: (decision: 'allow' | 'deny' | 'allow_always') => void;
     tool: string;
+    args: Record<string, unknown>;
   } | null>(null);
+  const persistedRunIdRef = useRef<string | null>(null);
   const optionsRef = useRef(options);
 
   useEffect(() => {
     optionsRef.current = options;
   }, [options]);
+
+  const emitSyntheticEvent = useCallback((event: AgentLoopEvent): void => {
+    setEvents((prev) => [...prev, event]);
+    optionsRef.current.onEvent?.(event);
+  }, []);
 
   const isEnabled = typeof isAgentLoopEnabled === 'function' ? isAgentLoopEnabled() : false;
 
@@ -134,6 +148,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
         return;
       }
       runGuardRef.current = true;
+      persistedRunIdRef.current = null;
 
       // Reset state
       setIsRunning(true);
@@ -141,6 +156,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
       setError(null);
       setToolResults([]);
       setPhase('streaming');
+      abortNotifiedRef.current = false;
 
       // Pre-flight: check AI provider
       if (typeof llmClient.isConfigured === 'function' && !llmClient.isConfigured()) {
@@ -169,33 +185,293 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
       }
 
       const context = buildContext();
+      const store = useConversationStore.getState();
+      const storeSessionId = store.activeSessionId ?? await store.ensureSession();
+      if (!storeSessionId) {
+        const sessionError = new Error('Conversation session is required before starting agent loop');
+        setError(sessionError);
+        setPhase('failed');
+        setIsRunning(false);
+        optionsRef.current.onError?.(sessionError);
+        runGuardRef.current = false;
+        return;
+      }
+
+      const projectId = store.activeProjectId ?? context.projectId;
+      const agentSessionStore = useAgentSessionStore.getState();
+      const persistResumeCheckpoint = async (inputOverrides: Parameters<
+        typeof buildResumeCheckpointPayload
+      >[0]): Promise<string | null> => {
+        try {
+          const sessionSnapshot = useAgentSessionStore.getState().snapshotsById[storeSessionId]?.session;
+          const payload = buildResumeCheckpointPayload({
+            currentPlanId: sessionSnapshot?.currentPlanId ?? null,
+            pendingApprovalId: sessionSnapshot?.pendingApprovalId ?? null,
+            ...inputOverrides,
+          });
+          const checkpoint = await agentSessionStore.createResumeCheckpoint({
+            sessionId: storeSessionId,
+            runId: persistedRunIdRef.current,
+            checkpointKind: inputOverrides.checkpointKind,
+            ...payload,
+          });
+          return checkpoint.id;
+        } catch (error) {
+          logger.warn('Failed to persist fast-loop resume checkpoint', {
+            sessionId: storeSessionId,
+            checkpointKind: inputOverrides.checkpointKind,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        }
+      };
+      const consumeResumeCheckpoint = async (checkpointId: string | null): Promise<void> => {
+        if (!checkpointId) {
+          return;
+        }
+
+        try {
+          await agentSessionStore.consumeResumeCheckpoint(checkpointId);
+        } catch (error) {
+          logger.warn('Failed to consume fast-loop resume checkpoint', {
+            sessionId: storeSessionId,
+            checkpointId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      };
+      const persistCompactionBoundary = async (event: Extract<AgentLoopEvent, { type: 'compacted' }>): Promise<void> => {
+        const compactionPayload = buildCompactionPayload({
+          sessionId: storeSessionId,
+          runId: persistedRunIdRef.current,
+          runtimeKind: 'fast',
+          trigger: 'auto',
+          projectId: context.projectId,
+          sequenceId: context.sequenceId ?? null,
+          input,
+          summary: event.summary,
+          sourceMessageCount: event.originalMessageCount,
+          retainedMessageCount: event.retainedMessageCount,
+          estimatedTokensSaved: event.estimatedTokensSaved,
+        });
+
+        let didPersistCompaction = false;
+        try {
+          await agentSessionStore.recordCompaction({
+            sessionId: storeSessionId,
+            runId: persistedRunIdRef.current,
+            tier: 'summary',
+            trigger: 'auto',
+            sourceMessageCount: event.originalMessageCount,
+            retainedMessageCount: event.retainedMessageCount,
+            estimatedTokensSaved: event.estimatedTokensSaved,
+            continuationSummaryJson: compactionPayload.continuationSummaryJson,
+            stateRehydrationJson: compactionPayload.stateRehydrationJson,
+          });
+          didPersistCompaction = true;
+        } catch (error) {
+          logger.warn('Failed to persist fast-loop compaction record', {
+            sessionId: storeSessionId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+
+        if (!didPersistCompaction) {
+          return;
+        }
+
+        await persistResumeCheckpoint({
+          sessionId: storeSessionId,
+          runId: persistedRunIdRef.current,
+          runtimeKind: 'fast',
+          checkpointKind: 'compaction_boundary',
+          phase: 'compacting',
+          projectId: context.projectId,
+          sequenceId: context.sequenceId ?? null,
+          input,
+          summary: event.summary,
+          sourceMessageCount: event.originalMessageCount,
+          retainedMessageCount: event.retainedMessageCount,
+          estimatedTokensSaved: event.estimatedTokensSaved,
+        });
+      };
+      if (projectId) {
+        agentSessionStore.loadForProject(projectId);
+
+        try {
+          await agentSessionStore.ensureSession({
+            id: storeSessionId,
+            projectId,
+            sequenceId: context.sequenceId ?? null,
+            runtimeKind: 'fast',
+            sessionMode: 'primary',
+            agentProfileId: 'editor',
+            modelProvider: config?.activeProvider ?? null,
+            modelId: config?.activeModel ?? null,
+          });
+        } catch (error) {
+          logger.warn('Failed to ensure persisted agent loop session', {
+            sessionId: storeSessionId,
+            projectId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+
+        try {
+          const decisions = await agentSessionStore.refreshPermissionDecisions(storeSessionId);
+          usePermissionStore
+            .getState()
+            .hydrateSessionRulesFromPersistedDecisions(storeSessionId, decisions);
+        } catch (error) {
+          logger.warn('Failed to replay persisted agent loop permissions', {
+            sessionId: storeSessionId,
+            projectId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+
+      let persistedToolCalls = 0;
+      let persistedFinalPhase: 'completed' | 'failed' | 'aborted' = 'completed';
+      let persistedErrorMessage: string | null = null;
+
+      try {
+        const persistedRun = await agentSessionStore.startRun({
+          sessionId: storeSessionId,
+          runtimeKind: 'fast',
+          trigger: 'user',
+          maxIterations: config?.maxIterations,
+        });
+        persistedRunIdRef.current = persistedRun.id;
+        await persistResumeCheckpoint({
+          sessionId: storeSessionId,
+          runId: persistedRun.id,
+          runtimeKind: 'fast',
+          checkpointKind: 'safe_resume_point',
+          phase: 'initializing',
+          projectId: context.projectId,
+          sequenceId: context.sequenceId ?? null,
+          input,
+        });
+      } catch (error) {
+        persistedRunIdRef.current = null;
+        logger.warn('Failed to create persisted agent loop run', {
+          sessionId: storeSessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
 
       // Create the loop
+      const baseToolPermissionHandler =
+        config?.toolPermissionHandler ??
+        (async (toolName, args, riskLevel) => {
+          void riskLevel;
+          const resolution = usePermissionStore
+            .getState()
+            .resolvePermissionDetails(toolName, args);
+
+          if (resolution.permission === 'allow' || resolution.permission === 'deny') {
+            persistPermissionAudit(
+              storeSessionId,
+              persistedRunIdRef.current,
+              null,
+              resolution,
+              resolution.permission,
+            );
+            return resolution.permission;
+          }
+
+          persistPermissionAudit(
+            storeSessionId,
+            persistedRunIdRef.current,
+            null,
+            resolution,
+            'ask',
+          );
+
+          const decision = await new Promise<'allow' | 'deny' | 'allow_always'>((resolve) => {
+            toolPermissionResolverRef.current = { resolve, tool: toolName, args };
+          });
+
+          persistPermissionAudit(
+            storeSessionId,
+            persistedRunIdRef.current,
+            null,
+            resolution,
+            decision,
+            'interactive_approval',
+          );
+
+          return decision;
+        });
+
       const loop = createAgentLoop(llmClient, toolExecutor, {
         ...config,
-        toolPermissionHandler:
-          config?.toolPermissionHandler ??
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          (async (toolName, _args, _riskLevel) => {
-            const permission = usePermissionStore.getState().resolvePermission(toolName);
-            if (permission === 'allow') return 'allow';
-            if (permission === 'deny') return 'deny';
-            // 'ask' — wait for user
-            return new Promise<'allow' | 'deny' | 'allow_always'>((resolve) => {
-              toolPermissionResolverRef.current = { resolve, tool: toolName };
+        toolPermissionHandler: async (toolName, args, riskLevel) => {
+          const decisionPromise = baseToolPermissionHandler(toolName, args, riskLevel);
+          let autoResolved = false;
+          let autoDecision: 'allow' | 'deny' | 'allow_always' | undefined;
+          let permissionRequestId: string | null = null;
+
+          void decisionPromise.then((decision) => {
+            if (!autoResolved) {
+              autoResolved = true;
+              autoDecision = decision;
+            }
+          });
+
+          await Promise.resolve();
+
+          let checkpointId: string | null = null;
+          if (!autoResolved) {
+            permissionRequestId = `tool-permission-${toolName}-${Date.now()}`;
+            emitSyntheticEvent({
+              type: 'tool_permission_request',
+              id: permissionRequestId,
+              tool: toolName,
+              args,
+              riskLevel,
             });
-          }),
+            checkpointId = await persistResumeCheckpoint({
+              sessionId: storeSessionId,
+              runId: persistedRunIdRef.current,
+              runtimeKind: 'fast',
+              checkpointKind: 'tool_wait',
+              phase: 'awaiting_tool_permission',
+              projectId: context.projectId,
+              sequenceId: context.sequenceId ?? null,
+              input,
+              toolName,
+              args,
+            });
+            autoResolved = true;
+          }
+
+          try {
+            const decision = autoDecision ?? await decisionPromise;
+            if (permissionRequestId) {
+              emitSyntheticEvent({
+                type: 'tool_permission_response',
+                id: permissionRequestId,
+                tool: toolName,
+                decision,
+              });
+            }
+            return decision;
+          } finally {
+            await consumeResumeCheckpoint(checkpointId);
+          }
+        },
       });
       loopRef.current = loop;
 
       // Get conversation history
-      const store = useConversationStore.getState();
       const rawHistory: ConversationMessage[] = store.activeConversation?.messages ?? [];
       const historySlice = rawHistory.slice(-CONTEXT_HISTORY_LIMIT);
 
       try {
         const gen = loop.run(
-          store.activeSessionId ?? crypto.randomUUID(),
+          storeSessionId,
           input,
           context,
           historySlice,
@@ -211,7 +487,12 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
               break;
 
             case 'tool_call_complete':
+              persistedToolCalls += 1;
               setToolResults((prev) => [...prev, event.result]);
+              break;
+
+            case 'compacted':
+              await persistCompactionBoundary(event);
               break;
 
             case 'tools_executed':
@@ -219,21 +500,28 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
               break;
 
             case 'error':
+              persistedFinalPhase = 'failed';
+              persistedErrorMessage = event.error.message;
               setError(event.error);
               setPhase('failed');
               optionsRef.current.onError?.(event.error);
               break;
 
             case 'done':
+              if (persistedFinalPhase !== 'failed') {
+                persistedFinalPhase = 'completed';
+              }
               // Only mark completed if no prior error/doom-loop occurred
               setPhase((prev) => (prev === 'failed' ? 'failed' : 'completed'));
               optionsRef.current.onComplete?.(event.usage);
               break;
 
             case 'doom_loop_detected': {
+              persistedFinalPhase = 'failed';
               const doomErr = new Error(
                 `Doom loop detected: ${event.tool} called ${event.count} times`,
               );
+              persistedErrorMessage = doomErr.message;
               setError(doomErr);
               setPhase('failed');
               optionsRef.current.onError?.(doomErr);
@@ -246,21 +534,52 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
         }
       } catch (err) {
         if (err instanceof AgentLoopAbortedError) {
+          persistedFinalPhase = 'aborted';
           setPhase('aborted');
-          optionsRef.current.onAbort?.();
+          if (!abortNotifiedRef.current) {
+            abortNotifiedRef.current = true;
+            optionsRef.current.onAbort?.();
+          }
         } else {
           const loopError = err instanceof Error ? err : new Error(String(err));
+          persistedFinalPhase = 'failed';
+          persistedErrorMessage = loopError.message;
           setError(loopError);
           setPhase('failed');
           optionsRef.current.onError?.(loopError);
         }
       } finally {
+        const persistedRunId = persistedRunIdRef.current;
+        persistedRunIdRef.current = null;
+        if (persistedRunId) {
+          try {
+            await agentSessionStore.updateRunPhase({
+              runId: persistedRunId,
+              phase: persistedFinalPhase,
+              toolCallsUsed: persistedToolCalls,
+              errorMessage: persistedErrorMessage,
+              endedAt: Date.now(),
+            });
+          } catch (error) {
+            agentSessionStore.reportPersistenceIssue({
+              sessionId: storeSessionId,
+              stage: 'run_finalize',
+              error,
+            });
+            logger.warn('Failed to finalize persisted agent loop run', {
+              runId: persistedRunId,
+              phase: persistedFinalPhase,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
         runGuardRef.current = false;
         setIsRunning(false);
         loopRef.current = null;
       }
     },
-    [isEnabled, llmClient, toolExecutor, config, buildContext],
+    [isEnabled, llmClient, toolExecutor, config, buildContext, emitSyntheticEvent],
   );
 
   // Abort
@@ -271,7 +590,10 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
     toolPermissionResolverRef.current = null;
     setPhase('aborted');
     setIsRunning(false);
-    optionsRef.current.onAbort?.();
+    if (!abortNotifiedRef.current) {
+      abortNotifiedRef.current = true;
+      optionsRef.current.onAbort?.();
+    }
   }, []);
 
   // Reset
@@ -279,6 +601,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
     runGuardRef.current = false;
     loopRef.current = null;
     toolPermissionResolverRef.current = null;
+    abortNotifiedRef.current = false;
     setPhase('idle');
     setIsRunning(false);
     setEvents([]);
@@ -290,7 +613,10 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
   const approveToolPermission = useCallback(
     (decision: 'allow' | 'deny' | 'allow_always') => {
       if (decision === 'allow_always' && toolPermissionResolverRef.current?.tool) {
-        usePermissionStore.getState().allowAlways(toolPermissionResolverRef.current.tool);
+        usePermissionStore.getState().allowAlways(
+          toolPermissionResolverRef.current.tool,
+          toolPermissionResolverRef.current.args,
+        );
       }
       toolPermissionResolverRef.current?.resolve(decision);
       toolPermissionResolverRef.current = null;

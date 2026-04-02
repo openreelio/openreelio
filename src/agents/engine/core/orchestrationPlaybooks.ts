@@ -5,6 +5,7 @@ import type { StepValueReference } from './stepReferences';
 export type OrchestrationPlaybookId =
   | 'broll_music_subtitles'
   | 'generate_and_place'
+  | 'insert_and_segment'
   | 'stock_media_search'
   | 'auto_caption'
   | 'music_bed'
@@ -59,6 +60,27 @@ const PLACE_KEYWORDS = [
   /삽입/i,
   /추가/i,
   /배치/i,
+];
+
+const INSERT_KEYWORDS = [
+  /\binsert\b/i,
+  /\badd\b/i,
+  /\bplace\b/i,
+  /\bput\b/i,
+  /삽입/i,
+  /추가/i,
+  /배치/i,
+  /넣/i,
+];
+
+const SEGMENT_KEYWORDS = [
+  /\bsplit\b/i,
+  /\bsegment(s)?\b/i,
+  /\bchunk(s)?\b/i,
+  /\bdivide\b/i,
+  /\bcut\b/i,
+  /분할/i,
+  /나누/i,
 ];
 
 const STOCK_KEYWORDS = [
@@ -182,6 +204,11 @@ export function buildOrchestrationPlaybook(
     return generateAndPlace;
   }
 
+  const insertAndSegment = buildInsertAndSegmentPlaybook(playbookContext);
+  if (insertAndSegment) {
+    return insertAndSegment;
+  }
+
   const brollMusicSubtitles = buildBrollMusicSubtitlesPlaybook(playbookContext);
   if (brollMusicSubtitles) {
     return brollMusicSubtitles;
@@ -208,6 +235,98 @@ export function buildOrchestrationPlaybook(
   }
 
   return null;
+}
+
+function buildInsertAndSegmentPlaybook(
+  playbookContext: PlaybookContext,
+): OrchestrationPlaybookMatch | null {
+  const { text, thought, context, toolExecutor } = playbookContext;
+
+  if (!matchesAny(text, INSERT_KEYWORDS) || !matchesAny(text, SEGMENT_KEYWORDS)) {
+    return null;
+  }
+
+  if (!hasTools(toolExecutor, ['insert_clip', 'split_clip'])) {
+    return null;
+  }
+
+  const segmentDurationSec = parseSegmentIntervalSeconds(text);
+  const sequenceId = context.sequenceId;
+  const targetTrackId = pickTrackId(context, 'video');
+  const targetAsset = pickMentionedAsset(context, thought, 'video');
+
+  if (!segmentDurationSec || !sequenceId || !targetTrackId || !targetAsset) {
+    return null;
+  }
+
+  const assetDuration = targetAsset.duration;
+  if (typeof assetDuration !== 'number' || !Number.isFinite(assetDuration) || assetDuration <= segmentDurationSec) {
+    return null;
+  }
+
+  const MAX_SEGMENT_SPLITS = 50;
+  const MIN_SEGMENT_TAIL_SECONDS = 0.05;
+
+  const splitBoundaries = buildSegmentBoundaries(assetDuration, segmentDurationSec, MIN_SEGMENT_TAIL_SECONDS);
+  if (splitBoundaries.length === 0 || splitBoundaries.length > MAX_SEGMENT_SPLITS) {
+    return null;
+  }
+
+  const timelineStart = clampTimelineStart(context.playheadPosition, context.timelineDuration);
+  const steps: PlanStep[] = [
+    {
+      id: 'playbook_insert_segment_source',
+      tool: 'insert_clip',
+      args: {
+        sequenceId,
+        trackId: targetTrackId,
+        assetId: targetAsset.id,
+        timelineStart,
+      },
+      description: `Insert ${targetAsset.name} onto the timeline`,
+      riskLevel: 'low',
+      estimatedDuration: 250,
+    },
+  ];
+
+  let priorStepId = 'playbook_insert_segment_source';
+  let clipReference: StepValueReference = makeReference(priorStepId, 'data.clipId');
+
+  splitBoundaries.forEach((boundarySec, index) => {
+    const stepId = `playbook_split_segment_${index + 1}`;
+    const timelineBoundary = roundPlanTime(timelineStart + boundarySec);
+
+    steps.push({
+      id: stepId,
+      tool: 'split_clip',
+      args: {
+        sequenceId,
+        trackId: targetTrackId,
+        clipId: clipReference,
+        splitTime: timelineBoundary,
+      },
+      description: `Split the inserted clip at ${formatPlanSeconds(boundarySec)} to keep ${formatPlanSeconds(segmentDurationSec)} segments`,
+      riskLevel: 'low',
+      estimatedDuration: 180,
+      dependsOn: [priorStepId],
+    });
+
+    priorStepId = stepId;
+    clipReference = makeReference(stepId, 'data.newClipId');
+  });
+
+  return {
+    id: 'insert_and_segment',
+    confidence: 0.94,
+    plan: {
+      goal: `Insert ${targetAsset.name} and split it into ${formatPlanSeconds(segmentDurationSec)} segments`,
+      steps,
+      estimatedTotalDuration: estimateTotalDuration(steps),
+      requiresApproval: false,
+      rollbackStrategy:
+        'Undo the split operations in reverse order, then remove the inserted source clip if needed.',
+    },
+  };
 }
 
 function buildMusicBedPlaybook(
@@ -764,6 +883,48 @@ function pickAssetId(context: AgentContext, type: 'video' | 'audio'): string | n
   return firstAsset?.id ?? null;
 }
 
+function pickMentionedAsset(
+  context: AgentContext,
+  thought: Thought,
+  type: 'video' | 'audio',
+): AgentContext['availableAssets'][number] | null {
+  const candidates = context.availableAssets.filter((asset) => asset.type === type);
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const quotedText = extractQuotedText(thought)?.toLowerCase();
+  if (quotedText) {
+    const normalizedQuoted = stripExtension(quotedText);
+    const quotedMatch = candidates.find((asset) => {
+      const assetName = asset.name.toLowerCase();
+      return assetName === quotedText || stripExtension(assetName) === normalizedQuoted;
+    });
+    if (quotedMatch) {
+      return quotedMatch;
+    }
+  }
+
+  const searchText = buildSearchText(thought);
+  const mentionedAssets = candidates
+    .map((asset) => ({
+      asset,
+      matchIndex: getAssetMentionIndex(searchText, asset.name),
+    }))
+    .filter(
+      (entry): entry is { asset: (typeof candidates)[number]; matchIndex: number } =>
+        entry.matchIndex !== null,
+    )
+    .sort((left, right) => left.matchIndex - right.matchIndex)
+    .map((entry) => entry.asset);
+
+  if (mentionedAssets.length > 0) {
+    return mentionedAssets[0];
+  }
+
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
 function pickReferenceStyleAssets(
   text: string,
   context: AgentContext,
@@ -825,6 +986,61 @@ function clampTimelineStart(playhead: number, timelineDuration: number): number 
   }
 
   return Math.min(playhead, timelineDuration);
+}
+
+function buildSegmentBoundaries(
+  totalDurationSec: number,
+  segmentDurationSec: number,
+  minTailSeconds: number = 0.05,
+): number[] {
+  const boundaries: number[] = [];
+  for (
+    let boundary = segmentDurationSec;
+    boundary < totalDurationSec - 1e-6;
+    boundary += segmentDurationSec
+  ) {
+    const rounded = roundPlanTime(boundary);
+    if (totalDurationSec - rounded <= minTailSeconds) {
+      break;
+    }
+    boundaries.push(rounded);
+  }
+  return boundaries;
+}
+
+function parseSegmentIntervalSeconds(text: string): number | null {
+  const patterns = [
+    /every\s+(\d+(?:\.\d+)?)\s*seconds?/i,
+    /(\d+(?:\.\d+)?)\s*-\s*second\s+segments?/i,
+    /(\d+(?:\.\d+)?)\s*seconds?\s+segments?/i,
+    /(\d+(?:\.\d+)?)\s*초(?:씩| 간격| 단위)?/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) {
+      continue;
+    }
+
+    const value = Number(match[1]);
+    if (Number.isFinite(value) && value > 0) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+function roundPlanTime(value: number): number {
+  return Math.round(value * 1000) / 1000;
+}
+
+function formatPlanSeconds(value: number): string {
+  return Number.isInteger(value) ? `${value}s` : `${value.toFixed(3).replace(/\.?0+$/, '')}s`;
+}
+
+function stripExtension(value: string): string {
+  return value.replace(/\.[a-z0-9]+$/i, '');
 }
 
 function createCaptionWindow(

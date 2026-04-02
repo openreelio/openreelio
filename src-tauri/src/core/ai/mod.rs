@@ -39,7 +39,10 @@ pub(crate) fn get_app_data_dir(app: &tauri::AppHandle) -> Result<std::path::Path
 pub use agent_plan::{
     AgentPlan, AgentPlanResult, PlanRiskLevel, PlanStep, RollbackReport, StepResult,
 };
-pub use conversation::{ConversationDb, MessageRow, MessageWithParts, PartRow, SessionRow};
+pub use conversation::{
+    AgentRunRow, CompactionRecordRow, ConversationDb, DelegationRecordRow, MessageRow,
+    MessageWithParts, PartRow, PermissionDecisionRow, ResumeCheckpointRow, SessionRow,
+};
 pub use cost_tracker::{CostError, CostTracker, ModelPricing, UsageSummary};
 pub use edit_script::{EditCommand, EditScript, Requirement, RiskAssessment};
 pub use executor::{

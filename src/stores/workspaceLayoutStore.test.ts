@@ -294,6 +294,7 @@ describe('WorkspaceLayoutStore', () => {
         expect(layout.zones.left.collapsed).toBe(true);
         expect(layout.zones.right.panelIds).toContain('inspector');
         expect(layout.zones.right.panelIds).toContain('comparison');
+        expect(layout.zones.right.panelIds).toContain('ai-assistant');
         expect(layout.sizes.rightWidth).toBe(380);
       });
 
@@ -305,6 +306,7 @@ describe('WorkspaceLayoutStore', () => {
         expect(activePresetId).toBe('audio');
         expect(layout.zones.left.panelIds).toEqual(['audio-mixer']);
         expect(layout.zones.left.activePanelId).toBe('audio-mixer');
+        expect(layout.zones.right.panelIds).toContain('ai-assistant');
       });
 
       it('should apply the Effects preset with AI assistant in right zone', () => {

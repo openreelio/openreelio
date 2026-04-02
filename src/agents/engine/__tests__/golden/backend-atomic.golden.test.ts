@@ -241,19 +241,31 @@ describe('Golden: backend-atomic', () => {
     expect(result.results[2].result.error).toContain('Batch rolled back');
   });
 
-  it('should route mixed batch (editing + analysis) correctly', async () => {
-    // Backend handles editing tools
+  it('should route mixed batch (editing + analysis) in original order', async () => {
+    // Mixed batches execute per-tool in order (not partitioned) to preserve
+    // the caller's intended execution sequence.
+    // Backend tools are routed individually via execute() calls.
     mockInvoke.mockResolvedValueOnce({
-      planId: 'batch-3',
+      planId: 'single-1',
       success: true,
-      totalSteps: 2,
-      stepsCompleted: 2,
+      totalSteps: 1,
+      stepsCompleted: 1,
       stepResults: [
         { stepId: 'step-1', success: true, data: { newClipId: 'clip-2' }, durationMs: 20 },
-        { stepId: 'step-2', success: true, data: { moved: true }, durationMs: 15 },
       ],
-      operationIds: ['op-1', 'op-2'],
-      executionTimeMs: 35,
+      operationIds: ['op-1'],
+      executionTimeMs: 20,
+    });
+    mockInvoke.mockResolvedValueOnce({
+      planId: 'single-2',
+      success: true,
+      totalSteps: 1,
+      stepsCompleted: 1,
+      stepResults: [
+        { stepId: 'step-1', success: true, data: { moved: true }, durationMs: 15 },
+      ],
+      operationIds: ['op-2'],
+      executionTimeMs: 15,
     });
 
     const result = await backendExecutor.executeBatch(
@@ -271,20 +283,15 @@ describe('Golden: backend-atomic', () => {
 
     expect(result.success).toBe(true);
     expect(result.successCount).toBe(3);
+    // Results preserve request order
+    expect(result.results[0].tool).toBe('split_clip');
+    expect(result.results[1].tool).toBe('move_clip');
+    expect(result.results[2].tool).toBe('get_timeline_info');
 
-    // Backend IPC: only editing tools (split + move)
-    expect(mockInvoke).toHaveBeenCalledTimes(1);
-    expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
-      plan: expect.objectContaining({
-        steps: expect.arrayContaining([
-          expect.objectContaining({ toolName: 'splitClip' }),
-          expect.objectContaining({ toolName: 'moveClip' }),
-        ]),
-      }),
-    });
+    // Backend IPC: 2 separate single-tool plans (not one combined plan)
+    expect(mockInvoke).toHaveBeenCalledTimes(2);
 
-    // Frontend executor handled the analysis tool via its executeBatch
-    // (MockToolExecutor.executeBatch internally calls execute, so the call IS recorded)
+    // Frontend executor handled the analysis tool
     expect(mockToolExecutor.wasToolCalled('get_timeline_info')).toBe(true);
   });
 });

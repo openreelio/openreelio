@@ -497,15 +497,23 @@ const EDITING_TOOLS: ToolDefinition[] = [
     },
     handler: async (args) => {
       try {
+        const sourceClipId = args.clipId as string;
         const result = await executeAgentCommand('SplitClip', {
           sequenceId: args.sequenceId as string,
           trackId: args.trackId as string,
-          clipId: args.clipId as string,
+          clipId: sourceClipId,
           splitTime: args.splitTime as number,
         });
 
         logger.debug('split_clip executed', { opId: result.opId });
-        return { success: true, result };
+        return {
+          success: true,
+          result: {
+            ...result,
+            sourceClipId,
+            newClipId: result.createdIds[0] ?? null,
+          },
+        };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         logger.error('split_clip failed', { error: message });

@@ -22,6 +22,7 @@ import { useProjectStore } from '@/stores';
 import type { ILLMClient, IToolExecutor, AgentContext, AgenticEngineConfig } from '@/agents/engine';
 import { ChatMessageList } from './ChatMessageList';
 import { ChatInputArea } from './ChatInputArea';
+import { AgentSessionPersistenceBanner } from './AgentSessionPersistenceBanner';
 
 // Stable reference to avoid infinite re-renders from Zustand selector
 const EMPTY_MESSAGES: readonly never[] = [];
@@ -240,6 +241,8 @@ export const AgenticChat = forwardRef<AgenticChatHandle, AgenticChatProps>(funct
   // Render
   return (
     <div data-testid="agentic-chat" className={`flex flex-col h-full bg-surface-base ${className}`}>
+      <AgentSessionPersistenceBanner />
+
       <ChatMessageList
         messages={messages}
         error={error}

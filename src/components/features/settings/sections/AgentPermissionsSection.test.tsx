@@ -41,7 +41,7 @@ describe('AgentPermissionsSection', () => {
 
     expect(screen.getByText('Agent Permissions')).toBeInTheDocument();
     expect(
-      screen.getByText(/Control which tools the AI agent can use/),
+      screen.getByText(/Control which capabilities the AI agent can use/),
     ).toBeInTheDocument();
   });
 

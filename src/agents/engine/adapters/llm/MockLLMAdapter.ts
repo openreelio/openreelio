@@ -30,6 +30,11 @@ export interface MockResponse {
     name: string;
     args: Record<string, unknown>;
   }>;
+  /** Token usage to emit on completion */
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+  };
   /** Structured output to return */
   structured?: unknown;
   /** Error to throw */
@@ -271,7 +276,7 @@ export class MockLLMAdapter implements ILLMClient {
         }
       }
 
-      yield { type: 'done' };
+      yield { type: 'done', usage: this.toolsResponse.usage };
     } finally {
       this._isGenerating = false;
     }
@@ -311,6 +316,7 @@ export class MockLLMAdapter implements ILLMClient {
 
     return {
       content: this.completeResponse.content ?? '',
+      usage: this.completeResponse.usage,
       finishReason: this.completeResponse.toolCalls ? 'tool_call' : 'stop',
       toolCalls: this.completeResponse.toolCalls,
     };

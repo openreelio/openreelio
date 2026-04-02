@@ -47,11 +47,11 @@ const QUERY_ACTIONS = `## Query Actions (meta-tool: query)
 - get_analysis_providers → available analysis backends`;
 
 const EDIT_ACTIONS = `## Edit Actions (meta-tool: edit, all require sequenceId)
-- insert_clip(trackId, assetId, timelineStart) → place asset on timeline
-- insert_clip_from_file(file, trackId, timelineStart) → insert by filename (auto-imports)
+- insert_clip(trackId, assetId, timelineStart) → place asset on timeline; result exposes data.clipId
+- insert_clip_from_file(file, trackId, timelineStart) → insert by filename (auto-imports); result exposes data.clipId
 - move_clip(trackId, clipId, newTimelineIn, newTrackId?) → reposition or cross-track move
 - trim_clip(trackId, clipId, newSourceIn?, newSourceOut?) → adjust source boundaries
-- split_clip(trackId, clipId, splitTime) → divide into two clips at time point
+- split_clip(trackId, clipId, splitTime) → divide into two clips at time point; result exposes data.newClipId for the right-hand segment
 - delete_clip(trackId, clipId) → remove clip from timeline
 - delete_clips_in_range(startTime, endTime, trackId?) → bulk remove by time range
 - change_clip_speed(trackId, clipId, speed) → speed 0.1–10.0, duration auto-adjusts
@@ -66,7 +66,8 @@ const EDIT_ACTIONS = `## Edit Actions (meta-tool: edit, all require sequenceId)
 - add_marker(time, label, color?) → timeline marker at position
 - remove_marker(markerId) → delete marker
 - list_markers(fromTime?, toTime?) → list markers in range
-- navigate_to_marker(time) → move playhead to time`;
+- navigate_to_marker(time) → move playhead to time
+- Use canonical arg names in plans: timelineStart / splitTime / file. Avoid legacy aliases like timelineIn / atTimelineSec / filePath`;
 
 const AUDIO_ACTIONS = `## Audio Actions (meta-tool: audio, require sequenceId + trackId)
 - adjust_volume(clipId?, volume) → set volume 0–200% (omit clipId for whole track)
@@ -97,10 +98,6 @@ const WORKSPACE_TOOLS = `## Workspace Tools (always available, not behind meta-t
 - replace_workspace_document_text / create_workspace_folder
 - rename_workspace_entry / move_workspace_entry / delete_workspace_entry`;
 
-const BATCH_EXECUTION = `## Batch Execution (meta-tool: execute_plan)
-Use for multi-step atomic edits. Each step: { id, toolName, params, dependsOn? }.
-Stops on first failure; completed steps are NOT rolled back.`;
-
 const EDITING_CONCEPTS = `## Editing Concepts
 - Ripple: trim + shift subsequent clips to fill/accommodate
 - Roll: move cut point between adjacent clips (total duration unchanged)
@@ -114,7 +111,8 @@ const COMMON_WORKFLOWS = `## Common Workflows
 2. Remove section: split_clip at start → split_clip at end → delete_clip middle
 3. Remove silence: find_gaps → delete_clips_in_range or manual split+delete
 4. Speed ramp: split_clip at boundaries → change_clip_speed on middle segment
-5. Batch edit: use execute_plan with steps array for atomic multi-step operations`;
+5. Multi-step edit: issue ordered edit actions only when needed; backend-safe edit actions may be fused into one atomic backend plan
+6. Segment an inserted clip: insert_clip → split_clip using data.clipId for the first cut → later split_clip steps use the previous split's data.newClipId`;
 
 const CLI_REFERENCE = `## CLI (headless alternative)
 openreelio-cli --path <dir> <group> <command> [--args]
@@ -131,7 +129,7 @@ function getSectionsForRole(role: ToolReferenceRole): string[] {
     case 'editor':
       return [
         QUERY_ACTIONS, EDIT_ACTIONS, AUDIO_ACTIONS, EFFECTS_ACTIONS, TEXT_ACTIONS,
-        WORKSPACE_TOOLS, BATCH_EXECUTION, EDITING_CONCEPTS, COMMON_WORKFLOWS, CLI_REFERENCE,
+        WORKSPACE_TOOLS, EDITING_CONCEPTS, COMMON_WORKFLOWS, CLI_REFERENCE,
       ];
     case 'analyst':
       return [QUERY_ACTIONS, WORKSPACE_TOOLS, CLI_REFERENCE];
