@@ -447,6 +447,12 @@ export class Planner {
     parts.push(
       '10. Every step that uses a step reference must include dependsOn entries for all referenced step IDs.',
     );
+    parts.push(
+      '11. Use canonical argument names from the validation schemas. Important: insert_clip and insert_clip_from_file require timelineStart, split_clip requires splitTime, and insert_clip_from_file requires file. Do not emit timelineIn, atTimelineSec, or filePath in plan JSON.',
+    );
+    parts.push(
+      '12. Tool output contracts: insert_clip exposes data.clipId; split_clip exposes data.newClipId for the newly created right-hand segment. For repeated segmentation, first reference data.clipId from insert_clip, then chain later split_clip steps through data.newClipId.',
+    );
     parts.push('');
     parts.push(...ORCHESTRATION_PLAYBOOK_LINES);
 
@@ -892,11 +898,12 @@ export class Planner {
     toolName: string,
     args: Record<string, unknown>,
   ): Record<string, unknown> {
+    const canonicalArgs = normalizeLegacyAgentArgs(toolName, args);
     const toolDefinition = this.toolExecutor.getToolDefinition(toolName);
-    const normalized = normalizeReferencesForValidation(args, toolDefinition?.parameters);
+    const normalized = normalizeReferencesForValidation(canonicalArgs, toolDefinition?.parameters);
 
     if (!normalized || typeof normalized !== 'object' || Array.isArray(normalized)) {
-      return args;
+      return canonicalArgs;
     }
 
     return normalized as Record<string, unknown>;
@@ -1125,4 +1132,39 @@ export function createPlanner(
   config?: PlannerConfig,
 ): Planner {
   return new Planner(llm, toolExecutor, config);
+}
+
+function normalizeLegacyAgentArgs(
+  toolName: string,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  const normalized = { ...args };
+  const action = typeof normalized.action === 'string' ? normalized.action : null;
+  const effectiveToolName = toolName === 'edit' && action ? action : toolName;
+
+  if (
+    (effectiveToolName === 'insert_clip' || effectiveToolName === 'insert_clip_from_file') &&
+    normalized.timelineStart === undefined &&
+    typeof normalized.timelineIn === 'number'
+  ) {
+    normalized.timelineStart = normalized.timelineIn;
+  }
+
+  if (
+    effectiveToolName === 'split_clip' &&
+    normalized.splitTime === undefined &&
+    typeof normalized.atTimelineSec === 'number'
+  ) {
+    normalized.splitTime = normalized.atTimelineSec;
+  }
+
+  if (
+    effectiveToolName === 'insert_clip_from_file' &&
+    typeof normalized.file !== 'string' &&
+    typeof normalized.filePath === 'string'
+  ) {
+    normalized.file = normalized.filePath;
+  }
+
+  return normalized;
 }
