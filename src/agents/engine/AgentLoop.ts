@@ -51,6 +51,7 @@ export type AgentLoopEvent =
   | ToolCallStartEvent
   | ToolCallCompleteEvent
   | ToolPermissionRequestEvent
+  | ToolPermissionResponseEvent
   | ToolsExecutedEvent
   | CompactedEvent
   | DoomLoopDetectedEvent
@@ -85,7 +86,15 @@ export interface ToolPermissionRequestEvent {
   type: 'tool_permission_request';
   id: string;
   tool: string;
+  args: Record<string, unknown>;
   riskLevel: RiskLevel;
+}
+
+export interface ToolPermissionResponseEvent {
+  type: 'tool_permission_response';
+  id: string;
+  tool: string;
+  decision: 'allow' | 'deny' | 'allow_always';
 }
 
 export interface ToolsExecutedEvent {
@@ -96,6 +105,9 @@ export interface ToolsExecutedEvent {
 export interface CompactedEvent {
   type: 'compacted';
   summary: string;
+  originalMessageCount: number;
+  retainedMessageCount: number;
+  estimatedTokensSaved: number;
 }
 
 export interface DoomLoopDetectedEvent {
@@ -420,7 +432,13 @@ export class AgentLoop {
         }));
         // Re-append user message after compaction
         messages.push({ role: 'user', content: input });
-        yield { type: 'compacted', summary: compacted.summary };
+        yield {
+          type: 'compacted',
+          summary: compacted.summary,
+          originalMessageCount: compacted.originalMessageCount,
+          retainedMessageCount: compacted.messages.length,
+          estimatedTokensSaved: compacted.estimatedTokensSaved,
+        };
       }
 
       // Refresh context if handler provided

@@ -49,10 +49,13 @@ import { usePermissionStore } from '@/stores/permissionStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { useTimelineStore } from '@/stores/timelineStore';
 import { useProjectStore } from '@/stores';
+import { useAgentSessionStore } from '@/stores/agentSessionStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { globalToolRegistry } from '@/agents';
 import { clearPendingApprovals } from '@/hooks/useAgentApproval';
 import { registerAgentAbort, unregisterAgentAbort } from '@/agents/engine/core/agentCleanup';
+import { buildResumeCheckpointPayload } from '@/agents/engine/core/recoveryPersistence';
+import { persistPermissionAudit } from '@/agents/engine/core/permissionAudit';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('useAgenticLoop');
@@ -160,6 +163,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     step: unknown;
   } | null>(null);
   const memoryStoreRef = useRef<IMemoryStore | null>(null);
+  const persistedRunIdRef = useRef<string | null>(null);
 
   if (!memoryStoreRef.current && config?.enableMemory !== false) {
     memoryStoreRef.current = createMemoryManagerAdapter();
@@ -269,6 +273,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         return null;
       }
       runGuardRef.current = true;
+      persistedRunIdRef.current = null;
 
       // Reset state
       setIsRunning(true);
@@ -318,41 +323,253 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       const convStore = useConversationStore.getState();
       const storeSessionId = convStore.activeSessionId
         ?? await convStore.ensureSession();
+      if (!storeSessionId) {
+        const sessionError = new Error(
+          'Conversation session is required before starting agentic loop',
+        );
+        setError(sessionError);
+        setPhase('failed');
+        setIsRunning(false);
+        optionsRef.current.onError?.(sessionError);
+        logger.error('Failed to start agentic loop without conversation session');
+        runGuardRef.current = false;
+        return null;
+      }
+
+      const projectId = convStore.activeProjectId ?? context.projectId;
+      const agentSessionStore = useAgentSessionStore.getState();
+      const persistResumeCheckpoint = async (inputOverrides: Parameters<
+        typeof buildResumeCheckpointPayload
+      >[0]): Promise<string | null> => {
+        try {
+          const sessionSnapshot = useAgentSessionStore.getState().snapshotsById[storeSessionId]?.session;
+          const payload = buildResumeCheckpointPayload({
+            currentPlanId: sessionSnapshot?.currentPlanId ?? null,
+            pendingApprovalId: sessionSnapshot?.pendingApprovalId ?? null,
+            ...inputOverrides,
+          });
+          const checkpoint = await agentSessionStore.createResumeCheckpoint({
+            sessionId: storeSessionId,
+            runId: persistedRunIdRef.current,
+            checkpointKind: inputOverrides.checkpointKind,
+            ...payload,
+          });
+          return checkpoint.id;
+        } catch (error) {
+          logger.warn('Failed to persist agentic resume checkpoint', {
+            sessionId: storeSessionId,
+            checkpointKind: inputOverrides.checkpointKind,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return null;
+        }
+      };
+      const consumeResumeCheckpoint = async (checkpointId: string | null): Promise<void> => {
+        if (!checkpointId) {
+          return;
+        }
+
+        try {
+          await agentSessionStore.consumeResumeCheckpoint(checkpointId);
+        } catch (error) {
+          logger.warn('Failed to consume agentic resume checkpoint', {
+            sessionId: storeSessionId,
+            checkpointId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      };
+      if (projectId) {
+        agentSessionStore.loadForProject(projectId);
+
+        try {
+          await agentSessionStore.ensureSession({
+            id: storeSessionId,
+            projectId,
+            sequenceId: context.sequenceId ?? null,
+            runtimeKind: 'tpao',
+            sessionMode: 'primary',
+            agentProfileId: 'editor',
+            modelProvider: config?.activeProvider ?? null,
+            modelId: config?.activeModel ?? null,
+          });
+        } catch (error) {
+          logger.warn('Failed to ensure persisted agentic session', {
+            sessionId: storeSessionId,
+            projectId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+
+        try {
+          const decisions = await agentSessionStore.refreshPermissionDecisions(storeSessionId);
+          usePermissionStore
+            .getState()
+            .hydrateSessionRulesFromPersistedDecisions(storeSessionId, decisions);
+        } catch (error) {
+          logger.warn('Failed to replay persisted agentic permissions', {
+            sessionId: storeSessionId,
+            projectId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
 
       // Create execution context bound to the store session
       const executionContext = {
         projectId: context.projectId,
         sequenceId: context.sequenceId,
-        sessionId: storeSessionId ?? crypto.randomUUID(),
+        sessionId: storeSessionId,
         expectedStateVersion: context.projectStateVersion,
       };
 
+      let persistedFinalPhase: 'completed' | 'failed' | 'aborted' = 'completed';
+      let persistedErrorMessage: string | null = null;
+      let persistedToolCalls = 0;
+
       try {
+        const persistedRun = await agentSessionStore.startRun({
+          sessionId: executionContext.sessionId,
+          runtimeKind: 'tpao',
+          trigger: 'user',
+          maxIterations: config?.maxIterations,
+          maxToolCalls: config?.maxToolCallsPerRun,
+        });
+        persistedRunIdRef.current = persistedRun.id;
+        await persistResumeCheckpoint({
+          sessionId: storeSessionId,
+          runId: persistedRun.id,
+          runtimeKind: 'tpao',
+          checkpointKind: 'safe_resume_point',
+          phase: 'initializing',
+          projectId: context.projectId,
+          sequenceId: context.sequenceId ?? null,
+          input,
+        });
+      } catch (error) {
+        persistedRunIdRef.current = null;
+        logger.warn('Failed to create persisted agentic run', {
+          sessionId: executionContext.sessionId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      try {
+        const baseApprovalHandler =
+          config?.approvalHandler ??
+          (async () => {
+            return await new Promise<{ approved: boolean; feedback?: string }>((resolve) => {
+              approvalResolverRef.current = { resolve };
+            });
+          });
+        const baseToolPermissionHandler =
+          config?.toolPermissionHandler ??
+          (async (toolName, args, step) => {
+            const resolution = usePermissionStore
+              .getState()
+              .resolvePermissionDetails(toolName, args);
+            const stepId = typeof step.id === 'string' ? step.id : null;
+
+            if (resolution.permission === 'allow' || resolution.permission === 'deny') {
+              persistPermissionAudit(
+                storeSessionId,
+                persistedRunIdRef.current,
+                stepId,
+                resolution,
+                resolution.permission,
+              );
+              return resolution.permission;
+            }
+
+            persistPermissionAudit(
+              storeSessionId,
+              persistedRunIdRef.current,
+              stepId,
+              resolution,
+              'ask',
+            );
+
+            const decision = await new Promise<'allow' | 'deny' | 'allow_always'>((resolve) => {
+              toolPermissionResolverRef.current = {
+                resolve,
+                step,
+              };
+            });
+
+            persistPermissionAudit(
+              storeSessionId,
+              persistedRunIdRef.current,
+              stepId,
+              resolution,
+              decision,
+              'interactive_approval',
+            );
+
+            return decision;
+          });
+
         // Create engine
         const engine = createAgenticEngine(llmClient, toolExecutor, {
           ...config,
           memoryStore: config?.memoryStore ?? memoryStoreRef.current ?? undefined,
-          approvalHandler:
-            config?.approvalHandler ??
-            (async () => {
-              return await new Promise<{ approved: boolean; feedback?: string }>((resolve) => {
-                approvalResolverRef.current = { resolve };
+          approvalHandler: async (plan) => {
+            const checkpointId = await persistResumeCheckpoint({
+              sessionId: storeSessionId,
+              runId: persistedRunIdRef.current,
+              runtimeKind: 'tpao',
+              checkpointKind: 'approval_wait',
+              phase: 'awaiting_approval',
+              projectId: context.projectId,
+              sequenceId: context.sequenceId ?? null,
+              input,
+              planGoal: plan.goal,
+              planStepIds: plan.steps.map((step) => step.id),
+            });
+
+            try {
+              return await baseApprovalHandler(plan);
+            } finally {
+              await consumeResumeCheckpoint(checkpointId);
+            }
+          },
+          toolPermissionHandler: async (toolName, args, step) => {
+            const decisionPromise = baseToolPermissionHandler(toolName, args, step);
+            let autoResolved = false;
+            let autoDecision: 'allow' | 'deny' | 'allow_always' | undefined;
+
+            void decisionPromise.then((decision) => {
+              if (!autoResolved) {
+                autoResolved = true;
+                autoDecision = decision;
+              }
+            });
+
+            await Promise.resolve();
+
+            let checkpointId: string | null = null;
+            if (!autoResolved) {
+              checkpointId = await persistResumeCheckpoint({
+                sessionId: storeSessionId,
+                runId: persistedRunIdRef.current,
+                runtimeKind: 'tpao',
+                checkpointKind: 'tool_wait',
+                phase: 'awaiting_tool_permission',
+                projectId: context.projectId,
+                sequenceId: context.sequenceId ?? null,
+                input,
+                stepId: typeof step.id === 'string' ? step.id : null,
+                toolName,
+                args,
               });
-            }),
-          toolPermissionHandler:
-            config?.toolPermissionHandler ??
-            (async (toolName, _args, step) => {
-              const permission = usePermissionStore.getState().resolvePermission(toolName);
-              if (permission === 'allow') return 'allow';
-              if (permission === 'deny') return 'deny';
-              // 'ask' — show inline approval UI, wait for user response
-              return await new Promise<'allow' | 'deny' | 'allow_always'>((resolve) => {
-                toolPermissionResolverRef.current = {
-                  resolve,
-                  step,
-                };
-              });
-            }),
+              autoResolved = true;
+            }
+
+            try {
+              return autoDecision ?? await decisionPromise;
+            } finally {
+              await consumeResumeCheckpoint(checkpointId);
+            }
+          },
         });
         engineRef.current = engine;
 
@@ -372,6 +589,14 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         );
 
         if (!abortedRef.current) {
+          persistedFinalPhase =
+            result.finalState.phase === 'aborted'
+              ? 'aborted'
+              : result.finalState.phase === 'failed'
+                ? 'failed'
+                : 'completed';
+          persistedErrorMessage = result.error?.message ?? null;
+          persistedToolCalls = result.finalState.executionHistory.length;
           setPhase(result.finalState.phase);
           optionsRef.current.onComplete?.(result);
         }
@@ -379,12 +604,35 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         return result;
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
+        persistedFinalPhase = 'failed';
+        persistedErrorMessage = error.message;
         setError(error);
         setPhase('failed');
         optionsRef.current.onError?.(error);
         logger.error('Engine run failed', { error: error.message });
         throw error;
       } finally {
+        const persistedRunId = persistedRunIdRef.current;
+        persistedRunIdRef.current = null;
+        if (persistedRunId) {
+          try {
+            await agentSessionStore.updateRunPhase({
+              runId: persistedRunId,
+              phase: abortedRef.current ? 'aborted' : persistedFinalPhase,
+              toolCallsUsed: persistedToolCalls,
+              completedStepCount: persistedToolCalls,
+              errorMessage: persistedErrorMessage,
+              endedAt: Date.now(),
+            });
+          } catch (error) {
+            logger.warn('Failed to finalize persisted agentic run', {
+              runId: persistedRunId,
+              phase: abortedRef.current ? 'aborted' : persistedFinalPhase,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+
         runGuardRef.current = false;
         setIsRunning(false);
         engineRef.current = null;
@@ -393,8 +641,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     [isEnabled, llmClient, toolExecutor, config, buildContext, handleEvent],
   );
 
-  // Abort
-  const abort = useCallback(() => {
+  const cleanupAbort = useCallback(() => {
     abortedRef.current = true;
     engineRef.current?.abort();
     // Unblock pending promises so the engine can finish aborting.
@@ -405,11 +652,16 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     toolPermissionResolverRef.current?.resolve('deny');
     toolPermissionResolverRef.current = null;
     clearPendingApprovals();
+  }, []);
+
+  // Abort
+  const abort = useCallback(() => {
+    cleanupAbort();
     setPhase('aborted');
     setIsRunning(false);
     optionsRef.current.onAbort?.();
     logger.info('Engine aborted by user');
-  }, []);
+  }, [cleanupAbort]);
 
   // Reset
   const reset = useCallback(() => {
@@ -444,9 +696,12 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
   // Tool permission actions
   const approveToolPermission = useCallback((decision: 'allow' | 'deny' | 'allow_always') => {
     if (decision === 'allow_always' && toolPermissionResolverRef.current?.step) {
-      const step = toolPermissionResolverRef.current.step as { tool?: string };
+      const step = toolPermissionResolverRef.current.step as {
+        tool?: string;
+        args?: Record<string, unknown>;
+      };
       if (step.tool) {
-        usePermissionStore.getState().allowAlways(step.tool);
+        usePermissionStore.getState().allowAlways(step.tool, step.args);
       }
     }
     toolPermissionResolverRef.current?.resolve(decision);
@@ -468,10 +723,9 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     registerAgentAbort(abort);
     return () => {
       unregisterAgentAbort();
-      // Use the shared abort() to ensure resolver and approval cleanup
-      abort();
+      cleanupAbort();
     };
-  }, [abort]);
+  }, [abort, cleanupAbort]);
 
   return {
     // State
