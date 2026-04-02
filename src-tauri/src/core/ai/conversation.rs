@@ -587,10 +587,7 @@ impl ConversationDb {
                 "#,
             )
             .map_err(|e| {
-                CoreError::Internal(format!(
-                    "Failed to initialize agent session indexes: {}",
-                    e
-                ))
+                CoreError::Internal(format!("Failed to initialize agent session indexes: {}", e))
             })?;
 
         Ok(())
@@ -601,7 +598,10 @@ impl ConversationDb {
             "ai_sessions",
             &[
                 ("runtime_kind", "runtime_kind TEXT NOT NULL DEFAULT 'tpao'"),
-                ("session_mode", "session_mode TEXT NOT NULL DEFAULT 'primary'"),
+                (
+                    "session_mode",
+                    "session_mode TEXT NOT NULL DEFAULT 'primary'",
+                ),
                 ("status", "status TEXT NOT NULL DEFAULT 'idle'"),
                 ("parent_session_id", "parent_session_id TEXT"),
                 ("branch_from_session_id", "branch_from_session_id TEXT"),
@@ -615,7 +615,10 @@ impl ConversationDb {
                     "permission_state_version",
                     "permission_state_version INTEGER NOT NULL DEFAULT 0",
                 ),
-                ("compaction_version", "compaction_version INTEGER NOT NULL DEFAULT 0"),
+                (
+                    "compaction_version",
+                    "compaction_version INTEGER NOT NULL DEFAULT 0",
+                ),
                 (
                     "resume_cursor_version",
                     "resume_cursor_version INTEGER NOT NULL DEFAULT 0",
@@ -659,11 +662,9 @@ impl ConversationDb {
 
         let mut columns = HashSet::new();
         for row in rows {
-            columns.insert(
-                row.map_err(|e| {
-                    CoreError::Internal(format!("Failed to read {table} columns: {}", e))
-                })?,
-            );
+            columns.insert(row.map_err(|e| {
+                CoreError::Internal(format!("Failed to read {table} columns: {}", e))
+            })?);
         }
 
         Ok(columns)
@@ -1166,7 +1167,10 @@ impl ConversationDb {
             .map_err(|e| CoreError::Internal(format!("Failed to update session: {}", e)))?;
 
         if affected == 0 {
-            return Err(CoreError::NotFound(format!("Session not found: {}", row.id)));
+            return Err(CoreError::NotFound(format!(
+                "Session not found: {}",
+                row.id
+            )));
         }
 
         Ok(())
@@ -1342,7 +1346,11 @@ impl ConversationDb {
     }
 
     /// Updates an existing run and synchronizes the owning session in one transaction.
-    pub fn update_session_and_run(&self, session: &SessionRow, run: &AgentRunRow) -> CoreResult<()> {
+    pub fn update_session_and_run(
+        &self,
+        session: &SessionRow,
+        run: &AgentRunRow,
+    ) -> CoreResult<()> {
         let tx = self
             .conn
             .unchecked_transaction()
@@ -1618,7 +1626,10 @@ impl ConversationDb {
              WHERE session_id = ?1 ORDER BY created_at DESC"
         );
         let mut stmt = self.conn.prepare(&sql).map_err(|e| {
-            CoreError::Internal(format!("Failed to prepare list permission decisions: {}", e))
+            CoreError::Internal(format!(
+                "Failed to prepare list permission decisions: {}",
+                e
+            ))
         })?;
 
         let rows = stmt
@@ -2067,7 +2078,9 @@ impl ConversationDb {
                     checkpoint.consumed_at,
                 ],
             )
-            .map_err(|e| CoreError::Internal(format!("Failed to update resume checkpoint: {}", e)))?;
+            .map_err(|e| {
+                CoreError::Internal(format!("Failed to update resume checkpoint: {}", e))
+            })?;
 
         if checkpoint_affected == 0 {
             return Err(CoreError::NotFound(format!(
@@ -2473,7 +2486,10 @@ mod tests {
         assert_eq!(session.completed_at, Some(2_000));
         assert_eq!(persisted_run.phase, "completed");
         assert_eq!(persisted_run.completed_step_count, 2);
-        assert_eq!(persisted_run.output_message_id.as_deref(), Some("m-assistant"));
+        assert_eq!(
+            persisted_run.output_message_id.as_deref(),
+            Some("m-assistant")
+        );
         assert_eq!(persisted_run.ended_at, Some(2_000));
     }
 
@@ -2625,7 +2641,10 @@ mod tests {
         assert_eq!(rows[0].tier, "summary");
         assert_eq!(session.compaction_version, 1);
         assert_eq!(session.last_compacted_at, Some(2000));
-        assert_eq!(session.summary_message_id.as_deref(), Some("summary-message"));
+        assert_eq!(
+            session.summary_message_id.as_deref(),
+            Some("summary-message")
+        );
     }
 
     #[test]
@@ -2656,7 +2675,10 @@ mod tests {
             .unwrap();
 
         let session = db.get_session("s1").unwrap();
-        assert_eq!(session.active_checkpoint_id.as_deref(), Some("checkpoint-1"));
+        assert_eq!(
+            session.active_checkpoint_id.as_deref(),
+            Some("checkpoint-1")
+        );
         assert_eq!(session.resume_cursor_version, 1);
 
         let mut resumed_session = session.clone();
