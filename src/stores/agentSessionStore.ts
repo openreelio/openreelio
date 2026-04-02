@@ -204,7 +204,7 @@ function applySnapshot(state: AgentSessionStoreState, snapshot: AgentSessionSnap
 
 function isMissingSessionError(error: unknown): boolean {
   const message = extractErrorMessage(error).toLowerCase();
-  return message.includes('session not found') || message.includes('failed to get agent session');
+  return message.includes('session not found');
 }
 
 function upsertPersistenceIssue(

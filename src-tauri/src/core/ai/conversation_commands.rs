@@ -590,15 +590,13 @@ fn resolve_session_mode(
     parent_session_id: Option<&str>,
     branch_from_session_id: Option<&str>,
 ) -> String {
-    requested_mode.unwrap_or_else(|| {
-        if parent_session_id.is_some() {
-            "child".to_string()
-        } else if branch_from_session_id.is_some() {
-            "branch".to_string()
-        } else {
-            "primary".to_string()
-        }
-    })
+    if parent_session_id.is_some() {
+        "child".to_string()
+    } else if branch_from_session_id.is_some() {
+        "branch".to_string()
+    } else {
+        requested_mode.unwrap_or_else(|| "primary".to_string())
+    }
 }
 
 fn resolve_root_session_id(
@@ -608,27 +606,26 @@ fn resolve_root_session_id(
     parent_session_id: Option<&str>,
     branch_from_session_id: Option<&str>,
 ) -> Result<String, String> {
-    if let Some(root_session_id) = explicit_root_session_id {
-        return Ok(root_session_id);
+    let ancestor_id = parent_session_id.or(branch_from_session_id);
+
+    if let Some(ancestor_id) = ancestor_id {
+        let ancestor = db
+            .get_session(ancestor_id)
+            .map_err(|e| format!("Failed to resolve ancestor session {ancestor_id}: {e}"))?;
+        let derived_root = ancestor.root_session_id;
+
+        if let Some(explicit) = explicit_root_session_id {
+            if explicit != derived_root {
+                return Err(format!(
+                    "Explicit root_session_id '{explicit}' conflicts with ancestor-derived root '{derived_root}'"
+                ));
+            }
+        }
+
+        return Ok(derived_root);
     }
 
-    if let Some(parent_session_id) = parent_session_id {
-        return db
-            .get_session(parent_session_id)
-            .map(|session| session.root_session_id)
-            .map_err(|e| format!("Failed to resolve parent session {parent_session_id}: {e}"));
-    }
-
-    if let Some(branch_from_session_id) = branch_from_session_id {
-        return db
-            .get_session(branch_from_session_id)
-            .map(|session| session.root_session_id)
-            .map_err(|e| {
-                format!("Failed to resolve branch source session {branch_from_session_id}: {e}")
-            });
-    }
-
-    Ok(session_id.to_string())
+    Ok(explicit_root_session_id.unwrap_or_else(|| session_id.to_string()))
 }
 
 fn truncate_preview(text: &str, max_chars: usize) -> String {
@@ -1017,8 +1014,12 @@ pub async fn create_agent_delegation_record(
         .map_err(|e| format!("Failed to validate parent session: {e}"))?;
     db.get_session(&input.child_session_id)
         .map_err(|e| format!("Failed to validate child session: {e}"))?;
-    db.get_run(&input.parent_run_id)
+    let parent_run = db
+        .get_run(&input.parent_run_id)
         .map_err(|e| format!("Failed to validate parent run: {e}"))?;
+    if parent_run.session_id != input.parent_session_id {
+        return Err("parentRunId does not belong to parentSessionId".to_string());
+    }
 
     let now = chrono::Utc::now().timestamp_millis();
     let row = DelegationRecordRow {
@@ -1276,6 +1277,14 @@ pub async fn consume_agent_resume_checkpoint(
     let mut checkpoint = db
         .get_resume_checkpoint(&checkpoint_id)
         .map_err(|e| format!("Failed to load resume checkpoint {}: {e}", checkpoint_id))?;
+
+    if checkpoint.status != "active" {
+        return Err(format!(
+            "Resume checkpoint {} is not active (current status: {})",
+            checkpoint_id, checkpoint.status
+        ));
+    }
+
     let mut session = db
         .get_session(&checkpoint.session_id)
         .map_err(|e| format!("Failed to load session {}: {e}", checkpoint.session_id))?;

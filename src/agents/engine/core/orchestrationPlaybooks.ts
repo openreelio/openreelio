@@ -264,8 +264,11 @@ function buildInsertAndSegmentPlaybook(
     return null;
   }
 
-  const splitBoundaries = buildSegmentBoundaries(assetDuration, segmentDurationSec);
-  if (splitBoundaries.length === 0) {
+  const MAX_SEGMENT_SPLITS = 50;
+  const MIN_SEGMENT_TAIL_SECONDS = 0.05;
+
+  const splitBoundaries = buildSegmentBoundaries(assetDuration, segmentDurationSec, MIN_SEGMENT_TAIL_SECONDS);
+  if (splitBoundaries.length === 0 || splitBoundaries.length > MAX_SEGMENT_SPLITS) {
     return null;
   }
 
@@ -985,14 +988,22 @@ function clampTimelineStart(playhead: number, timelineDuration: number): number 
   return Math.min(playhead, timelineDuration);
 }
 
-function buildSegmentBoundaries(totalDurationSec: number, segmentDurationSec: number): number[] {
+function buildSegmentBoundaries(
+  totalDurationSec: number,
+  segmentDurationSec: number,
+  minTailSeconds: number = 0.05,
+): number[] {
   const boundaries: number[] = [];
   for (
     let boundary = segmentDurationSec;
     boundary < totalDurationSec - 1e-6;
     boundary += segmentDurationSec
   ) {
-    boundaries.push(roundPlanTime(boundary));
+    const rounded = roundPlanTime(boundary);
+    if (totalDurationSec - rounded <= minTailSeconds) {
+      break;
+    }
+    boundaries.push(rounded);
   }
   return boundaries;
 }

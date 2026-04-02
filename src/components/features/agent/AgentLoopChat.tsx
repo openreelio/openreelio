@@ -120,7 +120,7 @@ export const AgentLoopChat = forwardRef<AgentLoopChatHandle, AgentLoopChatProps>
   );
 
   const handleSubmit = useCallback(async () => {
-    if (!input.trim() || disabled) {
+    if (!input.trim() || disabled || !isEnabled) {
       return;
     }
 
@@ -136,7 +136,7 @@ export const AgentLoopChat = forwardRef<AgentLoopChatHandle, AgentLoopChatProps>
     }
 
     await executeMessage(userInput);
-  }, [addUserMessage, disabled, enqueue, executeMessage, input, isRunning, onSubmit]);
+  }, [addUserMessage, disabled, enqueue, executeMessage, input, isEnabled, isRunning, onSubmit]);
 
   const handleStop = useCallback(() => {
     const now = Date.now();
@@ -172,9 +172,10 @@ export const AgentLoopChat = forwardRef<AgentLoopChatHandle, AgentLoopChatProps>
   useEffect(() => {
     const targetProjectId = currentProjectId ?? 'default';
     if (activeProjectId !== targetProjectId) {
+      clearQueue();
       loadForProject(targetProjectId);
     }
-  }, [activeProjectId, currentProjectId, loadForProject]);
+  }, [activeProjectId, clearQueue, currentProjectId, loadForProject]);
 
   const prevIsRunningRef = useRef(isRunning);
   useEffect(() => {
@@ -190,9 +191,10 @@ export const AgentLoopChat = forwardRef<AgentLoopChatHandle, AgentLoopChatProps>
 
   useEffect(() => {
     return () => {
+      clearQueue();
       reset();
     };
-  }, [reset]);
+  }, [clearQueue, reset]);
 
   return (
     <div data-testid="agent-loop-chat" className={`flex flex-col h-full bg-surface-base ${className}`}>
@@ -215,7 +217,7 @@ export const AgentLoopChat = forwardRef<AgentLoopChatHandle, AgentLoopChatProps>
         onSubmit={() => void handleSubmit()}
         onStop={handleStop}
         placeholder={placeholder}
-        disabled={disabled}
+        disabled={disabled || !isEnabled}
         isRunning={isRunning}
         stopState={stopState}
         phase={phase}

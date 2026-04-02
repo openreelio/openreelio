@@ -798,9 +798,11 @@ export class Planner {
       if (!this.toolExecutor.hasTool(s.tool)) {
         errors.push(`Step ${index}: unknown tool '${s.tool}'`);
       } else {
-        // Validate tool arguments
+        // Canonicalize plan args (strip legacy aliases) and validate
         const args = (s.args ?? {}) as Record<string, unknown>;
-        const argsForValidation = this.normalizeArgsForValidation(s.tool, args);
+        const canonicalArgs = normalizeLegacyAgentArgs(s.tool, args);
+        s.args = canonicalArgs;
+        const argsForValidation = this.normalizeArgsForValidation(s.tool, canonicalArgs);
         const validation = this.toolExecutor.validateArgs(s.tool, argsForValidation);
         if (!validation.valid) {
           errors.push(
@@ -1148,6 +1150,7 @@ function normalizeLegacyAgentArgs(
     typeof normalized.timelineIn === 'number'
   ) {
     normalized.timelineStart = normalized.timelineIn;
+    delete normalized.timelineIn;
   }
 
   if (
@@ -1156,6 +1159,7 @@ function normalizeLegacyAgentArgs(
     typeof normalized.atTimelineSec === 'number'
   ) {
     normalized.splitTime = normalized.atTimelineSec;
+    delete normalized.atTimelineSec;
   }
 
   if (
@@ -1164,6 +1168,7 @@ function normalizeLegacyAgentArgs(
     typeof normalized.filePath === 'string'
   ) {
     normalized.file = normalized.filePath;
+    delete normalized.filePath;
   }
 
   return normalized;

@@ -645,25 +645,49 @@ export class BackendToolExecutor implements IToolExecutor {
     let successCount = 0;
     let failureCount = 0;
 
-    // Separate tools into backend and frontend batches
-    const backendTools = request.tools
-      .map((tool) => ({
-        requestTool: tool,
-        executionTarget: this.resolveBackendExecutionTarget(tool.name, tool.args),
-      }))
-      .filter(
-        (
-          entry,
-        ): entry is {
-          requestTool: BatchExecutionRequest['tools'][number];
-          executionTarget: BackendExecutionTarget;
-        } => entry.executionTarget !== null,
-      );
-    const frontendTools = request.tools.filter(
-      (tool) => this.resolveBackendExecutionTarget(tool.name, tool.args) === null,
-    );
+    // Resolve each tool's execution target while preserving original order
+    const resolvedTools = request.tools.map((tool) => ({
+      requestTool: tool,
+      executionTarget: this.resolveBackendExecutionTarget(tool.name, tool.args),
+    }));
 
-    // Execute backend tools as a single plan (atomic with rollback)
+    const allBackend = resolvedTools.every((t) => t.executionTarget !== null);
+
+    // If the batch is mixed (backend + frontend), fall back to sequential
+    // per-tool execution to preserve the caller's intended order.
+    if (!allBackend) {
+      for (const { requestTool, executionTarget } of resolvedTools) {
+        if (executionTarget) {
+          const singleResult = await this.execute(requestTool.name, requestTool.args, context);
+          results.push({ tool: requestTool.name, result: singleResult });
+          if (singleResult.success) successCount++;
+          else failureCount++;
+        } else {
+          const frontendResult = await this.frontendExecutor.executeBatch(
+            { ...request, tools: [requestTool] },
+            context,
+          );
+          results.push(...frontendResult.results);
+          successCount += frontendResult.successCount;
+          failureCount += frontendResult.failureCount;
+        }
+      }
+
+      return {
+        success: failureCount === 0,
+        results,
+        totalDuration: performance.now() - start,
+        successCount,
+        failureCount,
+      };
+    }
+
+    // All tools resolve to backend — execute as a single atomic plan with rollback.
+    const backendTools = resolvedTools as Array<{
+      requestTool: BatchExecutionRequest['tools'][number];
+      executionTarget: BackendExecutionTarget;
+    }>;
+
     // Compound tools are expanded into primitive sub-steps.
     if (backendTools.length > 0) {
       // Track which original tool index maps to which step ranges
@@ -825,18 +849,6 @@ export class BackendToolExecutor implements IToolExecutor {
           }
         }
       }
-    }
-
-    // Execute frontend tools via the frontend executor
-    if (frontendTools.length > 0) {
-      const frontendRequest: BatchExecutionRequest = {
-        ...request,
-        tools: frontendTools,
-      };
-      const frontendResult = await this.frontendExecutor.executeBatch(frontendRequest, context);
-      results.push(...frontendResult.results);
-      successCount += frontendResult.successCount;
-      failureCount += frontendResult.failureCount;
     }
 
     return {

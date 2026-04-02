@@ -568,8 +568,9 @@ impl ConversationDb {
                     ON ai_compactions(session_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS idx_ai_resume_checkpoints_session
                     ON ai_resume_checkpoints(session_id, created_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_ai_resume_checkpoints_active
-                    ON ai_resume_checkpoints(session_id, status, created_at DESC);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_resume_checkpoints_single_active
+                    ON ai_resume_checkpoints(session_id)
+                    WHERE status = 'active';
                 "#,
             )
             .map_err(|e| CoreError::Internal(format!("Failed to initialize schema: {}", e)))?;

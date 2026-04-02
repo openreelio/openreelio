@@ -133,10 +133,13 @@ function matchLegacyPermissionPattern(pattern: string, value: string): boolean {
 function splitCanonicalSubject(
   value: string,
 ): { path: string; resource: string | null } {
-  const [path, resource] = value.split('#');
+  const separatorIndex = value.indexOf('#');
+  if (separatorIndex === -1) {
+    return { path: value.trim(), resource: null };
+  }
   return {
-    path: path?.trim() ?? '',
-    resource: resource?.trim() || null,
+    path: value.slice(0, separatorIndex).trim(),
+    resource: value.slice(separatorIndex + 1).trim() || null,
   };
 }
 

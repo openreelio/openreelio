@@ -794,18 +794,29 @@ describe('BackendToolExecutor', () => {
   // ===========================================================================
 
   describe('batch execution', () => {
-    it('should separate editing and analysis tools in batch', async () => {
+    it('should execute mixed backend/frontend batch in original order', async () => {
+      // Backend tools execute individually via execute() for order preservation
       mockInvoke.mockResolvedValueOnce({
-        planId: 'batch-1',
+        planId: 'single-1',
         success: true,
-        totalSteps: 2,
-        stepsCompleted: 2,
+        totalSteps: 1,
+        stepsCompleted: 1,
         stepResults: [
           { stepId: 'step-1', success: true, data: { ok: true }, durationMs: 5 },
-          { stepId: 'step-2', success: true, data: { ok: true }, durationMs: 5 },
         ],
-        operationIds: ['op-1', 'op-2'],
-        executionTimeMs: 10,
+        operationIds: ['op-1'],
+        executionTimeMs: 5,
+      });
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'single-2',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [
+          { stepId: 'step-1', success: true, data: { ok: true }, durationMs: 5 },
+        ],
+        operationIds: ['op-2'],
+        executionTimeMs: 5,
       });
 
       const result = await backend.executeBatch(
@@ -822,27 +833,14 @@ describe('BackendToolExecutor', () => {
       );
 
       expect(result.success).toBe(true);
-      // 2 backend + 1 frontend = 3 results
+      // 2 backend (per-tool) + 1 frontend = 3 results
       expect(result.successCount).toBe(3);
       expect(result.failureCount).toBe(0);
-
-      // Backend received a 2-step plan (split_clip + move_clip)
-      expect(mockInvoke).toHaveBeenCalledWith('execute_agent_plan', {
-        plan: expect.objectContaining({
-          steps: expect.arrayContaining([
-            expect.objectContaining({ toolName: 'splitClip' }),
-            expect.objectContaining({ toolName: 'moveClip' }),
-          ]),
-        }),
-      });
-
-      // Frontend received the analysis tool
-      expect(frontend.executeBatch).toHaveBeenCalledWith(
-        expect.objectContaining({
-          tools: [{ name: 'analyze_video', args: { assetId: 'a1' } }],
-        }),
-        CONTEXT,
-      );
+      // Results preserve original request order
+      expect(result.results).toHaveLength(3);
+      expect(result.results[0].tool).toBe('split_clip');
+      expect(result.results[1].tool).toBe('move_clip');
+      expect(result.results[2].tool).toBe('analyze_video');
     });
 
     it('should batch backend-safe edit meta-tool actions through one backend plan', async () => {
