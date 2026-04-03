@@ -11,7 +11,10 @@
 import { useCallback, useMemo, useState, useEffect, useRef } from 'react';
 import { Plus } from 'lucide-react';
 import { useAgentManagerStore } from '@/stores/agentManagerStore';
-import { getAllAgentDefinitions, type AgentDefinition } from '@/agents/engine/core/agentDefinitions';
+import {
+  listExperimentalAgentDefinitions,
+  type ExperimentalAgentDefinition,
+} from '@/agents/engine/core/agentDefinitions.experimental';
 import { AgentCard } from './AgentCard';
 import { InboxPanel } from './InboxPanel';
 
@@ -21,7 +24,7 @@ import { InboxPanel } from './InboxPanel';
 
 interface AgentManagerProps {
   onAgentFocus?: (agentId: string) => void;
-  onAgentLaunch?: (definition: AgentDefinition) => void;
+  onAgentLaunch?: (definition: ExperimentalAgentDefinition) => void;
   onAgentStop?: (agentId: string) => void;
   onAgentRestart?: (agentId: string) => void;
   className?: string;
@@ -47,7 +50,7 @@ export function AgentManager({
     [activeAgents],
   );
 
-  const availableDefinitions = useMemo(() => getAllAgentDefinitions(), []);
+  const availableDefinitions = useMemo(() => listExperimentalAgentDefinitions(), []);
 
   const handleFocus = useCallback(
     (agentId: string) => {
@@ -72,7 +75,7 @@ export function AgentManager({
   );
 
   const handleLaunch = useCallback(
-    (definition: AgentDefinition) => {
+    (definition: ExperimentalAgentDefinition) => {
       onAgentLaunch?.(definition);
       setDropdownOpen(false);
     },

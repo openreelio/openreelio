@@ -1,9 +1,9 @@
 /**
  * Agent Framework
  *
- * Exports the tool registry and tool registration functions.
- * Legacy agent classes (Agent, VideoEditingAgent, MockAgent) have been removed.
- * Use the Agentic Engine (src/agents/engine/) for all agent operations.
+ * Exports only the shipping tool registry surface.
+ * Legacy agent classes and experimental context-builder helpers are intentionally
+ * not re-exported from this top-level barrel.
  */
 
 // Tool registry
@@ -19,15 +19,6 @@ export {
   type AgentContext,
   type AgentTool,
 } from './ToolRegistry';
-
-// Context builder
-export {
-  ContextBuilder,
-  buildAgentContext,
-  type AgentContextOptions,
-  type ProjectStateShape,
-  type TimelineStateShape,
-} from './ContextBuilder';
 
 // Tools
 export {

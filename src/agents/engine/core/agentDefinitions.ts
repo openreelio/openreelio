@@ -1,8 +1,8 @@
 /**
  * Agent Definitions
  *
- * Defines the available agent types and their configurations.
- * Each agent has specific capabilities, allowed tools, and behavior.
+ * Defines the shipping agent profile surface.
+ * Experimental multi-agent definitions live in `agentDefinitions.experimental.ts`.
  */
 
 import type { AgentRole } from '../prompts/system';
@@ -33,76 +33,36 @@ export interface AgentDefinition {
 }
 
 // =============================================================================
-// Built-in Agents
+// Shipping Agent Profiles
 // =============================================================================
 
-export const AGENT_DEFINITIONS: Record<string, AgentDefinition> = {
-  editor: {
-    id: 'editor',
-    name: 'Editor',
-    description: 'Full video editing agent with all tools',
-    mode: 'primary',
-    tools: ['*'],
-    role: 'editor',
-    temperature: 0.3,
-    maxIterations: 20,
-  },
-  analyst: {
-    id: 'analyst',
-    name: 'Analyst',
-    description: 'Read-only analysis agent for timeline and asset inspection',
-    mode: 'subagent',
-    tools: ['analysis', 'mediaAnalysis'],
-    role: 'analyst',
-    temperature: 0.2,
-    maxIterations: 10,
-  },
-  colorist: {
-    id: 'colorist',
-    name: 'Colorist',
-    description: 'Color grading specialist',
-    mode: 'subagent',
-    tools: ['effect', 'analysis'],
-    role: 'colorist',
-    temperature: 0.4,
-    maxIterations: 15,
-  },
-  audio: {
-    id: 'audio',
-    name: 'Audio Engineer',
-    description: 'Audio mixing and processing specialist',
-    mode: 'subagent',
-    tools: ['audio', 'analysis'],
-    role: 'audio',
-    temperature: 0.3,
-    maxIterations: 15,
-  },
+export const DEFAULT_AGENT_PROFILE_ID = 'editor' as const;
+
+export const EDITOR_AGENT_DEFINITION: AgentDefinition = {
+  id: DEFAULT_AGENT_PROFILE_ID,
+  name: 'Editor',
+  description: 'Full video editing agent with all tools',
+  mode: 'primary',
+  tools: ['*'],
+  role: 'editor',
+  temperature: 0.3,
+  maxIterations: 20,
+};
+
+export const SHIPPING_AGENT_DEFINITIONS: Record<string, AgentDefinition> = {
+  [DEFAULT_AGENT_PROFILE_ID]: EDITOR_AGENT_DEFINITION,
 };
 
 /**
- * Get an agent definition by ID.
+ * Get the shipping agent definition by ID.
  */
-export function getAgentDefinition(id: string): AgentDefinition | undefined {
-  return AGENT_DEFINITIONS[id];
+export function getShippingAgentDefinition(id: string): AgentDefinition | undefined {
+  return SHIPPING_AGENT_DEFINITIONS[id];
 }
 
 /**
- * Get all available agent definitions.
+ * List the shipping agent definitions exposed by the product UI.
  */
-export function getAllAgentDefinitions(): AgentDefinition[] {
-  return Object.values(AGENT_DEFINITIONS);
-}
-
-/**
- * Get only primary agents (suitable for direct user interaction).
- */
-export function getPrimaryAgents(): AgentDefinition[] {
-  return getAllAgentDefinitions().filter((a) => a.mode === 'primary');
-}
-
-/**
- * Get only sub-agents (suitable for orchestration by a primary agent).
- */
-export function getSubAgents(): AgentDefinition[] {
-  return getAllAgentDefinitions().filter((a) => a.mode === 'subagent');
+export function listShippingAgentDefinitions(): AgentDefinition[] {
+  return Object.values(SHIPPING_AGENT_DEFINITIONS);
 }

@@ -96,29 +96,27 @@ export {
 export {
   type AgentSessionStatus,
   type AgentRuntimeKind,
-  type AgentSessionMode,
   type AgentRunTrigger,
   type AgentRunPhase,
   type PermissionSubjectType,
   type PermissionDecisionAction,
   type PermissionDecisionSource,
-  type DelegationStatus,
-  type DelegationMergeStatus,
   type CompactionTier,
   type CompactionTrigger,
   type ResumeCheckpointKind,
   type ResumeCheckpointStatus,
+  type ShippingAgentRuntimeKind,
+  type ShippingAgentSessionMode,
+  type ShippingResumeCheckpointKind,
   type AgentSessionLineage,
   type AgentSession,
   type AgentRun,
-  type DelegationRecord,
   type PermissionDecision,
   type CompactionRecord,
   type ResumeCheckpoint,
-  type CreateAgentSessionInput,
-  type CreateAgentRunInput,
-  createAgentSession,
-  createAgentRun,
+  type CreateShippingAgentSessionInput as CreateAgentSessionInput,
+  DEFAULT_AGENT_RUNTIME_KIND,
+  DEFAULT_AGENT_SESSION_MODE,
 } from './core/agentSession';
 
 export {
@@ -351,26 +349,6 @@ export {
 } from './adapters/memory/MemoryManagerAdapter';
 
 // =============================================================================
-// Simplified Agent Loop (opencode-style)
-// =============================================================================
-export {
-  AgentLoop,
-  createAgentLoop,
-  AgentLoopAbortedError,
-  type AgentLoopConfig,
-  DEFAULT_AGENT_LOOP_CONFIG,
-  type AgentLoopEvent,
-  type TextDeltaEvent,
-  type ReasoningDeltaEvent,
-  type ToolCallStartEvent,
-  type ToolCallCompleteEvent,
-  type ToolsExecutedEvent,
-  type CompactedEvent,
-  type DoneEvent,
-  type ToolCallResult,
-} from './AgentLoop';
-
-// =============================================================================
 // Context Compaction
 // =============================================================================
 export {
@@ -452,14 +430,14 @@ export {
 } from './prompts/agentPrompts';
 
 // =============================================================================
-// Agent Definitions (Phase 5)
+// Shipping Agent Definitions
 // =============================================================================
 export {
-  AGENT_DEFINITIONS,
-  getAgentDefinition,
-  getAllAgentDefinitions,
-  getPrimaryAgents,
-  getSubAgents,
+  DEFAULT_AGENT_PROFILE_ID,
+  EDITOR_AGENT_DEFINITION,
+  SHIPPING_AGENT_DEFINITIONS,
+  getShippingAgentDefinition,
+  listShippingAgentDefinitions,
   type AgentDefinition,
   type AgentMode,
 } from './core/agentDefinitions';
