@@ -1,7 +1,8 @@
 /**
  * AI Store
  *
- * Manages AI-related state including provider configuration, proposals, and chat history.
+ * Manages AI-related state including provider configuration, proposals, and
+ * the retained legacy/internal chat history path.
  * Uses Zustand with Immer for immutable state updates.
  */
 
@@ -104,13 +105,13 @@ export interface EditScript {
 }
 
 // =============================================================================
-// Unified Agent Types (Conversation Mode)
+// Legacy/Internal Request-Response AI Types
 // =============================================================================
 
 /** Intent type detected by AI */
 export type AIIntentType = 'chat' | 'edit' | 'query' | 'clarify';
 
-/** Unified AI response supporting both conversation and editing */
+/** Legacy/internal AI response supporting both conversation and editing */
 export interface AIResponse {
   /** Conversational response text - always present */
   message: string;
@@ -196,7 +197,7 @@ interface AIState {
 
   // Actions - AI Generation
   generateEditScript: (intent: string, context?: AIContext) => Promise<EditScript>;
-  /** Send a message to AI using conversation mode (unified agent) */
+  /** Send a message through the legacy/internal request-response AI path */
   sendMessage: (message: string, context?: AIContext) => Promise<AIResponse>;
   applyEditScript: (
     editScript: EditScript,
@@ -559,7 +560,7 @@ export const useAIStore = create<AIState>()(
           }
         },
 
-        // Send message using conversation mode (unified agent)
+        // Send a message through the legacy/internal request-response path
         sendMessage: async (message: string, context?: AIContext) => {
           // Check if provider is configured, if not try to sync from settings first
           const currentStatus = get().providerStatus;
@@ -611,7 +612,7 @@ export const useAIStore = create<AIState>()(
                     : undefined,
               }));
 
-            // Call unified agent chat endpoint
+            // Call the legacy/internal request-response chat endpoint
             const response = await invoke<AIResponse>('chat_with_ai', {
               messages: conversationMessages.map((m) => ({
                 role: m.role,
@@ -1231,7 +1232,8 @@ let isAgentSystemInitialized = false;
 /**
  * Initialize the AI agent system.
  * Registers all agent tools (editing, analysis, audio, caption, effect, transition)
- * and sets up the agent framework.
+ * and shared runtime helpers used by the canonical sidebar runtime and retained
+ * compatibility paths.
  * Safe to call multiple times - will only initialize once.
  */
 export function initializeAgentSystem(): void {

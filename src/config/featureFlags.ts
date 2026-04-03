@@ -1,9 +1,8 @@
 /**
  * Feature Flags System
  *
- * Provides feature flag functionality for gradual rollout of new features.
- * The primary use case is enabling the new Agentic Engine while keeping
- * the legacy AI chat system as fallback.
+ * Provides feature flag functionality for AI runtime rollout,
+ * compatibility paths, and related product features.
  *
  * Features:
  * - Default values defined in code
@@ -15,11 +14,11 @@
  * ```typescript
  * import { isAgenticEngineEnabled, setFeatureFlag } from '@/config/featureFlags';
  *
- * // Check if new engine is enabled
+ * // Check if the canonical engine is enabled
  * if (isAgenticEngineEnabled()) {
- *   // Use new agentic engine
+ *   // Use canonical agentic engine
  * } else {
- *   // Use legacy chat
+ *   // Hide interactive AI runtime
  * }
  *
  * // Enable for testing (persists in localStorage)
@@ -36,8 +35,7 @@
  */
 export interface FeatureFlags {
   /**
-   * Enable the new Agentic Engine (Think-Plan-Act-Observe loop)
-   * When false, uses legacy single-shot AI chat
+   * Enable the canonical TPAO Agentic Engine used by the shipping AI sidebar.
    * @default true
    */
   USE_AGENTIC_ENGINE: boolean;
@@ -51,7 +49,8 @@ export interface FeatureFlags {
 
   /**
    * Enable the simplified Agent Loop (opencode-style stream → tool → loop)
-   * When true, uses the new AgentLoop instead of the 4-phase TPAO engine
+   * for compatibility verification and internal entry points.
+   * This does not replace the shipping AI sidebar runtime.
    * @default false
    */
   USE_AGENT_LOOP: boolean;
@@ -78,6 +77,17 @@ export interface FeatureFlags {
  * Keys of all feature flags
  */
 export type FeatureFlagKey = keyof FeatureFlags;
+
+export type AgentSidebarRuntime = 'tpao' | 'disabled';
+export type AgentSidebarRuntimeTrack = 'canonical' | 'disabled';
+
+export interface AgentSidebarRuntimePolicy {
+  canonicalRuntime: 'tpao';
+  selectedRuntime: AgentSidebarRuntime;
+  track: AgentSidebarRuntimeTrack;
+  compatibilityRuntime: 'fast' | null;
+  compatibilityRuntimeEnabled: boolean;
+}
 
 // =============================================================================
 // Constants
@@ -343,15 +353,45 @@ export function isVideoGenerationEnabled(): boolean {
 }
 
 /**
- * Check if the simplified Agent Loop is enabled
+ * Check if the simplified Agent Loop compatibility runtime is enabled.
  *
- * When true, uses the new AgentLoop (opencode-style stream → tool → loop)
- * instead of the 4-phase Think-Plan-Act-Observe engine.
+ * When true, internal debug or harness-oriented entry points may use
+ * AgentLoop (stream → tool → loop) for compatibility verification.
  *
- * @returns true if the simplified agent loop should be used
+ * @returns true if the compatibility runtime should be available
  */
 export function isAgentLoopEnabled(): boolean {
   return getFeatureFlag('USE_AGENT_LOOP');
+}
+
+/**
+ * Resolve the sidebar runtime policy from the current feature-flag matrix.
+ *
+ * TPAO remains the canonical interactive runtime. The fast AgentLoop runtime
+ * may remain available for compatibility verification, but it does not replace
+ * the shipping sidebar runtime.
+ */
+export function resolveSidebarRuntimePolicy(): AgentSidebarRuntimePolicy {
+  const compatibilityRuntimeEnabled = isAgentLoopEnabled();
+  const tpaoRuntimeEnabled = isAgenticEngineEnabled();
+
+  if (tpaoRuntimeEnabled) {
+    return {
+      canonicalRuntime: 'tpao',
+      selectedRuntime: 'tpao',
+      track: 'canonical',
+      compatibilityRuntime: compatibilityRuntimeEnabled ? 'fast' : null,
+      compatibilityRuntimeEnabled,
+    };
+  }
+
+  return {
+    canonicalRuntime: 'tpao',
+    selectedRuntime: 'disabled',
+    track: 'disabled',
+    compatibilityRuntime: compatibilityRuntimeEnabled ? 'fast' : null,
+    compatibilityRuntimeEnabled,
+  };
 }
 
 /**

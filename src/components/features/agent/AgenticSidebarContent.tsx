@@ -2,13 +2,13 @@
  * AgenticSidebarContent Component
  *
  * Content for the AI sidebar.
- * Switches between the legacy TPAO runtime and the fast AgentLoop runtime.
+ * Renders the canonical TPAO runtime for the shipping AI sidebar.
  */
 
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { PanelLeftClose, PanelLeftOpen } from 'lucide-react';
-import { AgenticChat, type AgenticChatHandle } from './AgenticChat';
-import { AgentLoopChat } from './AgentLoopChat';
+import { AgenticChat } from './AgenticChat';
+import type { AgentRuntimeChatHandle } from './AgentRuntimeChatShell';
 import { AgentSessionRecoveryPanel } from './AgentSessionRecoveryPanel';
 import { AgentSessionResumeHistoryPanel } from './AgentSessionResumeHistoryPanel';
 import { AgentSessionRecoveryStatus } from './AgentSessionRecoveryStatus';
@@ -17,8 +17,10 @@ import { createTauriLLMAdapter } from '@/agents/engine/adapters/llm/TauriLLMAdap
 import { createToolRegistryAdapter } from '@/agents/engine/adapters/tools/ToolRegistryAdapter';
 import { createBackendToolExecutor } from '@/agents/engine/adapters/tools/BackendToolExecutor';
 import { globalToolRegistry } from '@/agents';
-import { isAgentLoopEnabled, isBackendToolsEnabled } from '@/config/featureFlags';
+import { loadProjectPromptContext, type ProjectPromptContext } from '@/agents/engine/core/projectPromptContext';
+import { resolveSidebarRuntimePolicy, isBackendToolsEnabled } from '@/config/featureFlags';
 import { useNewChat } from '@/hooks/useNewChat';
+import { useProjectStore } from '@/stores';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('AgenticSidebarContent');
@@ -49,6 +51,9 @@ export function AgenticSidebarContent({
   className = '',
 }: AgenticSidebarContentProps) {
   const [showSessionList, setShowSessionList] = useState(false);
+  const [projectPromptContext, setProjectPromptContext] = useState<ProjectPromptContext>({
+    knowledge: [],
+  });
   // ===========================================================================
   // Adapters
   // ===========================================================================
@@ -72,8 +77,10 @@ export function AgenticSidebarContent({
   // Chat Handle Ref (for abort/isRunning access)
   // ===========================================================================
 
-  const chatHandleRef = useRef<AgenticChatHandle>(null);
-  const useFastLoop = isAgentLoopEnabled();
+  const chatHandleRef = useRef<AgentRuntimeChatHandle>(null);
+  const runtimePolicy = resolveSidebarRuntimePolicy();
+  const currentProjectId = useProjectStore((state) => state.meta?.id ?? null);
+  const currentProjectPath = useProjectStore((state) => state.meta?.path ?? null);
 
   const abortCurrentSession = useCallback(() => {
     chatHandleRef.current?.abort();
@@ -91,6 +98,42 @@ export function AgenticSidebarContent({
   useEffect(() => {
     onRegisterNewChat?.(newChat, canCreateNew);
   }, [onRegisterNewChat, newChat, canCreateNew]);
+
+  useEffect(() => {
+    let isCancelled = false;
+
+    if (!currentProjectId || !currentProjectPath) {
+      setProjectPromptContext({ knowledge: [] });
+      return () => {
+        isCancelled = true;
+      };
+    }
+
+    void loadProjectPromptContext(currentProjectId)
+      .then((nextContext) => {
+        if (!isCancelled) {
+          setProjectPromptContext(nextContext);
+        }
+      })
+      .catch((error) => {
+        logger.warn('Failed to load project prompt context', {
+          projectId: currentProjectId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        if (!isCancelled) {
+          setProjectPromptContext({ knowledge: [] });
+        }
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [currentProjectId, currentProjectPath]);
+
+  const chatPromptConfig = useMemo(() => ({
+    knowledge: projectPromptContext.knowledge,
+    customInstructions: projectPromptContext.customInstructions,
+  }), [projectPromptContext.customInstructions, projectPromptContext.knowledge]);
 
   // ===========================================================================
   // Handlers
@@ -155,22 +198,24 @@ export function AgenticSidebarContent({
         <AgentSessionRecoveryPanel />
         <AgentSessionResumeHistoryPanel />
 
-        {useFastLoop ? (
-          <AgentLoopChat
-            ref={chatHandleRef}
-            llmClient={llmClient}
-            toolExecutor={toolExecutor}
-            onSubmit={handleSubmit}
-            onComplete={handleComplete}
-            onError={handleError}
-            placeholder="Describe what you want to edit..."
-            className="flex-1"
-          />
+        {runtimePolicy.selectedRuntime === 'disabled' ? (
+          <div
+            data-testid="agent-runtime-disabled-state"
+            className="flex flex-1 items-center justify-center px-6 py-8"
+          >
+            <div className="max-w-sm text-center">
+              <p className="text-sm font-medium text-text-primary">AI runtime is disabled</p>
+              <p className="mt-2 text-xs text-text-secondary">
+                Enable `USE_AGENTIC_ENGINE` to restore the canonical TPAO runtime.
+              </p>
+            </div>
+          </div>
         ) : (
           <AgenticChat
             ref={chatHandleRef}
             llmClient={llmClient}
             toolExecutor={toolExecutor}
+            config={chatPromptConfig}
             onSubmit={handleSubmit}
             onComplete={handleComplete}
             onError={handleError}
