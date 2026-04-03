@@ -94,6 +94,56 @@ jobs:
         timeout-minutes: 10
 
   # ==========================================================================
+  # Agent Runtime Verification
+  # ==========================================================================
+  agent-runtime-canonical:
+    name: Agent Runtime Canonical
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    needs: [frontend-lint]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run canonical runtime verification
+        run: npm run test:agent:canonical
+        timeout-minutes: 10
+
+  agent-runtime-compatibility:
+    name: Agent Runtime Compatibility
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    needs: [frontend-lint]
+    continue-on-error: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run compatibility runtime verification
+        run: npm run test:agent:compatibility
+        timeout-minutes: 10
+
+  # ==========================================================================
   # Rust Tests
   # ==========================================================================
   rust-test:
@@ -155,7 +205,7 @@ jobs:
     name: Build Check
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    needs: [frontend-lint, frontend-test, rust-test]
+    needs: [frontend-lint, frontend-test, agent-runtime-canonical, rust-test]
 
     steps:
       - name: Checkout repository
