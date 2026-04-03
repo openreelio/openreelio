@@ -72,7 +72,7 @@ describe('AgentSessionRecoveryStatus', () => {
     expect(screen.getByText('Degraded')).toBeInTheDocument();
     expect(
       screen.getByText(
-        'Recovered in this app session, but earlier resume history may still be partial.',
+        'Recovered in this app session, but earlier recovery context may still be partial.',
       ),
     ).toBeInTheDocument();
   });

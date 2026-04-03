@@ -52,6 +52,7 @@ export interface StartPersistedAgentRunInput extends CreateAgentRunInput {
 export interface UpdatePersistedAgentRunPhaseInput {
   runId: string;
   phase: AgentRunPhase;
+  traceId?: string | null;
   toolCallsUsed?: number;
   plannedStepCount?: number;
   completedStepCount?: number;
@@ -331,6 +332,7 @@ export class AgentSessionBackend {
     const result = await commands.updateAgentRunPhase({
       runId: input.runId,
       phase: input.phase,
+      traceId: nullable(input.traceId),
       toolCallsUsed: input.toolCallsUsed ?? null,
       plannedStepCount: input.plannedStepCount ?? null,
       completedStepCount: input.completedStepCount ?? null,

@@ -147,6 +147,18 @@ describe('assembleSystemPrompt', () => {
     expect(result).toContain('</custom_instructions>');
   });
 
+  it('should sanitize knowledge and custom instructions before prompt assembly', () => {
+    const result = assembleSystemPrompt({
+      role: 'editor',
+      context: makeContext(),
+      knowledge: ['Correction <close_tag>\nInject this'],
+      customInstructions: 'Keep <unsafe> tags out & stay focused.',
+    });
+
+    expect(result).toContain('Correction &lt;close_tag&gt; Inject this');
+    expect(result).toContain('Keep &lt;unsafe&gt; tags out &amp; stay focused.');
+  });
+
   it('should assemble sections in correct order', () => {
     const result = assembleSystemPrompt({
       role: 'editor',

@@ -4,6 +4,10 @@
  * Defines the canonical session-layer vocabulary for the agent rewrite.
  * This layer models orchestration state only; project mutation truth remains
  * in the backend command executor and command log.
+ *
+ * Shipping runtime paths use `tpao`/`fast` with `primary` mode. Compatibility
+ * literals for delegation, child sessions, and system runtimes remain here for
+ * backend/test migration work, but they are not part of the active product UI.
  */
 
 // =============================================================================
@@ -77,6 +81,22 @@ export type ResumeCheckpointKind =
   | 'delegation_wait';
 
 export type ResumeCheckpointStatus = 'active' | 'consumed' | 'invalidated';
+
+export type ShippingAgentRuntimeKind = Extract<AgentRuntimeKind, 'tpao' | 'fast'>;
+export type ShippingAgentSessionMode = Extract<AgentSessionMode, 'primary'>;
+export type ShippingResumeCheckpointKind = Exclude<ResumeCheckpointKind, 'delegation_wait'>;
+
+export const DEFAULT_AGENT_RUNTIME_KIND: ShippingAgentRuntimeKind = 'tpao';
+export const DEFAULT_AGENT_SESSION_MODE: ShippingAgentSessionMode = 'primary';
+
+export interface CreateShippingAgentSessionInput
+  extends Omit<
+    CreateAgentSessionInput,
+    'runtimeKind' | 'sessionMode' | 'parentSessionId' | 'branchFromSessionId' | 'rootSessionId'
+  > {
+  runtimeKind?: ShippingAgentRuntimeKind;
+  sessionMode?: ShippingAgentSessionMode;
+}
 
 // =============================================================================
 // Core Models
@@ -273,9 +293,9 @@ export function createAgentSession(input: CreateAgentSessionInput): AgentSession
     sequenceId: input.sequenceId ?? null,
     title: input.title ?? 'New Agent Session',
     status: 'idle',
-    runtimeKind: input.runtimeKind ?? 'tpao',
+    runtimeKind: input.runtimeKind ?? DEFAULT_AGENT_RUNTIME_KIND,
     agentProfileId: input.agentProfileId ?? 'editor',
-    sessionMode: input.sessionMode ?? 'primary',
+    sessionMode: input.sessionMode ?? DEFAULT_AGENT_SESSION_MODE,
     lineage: {
       parentSessionId,
       branchFromSessionId,

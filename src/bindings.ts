@@ -785,9 +785,10 @@ async generateEditScriptWithAi(intent: string, context: AIContextDto) : Promise<
 /**
  * Perform a raw completion using the configured AI provider.
  * 
- * Unlike `chat_with_ai`, this does not apply the unified-agent system prompt and does not parse
- * the output into an `AIResponse`. This is intended for the frontend agentic engine, which
- * supplies its own prompts and schemas.
+ * Unlike the legacy/internal `chat_with_ai` path, this does not apply the
+ * request-response chat prompt and does not parse the output into an `AIResponse`.
+ * This is intended for the frontend agentic runtimes, which supply their own
+ * prompts and schemas.
  */
 async completeWithAiRaw(messages: ConversationMessageDto[], options: AICompletionOptionsDto | null) : Promise<Result<AICompletionResponseDto, string>> {
     try {
@@ -797,10 +798,11 @@ async completeWithAiRaw(messages: ConversationMessageDto[], options: AICompletio
 }
 },
 /**
- * Chat with AI using conversation history (unified agent mode)
+ * Chat with AI using conversation history through the legacy/internal
+ * request-response path.
  * 
- * This endpoint supports natural conversation and optional edit commands.
- * The AI will decide whether to respond conversationally or execute edits.
+ * This endpoint is retained for compatibility with the older store-driven flow.
+ * The shipping AI sidebar uses the canonical agent runtime instead.
  */
 async chatWithAi(messages: ConversationMessageDto[], context: AIContextDto) : Promise<Result<AIResponseDto, string>> {
     try {
@@ -6738,7 +6740,7 @@ export type UnnestCompoundClipArgs = { sequenceId: string; trackId: string; clip
 /**
  * Input payload for updating an agent run phase and syncing session state.
  */
-export type UpdateAgentRunPhaseInput = { runId: string; phase: string; toolCallsUsed: number | null; plannedStepCount: number | null; completedStepCount: number | null; outputMessageId: string | null; rollbackReportJson: string | null; errorCode: string | null; errorMessage: string | null; currentPlanId: string | null; pendingApprovalId: string | null; activeCheckpointId: string | null; permissionStateVersion: number | null; compactionVersion: number | null; resumeCursorVersion: number | null; lastCompactedAt: number | null; lastResumedAt: number | null; endedAt: number | null }
+export type UpdateAgentRunPhaseInput = { runId: string; phase: string; traceId: string | null; toolCallsUsed: number | null; plannedStepCount: number | null; completedStepCount: number | null; outputMessageId: string | null; rollbackReportJson: string | null; errorCode: string | null; errorMessage: string | null; currentPlanId: string | null; pendingApprovalId: string | null; activeCheckpointId: string | null; permissionStateVersion: number | null; compactionVersion: number | null; resumeCursorVersion: number | null; lastCompactedAt: number | null; lastResumedAt: number | null; endedAt: number | null }
 /**
  * DTO for update check result
  */

@@ -11,7 +11,7 @@ const STAGE_COPY: Record<AgentSessionPersistenceStage, string> = {
   run_start: 'Persisted run creation failed',
   run_finalize: 'Persisted run finalization failed',
   compaction_record: 'Compaction artifact persistence failed',
-  resume_checkpoint: 'Resume checkpoint persistence failed',
+  resume_checkpoint: 'Recovery checkpoint persistence failed',
 };
 
 export interface AgentSessionRecoveryPanelProps {

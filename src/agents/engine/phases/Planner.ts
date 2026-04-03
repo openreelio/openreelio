@@ -15,16 +15,10 @@
 
 import type { ILLMClient, LLMMessage } from '../ports/ILLMClient';
 import type { IToolExecutor } from '../ports/IToolExecutor';
-import type {
-  AgentContext,
-  LanguagePolicy,
-  Thought,
-  Plan,
-  PlanStep,
-  RiskLevel,
-} from '../core/types';
+import type { AgentContext, Thought, Plan, PlanStep, RiskLevel } from '../core/types';
 import { PlanningTimeoutError, PlanValidationError } from '../core/errors';
 import { createLogger } from '@/services/logger';
+import { assembleSystemPrompt } from '../prompts/system';
 import {
   collectStepValueReferences,
   normalizeReferencesForValidation,
@@ -49,6 +43,8 @@ export interface PlannerConfig {
   approvalRequiredRisks?: RiskLevel[];
   /** Custom system prompt override */
   systemPromptOverride?: string;
+  /** Additional project prompt sections appended to the base phase prompt */
+  projectPromptAddendum?: string;
   /** Number of retries after initial planning attempt */
   maxRetries?: number;
   /** Backoff in milliseconds between retries */
@@ -67,6 +63,7 @@ const DEFAULT_CONFIG: Required<PlannerConfig> = {
   maxSteps: 20,
   approvalRequiredRisks: ['high', 'critical'],
   systemPromptOverride: '',
+  projectPromptAddendum: '',
   maxRetries: 1,
   retryBackoffMs: 400,
   compactPromptToolLimit: 24,
@@ -348,11 +345,22 @@ export class Planner {
     const contextListLimit =
       promptDetailLevel === 'compact' ? COMPACT_CONTEXT_LIST_LIMIT : CONTEXT_LIST_LIMIT;
 
+    const sections = [
+      assembleSystemPrompt({
+        role: 'editor',
+        context,
+      }),
+    ];
+
+    if (this.config.projectPromptAddendum) {
+      sections.push(this.config.projectPromptAddendum);
+    }
+
     const parts: string[] = [
-      'You are a planning assistant for a video editing application.',
+      'You are currently operating in the PLAN phase of the canonical TPAO runtime.',
       'Your task is to create an execution plan based on the analyzed intent.',
       '',
-      'Current Context:',
+      'Current Planning Context:',
       `- Project ID: ${context.projectId || '(unknown)'}`,
       context.sequenceId ? `- Sequence ID: ${context.sequenceId}` : '- Sequence ID: (none)',
       `- Project state version: ${context.projectStateVersion ?? '(unknown)'}`,
@@ -425,8 +433,6 @@ export class Planner {
       );
     }
 
-    this.appendLanguagePolicyInstructions(parts, context.languagePolicy);
-
     parts.push('');
     parts.push('Planning Guidelines:');
     parts.push('1. Break down complex tasks into ordered steps');
@@ -456,28 +462,8 @@ export class Planner {
     parts.push('');
     parts.push(...ORCHESTRATION_PLAYBOOK_LINES);
 
-    return parts.join('\n');
-  }
-
-  private appendLanguagePolicyInstructions(parts: string[], languagePolicy?: LanguagePolicy): void {
-    if (!languagePolicy) {
-      return;
-    }
-
-    parts.push('');
-    parts.push('Language Policy:');
-    parts.push(`- UI language: ${languagePolicy.uiLanguage}`);
-    parts.push(`- Default output language: ${languagePolicy.outputLanguage}`);
-    parts.push(
-      `- Detect input language: ${languagePolicy.detectInputLanguage ? 'enabled' : 'disabled'}`,
-    );
-    parts.push(
-      `- User language override: ${languagePolicy.allowUserLanguageOverride ? 'allowed' : 'disallowed'}`,
-    );
-    parts.push(
-      '- Keep natural-language fields (goal, step descriptions, rollback strategy) in the default output language unless user explicitly asks otherwise.',
-    );
-    parts.push('- Never translate tool names, IDs, argument keys, or JSON schema keys.');
+    sections.push(parts.join('\n'));
+    return sections.join('\n\n');
   }
 
   /**
@@ -625,14 +611,31 @@ export class Planner {
     for (let i = start + 1; i < text.length; i++) {
       const char = text[i];
       if (inString) {
-        if (escaped) { escaped = false; continue; }
-        if (char === '\\') { escaped = true; continue; }
-        if (char === '"') { inString = false; }
+        if (escaped) {
+          escaped = false;
+          continue;
+        }
+        if (char === '\\') {
+          escaped = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = false;
+        }
         continue;
       }
-      if (char === '"') { inString = true; continue; }
-      if (char === '{') { stack.push('}'); continue; }
-      if (char === '[') { stack.push(']'); continue; }
+      if (char === '"') {
+        inString = true;
+        continue;
+      }
+      if (char === '{') {
+        stack.push('}');
+        continue;
+      }
+      if (char === '[') {
+        stack.push(']');
+        continue;
+      }
       if (char === '}' || char === ']') {
         if (stack.pop() !== char) return null;
         if (stack.length === 0) return text.slice(start, i + 1);

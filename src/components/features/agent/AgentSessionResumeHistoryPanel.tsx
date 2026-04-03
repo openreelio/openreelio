@@ -97,7 +97,7 @@ export function AgentSessionResumeHistoryPanel({
         className={`border-b border-border-subtle bg-surface-base px-3 py-2 ${className}`}
       >
         <div className="flex items-center gap-2">
-          <h3 className="text-xs font-medium text-text-primary">Resume History</h3>
+          <h3 className="text-xs font-medium text-text-primary">Recovery History</h3>
           <span className="rounded-full border border-border-subtle bg-surface-elevated px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.08em] text-text-secondary">
             Pending
           </span>
@@ -130,7 +130,7 @@ export function AgentSessionResumeHistoryPanel({
       <div className="flex items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-xs font-medium text-text-primary">Resume History</h3>
+            <h3 className="text-xs font-medium text-text-primary">Recovery History</h3>
             <span
               className={`rounded-full border px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.08em] ${MODE_BADGE_CLASS[history.status]}`}
             >
@@ -148,12 +148,12 @@ export function AgentSessionResumeHistoryPanel({
           </p>
           {artifacts?.lastError && (
             <p className="mt-1 text-[10px] text-status-warning">
-              Persisted resume history refresh is partial: {artifacts.lastError}
+              Persisted recovery history refresh is partial: {artifacts.lastError}
             </p>
           )}
           {artifacts?.isLoading && (
             <p className="mt-1 text-[10px] text-text-tertiary">
-              Refreshing persisted resume artifacts...
+              Refreshing persisted recovery artifacts...
             </p>
           )}
         </div>
@@ -166,7 +166,7 @@ export function AgentSessionResumeHistoryPanel({
 
       <div className="mt-2 grid gap-1 text-[10px] text-text-secondary sm:grid-cols-2">
         <p>
-          Checkpoint:
+          Linked checkpoint:
           {' '}
           {history.activeCheckpoint
             ? `${humanizeToken(history.activeCheckpoint.checkpointKind)} / ${history.activeCheckpoint.status}`
@@ -179,7 +179,7 @@ export function AgentSessionResumeHistoryPanel({
             ? `${history.latestCompaction.tier} / ${history.latestCompaction.trigger}`
             : 'not recorded'}
         </p>
-        <p>Resume cursor v{snapshot.session.resumeCursorVersion}</p>
+        <p>Recovery cursor v{snapshot.session.resumeCursorVersion}</p>
         <p>Compaction v{snapshot.session.compactionVersion}</p>
         <p>{history.checkpointCount} persisted checkpoints</p>
         <p>{history.compactionCount} persisted compactions</p>

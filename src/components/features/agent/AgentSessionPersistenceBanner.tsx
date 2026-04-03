@@ -11,7 +11,7 @@ const STAGE_COPY: Record<AgentSessionPersistenceStage, string> = {
   run_start: 'Run history could not be persisted at start.',
   run_finalize: 'Run completion could not be persisted.',
   compaction_record: 'Compaction history could not be persisted.',
-  resume_checkpoint: 'Resume checkpoint history could not be persisted.',
+  resume_checkpoint: 'Recovery checkpoint history could not be persisted.',
 };
 
 export interface AgentSessionPersistenceBannerProps {

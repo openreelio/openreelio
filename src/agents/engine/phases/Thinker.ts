@@ -14,8 +14,9 @@
  */
 
 import type { ILLMClient, LLMMessage } from '../ports/ILLMClient';
-import type { AgentContext, LanguagePolicy, Thought } from '../core/types';
+import type { AgentContext, Thought } from '../core/types';
 import { ThinkingTimeoutError, UnderstandingError } from '../core/errors';
+import { assembleSystemPrompt } from '../prompts/system';
 
 // =============================================================================
 // Types
@@ -29,6 +30,8 @@ export interface ThinkerConfig {
   timeout?: number;
   /** Custom system prompt override */
   systemPromptOverride?: string;
+  /** Additional project prompt sections appended to the base phase prompt */
+  projectPromptAddendum?: string;
   /** Maximum retries on transient errors */
   maxRetries?: number;
 }
@@ -39,6 +42,7 @@ export interface ThinkerConfig {
 const DEFAULT_CONFIG: Required<ThinkerConfig> = {
   timeout: 60000, // 60 seconds (structured output is slow)
   systemPromptOverride: '',
+  projectPromptAddendum: '',
   maxRetries: 2,
 };
 
@@ -113,7 +117,7 @@ export class Thinker {
       }
       throw new UnderstandingError(
         `Failed to analyze input: ${error instanceof Error ? error.message : String(error)}`,
-        error instanceof Error ? error.stack ?? error.message : String(error),
+        error instanceof Error ? (error.stack ?? error.message) : String(error),
       );
     } finally {
       this.abortController = null;
@@ -156,7 +160,7 @@ export class Thinker {
     } catch (error) {
       throw new UnderstandingError(
         `Failed to analyze input with streaming: ${error instanceof Error ? error.message : String(error)}`,
-        error instanceof Error ? error.stack ?? error.message : String(error),
+        error instanceof Error ? (error.stack ?? error.message) : String(error),
       );
     } finally {
       this.abortController = null;
@@ -205,91 +209,43 @@ export class Thinker {
       return this.config.systemPromptOverride;
     }
 
-    const parts: string[] = [
-      'You are an AI assistant for a video editing application.',
-      "Your task is to analyze the user's request and understand their intent.",
-      '',
-      'Current Context:',
+    const sections = [
+      assembleSystemPrompt({
+        role: 'editor',
+        context,
+      }),
     ];
 
-    // Add selected clips
-    if (context.selectedClips.length > 0) {
-      parts.push(`- Selected clips: ${context.selectedClips.join(', ')}`);
+    if (this.config.projectPromptAddendum) {
+      sections.push(this.config.projectPromptAddendum);
     }
 
-    // Add playhead position
-    if (context.playheadPosition !== undefined) {
-      parts.push(`- Playhead position: ${context.playheadPosition} seconds`);
-    }
-
-    // Add available tools
-    if (context.availableTools.length > 0) {
-      parts.push(`- Available tools: ${context.availableTools.join(', ')}`);
-    }
-
-    // Add timeline info if available
-    if (context.timelineInfo) {
-      parts.push(`- Timeline duration: ${context.timelineInfo.duration} seconds`);
-      parts.push(`- Track count: ${context.timelineInfo.trackCount}`);
-    }
-
-    this.appendLanguagePolicyInstructions(parts, context.languagePolicy);
-
-    parts.push('');
-    parts.push("Analyze the user's request and provide:");
-    parts.push('1. Your understanding of what they want to do');
-    parts.push('2. Requirements needed to fulfill the request');
-    parts.push('3. Any uncertainties that need clarification');
-    parts.push('4. Your proposed approach');
-    parts.push('5. Whether you need more information from the user');
-    parts.push('');
-    parts.push('Clarification Policy (important):');
-    parts.push(
-      '- Prefer proceeding with reasonable defaults and assumptions when the request is generally understandable.',
-    );
-    parts.push(
-      '- Do NOT set needsMoreInfo=true for optional stylistic choices (e.g., visual style, mood, exact wording) if execution can still proceed safely.',
-    );
-    parts.push(
-      '- Set needsMoreInfo=true ONLY when execution would likely fail or be unsafe without missing critical data (e.g., required target asset/track and no safe default).',
-    );
-    parts.push(
-      '- When needsMoreInfo=true, provide exactly one concise clarificationQuestion that unblocks execution.',
-    );
-    parts.push('');
-    parts.push('Source-Aware Policy:');
-    parts.push(
-      '- Do not assume timeline clips are the only available media. Imported assets may exist without timeline placement.',
-    );
-    parts.push(
-      '- When the request implies searching or selecting moments from source footage, prefer using source-discovery analysis tools before asking for clarification.',
-    );
-    parts.push(
-      '- Use timeline-only reasoning only when the request explicitly limits scope to existing timeline clips.',
+    sections.push(
+      [
+        'You are currently operating in the THINK phase of the canonical TPAO runtime.',
+        "Your task is to analyze the user's request and understand their intent before planning.",
+        '',
+        "Analyze the user's request and provide:",
+        '1. Your understanding of what they want to do',
+        '2. Requirements needed to fulfill the request',
+        '3. Any uncertainties that need clarification',
+        '4. Your proposed approach',
+        '5. Whether you need more information from the user',
+        '',
+        'Clarification Policy (important):',
+        '- Prefer proceeding with reasonable defaults and assumptions when the request is generally understandable.',
+        '- Do NOT set needsMoreInfo=true for optional stylistic choices (e.g., visual style, mood, exact wording) if execution can still proceed safely.',
+        '- Set needsMoreInfo=true ONLY when execution would likely fail or be unsafe without missing critical data (e.g., required target asset/track and no safe default).',
+        '- When needsMoreInfo=true, provide exactly one concise clarificationQuestion that unblocks execution.',
+        '',
+        'Source-Aware Policy:',
+        '- Do not assume timeline clips are the only available media. Imported assets may exist without timeline placement.',
+        '- When the request implies searching or selecting moments from source footage, prefer using source-discovery analysis tools before asking for clarification.',
+        '- Use timeline-only reasoning only when the request explicitly limits scope to existing timeline clips.',
+      ].join('\n'),
     );
 
-    return parts.join('\n');
-  }
-
-  private appendLanguagePolicyInstructions(parts: string[], languagePolicy?: LanguagePolicy): void {
-    if (!languagePolicy) {
-      return;
-    }
-
-    parts.push('');
-    parts.push('Language Policy:');
-    parts.push(`- UI language: ${languagePolicy.uiLanguage}`);
-    parts.push(`- Default output language: ${languagePolicy.outputLanguage}`);
-    parts.push(
-      `- Detect input language: ${languagePolicy.detectInputLanguage ? 'enabled' : 'disabled'}`,
-    );
-    parts.push(
-      `- User language override: ${languagePolicy.allowUserLanguageOverride ? 'allowed' : 'disallowed'}`,
-    );
-    parts.push(
-      '- Keep all natural-language response fields in the default output language unless user explicitly asks otherwise.',
-    );
-    parts.push('- Never translate IDs, tool names, schema keys, or structured field names.');
+    return sections.join('\n\n');
   }
 
   /**

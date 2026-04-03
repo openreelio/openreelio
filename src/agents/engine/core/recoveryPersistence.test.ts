@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  buildCompactionTraceRecord,
   buildCompactionPayload,
   buildResumeCheckpointPayload,
+  buildResumeCheckpointTraceRecord,
 } from './recoveryPersistence';
 
 describe('recoveryPersistence', () => {
@@ -114,6 +116,54 @@ describe('recoveryPersistence', () => {
       sourceMessageCount: 24,
       retainedMessageCount: 5,
       estimatedTokensSaved: 6400,
+    });
+  });
+
+  it('should build normalized checkpoint trace records', () => {
+    expect(buildResumeCheckpointTraceRecord({
+      checkpointId: 'checkpoint-1',
+      runId: 'run-1',
+      checkpointKind: 'tool_wait',
+      phase: 'awaiting_tool_permission',
+      toolName: 'delete_clip',
+      status: 'recovered',
+      recordedAt: 44,
+    })).toEqual({
+      checkpointId: 'checkpoint-1',
+      runId: 'run-1',
+      checkpointKind: 'tool_wait',
+      phase: 'awaiting_tool_permission',
+      stepId: null,
+      toolName: 'delete_clip',
+      summary: null,
+      status: 'recovered',
+      recordedAt: 44,
+    });
+  });
+
+  it('should build normalized compaction trace records', () => {
+    expect(buildCompactionTraceRecord({
+      compactionId: 'compaction-1',
+      runId: 'run-1',
+      tier: 'summary',
+      trigger: 'auto',
+      summary: 'Compacted around delete flow',
+      sourceMessageCount: 12,
+      retainedMessageCount: 4,
+      estimatedTokensSaved: 3200,
+      status: 'persisted',
+      recordedAt: 55,
+    })).toEqual({
+      compactionId: 'compaction-1',
+      runId: 'run-1',
+      tier: 'summary',
+      trigger: 'auto',
+      summary: 'Compacted around delete flow',
+      sourceMessageCount: 12,
+      retainedMessageCount: 4,
+      estimatedTokensSaved: 3200,
+      status: 'persisted',
+      recordedAt: 55,
     });
   });
 });

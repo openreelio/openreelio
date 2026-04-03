@@ -1,14 +1,16 @@
 /**
  * useAgentLoop Hook
  *
- * React hook for the simplified AgentLoop (opencode-style stream -> tool -> loop).
- * This is the counterpart of useAgenticLoop for the new USE_AGENT_LOOP feature flag.
+ * React hook for the simplified AgentLoop compatibility runtime
+ * (opencode-style stream -> tool -> loop).
+ * This is the counterpart of useAgenticLoop for internal compatibility
+ * verification when USE_AGENT_LOOP is enabled.
  *
  * Much simpler than the TPAO hook: iterates the AsyncGenerator, dispatches events
  * to the conversation store, handles abort and error recovery.
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   createAgentLoop,
   type AgentLoop,
@@ -21,21 +23,32 @@ import type { ILLMClient } from '@/agents/engine/ports/ILLMClient';
 import type { IToolExecutor } from '@/agents/engine/ports/IToolExecutor';
 import type { AgentContext } from '@/agents/engine/core/types';
 import type { TokenUsage, ConversationMessage } from '@/agents/engine/core/conversation';
-import { createEmptyContext, createLanguagePolicy } from '@/agents/engine/core/types';
+import { createEmptyContext, generateId } from '@/agents/engine/core/types';
 import {
+  buildCompactionTraceRecord,
   buildCompactionPayload,
-  buildResumeCheckpointPayload,
 } from '@/agents/engine/core/recoveryPersistence';
 import { isAgentLoopEnabled } from '@/config/featureFlags';
 import { useConversationStore } from '@/stores/conversationStore';
 import { usePermissionStore } from '@/stores/permissionStore';
-import { usePlaybackStore } from '@/stores/playbackStore';
-import { useTimelineStore } from '@/stores/timelineStore';
-import { useProjectStore } from '@/stores';
 import { useAgentSessionStore } from '@/stores/agentSessionStore';
-import { useSettingsStore } from '@/stores/settingsStore';
-import { globalToolRegistry } from '@/agents';
-import { persistPermissionAudit } from '@/agents/engine/core/permissionAudit';
+import {
+  buildPermissionTraceRecord,
+  persistPermissionAudit,
+} from '@/agents/engine/core/permissionAudit';
+import { TraceRecorder, type AgentTrace } from '@/agents/engine/core/traceRecorder';
+import { writeTrace } from '@/agents/engine/core/traceWriter';
+import {
+  bootstrapPersistedAgentSession,
+  bootstrapRecoveredContextFromCheckpoint,
+  createResumeCheckpointController,
+  ensureConfiguredProvider,
+  ensureConversationSessionId,
+  finalizePersistedRun,
+  getPersistedSessionTraceState,
+  startPersistedRun,
+} from './agentRuntimePersistence';
+import { useAgentRuntimeStoreContext } from './agentRuntimeStoreContext';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('useAgentLoop');
@@ -109,6 +122,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
     tool: string;
     args: Record<string, unknown>;
   } | null>(null);
+  const bootstrappedCheckpointIdRef = useRef<string | null>(null);
   const persistedRunIdRef = useRef<string | null>(null);
   const optionsRef = useRef(options);
 
@@ -135,7 +149,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
     async (input: string): Promise<void> => {
       if (!isEnabled) {
         const disabledError = new Error(
-          'Agent loop is disabled via feature flag. Enable USE_AGENT_LOOP to use.',
+          'Agent loop compatibility runtime is disabled via feature flag. Enable USE_AGENT_LOOP for internal compatibility verification.',
         );
         setError(disabledError);
         setPhase('failed');
@@ -159,20 +173,8 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
       abortNotifiedRef.current = false;
 
       // Pre-flight: check AI provider
-      if (typeof llmClient.isConfigured === 'function' && !llmClient.isConfigured()) {
-        const refreshable = llmClient as ILLMClient & {
-          refreshStatus?: () => Promise<{ isConfigured: boolean }>;
-        };
-        if (typeof refreshable.refreshStatus === 'function') {
-          try {
-            await refreshable.refreshStatus();
-          } catch {
-            // Ignore refresh failure
-          }
-        }
-      }
-
-      if (typeof llmClient.isConfigured === 'function' && !llmClient.isConfigured()) {
+      const providerConfigured = await ensureConfiguredProvider(llmClient, logger, 'agent loop');
+      if (!providerConfigured) {
         const configError = new Error(
           'AI provider not configured. Go to Settings > AI to set up your API key.',
         );
@@ -186,7 +188,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
 
       const context = buildContext();
       const store = useConversationStore.getState();
-      const storeSessionId = store.activeSessionId ?? await store.ensureSession();
+      const storeSessionId = await ensureConversationSessionId(store);
       if (!storeSessionId) {
         const sessionError = new Error('Conversation session is required before starting agent loop');
         setError(sessionError);
@@ -199,47 +201,24 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
 
       const projectId = store.activeProjectId ?? context.projectId;
       const agentSessionStore = useAgentSessionStore.getState();
-      const persistResumeCheckpoint = async (inputOverrides: Parameters<
-        typeof buildResumeCheckpointPayload
-      >[0]): Promise<string | null> => {
-        try {
-          const sessionSnapshot = useAgentSessionStore.getState().snapshotsById[storeSessionId]?.session;
-          const payload = buildResumeCheckpointPayload({
-            currentPlanId: sessionSnapshot?.currentPlanId ?? null,
-            pendingApprovalId: sessionSnapshot?.pendingApprovalId ?? null,
-            ...inputOverrides,
-          });
-          const checkpoint = await agentSessionStore.createResumeCheckpoint({
-            sessionId: storeSessionId,
-            runId: persistedRunIdRef.current,
-            checkpointKind: inputOverrides.checkpointKind,
-            ...payload,
-          });
-          return checkpoint.id;
-        } catch (error) {
-          logger.warn('Failed to persist fast-loop resume checkpoint', {
-            sessionId: storeSessionId,
-            checkpointKind: inputOverrides.checkpointKind,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          return null;
-        }
-      };
-      const consumeResumeCheckpoint = async (checkpointId: string | null): Promise<void> => {
-        if (!checkpointId) {
-          return;
-        }
-
-        try {
-          await agentSessionStore.consumeResumeCheckpoint(checkpointId);
-        } catch (error) {
-          logger.warn('Failed to consume fast-loop resume checkpoint', {
-            sessionId: storeSessionId,
-            checkpointId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      };
+      const persistedTraceId = config?.enableTracing === false ? null : generateId('trace');
+      const runtimeTraceRecorder = persistedTraceId ? new TraceRecorder() : null;
+      runtimeTraceRecorder?.startRun({
+        sessionId: storeSessionId,
+        input,
+        model: config?.activeModel,
+        provider: config?.activeProvider,
+        traceId: persistedTraceId ?? undefined,
+        runtimeKind: 'fast',
+      });
+      const checkpointController = createResumeCheckpointController({
+        sessionId: storeSessionId,
+        persistedRunIdRef,
+        logger,
+        loggerLabel: 'fast-loop',
+        onCheckpointPersisted: (record) => runtimeTraceRecorder?.recordCheckpointEvent(record),
+        onCheckpointConsumed: (record) => runtimeTraceRecorder?.recordCheckpointEvent(record),
+      });
       const persistCompactionBoundary = async (event: Extract<AgentLoopEvent, { type: 'compacted' }>): Promise<void> => {
         const compactionPayload = buildCompactionPayload({
           sessionId: storeSessionId,
@@ -257,7 +236,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
 
         let didPersistCompaction = false;
         try {
-          await agentSessionStore.recordCompaction({
+          const compaction = await agentSessionStore.recordCompaction({
             sessionId: storeSessionId,
             runId: persistedRunIdRef.current,
             tier: 'summary',
@@ -268,6 +247,20 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
             continuationSummaryJson: compactionPayload.continuationSummaryJson,
             stateRehydrationJson: compactionPayload.stateRehydrationJson,
           });
+          runtimeTraceRecorder?.recordCompactionEvent(
+            buildCompactionTraceRecord({
+              compactionId: compaction.id,
+              runId: persistedRunIdRef.current,
+              tier: 'summary',
+              trigger: 'auto',
+              summary: event.summary,
+              sourceMessageCount: event.originalMessageCount,
+              retainedMessageCount: event.retainedMessageCount,
+              estimatedTokensSaved: event.estimatedTokensSaved,
+              status: 'persisted',
+              recordedAt: compaction.createdAt,
+            }),
+          );
           didPersistCompaction = true;
         } catch (error) {
           logger.warn('Failed to persist fast-loop compaction record', {
@@ -280,7 +273,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
           return;
         }
 
-        await persistResumeCheckpoint({
+        await checkpointController.persistCheckpoint({
           sessionId: storeSessionId,
           runId: persistedRunIdRef.current,
           runtimeKind: 'fast',
@@ -295,71 +288,63 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
           estimatedTokensSaved: event.estimatedTokensSaved,
         });
       };
-      if (projectId) {
-        agentSessionStore.loadForProject(projectId);
-
-        try {
-          await agentSessionStore.ensureSession({
-            id: storeSessionId,
-            projectId,
-            sequenceId: context.sequenceId ?? null,
-            runtimeKind: 'fast',
-            sessionMode: 'primary',
-            agentProfileId: 'editor',
-            modelProvider: config?.activeProvider ?? null,
-            modelId: config?.activeModel ?? null,
-          });
-        } catch (error) {
-          logger.warn('Failed to ensure persisted agent loop session', {
-            sessionId: storeSessionId,
-            projectId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-
-        try {
-          const decisions = await agentSessionStore.refreshPermissionDecisions(storeSessionId);
-          usePermissionStore
-            .getState()
-            .hydrateSessionRulesFromPersistedDecisions(storeSessionId, decisions);
-        } catch (error) {
-          logger.warn('Failed to replay persisted agent loop permissions', {
-            sessionId: storeSessionId,
-            projectId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
+      await bootstrapPersistedAgentSession({
+        sessionId: storeSessionId,
+        projectId,
+        sequenceId: context.sequenceId ?? null,
+        runtimeKind: 'fast',
+        modelProvider: config?.activeProvider ?? null,
+        modelId: config?.activeModel ?? null,
+        logger,
+        loggerLabel: 'agent loop',
+      });
+      await bootstrapRecoveredContextFromCheckpoint({
+        sessionId: storeSessionId,
+        addSystemMessage: store.addSystemMessage,
+        logger,
+        loggerLabel: 'agent loop',
+        lastBootstrappedCheckpointIdRef: bootstrappedCheckpointIdRef,
+        onCheckpointRecovered: (record) => runtimeTraceRecorder?.recordCheckpointEvent(record),
+        onCompactionRecovered: (record) => runtimeTraceRecorder?.recordCompactionEvent(record),
+      });
 
       let persistedToolCalls = 0;
       let persistedFinalPhase: 'completed' | 'failed' | 'aborted' = 'completed';
       let persistedErrorMessage: string | null = null;
+      let traceToWrite: AgentTrace | null = null;
+      let finalizedRuntimeTrace: AgentTrace | null = null;
+      let traceIterations = 1;
+      let currentTracePhase: 'planning' | 'executing' = 'planning';
 
-      try {
-        const persistedRun = await agentSessionStore.startRun({
-          sessionId: storeSessionId,
-          runtimeKind: 'fast',
-          trigger: 'user',
-          maxIterations: config?.maxIterations,
-        });
-        persistedRunIdRef.current = persistedRun.id;
-        await persistResumeCheckpoint({
-          sessionId: storeSessionId,
-          runId: persistedRun.id,
-          runtimeKind: 'fast',
-          checkpointKind: 'safe_resume_point',
-          phase: 'initializing',
-          projectId: context.projectId,
-          sequenceId: context.sequenceId ?? null,
-          input,
-        });
-      } catch (error) {
-        persistedRunIdRef.current = null;
-        logger.warn('Failed to create persisted agent loop run', {
-          sessionId: storeSessionId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+      const finalizeRuntimeTrace = (success: boolean, errorMessage?: string | null): AgentTrace | null => {
+        if (!runtimeTraceRecorder) {
+          return null;
+        }
+
+        if (!finalizedRuntimeTrace) {
+          finalizedRuntimeTrace = runtimeTraceRecorder.finalize(success, errorMessage ?? undefined);
+        }
+
+        return finalizedRuntimeTrace;
+      };
+
+      const startedRunId = await startPersistedRun({
+        sessionId: storeSessionId,
+        runtimeKind: 'fast',
+        maxIterations: config?.maxIterations,
+        traceId: persistedTraceId,
+        runInput: input,
+        context,
+        checkpointController,
+        persistedRunIdRef,
+        logger,
+        loggerLabel: 'agent loop',
+      });
+      runtimeTraceRecorder?.setArtifactState({
+        persistedRunId: startedRunId,
+      });
+      runtimeTraceRecorder?.startPhase('planning');
+      runtimeTraceRecorder?.setIterations(traceIterations);
 
       // Create the loop
       const baseToolPermissionHandler =
@@ -371,6 +356,14 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
             .resolvePermissionDetails(toolName, args);
 
           if (resolution.permission === 'allow' || resolution.permission === 'deny') {
+            runtimeTraceRecorder?.recordPermissionEvent(
+              buildPermissionTraceRecord({
+                runId: persistedRunIdRef.current,
+                stepId: null,
+                resolution,
+                action: resolution.permission,
+              }),
+            );
             persistPermissionAudit(
               storeSessionId,
               persistedRunIdRef.current,
@@ -381,6 +374,14 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
             return resolution.permission;
           }
 
+          runtimeTraceRecorder?.recordPermissionEvent(
+            buildPermissionTraceRecord({
+              runId: persistedRunIdRef.current,
+              stepId: null,
+              resolution,
+              action: 'ask',
+            }),
+          );
           persistPermissionAudit(
             storeSessionId,
             persistedRunIdRef.current,
@@ -393,6 +394,15 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
             toolPermissionResolverRef.current = { resolve, tool: toolName, args };
           });
 
+          runtimeTraceRecorder?.recordPermissionEvent(
+            buildPermissionTraceRecord({
+              runId: persistedRunIdRef.current,
+              stepId: null,
+              resolution,
+              action: decision,
+              source: 'interactive_approval',
+            }),
+          );
           persistPermissionAudit(
             storeSessionId,
             persistedRunIdRef.current,
@@ -432,7 +442,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
               args,
               riskLevel,
             });
-            checkpointId = await persistResumeCheckpoint({
+            checkpointId = await checkpointController.persistCheckpoint({
               sessionId: storeSessionId,
               runId: persistedRunIdRef.current,
               runtimeKind: 'fast',
@@ -459,7 +469,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
             }
             return decision;
           } finally {
-            await consumeResumeCheckpoint(checkpointId);
+            await checkpointController.consumeCheckpoint(checkpointId);
           }
         },
       });
@@ -483,10 +493,20 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
 
           switch (event.type) {
             case 'tool_call_start':
+              if (currentTracePhase !== 'executing') {
+                runtimeTraceRecorder?.startPhase('executing');
+                currentTracePhase = 'executing';
+              }
               setPhase('executing_tools');
               break;
 
             case 'tool_call_complete':
+              runtimeTraceRecorder?.recordToolCall({
+                name: event.name,
+                success: event.result.success,
+                durationMs: event.result.duration,
+                error: event.result.error,
+              });
               persistedToolCalls += 1;
               setToolResults((prev) => [...prev, event.result]);
               break;
@@ -496,6 +516,12 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
               break;
 
             case 'tools_executed':
+              traceIterations += 1;
+              runtimeTraceRecorder?.setIterations(traceIterations);
+              if (currentTracePhase !== 'planning') {
+                runtimeTraceRecorder?.startPhase('planning');
+                currentTracePhase = 'planning';
+              }
               setPhase('streaming'); // Back to streaming for next iteration
               break;
 
@@ -508,9 +534,18 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
               break;
 
             case 'done':
+              runtimeTraceRecorder?.setFastPath(event.fastPath ?? false);
+              runtimeTraceRecorder?.addTokenUsage({
+                inputTokens: event.usage?.promptTokens ?? 0,
+                outputTokens: event.usage?.completionTokens ?? 0,
+              });
               if (persistedFinalPhase !== 'failed') {
                 persistedFinalPhase = 'completed';
               }
+              traceToWrite = finalizeRuntimeTrace(
+                persistedFinalPhase === 'completed',
+                persistedErrorMessage,
+              );
               // Only mark completed if no prior error/doom-loop occurred
               setPhase((prev) => (prev === 'failed' ? 'failed' : 'completed'));
               optionsRef.current.onComplete?.(event.usage);
@@ -522,6 +557,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
                 `Doom loop detected: ${event.tool} called ${event.count} times`,
               );
               persistedErrorMessage = doomErr.message;
+              traceToWrite = finalizeRuntimeTrace(false, doomErr.message);
               setError(doomErr);
               setPhase('failed');
               optionsRef.current.onError?.(doomErr);
@@ -535,6 +571,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
       } catch (err) {
         if (err instanceof AgentLoopAbortedError) {
           persistedFinalPhase = 'aborted';
+          traceToWrite = finalizeRuntimeTrace(false, 'Aborted by user');
           setPhase('aborted');
           if (!abortNotifiedRef.current) {
             abortNotifiedRef.current = true;
@@ -544,6 +581,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
           const loopError = err instanceof Error ? err : new Error(String(err));
           persistedFinalPhase = 'failed';
           persistedErrorMessage = loopError.message;
+          traceToWrite = finalizeRuntimeTrace(false, loopError.message);
           setError(loopError);
           setPhase('failed');
           optionsRef.current.onError?.(loopError);
@@ -552,26 +590,37 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
         const persistedRunId = persistedRunIdRef.current;
         persistedRunIdRef.current = null;
         if (persistedRunId) {
-          try {
-            await agentSessionStore.updateRunPhase({
-              runId: persistedRunId,
-              phase: persistedFinalPhase,
-              toolCallsUsed: persistedToolCalls,
-              errorMessage: persistedErrorMessage,
-              endedAt: Date.now(),
-            });
-          } catch (error) {
-            agentSessionStore.reportPersistenceIssue({
-              sessionId: storeSessionId,
-              stage: 'run_finalize',
-              error,
-            });
-            logger.warn('Failed to finalize persisted agent loop run', {
-              runId: persistedRunId,
-              phase: persistedFinalPhase,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
+          await finalizePersistedRun({
+            sessionId: storeSessionId,
+            runId: persistedRunId,
+            phase: persistedFinalPhase,
+            traceId: persistedTraceId,
+            toolCallsUsed: persistedToolCalls,
+            errorMessage: persistedErrorMessage,
+            reportIssue: (input) => {
+              agentSessionStore.reportPersistenceIssue({
+                sessionId: input.sessionId,
+                stage: input.stage,
+                error: input.error,
+              });
+            },
+            logger,
+            loggerLabel: 'agent loop',
+          });
+        }
+        if (!traceToWrite) {
+          traceToWrite = finalizeRuntimeTrace(persistedFinalPhase === 'completed', persistedErrorMessage);
+        }
+        if (traceToWrite) {
+          traceToWrite = {
+            ...traceToWrite,
+            artifacts: {
+              ...traceToWrite.artifacts,
+              ...getPersistedSessionTraceState(storeSessionId),
+              persistedRunId: persistedRunId ?? traceToWrite.artifacts.persistedRunId,
+            },
+          };
+          await writeTrace(traceToWrite);
         }
 
         runGuardRef.current = false;
@@ -601,6 +650,7 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
     runGuardRef.current = false;
     loopRef.current = null;
     toolPermissionResolverRef.current = null;
+    bootstrappedCheckpointIdRef.current = null;
     abortNotifiedRef.current = false;
     setPhase('idle');
     setIsRunning(false);
@@ -660,68 +710,6 @@ export function useAgentLoop(options: UseAgentLoopOptions): UseAgentLoopReturn {
 }
 
 // =============================================================================
-// Shared Context Builder
-// =============================================================================
-
-interface StoreSnapshots {
-  currentTime: number;
-  duration: number;
-  selectedClipIds: string[];
-  selectedTrackIds: string[];
-  activeSequenceId: string | null;
-  projectStateVersion: number;
-  sequences: Map<string, { tracks: Array<{ id: string; name: string; kind: string; clips: Array<{ id: string; assetId: string; label?: string; place: { timelineInSec: number } }> }> }>;
-  assets: Map<string, { id: string; name: string; kind: string; durationSec?: number }>;
-  uiLanguage: string;
-}
-
-/**
- * Builds an AgentContext from store snapshots. Shared between
- * the reactive useMemo path and the imperative contextRefresher.
- */
-function buildContextFromStores(
-  stores: StoreSnapshots,
-  externalContext?: Partial<AgentContext>,
-): Partial<AgentContext> {
-  const activeSequence = stores.activeSequenceId
-    ? stores.sequences.get(stores.activeSequenceId)
-    : undefined;
-
-  const storeContext: Partial<AgentContext> = {
-    projectId: 'current',
-    sequenceId: stores.activeSequenceId ?? undefined,
-    languagePolicy: createLanguagePolicy(stores.uiLanguage),
-    projectStateVersion: stores.projectStateVersion,
-    playheadPosition: stores.currentTime,
-    timelineDuration: stores.duration,
-    selectedClips: stores.selectedClipIds,
-    selectedTracks: stores.selectedTrackIds,
-    availableAssets: Array.from(stores.assets.values())
-      .filter((a) => a.kind === 'video' || a.kind === 'audio' || a.kind === 'image')
-      .map((a) => ({
-        id: a.id,
-        name: a.name,
-        type: a.kind as 'video' | 'audio' | 'image',
-        duration: a.durationSec,
-      })),
-    availableTracks:
-      activeSequence?.tracks.map((t) => ({
-        id: t.id,
-        name: t.name || `Track ${t.id}`,
-        type: t.kind === 'audio' ? ('audio' as const) : ('video' as const),
-        clipCount: t.clips.length,
-      })) ?? [],
-    availableTools: globalToolRegistry.listAll().map((t) => t.name),
-  };
-
-  return {
-    ...storeContext,
-    ...externalContext,
-    projectId: externalContext?.projectId ?? storeContext.projectId,
-  };
-}
-
-// =============================================================================
 // Extended Hook: useAgentLoopWithStores
 // =============================================================================
 
@@ -731,86 +719,20 @@ function buildContextFromStores(
 export function useAgentLoopWithStores(
   options: Omit<UseAgentLoopOptions, 'context'> & { context?: Partial<AgentContext> },
 ): UseAgentLoopReturn {
-  const externalContext = options.context;
-
-  const currentTime = usePlaybackStore((s) => s.currentTime);
-  const duration = usePlaybackStore((s) => s.duration);
-  const selectedClipIds = useTimelineStore((s) => s.selectedClipIds);
-  const selectedTrackIds = useTimelineStore((s) => s.selectedTrackIds);
-  const activeSequenceId = useProjectStore((s) => s.activeSequenceId);
-  const projectStateVersion = useProjectStore((s) => s.stateVersion);
-  const sequences = useProjectStore((s) => s.sequences);
-  const assets = useProjectStore((s) => s.assets);
-  const uiLanguage = useSettingsStore((s) => s.settings.general.language);
-
-  const context = useMemo(
-    () =>
-      buildContextFromStores(
-        {
-          currentTime,
-          duration,
-          selectedClipIds,
-          selectedTrackIds,
-          activeSequenceId,
-          projectStateVersion,
-          sequences,
-          assets,
-          uiLanguage,
-        },
-        externalContext,
-      ),
-    [
-      currentTime,
-      duration,
-      selectedClipIds,
-      selectedTrackIds,
-      activeSequenceId,
-      projectStateVersion,
-      sequences,
-      assets,
-      uiLanguage,
-      externalContext,
-    ],
-  );
-
-  const contextRefresher = useCallback((): Partial<AgentContext> => {
-    const playback = usePlaybackStore.getState();
-    const timeline = useTimelineStore.getState();
-    const project = useProjectStore.getState();
-    const settings = useSettingsStore.getState();
-
-    return buildContextFromStores(
-      {
-        currentTime: playback.currentTime,
-        duration: playback.duration,
-        selectedClipIds: timeline.selectedClipIds,
-        selectedTrackIds: timeline.selectedTrackIds,
-        activeSequenceId: project.activeSequenceId,
-        projectStateVersion: project.stateVersion,
-        sequences: project.sequences,
-        assets: project.assets,
-        uiLanguage: settings.settings.general.language,
-      },
-      externalContext,
-    );
-  }, [externalContext]);
-
-  // Read AI settings for model-aware token budget resolution
-  const aiMaxTokens = useSettingsStore((s) => s.settings.ai.maxTokens);
-  const aiPrimaryModel = useSettingsStore((s) => s.settings.ai.primaryModel);
-  const aiPrimaryProvider = useSettingsStore((s) => s.settings.ai.primaryProvider);
+  const { context, contextRefresher, aiMaxTokens, aiPrimaryModel, aiPrimaryProvider } =
+    useAgentRuntimeStoreContext(options.context);
 
   return useAgentLoop({
     ...options,
-    context,
-    config: {
-      ...options.config,
-      contextRefresher,
-      activeModel: options.config?.activeModel ?? aiPrimaryModel,
-      activeProvider: options.config?.activeProvider ?? aiPrimaryProvider,
-      generateOptions: {
-        ...options.config?.generateOptions,
-        maxTokens: options.config?.generateOptions?.maxTokens ?? aiMaxTokens,
+      context,
+      config: {
+        ...options.config,
+        contextRefresher,
+        activeModel: options.config?.activeModel ?? aiPrimaryModel ?? undefined,
+        activeProvider: options.config?.activeProvider ?? aiPrimaryProvider ?? undefined,
+        generateOptions: {
+          ...options.config?.generateOptions,
+          maxTokens: options.config?.generateOptions?.maxTokens ?? aiMaxTokens,
       },
     },
   });

@@ -77,7 +77,7 @@ export interface AgentSessionRestartBoundaryView {
 
 export interface AgentSessionResumeHistoryView {
   status: AgentSessionRecoveryMode;
-  label: 'Full' | 'Degraded' | 'Cold' | 'Ephemeral';
+  label: 'Context Available' | 'Degraded' | 'Cold' | 'Ephemeral';
   description: string;
   restartBoundary: AgentSessionRestartBoundaryView;
   activeCheckpoint: ResumeCheckpoint | null;
@@ -178,7 +178,7 @@ export function summarizeAgentSessionPersistence(
     status: 'degraded',
     label: 'Degraded',
     description:
-      'Persistence is partial. Resume, approval history, or audit trail may be incomplete until persistence recovers.',
+      'Persistence is partial. Recovery context, approval history, or audit trail may be incomplete until persistence recovers.',
     isRestartSafe: true,
   };
 }
@@ -256,7 +256,7 @@ export function summarizeAgentSessionPersistenceView(
     description:
       summary.status === 'ephemeral'
         ? 'Persistence recovered for the active run, but this session crossed a non-durable boundary earlier in this app session. Restart survivability is still not guaranteed for that earlier history.'
-        : 'Persistence recovered for the active run, but this session previously ran in degraded mode during this app session. Resume or audit history may still be incomplete for that earlier boundary.',
+        : 'Persistence recovered for the active run, but this session previously ran in degraded mode during this app session. Recovery context or audit history may still be incomplete for that earlier boundary.',
     hasActiveIssues: false,
     isLatched: true,
     visibleIssues,
@@ -303,14 +303,11 @@ function resolveActiveCheckpoint(
   session: AgentSession,
   checkpoints: ResumeCheckpoint[],
 ): ResumeCheckpoint | null {
-  if (session.activeCheckpointId) {
-    const exactMatch = checkpoints.find((checkpoint) => checkpoint.id === session.activeCheckpointId);
-    if (exactMatch) {
-      return exactMatch;
-    }
+  if (!session.activeCheckpointId) {
+    return null;
   }
 
-  return checkpoints.find((checkpoint) => checkpoint.status === 'active') ?? null;
+  return checkpoints.find((checkpoint) => checkpoint.id === session.activeCheckpointId) ?? null;
 }
 
 function buildResumeHistoryLabel(
@@ -318,7 +315,7 @@ function buildResumeHistoryLabel(
 ): AgentSessionResumeHistoryView['label'] {
   switch (status) {
     case 'full':
-      return 'Full';
+      return 'Context Available';
     case 'degraded':
       return 'Degraded';
     case 'cold':
@@ -339,16 +336,16 @@ function buildRestartBoundary(input: {
       kind: 'session_kernel_unavailable',
       title: 'Session kernel unavailable',
       description:
-        'Resume anchor details will appear after this conversation is hydrated into the persisted session kernel.',
+        'Recovery anchor details will appear after this conversation is hydrated into the persisted session kernel.',
     };
   }
 
   if (input.activeCheckpoint) {
     return {
       kind: 'checkpoint',
-      title: 'Resume checkpoint',
+      title: 'Linked checkpoint',
       description:
-        'Restart will resume from the active persisted checkpoint before replaying live execution state.',
+        'An active persisted checkpoint is linked to this session. The next run can rebuild visible context from that durable boundary, but it does not resume the prior execution state automatically.',
     };
   }
 
@@ -360,9 +357,9 @@ function buildRestartBoundary(input: {
   ) {
     return {
       kind: 'summary_boundary',
-      title: 'Summary boundary',
+      title: 'Persisted summary',
       description:
-        'Restart will fall back to the latest persisted compaction boundary and rebuild the visible context from durable rows.',
+        'A persisted compaction summary is available. The next run can rebuild visible context from durable rows, but not the prior execution state.',
     };
   }
 
@@ -370,7 +367,7 @@ function buildRestartBoundary(input: {
     kind: 'conversation_log',
     title: 'Conversation log replay',
     description:
-      'Restart will rebuild the session from persisted conversation rows because no safe checkpoint boundary is currently available.',
+      'Restart will rebuild visible context from persisted conversation rows because no linked checkpoint or persisted summary is currently available.',
   };
 }
 
@@ -402,7 +399,7 @@ export function summarizeAgentSessionResumeHistory(input: {
 
   let status: AgentSessionRecoveryMode = 'cold';
   let description =
-    'Restart will rely on persisted conversation-log replay because no safe checkpoint or summary boundary is currently linked.';
+    'Restart will rely on persisted conversation-log replay because no linked checkpoint or summary boundary is currently available.';
 
   if (persistence.status === 'ephemeral') {
     status = 'ephemeral';
@@ -414,11 +411,11 @@ export function summarizeAgentSessionResumeHistory(input: {
   } else if (restartBoundary.kind === 'checkpoint') {
     status = 'full';
     description =
-      'A persisted checkpoint is linked to the current session state, so restart can resume from a durable boundary.';
+      'A persisted checkpoint is linked to the current session state, so the next run can rebuild visible context from a durable boundary.';
   } else if (restartBoundary.kind === 'summary_boundary') {
     status = 'degraded';
     description =
-      'A persisted compaction boundary exists, but restart will rebuild from that summary boundary instead of a live checkpoint.';
+      'A persisted compaction summary exists, but recovery will rebuild visible context from that summary instead of a linked checkpoint.';
   }
 
   return {
@@ -474,6 +471,7 @@ export function createAgentSessionStore(
             state.snapshotsById = {};
             state.permissionDecisionsBySessionId = {};
             state.persistenceIssuesBySessionId = {};
+            state.persistenceLatchesBySessionId = {};
             state.recoveryArtifactsBySessionId = {};
             state.sessionOrder = [];
             state.activeSessionId = null;

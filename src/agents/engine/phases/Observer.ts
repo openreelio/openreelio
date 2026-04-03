@@ -31,6 +31,8 @@ export interface ObserverConfig {
   maxIterations?: number;
   /** Custom system prompt override */
   systemPromptOverride?: string;
+  /** Additional project prompt sections appended to the base phase prompt */
+  projectPromptAddendum?: string;
 }
 
 /**
@@ -40,6 +42,7 @@ const DEFAULT_CONFIG: Required<ObserverConfig> = {
   timeout: 30000, // 30 seconds
   maxIterations: 5,
   systemPromptOverride: '',
+  projectPromptAddendum: '',
 };
 
 // =============================================================================
@@ -218,6 +221,9 @@ export class Observer {
     }
 
     const languageSection = this.buildLanguagePolicySection(context.languagePolicy);
+    const projectPromptAddendum = this.config.projectPromptAddendum
+      ? `\n\n${this.config.projectPromptAddendum}`
+      : '';
 
     return `You are an AI observer for a video editing application.
 Your task is to analyze the results of an executed plan and determine:
@@ -240,7 +246,7 @@ Confidence Scale:
 - 0.5-0.7: Uncertain, mixed results
 - 0.0-0.5: Low confidence, unclear outcome
 
-${languageSection}`;
+${languageSection}${projectPromptAddendum}`;
   }
 
   private buildLanguagePolicySection(languagePolicy?: LanguagePolicy): string {

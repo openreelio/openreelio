@@ -132,6 +132,28 @@ describe('Thinker', () => {
       expect(systemMessage?.content).toContain('Source-Aware Policy:');
     });
 
+    it('should include the shared editor tool reference in the system prompt', async () => {
+      mockLLM.setStructuredResponse({
+        structured: {
+          understanding: 'test',
+          requirements: [],
+          uncertainties: [],
+          approach: 'test',
+          needsMoreInfo: false,
+        } as Thought,
+      });
+
+      await thinker.think('split the selected clip and add captions', context);
+
+      const request = mockLLM.getLastRequest();
+      const systemMessage = request?.messages.find((m) => m.role === 'system');
+
+      expect(systemMessage?.content).toContain('AI video editing assistant');
+      expect(systemMessage?.content).toContain('<tool_reference>');
+      expect(systemMessage?.content).toContain('## Edit Actions');
+      expect(systemMessage?.content).toContain('## Common Workflows');
+    });
+
     it('should include language policy instructions in system prompt', async () => {
       mockLLM.setStructuredResponse({
         structured: {
@@ -152,9 +174,9 @@ describe('Thinker', () => {
 
       const request = mockLLM.getLastRequest();
       const systemMessage = request?.messages.find((m) => m.role === 'system');
-      expect(systemMessage?.content).toContain('Language Policy:');
-      expect(systemMessage?.content).toContain('Default output language: es-ES');
-      expect(systemMessage?.content).toContain('Never translate IDs, tool names');
+      expect(systemMessage?.content).toContain('<language_policy>');
+      expect(systemMessage?.content).toContain('Output Language: es-ES');
+      expect(systemMessage?.content).toContain('Never translate command names, tool names');
     });
 
     it('should include clarification policy to avoid unnecessary blocking', async () => {
@@ -306,6 +328,29 @@ describe('Thinker', () => {
       const request = mockLLM.getLastRequest();
       const systemMessage = request?.messages.find((m) => m.role === 'system');
       expect(systemMessage?.content).toContain('Custom system prompt');
+    });
+
+    it('should append project prompt addendum when provided', async () => {
+      const customThinker = createThinker(mockLLM, {
+        projectPromptAddendum: '<knowledge>\n- Use concise cuts\n</knowledge>',
+      });
+
+      mockLLM.setStructuredResponse({
+        structured: {
+          understanding: 'test',
+          requirements: [],
+          uncertainties: [],
+          approach: 'test',
+          needsMoreInfo: false,
+        },
+      });
+
+      await customThinker.think('test', context);
+
+      const request = mockLLM.getLastRequest();
+      const systemMessage = request?.messages.find((message) => message.role === 'system');
+      expect(systemMessage?.content).toContain('<knowledge>');
+      expect(systemMessage?.content).toContain('Use concise cuts');
     });
   });
 

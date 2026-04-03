@@ -21,6 +21,8 @@ export interface ExecutionContext {
   sequenceId?: string;
   /** Session identifier for tracking */
   sessionId: string;
+  /** Optional run-level trace identifier for observability linkage */
+  traceId?: string;
   /** Expected project state version for optimistic consistency checks */
   expectedStateVersion?: number;
   /** Whether this is a dry run */

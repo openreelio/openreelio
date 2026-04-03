@@ -204,6 +204,7 @@ pub struct StartAgentRunInput {
 pub struct UpdateAgentRunPhaseInput {
     pub run_id: String,
     pub phase: String,
+    pub trace_id: Option<String>,
     pub tool_calls_used: Option<i64>,
     pub planned_step_count: Option<i64>,
     pub completed_step_count: Option<i64>,
@@ -925,6 +926,9 @@ pub async fn update_agent_run_phase(
     run.phase = input.phase;
     run.updated_at = now;
 
+    if let Some(trace_id) = input.trace_id {
+        run.trace_id = Some(trace_id);
+    }
     if let Some(tool_calls_used) = input.tool_calls_used {
         run.tool_calls_used = tool_calls_used;
     }

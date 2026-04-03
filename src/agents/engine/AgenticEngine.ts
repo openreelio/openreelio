@@ -55,6 +55,7 @@ import {
 } from './phases/executionFailureUtils';
 import { TraceRecorder, type AgentTrace } from './core/traceRecorder';
 import { writeTrace } from './core/traceWriter';
+import { buildProjectPromptAddendum } from './prompts/system';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('AgenticEngine');
@@ -144,12 +145,20 @@ export class AgenticEngine {
       this.config.activeModel,
       this.config.activeProvider,
     ).maxOutputTokens;
+    const projectPromptAddendum = buildProjectPromptAddendum({
+      knowledge: this.config.knowledge,
+      customInstructions: this.config.customInstructions,
+    });
 
-    this.thinker = createThinker(llm, { timeout: this.config.thinkingTimeout });
+    this.thinker = createThinker(llm, {
+      timeout: this.config.thinkingTimeout,
+      projectPromptAddendum: projectPromptAddendum ?? undefined,
+    });
     this.planner = createPlanner(llm, toolExecutor, {
       timeout: this.config.planningTimeout,
       approvalRequiredRisks,
       maxOutputTokens: plannerMaxOutputTokens,
+      projectPromptAddendum: projectPromptAddendum ?? undefined,
     });
     this.executor = createExecutor(toolExecutor, {
       stopOnError: this.config.stopOnError ?? true,
@@ -159,6 +168,7 @@ export class AgenticEngine {
     this.observer = createObserver(llm, {
       timeout: this.config.observationTimeout,
       maxIterations: this.config.maxIterations,
+      projectPromptAddendum: projectPromptAddendum ?? undefined,
     });
   }
 
@@ -200,6 +210,8 @@ export class AgenticEngine {
       input,
       model: this.config.activeModel,
       provider: this.config.activeProvider,
+      traceId: executionContext.traceId,
+      runtimeKind: 'tpao',
     });
 
     const startTime = Date.now();
@@ -349,6 +361,7 @@ export class AgenticEngine {
             clarificationQuestion: question,
             finalState: state,
             summary,
+            trace: tracer?.finalize(false, 'Clarification required'),
           });
         }
 
@@ -402,6 +415,7 @@ export class AgenticEngine {
           return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
             error: err,
             finalState: state,
+            trace: tracer?.finalize(false, err.message),
           });
         }
         plannedStepCount = attemptedStepCount;
@@ -442,6 +456,7 @@ export class AgenticEngine {
             return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
               error: err,
               finalState: state,
+              trace: tracer?.finalize(false, err.message),
             });
           }
 
@@ -485,6 +500,7 @@ export class AgenticEngine {
               approvalDenied: true,
               finalState: state,
               summary,
+              trace: tracer?.finalize(false, 'Plan approval denied'),
             });
           }
         }
@@ -533,6 +549,7 @@ export class AgenticEngine {
           return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
             error: err,
             finalState: state,
+            trace: tracer?.finalize(false, err.message),
           });
         }
 
@@ -689,6 +706,69 @@ export class AgenticEngine {
         await this.recordExecutionOperations(executionResult, contextWithTools.projectId);
         tracer?.endPhase();
 
+        const immediateTerminalFailure = detectImmediateTerminalFailure(
+          executionResult,
+          state.context,
+        );
+        const repeatedTerminalFailure =
+          executionResults.length > 1
+            ? detectRepeatedTerminalFailure(
+                executionResults[executionResults.length - 2],
+                executionResult,
+              )
+            : null;
+        const terminalFailureGuard = immediateTerminalFailure ?? repeatedTerminalFailure;
+
+        if (!executionResult.success) {
+          const failureReason =
+            executionResult.failedSteps[0]?.result.error
+            ?? 'Execution failed before observation';
+          const rollbackReport = await this.attemptRollback(executionResults, executionContext);
+          const observation = terminalFailureGuard
+            ? this.applyTerminalFailureGuard(
+                {
+                  goalAchieved: false,
+                  stateChanges: [],
+                  summary: failureReason,
+                  confidence: 0.5,
+                  needsIteration: true,
+                },
+                terminalFailureGuard,
+              )
+            : undefined;
+
+          const executionError = new Error(failureReason);
+          state.error = executionError;
+          state = this.finalizeState(state, 'failed');
+          this.emitEvent(onEvent, {
+            type: 'session_failed',
+            error: executionError,
+            timestamp: Date.now(),
+          });
+          logger.error('Execution completed with failed steps', {
+            sessionId: executionContext.sessionId,
+            error: failureReason,
+            rollbackAttempted: rollbackReport.attempted,
+            rollbackSucceeded: rollbackReport.succeededCount,
+            rollbackFailed: rollbackReport.failedCount,
+            rollbackSkipped: rollbackReport.skippedCount,
+          });
+
+          const summary = this.createSummary(state, Date.now() - startTime, {
+            failureReason,
+            rollbackReport,
+          });
+
+          return this.createResult(false, executionResults, iteration, Date.now() - startTime, {
+            observation,
+            error: executionError,
+            finalState: state,
+            summary,
+            rollbackReport,
+            trace: tracer?.finalize(false, failureReason),
+          });
+        }
+
         if (this.isAborted || executionResult.aborted) {
           state = this.finalizeState(state, 'aborted');
           this.emitEvent(onEvent, {
@@ -732,19 +812,6 @@ export class AgenticEngine {
           });
         }
 
-        const immediateTerminalFailure = detectImmediateTerminalFailure(
-          executionResult,
-          state.context,
-        );
-        const repeatedTerminalFailure =
-          executionResults.length > 1
-            ? detectRepeatedTerminalFailure(
-                executionResults[executionResults.length - 2],
-                executionResult,
-              )
-            : null;
-
-        const terminalFailureGuard = immediateTerminalFailure ?? repeatedTerminalFailure;
         if (observation.needsIteration && terminalFailureGuard) {
           logger.warn('Stopping automatic retry loop after terminal failure', {
             sessionId: executionContext.sessionId,
@@ -1187,7 +1254,7 @@ export class AgenticEngine {
     };
 
     // Fire-and-forget trace writing — errors are logged but not propagated
-    if (result.trace) {
+    if (result.trace && this.config.writeTraceOnComplete !== false) {
       writeTrace(result.trace).catch(() => {
         // Intentionally swallowed — writeTrace already logs on failure
       });

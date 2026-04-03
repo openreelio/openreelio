@@ -158,14 +158,14 @@ describe('AgentSessionResumeHistoryPanel', () => {
   it('should render a pending state before the session kernel is hydrated', () => {
     render(<AgentSessionResumeHistoryPanel />);
 
-    expect(screen.getByText('Resume History')).toBeInTheDocument();
+    expect(screen.getByText('Recovery History')).toBeInTheDocument();
     expect(screen.getByText('Pending')).toBeInTheDocument();
     expect(
       screen.getByText(/has not been hydrated into the session kernel yet/i),
     ).toBeInTheDocument();
   });
 
-  it('should render a full restart path when an active checkpoint is linked', () => {
+  it('should render linked recovery context when an active checkpoint is linked', () => {
     seedSessionKernel({
       sessionOverrides: {
         activeCheckpointId: 'checkpoint-1',
@@ -180,11 +180,11 @@ describe('AgentSessionResumeHistoryPanel', () => {
 
     render(<AgentSessionResumeHistoryPanel />);
 
-    expect(screen.getByText('Full')).toBeInTheDocument();
-    expect(screen.getByText('Resume checkpoint')).toBeInTheDocument();
+    expect(screen.getByText('Context Available')).toBeInTheDocument();
+    expect(screen.getByText('Linked checkpoint')).toBeInTheDocument();
     expect(
       screen.getByText(
-        'A persisted checkpoint is linked to the current session state, so restart can resume from a durable boundary.',
+        'A persisted checkpoint is linked to the current session state, so the next run can rebuild visible context from a durable boundary.',
       ),
     ).toBeInTheDocument();
     expect(screen.getByText('1 persisted checkpoints')).toBeInTheDocument();
@@ -205,12 +205,14 @@ describe('AgentSessionResumeHistoryPanel', () => {
     render(<AgentSessionResumeHistoryPanel />);
 
     expect(screen.getByText('Degraded')).toBeInTheDocument();
-    expect(screen.getByText('Summary boundary')).toBeInTheDocument();
+    expect(screen.getByText('Persisted summary')).toBeInTheDocument();
     expect(
-      screen.getByText(/restart will rebuild from that summary boundary instead of a live checkpoint/i),
+      screen.getByText(
+        /recovery will rebuild visible context from that summary instead of a linked checkpoint/i,
+      ),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/persisted resume history refresh is partial/i),
+      screen.getByText(/persisted recovery history refresh is partial/i),
     ).toBeInTheDocument();
   });
 
@@ -248,6 +250,6 @@ describe('AgentSessionResumeHistoryPanel', () => {
     expect(
       screen.getByText(/crossed a non-durable boundary in the current app session/i),
     ).toBeInTheDocument();
-    expect(screen.getByText('Resume checkpoint')).toBeInTheDocument();
+    expect(screen.getByText('Linked checkpoint')).toBeInTheDocument();
   });
 });

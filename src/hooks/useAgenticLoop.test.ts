@@ -10,6 +10,11 @@ import { usePermissionStore } from '@/stores/permissionStore';
 import { useAgentSessionStore } from '@/stores/agentSessionStore';
 import { useAgenticLoop } from './useAgenticLoop';
 
+const mockTauriInvoke = vi.fn().mockResolvedValue(undefined);
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...args: unknown[]) => mockTauriInvoke(...args),
+}));
+
 vi.mock('@/bindings', () => ({
   commands: {
     createAgentSession: vi.fn(),
@@ -101,6 +106,61 @@ function createPermissionDecisionDto(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function createPersistedRecoveryCheckpoint(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'checkpoint-recovery-1',
+    sessionId: 'conversation-session-1',
+    runId: 'run-previous',
+    checkpointKind: 'approval_wait',
+    status: 'active',
+    resumeCursorJson: JSON.stringify({
+      checkpointKind: 'approval_wait',
+      phase: 'awaiting_approval',
+    }),
+    sessionStateJson: JSON.stringify({
+      phase: 'awaiting_approval',
+      input: 'Delete the intro clip',
+      planGoal: 'Delete the intro clip safely',
+    }),
+    pendingWorkJson: JSON.stringify({
+      type: 'plan_approval',
+      goal: 'Delete the intro clip safely',
+      stepIds: ['step-1'],
+    }),
+    createdAt: 95,
+    consumedAt: null,
+    ...overrides,
+  };
+}
+
+function createPersistedCompaction(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'compaction-summary-1',
+    sessionId: 'conversation-session-1',
+    runId: 'run-previous',
+    tier: 'summary',
+    trigger: 'auto',
+    summaryMessageId: 'summary-message-1',
+    sourceMessageCount: 12,
+    retainedMessageCount: 4,
+    estimatedTokensSaved: 3200,
+    continuationSummaryJson: JSON.stringify({
+      summary: 'Recovered TPAO summary',
+      input: 'Delete the intro clip',
+      sourceMessageCount: 12,
+      retainedMessageCount: 4,
+    }),
+    stateRehydrationJson: JSON.stringify({
+      phase: 'compacting',
+      summary: 'Recovered TPAO summary',
+      sourceMessageCount: 12,
+      retainedMessageCount: 4,
+    }),
+    createdAt: 96,
+    ...overrides,
+  };
+}
+
 interface FailedRunLike {
   success: boolean;
   error?: {
@@ -116,6 +176,7 @@ describe('useAgenticLoop', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    mockTauriInvoke.mockReset().mockResolvedValue(undefined);
 
     setFeatureFlag('USE_AGENTIC_ENGINE', true);
     sessionState = createAgentSessionDto();
@@ -461,6 +522,154 @@ describe('useAgenticLoop', () => {
     );
   });
 
+  it('should persist the final trace id on the tpao run when tracing is enabled', async () => {
+    const llm = createMockLLMAdapter();
+    const tools = createMockToolExecutorWithVideoTools();
+
+    let structuredCallCount = 0;
+    vi.spyOn(llm, 'generateStructured').mockImplementation(async () => {
+      structuredCallCount += 1;
+
+      if (structuredCallCount === 1) {
+        return {
+          understanding: 'The user wants to delete a clip',
+          requirements: ['clipId'],
+          uncertainties: [],
+          approach: 'Plan a single delete step',
+          needsMoreInfo: false,
+        };
+      }
+
+      if (structuredCallCount === 2) {
+        return {
+          goal: 'Delete the target clip',
+          steps: [
+            {
+              id: 'step-1',
+              tool: 'delete_clip',
+              args: { clipId: 'clip-1' },
+              description: 'Delete clip-1 from the timeline',
+              riskLevel: 'medium',
+              estimatedDuration: 50,
+            },
+          ],
+          estimatedTotalDuration: 50,
+          requiresApproval: false,
+          rollbackStrategy: 'Restore the deleted clip',
+        };
+      }
+
+      return {
+        goalAchieved: true,
+        stateChanges: [
+          {
+            type: 'clip_deleted',
+            target: 'clip-1',
+            details: { deleted: true },
+          },
+        ],
+        summary: 'Deleted clip-1',
+        confidence: 0.95,
+        needsIteration: false,
+      };
+    });
+
+    const { result } = renderHook(() =>
+      useAgenticLoop({
+        llmClient: llm,
+        toolExecutor: tools,
+        context: {
+          projectId: 'project-1',
+          sequenceId: 'sequence-1',
+        },
+        config: {
+          enableFastPath: false,
+          enableMemory: false,
+          enableTracing: true,
+          approvalThreshold: 'low',
+          requireApprovalForDestructiveActions: false,
+        },
+      }),
+    );
+
+    let runPromise!: ReturnType<typeof result.current.run>;
+    act(() => {
+      runPromise = result.current.run('Delete clip 1');
+    });
+
+    await waitFor(() => {
+      expect(result.current.events.map((event) => event.type)).toContain('tool_permission_request');
+    });
+
+    act(() => {
+      result.current.approveToolPermission('allow');
+    });
+
+    await act(async () => {
+      await runPromise;
+    });
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('completed');
+    });
+
+    const traceWriteCall = mockTauriInvoke.mock.calls.find(
+      ([command]) => command === 'write_agent_trace',
+    );
+    expect(traceWriteCall).toBeDefined();
+
+    const traceId = traceWriteCall?.[1] && typeof traceWriteCall[1] === 'object'
+      ? (traceWriteCall[1] as { traceId?: string }).traceId
+      : undefined;
+    const traceJson = traceWriteCall?.[1] && typeof traceWriteCall[1] === 'object'
+      ? (traceWriteCall[1] as { traceJson?: string }).traceJson
+      : undefined;
+    const trace = JSON.parse(traceJson ?? '{}');
+
+    expect(traceId).toEqual(expect.any(String));
+    expect(trace.runtimeKind).toBe('tpao');
+    expect(trace.artifacts.persistedRunId).toBe('run-tpao-1');
+    expect(trace.artifacts.permissionEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: 'ask',
+          stepId: 'step-1',
+          subject: 'timeline.clip.delete#clip:clip-1',
+        }),
+        expect.objectContaining({
+          action: 'allow',
+          source: 'interactive_approval',
+        }),
+      ]),
+    );
+    expect(trace.artifacts.checkpointEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          checkpointKind: 'safe_resume_point',
+          status: 'persisted',
+        }),
+        expect.objectContaining({
+          checkpointKind: 'tool_wait',
+          status: 'persisted',
+        }),
+      ]),
+    );
+    expect(vi.mocked(commands.startAgentRun)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'conversation-session-1',
+        runtimeKind: 'tpao',
+        traceId,
+      }),
+    );
+    expect(vi.mocked(commands.updateAgentRunPhase)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run-tpao-1',
+        phase: 'completed',
+        traceId,
+      }),
+    );
+  });
+
   it('should persist and consume approval wait checkpoints while awaiting plan approval', async () => {
     const llm = createMockLLMAdapter();
     const tools = createMockToolExecutorWithVideoTools();
@@ -605,6 +814,425 @@ describe('useAgenticLoop', () => {
       expect.objectContaining({
         runId: 'run-tpao-1',
         phase: 'completed',
+      }),
+    );
+  });
+
+  it('should bootstrap recovered context from an active persisted checkpoint before a new TPAO run', async () => {
+    const llm = createMockLLMAdapter();
+    const tools = createMockToolExecutorWithVideoTools();
+
+    sessionState = {
+      ...createAgentSessionDto(),
+      activeCheckpointId: 'checkpoint-recovery-1',
+      resumeCursorVersion: 1,
+    };
+    persistedCheckpoints = [createPersistedRecoveryCheckpoint()];
+
+    let structuredCallCount = 0;
+    vi.spyOn(llm, 'generateStructured').mockImplementation(async () => {
+      structuredCallCount += 1;
+
+      if (structuredCallCount === 1) {
+        return {
+          understanding: 'Continue the recovered task',
+          requirements: [],
+          uncertainties: [],
+          approach: 'Proceed with the next edit step',
+          needsMoreInfo: false,
+        };
+      }
+
+      if (structuredCallCount === 2) {
+        return {
+          goal: 'Continue the recovered task',
+          steps: [],
+          estimatedTotalDuration: 0,
+          requiresApproval: false,
+          rollbackStrategy: 'N/A',
+        };
+      }
+
+      return {
+        goalAchieved: true,
+        stateChanges: [],
+        summary: 'Recovered context was acknowledged',
+        confidence: 0.95,
+        needsIteration: false,
+      };
+    });
+
+    const { result } = renderHook(() =>
+      useAgenticLoop({
+        llmClient: llm,
+        toolExecutor: tools,
+        context: {
+          projectId: 'project-1',
+          sequenceId: 'sequence-1',
+        },
+        config: {
+          enableFastPath: false,
+          enableMemory: false,
+          enableTracing: false,
+          toolPermissionHandler: async () => 'allow',
+        },
+      }),
+    );
+
+    await act(async () => {
+      await result.current.run('Continue the edit');
+    });
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('completed');
+    });
+
+    const systemMessages = useConversationStore
+      .getState()
+      .activeConversation?.messages
+      .filter((message) => message.role === 'system')
+      .map((message) => message.parts.find((part) => part.type === 'text'))
+      .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
+      .map((part) => part.content);
+
+    expect(systemMessages).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('Recovered durable context from a previous app session.'),
+      ]),
+    );
+    expect(systemMessages?.join('\n')).toContain('Pending plan approval was recovered into visible context.');
+    expect(vi.mocked(commands.consumeAgentResumeCheckpoint)).not.toHaveBeenCalledWith(
+      'checkpoint-recovery-1',
+    );
+  });
+
+  it('should bootstrap recovered context from the latest persisted compaction summary when no checkpoint is linked', async () => {
+    const llm = createMockLLMAdapter();
+    const tools = createMockToolExecutorWithVideoTools();
+
+    sessionState = {
+      ...createAgentSessionDto(),
+      latestSummaryMessageId: 'summary-message-1',
+      compactionVersion: 1,
+      lastCompactedAt: 96,
+    };
+    persistedCompactions = [createPersistedCompaction()];
+
+    let structuredCallCount = 0;
+    vi.spyOn(llm, 'generateStructured').mockImplementation(async () => {
+      structuredCallCount += 1;
+
+      if (structuredCallCount === 1) {
+        return {
+          understanding: 'Continue the recovered task',
+          requirements: [],
+          uncertainties: [],
+          approach: 'Proceed with the next edit step',
+          needsMoreInfo: false,
+        };
+      }
+
+      if (structuredCallCount === 2) {
+        return {
+          goal: 'Continue the recovered task',
+          steps: [],
+          estimatedTotalDuration: 0,
+          requiresApproval: false,
+          rollbackStrategy: 'N/A',
+        };
+      }
+
+      return {
+        goalAchieved: true,
+        stateChanges: [],
+        summary: 'Recovered context was acknowledged',
+        confidence: 0.95,
+        needsIteration: false,
+      };
+    });
+
+    const { result } = renderHook(() =>
+      useAgenticLoop({
+        llmClient: llm,
+        toolExecutor: tools,
+        context: {
+          projectId: 'project-1',
+          sequenceId: 'sequence-1',
+        },
+        config: {
+          enableFastPath: false,
+          enableMemory: false,
+          enableTracing: false,
+          toolPermissionHandler: async () => 'allow',
+        },
+      }),
+    );
+
+    await act(async () => {
+      await result.current.run('Continue the edit');
+    });
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('completed');
+    });
+
+    const systemMessages = useConversationStore
+      .getState()
+      .activeConversation?.messages
+      .filter((message) => message.role === 'system')
+      .map((message) => message.parts.find((part) => part.type === 'text'))
+      .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
+      .map((part) => part.content)
+      ?? [];
+
+    expect(
+      systemMessages.some((message) =>
+        message.includes('Recovered durable context from persisted compaction history.'),
+      ),
+    ).toBe(true);
+    expect(
+      systemMessages.some((message) => message.includes('Recovered summary: Recovered TPAO summary')),
+    ).toBe(true);
+  });
+
+  it('should ignore active checkpoint rows that are not linked from the session header before a new TPAO run', async () => {
+    const llm = createMockLLMAdapter();
+    const tools = createMockToolExecutorWithVideoTools();
+
+    sessionState = createAgentSessionDto();
+    persistedCheckpoints = [createPersistedRecoveryCheckpoint()];
+
+    let structuredCallCount = 0;
+    vi.spyOn(llm, 'generateStructured').mockImplementation(async () => {
+      structuredCallCount += 1;
+
+      if (structuredCallCount === 1) {
+        return {
+          understanding: 'Start a fresh task',
+          requirements: [],
+          uncertainties: [],
+          approach: 'Proceed normally',
+          needsMoreInfo: false,
+        };
+      }
+
+      if (structuredCallCount === 2) {
+        return {
+          goal: 'Start a fresh task',
+          steps: [],
+          estimatedTotalDuration: 0,
+          requiresApproval: false,
+          rollbackStrategy: 'N/A',
+        };
+      }
+
+      return {
+        goalAchieved: true,
+        stateChanges: [],
+        summary: 'No recovered checkpoint was linked',
+        confidence: 0.95,
+        needsIteration: false,
+      };
+    });
+
+    const { result } = renderHook(() =>
+      useAgenticLoop({
+        llmClient: llm,
+        toolExecutor: tools,
+        context: {
+          projectId: 'project-1',
+          sequenceId: 'sequence-1',
+        },
+        config: {
+          enableFastPath: false,
+          enableMemory: false,
+          enableTracing: false,
+          toolPermissionHandler: async () => 'allow',
+        },
+      }),
+    );
+
+    await act(async () => {
+      await result.current.run('Continue the edit');
+    });
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('completed');
+    });
+
+    const systemMessages = useConversationStore
+      .getState()
+      .activeConversation?.messages
+      .filter((message) => message.role === 'system')
+      .map((message) => message.parts.find((part) => part.type === 'text'))
+      .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
+      .map((part) => part.content)
+      ?? [];
+
+    expect(
+      systemMessages.some((message) =>
+        message.includes('Recovered durable context from a previous app session.'),
+      ),
+    ).toBe(false);
+    expect(vi.mocked(commands.consumeAgentResumeCheckpoint)).not.toHaveBeenCalledWith(
+      'checkpoint-recovery-1',
+    );
+  });
+
+  it('should persist rollback reports when recovery is attempted after execution failure', async () => {
+    const llm = createMockLLMAdapter();
+    const tools = createMockToolExecutorWithVideoTools();
+
+    tools.registerTool({
+      info: {
+        name: 'split_clip',
+        description: 'Split clip',
+        category: 'editing',
+        riskLevel: 'low',
+        supportsUndo: true,
+        parallelizable: false,
+      },
+      parameters: {
+        type: 'object',
+        properties: {
+          clipId: { type: 'string' },
+        },
+      },
+      required: ['clipId'],
+      result: {
+        success: true,
+        data: { split: true },
+        duration: 10,
+        undoable: true,
+        undoOperation: {
+          tool: 'undo_split_clip',
+          args: { clipId: 'clip-1' },
+          description: 'Undo split',
+        },
+      },
+    });
+
+    tools.registerTool({
+      info: {
+        name: 'undo_split_clip',
+        description: 'Undo split clip',
+        category: 'editing',
+        riskLevel: 'low',
+        supportsUndo: false,
+        parallelizable: false,
+      },
+      parameters: {
+        type: 'object',
+        properties: {
+          clipId: { type: 'string' },
+        },
+      },
+      required: ['clipId'],
+      result: {
+        success: true,
+        data: { undone: true },
+        duration: 5,
+      },
+    });
+
+    tools.registerTool({
+      info: {
+        name: 'delete_clip',
+        description: 'Delete clip',
+        category: 'editing',
+        riskLevel: 'low',
+        supportsUndo: true,
+        parallelizable: false,
+      },
+      parameters: {
+        type: 'object',
+        properties: {
+          clipId: { type: 'string' },
+        },
+      },
+      required: ['clipId'],
+      error: new Error('delete failed'),
+    });
+
+    let structuredCallCount = 0;
+    vi.spyOn(llm, 'generateStructured').mockImplementation(async () => {
+      structuredCallCount += 1;
+
+      if (structuredCallCount === 1) {
+        return {
+          understanding: 'Split the clip and then delete it',
+          requirements: ['clipId'],
+          uncertainties: [],
+          approach: 'Execute a split before deleting',
+          needsMoreInfo: false,
+        };
+      }
+
+      return {
+        goal: 'Split the clip and then delete it',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'split_clip',
+            args: { clipId: 'clip-1' },
+            description: 'Split clip-1',
+            riskLevel: 'low',
+            estimatedDuration: 10,
+          },
+          {
+            id: 'step-2',
+            tool: 'delete_clip',
+            args: { clipId: 'clip-1' },
+            description: 'Delete clip-1',
+            riskLevel: 'low',
+            estimatedDuration: 15,
+          },
+        ],
+        estimatedTotalDuration: 25,
+        requiresApproval: false,
+        rollbackStrategy: 'Undo prior edits',
+      };
+    });
+
+    const { result } = renderHook(() =>
+      useAgenticLoop({
+        llmClient: llm,
+        toolExecutor: tools,
+        context: {
+          projectId: 'project-1',
+          sequenceId: 'sequence-1',
+        },
+        config: {
+          enableFastPath: false,
+          enableMemory: false,
+          enableTracing: false,
+          approvalThreshold: 'critical',
+          requireApprovalForDestructiveActions: false,
+          toolPermissionHandler: async () => 'allow',
+        },
+      }),
+    );
+
+    let runResult: FailedRunLike | null = null;
+    await act(async () => {
+      runResult = await result.current.run('Split and delete clip 1');
+    });
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('failed');
+    });
+
+    expect(runResult).not.toBeNull();
+    const failedRun = runResult as any;
+    expect(failedRun.success).toBe(false);
+    expect(failedRun.rollbackReport?.attempted).toBe(true);
+    expect(vi.mocked(commands.updateAgentRunPhase)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run-tpao-1',
+        phase: 'failed',
+        plannedStepCount: 2,
+        completedStepCount: 1,
+        rollbackReportJson: expect.stringContaining('"attempted":true'),
       }),
     );
   });
