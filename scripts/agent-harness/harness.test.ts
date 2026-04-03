@@ -21,6 +21,7 @@
 import { describe, it, expect, beforeAll, vi } from 'vitest';
 import { invoke } from '@tauri-apps/api/core';
 import { buildOrchestrationPlaybook } from '@/agents/engine/core/orchestrationPlaybooks';
+import { parseFastPathPlan } from '@/agents/engine/core/fastPathParser';
 import { createEmptyContext } from '@/agents/engine/core/types';
 import type { Thought, AgentContext } from '@/agents/engine/core/types';
 import type { IToolExecutor } from '@/agents/engine/ports/IToolExecutor';
@@ -85,6 +86,13 @@ const ALL_PLAYBOOK_TOOLS = [
   'analyze_workspace_video',
   'get_analysis_status',
   'get_asset_annotation',
+];
+const RUNTIME_MATRIX_TOOLS = [
+  ...ALL_PLAYBOOK_TOOLS,
+  'split_clip',
+  'trim_clip',
+  'move_clip',
+  'delete_clips_in_range',
 ];
 
 function createMockToolExecutor(toolNames: string[]): IToolExecutor {
@@ -186,6 +194,27 @@ function diagnosePlaybook(
       requirements: thought.requirements,
       approach: thought.approach,
     },
+  };
+}
+
+function diagnoseRuntimeRoute(
+  input: string,
+  context?: Partial<AgentContext>,
+): {
+  input: string;
+  recommendedRuntime: 'fast' | 'tpao';
+  fastPathStrategy: string | null;
+  fastPathTool: string | null;
+} {
+  const ctx = createTestContext(context);
+  const executor = createMockToolExecutor(RUNTIME_MATRIX_TOOLS);
+  const fastPathMatch = parseFastPathPlan(input, ctx, executor);
+
+  return {
+    input,
+    recommendedRuntime: fastPathMatch ? 'fast' : 'tpao',
+    fastPathStrategy: fastPathMatch?.strategy ?? null,
+    fastPathTool: fastPathMatch?.plan.steps[0]?.tool ?? null,
   };
 }
 
@@ -543,5 +572,30 @@ describe('QA Scenarios', () => {
     printSection('QA-006: Korean auto-caption', result);
 
     expect(result.playbookId).toBe('auto_caption');
+  });
+
+  it('QA-009: compatibility runtime route picks the fast path for deterministic split', () => {
+    if (skip) return;
+
+    const result = diagnoseRuntimeRoute('Split selected clip at 5s', {
+      selectedClips: ['clip-1'],
+      selectedTracks: ['track-v1'],
+    });
+
+    printSection('QA-009: Compatibility runtime route for deterministic split', result);
+
+    expect(result.recommendedRuntime).toBe('fast');
+    expect(result.fastPathTool).toBe('split_clip');
+  });
+
+  it('QA-010: canonical runtime route stays on the TPAO path for caption workflow', () => {
+    if (skip) return;
+
+    const result = diagnoseRuntimeRoute('Add captions to the video on the timeline');
+
+    printSection('QA-010: Canonical runtime route for caption workflow', result);
+
+    expect(result.recommendedRuntime).toBe('tpao');
+    expect(result.fastPathTool).toBeNull();
   });
 });
