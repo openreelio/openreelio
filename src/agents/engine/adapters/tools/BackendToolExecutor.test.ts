@@ -24,6 +24,7 @@ import type {
   BatchExecutionResult,
 } from '../../ports/IToolExecutor';
 import type { RiskLevel, ValidationResult } from '../../core/types';
+import { useProjectStore } from '@/stores/projectStore';
 
 // Disable meta-tool filtering in unit tests (mock tools don't match meta-tool names)
 vi.mock('@/config/featureFlags', async (importOriginal) => {
@@ -217,6 +218,14 @@ describe('BackendToolExecutor', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    useProjectStore.setState({
+      isLoaded: false,
+      meta: null,
+      stateVersion: 0,
+      activeSequenceId: null,
+      sequences: new Map(),
+      assets: new Map(),
+    });
     frontend = createMockFrontendExecutor(TOOL_DEFS);
     backend = createBackendToolExecutor(frontend);
   });
@@ -382,7 +391,7 @@ describe('BackendToolExecutor', () => {
       });
     });
 
-    it('should keep frontend-only edit meta-tool actions on the frontend executor', async () => {
+    it('should fail fast when an edit meta-tool action is not backend-safe', async () => {
       const extendedTools = [
         ...TOOL_DEFS,
         { name: 'edit', description: 'Editing meta-tool', category: 'timeline', parameters: {} },
@@ -396,40 +405,31 @@ describe('BackendToolExecutor', () => {
         CONTEXT,
       );
 
-      expect(result.success).toBe(true);
-      expect(extendedFrontend.execute).toHaveBeenCalledWith(
-        'edit',
-        { action: 'rename_track', sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
-        CONTEXT,
-      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not approved for backend-safe agent execution');
+      expect(extendedFrontend.execute).not.toHaveBeenCalled();
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
-    it('should route transition orchestration tool to frontend executor', async () => {
+    it('should fail fast for mutating transition tools that are not backend-safe', async () => {
       const result = await backend.execute('add_transition', { type: 'dissolve' }, CONTEXT);
 
-      expect(result.success).toBe(true);
-      expect(frontend.execute).toHaveBeenCalledWith(
-        'add_transition',
-        { type: 'dissolve' },
-        CONTEXT,
-      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not approved for backend-safe agent execution');
+      expect(frontend.execute).not.toHaveBeenCalled();
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
-    it('should route track tools with frontend-only arg shaping to frontend', async () => {
+    it('should fail fast for mutating track tools that are not backend-safe', async () => {
       const result = await backend.execute(
         'rename_track',
         { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
         CONTEXT,
       );
 
-      expect(result.success).toBe(true);
-      expect(frontend.execute).toHaveBeenCalledWith(
-        'rename_track',
-        { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
-        CONTEXT,
-      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not approved for backend-safe agent execution');
+      expect(frontend.execute).not.toHaveBeenCalled();
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
@@ -460,19 +460,43 @@ describe('BackendToolExecutor', () => {
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
-    it('should keep frontend-only compound clip tools on frontend', async () => {
+    it('should fail fast for mutating compound tools that are not backend-safe', async () => {
       const result = await backend.execute(
         'freeze_frame',
         { clipId: 'clip-1', frameTime: 4, freezeDuration: 2 },
         CONTEXT,
       );
 
-      expect(result.success).toBe(true);
-      expect(frontend.execute).toHaveBeenCalledWith(
-        'freeze_frame',
-        { clipId: 'clip-1', frameTime: 4, freezeDuration: 2 },
-        CONTEXT,
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not approved for backend-safe agent execution');
+      expect(frontend.execute).not.toHaveBeenCalled();
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should reject backend-routed mutations when the expected revision is stale', async () => {
+      useProjectStore.setState({
+        isLoaded: true,
+        meta: {
+          id: 'project-1',
+          name: 'Test',
+          path: '/tmp/test.orio',
+          createdAt: new Date().toISOString(),
+          modifiedAt: new Date().toISOString(),
+        },
+        stateVersion: 8,
+      });
+
+      const result = await backend.execute(
+        'split_clip',
+        { clipId: 'clip-1', atTimelineSec: 5 },
+        {
+          ...CONTEXT,
+          expectedStateVersion: 3,
+        },
       );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('REV_CONFLICT');
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
@@ -593,7 +617,7 @@ describe('BackendToolExecutor', () => {
       expect(frontend.execute).not.toHaveBeenCalled();
     });
 
-    it('should fall back to frontend execute_plan when a legacy batch contains a frontend-only step', async () => {
+    it('should fail fast when a legacy execute_plan contains a frontend-only mutation step', async () => {
       const result = await backend.execute(
         'execute_plan',
         {
@@ -613,47 +637,13 @@ describe('BackendToolExecutor', () => {
         CONTEXT,
       );
 
-      expect(result.success).toBe(true);
-      expect(result.data).toEqual({
-        frontend: true,
-        tool: 'execute_plan',
-        args: {
-          steps: [
-            {
-              id: 'split-step',
-              toolName: 'split_clip',
-              params: { clipId: 'clip-1', splitTime: 5 },
-            },
-            {
-              id: 'transition-step',
-              toolName: 'add_transition',
-              params: { clipId: 'clip-1b', transitionType: 'dissolve' },
-            },
-          ],
-        },
-      });
-      expect(frontend.execute).toHaveBeenCalledWith(
-        'execute_plan',
-        {
-          steps: [
-            {
-              id: 'split-step',
-              toolName: 'split_clip',
-              params: { clipId: 'clip-1', splitTime: 5 },
-            },
-            {
-              id: 'transition-step',
-              toolName: 'add_transition',
-              params: { clipId: 'clip-1b', transitionType: 'dissolve' },
-            },
-          ],
-        },
-        CONTEXT,
-      );
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not approved for backend-safe agent execution');
+      expect(frontend.execute).not.toHaveBeenCalled();
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
-    it('should fall back to frontend execute_plan when legacy backend promotion expansion throws', async () => {
+    it('should fail fast when legacy execute_plan promotion expansion throws', async () => {
       registerCompoundExpander('ripple_edit', () => {
         throw new Error('Invalid ripple request');
       });
@@ -677,15 +667,9 @@ describe('BackendToolExecutor', () => {
       try {
         const result = await extendedBackend.execute('execute_plan', args, CONTEXT);
 
-        expect(result).toMatchObject({
-          success: true,
-          data: {
-            frontend: true,
-            tool: 'execute_plan',
-            args,
-          },
-        });
-        expect(extendedFrontend.execute).toHaveBeenCalledWith('execute_plan', args, CONTEXT);
+        expect(result.success).toBe(false);
+        expect(result.error).toContain('not approved for backend-safe agent execution');
+        expect(extendedFrontend.execute).not.toHaveBeenCalled();
         expect(mockInvoke).not.toHaveBeenCalled();
       } finally {
         unregisterCompoundExpander('ripple_edit');
@@ -757,7 +741,7 @@ describe('BackendToolExecutor', () => {
       expect(extendedFrontend.execute).not.toHaveBeenCalled();
     });
 
-    it('should fall back to frontend execute_plan when the legacy batch includes frontend-only tools', async () => {
+    it('should fail fast when a legacy execute_plan includes frontend-only mutation tools', async () => {
       const extendedTools = [
         ...TOOL_DEFS,
         {
@@ -783,8 +767,9 @@ describe('BackendToolExecutor', () => {
 
       const result = await extendedBackend.execute('execute_plan', args, CONTEXT);
 
-      expect(result.success).toBe(true);
-      expect(extendedFrontend.execute).toHaveBeenCalledWith('execute_plan', args, CONTEXT);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('not approved for backend-safe agent execution');
+      expect(extendedFrontend.execute).not.toHaveBeenCalled();
       expect(mockInvoke).not.toHaveBeenCalled();
     });
   });

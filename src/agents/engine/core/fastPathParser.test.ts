@@ -108,6 +108,7 @@ describe('parseFastPathPlan', () => {
       endTime: 20,
       trackId: 'track-3',
     });
+    expect(match?.plan.steps[0]?.riskLevel).toBe('high');
   });
 
   it('Given missing selected clip context, When parser runs, Then it returns null for safe fallback', () => {
