@@ -246,9 +246,7 @@ describe('agentSessionStore', () => {
     expect(state.snapshotsById).toEqual({});
     expect(state.permissionDecisionsBySessionId).toEqual({});
     expect(state.persistenceIssuesBySessionId).toEqual({});
-    expect(state.persistenceLatchesBySessionId).toEqual({
-      'session-old': [degradedIssue],
-    });
+    expect(state.persistenceLatchesBySessionId).toEqual({});
     expect(state.recoveryArtifactsBySessionId).toEqual({});
     expect(state.sessionOrder).toEqual([]);
     expect(state.lastError).toBeNull();
@@ -627,7 +625,7 @@ describe('agentSessionStore', () => {
       status: 'degraded',
       label: 'Degraded',
       description:
-        'Persistence is partial. Resume, approval history, or audit trail may be incomplete until persistence recovers.',
+        'Persistence is partial. Recovery context, approval history, or audit trail may be incomplete until persistence recovers.',
       isRestartSafe: true,
     });
   });
@@ -669,7 +667,7 @@ describe('agentSessionStore', () => {
     });
   });
 
-  it('classifies a linked checkpoint as a full restart path', () => {
+  it('classifies a linked checkpoint as recovery context available', () => {
     const session = createSession({
       activeCheckpointId: 'checkpoint-9',
       compactionVersion: 2,
@@ -697,17 +695,19 @@ describe('agentSessionStore', () => {
       },
     })).toMatchObject({
       status: 'full',
-      label: 'Full',
+      label: 'Context Available',
       restartBoundary: {
         kind: 'checkpoint',
-        title: 'Resume checkpoint',
+        title: 'Linked checkpoint',
       },
+      description:
+        'A persisted checkpoint is linked to the current session state, so the next run can rebuild visible context from a durable boundary.',
       checkpointCount: 1,
       compactionCount: 1,
     });
   });
 
-  it('falls back to a degraded summary boundary when no checkpoint is linked', () => {
+  it('falls back to a degraded persisted summary when no checkpoint is linked', () => {
     const session = createSession({
       latestSummaryMessageId: 'summary-9',
       lastCompactedAt: 700,
@@ -730,8 +730,10 @@ describe('agentSessionStore', () => {
       label: 'Degraded',
       restartBoundary: {
         kind: 'summary_boundary',
-        title: 'Summary boundary',
+        title: 'Persisted summary',
       },
+      description:
+        'A persisted compaction summary exists, but recovery will rebuild visible context from that summary instead of a linked checkpoint.',
       checkpointCount: 0,
       compactionCount: 1,
     });
@@ -780,7 +782,34 @@ describe('agentSessionStore', () => {
       label: 'Ephemeral',
       restartBoundary: {
         kind: 'checkpoint',
-        title: 'Resume checkpoint',
+        title: 'Linked checkpoint',
+      },
+      checkpointCount: 1,
+    });
+  });
+
+  it('ignores active checkpoint rows that are not linked from the session header', () => {
+    expect(summarizeAgentSessionResumeHistory({
+      session: createSession(),
+      artifacts: {
+        ...createEmptyAgentSessionRecoveryArtifacts(),
+        checkpoints: [
+          createResumeCheckpoint({
+            id: 'checkpoint-unlinked',
+            status: 'active',
+          }),
+        ],
+      },
+    })).toMatchObject({
+      status: 'cold',
+      label: 'Cold',
+      restartBoundary: {
+        kind: 'conversation_log',
+        title: 'Conversation log replay',
+      },
+      activeCheckpoint: null,
+      latestCheckpoint: {
+        id: 'checkpoint-unlinked',
       },
       checkpointCount: 1,
     });

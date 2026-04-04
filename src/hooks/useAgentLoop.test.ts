@@ -10,6 +10,11 @@ import { usePermissionStore } from '@/stores/permissionStore';
 import { useAgentSessionStore } from '@/stores/agentSessionStore';
 import { useAgentLoop } from './useAgentLoop';
 
+const mockTauriInvoke = vi.fn().mockResolvedValue(undefined);
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: (...args: unknown[]) => mockTauriInvoke(...args),
+}));
+
 vi.mock('@/bindings', () => ({
   commands: {
     createAgentSession: vi.fn(),
@@ -101,6 +106,61 @@ function createPermissionDecisionDto(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function createPersistedRecoveryCheckpoint(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'checkpoint-recovery-1',
+    sessionId: 'conversation-session-1',
+    runId: 'run-previous',
+    checkpointKind: 'tool_wait',
+    status: 'active',
+    resumeCursorJson: JSON.stringify({
+      checkpointKind: 'tool_wait',
+      phase: 'awaiting_tool_permission',
+      toolName: 'delete_clip',
+    }),
+    sessionStateJson: JSON.stringify({
+      phase: 'awaiting_tool_permission',
+      input: 'Delete the intro clip',
+      planGoal: 'Delete the intro clip safely',
+    }),
+    pendingWorkJson: JSON.stringify({
+      type: 'tool_permission',
+      toolName: 'delete_clip',
+    }),
+    createdAt: 95,
+    consumedAt: null,
+    ...overrides,
+  };
+}
+
+function createPersistedCompaction(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'compaction-summary-1',
+    sessionId: 'conversation-session-1',
+    runId: 'run-previous',
+    tier: 'summary',
+    trigger: 'auto',
+    summaryMessageId: 'summary-message-1',
+    sourceMessageCount: 12,
+    retainedMessageCount: 4,
+    estimatedTokensSaved: 3200,
+    continuationSummaryJson: JSON.stringify({
+      summary: 'Recovered fast runtime summary',
+      input: 'Delete the intro clip',
+      sourceMessageCount: 12,
+      retainedMessageCount: 4,
+    }),
+    stateRehydrationJson: JSON.stringify({
+      phase: 'compacting',
+      summary: 'Recovered fast runtime summary',
+      sourceMessageCount: 12,
+      retainedMessageCount: 4,
+    }),
+    createdAt: 96,
+    ...overrides,
+  };
+}
+
 describe('useAgentLoop', () => {
   let sessionState: AgentSession;
   let persistedCompactions: Array<Record<string, unknown>>;
@@ -109,6 +169,7 @@ describe('useAgentLoop', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    mockTauriInvoke.mockReset().mockResolvedValue(undefined);
 
     setFeatureFlag('USE_AGENT_LOOP', true);
     sessionState = createAgentSessionDto();
@@ -434,6 +495,166 @@ describe('useAgentLoop', () => {
     );
   });
 
+  it('should bootstrap recovered context from an active persisted checkpoint before a new fast run', async () => {
+    const llm = createMockLLMAdapter();
+    const tools = createMockToolExecutorWithVideoTools();
+
+    sessionState = createAgentSessionDto();
+    sessionState = {
+      ...sessionState,
+      activeCheckpointId: 'checkpoint-recovery-1',
+      resumeCursorVersion: 1,
+    };
+    persistedCheckpoints = [createPersistedRecoveryCheckpoint()];
+
+    llm.setToolsResponse({ content: 'Recovered context acknowledged.' });
+
+    const { result } = renderHook(() =>
+      useAgentLoop({
+        llmClient: llm,
+        toolExecutor: tools,
+        context: {
+          projectId: 'project-1',
+          sequenceId: 'sequence-1',
+        },
+        config: {
+          enableFastPath: false,
+        },
+      }),
+    );
+
+    await act(async () => {
+      await result.current.run('Continue the edit');
+    });
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('completed');
+    });
+
+    const systemMessages = useConversationStore
+      .getState()
+      .activeConversation?.messages
+      .filter((message) => message.role === 'system')
+      .map((message) => message.parts.find((part) => part.type === 'text'))
+      .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
+      .map((part) => part.content);
+
+    expect(systemMessages).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('Recovered durable context from a previous app session.'),
+      ]),
+    );
+    expect(systemMessages?.join('\n')).toContain('Pending tool permission: delete_clip');
+    expect(vi.mocked(commands.consumeAgentResumeCheckpoint)).not.toHaveBeenCalledWith(
+      'checkpoint-recovery-1',
+    );
+  });
+
+  it('should ignore active checkpoint rows that are not linked from the session header', async () => {
+    const llm = createMockLLMAdapter();
+    const tools = createMockToolExecutorWithVideoTools();
+
+    sessionState = createAgentSessionDto();
+    persistedCheckpoints = [createPersistedRecoveryCheckpoint()];
+
+    llm.setToolsResponse({ content: 'Started a fresh run.' });
+
+    const { result } = renderHook(() =>
+      useAgentLoop({
+        llmClient: llm,
+        toolExecutor: tools,
+        context: {
+          projectId: 'project-1',
+          sequenceId: 'sequence-1',
+        },
+        config: {
+          enableFastPath: false,
+        },
+      }),
+    );
+
+    await act(async () => {
+      await result.current.run('Continue the edit');
+    });
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('completed');
+    });
+
+    const systemMessages = useConversationStore
+      .getState()
+      .activeConversation?.messages
+      .filter((message) => message.role === 'system')
+      .map((message) => message.parts.find((part) => part.type === 'text'))
+      .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
+      .map((part) => part.content)
+      ?? [];
+
+    expect(
+      systemMessages.some((message) =>
+        message.includes('Recovered durable context from a previous app session.'),
+      ),
+    ).toBe(false);
+    expect(vi.mocked(commands.consumeAgentResumeCheckpoint)).not.toHaveBeenCalledWith(
+      'checkpoint-recovery-1',
+    );
+  });
+
+  it('should bootstrap recovered context from the latest persisted compaction summary when no checkpoint is linked', async () => {
+    const llm = createMockLLMAdapter();
+    const tools = createMockToolExecutorWithVideoTools();
+
+    sessionState = {
+      ...createAgentSessionDto(),
+      latestSummaryMessageId: 'summary-message-1',
+      compactionVersion: 1,
+      lastCompactedAt: 96,
+    };
+    persistedCompactions = [createPersistedCompaction()];
+
+    llm.setToolsResponse({ content: 'Recovered summary acknowledged.' });
+
+    const { result } = renderHook(() =>
+      useAgentLoop({
+        llmClient: llm,
+        toolExecutor: tools,
+        context: {
+          projectId: 'project-1',
+          sequenceId: 'sequence-1',
+        },
+        config: {
+          enableFastPath: false,
+        },
+      }),
+    );
+
+    await act(async () => {
+      await result.current.run('Continue the edit');
+    });
+
+    await waitFor(() => {
+      expect(result.current.phase).toBe('completed');
+    });
+
+    const systemMessages = useConversationStore
+      .getState()
+      .activeConversation?.messages
+      .filter((message) => message.role === 'system')
+      .map((message) => message.parts.find((part) => part.type === 'text'))
+      .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
+      .map((part) => part.content)
+      ?? [];
+
+    expect(
+      systemMessages.some((message) =>
+        message.includes('Recovered durable context from persisted compaction history.'),
+      ),
+    ).toBe(true);
+    expect(
+      systemMessages.some((message) => message.includes('Recovered summary: Recovered fast runtime summary')),
+    ).toBe(true);
+  });
+
   it('should call onAbort only once when a pending permission prompt is aborted', async () => {
     const llm = createMockLLMAdapter();
     const tools = createMockToolExecutorWithVideoTools();
@@ -567,6 +788,135 @@ describe('useAgentLoop', () => {
       expect.objectContaining({
         runId: 'run-fast-1',
         phase: 'aborted',
+      }),
+    );
+  });
+
+  it('should write a fast-runtime trace and persist the trace id on the run row', async () => {
+    const llm = createMockLLMAdapter();
+    const tools = createMockToolExecutorWithVideoTools();
+
+    llm.setToolsResponse({
+      toolCalls: [
+        {
+          id: 'tool-call-1',
+          name: 'delete_clip',
+          args: { clipId: 'clip-1' },
+        },
+      ],
+    });
+
+    tools.registerTool({
+      info: {
+        name: 'delete_clip',
+        description: 'Delete clip',
+        category: 'editing',
+        riskLevel: 'medium',
+        supportsUndo: true,
+        parallelizable: false,
+      },
+      parameters: {
+        type: 'object',
+        properties: {
+          clipId: { type: 'string' },
+        },
+      },
+      required: ['clipId'],
+      executor: async () => {
+        llm.setToolsResponse({
+          content: 'The clip has been deleted.',
+          usage: {
+            inputTokens: 12,
+            outputTokens: 8,
+          },
+        });
+        return {
+          success: true,
+          data: { deleted: true },
+          duration: 10,
+        };
+      },
+    });
+
+    const { result } = renderHook(() =>
+      useAgentLoop({
+        llmClient: llm,
+        toolExecutor: tools,
+        context: {
+          projectId: 'project-1',
+          sequenceId: 'sequence-1',
+        },
+        config: {
+          enableFastPath: false,
+          enableTracing: true,
+          approvalThreshold: 'low',
+        },
+      }),
+    );
+
+    let runPromise!: Promise<void>;
+    act(() => {
+      runPromise = result.current.run('Delete clip 1');
+    });
+
+    await waitFor(() => {
+      expect(result.current.events.map((event) => event.type)).toContain('tool_permission_request');
+    });
+
+    act(() => {
+      result.current.approveToolPermission('allow');
+    });
+
+    await act(async () => {
+      await runPromise;
+    });
+
+    const traceWriteCall = mockTauriInvoke.mock.calls.find(
+      ([command]) => command === 'write_agent_trace',
+    );
+    expect(traceWriteCall).toBeDefined();
+
+    const tracePayload = traceWriteCall?.[1] as { traceId?: string; traceJson?: string };
+    const trace = JSON.parse(tracePayload.traceJson ?? '{}');
+
+    expect(trace.runtimeKind).toBe('fast');
+    expect(trace.artifacts.persistedRunId).toBe('run-fast-1');
+    expect(trace.artifacts.permissionEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          action: 'ask',
+          subject: 'timeline.clip.delete#clip:clip-1',
+        }),
+        expect.objectContaining({
+          action: 'allow',
+          source: 'interactive_approval',
+        }),
+      ]),
+    );
+    expect(trace.artifacts.checkpointEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          checkpointKind: 'safe_resume_point',
+          status: 'persisted',
+        }),
+        expect.objectContaining({
+          checkpointKind: 'tool_wait',
+          status: 'persisted',
+        }),
+      ]),
+    );
+    expect(vi.mocked(commands.startAgentRun)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: 'conversation-session-1',
+        runtimeKind: 'fast',
+        traceId: tracePayload.traceId,
+      }),
+    );
+    expect(vi.mocked(commands.updateAgentRunPhase)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run-fast-1',
+        phase: 'completed',
+        traceId: tracePayload.traceId,
       }),
     );
   });

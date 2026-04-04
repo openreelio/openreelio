@@ -6738,7 +6738,7 @@ export type UnnestCompoundClipArgs = { sequenceId: string; trackId: string; clip
 /**
  * Input payload for updating an agent run phase and syncing session state.
  */
-export type UpdateAgentRunPhaseInput = { runId: string; phase: string; toolCallsUsed: number | null; plannedStepCount: number | null; completedStepCount: number | null; outputMessageId: string | null; rollbackReportJson: string | null; errorCode: string | null; errorMessage: string | null; currentPlanId: string | null; pendingApprovalId: string | null; activeCheckpointId: string | null; permissionStateVersion: number | null; compactionVersion: number | null; resumeCursorVersion: number | null; lastCompactedAt: number | null; lastResumedAt: number | null; endedAt: number | null }
+export type UpdateAgentRunPhaseInput = { runId: string; phase: string; traceId: string | null; toolCallsUsed: number | null; plannedStepCount: number | null; completedStepCount: number | null; outputMessageId: string | null; rollbackReportJson: string | null; errorCode: string | null; errorMessage: string | null; currentPlanId: string | null; pendingApprovalId: string | null; activeCheckpointId: string | null; permissionStateVersion: number | null; compactionVersion: number | null; resumeCursorVersion: number | null; lastCompactedAt: number | null; lastResumedAt: number | null; endedAt: number | null }
 /**
  * DTO for update check result
  */

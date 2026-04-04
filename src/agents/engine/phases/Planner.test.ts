@@ -144,6 +144,37 @@ describe('Planner', () => {
       expect(result.steps[0].tool).toBe('split_clip');
     });
 
+    it('should include the shared editor tool reference in the planning prompt', async () => {
+      const mockPlan: Plan = {
+        goal: 'Split the clip at 5 seconds',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'split_clip',
+            args: { clipId: 'clip-1', position: 5 },
+            description: 'Split clip-1 at position 5',
+            riskLevel: 'low',
+            estimatedDuration: 100,
+          },
+        ],
+        estimatedTotalDuration: 100,
+        requiresApproval: false,
+        rollbackStrategy: 'Use undo to reverse split',
+      };
+
+      mockLLM.setStructuredResponse({ structured: mockPlan });
+
+      await planner.plan(sampleThought, context);
+
+      const request = mockLLM.getLastRequest();
+      const systemMessage = request?.messages.find((message) => message.role === 'system');
+
+      expect(systemMessage?.content).toContain('AI video editing assistant');
+      expect(systemMessage?.content).toContain('<tool_reference>');
+      expect(systemMessage?.content).toContain('## Edit Actions');
+      expect(systemMessage?.content).toContain('You are currently operating in the PLAN phase');
+    });
+
     it('should generate multi-step plan for complex tasks', async () => {
       const complexThought: Thought = {
         understanding: 'Cut first 5 seconds and move to end',
@@ -745,9 +776,9 @@ describe('Planner', () => {
       const request = mockLLM.getLastRequest();
       const systemMessage = request?.messages.find((m) => m.role === 'system');
 
-      expect(systemMessage?.content).toContain('Language Policy:');
-      expect(systemMessage?.content).toContain('Default output language: ko');
-      expect(systemMessage?.content).toContain('Never translate tool names, IDs, argument keys');
+      expect(systemMessage?.content).toContain('<language_policy>');
+      expect(systemMessage?.content).toContain('Output Language: ko');
+      expect(systemMessage?.content).toContain('Never translate command names, tool names');
     });
   });
 
@@ -1047,6 +1078,29 @@ describe('Planner', () => {
       mockLLM.setStructuredResponse({ structured: mockPlan });
 
       await expect(customPlanner.plan(sampleThought, context)).rejects.toThrow(PlanValidationError);
+    });
+
+    it('should append project prompt addendum when provided', async () => {
+      const customPlanner = createPlanner(mockLLM, mockToolExecutor, {
+        projectPromptAddendum: '<custom_instructions>\nPrefer hard cuts\n</custom_instructions>',
+      });
+
+      mockLLM.setStructuredResponse({
+        structured: {
+          goal: 'Test plan',
+          steps: [],
+          estimatedTotalDuration: 0,
+          requiresApproval: false,
+          rollbackStrategy: 'N/A',
+        } as Plan,
+      });
+
+      await customPlanner.plan(sampleThought, context);
+
+      const request = mockLLM.getLastRequest();
+      const systemMessage = request?.messages.find((message) => message.role === 'system');
+      expect(systemMessage?.content).toContain('<custom_instructions>');
+      expect(systemMessage?.content).toContain('Prefer hard cuts');
     });
   });
 

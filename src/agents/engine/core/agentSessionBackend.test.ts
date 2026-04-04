@@ -257,6 +257,7 @@ describe('AgentSessionBackend', () => {
     const completedRun = await backend.updateRunPhase({
       runId: 'run-1',
       phase: 'completed',
+      traceId: 'trace-1',
       toolCallsUsed: 2,
       plannedStepCount: 2,
       completedStepCount: 2,
@@ -267,6 +268,7 @@ describe('AgentSessionBackend', () => {
     expect(commands.updateAgentRunPhase).toHaveBeenCalledWith({
       runId: 'run-1',
       phase: 'completed',
+      traceId: 'trace-1',
       toolCallsUsed: 2,
       plannedStepCount: 2,
       completedStepCount: 2,

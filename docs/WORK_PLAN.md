@@ -14,7 +14,7 @@ This document provides actionable task breakdowns for immediate development work
 | Version | Status | Progress | Notes |
 |---------|--------|----------|-------|
 | v0.1.0 MVP | ✅ READY | **99%** | All P2 issues resolved |
-| v0.2.0 AI | 🚧 REWRITE | **98%** | **Agent system rewrite in progress** - see [AGENT_IMPLEMENTATION_MASTER_PLAN.md](./AGENT_IMPLEMENTATION_MASTER_PLAN.md) |
+| v0.2.0 AI | 🚧 ENFORCEMENT | **98%** | **TPAO is the shipping runtime; AgentLoop and `chat_with_ai` remain compatibility/internal surfaces while verification hardening continues** - see [AGENT_IMPLEMENTATION_MASTER_PLAN.md](./AGENT_IMPLEMENTATION_MASTER_PLAN.md) |
 | v0.3.0 Effects | ✅ READY | **90%** | Export integration complete |
 | v0.4.0 Plugins | 📋 PLANNED | **60%** | WASM host exists |
 | **v0.5.0 Pro Foundation** | 📋 **NEW** | **0%** | Critical gaps identified |
@@ -235,7 +235,7 @@ Based on industry research comparing OpenReelio to DaVinci Resolve, Premiere Pro
 | AI Provider Architecture | ✅ COMPLETE | OpenAI, Anthropic, Local providers implemented |
 | AI Gateway & Executor | ✅ COMPLETE | EditScript execution from AI responses |
 | AI Settings Panel | ✅ COMPLETE | Full UI for configuring AI providers |
-| AI Prompt Panel | ✅ COMPLETE | Natural language editing interface |
+| AI Prompt Panel | ✅ COMPLETE | Legacy/internal natural language editing path retained for compatibility |
 | Meilisearch Sidecar | ✅ COMPLETE | Search engine sidecar management |
 | Search Service | ✅ COMPLETE | Asset/transcript indexing pipeline |
 | Search UI | ✅ COMPLETE | SearchBar, SearchPanel, Filters, Results |

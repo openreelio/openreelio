@@ -14,6 +14,58 @@ import { useTimelineStore } from '@/stores/timelineStore';
 import { usePlaybackStore } from '@/stores/playbackStore';
 import { createMockAsset, createMockClip, createMockTrack, createMockSequence } from '@/test/mocks';
 
+function seedActiveProjectState(): void {
+  const clip = createMockClip({
+    id: 'clip-1',
+    assetId: 'asset-1',
+    place: { timelineInSec: 0, durationSec: 10 },
+  });
+  const secondaryClip = createMockClip({
+    id: 'clip-2',
+    assetId: 'asset-2',
+    place: { timelineInSec: 10, durationSec: 10 },
+  });
+  const track = createMockTrack({
+    id: 'track-1',
+    kind: 'video',
+    name: 'Video 1',
+    clips: [clip, secondaryClip],
+  });
+  const sequence = createMockSequence({
+    id: 'sequence-1',
+    name: 'Main Sequence',
+    tracks: [track],
+  });
+  const asset = createMockAsset({
+    id: 'asset-1',
+    name: 'clip-1.mp4',
+    kind: 'video',
+  });
+  const secondaryAsset = createMockAsset({
+    id: 'asset-2',
+    name: 'clip-2.mp4',
+    kind: 'video',
+  });
+
+  useProjectStore.setState({
+    isLoaded: true,
+    meta: {
+      id: 'project-1',
+      name: 'Test',
+      path: '/tmp/test.orio',
+      createdAt: new Date().toISOString(),
+      modifiedAt: new Date().toISOString(),
+    },
+    stateVersion: 8,
+    activeSequenceId: 'sequence-1',
+    sequences: new Map([['sequence-1', sequence]]),
+    assets: new Map([
+      ['asset-1', asset],
+      ['asset-2', secondaryAsset],
+    ]),
+  });
+}
+
 describe('ToolRegistryAdapter', () => {
   let registry: ToolRegistry;
   let adapter: ToolRegistryAdapter;
@@ -23,14 +75,7 @@ describe('ToolRegistryAdapter', () => {
   let analyzeVideoTool: ToolDefinition;
 
   beforeEach(() => {
-    useProjectStore.setState({
-      isLoaded: false,
-      meta: null,
-      stateVersion: 0,
-      activeSequenceId: null,
-      sequences: new Map(),
-      assets: new Map(),
-    });
+    seedActiveProjectState();
     useTimelineStore.setState({ selectedClipIds: [], selectedTrackIds: [] });
     usePlaybackStore.setState({ currentTime: 0, duration: 0 });
 
@@ -205,6 +250,45 @@ describe('ToolRegistryAdapter', () => {
 
       expect(result.success).toBe(true);
       expect(readOnlyTool.handler).toHaveBeenCalledTimes(1);
+    });
+
+    it('should allow non-mutating analysis tools with non-read prefixes when state version is stale', async () => {
+      useProjectStore.setState({
+        isLoaded: true,
+        meta: {
+          id: 'project-1',
+          name: 'Test',
+          path: '/tmp/test.orio',
+          createdAt: new Date().toISOString(),
+          modifiedAt: new Date().toISOString(),
+        },
+        stateVersion: 9,
+      });
+
+      const analysisTool: ToolDefinition = {
+        name: 'compare_edit_structure',
+        description: 'Compare two edit structures',
+        category: 'analysis',
+        parameters: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+        handler: vi.fn().mockResolvedValue({ success: true, result: { correlation: 0.91 } }),
+      };
+      registry.register(analysisTool);
+
+      const result = await adapter.execute(
+        'compare_edit_structure',
+        {},
+        {
+          ...executionContext,
+          expectedStateVersion: 2,
+        },
+      );
+
+      expect(result.success).toBe(true);
+      expect(analysisTool.handler).toHaveBeenCalledTimes(1);
     });
 
     it('should reject placeholder or unknown IDs before tool execution', async () => {

@@ -25,11 +25,10 @@
  * ```
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   createAgenticEngine,
   createEmptyContext,
-  createLanguagePolicy,
   type AgentEvent,
   type AgentRunResult,
   type AgenticEngineConfig,
@@ -42,20 +41,34 @@ import {
   type Thought,
   type Plan,
   createMemoryManagerAdapter,
+  generateId,
 } from '@/agents/engine';
 import { isAgenticEngineEnabled } from '@/config/featureFlags';
 import { useConversationStore } from '@/stores/conversationStore';
 import { usePermissionStore } from '@/stores/permissionStore';
-import { usePlaybackStore } from '@/stores/playbackStore';
-import { useTimelineStore } from '@/stores/timelineStore';
-import { useProjectStore } from '@/stores';
-import { useAgentSessionStore } from '@/stores/agentSessionStore';
-import { useSettingsStore } from '@/stores/settingsStore';
-import { globalToolRegistry } from '@/agents';
 import { clearPendingApprovals } from '@/hooks/useAgentApproval';
 import { registerAgentAbort, unregisterAgentAbort } from '@/agents/engine/core/agentCleanup';
-import { buildResumeCheckpointPayload } from '@/agents/engine/core/recoveryPersistence';
-import { persistPermissionAudit } from '@/agents/engine/core/permissionAudit';
+import {
+  buildPermissionTraceRecord,
+  persistPermissionAudit,
+} from '@/agents/engine/core/permissionAudit';
+import {
+  mergeTraceArtifacts,
+  TraceRecorder,
+  type AgentTrace,
+} from '@/agents/engine/core/traceRecorder';
+import { writeTrace } from '@/agents/engine/core/traceWriter';
+import {
+  bootstrapPersistedAgentSession,
+  bootstrapRecoveredContextFromCheckpoint,
+  createResumeCheckpointController,
+  ensureConfiguredProvider,
+  ensureConversationSessionId,
+  finalizePersistedRun,
+  getPersistedSessionTraceState,
+  startPersistedRun,
+} from './agentRuntimePersistence';
+import { useAgentRuntimeStoreContext } from './agentRuntimeStoreContext';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('useAgenticLoop');
@@ -162,6 +175,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     resolve: (decision: 'allow' | 'deny' | 'allow_always') => void;
     step: unknown;
   } | null>(null);
+  const bootstrappedCheckpointIdRef = useRef<string | null>(null);
   const memoryStoreRef = useRef<IMemoryStore | null>(null);
   const persistedRunIdRef = useRef<string | null>(null);
 
@@ -287,23 +301,8 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       // Pre-flight: verify AI provider is configured
       // For refreshable clients (e.g., Tauri adapter), refresh backend status first
       // to avoid false negatives from stale in-memory cache.
-      if (typeof llmClient.isConfigured === 'function' && !llmClient.isConfigured()) {
-        const refreshableClient = llmClient as ILLMClient & {
-          refreshStatus?: () => Promise<{ isConfigured: boolean }>;
-        };
-
-        if (typeof refreshableClient.refreshStatus === 'function') {
-          try {
-            await refreshableClient.refreshStatus();
-          } catch (statusError) {
-            logger.warn('Failed to refresh LLM provider status before run', {
-              error: statusError instanceof Error ? statusError.message : String(statusError),
-            });
-          }
-        }
-      }
-
-      if (typeof llmClient.isConfigured === 'function' && !llmClient.isConfigured()) {
+      const providerConfigured = await ensureConfiguredProvider(llmClient, logger, 'agentic');
+      if (!providerConfigured) {
         const configError = new Error(
           'AI provider not configured. Go to Settings > AI to set up your API key.',
         );
@@ -321,8 +320,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
 
       // Ensure a conversation session exists before running
       const convStore = useConversationStore.getState();
-      const storeSessionId = convStore.activeSessionId
-        ?? await convStore.ensureSession();
+      const storeSessionId = await ensureConversationSessionId(convStore);
       if (!storeSessionId) {
         const sessionError = new Error(
           'Conversation session is required before starting agentic loop',
@@ -337,122 +335,90 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
       }
 
       const projectId = convStore.activeProjectId ?? context.projectId;
-      const agentSessionStore = useAgentSessionStore.getState();
-      const persistResumeCheckpoint = async (inputOverrides: Parameters<
-        typeof buildResumeCheckpointPayload
-      >[0]): Promise<string | null> => {
-        try {
-          const sessionSnapshot = useAgentSessionStore.getState().snapshotsById[storeSessionId]?.session;
-          const payload = buildResumeCheckpointPayload({
-            currentPlanId: sessionSnapshot?.currentPlanId ?? null,
-            pendingApprovalId: sessionSnapshot?.pendingApprovalId ?? null,
-            ...inputOverrides,
-          });
-          const checkpoint = await agentSessionStore.createResumeCheckpoint({
-            sessionId: storeSessionId,
-            runId: persistedRunIdRef.current,
-            checkpointKind: inputOverrides.checkpointKind,
-            ...payload,
-          });
-          return checkpoint.id;
-        } catch (error) {
-          logger.warn('Failed to persist agentic resume checkpoint', {
-            sessionId: storeSessionId,
-            checkpointKind: inputOverrides.checkpointKind,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          return null;
-        }
-      };
-      const consumeResumeCheckpoint = async (checkpointId: string | null): Promise<void> => {
-        if (!checkpointId) {
-          return;
-        }
-
-        try {
-          await agentSessionStore.consumeResumeCheckpoint(checkpointId);
-        } catch (error) {
-          logger.warn('Failed to consume agentic resume checkpoint', {
-            sessionId: storeSessionId,
-            checkpointId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      };
-      if (projectId) {
-        agentSessionStore.loadForProject(projectId);
-
-        try {
-          await agentSessionStore.ensureSession({
-            id: storeSessionId,
-            projectId,
-            sequenceId: context.sequenceId ?? null,
-            runtimeKind: 'tpao',
-            sessionMode: 'primary',
-            agentProfileId: 'editor',
-            modelProvider: config?.activeProvider ?? null,
-            modelId: config?.activeModel ?? null,
-          });
-        } catch (error) {
-          logger.warn('Failed to ensure persisted agentic session', {
-            sessionId: storeSessionId,
-            projectId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-
-        try {
-          const decisions = await agentSessionStore.refreshPermissionDecisions(storeSessionId);
-          usePermissionStore
-            .getState()
-            .hydrateSessionRulesFromPersistedDecisions(storeSessionId, decisions);
-        } catch (error) {
-          logger.warn('Failed to replay persisted agentic permissions', {
-            sessionId: storeSessionId,
-            projectId,
-            error: error instanceof Error ? error.message : String(error),
-          });
-        }
-      }
+      const persistedTraceId = config?.enableTracing === false ? null : generateId('trace');
+      const runtimeTraceRecorder = persistedTraceId ? new TraceRecorder() : null;
+      runtimeTraceRecorder?.startRun({
+        sessionId: storeSessionId,
+        input,
+        model: config?.activeModel,
+        provider: config?.activeProvider,
+        traceId: persistedTraceId ?? undefined,
+        runtimeKind: 'tpao',
+      });
+      const checkpointController = createResumeCheckpointController({
+        sessionId: storeSessionId,
+        persistedRunIdRef,
+        logger,
+        loggerLabel: 'agentic',
+        onCheckpointPersisted: (record) => runtimeTraceRecorder?.recordCheckpointEvent(record),
+        onCheckpointConsumed: (record) => runtimeTraceRecorder?.recordCheckpointEvent(record),
+      });
+      await bootstrapPersistedAgentSession({
+        sessionId: storeSessionId,
+        projectId,
+        sequenceId: context.sequenceId ?? null,
+        runtimeKind: 'tpao',
+        modelProvider: config?.activeProvider ?? null,
+        modelId: config?.activeModel ?? null,
+        logger,
+        loggerLabel: 'agentic',
+      });
+      await bootstrapRecoveredContextFromCheckpoint({
+        sessionId: storeSessionId,
+        addSystemMessage: convStore.addSystemMessage,
+        logger,
+        loggerLabel: 'agentic',
+        lastBootstrappedCheckpointIdRef: bootstrappedCheckpointIdRef,
+        onCheckpointRecovered: (record) => runtimeTraceRecorder?.recordCheckpointEvent(record),
+        onCompactionRecovered: (record) => runtimeTraceRecorder?.recordCompactionEvent(record),
+      });
 
       // Create execution context bound to the store session
       const executionContext = {
         projectId: context.projectId,
         sequenceId: context.sequenceId,
         sessionId: storeSessionId,
+        traceId: persistedTraceId ?? undefined,
         expectedStateVersion: context.projectStateVersion,
       };
 
       let persistedFinalPhase: 'completed' | 'failed' | 'aborted' = 'completed';
       let persistedErrorMessage: string | null = null;
       let persistedToolCalls = 0;
+      let persistedCompletedStepCount = 0;
+      let persistedPlannedStepCount: number | undefined;
+      let persistedRollbackReportJson: string | null = null;
+      let traceToWrite: AgentTrace | null = null;
+      let finalizedRuntimeTrace: AgentTrace | null = null;
 
-      try {
-        const persistedRun = await agentSessionStore.startRun({
-          sessionId: executionContext.sessionId,
-          runtimeKind: 'tpao',
-          trigger: 'user',
-          maxIterations: config?.maxIterations,
-          maxToolCalls: config?.maxToolCallsPerRun,
-        });
-        persistedRunIdRef.current = persistedRun.id;
-        await persistResumeCheckpoint({
-          sessionId: storeSessionId,
-          runId: persistedRun.id,
-          runtimeKind: 'tpao',
-          checkpointKind: 'safe_resume_point',
-          phase: 'initializing',
-          projectId: context.projectId,
-          sequenceId: context.sequenceId ?? null,
-          input,
-        });
-      } catch (error) {
-        persistedRunIdRef.current = null;
-        logger.warn('Failed to create persisted agentic run', {
-          sessionId: executionContext.sessionId,
-          error: error instanceof Error ? error.message : String(error),
-        });
-      }
+      const finalizeRuntimeTrace = (success: boolean, errorMessage?: string | null): AgentTrace | null => {
+        if (!runtimeTraceRecorder) {
+          return null;
+        }
+
+        if (!finalizedRuntimeTrace) {
+          finalizedRuntimeTrace = runtimeTraceRecorder.finalize(success, errorMessage ?? undefined);
+        }
+
+        return finalizedRuntimeTrace;
+      };
+
+      const startedRunId = await startPersistedRun({
+        sessionId: executionContext.sessionId,
+        runtimeKind: 'tpao',
+        maxIterations: config?.maxIterations,
+        maxToolCalls: config?.maxToolCallsPerRun,
+        traceId: persistedTraceId,
+        runInput: input,
+        context,
+        checkpointController,
+        persistedRunIdRef,
+        logger,
+        loggerLabel: 'agentic',
+      });
+      runtimeTraceRecorder?.setArtifactState({
+        persistedRunId: startedRunId,
+      });
 
       try {
         const baseApprovalHandler =
@@ -471,6 +437,14 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
             const stepId = typeof step.id === 'string' ? step.id : null;
 
             if (resolution.permission === 'allow' || resolution.permission === 'deny') {
+              runtimeTraceRecorder?.recordPermissionEvent(
+                buildPermissionTraceRecord({
+                  runId: persistedRunIdRef.current,
+                  stepId,
+                  resolution,
+                  action: resolution.permission,
+                }),
+              );
               persistPermissionAudit(
                 storeSessionId,
                 persistedRunIdRef.current,
@@ -481,6 +455,14 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
               return resolution.permission;
             }
 
+            runtimeTraceRecorder?.recordPermissionEvent(
+              buildPermissionTraceRecord({
+                runId: persistedRunIdRef.current,
+                stepId,
+                resolution,
+                action: 'ask',
+              }),
+            );
             persistPermissionAudit(
               storeSessionId,
               persistedRunIdRef.current,
@@ -496,6 +478,15 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
               };
             });
 
+            runtimeTraceRecorder?.recordPermissionEvent(
+              buildPermissionTraceRecord({
+                runId: persistedRunIdRef.current,
+                stepId,
+                resolution,
+                action: decision,
+                source: 'interactive_approval',
+              }),
+            );
             persistPermissionAudit(
               storeSessionId,
               persistedRunIdRef.current,
@@ -511,9 +502,10 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         // Create engine
         const engine = createAgenticEngine(llmClient, toolExecutor, {
           ...config,
+          writeTraceOnComplete: false,
           memoryStore: config?.memoryStore ?? memoryStoreRef.current ?? undefined,
           approvalHandler: async (plan) => {
-            const checkpointId = await persistResumeCheckpoint({
+            const checkpointId = await checkpointController.persistCheckpoint({
               sessionId: storeSessionId,
               runId: persistedRunIdRef.current,
               runtimeKind: 'tpao',
@@ -529,7 +521,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
             try {
               return await baseApprovalHandler(plan);
             } finally {
-              await consumeResumeCheckpoint(checkpointId);
+              await checkpointController.consumeCheckpoint(checkpointId);
             }
           },
           toolPermissionHandler: async (toolName, args, step) => {
@@ -548,7 +540,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
 
             let checkpointId: string | null = null;
             if (!autoResolved) {
-              checkpointId = await persistResumeCheckpoint({
+              checkpointId = await checkpointController.persistCheckpoint({
                 sessionId: storeSessionId,
                 runId: persistedRunIdRef.current,
                 runtimeKind: 'tpao',
@@ -567,7 +559,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
             try {
               return autoDecision ?? await decisionPromise;
             } finally {
-              await consumeResumeCheckpoint(checkpointId);
+              await checkpointController.consumeCheckpoint(checkpointId);
             }
           },
         });
@@ -588,24 +580,45 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
           conversationHistory,
         );
 
+        persistedFinalPhase =
+          result.finalState.phase === 'aborted'
+            ? 'aborted'
+            : result.finalState.phase === 'failed'
+              ? 'failed'
+              : 'completed';
+        persistedErrorMessage = result.error?.message ?? null;
+        persistedToolCalls = result.executionResults.reduce(
+          (count, executionResult) => count + executionResult.toolCallsUsed,
+          0,
+        );
+        persistedCompletedStepCount = result.executionResults.reduce(
+          (count, executionResult) => count + executionResult.completedSteps.length,
+          0,
+        );
+        persistedPlannedStepCount = result.pendingPlan?.steps.length
+          ?? result.finalState.plan?.steps.length;
+        persistedRollbackReportJson = result.rollbackReport
+          ? JSON.stringify(result.rollbackReport)
+          : null;
+        const runtimeTrace = finalizeRuntimeTrace(result.success, result.error?.message ?? null);
+        const enrichedResult = runtimeTrace && result.trace
+          ? { ...result, trace: mergeTraceArtifacts(result.trace, runtimeTrace) }
+          : runtimeTrace
+            ? { ...result, trace: runtimeTrace }
+            : result;
+        traceToWrite = enrichedResult.trace ?? null;
+
         if (!abortedRef.current) {
-          persistedFinalPhase =
-            result.finalState.phase === 'aborted'
-              ? 'aborted'
-              : result.finalState.phase === 'failed'
-                ? 'failed'
-                : 'completed';
-          persistedErrorMessage = result.error?.message ?? null;
-          persistedToolCalls = result.finalState.executionHistory.length;
-          setPhase(result.finalState.phase);
-          optionsRef.current.onComplete?.(result);
+          setPhase(enrichedResult.finalState.phase);
+          optionsRef.current.onComplete?.(enrichedResult);
         }
 
-        return result;
+        return enrichedResult;
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         persistedFinalPhase = 'failed';
         persistedErrorMessage = error.message;
+        traceToWrite = finalizeRuntimeTrace(false, error.message);
         setError(error);
         setPhase('failed');
         optionsRef.current.onError?.(error);
@@ -615,22 +628,30 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         const persistedRunId = persistedRunIdRef.current;
         persistedRunIdRef.current = null;
         if (persistedRunId) {
-          try {
-            await agentSessionStore.updateRunPhase({
-              runId: persistedRunId,
-              phase: abortedRef.current ? 'aborted' : persistedFinalPhase,
-              toolCallsUsed: persistedToolCalls,
-              completedStepCount: persistedToolCalls,
-              errorMessage: persistedErrorMessage,
-              endedAt: Date.now(),
-            });
-          } catch (error) {
-            logger.warn('Failed to finalize persisted agentic run', {
-              runId: persistedRunId,
-              phase: abortedRef.current ? 'aborted' : persistedFinalPhase,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
+          await finalizePersistedRun({
+            sessionId: executionContext.sessionId,
+            runId: persistedRunId,
+            phase: abortedRef.current ? 'aborted' : persistedFinalPhase,
+            traceId: persistedTraceId,
+            toolCallsUsed: persistedToolCalls,
+            plannedStepCount: persistedPlannedStepCount,
+            completedStepCount: persistedCompletedStepCount,
+            rollbackReportJson: persistedRollbackReportJson,
+            errorMessage: persistedErrorMessage,
+            logger,
+            loggerLabel: 'agentic',
+          });
+        }
+        if (traceToWrite) {
+          traceToWrite = {
+            ...traceToWrite,
+            artifacts: {
+              ...traceToWrite.artifacts,
+              ...getPersistedSessionTraceState(executionContext.sessionId),
+              persistedRunId: persistedRunId ?? traceToWrite.artifacts.persistedRunId,
+            },
+          };
+          await writeTrace(traceToWrite);
         }
 
         runGuardRef.current = false;
@@ -670,6 +691,7 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
     engineRef.current = null;
     approvalResolverRef.current = null;
     clearPendingApprovals();
+    bootstrappedCheckpointIdRef.current = null;
     setPhase('idle');
     setIsRunning(false);
     setEvents([]);
@@ -762,111 +784,8 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
 export function useAgenticLoopWithStores(
   options: Omit<UseAgenticLoopOptions, 'context'> & { context?: Partial<AgentContext> },
 ): UseAgenticLoopReturn {
-  const externalContext = options.context;
-  // Read from stores
-  const currentTime = usePlaybackStore((s) => s.currentTime);
-  const duration = usePlaybackStore((s) => s.duration);
-  const selectedClipIds = useTimelineStore((s) => s.selectedClipIds);
-  const selectedTrackIds = useTimelineStore((s) => s.selectedTrackIds);
-  const activeSequenceId = useProjectStore((s) => s.activeSequenceId);
-  const projectStateVersion = useProjectStore((s) => s.stateVersion);
-  const sequences = useProjectStore((s) => s.sequences);
-  const assets = useProjectStore((s) => s.assets);
-  const uiLanguage = useSettingsStore((s) => s.settings.general.language);
-
-  // Build real context from stores
-  const context = useMemo((): Partial<AgentContext> => {
-    const activeSequence = activeSequenceId ? sequences.get(activeSequenceId) : undefined;
-
-    const storeContext: Partial<AgentContext> = {
-      projectId: 'current',
-      sequenceId: activeSequenceId ?? undefined,
-      languagePolicy: createLanguagePolicy(uiLanguage),
-      projectStateVersion,
-      playheadPosition: currentTime,
-      timelineDuration: duration,
-      selectedClips: selectedClipIds,
-      selectedTracks: selectedTrackIds,
-      availableAssets: Array.from(assets.values())
-        .filter((a) => a.kind === 'video' || a.kind === 'audio' || a.kind === 'image')
-        .map((a) => ({
-          id: a.id,
-          name: a.name,
-          type: a.kind as 'video' | 'audio' | 'image',
-          duration: a.durationSec,
-        })),
-      availableTracks:
-        activeSequence?.tracks.map((t) => ({
-          id: t.id,
-          name: t.name || `Track ${t.id}`,
-          type: t.kind === 'audio' ? ('audio' as const) : ('video' as const),
-          clipCount: t.clips.length,
-        })) ?? [],
-      availableTools: globalToolRegistry.listAll().map((t) => t.name),
-    };
-    return {
-      ...storeContext,
-      ...externalContext,
-      projectId: externalContext?.projectId ?? storeContext.projectId,
-    };
-  }, [
-    currentTime,
-    duration,
-    selectedClipIds,
-    selectedTrackIds,
-    activeSequenceId,
-    projectStateVersion,
-    sequences,
-    assets,
-    uiLanguage,
-    externalContext,
-  ]);
-
-  // Build a contextRefresher that reads fresh state from stores each iteration.
-  // Returns only the fields that may change between iterations (timeline/playback state).
-  // Memory fields (recentOperations, userPreferences, corrections) and availableTools
-  // are preserved from the previous iteration by the engine's spread-merge logic.
-  const contextRefresher = useCallback((): Partial<AgentContext> => {
-    const playback = usePlaybackStore.getState();
-    const timeline = useTimelineStore.getState();
-    const project = useProjectStore.getState();
-    const settings = useSettingsStore.getState();
-
-    const activeSeq = project.activeSequenceId
-      ? project.sequences.get(project.activeSequenceId)
-      : undefined;
-
-    return {
-      projectId: externalContext?.projectId ?? 'current',
-      sequenceId: project.activeSequenceId ?? undefined,
-      languagePolicy: createLanguagePolicy(settings.settings.general.language),
-      projectStateVersion: project.stateVersion,
-      playheadPosition: playback.currentTime,
-      timelineDuration: playback.duration,
-      selectedClips: timeline.selectedClipIds,
-      selectedTracks: timeline.selectedTrackIds,
-      availableAssets: Array.from(project.assets.values())
-        .filter((a) => a.kind === 'video' || a.kind === 'audio' || a.kind === 'image')
-        .map((a) => ({
-          id: a.id,
-          name: a.name,
-          type: a.kind as 'video' | 'audio' | 'image',
-          duration: a.durationSec,
-        })),
-      availableTracks:
-        activeSeq?.tracks.map((t) => ({
-          id: t.id,
-          name: t.name || `Track ${t.id}`,
-          type: t.kind === 'audio' ? ('audio' as const) : ('video' as const),
-          clipCount: t.clips.length,
-        })) ?? [],
-    };
-  }, [externalContext?.projectId]);
-
-  // Read AI settings for model-aware token budget resolution
-  const aiMaxTokens = useSettingsStore((s) => s.settings.ai.maxTokens);
-  const aiPrimaryModel = useSettingsStore((s) => s.settings.ai.primaryModel);
-  const aiPrimaryProvider = useSettingsStore((s) => s.settings.ai.primaryProvider);
+  const { context, contextRefresher, aiMaxTokens, aiPrimaryModel, aiPrimaryProvider } =
+    useAgentRuntimeStoreContext(options.context);
 
   return useAgenticLoop({
     ...options,
@@ -875,8 +794,8 @@ export function useAgenticLoopWithStores(
       ...options.config,
       contextRefresher,
       maxOutputTokens: options.config?.maxOutputTokens ?? aiMaxTokens,
-      activeModel: options.config?.activeModel ?? aiPrimaryModel,
-      activeProvider: options.config?.activeProvider ?? aiPrimaryProvider,
+      activeModel: options.config?.activeModel ?? aiPrimaryModel ?? undefined,
+      activeProvider: options.config?.activeProvider ?? aiPrimaryProvider ?? undefined,
     },
   });
 }

@@ -12,8 +12,8 @@ function getRecoveryCopy(status: 'degraded' | 'ephemeral', isLatched: boolean): 
   }
 
   return isLatched
-    ? 'Recovered in this app session, but earlier resume history may still be partial.'
-    : 'Resume or audit history may be incomplete.';
+    ? 'Recovered in this app session, but earlier recovery context may still be partial.'
+    : 'Recovery context or audit history may be incomplete.';
 }
 
 export interface AgentSessionRecoveryStatusProps {

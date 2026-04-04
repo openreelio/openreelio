@@ -194,6 +194,97 @@ describe('AgenticEngine', () => {
       expect(result.finalState.thought?.approach).toContain('fast path');
     });
 
+    it('should keep destructive edits on approval-gated TPAO even when fast path is enabled', async () => {
+      const destructiveThought: Thought = {
+        understanding: 'Delete all clips from the timeline',
+        requirements: ['Sequence ID', 'User confirmation'],
+        uncertainties: [],
+        approach: 'Require approval before clearing the timeline',
+        needsMoreInfo: false,
+      };
+
+      const destructivePlan: Plan = {
+        goal: 'Delete all clips from timeline',
+        steps: [
+          {
+            id: 'step-1',
+            tool: 'delete_all_clips',
+            args: { sequenceId: 'sequence-1', confirm: true },
+            description: 'Delete every clip in the timeline',
+            riskLevel: 'critical',
+            estimatedDuration: 100,
+          },
+        ],
+        estimatedTotalDuration: 100,
+        requiresApproval: true,
+        rollbackStrategy: 'Manual restore required',
+      };
+
+      const destructiveObservation: Observation = {
+        goalAchieved: true,
+        stateChanges: [{ type: 'timeline_cleared', target: 'sequence-1' }],
+        summary: 'Timeline cleared',
+        confidence: 1,
+        needsIteration: false,
+      };
+
+      mockToolExecutor.registerTool({
+        info: {
+          name: 'delete_all_clips',
+          description: 'Delete all clips',
+          category: 'editing',
+          riskLevel: 'critical',
+          supportsUndo: false,
+          parallelizable: false,
+        },
+        parameters: {
+          type: 'object',
+          properties: {
+            sequenceId: { type: 'string' },
+            confirm: { type: 'boolean' },
+          },
+        },
+        required: ['sequenceId', 'confirm'],
+        result: {
+          success: true,
+          data: { removedCount: 12 },
+          duration: 20,
+        },
+      });
+      agentContext.availableTools = mockToolExecutor.getAvailableTools().map((tool) => tool.name);
+
+      let callCount = 0;
+      vi.spyOn(mockLLM, 'generateStructured').mockImplementation(async () => {
+        callCount += 1;
+        if (callCount === 1) return destructiveThought;
+        if (callCount === 2) return destructivePlan;
+        return destructiveObservation;
+      });
+
+      const approvalHandler = vi.fn().mockResolvedValue(true);
+      const engineWithApproval = createAgenticEngine(mockLLM, mockToolExecutor, {
+        enableFastPath: true,
+        enableTracing: true,
+        approvalHandler,
+      });
+
+      const events: AgentEvent[] = [];
+      const result = await engineWithApproval.run(
+        'Delete all clips from the timeline',
+        agentContext,
+        executionContext,
+        (event) => events.push(event),
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.trace?.fastPath).toBe(false);
+      expect(callCount).toBe(3);
+      expect(approvalHandler).toHaveBeenCalledTimes(1);
+      expect(events.some((event) => event.type === 'approval_required')).toBe(true);
+      expect(events.some((event) => event.type === 'approval_response')).toBe(true);
+      expect(mockToolExecutor.wasToolCalled('delete_all_clips')).toBe(true);
+    });
+
     it('should resolve step-reference args for orchestration plans before downstream execution', async () => {
       mockToolExecutor.registerTool({
         info: {

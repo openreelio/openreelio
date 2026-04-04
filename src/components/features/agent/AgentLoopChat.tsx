@@ -1,23 +1,22 @@
 /**
  * AgentLoopChat Component
  *
- * Chat UI for the streaming AgentLoop runtime.
+ * Compatibility-only fast-loop chat container used by internal
+ * verification surfaces. Shared chat-shell behavior lives in
+ * `AgentRuntimeChatShell`.
  */
 
-import { useState, useCallback, useRef, useEffect, useImperativeHandle, forwardRef } from 'react';
+import { useCallback, forwardRef } from 'react';
 import { useAgentLoopWithStores, type UseAgentLoopOptions } from '@/hooks/useAgentLoop';
 import { useAgentLoopEventHandler } from '@/hooks/useAgentLoopEventHandler';
 import { useConversationStore } from '@/stores/conversationStore';
-import { useMessageQueueStore } from '@/stores/messageQueueStore';
-import { useProjectStore } from '@/stores';
 import type { ILLMClient, IToolExecutor, AgentContext } from '@/agents/engine';
 import type { AgentLoopConfig } from '@/agents/engine/AgentLoop';
-import { ChatMessageList } from './ChatMessageList';
-import { ChatInputArea } from './ChatInputArea';
-import { AgentSessionPersistenceBanner } from './AgentSessionPersistenceBanner';
+import {
+  AgentRuntimeChatShell,
+  type AgentRuntimeChatHandle,
+} from './AgentRuntimeChatShell';
 
-const EMPTY_MESSAGES: readonly never[] = [];
-const FORCE_STOP_WINDOW_MS = 1500;
 const NOOP = () => {};
 
 export interface AgentLoopChatProps {
@@ -33,10 +32,7 @@ export interface AgentLoopChatProps {
   className?: string;
 }
 
-export interface AgentLoopChatHandle {
-  abort: () => void;
-  isRunning: boolean;
-}
+export type AgentLoopChatHandle = AgentRuntimeChatHandle;
 
 export const AgentLoopChat = forwardRef<AgentLoopChatHandle, AgentLoopChatProps>(function AgentLoopChat(
   {
@@ -53,17 +49,6 @@ export const AgentLoopChat = forwardRef<AgentLoopChatHandle, AgentLoopChatProps>
   },
   ref,
 ) {
-  const [input, setInput] = useState('');
-  const lastStopClickRef = useRef<number>(0);
-  const [stopState, setStopState] = useState<'idle' | 'stopping'>('idle');
-
-  const queueSize = useMessageQueueStore((state) => state.queue.length);
-  const enqueue = useMessageQueueStore((state) => state.enqueue);
-  const dequeue = useMessageQueueStore((state) => state.dequeue);
-  const clearQueue = useMessageQueueStore((state) => state.clear);
-
-  const messages = useConversationStore((state) => state.activeConversation?.messages ?? EMPTY_MESSAGES);
-  const addUserMessage = useConversationStore((state) => state.addUserMessage);
   const addSystemMessage = useConversationStore((state) => state.addSystemMessage);
 
   const { handleEvent, handleAbort, reset } = useAgentLoopEventHandler();
@@ -95,66 +80,6 @@ export const AgentLoopChat = forwardRef<AgentLoopChatHandle, AgentLoopChatProps>
     },
   });
 
-  useImperativeHandle(
-    ref,
-    () => ({
-      abort,
-      isRunning,
-    }),
-    [abort, isRunning],
-  );
-
-  const executeMessage = useCallback(
-    async (message: string) => {
-      if (!isEnabled) {
-        return;
-      }
-
-      try {
-        await run(message);
-      } catch {
-        // Error handling is delegated to the hook callbacks.
-      }
-    },
-    [isEnabled, run],
-  );
-
-  const handleSubmit = useCallback(async () => {
-    if (!input.trim() || disabled || !isEnabled) {
-      return;
-    }
-
-    const userInput = input.trim();
-    setInput('');
-
-    addUserMessage(userInput);
-    onSubmit?.(userInput);
-
-    if (isRunning) {
-      enqueue(userInput);
-      return;
-    }
-
-    await executeMessage(userInput);
-  }, [addUserMessage, disabled, enqueue, executeMessage, input, isEnabled, isRunning, onSubmit]);
-
-  const handleStop = useCallback(() => {
-    const now = Date.now();
-
-    if (stopState === 'stopping' && now - lastStopClickRef.current < FORCE_STOP_WINDOW_MS) {
-      abort();
-      addSystemMessage('Operation force-stopped by user');
-      setStopState('idle');
-      clearQueue();
-      return;
-    }
-
-    setStopState('stopping');
-    lastStopClickRef.current = now;
-    abort();
-    addSystemMessage('Stopping after current step...');
-  }, [abort, addSystemMessage, clearQueue, stopState]);
-
   const handleRetry = useCallback(() => {
     void retry().catch(() => {});
   }, [retry]);
@@ -165,64 +90,35 @@ export const AgentLoopChat = forwardRef<AgentLoopChatHandle, AgentLoopChatProps>
   );
   const handleToolDeny = useCallback(() => approveToolPermission('deny'), [approveToolPermission]);
 
-  const currentProjectId = useProjectStore((state) => state.meta?.id ?? null);
-  const activeProjectId = useConversationStore((state) => state.activeProjectId);
-  const loadForProject = useConversationStore((state) => state.loadForProject);
-
-  useEffect(() => {
-    const targetProjectId = currentProjectId ?? 'default';
-    if (activeProjectId !== targetProjectId) {
-      clearQueue();
-      loadForProject(targetProjectId);
-    }
-  }, [activeProjectId, clearQueue, currentProjectId, loadForProject]);
-
-  const prevIsRunningRef = useRef(isRunning);
-  useEffect(() => {
-    if (prevIsRunningRef.current && !isRunning) {
-      setStopState('idle');
-      const next = dequeue();
-      if (next) {
-        void executeMessage(next.content);
-      }
-    }
-    prevIsRunningRef.current = isRunning;
-  }, [dequeue, executeMessage, isRunning]);
-
-  useEffect(() => {
-    return () => {
-      clearQueue();
-      reset();
-    };
-  }, [clearQueue, reset]);
-
   return (
-    <div data-testid="agent-loop-chat" className={`flex flex-col h-full bg-surface-base ${className}`}>
-      <AgentSessionPersistenceBanner />
-
-      <ChatMessageList
-        messages={messages}
-        error={error}
-        onApprove={NOOP}
-        onReject={NOOP}
-        onRetry={handleRetry}
-        onToolAllow={handleToolAllow}
-        onToolAllowAlways={handleToolAllowAlways}
-        onToolDeny={handleToolDeny}
-      />
-
-      <ChatInputArea
-        input={input}
-        onInputChange={setInput}
-        onSubmit={() => void handleSubmit()}
-        onStop={handleStop}
-        placeholder={placeholder}
-        disabled={disabled || !isEnabled}
-        isRunning={isRunning}
-        stopState={stopState}
-        phase={phase}
-        queueSize={queueSize}
-      />
-    </div>
+    <AgentRuntimeChatShell
+      ref={ref}
+      chatTestId="agent-loop-chat"
+      executeMessage={async (message) => {
+        try {
+          await run(message);
+        } catch {
+          // Error handling is delegated to the hook callbacks.
+        }
+      }}
+      abort={abort}
+      phase={phase}
+      isRunning={isRunning}
+      isEnabled={isEnabled}
+      error={error}
+      onSubmit={onSubmit}
+      placeholder={placeholder}
+      disabled={disabled}
+      className={className}
+      clearQueueOnProjectSwitch
+      clearQueueOnUnmount
+      onUnmount={reset}
+      onApprove={NOOP}
+      onReject={NOOP}
+      onRetry={handleRetry}
+      onToolAllow={handleToolAllow}
+      onToolAllowAlways={handleToolAllowAlways}
+      onToolDeny={handleToolDeny}
+    />
   );
 });

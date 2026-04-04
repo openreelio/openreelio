@@ -5,6 +5,7 @@ import type {
   PermissionDecisionSource,
   PermissionSubjectType,
 } from './agentSession';
+import type { PermissionTraceRecord } from './traceRecorder';
 import { createLogger } from '@/services/logger';
 import { usePermissionStore } from '@/stores/permissionStore';
 
@@ -71,7 +72,38 @@ export function persistPermissionAudit(
   });
 }
 
-export async function hydratePersistedPermissionRules(sessionId: string | null): Promise<void> {
+export interface HydratePersistedPermissionRulesOptions {
+  shouldApply?: () => boolean;
+}
+
+export function buildPermissionTraceRecord(input: {
+  runId: string | null;
+  stepId: string | null;
+  resolution: PermissionAuditResolution;
+  action: PermissionDecisionAction;
+  source?: PermissionDecisionSource;
+  recordedAt?: number;
+  reason?: string | null;
+  decisionId?: string | null;
+}): PermissionTraceRecord {
+  const source = input.source ?? input.resolution.source;
+  return {
+    decisionId: input.decisionId ?? null,
+    runId: input.runId,
+    stepId: input.stepId,
+    subjectType: input.resolution.subjectType,
+    subject: input.resolution.subject,
+    action: input.action,
+    source,
+    reason: input.reason ?? buildReason(input.resolution, input.action, source),
+    recordedAt: input.recordedAt ?? Date.now(),
+  };
+}
+
+export async function hydratePersistedPermissionRules(
+  sessionId: string | null,
+  options: HydratePersistedPermissionRulesOptions = {},
+): Promise<void> {
   if (!sessionId) {
     return;
   }
@@ -83,6 +115,9 @@ export async function hydratePersistedPermissionRules(sessionId: string | null):
 
   try {
     const decisions = await agentSessionBackend.listPermissionDecisions(sessionId);
+    if (options.shouldApply && !options.shouldApply()) {
+      return;
+    }
     usePermissionStore
       .getState()
       .hydrateSessionRulesFromPersistedDecisions(

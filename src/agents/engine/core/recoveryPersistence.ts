@@ -1,8 +1,13 @@
 import type {
   AgentRuntimeKind,
   CompactionTrigger,
+  CompactionTier,
   ResumeCheckpointKind,
 } from './agentSession';
+import type {
+  CheckpointTraceRecord,
+  CompactionTraceRecord,
+} from './traceRecorder';
 
 export interface RecoveryCheckpointPayloadInput {
   sessionId: string;
@@ -49,6 +54,31 @@ export interface PersistedRecoveryCheckpointPayload {
 export interface PersistedCompactionPayload {
   continuationSummaryJson: string;
   stateRehydrationJson: string;
+}
+
+export interface ResumeCheckpointTraceRecordInput {
+  checkpointId?: string | null;
+  runId: string | null;
+  checkpointKind: ResumeCheckpointKind;
+  phase?: string | null;
+  stepId?: string | null;
+  toolName?: string | null;
+  summary?: string | null;
+  status?: CheckpointTraceRecord['status'];
+  recordedAt?: number;
+}
+
+export interface CompactionTraceRecordInput {
+  compactionId?: string | null;
+  runId: string | null;
+  tier: CompactionTier;
+  trigger: CompactionTrigger;
+  summary?: string | null;
+  sourceMessageCount: number;
+  retainedMessageCount: number;
+  estimatedTokensSaved?: number | null;
+  status?: CompactionTraceRecord['status'];
+  recordedAt?: number;
 }
 
 export function buildResumeCheckpointPayload(
@@ -143,5 +173,38 @@ export function buildCompactionPayload(
   return {
     continuationSummaryJson: JSON.stringify(continuationSummary),
     stateRehydrationJson: JSON.stringify(rehydrationState),
+  };
+}
+
+export function buildResumeCheckpointTraceRecord(
+  input: ResumeCheckpointTraceRecordInput,
+): CheckpointTraceRecord {
+  return {
+    checkpointId: input.checkpointId ?? null,
+    runId: input.runId,
+    checkpointKind: input.checkpointKind,
+    phase: input.phase ?? null,
+    stepId: input.stepId ?? null,
+    toolName: input.toolName ?? null,
+    summary: input.summary ?? null,
+    status: input.status ?? 'persisted',
+    recordedAt: input.recordedAt ?? Date.now(),
+  };
+}
+
+export function buildCompactionTraceRecord(
+  input: CompactionTraceRecordInput,
+): CompactionTraceRecord {
+  return {
+    compactionId: input.compactionId ?? null,
+    runId: input.runId,
+    tier: input.tier,
+    trigger: input.trigger,
+    summary: input.summary ?? null,
+    sourceMessageCount: input.sourceMessageCount,
+    retainedMessageCount: input.retainedMessageCount,
+    estimatedTokensSaved: input.estimatedTokensSaved ?? null,
+    status: input.status ?? 'persisted',
+    recordedAt: input.recordedAt ?? Date.now(),
   };
 }

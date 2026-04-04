@@ -610,6 +610,8 @@ export interface AgenticEngineConfig {
 
   /** Enable structured JSON tracing for agent runs (default: true) */
   enableTracing: boolean;
+  /** Automatically write trace files when a run returns trace data (default: true) */
+  writeTraceOnComplete: boolean;
 
   /** Minimum risk level requiring approval (default: 'high') */
   approvalThreshold: RiskLevel;
@@ -653,6 +655,12 @@ export interface AgenticEngineConfig {
 
   /** Memory store adapter for operation/correction/preference retrieval */
   memoryStore?: IMemoryStore;
+
+  /** Additional project knowledge injected into phase prompts */
+  knowledge?: string[];
+
+  /** Optional project-specific instructions appended to phase prompts */
+  customInstructions?: string;
 
   /** Maximum recent operations loaded into context (default: 20) */
   memoryRecentOperationsLimit: number;
@@ -717,6 +725,7 @@ export const DEFAULT_ENGINE_CONFIG: AgenticEngineConfig = {
   enableMemory: true,
   enableCheckpoints: true,
   enableTracing: true,
+  writeTraceOnComplete: true,
   approvalThreshold: 'high',
   autoRetryOnFailure: true,
   maxRetries: 2,

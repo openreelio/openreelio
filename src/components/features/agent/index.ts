@@ -14,7 +14,6 @@ export { ThinkingIndicator, type ThinkingIndicatorProps } from './ThinkingIndica
 export { PlanViewer, type PlanViewerProps } from './PlanViewer';
 export { ActionFeed, type ActionFeedProps } from './ActionFeed';
 export { AgenticChat, type AgenticChatProps } from './AgenticChat';
-export { AgentLoopChat, type AgentLoopChatProps } from './AgentLoopChat';
 export { ChatMessageList, type ChatMessageListProps } from './ChatMessageList';
 export { ChatInputArea, type ChatInputAreaProps } from './ChatInputArea';
 
@@ -31,7 +30,4 @@ export { MentionPopover, type MentionItem } from './MentionPopover';
 export { CommandPopover, type CommandItem } from './CommandPopover';
 export { SessionList } from './SessionList';
 
-// Agent Manager (Phase 5 - Mission Control)
-export { AgentManager } from './AgentManager';
-export { AgentCard } from './AgentCard';
-export { InboxPanel } from './InboxPanel';
+// Experimental mission-control surfaces are intentionally not re-exported here.

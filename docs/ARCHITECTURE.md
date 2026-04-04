@@ -154,18 +154,34 @@ snapshot.json is a cached state for faster startup, rebuilt from ops.jsonl.
 
 ## AI Agent System
 
-> **✅ AGENTIC ENGINE IMPLEMENTED**: The new agentic loop architecture is implemented and available via feature flag. Enable with `setFeatureFlag('USE_AGENTIC_ENGINE', true)` or `VITE_FF_USE_AGENTIC_ENGINE=true`.
+> **Current State (2026-04-03)**: OpenReelio retains three AI execution paths: a legacy/internal `aiStore` -> `chat_with_ai` request-response flow, the canonical TPAO `AgenticEngine`, and the compatibility `AgentLoop` runtime. The shipping AI sidebar uses TPAO only; `AgentLoop` remains available for internal verification and harness coverage. See [AGENT_IMPLEMENTATION_MASTER_PLAN.md](./AGENT_IMPLEMENTATION_MASTER_PLAN.md) for the current stabilization plan.
 
 ### Architecture Overview
 
-OpenReelio supports two AI modes controlled by feature flag:
+OpenReelio currently has three distinct AI paths:
 
-1. **Legacy Mode** (default): Simple request-response chat interface
-2. **Agentic Mode**: Full Think → Plan → Act → Observe (TPAO) loop
+1. **Legacy AI Path**: Internal request-response flows centered on `aiStore` and `chat_with_ai`
+2. **TPAO Runtime**: Full Think → Plan → Act → Observe loop via `AgenticEngine`
+3. **Compatibility Runtime**: Streaming `AgentLoop` that follows stream → tool → loop for internal verification
 
-### Agentic Architecture (NEW)
+The TPAO and fast runtimes already share significant operational infrastructure:
 
-The new architecture implements the **Think → Plan → Act → Observe (TPAO)** cycle:
+- Session persistence and recovery artifacts
+- Permission audit records
+- Compaction and resume checkpoints
+- Backend-safe tool execution
+
+### Runtime Matrix
+
+| Runtime | Primary Entry Points | Current Role |
+| ------- | -------------------- | ------------ |
+| Legacy AI Path | `src/stores/aiStore.ts`, `chat_with_ai` | Legacy / internal compatibility surface |
+| TPAO Runtime | `src/agents/engine/AgenticEngine.ts`, `src/hooks/useAgenticLoop.ts`, `src/components/features/agent/AgenticChat.tsx` | Canonical interactive runtime |
+| Compatibility Runtime | `src/agents/engine/AgentLoop.ts`, `src/hooks/useAgentLoop.ts`, `src/components/features/agent/AgentLoopChat.tsx` | Internal compatibility runtime |
+
+### TPAO Runtime Architecture
+
+The TPAO runtime implements the **Think → Plan → Act → Observe (TPAO)** cycle:
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -204,6 +220,15 @@ The new architecture implements the **Think → Plan → Act → Observe (TPAO)*
 | **ThinkingIndicator**   | `src/components/features/agent/ThinkingIndicator.tsx`     | Shows AI thinking process                           |
 | **PlanViewer**          | `src/components/features/agent/PlanViewer.tsx`            | Displays and approves plans                         |
 | **ActionFeed**          | `src/components/features/agent/ActionFeed.tsx`            | Real-time action progress                           |
+
+### Compatibility Runtime Components
+
+| Component | Location | Purpose |
+| --------- | -------- | ------- |
+| **AgentLoop** | `src/agents/engine/AgentLoop.ts` | Streaming-first compatibility runtime that lets the model decide tool usage implicitly |
+| **useAgentLoop** | `src/hooks/useAgentLoop.ts` | React hook for compatibility-runtime verification |
+| **AgentLoopChat** | `src/components/features/agent/AgentLoopChat.tsx` | Compatibility-only chat UI for internal verification |
+| **useAgentLoopEventHandler** | `src/hooks/useAgentLoopEventHandler.ts` | Bridges loop events into conversation parts |
 
 ### Tool Categories
 
@@ -273,18 +298,17 @@ pub struct PluginPermissions {
 8. Loop back to THINK if needed
 9. Session complete - Update UI with results
 
-### AI Edit Flow (Legacy Mode)
+### AI Edit Flow (Legacy Internal Mode)
 
-1. Frontend (ChatInput.tsx) - User prompt
-2. IPC chat_with_ai - Send to core
+1. Internal caller (`aiStore.sendMessage`) - Legacy prompt
+2. IPC `chat_with_ai` - Send to core
 3. Core AI Gateway - Process with LLM
 4. EditScript generation - Create commands
 5. Proposal creation - Package for review
-6. IPC proposal_ready - Notify frontend
-7. Frontend (ProposalCard.tsx) - Show to user
-8. User Apply - Confirm changes
-9. Execute commands - Apply to state
-10. Update UI
+6. Legacy/internal UI flow consumes the response
+7. User Apply - Confirm changes
+8. Execute commands - Apply to state
+9. Update UI
 
 ---
 

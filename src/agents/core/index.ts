@@ -1,19 +1,9 @@
 /**
  * Agent Core Module
  *
- * Exports the memory system (still used by MemoryManagerAdapter).
- * Hook system and HookableAgent have been removed with the legacy agent.
+ * The legacy memory system remains available by direct-path import only.
+ * This barrel stays empty so the shipping surface does not advertise
+ * compatibility-only memory primitives.
  */
 
-// Memory system
-export {
-  MemoryManager,
-  createMemoryManager,
-  type AgentMessage,
-  type ShortTermMemory,
-  type LongTermMemory,
-  type OperationFrequency,
-  type UserCorrection,
-  type ProjectMemory,
-  type MemoryConfig,
-} from './AgentMemory';
+export {};

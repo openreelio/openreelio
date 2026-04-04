@@ -1,13 +1,13 @@
 /**
- * AgentLoop - Simplified Agentic Loop (opencode-style)
+ * AgentLoop - Simplified compatibility runtime (opencode-style)
  *
- * Replaces the 4-phase TPAO engine with a simpler pattern:
+ * Provides a compatibility runtime alongside the canonical TPAO engine:
  *   stream LLM response -> execute tool calls -> loop if more tools needed
  *
  * The LLM itself decides the plan implicitly through tool selection.
  * Fast-path parsing is reused for simple deterministic requests.
  *
- * Feature flag: USE_AGENT_LOOP (default: false)
+ * Feature flag: USE_AGENT_LOOP (compatibility verification only, default: false)
  */
 
 import type {
@@ -31,6 +31,7 @@ import { parseFastPathPlan, type FastPathMatch } from './core/fastPathParser';
 import { DoomLoopDetector } from './core/DoomLoopDetector';
 import { Compaction } from './core/compaction';
 import { resolveMaxOutputTokens, resolveContextLimit } from './core/modelRegistry';
+import { assembleSystemPrompt, type AgentRole } from './prompts/system';
 import { createLogger } from '@/services/logger';
 
 const logger = createLogger('AgentLoop');
@@ -163,6 +164,14 @@ export interface AgentLoopConfig {
   activeProvider?: string;
   /** LLM generation options */
   generateOptions?: GenerateOptions;
+  /** Agent role used when assembling the system prompt */
+  role?: AgentRole;
+  /** Additional project knowledge injected into the system prompt */
+  knowledge?: string[];
+  /** Optional project-specific instructions appended to the system prompt */
+  customInstructions?: string;
+  /** Enable structured JSON tracing for fast-loop runs. Default: true */
+  enableTracing?: boolean;
   /**
    * Per-tool permission handler.
    * Called before each tool execution. Returns:
@@ -186,7 +195,65 @@ export const DEFAULT_AGENT_LOOP_CONFIG: AgentLoopConfig = {
   contextLimit: 128_000,
   doomLoopThreshold: 3,
   approvalThreshold: 'high',
+  role: 'editor',
 };
+
+function truncateKnowledgeText(value: string, maxLength = 140): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength - 3)}...`;
+}
+
+function formatKnowledgeValue(value: unknown): string {
+  if (typeof value === 'string') {
+    return truncateKnowledgeText(value);
+  }
+
+  if (
+    typeof value === 'number'
+    || typeof value === 'boolean'
+    || value === null
+    || value === undefined
+  ) {
+    return String(value);
+  }
+
+  try {
+    return truncateKnowledgeText(JSON.stringify(value));
+  } catch {
+    return truncateKnowledgeText(String(value));
+  }
+}
+
+function buildPromptKnowledge(
+  context: AgentContext,
+  explicitKnowledge: string[] = [],
+): string[] {
+  const entries = [...explicitKnowledge];
+
+  if (context.recentOperations.length > 0) {
+    entries.push(
+      `Recent operations: ${context.recentOperations
+        .slice(0, 5)
+        .map((record) => record.operation)
+        .join(', ')}`,
+    );
+  }
+
+  for (const [key, value] of Object.entries(context.userPreferences).slice(0, 5)) {
+    entries.push(`Preference ${key}: ${formatKnowledgeValue(value)}`);
+  }
+
+  for (const correction of context.corrections.slice(0, 4)) {
+    entries.push(
+      `Correction: when the user says "${truncateKnowledgeText(correction.original, 60)}", prefer "${truncateKnowledgeText(correction.corrected, 80)}"`,
+    );
+  }
+
+  return Array.from(new Set(entries)).slice(0, 12);
+}
 
 // =============================================================================
 // AgentLoop Class
@@ -707,40 +774,12 @@ export class AgentLoop {
   }
 
   private buildSystemMessage(context: AgentContext): string {
-    const parts: string[] = [
-      'You are an AI video editing assistant for OpenReelio.',
-      'You help users edit videos through natural language commands.',
-      'Use the provided tools to execute editing operations.',
-      'Be concise and action-oriented. Execute commands directly when possible.',
-      '',
-      '<environment>',
-      `Project: ${context.projectId}`,
-      `Timeline Duration: ${context.timelineDuration}s`,
-      `Playhead: ${context.playheadPosition}s`,
-      `Selected Clips: ${context.selectedClips.length}`,
-      `Selected Tracks: ${context.selectedTracks.length}`,
-      `Available Assets: ${context.availableAssets.length}`,
-      `Available Tracks: ${context.availableTracks.length}`,
-      '</environment>',
-    ];
-
-    if (context.availableAssets.length > 0) {
-      parts.push('', '<assets>');
-      for (const asset of context.availableAssets.slice(0, 20)) {
-        parts.push(`- ${asset.name} (${asset.type}${asset.duration ? `, ${asset.duration}s` : ''})`);
-      }
-      parts.push('</assets>');
-    }
-
-    if (context.availableTracks.length > 0) {
-      parts.push('', '<tracks>');
-      for (const track of context.availableTracks) {
-        parts.push(`- ${track.name} (${track.type}, ${track.clipCount} clips)`);
-      }
-      parts.push('</tracks>');
-    }
-
-    return parts.join('\n');
+    return assembleSystemPrompt({
+      role: this.config.role ?? 'editor',
+      context,
+      knowledge: buildPromptKnowledge(context, this.config.knowledge),
+      customInstructions: this.config.customInstructions,
+    });
   }
 
   private appendToolRoundtrip(

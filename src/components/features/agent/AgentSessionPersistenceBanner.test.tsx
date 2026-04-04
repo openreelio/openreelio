@@ -54,7 +54,7 @@ describe('AgentSessionPersistenceBanner', () => {
     expect(screen.getByText('Run completion could not be persisted.')).toBeInTheDocument();
     expect(
       screen.getByText(
-        /resume, approval history, or audit trail may be incomplete until persistence recovers/i,
+        /recovery context, approval history, or audit trail may be incomplete until persistence recovers/i,
       ),
     ).toBeInTheDocument();
     expect(screen.getByText('failed to persist final run phase')).toBeInTheDocument();

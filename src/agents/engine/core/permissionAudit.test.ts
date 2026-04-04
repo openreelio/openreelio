@@ -19,7 +19,11 @@ vi.mock('@/services/logger', () => ({
   }),
 }));
 
-import { hydratePersistedPermissionRules, persistPermissionAudit } from './permissionAudit';
+import {
+  buildPermissionTraceRecord,
+  hydratePersistedPermissionRules,
+  persistPermissionAudit,
+} from './permissionAudit';
 import { usePermissionStore } from '@/stores/permissionStore';
 
 describe('permissionAudit', () => {
@@ -129,6 +133,33 @@ describe('permissionAudit', () => {
       subject: 'timeline.clip.trim',
       action: 'ask',
       error: 'db down',
+    });
+  });
+
+  it('should build normalized permission trace records', () => {
+    expect(buildPermissionTraceRecord({
+      runId: 'run-1',
+      stepId: 'step-1',
+      resolution: {
+        subjectType: 'resource',
+        subject: 'timeline.clip.delete#clip:clip-7',
+        matchedPattern: 'timeline.clip.delete',
+        matchedScope: 'session',
+        source: 'session_rule',
+      },
+      action: 'allow_always',
+      source: 'interactive_approval',
+      recordedAt: 25,
+    })).toEqual({
+      decisionId: null,
+      runId: 'run-1',
+      stepId: 'step-1',
+      subjectType: 'resource',
+      subject: 'timeline.clip.delete#clip:clip-7',
+      action: 'allow_always',
+      source: 'interactive_approval',
+      reason: 'Resolved interactively as allow_always for timeline.clip.delete#clip:clip-7',
+      recordedAt: 25,
     });
   });
 

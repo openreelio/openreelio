@@ -23,6 +23,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 function createTrace(overrides: Partial<AgentTrace> = {}): AgentTrace {
   return {
     traceId: 'trace_test_001',
+    runtimeKind: 'tpao',
     sessionId: 'session_001',
     input: 'split clip at 5 seconds',
     phases: [
@@ -62,6 +63,17 @@ function createTrace(overrides: Partial<AgentTrace> = {}): AgentTrace {
     fastPath: false,
     iterations: 1,
     success: true,
+    artifacts: {
+      persistedRunId: null,
+      permissionStateVersion: null,
+      compactionVersion: null,
+      resumeCursorVersion: null,
+      activeCheckpointId: null,
+      latestSummaryMessageId: null,
+      permissionEvents: [],
+      compactionEvents: [],
+      checkpointEvents: [],
+    },
     createdAt: '2026-03-07T12:00:00.000Z',
     ...overrides,
   };

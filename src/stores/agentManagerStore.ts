@@ -8,7 +8,7 @@
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
 import { enableMapSet } from 'immer';
-import type { AgentDefinition } from '@/agents/engine/core/agentDefinitions';
+import type { ExperimentalAgentDefinition } from '@/agents/engine/core/agentDefinitions.experimental';
 
 // Required for Immer to track Map/Set mutations
 enableMapSet();
@@ -27,7 +27,7 @@ export type AgentInstanceStatus =
 
 export interface AgentInstance {
   id: string;
-  definition: AgentDefinition;
+  definition: ExperimentalAgentDefinition;
   sessionId: string;
   status: AgentInstanceStatus;
   lastMessage?: string;

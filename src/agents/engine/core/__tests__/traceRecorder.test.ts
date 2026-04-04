@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { TraceRecorder } from '../traceRecorder';
+import { mergeTraceArtifacts, TraceRecorder } from '../traceRecorder';
 
 describe('TraceRecorder', () => {
   let recorder: TraceRecorder;
@@ -73,6 +73,19 @@ describe('TraceRecorder', () => {
     expect(trace.phases[2].toolCalls[0].name).toBe('split_clip_at_time');
     expect(trace.phases[2].toolCalls[0].success).toBe(true);
     expect(trace.phases[2].toolCalls[1].name).toBe('trim_clip');
+  });
+
+  it('should preserve a provided trace ID for run linkage', () => {
+    recorder.startRun({
+      sessionId: 'session-linked',
+      input: 'continue edit',
+      traceId: 'trace_linked_1',
+    });
+
+    const trace = recorder.finalize(true);
+
+    expect(recorder.getTraceId()).toBe('trace_linked_1');
+    expect(trace.traceId).toBe('trace_linked_1');
   });
 
   it('should record an abbreviated fast-path trace', () => {
@@ -206,5 +219,111 @@ describe('TraceRecorder', () => {
     const trace = recorder.finalize(true);
     expect(trace.model).toBe('');
     expect(trace.provider).toBe('');
+  });
+
+  it('should capture runtime metadata and shared operational artifacts', () => {
+    recorder.startRun({
+      sessionId: 'session-fast',
+      input: 'Delete clip 1',
+      traceId: 'trace_fast_1',
+      runtimeKind: 'fast',
+    });
+    recorder.setArtifactState({
+      persistedRunId: 'run-fast-1',
+      permissionStateVersion: 2,
+      compactionVersion: 1,
+      resumeCursorVersion: 3,
+      activeCheckpointId: 'checkpoint-1',
+      latestSummaryMessageId: 'summary-1',
+    });
+    recorder.recordPermissionEvent({
+      decisionId: null,
+      runId: 'run-fast-1',
+      stepId: null,
+      subjectType: 'resource',
+      subject: 'timeline.clip.delete#clip:clip-1',
+      action: 'allow',
+      source: 'interactive_approval',
+      reason: 'Allowed interactively',
+      recordedAt: 10,
+    });
+    recorder.recordCompactionEvent({
+      compactionId: 'compaction-1',
+      runId: 'run-fast-1',
+      tier: 'summary',
+      trigger: 'auto',
+      summary: 'Compacted around delete flow',
+      sourceMessageCount: 12,
+      retainedMessageCount: 4,
+      estimatedTokensSaved: 3200,
+      status: 'persisted',
+      recordedAt: 11,
+    });
+    recorder.recordCheckpointEvent({
+      checkpointId: 'checkpoint-1',
+      runId: 'run-fast-1',
+      checkpointKind: 'tool_wait',
+      phase: 'awaiting_tool_permission',
+      stepId: null,
+      toolName: 'delete_clip',
+      summary: null,
+      status: 'persisted',
+      recordedAt: 12,
+    });
+
+    const trace = recorder.finalize(true);
+
+    expect(trace.runtimeKind).toBe('fast');
+    expect(trace.artifacts).toEqual(
+      expect.objectContaining({
+        persistedRunId: 'run-fast-1',
+        permissionStateVersion: 2,
+        compactionVersion: 1,
+        resumeCursorVersion: 3,
+        activeCheckpointId: 'checkpoint-1',
+        latestSummaryMessageId: 'summary-1',
+      }),
+    );
+    expect(trace.artifacts.permissionEvents).toHaveLength(1);
+    expect(trace.artifacts.compactionEvents).toHaveLength(1);
+    expect(trace.artifacts.checkpointEvents).toHaveLength(1);
+  });
+
+  it('should merge runtime artifacts into a base trace', () => {
+    recorder.startRun({
+      sessionId: 'session-tpao',
+      input: 'Delete clip 1',
+      traceId: 'trace_shared_1',
+      runtimeKind: 'tpao',
+    });
+    const baseTrace = recorder.finalize(true);
+
+    const artifactRecorder = new TraceRecorder();
+    artifactRecorder.startRun({
+      sessionId: 'session-tpao',
+      input: 'Delete clip 1',
+      traceId: 'trace_shared_1',
+      runtimeKind: 'tpao',
+    });
+    artifactRecorder.setArtifactState({
+      persistedRunId: 'run-tpao-1',
+    });
+    artifactRecorder.recordPermissionEvent({
+      decisionId: null,
+      runId: 'run-tpao-1',
+      stepId: 'step-1',
+      subjectType: 'resource',
+      subject: 'timeline.clip.delete#clip:clip-1',
+      action: 'ask',
+      source: 'interactive_approval',
+      reason: 'Asked interactively',
+      recordedAt: 12,
+    });
+
+    const merged = mergeTraceArtifacts(baseTrace, artifactRecorder.finalize(true));
+
+    expect(merged.traceId).toBe('trace_shared_1');
+    expect(merged.artifacts.persistedRunId).toBe('run-tpao-1');
+    expect(merged.artifacts.permissionEvents).toHaveLength(1);
   });
 });

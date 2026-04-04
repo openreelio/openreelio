@@ -13,6 +13,15 @@
 
 import { generateId } from './types';
 import type { AgentPhase } from './types';
+import type {
+  AgentRuntimeKind,
+  CompactionTier,
+  CompactionTrigger,
+  PermissionDecisionAction,
+  PermissionDecisionSource,
+  PermissionSubjectType,
+  ResumeCheckpointKind,
+} from './agentSession';
 
 // =============================================================================
 // Trace Types
@@ -60,6 +69,8 @@ export interface TokenUsage {
 export interface AgentTrace {
   /** Unique trace identifier */
   traceId: string;
+  /** Runtime kind that produced the trace */
+  runtimeKind: AgentRuntimeKind;
   /** Session identifier */
   sessionId: string;
   /** Original user input */
@@ -82,8 +93,59 @@ export interface AgentTrace {
   success: boolean;
   /** Error message if run failed */
   error?: string;
+  /** Shared operational metadata captured during the run */
+  artifacts: AgentTraceArtifacts;
   /** Trace creation timestamp (ISO 8601) */
   createdAt: string;
+}
+
+export interface PermissionTraceRecord {
+  decisionId: string | null;
+  runId: string | null;
+  stepId: string | null;
+  subjectType: PermissionSubjectType;
+  subject: string;
+  action: PermissionDecisionAction;
+  source: PermissionDecisionSource;
+  reason: string | null;
+  recordedAt: number;
+}
+
+export interface CompactionTraceRecord {
+  compactionId: string | null;
+  runId: string | null;
+  tier: CompactionTier;
+  trigger: CompactionTrigger;
+  summary: string | null;
+  sourceMessageCount: number;
+  retainedMessageCount: number;
+  estimatedTokensSaved: number | null;
+  status: 'persisted' | 'recovered';
+  recordedAt: number;
+}
+
+export interface CheckpointTraceRecord {
+  checkpointId: string | null;
+  runId: string | null;
+  checkpointKind: ResumeCheckpointKind;
+  phase: string | null;
+  stepId: string | null;
+  toolName: string | null;
+  summary: string | null;
+  status: 'persisted' | 'consumed' | 'recovered';
+  recordedAt: number;
+}
+
+export interface AgentTraceArtifacts {
+  persistedRunId: string | null;
+  permissionStateVersion: number | null;
+  compactionVersion: number | null;
+  resumeCursorVersion: number | null;
+  activeCheckpointId: string | null;
+  latestSummaryMessageId: string | null;
+  permissionEvents: PermissionTraceRecord[];
+  compactionEvents: CompactionTraceRecord[];
+  checkpointEvents: CheckpointTraceRecord[];
 }
 
 // =============================================================================
@@ -92,6 +154,7 @@ export interface AgentTrace {
 
 export class TraceRecorder {
   private traceId: string;
+  private runtimeKind: AgentRuntimeKind = 'tpao';
   private sessionId: string = '';
   private input: string = '';
   private model: string = '';
@@ -103,6 +166,7 @@ export class TraceRecorder {
   private phases: PhaseTrace[] = [];
   private currentPhase: PhaseTrace | null = null;
   private tokenUsage: TokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  private artifacts: AgentTraceArtifacts = createEmptyArtifacts();
 
   private finalized: boolean = false;
 
@@ -118,8 +182,11 @@ export class TraceRecorder {
     input: string;
     model?: string;
     provider?: string;
+    traceId?: string;
+    runtimeKind?: AgentRuntimeKind;
   }): void {
-    this.traceId = generateId('trace');
+    this.traceId = options.traceId ?? generateId('trace');
+    this.runtimeKind = options.runtimeKind ?? 'tpao';
     this.sessionId = options.sessionId;
     this.input = options.input;
     this.model = options.model ?? '';
@@ -131,6 +198,7 @@ export class TraceRecorder {
     this.phases = [];
     this.currentPhase = null;
     this.tokenUsage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    this.artifacts = createEmptyArtifacts();
   }
 
   /**
@@ -199,6 +267,7 @@ export class TraceRecorder {
     const endTime = Date.now();
     return {
       traceId: this.traceId,
+      runtimeKind: this.runtimeKind,
       sessionId: this.sessionId,
       input: this.input,
       phases: this.phases,
@@ -210,7 +279,29 @@ export class TraceRecorder {
       iterations: this.iterations,
       success,
       error,
+      artifacts: this.artifacts,
       createdAt: new Date(this.startTime).toISOString(),
+    };
+  }
+
+  recordPermissionEvent(event: PermissionTraceRecord): void {
+    this.artifacts.permissionEvents.push(event);
+  }
+
+  recordCompactionEvent(event: CompactionTraceRecord): void {
+    this.artifacts.compactionEvents.push(event);
+  }
+
+  recordCheckpointEvent(event: CheckpointTraceRecord): void {
+    this.artifacts.checkpointEvents.push(event);
+  }
+
+  setArtifactState(
+    state: Partial<Omit<AgentTraceArtifacts, 'permissionEvents' | 'compactionEvents' | 'checkpointEvents'>>,
+  ): void {
+    this.artifacts = {
+      ...this.artifacts,
+      ...state,
     };
   }
 
@@ -243,4 +334,41 @@ export class TraceRecorder {
     this.phases.push(this.currentPhase);
     this.currentPhase = null;
   }
+}
+
+export function mergeTraceArtifacts(baseTrace: AgentTrace, artifactTrace: AgentTrace): AgentTrace {
+  return {
+    ...baseTrace,
+    runtimeKind: artifactTrace.runtimeKind,
+    artifacts: {
+      ...baseTrace.artifacts,
+      ...artifactTrace.artifacts,
+      permissionEvents: [
+        ...baseTrace.artifacts.permissionEvents,
+        ...artifactTrace.artifacts.permissionEvents,
+      ],
+      compactionEvents: [
+        ...baseTrace.artifacts.compactionEvents,
+        ...artifactTrace.artifacts.compactionEvents,
+      ],
+      checkpointEvents: [
+        ...baseTrace.artifacts.checkpointEvents,
+        ...artifactTrace.artifacts.checkpointEvents,
+      ],
+    },
+  };
+}
+
+function createEmptyArtifacts(): AgentTraceArtifacts {
+  return {
+    persistedRunId: null,
+    permissionStateVersion: null,
+    compactionVersion: null,
+    resumeCursorVersion: null,
+    activeCheckpointId: null,
+    latestSummaryMessageId: null,
+    permissionEvents: [],
+    compactionEvents: [],
+    checkpointEvents: [],
+  };
 }

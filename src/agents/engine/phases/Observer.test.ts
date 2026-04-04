@@ -428,6 +428,29 @@ describe('Observer', () => {
       // Observer should prevent iteration when at max
       expect(result.needsIteration).toBe(false);
     });
+
+    it('should append project prompt addendum when provided', async () => {
+      const customObserver = createObserver(mockLLM, {
+        projectPromptAddendum: '<knowledge>\n- Keep deliveries platform-safe\n</knowledge>',
+      });
+
+      mockLLM.setStructuredResponse({
+        structured: {
+          goalAchieved: true,
+          stateChanges: [],
+          summary: 'Done',
+          confidence: 0.9,
+          needsIteration: false,
+        } as Observation,
+      });
+
+      await customObserver.observe(successfulPlan, successfulExecution, context);
+
+      const request = mockLLM.getLastRequest();
+      const systemMessage = request?.messages.find((message) => message.role === 'system');
+      expect(systemMessage?.content).toContain('<knowledge>');
+      expect(systemMessage?.content).toContain('Keep deliveries platform-safe');
+    });
   });
 
   describe('observation validation', () => {

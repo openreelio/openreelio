@@ -31,6 +31,11 @@ import { createLogger } from '@/services/logger';
 import { isMetaToolsEnabled } from '@/config/featureFlags';
 import { getVisibleMetaToolNames } from '@/agents/tools/metaTools';
 import { getWorkspaceToolNames } from '@/agents/tools/workspaceTools';
+import {
+  requiresProjectMutationPreflight,
+  validateMutationPreconditions,
+  validateMutationStateRevision,
+} from './mutationPreflight';
 
 const logger = createLogger('BackendToolExecutor');
 
@@ -254,6 +259,45 @@ export class BackendToolExecutor implements IToolExecutor {
     return BACKEND_DIRECT_TOOLS.has(toolName);
   }
 
+  private isUnsafeMutatingFallback(toolName: string): boolean {
+    const toolDefinition = this.frontendExecutor.getToolDefinition(toolName);
+    if (!toolDefinition) {
+      return false;
+    }
+
+    return requiresProjectMutationPreflight(toolName, toolDefinition.category);
+  }
+
+  private buildUnsupportedMutationFailure(toolName: string): ToolExecutionResult {
+    return createFailureResult(
+      `Mutating tool '${toolName}' is not approved for backend-safe agent execution.`,
+      0,
+    );
+  }
+
+  private getMutationPreflightFailure(
+    toolName: string,
+    args: Record<string, unknown>,
+    context: ExecutionContext,
+  ): string | null {
+    const { error: revisionError } = validateMutationStateRevision(context);
+    if (revisionError) {
+      return revisionError;
+    }
+
+    const preflightErrors = validateMutationPreconditions(
+      toolName,
+      args,
+      context,
+      this.frontendExecutor.getToolDefinition(toolName)?.category,
+    );
+    if (preflightErrors.length > 0) {
+      return `PRECONDITION_FAILED: ${preflightErrors.join('; ')}`;
+    }
+
+    return null;
+  }
+
   private resolveBackendExecutionTarget(
     toolName: string,
     args: Record<string, unknown>,
@@ -467,6 +511,16 @@ export class BackendToolExecutor implements IToolExecutor {
     if (toolName === 'execute_plan') {
       const legacyRoute = this.tryBuildLegacyExecutePlanRoute(args, context);
       if (legacyRoute) {
+        for (const step of legacyRoute.plan.steps) {
+          const preflightFailure = this.getMutationPreflightFailure(
+            step.toolName.replace(/[A-Z]/g, (match) => `_${match.toLowerCase()}`),
+            step.params as Record<string, unknown>,
+            context,
+          );
+          if (preflightFailure) {
+            return createFailureResult(preflightFailure, 0);
+          }
+        }
         const execution = await this.invokeBackendPlan(legacyRoute.plan, {
           toolName,
           legacy: true,
@@ -535,11 +589,25 @@ export class BackendToolExecutor implements IToolExecutor {
           },
         };
       }
+
+      return this.buildUnsupportedMutationFailure(toolName);
     }
 
     const executionTarget = this.resolveBackendExecutionTarget(toolName, args);
     if (!executionTarget) {
+      if (this.isUnsafeMutatingFallback(toolName)) {
+        return this.buildUnsupportedMutationFailure(toolName);
+      }
       return this.frontendExecutor.execute(toolName, args, context);
+    }
+
+    const preflightFailure = this.getMutationPreflightFailure(
+      executionTarget.effectiveToolName,
+      executionTarget.params,
+      context,
+    );
+    if (preflightFailure) {
+      return createFailureResult(preflightFailure, 0);
     }
 
     const start = performance.now();
@@ -650,6 +718,22 @@ export class BackendToolExecutor implements IToolExecutor {
       requestTool: tool,
       executionTarget: this.resolveBackendExecutionTarget(tool.name, tool.args),
     }));
+    const unsupportedMutation = resolvedTools.find(
+      ({ requestTool, executionTarget }) =>
+        executionTarget === null && this.isUnsafeMutatingFallback(requestTool.name),
+    );
+    if (unsupportedMutation) {
+      return {
+        success: false,
+        results: [{
+          tool: unsupportedMutation.requestTool.name,
+          result: this.buildUnsupportedMutationFailure(unsupportedMutation.requestTool.name),
+        }],
+        totalDuration: performance.now() - start,
+        successCount: 0,
+        failureCount: 1,
+      };
+    }
 
     const allBackend = resolvedTools.every((t) => t.executionTarget !== null);
 
@@ -699,6 +783,23 @@ export class BackendToolExecutor implements IToolExecutor {
 
       for (let i = 0; i < backendTools.length; i++) {
         const { requestTool, executionTarget } = backendTools[i];
+        const preflightFailure = this.getMutationPreflightFailure(
+          executionTarget.effectiveToolName,
+          executionTarget.params,
+          context,
+        );
+        if (preflightFailure) {
+          return {
+            success: false,
+            results: [{
+              tool: requestTool.name,
+              result: createFailureResult(preflightFailure, performance.now() - start),
+            }],
+            totalDuration: performance.now() - start,
+            successCount: 0,
+            failureCount: 1,
+          };
+        }
         const exp = compoundExpanders.get(executionTarget.effectiveToolName);
 
         if (exp) {

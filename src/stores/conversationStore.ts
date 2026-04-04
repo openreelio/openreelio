@@ -29,7 +29,10 @@ import {
   type PersistenceStatus,
 } from '@/agents/engine/core/conversation';
 import type { LLMMessage } from '@/agents/engine/ports/ILLMClient';
+import { hydratePersistedPermissionRules } from '@/agents/engine/core/permissionAudit';
 import { createLogger } from '@/services/logger';
+import { useAgentSessionStore } from '@/stores/agentSessionStore';
+import { usePermissionStore } from '@/stores/permissionStore';
 
 const logger = createLogger('ConversationStore');
 
@@ -166,6 +169,42 @@ function updatePersistenceStatus(messageId: string, status: PersistenceStatus): 
   });
 }
 
+function extractErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message.trim().length > 0) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
+function isMissingAgentSessionError(error: unknown): boolean {
+  return /not found/i.test(extractErrorMessage(error));
+}
+
+async function hydrateAgentSessionKernel(projectId: string, sessionId: string): Promise<void> {
+  const agentSessionStore = useAgentSessionStore.getState();
+  agentSessionStore.loadForProject(projectId);
+
+  try {
+    await agentSessionStore.loadSession(sessionId);
+  } catch (error) {
+    const message = extractErrorMessage(error);
+    if (isMissingAgentSessionError(error)) {
+      logger.info('No persisted agent session kernel found for conversation session', {
+        projectId,
+        sessionId,
+      });
+      return;
+    }
+
+    logger.warn('Failed to hydrate agent session kernel for conversation session', {
+      projectId,
+      sessionId,
+      error: message,
+    });
+  }
+}
+
 async function persistMessage(sessionId: string, message: ConversationMessage): Promise<void> {
   const parts = message.parts.map((part, idx) => ({
     id: `${message.id}_p${idx}`,
@@ -231,6 +270,7 @@ export const useConversationStore = create<ConversationStore>()(
 
     loadForProject: (projectId: string) => {
       clearAllPendingSaves();
+      usePermissionStore.getState().resetSessionRules();
       set((state) => {
         state.activeProjectId = projectId;
         state.activeConversation = createConversation(projectId);
@@ -288,6 +328,7 @@ export const useConversationStore = create<ConversationStore>()(
           return session.id;
         }
 
+        usePermissionStore.getState().resetSessionRules();
         set((state) => {
           state.sessions = [session, ...state.sessions.filter((s) => s.id !== session.id)];
           state.activeSessionId = session.id;
@@ -362,6 +403,7 @@ export const useConversationStore = create<ConversationStore>()(
             : undefined,
         }));
 
+        usePermissionStore.getState().resetSessionRules();
         set((state) => {
           state.activeSessionId = sessionId;
           state.activeConversation = {
@@ -375,6 +417,10 @@ export const useConversationStore = create<ConversationStore>()(
           state.streamingMessageId = null;
         });
 
+        await hydratePersistedPermissionRules(sessionId, {
+          shouldApply: () => get().activeSessionId === sessionId,
+        });
+        void hydrateAgentSessionKernel(projectId, sessionId);
         logger.info('Switched to session', { sessionId, messageCount: messages.length });
       } catch (err) {
         logger.error('Failed to switch session', { sessionId, err });
@@ -384,6 +430,7 @@ export const useConversationStore = create<ConversationStore>()(
     deleteSession: async (sessionId: string) => {
       try {
         await invoke('delete_ai_session', { sessionId });
+        const wasActive = get().activeSessionId === sessionId;
         set((state) => {
           state.sessions = state.sessions.filter((s) => s.id !== sessionId);
           if (state.activeSessionId === sessionId) {
@@ -392,6 +439,9 @@ export const useConversationStore = create<ConversationStore>()(
             state.activeConversation = pid ? createConversation(pid) : null;
           }
         });
+        if (wasActive) {
+          usePermissionStore.getState().resetSessionRules();
+        }
         logger.info('Deleted AI session', { sessionId });
       } catch (err) {
         logger.error('Failed to delete session', { sessionId, err });
@@ -401,6 +451,7 @@ export const useConversationStore = create<ConversationStore>()(
     archiveSession: async (sessionId: string) => {
       try {
         await invoke('archive_ai_session', { sessionId });
+        const wasActive = get().activeSessionId === sessionId;
         set((state) => {
           state.sessions = state.sessions.filter((s) => s.id !== sessionId);
           if (state.activeSessionId === sessionId) {
@@ -409,6 +460,9 @@ export const useConversationStore = create<ConversationStore>()(
             state.activeConversation = pid ? createConversation(pid) : null;
           }
         });
+        if (wasActive) {
+          usePermissionStore.getState().resetSessionRules();
+        }
         logger.info('Archived AI session', { sessionId });
       } catch (err) {
         logger.error('Failed to archive session', { sessionId, err });
@@ -563,6 +617,7 @@ export const useConversationStore = create<ConversationStore>()(
     clearConversation: () => {
       clearAllPendingSaves();
       const projectId = get().activeProjectId;
+      usePermissionStore.getState().resetSessionRules();
 
       set((state) => {
         if (projectId) {

@@ -197,7 +197,14 @@ function parseDeleteRange(
     args.trackId = selectedTrack;
   }
 
-  return createFastPathMatch('delete_range', 'delete_clips_in_range', args, 0.94, toolExecutor);
+  return createFastPathMatch(
+    'delete_range',
+    'delete_clips_in_range',
+    args,
+    0.94,
+    toolExecutor,
+    'high',
+  );
 }
 
 function createFastPathMatch(
@@ -206,6 +213,7 @@ function createFastPathMatch(
   args: Record<string, unknown>,
   confidence: number,
   toolExecutor: IToolExecutor,
+  riskLevel: PlanStep['riskLevel'] = 'low',
 ): FastPathMatch | null {
   if (!toolExecutor.hasTool(tool)) {
     return null;
@@ -221,7 +229,7 @@ function createFastPathMatch(
     tool,
     args,
     description: `Fast-path ${strategy.replace('_', ' ')} action`,
-    riskLevel: 'low',
+    riskLevel,
     estimatedDuration: 150,
   };
 

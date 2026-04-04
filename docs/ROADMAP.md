@@ -187,9 +187,9 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 
 **Goal**: Enable AI-powered editing with automatic transcription, smart search, and shot detection.
 
-> **Status**: 98% Complete - Full AI chat interface, agent framework, and editing tools implemented
+> **Status**: 98% capability surface complete, canonical runtime enforcement in progress
 >
-> **🚧 AGENT SYSTEM REWRITE IN PROGRESS**: The current request-response AI system is being replaced with a native agentic loop (Think → Plan → Act → Observe). See [AGENT_IMPLEMENTATION_MASTER_PLAN.md](./AGENT_IMPLEMENTATION_MASTER_PLAN.md) for the complete implementation plan.
+> **⚙️ CANONICAL RUNTIME ENFORCEMENT**: The shipping AI sidebar now uses the TPAO `AgenticEngine` only. The legacy `chat_with_ai` path and the streaming `AgentLoop` runtime remain retained compatibility/internal surfaces while verification and cleanup continue. See [AGENT_IMPLEMENTATION_MASTER_PLAN.md](./AGENT_IMPLEMENTATION_MASTER_PLAN.md) for the current plan.
 
 ### Current Progress (as of 2026-01-27)
 
@@ -197,8 +197,8 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 - ✅ AI Provider Architecture (OpenAI, Anthropic, Local providers)
 - ✅ AI Gateway with edit script executor
 - ✅ AI Settings Panel (AISettingsPanel.tsx) with dialog integration
-- ✅ AI Prompt Panel (AIPromptPanel.tsx)
-- ✅ AI Store (aiStore.ts with full state management + cancel generation)
+- ✅ Legacy AI Prompt Path (`aiStore` + `chat_with_ai`) retained for internal compatibility
+- ✅ AI Store (provider sync, proposals, and legacy/internal compatibility state)
 - ✅ Meilisearch Sidecar Setup (sidecar.rs)
 - ✅ Meilisearch Search Service (service.rs)
 - ✅ Search UI Components (SearchBar, SearchPanel, SearchFilters, GroupedSearchResults)
@@ -209,20 +209,18 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
 - ✅ useCaption Hook (CRUD operations)
 - ✅ useTranscriptionWithIndexing Hook
 - ✅ First-Run Setup Wizard (SetupWizard.tsx)
-- ✅ **AI Sidebar** (AISidebar.tsx) - Collapsible chat interface with resize support
-- ✅ **Chat History** (ChatHistory.tsx) - Message display with auto-scroll
-- ✅ **Chat Input** (ChatInput.tsx) - Auto-resize input with stop generation
-- ✅ **Context Panel** (ContextPanel.tsx) - Shows current editing context
-- ✅ **Quick Actions Bar** (QuickActionsBar.tsx) - Common AI actions
+- ✅ **AI Sidebar** (AISidebar.tsx) - Shipping container for the canonical agent runtime
+- ✅ **Agent Sidebar Integration** (AgenticSidebarContent.tsx) - Runtime selection, recovery UI, and prompt-context loading
+- ✅ **Agentic Chat Surface** (AgenticChat.tsx) - Main plan-driven chat interface
+- ✅ **Recovery Surfaces** (`AgentSessionRecoveryPanel`, `AgentSessionResumeHistoryPanel`, `AgentSessionRecoveryStatus`) - Persisted session recovery visibility
 - ✅ **Proposal Card** (ProposalCard.tsx) - AI edit proposal display
-- ✅ **Chat Storage** (chatStorage.ts) - Persistent chat history per project
-- ✅ **Agent Framework** (src/agents/)
-  - ✅ Agent base class with event emitter and tool execution
-  - ✅ ToolRegistry for registering and executing tools
+- ✅ **Chat Storage** (chatStorage.ts) - Legacy/internal chat history persistence per project
+- ✅ **Agent Tool Surface** (src/agents/, src/agents/tools/)
+  - ✅ ToolRegistry-backed tool registration and execution
   - ✅ ContextBuilder for building agent context
-  - ✅ VideoEditingAgent for AI-powered video editing (LEGACY)
-  - ✅ MockAgent for testing
-- ✅ **Agentic Engine** (src/agents/engine/) - NEW Think-Plan-Act-Observe loop
+  - ✅ Meta-tool consolidation and workspace tool surfaces
+  - ✅ BackendToolExecutor for atomic backend-safe editing commands
+- ✅ **TPAO Runtime** (src/agents/engine/)
   - ✅ AgenticEngine orchestrator with iteration control
   - ✅ Thinker phase (intent analysis via LLM)
   - ✅ Planner phase (step generation with risk assessment)
@@ -232,14 +230,24 @@ This document outlines the complete development roadmap for OpenReelio, from MVP
   - ✅ TauriLLMAdapter (bridges to backend providers)
   - ✅ ToolRegistryAdapter (bridges to existing tools)
   - ✅ Feature flag controlled (USE_AGENTIC_ENGINE)
-- ✅ **Agentic UI Components** (src/components/features/agent/)
+- ✅ **Compatibility Runtime** (src/agents/engine/AgentLoop.ts)
+  - ✅ Streaming-first loop with iterative tool execution
+  - ✅ Doom-loop detection, compaction, and permission gating
+  - ✅ Internal compatibility flag (USE_AGENT_LOOP)
+- ✅ **Session / Recovery / Permission Substrate**
+  - ✅ Agent session backend and persistence store
+  - ✅ Permission audit persistence and replay
+  - ✅ Resume checkpoint and compaction artifact persistence
+- ✅ **Agent UI Components** (src/components/features/agent/)
   - ✅ AgenticChat - Main chat interface with loop integration
+  - ✅ AgentLoopChat - Compatibility-only chat interface for internal verification
   - ✅ ThinkingIndicator - Shows AI thinking process
   - ✅ PlanViewer - Displays plans with approval controls
   - ✅ ActionFeed - Real-time action progress
   - ✅ AgenticSidebarContent - Integration wrapper
 - ✅ **React Hooks** (src/hooks/)
   - ✅ useAgenticLoop - Main hook for engine orchestration
+  - ✅ useAgentLoop - Main hook for the compatibility runtime
   - ✅ useAgentApproval - Human-in-the-loop approval
   - ✅ useAgentStreaming - Token streaming support
   - ✅ useAgentWorkflow - Workflow state management
@@ -389,7 +397,7 @@ pub struct Shot {
 - [x] Full-text search across all assets (SearchPanel, Meilisearch)
 - [x] Transcript-based search ("find 'hello'") - infrastructure ready
 - [ ] Automatic shot detection with markers (candle pending)
-- [x] AI prompt panel with EditScript execution (AIPromptPanel.tsx)
+- [x] Canonical AI sidebar runtime with plan-driven editing (`AISidebar.tsx` + `AgenticEngine`)
 
 ---
 

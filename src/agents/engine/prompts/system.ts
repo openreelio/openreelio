@@ -34,6 +34,11 @@ export interface SystemPromptOptions {
   customInstructions?: string;
 }
 
+export interface ProjectPromptAddendumOptions {
+  knowledge?: string[];
+  customInstructions?: string;
+}
+
 // =============================================================================
 // Base Prompts by Role
 // =============================================================================
@@ -68,15 +73,58 @@ function buildLanguageSection(context: AgentContext): string | null {
 // Knowledge Section
 // =============================================================================
 
+function sanitizePromptText(value: string): string {
+  const normalized = value
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join(' ');
+
+  return normalized
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 function buildKnowledgeSection(knowledge: string[]): string | null {
   if (knowledge.length === 0) return null;
 
   return [
     '<knowledge>',
     'The following are learned patterns and preferences for this project:',
-    ...knowledge.map((k) => `- ${k}`),
+    ...knowledge.map((entry) => `- ${sanitizePromptText(entry)}`),
     '</knowledge>',
   ].join('\n');
+}
+
+function buildCustomInstructionsSection(customInstructions?: string): string | null {
+  if (!customInstructions) {
+    return null;
+  }
+
+  return [
+    '<custom_instructions>',
+    sanitizePromptText(customInstructions),
+    '</custom_instructions>',
+  ].join('\n');
+}
+
+export function buildProjectPromptAddendum(options: ProjectPromptAddendumOptions): string | null {
+  const { knowledge = [], customInstructions } = options;
+  const sections: string[] = [];
+
+  const knowledgeSection = buildKnowledgeSection(knowledge);
+  if (knowledgeSection) {
+    sections.push(knowledgeSection);
+  }
+
+  const customInstructionsSection = buildCustomInstructionsSection(customInstructions);
+  if (customInstructionsSection) {
+    sections.push(customInstructionsSection);
+  }
+
+  return sections.length > 0 ? sections.join('\n\n') : null;
 }
 
 // =============================================================================
@@ -117,13 +165,8 @@ export function assembleSystemPrompt(options: SystemPromptOptions): string {
   if (languageSection) sections.push(languageSection);
 
   // 6. Custom instructions
-  if (customInstructions) {
-    sections.push([
-      '<custom_instructions>',
-      customInstructions,
-      '</custom_instructions>',
-    ].join('\n'));
-  }
+  const customInstructionsSection = buildCustomInstructionsSection(customInstructions);
+  if (customInstructionsSection) sections.push(customInstructionsSection);
 
   return sections.join('\n\n');
 }

@@ -4,6 +4,9 @@
 
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { useConversationStore } from './conversationStore';
+import { useAgentSessionStore } from './agentSessionStore';
+import { usePermissionStore } from './permissionStore';
+import * as permissionAudit from '@/agents/engine/core/permissionAudit';
 import type { MessagePart } from '@/agents/engine/core/conversation';
 import {
   createTextPart,
@@ -66,6 +69,7 @@ beforeEach(() => {
     activeSessionId: null,
     sessions: [],
   });
+  useAgentSessionStore.getState().clear();
 
   // Reset IPC mock
   mockInvoke.mockReset().mockResolvedValue(undefined);
@@ -78,6 +82,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  useAgentSessionStore.getState().clear();
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
@@ -240,6 +245,168 @@ describe('ConversationStore', () => {
 
       const createCalls = mockInvoke.mock.calls.filter(([cmd]) => cmd === 'create_ai_session');
       expect(createCalls).toHaveLength(1);
+    });
+  });
+
+  describe('switchSession', () => {
+    it('should reset stale permission rules and hydrate the activated session rules', async () => {
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === 'list_ai_sessions') {
+          return [];
+        }
+
+        if (command === 'get_ai_session') {
+          return {
+            session: {
+              id: 'session-permissions',
+              projectId: 'project-1',
+              title: 'Permission session',
+              agent: 'editor',
+              modelProvider: null,
+              modelId: null,
+              createdAt: 100,
+              updatedAt: 200,
+              archived: false,
+              messageCount: 0,
+              lastMessagePreview: null,
+            },
+            messages: [],
+          };
+        }
+
+        return undefined;
+      });
+
+      usePermissionStore.getState().loadDefaults();
+      usePermissionStore.getState().allowAlways('delete_clip', { clipId: 'stale-clip' });
+      expect(usePermissionStore.getState().sessionRules).toHaveLength(1);
+
+      const hydrateSpy = vi
+        .spyOn(permissionAudit, 'hydratePersistedPermissionRules')
+        .mockImplementation(async (sessionId, options) => {
+          if (options?.shouldApply && !options.shouldApply()) {
+            return;
+          }
+
+          usePermissionStore.getState().hydrateSessionRulesFromPersistedDecisions(
+            sessionId!,
+            [{
+              id: 'decision-1',
+              subject: 'timeline.clip.delete#clip:clip-7',
+              action: 'allow_always',
+              createdAt: 10,
+            }],
+          );
+        });
+
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+
+      await store.switchSession('session-permissions');
+
+      expect(hydrateSpy).toHaveBeenCalledWith(
+        'session-permissions',
+        expect.objectContaining({
+          shouldApply: expect.any(Function),
+        }),
+      );
+      expect(usePermissionStore.getState().sessionRules).toEqual([
+        {
+          id: 'decision-1',
+          pattern: 'timeline.clip.delete#clip:clip-7',
+          permission: 'allow',
+          scope: 'session',
+        },
+      ]);
+    });
+
+    it('should hydrate the persisted agent session kernel for the activated session', async () => {
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === 'list_ai_sessions') {
+          return [];
+        }
+
+        if (command === 'get_ai_session') {
+          return {
+            session: {
+              id: 'session-1',
+              projectId: 'project-1',
+              title: 'Recovered session',
+              agent: 'editor',
+              modelProvider: null,
+              modelId: null,
+              createdAt: 100,
+              updatedAt: 200,
+              archived: false,
+              messageCount: 1,
+              lastMessagePreview: 'Recovered turn',
+            },
+            messages: [],
+          };
+        }
+
+        return undefined;
+      });
+
+      const loadForProjectSpy = vi.spyOn(useAgentSessionStore.getState(), 'loadForProject');
+      const loadSessionSpy = vi
+        .spyOn(useAgentSessionStore.getState(), 'loadSession')
+        .mockResolvedValue({
+          session: {
+            id: 'session-1',
+            projectId: 'project-1',
+          },
+          runs: [],
+        } as any);
+
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+
+      await store.switchSession('session-1');
+
+      expect(loadForProjectSpy).toHaveBeenCalledWith('project-1');
+      expect(loadSessionSpy).toHaveBeenCalledWith('session-1');
+    });
+
+    it('should ignore missing agent-session kernels when the conversation session has not been bootstrapped yet', async () => {
+      mockInvoke.mockImplementation(async (command: string) => {
+        if (command === 'list_ai_sessions') {
+          return [];
+        }
+
+        if (command === 'get_ai_session') {
+          return {
+            session: {
+              id: 'session-2',
+              projectId: 'project-1',
+              title: 'Fresh session',
+              agent: 'editor',
+              modelProvider: null,
+              modelId: null,
+              createdAt: 100,
+              updatedAt: 200,
+              archived: false,
+              messageCount: 0,
+              lastMessagePreview: null,
+            },
+            messages: [],
+          };
+        }
+
+        return undefined;
+      });
+
+      const loadSessionSpy = vi
+        .spyOn(useAgentSessionStore.getState(), 'loadSession')
+        .mockRejectedValue(new Error('session not found'));
+
+      const store = useConversationStore.getState();
+      store.loadForProject('project-1');
+
+      await expect(store.switchSession('session-2')).resolves.toBeUndefined();
+
+      expect(loadSessionSpy).toHaveBeenCalledWith('session-2');
+      expect(useConversationStore.getState().activeSessionId).toBe('session-2');
     });
   });
 
