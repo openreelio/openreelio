@@ -24,7 +24,7 @@ import {
 } from '@/agents/tools/storeAccessor';
 import { useProjectStore } from '@/stores/projectStore';
 import {
-  isReadOnlyToolName,
+  requiresProjectMutationPreflight,
   validateMutationPreconditions,
   validateMutationStateRevision,
 } from './mutationPreflight';
@@ -106,9 +106,10 @@ export class ToolRegistryAdapter implements IToolExecutor {
     context: ExecutionContext,
   ): Promise<ToolExecutionResult> {
     const startTime = performance.now();
-    const isReadOnlyTool = isReadOnlyToolName(toolName);
+    const tool = this.registry.get(toolName);
+    const requiresMutationPreflight = requiresProjectMutationPreflight(toolName, tool?.category);
 
-    if (!isReadOnlyTool) {
+    if (requiresMutationPreflight) {
       const { error: revisionError, currentVersion } = validateMutationStateRevision(
         context,
         this.sessionStateVersions.get(context.sessionId),
@@ -124,7 +125,7 @@ export class ToolRegistryAdapter implements IToolExecutor {
       }
     }
 
-    const preflightErrors = validateMutationPreconditions(toolName, args, context);
+    const preflightErrors = validateMutationPreconditions(toolName, args, context, tool?.category);
     if (preflightErrors.length > 0) {
       return {
         success: false,
@@ -174,7 +175,6 @@ export class ToolRegistryAdapter implements IToolExecutor {
     }
 
     // Determine side effects based on tool category
-    const tool = this.registry.get(toolName);
     const sideEffects = this.inferSideEffects(tool, context);
 
     return {

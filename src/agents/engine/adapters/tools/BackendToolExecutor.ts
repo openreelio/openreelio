@@ -32,7 +32,7 @@ import { isMetaToolsEnabled } from '@/config/featureFlags';
 import { getVisibleMetaToolNames } from '@/agents/tools/metaTools';
 import { getWorkspaceToolNames } from '@/agents/tools/workspaceTools';
 import {
-  isReadOnlyToolName,
+  requiresProjectMutationPreflight,
   validateMutationPreconditions,
   validateMutationStateRevision,
 } from './mutationPreflight';
@@ -265,11 +265,7 @@ export class BackendToolExecutor implements IToolExecutor {
       return false;
     }
 
-    if (toolName === 'execute_plan' || toolName === 'edit') {
-      return true;
-    }
-
-    return !isReadOnlyToolName(toolName);
+    return requiresProjectMutationPreflight(toolName, toolDefinition.category);
   }
 
   private buildUnsupportedMutationFailure(toolName: string): ToolExecutionResult {
@@ -289,7 +285,12 @@ export class BackendToolExecutor implements IToolExecutor {
       return revisionError;
     }
 
-    const preflightErrors = validateMutationPreconditions(toolName, args, context);
+    const preflightErrors = validateMutationPreconditions(
+      toolName,
+      args,
+      context,
+      this.frontendExecutor.getToolDefinition(toolName)?.category,
+    );
     if (preflightErrors.length > 0) {
       return `PRECONDITION_FAILED: ${preflightErrors.join('; ')}`;
     }

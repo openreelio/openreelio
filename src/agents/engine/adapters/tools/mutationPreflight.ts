@@ -14,6 +14,9 @@ const READ_ONLY_TOOL_PREFIXES = [
   'inspect_',
   'query_',
   'read_',
+  'check_',
+  'compare_',
+  'estimate_',
 ];
 
 const ID_PLACEHOLDER_PATTERNS: RegExp[] = [
@@ -24,9 +27,55 @@ const ID_PLACEHOLDER_PATTERNS: RegExp[] = [
 
 const TRACK_ALIAS_PATTERNS: RegExp[] = [/^(video|audio)_[0-9]+$/i];
 
-export function isReadOnlyToolName(toolName: string): boolean {
+const PROJECT_MUTATION_CATEGORIES = new Set([
+  'timeline',
+  'clip',
+  'track',
+  'effect',
+  'transition',
+  'audio',
+]);
+
+const PROJECT_MUTATION_UTILITY_TOOLS = new Set([
+  'add_caption',
+  'update_caption',
+  'delete_caption',
+  'style_caption',
+  'add_captions_from_transcription',
+]);
+
+const READ_ONLY_EXACT_TOOL_NAMES = new Set([
+  'check_generation_status',
+  'estimate_generation_cost',
+]);
+
+export function isReadOnlyToolName(toolName: string, category?: string | null): boolean {
   const normalized = toolName.trim().toLowerCase();
+  const normalizedCategory = category?.trim().toLowerCase() ?? null;
+
+  if (normalizedCategory === 'analysis' || READ_ONLY_EXACT_TOOL_NAMES.has(normalized)) {
+    return true;
+  }
+
   return READ_ONLY_TOOL_PREFIXES.some((prefix) => normalized.startsWith(prefix));
+}
+
+export function requiresProjectMutationPreflight(
+  toolName: string,
+  category?: string | null,
+): boolean {
+  const normalized = toolName.trim().toLowerCase();
+  const normalizedCategory = category?.trim().toLowerCase() ?? null;
+
+  if (normalized === 'execute_plan' || normalized === 'edit') {
+    return true;
+  }
+
+  if (PROJECT_MUTATION_UTILITY_TOOLS.has(normalized)) {
+    return true;
+  }
+
+  return normalizedCategory !== null && PROJECT_MUTATION_CATEGORIES.has(normalizedCategory);
 }
 
 export function validateMutationStateRevision(
@@ -57,6 +106,7 @@ export function validateMutationPreconditions(
   toolName: string,
   args: Record<string, unknown>,
   context: ExecutionContext,
+  category?: string | null,
 ): string[] {
   const errors: string[] = [];
 
@@ -70,7 +120,7 @@ export function validateMutationPreconditions(
     }
   }
 
-  if (isReadOnlyToolName(toolName)) {
+  if (!requiresProjectMutationPreflight(toolName, category)) {
     return errors;
   }
 
@@ -78,10 +128,14 @@ export function validateMutationPreconditions(
   const catalog = getAssetCatalogSnapshot();
 
   if (!timeline.sequenceId) {
+    errors.push('No active sequence is loaded for mutation preflight');
     return errors;
   }
 
   if (context.sequenceId && context.sequenceId !== timeline.sequenceId) {
+    errors.push(
+      `context sequence '${context.sequenceId}' does not match active sequence '${timeline.sequenceId}'`,
+    );
     return errors;
   }
 

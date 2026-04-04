@@ -25,6 +25,12 @@ import type {
 } from '../../ports/IToolExecutor';
 import type { RiskLevel, ValidationResult } from '../../core/types';
 import { useProjectStore } from '@/stores/projectStore';
+import {
+  createMockAsset,
+  createMockClip,
+  createMockSequence,
+  createMockTrack,
+} from '@/test/mocks';
 
 // Disable meta-tool filtering in unit tests (mock tools don't match meta-tool names)
 vi.mock('@/config/featureFlags', async (importOriginal) => {
@@ -200,6 +206,12 @@ const TOOL_DEFS: TestToolDef[] = [
     category: 'utility',
     parameters: { type: 'object', properties: {} },
   },
+  {
+    name: 'check_generation_status',
+    description: 'Check the status of a generation job',
+    category: 'generation',
+    parameters: { type: 'object', properties: {} },
+  },
 ];
 
 const CONTEXT: ExecutionContext = {
@@ -207,6 +219,64 @@ const CONTEXT: ExecutionContext = {
   sequenceId: 'seq-1',
   sessionId: 'session-1',
 };
+
+function seedActiveProjectState(options: {
+  activeSequenceId?: string | null;
+  sequenceId?: string;
+  stateVersion?: number;
+  clipIds?: string[];
+} = {}): void {
+  const sequenceId = options.sequenceId ?? 'seq-1';
+  const activeSequenceId = options.activeSequenceId === undefined
+    ? sequenceId
+    : options.activeSequenceId;
+  const clipIds = options.clipIds ?? ['clip-1', 'clip-2', 'clip-3', 'clip-5', 'c1', 'c2'];
+
+  const clips = clipIds.map((clipId, index) => createMockClip({
+    id: clipId,
+    assetId: `asset-${clipId}`,
+    place: {
+      timelineInSec: index * 5,
+      durationSec: 5,
+    },
+  }));
+  const track = createMockTrack({
+    id: 'track-1',
+    kind: 'video',
+    name: 'Video 1',
+    clips,
+  });
+  const sequence = createMockSequence({
+    id: sequenceId,
+    name: 'Test Sequence',
+    tracks: [track],
+  });
+  const assets = new Map(
+    clips.map((clip) => [
+      clip.assetId,
+      createMockAsset({
+        id: clip.assetId,
+        name: `${clip.id}.mp4`,
+        kind: 'video',
+      }),
+    ]),
+  );
+
+  useProjectStore.setState({
+    isLoaded: true,
+    meta: {
+      id: 'project-1',
+      name: 'Test',
+      path: '/tmp/test.orio',
+      createdAt: new Date().toISOString(),
+      modifiedAt: new Date().toISOString(),
+    },
+    stateVersion: options.stateVersion ?? 8,
+    activeSequenceId,
+    sequences: new Map([[sequenceId, sequence]]),
+    assets,
+  });
+}
 
 // =============================================================================
 // Tests
@@ -218,14 +288,7 @@ describe('BackendToolExecutor', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    useProjectStore.setState({
-      isLoaded: false,
-      meta: null,
-      stateVersion: 0,
-      activeSequenceId: null,
-      sequences: new Map(),
-      assets: new Map(),
-    });
+    seedActiveProjectState();
     frontend = createMockFrontendExecutor(TOOL_DEFS);
     backend = createBackendToolExecutor(frontend);
   });
@@ -460,6 +523,22 @@ describe('BackendToolExecutor', () => {
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
+    it('should route generation status tools to the frontend executor', async () => {
+      const result = await backend.execute(
+        'check_generation_status',
+        { jobId: 'job-1' },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(frontend.execute).toHaveBeenCalledWith(
+        'check_generation_status',
+        { jobId: 'job-1' },
+        CONTEXT,
+      );
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
     it('should fail fast for mutating compound tools that are not backend-safe', async () => {
       const result = await backend.execute(
         'freeze_frame',
@@ -500,6 +579,45 @@ describe('BackendToolExecutor', () => {
       expect(mockInvoke).not.toHaveBeenCalled();
     });
 
+    it('should fail closed when no active sequence is available for backend mutations', async () => {
+      seedActiveProjectState({ activeSequenceId: null });
+
+      const result = await backend.execute(
+        'split_clip',
+        { clipId: 'clip-1', atTimelineSec: 5 },
+        {
+          ...CONTEXT,
+          expectedStateVersion: 8,
+        },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('No active sequence is loaded for mutation preflight');
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
+    it('should fail closed when backend mutation context targets a different sequence', async () => {
+      seedActiveProjectState({
+        activeSequenceId: 'seq-active',
+        sequenceId: 'seq-active',
+        clipIds: ['clip-1'],
+      });
+
+      const result = await backend.execute(
+        'split_clip',
+        { clipId: 'clip-1', atTimelineSec: 5 },
+        {
+          ...CONTEXT,
+          sequenceId: 'seq-stale',
+          expectedStateVersion: 8,
+        },
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("context sequence 'seq-stale' does not match active sequence 'seq-active'");
+      expect(mockInvoke).not.toHaveBeenCalled();
+    });
+
     it('should handle backend execution failure', async () => {
       mockInvoke.mockResolvedValueOnce({
         planId: 'plan-1',
@@ -512,7 +630,7 @@ describe('BackendToolExecutor', () => {
         executionTimeMs: 2,
       });
 
-      const result = await backend.execute('split_clip', { clipId: 'nonexistent' }, CONTEXT);
+      const result = await backend.execute('split_clip', { clipId: 'clip-1' }, CONTEXT);
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('Clip not found');
@@ -961,7 +1079,7 @@ describe('BackendToolExecutor', () => {
     it('should delegate getAvailableTools to frontend', () => {
       const tools = backend.getAvailableTools();
       expect(frontend.getAvailableTools).toHaveBeenCalled();
-      expect(tools.length).toBe(10);
+      expect(tools.length).toBe(TOOL_DEFS.length);
     });
 
     it('should delegate getToolDefinition to frontend', () => {

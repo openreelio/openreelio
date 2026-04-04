@@ -785,10 +785,9 @@ async generateEditScriptWithAi(intent: string, context: AIContextDto) : Promise<
 /**
  * Perform a raw completion using the configured AI provider.
  * 
- * Unlike the legacy/internal `chat_with_ai` path, this does not apply the
- * request-response chat prompt and does not parse the output into an `AIResponse`.
- * This is intended for the frontend agentic runtimes, which supply their own
- * prompts and schemas.
+ * Unlike `chat_with_ai`, this does not apply the unified-agent system prompt and does not parse
+ * the output into an `AIResponse`. This is intended for the frontend agentic engine, which
+ * supplies its own prompts and schemas.
  */
 async completeWithAiRaw(messages: ConversationMessageDto[], options: AICompletionOptionsDto | null) : Promise<Result<AICompletionResponseDto, string>> {
     try {
@@ -798,11 +797,10 @@ async completeWithAiRaw(messages: ConversationMessageDto[], options: AICompletio
 }
 },
 /**
- * Chat with AI using conversation history through the legacy/internal
- * request-response path.
+ * Chat with AI using conversation history (unified agent mode)
  * 
- * This endpoint is retained for compatibility with the older store-driven flow.
- * The shipping AI sidebar uses the canonical agent runtime instead.
+ * This endpoint supports natural conversation and optional edit commands.
+ * The AI will decide whether to respond conversationally or execute edits.
  */
 async chatWithAi(messages: ConversationMessageDto[], context: AIContextDto) : Promise<Result<AIResponseDto, string>> {
     try {
