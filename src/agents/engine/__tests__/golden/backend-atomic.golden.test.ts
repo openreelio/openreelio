@@ -15,6 +15,13 @@ import {
   type MockToolExecutor,
 } from '../../adapters/tools/MockToolExecutor';
 import type { ExecutionContext } from '../../ports/IToolExecutor';
+import { useProjectStore } from '@/stores/projectStore';
+import {
+  createMockAsset,
+  createMockClip,
+  createMockSequence,
+  createMockTrack,
+} from '@/test/mocks';
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -26,6 +33,48 @@ vi.mock('@tauri-apps/api/event', () => ({
 
 const mockInvoke = vi.mocked(invoke);
 
+function seedActiveProjectState(): void {
+  const clip1 = createMockClip({
+    id: 'clip-1',
+    assetId: 'asset-1',
+    place: { timelineInSec: 0, durationSec: 5 },
+  });
+  const clip2 = createMockClip({
+    id: 'clip-2',
+    assetId: 'asset-2',
+    place: { timelineInSec: 5, durationSec: 5 },
+  });
+  const track = createMockTrack({
+    id: 'track-1',
+    kind: 'video',
+    name: 'Video 1',
+    clips: [clip1, clip2],
+  });
+  const sequence = createMockSequence({
+    id: 'sequence-1',
+    name: 'Golden Sequence',
+    tracks: [track],
+  });
+
+  useProjectStore.setState({
+    isLoaded: true,
+    meta: {
+      id: 'project-1',
+      name: 'Golden Project',
+      path: '/tmp/golden.orio',
+      createdAt: new Date().toISOString(),
+      modifiedAt: new Date().toISOString(),
+    },
+    stateVersion: 8,
+    activeSequenceId: 'sequence-1',
+    sequences: new Map([['sequence-1', sequence]]),
+    assets: new Map([
+      ['asset-1', createMockAsset({ id: 'asset-1', name: 'clip-1.mp4', kind: 'video' })],
+      ['asset-2', createMockAsset({ id: 'asset-2', name: 'clip-2.mp4', kind: 'video' })],
+    ]),
+  });
+}
+
 describe('Golden: backend-atomic', () => {
   let mockToolExecutor: MockToolExecutor;
   let backendExecutor: BackendToolExecutor;
@@ -33,6 +82,7 @@ describe('Golden: backend-atomic', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    seedActiveProjectState();
     mockToolExecutor = createMockToolExecutor();
 
     // Register editing tools (category: 'clip' → backend route)
@@ -218,7 +268,7 @@ describe('Golden: backend-atomic', () => {
       {
         tools: [
           { name: 'split_clip', args: { clipId: 'clip-1', splitTime: 5 } },
-          { name: 'move_clip', args: { clipId: 'nonexistent', newPosition: 10 } },
+          { name: 'move_clip', args: { clipId: 'clip-2', newPosition: 10 } },
           { name: 'trim_clip', args: { clipId: 'clip-2', newEndTime: 15 } },
         ],
         mode: 'sequential',
