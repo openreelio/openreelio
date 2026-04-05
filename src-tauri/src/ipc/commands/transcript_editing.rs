@@ -92,7 +92,8 @@ pub async fn get_transcript_words(
         }
         if let Some(ref segments) = bundle.transcript {
             if !segments.is_empty() {
-                return Ok(estimate_word_timings(segments));
+                let inferred = infer_speaker_turns(segments, &bundle_speech_regions);
+                return Ok(estimate_word_timings(&inferred));
             }
         }
     }

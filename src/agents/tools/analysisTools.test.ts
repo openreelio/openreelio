@@ -2215,6 +2215,71 @@ describe('reference style transfer analysis tools', () => {
       expect(result.success).toBe(false);
       expect(result.error).toContain('No active sequence found');
     });
+
+    it('should not create an empty selects track when apply is requested with no matches', async () => {
+      const executeCommandMock = vi.fn();
+
+      setupStores({
+        assets: [
+          createAsset({
+            id: 'select-empty',
+            kind: 'video',
+            video: {
+              width: 1920,
+              height: 1080,
+              fps: { num: 30, den: 1 },
+              codec: 'h264',
+              hasAlpha: false,
+            },
+          }),
+        ],
+      });
+      useProjectStore.setState({
+        executeCommand: executeCommandMock,
+      } as unknown as Parameters<typeof useProjectStore.setState>[0]);
+
+      vi.mocked(invoke)
+        .mockResolvedValueOnce({
+          assetId: 'select-empty',
+          shots: [],
+          transcript: [],
+          audioProfile: {
+            bpm: 120,
+            spectralCentroidHz: 1400,
+            loudnessProfile: [-18.2],
+            peakDb: -4.2,
+            silenceRegions: [],
+          },
+          segments: [],
+          frameAnalysis: [],
+          metadata: {
+            durationSec: 4,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            codec: 'h264',
+            hasAudio: true,
+          },
+          analyzedAt: '2026-03-07T00:00:00Z',
+          errors: {},
+        })
+        .mockResolvedValueOnce({ annotation: null, status: 'notAnalyzed' });
+
+      const result = await globalToolRegistry.execute('build_source_selects', {
+        query: 'no matching moments',
+        apply: true,
+      });
+
+      const data = getToolResult<Record<string, any>>(result);
+      expect(data.count).toBe(0);
+      expect(data.applied).toMatchObject({
+        sequenceId: 'seq_001',
+        trackId: null,
+        createdTrack: false,
+        insertedClipCount: 0,
+      });
+      expect(executeCommandMock).not.toHaveBeenCalled();
+    });
   });
 
   // ===========================================================================

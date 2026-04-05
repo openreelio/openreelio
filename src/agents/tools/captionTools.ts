@@ -108,7 +108,10 @@ function parseAgentCaptionPosition(value: unknown): CaptionPosition | undefined 
   return undefined;
 }
 
-async function ensureCaptionTrack(sequenceId: string, explicitTrackId?: string): Promise<string> {
+async function ensureCaptionTrack(
+  sequenceId: string,
+  explicitTrackId?: string,
+): Promise<{ trackId: string; createdTrack: boolean }> {
   const sequence = getSequence(sequenceId);
   if (!sequence) {
     throw new Error(`Sequence '${sequenceId}' not found`);
@@ -124,12 +127,12 @@ async function ensureCaptionTrack(sequenceId: string, explicitTrackId?: string):
       throw new Error(`Track '${explicitTrackId}' is not a caption track`);
     }
 
-    return explicitTrackId;
+    return { trackId: explicitTrackId, createdTrack: false };
   }
 
   const existingCaptionTrack = sequence.tracks.find((track) => track.kind === 'caption');
   if (existingCaptionTrack) {
-    return existingCaptionTrack.id;
+    return { trackId: existingCaptionTrack.id, createdTrack: false };
   }
 
   const createTrackResult = await executeAgentCommand('CreateTrack', {
@@ -143,7 +146,7 @@ async function ensureCaptionTrack(sequenceId: string, explicitTrackId?: string):
     throw new Error('Failed to create caption track');
   }
 
-  return createdTrackId;
+  return { trackId: createdTrackId, createdTrack: true };
 }
 
 function normalizeTranscriptionSegments(
@@ -201,12 +204,28 @@ async function rollbackCreatedCaptions(
   return rollbackFailures;
 }
 
+async function rollbackCreatedCaptionTrack(
+  sequenceId: string,
+  trackId: string,
+): Promise<string | null> {
+  try {
+    await executeAgentCommand('DeleteTrack', {
+      sequenceId,
+      trackId,
+    });
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 async function createCaptionsFromSegments(
   sequenceId: string,
   segments: TranscriptionSegmentInput[],
   explicitTrackId?: string,
 ): Promise<{
   trackId: string;
+  createdTrack: boolean;
   captionCount: number;
   captions: Array<{ captionId: string; text: string }>;
   skippedSegmentCount: number;
@@ -220,7 +239,7 @@ async function createCaptionsFromSegments(
     throw new Error('No valid segments provided');
   }
 
-  const trackId = await ensureCaptionTrack(sequenceId, explicitTrackId);
+  const { trackId, createdTrack } = await ensureCaptionTrack(sequenceId, explicitTrackId);
   const createdCaptions: Array<{ captionId: string; text: string }> = [];
 
   for (const segment of normalizedSegments.segments) {
@@ -244,11 +263,17 @@ async function createCaptionsFromSegments(
       });
     } catch (error) {
       const rollbackFailures = await rollbackCreatedCaptions(sequenceId, trackId, createdCaptions);
+      if (createdTrack) {
+        const trackRollbackFailure = await rollbackCreatedCaptionTrack(sequenceId, trackId);
+        if (trackRollbackFailure) {
+          rollbackFailures.push(trackRollbackFailure);
+        }
+      }
       const message = error instanceof Error ? error.message : String(error);
 
       if (rollbackFailures.length > 0) {
         throw new Error(
-          `Failed to create captions: ${message}. Rollback failed for ${rollbackFailures.length} caption(s).`,
+          `Failed to create captions: ${message}. Rollback failed for ${rollbackFailures.length} operation(s).`,
         );
       }
 
@@ -260,6 +285,7 @@ async function createCaptionsFromSegments(
 
   return {
     trackId,
+    createdTrack,
     captionCount: createdCaptions.length,
     captions: createdCaptions,
     skippedSegmentCount: normalizedSegments.skippedCount,
@@ -323,7 +349,10 @@ const CAPTION_TOOLS: ToolDefinition[] = [
     handler: async (args) => {
       try {
         const sequenceId = args.sequenceId as string;
-        const trackId = await ensureCaptionTrack(sequenceId, args.trackId as string | undefined);
+        const { trackId } = await ensureCaptionTrack(
+          sequenceId,
+          args.trackId as string | undefined,
+        );
 
         const result = await executeAgentCommand('CreateCaption', {
           sequenceId,

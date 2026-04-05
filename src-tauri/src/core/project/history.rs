@@ -140,7 +140,8 @@ impl ProjectHistory {
             valid_ids.contains(op_id.as_str()) && seen_applied.insert(op_id.clone())
         });
 
-        self.protected_prefix_len = self.protected_prefix_len.min(self.applied_op_ids.len());
+        self.protected_prefix_len =
+            protected_prefix_len_for_applied_operations(operations, &self.applied_op_ids);
 
         let applied_ids: HashSet<&str> = self.applied_op_ids.iter().map(String::as_str).collect();
         let mut seen_redo = HashSet::new();
@@ -158,6 +159,24 @@ fn protected_prefix_len_for_operations(operations: &[Operation]) -> usize {
         .filter(|op| matches!(op.kind, crate::core::project::OpKind::SequenceCreate))
         .map(|_| 1)
         .unwrap_or(0)
+}
+
+fn protected_prefix_len_for_applied_operations(
+    operations: &[Operation],
+    applied_op_ids: &[OpId],
+) -> usize {
+    let Some(first_operation) = operations.first() else {
+        return 0;
+    };
+
+    if !matches!(
+        first_operation.kind,
+        crate::core::project::OpKind::SequenceCreate
+    ) {
+        return 0;
+    }
+
+    usize::from(applied_op_ids.first().map(String::as_str) == Some(first_operation.id.as_str()))
 }
 
 #[cfg(test)]
@@ -208,5 +227,20 @@ mod tests {
             vec!["op1".to_string(), "op2".to_string(), "op3".to_string()]
         );
         assert!(history.redo_op_ids.is_empty());
+    }
+
+    #[test]
+    fn sanitize_should_restore_protected_prefix_after_incremental_append() {
+        let operations = vec![
+            Operation::with_id("op1", OpKind::SequenceCreate, serde_json::json!({})),
+            Operation::with_id("op2", OpKind::AssetImport, serde_json::json!({})),
+        ];
+
+        let mut history = ProjectHistory::default();
+        history.append_new_operations(["op1".to_string(), "op2".to_string()]);
+        history.sanitize(&operations);
+
+        assert_eq!(history.protected_prefix_len, 1);
+        assert!(history.can_undo());
     }
 }

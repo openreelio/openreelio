@@ -17,7 +17,6 @@ const RENDER_PRESETS: &[(&str, &str, &str)] = &[
     ("mp4_h265_1080p", "MP4 H.265 1080p", "mp4"),
     ("webm_vp9_1080p", "WebM VP9 1080p", "webm"),
     ("prores_422", "ProRes 422", "mov"),
-    ("prores_4444", "ProRes 4444", "mov"),
 ];
 
 #[derive(Subcommand)]
@@ -146,28 +145,11 @@ fn build_export_settings(preset: &str, output_path: PathBuf) -> anyhow::Result<E
             ExportSettings::from_preset(ExportPreset::WebmVp9, output_path)
         }
         "prores_422" | "prores" => ExportSettings::from_preset(ExportPreset::ProRes, output_path),
-        "prores_4444" => ExportSettings {
-            preset: ExportPreset::Custom,
-            output_path,
-            video_codec: VideoCodec::ProRes,
-            audio_codec: AudioCodec::Pcm,
-            width: Some(1920),
-            height: Some(1080),
-            video_bitrate: Some("220M".to_string()),
-            audio_bitrate: None,
-            fps: Some(30.0),
-            crf: None,
-            two_pass: false,
-            start_time: None,
-            end_time: None,
-            hdr_mode: HdrMode::Sdr,
-            max_cll: None,
-            max_fall: None,
-            bit_depth: Some(10),
-            tonemap_mode: None,
-            hardware_accel: Default::default(),
-            resolved_encoder_name: None,
-        },
+        "prores_4444" => {
+            return Err(anyhow::anyhow!(
+                "Preset 'prores_4444' is not currently supported in CLI mode. Use 'prores_422' instead."
+            ));
+        }
         other => {
             return Err(anyhow::anyhow!(
                 "Unknown preset '{}'. Use 'render presets' to list available presets.",

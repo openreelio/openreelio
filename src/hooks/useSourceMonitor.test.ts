@@ -364,4 +364,23 @@ describe('useSourceMonitor', () => {
       expect(mockUnlisten).toHaveBeenCalled();
     });
   });
+
+  it('should no-op mutating IPC actions in browser runtimes', async () => {
+    globalThis[DESKTOP_RUNTIME_TEST_FLAG] = false;
+
+    const { result } = renderHook(() => useSourceMonitor());
+
+    await act(async () => {
+      await result.current.loadAsset('asset-browser');
+      await result.current.clearAsset();
+      await result.current.setInPoint();
+      await result.current.setOutPoint();
+      await result.current.clearInOut();
+    });
+
+    expect(commands.setSourceAsset).not.toHaveBeenCalled();
+    expect(commands.setSourceIn).not.toHaveBeenCalled();
+    expect(commands.setSourceOut).not.toHaveBeenCalled();
+    expect(commands.clearSourceInOut).not.toHaveBeenCalled();
+  });
 });

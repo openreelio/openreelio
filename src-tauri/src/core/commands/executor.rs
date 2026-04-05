@@ -1408,9 +1408,6 @@ impl CommandExecutor {
                 let seq_id = get_str(&command_json, "sequenceId").ok_or_else(|| {
                     CoreError::Internal("CaptionAdd payload missing sequenceId".to_string())
                 })?;
-                let track_id = get_str(&command_json, "trackId").ok_or_else(|| {
-                    CoreError::Internal("CaptionAdd payload missing trackId".to_string())
-                })?;
                 let caption_id = result.created_ids.first().ok_or_else(|| {
                     CoreError::Internal("CaptionAdd missing createdId".to_string())
                 })?;
@@ -1418,14 +1415,21 @@ impl CommandExecutor {
                 let sequence = state.sequences.get(seq_id).ok_or_else(|| {
                     CoreError::Internal(format!("CaptionAdd could not find sequence: {seq_id}"))
                 })?;
-                let track = sequence
-                    .tracks
-                    .iter()
-                    .find(|track| track.id == track_id)
+                let requested_track_id = get_str(&command_json, "trackId");
+                let resolved_track = requested_track_id
+                    .and_then(|track_id| sequence.tracks.iter().find(|track| track.id == track_id))
+                    .or_else(|| {
+                        sequence
+                            .tracks
+                            .iter()
+                            .find(|track| track.clips.iter().any(|clip| clip.id == *caption_id))
+                    })
                     .ok_or_else(|| {
-                        CoreError::Internal(format!("CaptionAdd could not find track: {track_id}"))
+                        CoreError::Internal(format!(
+                            "CaptionAdd could not find caption clip: {caption_id}"
+                        ))
                     })?;
-                let clip = track
+                let clip = resolved_track
                     .clips
                     .iter()
                     .find(|clip| clip.id == *caption_id)
@@ -1437,7 +1441,7 @@ impl CommandExecutor {
 
                 Ok(serde_json::json!({
                     "sequenceId": seq_id,
-                    "trackId": track_id,
+                    "trackId": resolved_track.id,
                     "clip": to_value(clip)?,
                 }))
             }

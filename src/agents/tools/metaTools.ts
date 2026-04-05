@@ -419,7 +419,7 @@ const META_TOOLS: ToolDefinition[] = [
         },
         format: { type: 'string', description: 'Subtitle format: srt or vtt' },
       },
-      required: ['action', 'sequenceId'],
+      required: ['action'],
     },
     handler: async (args) => dispatchToTool('text', args, TEXT_ACTIONS),
   },

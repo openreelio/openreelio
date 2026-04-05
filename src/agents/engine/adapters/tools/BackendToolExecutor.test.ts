@@ -958,6 +958,43 @@ describe('BackendToolExecutor', () => {
       expect(result.results[2].tool).toBe('analyze_video');
     });
 
+    it('should allow frontend-safe mutation fallbacks inside mixed batches', async () => {
+      mockInvoke.mockResolvedValueOnce({
+        planId: 'single-1',
+        success: true,
+        totalSteps: 1,
+        stepsCompleted: 1,
+        stepResults: [{ stepId: 'step-1', success: true, data: { ok: true }, durationMs: 5 }],
+        operationIds: ['op-1'],
+        executionTimeMs: 5,
+      });
+
+      const result = await backend.executeBatch(
+        {
+          tools: [
+            { name: 'split_clip', args: { clipId: 'c1', atTimelineSec: 5 } },
+            {
+              name: 'rename_track',
+              args: { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+            },
+          ],
+          mode: 'sequential',
+          stopOnError: true,
+        },
+        CONTEXT,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.successCount).toBe(2);
+      expect(result.failureCount).toBe(0);
+      expect(result.results.map((entry) => entry.tool)).toEqual(['split_clip', 'rename_track']);
+      expect(frontend.execute).toHaveBeenCalledWith(
+        'rename_track',
+        { sequenceId: 'seq-1', trackId: 'track-1', name: 'Main Video' },
+        CONTEXT,
+      );
+    });
+
     it('should batch backend-safe edit meta-tool actions through one backend plan', async () => {
       const extendedTools = [
         ...TOOL_DEFS,

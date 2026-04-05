@@ -152,50 +152,68 @@ export function useSourceMonitor(): UseSourceMonitorReturn {
     [desktopRuntimeAvailable, monitorState.assetId],
   );
 
-  const loadAsset = useCallback(async (assetId: string): Promise<void> => {
-    const result = await commands.setSourceAsset({ assetId });
-    if (result.status === 'error') {
-      logger.error('Failed to load source asset', { error: result.error });
-      return;
-    }
-    setMonitorState(result.data);
-  }, []);
+  const loadAsset = useCallback(
+    async (assetId: string): Promise<void> => {
+      if (!desktopRuntimeAvailable) {
+        return;
+      }
+      const result = await commands.setSourceAsset({ assetId });
+      if (result.status === 'error') {
+        logger.error('Failed to load source asset', { error: result.error });
+        return;
+      }
+      setMonitorState(result.data);
+    },
+    [desktopRuntimeAvailable],
+  );
 
   const clearAsset = useCallback(async (): Promise<void> => {
+    if (!desktopRuntimeAvailable) {
+      return;
+    }
     const result = await commands.setSourceAsset({ assetId: null });
     if (result.status === 'error') {
       logger.error('Failed to clear source monitor', { error: result.error });
       return;
     }
     setMonitorState(result.data);
-  }, []);
+  }, [desktopRuntimeAvailable]);
 
   const setInPoint = useCallback(async (): Promise<void> => {
+    if (!desktopRuntimeAvailable) {
+      return;
+    }
     const result = await commands.setSourceIn({ timeSec: currentTime });
     if (result.status === 'error') {
       logger.warn('Failed to set In point', { error: result.error });
       return;
     }
     setMonitorState(result.data);
-  }, [currentTime]);
+  }, [currentTime, desktopRuntimeAvailable]);
 
   const setOutPoint = useCallback(async (): Promise<void> => {
+    if (!desktopRuntimeAvailable) {
+      return;
+    }
     const result = await commands.setSourceOut({ timeSec: currentTime });
     if (result.status === 'error') {
       logger.warn('Failed to set Out point', { error: result.error });
       return;
     }
     setMonitorState(result.data);
-  }, [currentTime]);
+  }, [currentTime, desktopRuntimeAvailable]);
 
   const clearInOut = useCallback(async (): Promise<void> => {
+    if (!desktopRuntimeAvailable) {
+      return;
+    }
     const result = await commands.clearSourceInOut();
     if (result.status === 'error') {
       logger.warn('Failed to clear In/Out points', { error: result.error });
       return;
     }
     setMonitorState(result.data);
-  }, []);
+  }, [desktopRuntimeAvailable]);
 
   const seek = useCallback(
     (time: number): void => {

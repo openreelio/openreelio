@@ -1620,6 +1620,43 @@ async function ensureSelectsTrack(options: {
   return { trackId: createdTrackId, createdTrack: true };
 }
 
+async function rollbackInsertedSelectClips(
+  sequenceId: string,
+  trackId: string,
+  clipIds: string[],
+): Promise<string[]> {
+  const rollbackFailures: string[] = [];
+
+  for (const clipId of [...clipIds].reverse()) {
+    try {
+      await executeAgentCommand('RemoveClip', {
+        sequenceId,
+        trackId,
+        clipId,
+      });
+    } catch (error) {
+      rollbackFailures.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return rollbackFailures;
+}
+
+async function rollbackCreatedSelectsTrack(
+  sequenceId: string,
+  trackId: string,
+): Promise<string | null> {
+  try {
+    await executeAgentCommand('RemoveTrack', {
+      sequenceId,
+      trackId,
+    });
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+}
+
 function buildSourceAnalysisReportPayload({
   asset,
   bundle,
@@ -3174,7 +3211,7 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
 
         let applied: {
           sequenceId: string;
-          trackId: string;
+          trackId: string | null;
           createdTrack: boolean;
           insertedClipCount: number;
         } | null = null;
@@ -3183,47 +3220,88 @@ const ANALYSIS_TOOLS: ToolDefinition[] = [
           const { sequence } = resolveSelectsSequence(
             typeof args.sequenceId === 'string' ? args.sequenceId : undefined,
           );
-          const ensuredTrack = await ensureSelectsTrack({
-            sequenceId,
-            trackId: typeof args.trackId === 'string' ? args.trackId : undefined,
-            trackName: requestedTrackName,
-          });
-          const refreshedSequence =
-            useProjectStore.getState().sequences.get(sequenceId) ?? sequence;
-          const targetTrack = refreshedSequence.tracks.find(
-            (track) => track.id === ensuredTrack.trackId,
-          );
-          const baseTimelineStart =
-            typeof args.timelineStart === 'number' &&
-            Number.isFinite(args.timelineStart) &&
-            args.timelineStart >= 0
-              ? args.timelineStart
-              : targetTrack
-                ? Math.max(
-                    0,
-                    ...targetTrack.clips.map(
-                      (clip) => clip.place.timelineInSec + clip.place.durationSec,
-                    ),
-                  )
-                : 0;
+          if (selects.length === 0) {
+            applied = {
+              sequenceId,
+              trackId: existingTrack?.id ?? null,
+              createdTrack: false,
+              insertedClipCount: 0,
+            };
+          } else {
+            const ensuredTrack = await ensureSelectsTrack({
+              sequenceId,
+              trackId: typeof args.trackId === 'string' ? args.trackId : undefined,
+              trackName: requestedTrackName,
+            });
+            const refreshedSequence =
+              useProjectStore.getState().sequences.get(sequenceId) ?? sequence;
+            const targetTrack = refreshedSequence.tracks.find(
+              (track) => track.id === ensuredTrack.trackId,
+            );
+            const baseTimelineStart =
+              typeof args.timelineStart === 'number' &&
+              Number.isFinite(args.timelineStart) &&
+              args.timelineStart >= 0
+                ? args.timelineStart
+                : targetTrack
+                  ? Math.max(
+                      0,
+                      ...targetTrack.clips.map(
+                        (clip) => clip.place.timelineInSec + clip.place.durationSec,
+                      ),
+                    )
+                  : 0;
+            const createdClipIds: string[] = [];
 
-          for (const select of selects) {
-            await executeAgentCommand('InsertClip', {
+            try {
+              for (const select of selects) {
+                const result = await executeAgentCommand('InsertClip', {
+                  sequenceId,
+                  trackId: ensuredTrack.trackId,
+                  assetId: select.assetId,
+                  timelineStart: baseTimelineStart + select.timelineStartSec,
+                  sourceIn: select.sourceInSec,
+                  sourceOut: select.sourceOutSec,
+                });
+                const createdClipId = result.createdIds[0];
+                if (!createdClipId) {
+                  throw new Error('InsertClip did not return a created clip id');
+                }
+                createdClipIds.push(createdClipId);
+              }
+            } catch (error) {
+              const rollbackFailures = await rollbackInsertedSelectClips(
+                sequenceId,
+                ensuredTrack.trackId,
+                createdClipIds,
+              );
+              if (ensuredTrack.createdTrack) {
+                const trackRollbackFailure = await rollbackCreatedSelectsTrack(
+                  sequenceId,
+                  ensuredTrack.trackId,
+                );
+                if (trackRollbackFailure) {
+                  rollbackFailures.push(trackRollbackFailure);
+                }
+              }
+              const message = error instanceof Error ? error.message : String(error);
+              if (rollbackFailures.length > 0) {
+                throw new Error(
+                  `Failed to apply source selects: ${message}. Rollback failed for ${rollbackFailures.length} operation(s).`,
+                );
+              }
+              throw new Error(
+                `Failed to apply source selects: ${message}. Rolled back ${createdClipIds.length} clip(s).`,
+              );
+            }
+
+            applied = {
               sequenceId,
               trackId: ensuredTrack.trackId,
-              assetId: select.assetId,
-              timelineStart: baseTimelineStart + select.timelineStartSec,
-              sourceIn: select.sourceInSec,
-              sourceOut: select.sourceOutSec,
-            });
+              createdTrack: ensuredTrack.createdTrack,
+              insertedClipCount: selects.length,
+            };
           }
-
-          applied = {
-            sequenceId,
-            trackId: ensuredTrack.trackId,
-            createdTrack: ensuredTrack.createdTrack,
-            insertedClipCount: selects.length,
-          };
         }
 
         return {

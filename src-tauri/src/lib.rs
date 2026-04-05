@@ -491,14 +491,25 @@ impl ActiveProject {
         let ops_log = OpsLog::new(&ops_path);
         let read_result = ops_log.read_all_with_archive()?;
         let mut history = if history_path.exists() {
-            ProjectHistory::load(&history_path)?
+            match ProjectHistory::load(&history_path) {
+                Ok(history) => history,
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        path = %history_path.display(),
+                        "Failed to load history manifest. Rebuilding history from ops log."
+                    );
+                    ProjectHistory::from_operations(&read_result.operations, meta.clone())
+                }
+            }
         } else {
             ProjectHistory::from_operations(&read_result.operations, meta.clone())
         };
         if history.base_meta.is_none() {
             history.base_meta = Some(meta.clone());
         }
-        history.sanitize(&read_result.operations);
+        Self::sync_history_with_operations(&mut history, &read_result.operations);
+        let history_meta = history.base_meta.clone().unwrap_or_else(|| meta.clone());
 
         // Load state from history when available. Fall back to snapshot + replay or full ops replay.
         let state = if !history.applied_op_ids.is_empty() || history_path.exists() {
@@ -513,7 +524,7 @@ impl ActiveProject {
                 .iter()
                 .filter_map(|op_id| by_id.get(op_id.as_str()).cloned())
                 .collect::<Vec<_>>();
-            ProjectState::from_operations(active_ops, meta.clone())?
+            ProjectState::from_operations(active_ops, history_meta.clone())?
         } else if Snapshot::exists(&snapshot_path) {
             match Snapshot::load_with_replay(&snapshot_path, &ops_log) {
                 Ok(state) => state,
@@ -574,36 +585,40 @@ impl ActiveProject {
 
     fn sync_history_with_ops_log(&mut self) -> crate::core::CoreResult<()> {
         let read_result = self.ops_log.read_all_with_archive()?;
-        self.history.sanitize(&read_result.operations);
+        Self::sync_history_with_operations(&mut self.history, &read_result.operations);
+        Ok(())
+    }
 
-        let known_ids: std::collections::HashSet<&str> = self
-            .history
+    fn sync_history_with_operations(
+        history: &mut ProjectHistory,
+        operations: &[crate::core::project::Operation],
+    ) {
+        history.sanitize(operations);
+
+        let known_ids: std::collections::HashSet<&str> = history
             .applied_op_ids
             .iter()
-            .chain(self.history.redo_op_ids.iter())
+            .chain(history.redo_op_ids.iter())
             .map(String::as_str)
             .collect();
-        let new_ids = if let Some(last_known_index) = read_result
-            .operations
+        let new_ids = if let Some(last_known_index) = operations
             .iter()
             .rposition(|op| known_ids.contains(op.id.as_str()))
         {
-            read_result
-                .operations
+            operations
                 .iter()
                 .skip(last_known_index + 1)
                 .map(|op| op.id.clone())
                 .collect::<Vec<_>>()
         } else {
-            read_result
-                .operations
+            operations
                 .iter()
                 .map(|op| op.id.clone())
                 .collect::<Vec<_>>()
         };
-        self.history.append_new_operations(new_ids);
-        self.history.sanitize(&read_result.operations);
-        Ok(())
+
+        history.append_new_operations(new_ids);
+        history.sanitize(operations);
     }
 
     fn rebuild_state_from_history(&mut self) -> crate::core::CoreResult<()> {
@@ -815,6 +830,10 @@ pub struct AppState {
     /// Replaced whenever a new project is scanned.
     pub workspace_watcher: Mutex<Option<WorkspaceWatcher>>,
 
+    /// Serializes watcher lifecycle swaps so concurrent scans cannot interleave
+    /// watcher replacement and leak background resources.
+    pub workspace_watcher_lifecycle: Mutex<()>,
+
     /// Background task handle for the workspace watcher event-processing loop.
     ///
     /// The loop reads `WorkspaceEvent`s from the watcher channel, updates the
@@ -946,6 +965,7 @@ impl AppState {
             playback_sync: Mutex::new(PlaybackSyncState::default()),
             source_monitor: Mutex::new(SourceMonitorState::default()),
             workspace_watcher: Mutex::new(None),
+            workspace_watcher_lifecycle: Mutex::new(()),
             workspace_event_loop: Mutex::new(None),
         }
     }
@@ -1937,6 +1957,58 @@ mod tests {
 
         let reopened_after_redo = ActiveProject::open(project_path).unwrap();
         assert_eq!(reopened_after_redo.state.meta.name, "Updated Name");
+    }
+
+    #[test]
+    fn test_active_project_open_recovers_from_invalid_history_and_unsaved_ops() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("history_recovery_project");
+        let state_dir = ActiveProject::default_state_dir(&project_path);
+        let history_path = ActiveProject::state_history_path(&state_dir);
+
+        let mut project = ActiveProject::create("History Recovery", project_path.clone()).unwrap();
+        project
+            .executor
+            .execute(
+                Box::new(
+                    crate::core::commands::UpdateProjectSettingsCommand::new()
+                        .with_name("Recovered Name"),
+                ),
+                &mut project.state,
+            )
+            .unwrap();
+        std::fs::write(&history_path, b"{ this is not valid json").unwrap();
+        drop(project);
+
+        let reopened = ActiveProject::open(project_path).unwrap();
+        assert_eq!(reopened.state.meta.name, "Recovered Name");
+    }
+
+    #[test]
+    fn test_active_project_open_uses_history_base_meta_after_persisted_undo_without_save() {
+        let temp_dir = TempDir::new().unwrap();
+        let project_path = temp_dir.path().join("history_base_meta_project");
+
+        let mut project = ActiveProject::create("Base Meta Test", project_path.clone()).unwrap();
+        project
+            .executor
+            .execute(
+                Box::new(
+                    crate::core::commands::UpdateProjectSettingsCommand::new()
+                        .with_name("Updated Name"),
+                ),
+                &mut project.state,
+            )
+            .unwrap();
+        project.save().unwrap();
+        drop(project);
+
+        let mut reopened = ActiveProject::open(project_path.clone()).unwrap();
+        reopened.undo_persisted().unwrap();
+        drop(reopened);
+
+        let reopened_after_undo = ActiveProject::open(project_path).unwrap();
+        assert_eq!(reopened_after_undo.state.meta.name, "Base Meta Test");
     }
 
     #[test]

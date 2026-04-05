@@ -720,45 +720,17 @@ export class BackendToolExecutor implements IToolExecutor {
       requestTool: tool,
       executionTarget: this.resolveBackendExecutionTarget(tool.name, tool.args),
     }));
-    const unsupportedMutation = resolvedTools.find(
-      ({ requestTool, executionTarget }) =>
-        executionTarget === null && this.isUnsafeMutatingFallback(requestTool.name),
-    );
-    if (unsupportedMutation) {
-      return {
-        success: false,
-        results: [
-          {
-            tool: unsupportedMutation.requestTool.name,
-            result: this.buildUnsupportedMutationFailure(unsupportedMutation.requestTool.name),
-          },
-        ],
-        totalDuration: performance.now() - start,
-        successCount: 0,
-        failureCount: 1,
-      };
-    }
 
     const allBackend = resolvedTools.every((t) => t.executionTarget !== null);
 
     // If the batch is mixed (backend + frontend), fall back to sequential
     // per-tool execution to preserve the caller's intended order.
     if (!allBackend) {
-      for (const { requestTool, executionTarget } of resolvedTools) {
-        if (executionTarget) {
-          const singleResult = await this.execute(requestTool.name, requestTool.args, context);
-          results.push({ tool: requestTool.name, result: singleResult });
-          if (singleResult.success) successCount++;
-          else failureCount++;
-        } else {
-          const frontendResult = await this.frontendExecutor.executeBatch(
-            { ...request, tools: [requestTool] },
-            context,
-          );
-          results.push(...frontendResult.results);
-          successCount += frontendResult.successCount;
-          failureCount += frontendResult.failureCount;
-        }
+      for (const { requestTool } of resolvedTools) {
+        const singleResult = await this.execute(requestTool.name, requestTool.args, context);
+        results.push({ tool: requestTool.name, result: singleResult });
+        if (singleResult.success) successCount++;
+        else failureCount++;
       }
 
       return {

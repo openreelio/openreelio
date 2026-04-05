@@ -348,7 +348,14 @@ export function useAgenticLoop(options: UseAgenticLoopOptions): UseAgenticLoopRe
         resolveAgentDefinition(activeSessionSummary?.agent) ??
         resolveAgentDefinition(DEFAULT_AGENT_PROFILE_ID);
       if (!activeAgentDefinition) {
-        throw new Error('Default agent definition is not registered');
+        const definitionError = new Error('Default agent definition is not registered');
+        setError(definitionError);
+        setPhase('failed');
+        setIsRunning(false);
+        optionsRef.current.onError?.(definitionError);
+        logger.error('Failed to start agentic loop without a registered default agent');
+        runGuardRef.current = false;
+        return null;
       }
       const scopedToolExecutor = createScopedToolExecutor(
         toolExecutor,

@@ -5,6 +5,7 @@ import { setFeatureFlag } from '@/config/featureFlags';
 import { createMockLLMAdapter } from '@/agents/engine/adapters/llm/MockLLMAdapter';
 import { createMockToolExecutorWithVideoTools } from '@/agents/engine/adapters/tools/MockToolExecutor';
 import type { AgentSession } from '@/agents/engine';
+import * as agentCatalog from '@/agents/engine/core/agentCatalog';
 import { useConversationStore } from '@/stores/conversationStore';
 import { usePermissionStore } from '@/stores/permissionStore';
 import { useAgentSessionStore } from '@/stores/agentSessionStore';
@@ -296,7 +297,8 @@ describe('useAgenticLoop', () => {
       };
       sessionState = {
         ...sessionState,
-        activeCheckpointId: checkpoint.status === 'active' ? checkpoint.id : sessionState.activeCheckpointId,
+        activeCheckpointId:
+          checkpoint.status === 'active' ? checkpoint.id : sessionState.activeCheckpointId,
         resumeCursorVersion: sessionState.resumeCursorVersion + 1,
         updatedAt: createdAt,
       };
@@ -457,11 +459,13 @@ describe('useAgenticLoop', () => {
       useAgentSessionStore.getState().persistenceIssuesBySessionId['conversation-session-1'],
     ).toBeUndefined();
     expect(
-      sessionRules.some((rule) => rule.pattern === 'workspace.document.write#path:docs/ARCHITECTURE.md'),
+      sessionRules.some(
+        (rule) => rule.pattern === 'workspace.document.write#path:docs/ARCHITECTURE.md',
+      ),
     ).toBe(true);
-    expect(sessionRules.some((rule) => rule.pattern.includes('timeline.clip.delete#clip:clip-1'))).toBe(
-      true,
-    );
+    expect(
+      sessionRules.some((rule) => rule.pattern.includes('timeline.clip.delete#clip:clip-1')),
+    ).toBe(true);
 
     expect(vi.mocked(commands.listAgentPermissionDecisions)).toHaveBeenCalledWith(
       'conversation-session-1',
@@ -618,12 +622,14 @@ describe('useAgenticLoop', () => {
     );
     expect(traceWriteCall).toBeDefined();
 
-    const traceId = traceWriteCall?.[1] && typeof traceWriteCall[1] === 'object'
-      ? (traceWriteCall[1] as { traceId?: string }).traceId
-      : undefined;
-    const traceJson = traceWriteCall?.[1] && typeof traceWriteCall[1] === 'object'
-      ? (traceWriteCall[1] as { traceJson?: string }).traceJson
-      : undefined;
+    const traceId =
+      traceWriteCall?.[1] && typeof traceWriteCall[1] === 'object'
+        ? (traceWriteCall[1] as { traceId?: string }).traceId
+        : undefined;
+    const traceJson =
+      traceWriteCall?.[1] && typeof traceWriteCall[1] === 'object'
+        ? (traceWriteCall[1] as { traceJson?: string }).traceJson
+        : undefined;
     const trace = JSON.parse(traceJson ?? '{}');
 
     expect(traceId).toEqual(expect.any(String));
@@ -889,8 +895,7 @@ describe('useAgenticLoop', () => {
 
     const systemMessages = useConversationStore
       .getState()
-      .activeConversation?.messages
-      .filter((message) => message.role === 'system')
+      .activeConversation?.messages.filter((message) => message.role === 'system')
       .map((message) => message.parts.find((part) => part.type === 'text'))
       .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
       .map((part) => part.content);
@@ -900,7 +905,9 @@ describe('useAgenticLoop', () => {
         expect.stringContaining('Recovered durable context from a previous app session.'),
       ]),
     );
-    expect(systemMessages?.join('\n')).toContain('Pending plan approval was recovered into visible context.');
+    expect(systemMessages?.join('\n')).toContain(
+      'Pending plan approval was recovered into visible context.',
+    );
     expect(vi.mocked(commands.consumeAgentResumeCheckpoint)).not.toHaveBeenCalledWith(
       'checkpoint-recovery-1',
     );
@@ -976,14 +983,13 @@ describe('useAgenticLoop', () => {
       expect(result.current.phase).toBe('completed');
     });
 
-    const systemMessages = useConversationStore
-      .getState()
-      .activeConversation?.messages
-      .filter((message) => message.role === 'system')
-      .map((message) => message.parts.find((part) => part.type === 'text'))
-      .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
-      .map((part) => part.content)
-      ?? [];
+    const systemMessages =
+      useConversationStore
+        .getState()
+        .activeConversation?.messages.filter((message) => message.role === 'system')
+        .map((message) => message.parts.find((part) => part.type === 'text'))
+        .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
+        .map((part) => part.content) ?? [];
 
     expect(
       systemMessages.some((message) =>
@@ -991,7 +997,9 @@ describe('useAgenticLoop', () => {
       ),
     ).toBe(true);
     expect(
-      systemMessages.some((message) => message.includes('Recovered summary: Recovered TPAO summary')),
+      systemMessages.some((message) =>
+        message.includes('Recovered summary: Recovered TPAO summary'),
+      ),
     ).toBe(true);
   });
 
@@ -1060,14 +1068,13 @@ describe('useAgenticLoop', () => {
       expect(result.current.phase).toBe('completed');
     });
 
-    const systemMessages = useConversationStore
-      .getState()
-      .activeConversation?.messages
-      .filter((message) => message.role === 'system')
-      .map((message) => message.parts.find((part) => part.type === 'text'))
-      .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
-      .map((part) => part.content)
-      ?? [];
+    const systemMessages =
+      useConversationStore
+        .getState()
+        .activeConversation?.messages.filter((message) => message.role === 'system')
+        .map((message) => message.parts.find((part) => part.type === 'text'))
+        .filter((part): part is { type: 'text'; content: string } => part?.type === 'text')
+        .map((part) => part.content) ?? [];
 
     expect(
       systemMessages.some((message) =>
@@ -1343,6 +1350,51 @@ describe('useAgenticLoop', () => {
     );
   });
 
+  it('should fail preflight cleanly when no default agent definition is registered', async () => {
+    const llm = createMockLLMAdapter();
+    const tools = createMockToolExecutorWithVideoTools();
+    const onError = vi.fn();
+    const resolveSpy = vi
+      .spyOn(agentCatalog, 'resolveAgentDefinition')
+      .mockImplementation(() => undefined);
+
+    try {
+      const { result } = renderHook(() =>
+        useAgenticLoop({
+          llmClient: llm,
+          toolExecutor: tools,
+          context: {
+            projectId: 'project-1',
+            sequenceId: 'sequence-1',
+          },
+          config: {
+            enableFastPath: false,
+            enableMemory: false,
+            enableTracing: false,
+          },
+          onError,
+        }),
+      );
+
+      let runResult: Awaited<ReturnType<typeof result.current.run>> | null = null;
+      await act(async () => {
+        runResult = await result.current.run('Delete clip 1');
+      });
+
+      expect(runResult).toBeNull();
+      expect(result.current.phase).toBe('failed');
+      expect(result.current.isRunning).toBe(false);
+      expect(result.current.error?.message).toContain('Default agent definition is not registered');
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Default agent definition is not registered',
+        }),
+      );
+    } finally {
+      resolveSpy.mockRestore();
+    }
+  });
+
   it('should report degraded persistence state when tpao run finalization fails', async () => {
     const llm = createMockLLMAdapter();
     const tools = createMockToolExecutorWithVideoTools();
@@ -1441,13 +1493,15 @@ describe('useAgenticLoop', () => {
 
     expect(
       useAgentSessionStore.getState().persistenceIssuesBySessionId['conversation-session-1'],
-    ).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        sessionId: 'conversation-session-1',
-        stage: 'run_finalize',
-        message: 'tpao run finalize failed',
-        occurredAt: expect.any(Number),
-      }),
-    ]));
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId: 'conversation-session-1',
+          stage: 'run_finalize',
+          message: 'tpao run finalize failed',
+          occurredAt: expect.any(Number),
+        }),
+      ]),
+    );
   });
 });

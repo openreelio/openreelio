@@ -156,7 +156,10 @@ export function useCredentials(): UseCredentialsReturn {
 
         // Invalidate model cache for this provider since credential changed
         // This ensures fresh model list is fetched with new credentials
-        invalidateModelCache(mapProviderToAIProvider(provider));
+        const aiProvider = mapProviderToAIProvider(provider);
+        if (aiProvider) {
+          invalidateModelCache(aiProvider);
+        }
 
         // Refresh status after storing
         await refreshStatus();
@@ -212,7 +215,10 @@ export function useCredentials(): UseCredentialsReturn {
         await invoke('delete_credential', { provider });
 
         // Invalidate model cache since credential was removed
-        invalidateModelCache(mapProviderToAIProvider(provider));
+        const aiProvider = mapProviderToAIProvider(provider);
+        if (aiProvider) {
+          invalidateModelCache(aiProvider);
+        }
 
         // Refresh status after deletion
         await refreshStatus();

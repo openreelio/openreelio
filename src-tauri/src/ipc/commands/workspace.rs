@@ -177,36 +177,22 @@ pub async fn scan_workspace(state: State<'_, AppState>) -> Result<WorkspaceScanR
 async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Result<(), String> {
     use std::sync::Arc;
 
-    // --- Stop any running event-loop task ---
-    {
-        let mut loop_guard = state.workspace_event_loop.lock().await;
-        if let Some(handle) = loop_guard.take() {
-            handle.abort();
-        }
-    }
-    // --- Drop any existing watcher (signals its background thread to stop) ---
-    {
-        let mut watcher_guard = state.workspace_watcher.lock().await;
-        watcher_guard.take();
-    }
-
-    // --- Create the new watcher ---
-    let ignore_rules = Arc::new(IgnoreRules::load(&project_root));
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<WorkspaceEvent>();
-
-    let watcher =
-        WorkspaceWatcher::start(project_root.clone(), Arc::clone(&ignore_rules), event_tx)
-            .map_err(|e| format!("Failed to start workspace watcher: {e}"))?;
-
-    {
-        let mut watcher_guard = state.workspace_watcher.lock().await;
-        *watcher_guard = Some(watcher);
-    }
-
-    // --- Obtain the AppHandle needed by the event loop ---
     let Some(app_handle) = state.app_handle.get().cloned() else {
         return Err("AppHandle not yet initialized; cannot start workspace watcher".to_string());
     };
+
+    let _lifecycle_guard = state.workspace_watcher_lifecycle.lock().await;
+
+    if let Some(handle) = state.workspace_event_loop.lock().await.take() {
+        handle.abort();
+    }
+    state.workspace_watcher.lock().await.take();
+
+    let ignore_rules = Arc::new(IgnoreRules::load(&project_root));
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<WorkspaceEvent>();
+    let watcher =
+        WorkspaceWatcher::start(project_root.clone(), Arc::clone(&ignore_rules), event_tx)
+            .map_err(|e| format!("Failed to start workspace watcher: {e}"))?;
 
     // --- Spawn the event-processing loop ---
     let project_root_for_loop = project_root.clone();
@@ -309,6 +295,11 @@ async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Res
 
         tracing::debug!("Workspace watcher event loop ended");
     });
+
+    {
+        let mut watcher_guard = state.workspace_watcher.lock().await;
+        *watcher_guard = Some(watcher);
+    }
 
     {
         let mut loop_guard = state.workspace_event_loop.lock().await;

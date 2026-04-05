@@ -352,4 +352,92 @@ describe('captionTools', () => {
       captionCount: 2,
     });
   });
+
+  it('should remove a newly created caption track when batch creation fails', async () => {
+    const tool = globalToolRegistry.get('add_captions_from_transcription');
+    expect(tool).toBeDefined();
+
+    const sequenceWithoutCaptionTrack = createSequence({
+      tracks: [
+        createTrack({
+          id: 'track-video-1',
+          kind: 'video',
+          clips: [createClip({ id: 'clip-video-1', assetId: 'asset-video-1' })],
+        }),
+      ],
+    });
+    vi.mocked(useProjectStore.getState).mockReturnValue({
+      isLoaded: true,
+      meta: {
+        id: 'project-1',
+        name: 'Test Project',
+      },
+      sequences: new Map([[sequenceWithoutCaptionTrack.id, sequenceWithoutCaptionTrack]]),
+      executeCommand: executeCommandMock,
+    } as unknown as ReturnType<typeof useProjectStore.getState>);
+
+    executeCommandMock
+      .mockResolvedValueOnce({
+        opId: 'op-track-create',
+        success: true,
+        createdIds: ['track-caption-created'],
+        deletedIds: [],
+        changes: [],
+      })
+      .mockResolvedValueOnce({
+        opId: 'op-caption-1',
+        success: true,
+        createdIds: ['cap-created-1'],
+        deletedIds: [],
+        changes: [],
+      })
+      .mockRejectedValueOnce(new Error('caption create failed'))
+      .mockResolvedValueOnce({
+        opId: 'op-caption-rollback',
+        success: true,
+        createdIds: [],
+        deletedIds: ['cap-created-1'],
+        changes: [],
+      })
+      .mockResolvedValueOnce({
+        opId: 'op-track-rollback',
+        success: true,
+        createdIds: [],
+        deletedIds: ['track-caption-created'],
+        changes: [],
+      });
+
+    const result = await tool!.handler(
+      {
+        sequenceId: 'seq-1',
+        segments: [
+          { startTime: 0, endTime: 1, text: 'First line' },
+          { startTime: 1, endTime: 2, text: 'Second line' },
+        ],
+      },
+      CTX,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Rolled back 1 caption');
+    expect(executeCommandMock).toHaveBeenCalledTimes(5);
+    expect(executeCommandMock.mock.calls[0][0]).toMatchObject({ type: 'CreateTrack' });
+    expect(executeCommandMock.mock.calls[1][0]).toMatchObject({ type: 'CreateCaption' });
+    expect(executeCommandMock.mock.calls[2][0]).toMatchObject({ type: 'CreateCaption' });
+    expect(executeCommandMock.mock.calls[3][0]).toMatchObject({
+      type: 'DeleteCaption',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'track-caption-created',
+        captionId: 'cap-created-1',
+      },
+    });
+    expect(executeCommandMock.mock.calls[4][0]).toMatchObject({
+      type: 'DeleteTrack',
+      payload: {
+        sequenceId: 'seq-1',
+        trackId: 'track-caption-created',
+      },
+    });
+  });
 });

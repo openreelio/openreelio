@@ -4,6 +4,7 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -78,14 +79,21 @@ pub struct FreesoundProvider {
     name: String,
     config: Arc<RwLock<FreesoundConfig>>,
     cache: Arc<RwLock<std::collections::HashMap<String, Vec<PluginAssetRef>>>>,
+    available: Arc<AtomicBool>,
 }
 
 impl FreesoundProvider {
     pub fn new(name: &str, config: FreesoundConfig) -> Self {
+        let is_available = config
+            .api_key
+            .as_ref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
         Self {
             name: name.to_string(),
             config: Arc::new(RwLock::new(config)),
             cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            available: Arc::new(AtomicBool::new(is_available)),
         }
     }
 
@@ -156,12 +164,50 @@ impl FreesoundProvider {
 
     fn cache_key(query: &PluginSearchQuery) -> String {
         format!(
-            "{}|{}|{}|{}",
+            "{}|{:?}|{:?}|{}|{}|{}",
             query.text.as_deref().unwrap_or(""),
+            query.asset_type,
+            query.duration_range,
             query.limit,
             query.offset,
             query.tags.join(",")
         )
+    }
+
+    #[allow(dead_code)]
+    fn matches_query(sound: &FreesoundSound, query: &PluginSearchQuery) -> bool {
+        if query
+            .asset_type
+            .map(|asset_type| asset_type == PluginAssetType::Audio)
+            .unwrap_or(true)
+            == false
+        {
+            return false;
+        }
+
+        if !query.tags.is_empty() {
+            let tags = sound
+                .tags
+                .iter()
+                .map(|tag| tag.to_lowercase())
+                .collect::<Vec<_>>();
+            if !query
+                .tags
+                .iter()
+                .all(|required| tags.contains(&required.to_lowercase()))
+            {
+                return false;
+            }
+        }
+
+        if let Some((min_sec, max_sec)) = query.duration_range {
+            match sound.duration {
+                Some(duration) if duration >= min_sec && duration <= max_sec => {}
+                _ => return false,
+            }
+        }
+
+        true
     }
 
     fn parse_sound_id(asset_ref: &str) -> Option<u64> {
@@ -184,6 +230,14 @@ impl AssetProviderPlugin for FreesoundProvider {
     }
 
     async fn search(&self, query: &PluginSearchQuery) -> CoreResult<Vec<PluginAssetRef>> {
+        if query.limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        if matches!(query.asset_type, Some(asset_type) if asset_type != PluginAssetType::Audio) {
+            return Ok(Vec::new());
+        }
+
         let cache_key = Self::cache_key(query);
         if let Some(cached) = self.cache.read().await.get(&cache_key).cloned() {
             return Ok(cached);
@@ -215,76 +269,101 @@ impl AssetProviderPlugin for FreesoundProvider {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .unwrap_or("sound effect");
-            let page_size = query.limit.clamp(1, 50);
-            let page = (query.offset / page_size) + 1;
+            let requires_local_filtering = !query.tags.is_empty() || query.duration_range.is_some();
+            let page_size = if requires_local_filtering {
+                50
+            } else {
+                query.limit.clamp(1, 50)
+            };
+            let mut page = if requires_local_filtering {
+                1
+            } else {
+                (query.offset / page_size) + 1
+            };
+            let mut intra_page_skip = if requires_local_filtering {
+                0
+            } else {
+                query.offset % page_size
+            };
+            let required_results = if requires_local_filtering {
+                query.offset.saturating_add(query.limit)
+            } else {
+                query.limit
+            };
+            let mut filtered_results = Vec::new();
 
-            let response = client
-                .get(format!("{}/search/text/", FREESOUND_API_BASE))
-                .header("Authorization", format!("Token {}", api_key))
-                .query(&[
-                    ("query", text.to_string()),
-                    ("page_size", page_size.to_string()),
-                    ("page", page.to_string()),
-                ])
-                .send()
-                .await
-                .map_err(|e| {
-                    CoreError::PluginError(format!("Freesound search request failed: {e}"))
-                })?;
+            loop {
+                let response = client
+                    .get(format!("{}/search/text/", FREESOUND_API_BASE))
+                    .header("Authorization", format!("Token {}", api_key))
+                    .query(&[
+                        ("query", text.to_string()),
+                        ("page_size", page_size.to_string()),
+                        ("page", page.to_string()),
+                    ])
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        CoreError::PluginError(format!("Freesound search request failed: {e}"))
+                    })?;
 
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                return Err(CoreError::PluginError(format!(
-                    "Freesound search failed with status {}: {}",
-                    status, body
-                )));
+                if !response.status().is_success() {
+                    let status = response.status();
+                    let body = response.text().await.unwrap_or_default();
+                    return Err(CoreError::PluginError(format!(
+                        "Freesound search failed with status {}: {}",
+                        status, body
+                    )));
+                }
+
+                let payload = response
+                    .json::<FreesoundSearchResponse>()
+                    .await
+                    .map_err(|e| {
+                        CoreError::PluginError(format!("Failed to parse Freesound response: {e}"))
+                    })?;
+
+                if payload.results.is_empty() {
+                    break;
+                }
+
+                let page_result_count = payload.results.len();
+                let mut page_results = payload.results;
+                if intra_page_skip > 0 {
+                    let skip_count = intra_page_skip.min(page_results.len());
+                    page_results.drain(..skip_count);
+                    intra_page_skip -= skip_count;
+                }
+
+                for sound in page_results {
+                    if Self::matches_query(&sound, query) {
+                        filtered_results.push(Self::sound_to_asset(&sound));
+                        if filtered_results.len() >= required_results {
+                            break;
+                        }
+                    }
+                }
+
+                if filtered_results.len() >= required_results || page_result_count < page_size {
+                    break;
+                }
+
+                page += 1;
             }
 
-            let payload = response
-                .json::<FreesoundSearchResponse>()
-                .await
-                .map_err(|e| {
-                    CoreError::PluginError(format!("Failed to parse Freesound response: {e}"))
-                })?;
+            let results = if requires_local_filtering {
+                filtered_results
+                    .into_iter()
+                    .skip(query.offset)
+                    .take(query.limit)
+                    .collect::<Vec<_>>()
+            } else {
+                filtered_results
+                    .into_iter()
+                    .take(query.limit)
+                    .collect::<Vec<_>>()
+            };
 
-            let mut results = payload
-                .results
-                .into_iter()
-                .filter(|_sound| {
-                    query
-                        .asset_type
-                        .map(|asset_type| asset_type == PluginAssetType::Audio)
-                        .unwrap_or(true)
-                })
-                .filter(|sound| {
-                    if query.tags.is_empty() {
-                        return true;
-                    }
-
-                    let tags = sound
-                        .tags
-                        .iter()
-                        .map(|tag| tag.to_lowercase())
-                        .collect::<Vec<_>>();
-                    query
-                        .tags
-                        .iter()
-                        .all(|required| tags.contains(&required.to_lowercase()))
-                })
-                .filter(|sound| {
-                    if let Some((min_sec, max_sec)) = query.duration_range {
-                        if let Some(duration) = sound.duration {
-                            return duration >= min_sec && duration <= max_sec;
-                        }
-                        return false;
-                    }
-                    true
-                })
-                .map(|sound| Self::sound_to_asset(&sound))
-                .collect::<Vec<_>>();
-
-            results.truncate(page_size);
             self.cache.write().await.insert(cache_key, results.clone());
             Ok(results)
         }
@@ -389,12 +468,7 @@ impl AssetProviderPlugin for FreesoundProvider {
     }
 
     fn is_available(&self) -> bool {
-        self.config
-            .blocking_read()
-            .api_key
-            .as_ref()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
+        self.available.load(Ordering::Relaxed)
     }
 }
 
@@ -448,5 +522,40 @@ mod tests {
             Some("https://cdn.example/waveform.png".to_string())
         );
         assert_eq!(asset.metadata["previewUrl"], "https://cdn.example/hq.mp3");
+    }
+
+    #[test]
+    fn cache_key_should_include_asset_type_and_duration_range() {
+        let audio_query = PluginSearchQuery {
+            text: Some("whoosh".to_string()),
+            asset_type: Some(PluginAssetType::Audio),
+            tags: vec!["transition".to_string()],
+            duration_range: Some((0.5, 2.0)),
+            limit: 10,
+            offset: 0,
+        };
+        let all_query = PluginSearchQuery {
+            asset_type: None,
+            duration_range: None,
+            ..audio_query.clone()
+        };
+
+        assert_ne!(
+            FreesoundProvider::cache_key(&audio_query),
+            FreesoundProvider::cache_key(&all_query)
+        );
+    }
+
+    #[tokio::test]
+    async fn is_available_should_be_safe_in_async_context() {
+        let provider = FreesoundProvider::new(
+            "freesound",
+            FreesoundConfig {
+                api_key: Some("async-key".to_string()),
+                timeout_sec: 30,
+            },
+        );
+
+        assert!(provider.is_available());
     }
 }

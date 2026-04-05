@@ -105,6 +105,23 @@ function stripVttTags(text: string): { text: string; speaker?: string } {
   return speaker ? { text: cleanedText, speaker } : { text: cleanedText };
 }
 
+function isWebVttMetadataBlockStart(line: string): boolean {
+  const normalized = line.trim().toUpperCase();
+  return (
+    normalized.startsWith('NOTE') ||
+    normalized.startsWith('STYLE') ||
+    normalized.startsWith('REGION')
+  );
+}
+
+function skipWebVttMetadataBlock(lines: string[], index: number): number {
+  let nextIndex = index + 1;
+  while (nextIndex < lines.length && lines[nextIndex].trim() !== '') {
+    nextIndex += 1;
+  }
+  return nextIndex;
+}
+
 function parseVttBlocks(content: string): ParsedCaptionSegment[] {
   const lines = content.replace(/\r\n/g, '\n').split('\n');
   const segments: ParsedCaptionSegment[] = [];
@@ -131,6 +148,10 @@ function parseVttBlocks(content: string): ParsedCaptionSegment[] {
     }
 
     const firstLine = lines[index]?.trim() ?? '';
+    if (isWebVttMetadataBlockStart(firstLine)) {
+      index = skipWebVttMetadataBlock(lines, index);
+      continue;
+    }
     let timestampLine = firstLine;
 
     if (!timestampLine.includes('-->')) {

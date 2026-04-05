@@ -239,12 +239,21 @@ fn ensure_caption_track(
         return Ok((track_id.to_string(), false));
     }
 
-    if let Some(track) = sequence
+    let caption_tracks = sequence
         .tracks
         .iter()
-        .find(|track| track.kind == TrackKind::Caption)
-    {
-        return Ok((track.id.clone(), false));
+        .filter(|track| track.kind == TrackKind::Caption)
+        .collect::<Vec<_>>();
+
+    match caption_tracks.as_slice() {
+        [track] => return Ok((track.id.clone(), false)),
+        [] => {}
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Multiple caption tracks exist in sequence '{}'. Pass --track to choose one explicitly.",
+                sequence_id
+            ));
+        }
     }
 
     let cmd = AddTrackCommand::new(sequence_id, "Captions", TrackKind::Caption);
