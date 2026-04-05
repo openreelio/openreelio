@@ -656,6 +656,38 @@ invoke('get_analysis_bundle', { assetId: AssetId });
 AnalysisBundle | null; // null if no cached bundle exists
 ```
 
+### Source Analysis Report Surface
+
+The current source-analysis workflow is layered on top of `analyze_asset` / `get_analysis_bundle` and is intended for agent retrieval and headless editing workflows.
+
+Key capabilities now available:
+
+- unified source analysis report with `moments`, `chapters`, `highlights`, and `speakerTurns`
+- report search for one asset
+- library-wide search across many assets
+- selects stringout planning and optional direct apply
+- VAD-backed `speechRegions` and heuristic `speakerTurnId`
+
+Representative command surfaces:
+
+```typescript
+// Agent/tool surfaces
+generate_source_analysis_report(assetId)
+search_source_analysis_report(assetId, query)
+search_source_library(query)
+build_source_selects(query)
+
+// CLI surfaces
+openreelio-cli analysis report --path ./project --id asset_001
+openreelio-cli analysis search --path ./project --id asset_001 --query "host question" --sections speakerTurns,moments
+openreelio-cli analysis search-library --path ./project --query "crowd cheer"
+openreelio-cli analysis build-selects --path ./project --query "best answer quote" --track-name "Source Selects" --apply
+```
+
+Important note:
+
+- `speakerTurnId` is heuristic turn grouping, not true diarization / identity recognition.
+
 ### generate_esd
 
 Generates an Editing Style Document from an analysis bundle. Extracts rhythm profile, pacing curve, transition inventory, sync points, and content map.

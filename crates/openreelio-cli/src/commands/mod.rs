@@ -7,6 +7,7 @@
 //! 4. Save project state
 //! 5. Output JSON result to stdout
 
+mod analysis;
 mod asset;
 mod caption;
 mod help_json;
@@ -48,6 +49,12 @@ pub enum Commands {
         action: asset::AssetAction,
     },
 
+    /// Cached source analysis inspection
+    Analysis {
+        #[command(subcommand)]
+        action: analysis::AnalysisAction,
+    },
+
     /// Timeline editing operations (insert, move, trim, split, effects, tracks)
     Timeline {
         #[command(subcommand)]
@@ -87,6 +94,7 @@ pub fn execute(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Project { action } => project::execute(action),
         Commands::Asset { action } => asset::execute(action),
+        Commands::Analysis { action } => analysis::execute(action),
         Commands::Timeline { action } => timeline::execute(action),
         Commands::Caption { action } => caption::execute(action),
         Commands::Render { action } => render::execute(action),

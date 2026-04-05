@@ -65,6 +65,10 @@ export interface AssetSnapshot {
   kind: Asset['kind'];
   uri: string;
   durationSec?: number;
+  videoWidth?: number;
+  videoHeight?: number;
+  videoFps?: number;
+  videoCodec?: string;
   importedAt: string;
   proxyStatus: Asset['proxyStatus'];
   timelineClipCount: number;
@@ -123,16 +127,15 @@ function getActiveSequence(): Sequence | undefined {
   return project.sequences.get(project.activeSequenceId);
 }
 
-function buildAssetUsageCounts(activeSequence: Sequence | undefined): Map<string, number> {
+function buildAssetUsageCounts(sequences: Iterable<Sequence>): Map<string, number> {
   const usage = new Map<string, number>();
-  if (!activeSequence) {
-    return usage;
-  }
 
-  for (const track of activeSequence.tracks) {
-    for (const clip of track.clips) {
-      const current = usage.get(clip.assetId) ?? 0;
-      usage.set(clip.assetId, current + 1);
+  for (const sequence of sequences) {
+    for (const track of sequence.tracks) {
+      for (const clip of track.clips) {
+        const current = usage.get(clip.assetId) ?? 0;
+        usage.set(clip.assetId, current + 1);
+      }
     }
   }
 
@@ -146,6 +149,10 @@ function assetToSnapshot(asset: Asset, timelineClipCount: number): AssetSnapshot
     kind: asset.kind,
     uri: asset.uri,
     durationSec: asset.durationSec,
+    videoWidth: asset.video?.width,
+    videoHeight: asset.video?.height,
+    videoFps: asset.video?.fps ? asset.video.fps.num / asset.video.fps.den : undefined,
+    videoCodec: asset.video?.codec,
     importedAt: asset.importedAt,
     proxyStatus: asset.proxyStatus,
     timelineClipCount,
@@ -189,8 +196,7 @@ export function getSelectionContext(): {
  */
 export function getAssetCatalogSnapshot(): AssetCatalogSnapshot {
   const project = useProjectStore.getState();
-  const activeSequence = getActiveSequence();
-  const usage = buildAssetUsageCounts(activeSequence);
+  const usage = buildAssetUsageCounts(project.sequences.values());
 
   const assets = Array.from(project.assets.values())
     .map((asset) => assetToSnapshot(asset, usage.get(asset.id) ?? 0))

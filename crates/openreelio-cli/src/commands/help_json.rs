@@ -6,7 +6,11 @@
 use crate::output;
 
 pub fn execute() -> anyhow::Result<()> {
-    output::print_json_pretty(&serde_json::json!({
+    output::print_json_pretty(&build_schema())
+}
+
+pub(crate) fn build_schema() -> serde_json::Value {
+    serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "description": "OpenReelio CLI — Headless AI agent-driven video editing",
         "commands": {
@@ -70,6 +74,58 @@ pub fn execute() -> anyhow::Result<()> {
                     "id": { "type": "string", "required": true, "desc": "Asset ID to remove" }
                 },
                 "example": "openreelio-cli asset remove --path ./project --id asset_001"
+            },
+            "analysis.report": {
+                "description": "Build a cached source analysis report for one asset as structured JSON plus embedded Markdown, including moments, chapters, and candidate highlights",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Asset ID" }
+                },
+                "example": "openreelio-cli analysis report --path ./project --id asset_001"
+            },
+            "analysis.search": {
+                "description": "Search source-analysis moments, chapters, highlights, and speaker turns for one asset and return ranked matches",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "id": { "type": "string", "required": true, "desc": "Asset ID" },
+                    "query": { "type": "string", "required": true, "desc": "Search query" },
+                    "sections": { "type": "array", "required": false, "desc": "Optional comma-separated sections: moments, chapters, highlights, speakerTurns" },
+                    "limit": { "type": "number", "required": false, "desc": "Maximum matches to return (default: 5)" }
+                },
+                "example": "openreelio-cli analysis search --path ./project --id asset_001 --query \"host question\" --sections speakerTurns,moments --limit 5"
+            },
+            "analysis.search-library": {
+                "description": "Search source-analysis moments, chapters, highlights, and speaker turns across multiple video assets and return ranked matches",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "query": { "type": "string", "required": true, "desc": "Search query" },
+                    "ids": { "type": "array", "required": false, "desc": "Optional comma-separated asset IDs to restrict search scope" },
+                    "unused-only": { "type": "boolean", "required": false, "desc": "Restrict search to assets not currently used on any timeline" },
+                    "sections": { "type": "array", "required": false, "desc": "Optional comma-separated sections: moments, chapters, highlights, speakerTurns" },
+                    "limit": { "type": "number", "required": false, "desc": "Maximum matches to return (default: 8)" },
+                    "asset-limit": { "type": "number", "required": false, "desc": "Maximum candidate assets to inspect (default: 20)" }
+                },
+                "example": "openreelio-cli analysis search-library --path ./project --query \"interviewer question\" --sections speakerTurns,moments --limit 8 --asset-limit 20"
+            },
+            "analysis.build-selects": {
+                "description": "Build a selects stringout plan from ranked source matches, including speaker-turn matches when relevant, with optional direct apply to a target video track",
+                "params": {
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "query": { "type": "string", "required": true, "desc": "Search query" },
+                    "sequence": { "type": "string", "required": false, "desc": "Sequence ID (defaults to active sequence)" },
+                    "track": { "type": "string", "required": false, "desc": "Optional target video track ID" },
+                    "track-name": { "type": "string", "required": false, "desc": "Target track name when creating or reusing a selects track" },
+                    "timeline-start": { "type": "number", "required": false, "desc": "Optional timeline start position for the first selects clip" },
+                    "ids": { "type": "array", "required": false, "desc": "Optional comma-separated asset IDs to restrict search scope" },
+                    "unused-only": { "type": "boolean", "required": false, "desc": "Restrict search to assets not currently used on any timeline" },
+                    "sections": { "type": "array", "required": false, "desc": "Optional comma-separated sections: moments, chapters, highlights, speakerTurns" },
+                    "limit": { "type": "number", "required": false, "desc": "Maximum final selects to keep (default: 6)" },
+                    "asset-limit": { "type": "number", "required": false, "desc": "Maximum candidate assets to inspect (default: 20)" },
+                    "padding-sec": { "type": "number", "required": false, "desc": "Extra padding before and after each source range" },
+                    "gap-sec": { "type": "number", "required": false, "desc": "Gap between selects on the timeline" },
+                    "apply": { "type": "boolean", "required": false, "desc": "Apply the generated selects directly to the target track" }
+                },
+                "example": "openreelio-cli analysis build-selects --path ./project --query \"crowd cheer\" --track-name \"Source Selects\" --limit 6 --padding-sec 0.25 --gap-sec 0.25 --apply"
             },
             "timeline.info": {
                 "description": "Display timeline structure (tracks, clip counts)",
@@ -315,5 +371,45 @@ pub fn execute() -> anyhow::Result<()> {
                 "example": "openreelio-cli help-json"
             }
         }
-    }))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_schema;
+    use crate::commands::Cli;
+    use clap::{Command, CommandFactory};
+
+    fn collect_leaf_paths(command: &Command, prefix: &[String], acc: &mut Vec<String>) {
+        let mut has_subcommands = false;
+
+        for subcommand in command.get_subcommands() {
+            has_subcommands = true;
+            let mut next_prefix = prefix.to_vec();
+            next_prefix.push(subcommand.get_name().to_string());
+            collect_leaf_paths(subcommand, &next_prefix, acc);
+        }
+
+        if !has_subcommands && !prefix.is_empty() {
+            acc.push(prefix.join("."));
+        }
+    }
+
+    #[test]
+    fn build_schema_covers_all_clap_leaf_commands() {
+        let schema = build_schema();
+        let schema_commands = schema["commands"]
+            .as_object()
+            .expect("schema commands must be an object");
+
+        let mut clap_paths = Vec::new();
+        collect_leaf_paths(&Cli::command(), &[], &mut clap_paths);
+        clap_paths.sort();
+
+        let mut schema_paths: Vec<String> = schema_commands.keys().cloned().collect();
+        schema_paths.sort();
+
+        assert_eq!(schema_paths, clap_paths);
+    }
+
 }
