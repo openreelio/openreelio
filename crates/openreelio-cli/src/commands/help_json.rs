@@ -55,7 +55,8 @@ pub(crate) fn build_schema() -> serde_json::Value {
             "asset.list": {
                 "description": "List all assets in the project",
                 "params": {
-                    "path": { "type": "string", "required": true, "desc": "Project directory path" }
+                    "path": { "type": "string", "required": true, "desc": "Project directory path" },
+                    "format": { "type": "string", "required": false, "desc": "Output format (currently json only)" }
                 },
                 "example": "openreelio-cli asset list --path ./project"
             },
@@ -224,7 +225,7 @@ pub(crate) fn build_schema() -> serde_json::Value {
                 "description": "Add a new track to the timeline",
                 "params": {
                     "path": { "type": "string", "required": true, "desc": "Project directory path" },
-                    "kind": { "type": "string", "required": true, "desc": "Track type: video or audio" },
+                    "kind": { "type": "string", "required": true, "desc": "Track type: video, audio, caption, or overlay" },
                     "name": { "type": "string", "required": true, "desc": "Track name" },
                     "sequence": { "type": "string", "required": false, "desc": "Sequence ID" }
                 },
