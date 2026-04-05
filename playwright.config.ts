@@ -28,10 +28,7 @@ export default defineConfig({
   /* Opt out of parallel tests on CI. */
   workers: process.env.CI ? 1 : undefined,
   /* Reporter to use. See https://playwright.dev/docs/test-reporters */
-  reporter: [
-    ['html', { outputFolder: 'playwright-report' }],
-    ['list'],
-  ],
+  reporter: [['html', { outputFolder: 'playwright-report' }], ['list']],
   /* Shared settings for all the projects below. See https://playwright.dev/docs/api/class-testoptions. */
   use: {
     /* Base URL to use in actions like `await page.goto('/')`. */
@@ -71,7 +68,7 @@ export default defineConfig({
   outputDir: 'test-results/',
 
   /* Timeout for each test */
-  timeout: 30 * 1000, // 30 seconds
+  timeout: 60 * 1000, // 60 seconds for initial Vite compile in CI/dev-server mode
 
   /* Timeout for each expect */
   expect: {

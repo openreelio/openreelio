@@ -11,6 +11,7 @@ import { commands } from '@/bindings';
 import type { SourceMonitorStateDto } from '@/bindings';
 import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { createLogger } from '@/services/logger';
+import { isDesktopRuntimeAvailable } from '@/services/runtimeEnvironment';
 
 const logger = createLogger('useSourceMonitor');
 const BACKEND_PLAYHEAD_EPSILON_SEC = 0.01;
@@ -64,6 +65,7 @@ export function useSourceMonitor(): UseSourceMonitorReturn {
   const [monitorState, setMonitorState] = useState<SourceMonitorStateDto>(EMPTY_STATE);
   const backendPlayheadRef = useRef(EMPTY_STATE.playheadSec);
   const latestRequestedPlayheadRef = useRef<number | null>(null);
+  const desktopRuntimeAvailable = isDesktopRuntimeAvailable();
 
   // Local playback state (not persisted to backend)
   const [currentTime, setCurrentTimeState] = useState(0);
@@ -72,6 +74,11 @@ export function useSourceMonitor(): UseSourceMonitorReturn {
 
   // Listen for backend state changes and fetch initial state
   useEffect(() => {
+    if (!desktopRuntimeAvailable) {
+      setMonitorState(EMPTY_STATE);
+      return;
+    }
+
     let cancelled = false;
     let unlistenFn: UnlistenFn | null = null;
 
@@ -103,7 +110,7 @@ export function useSourceMonitor(): UseSourceMonitorReturn {
       cancelled = true;
       unlistenFn?.();
     };
-  }, []);
+  }, [desktopRuntimeAvailable]);
 
   // Reset local playback state when asset changes
   useEffect(() => {
@@ -119,7 +126,7 @@ export function useSourceMonitor(): UseSourceMonitorReturn {
 
   const syncPlayhead = useCallback(
     async (time: number): Promise<void> => {
-      if (monitorState.assetId === null) {
+      if (!desktopRuntimeAvailable || monitorState.assetId === null) {
         return;
       }
 
@@ -142,7 +149,7 @@ export function useSourceMonitor(): UseSourceMonitorReturn {
       backendPlayheadRef.current = result.data.playheadSec;
       setMonitorState(result.data);
     },
-    [monitorState.assetId],
+    [desktopRuntimeAvailable, monitorState.assetId],
   );
 
   const loadAsset = useCallback(async (assetId: string): Promise<void> => {
@@ -190,10 +197,13 @@ export function useSourceMonitor(): UseSourceMonitorReturn {
     setMonitorState(result.data);
   }, []);
 
-  const seek = useCallback((time: number): void => {
-    setCurrentTimeState(time);
-    void syncPlayhead(time);
-  }, [syncPlayhead]);
+  const seek = useCallback(
+    (time: number): void => {
+      setCurrentTimeState(time);
+      void syncPlayhead(time);
+    },
+    [syncPlayhead],
+  );
 
   const togglePlayback = useCallback((): void => {
     setIsPlayingState((prev) => !prev);

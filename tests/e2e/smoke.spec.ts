@@ -12,7 +12,7 @@ const APP_READY_SELECTOR =
 const LOAD_TIMEOUT = 30000;
 
 async function waitForAppReady(page: Page): Promise<void> {
-  await page.goto('/');
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
   await page.waitForLoadState('domcontentloaded');
   await expect(page.locator(APP_READY_SELECTOR).first()).toBeVisible({ timeout: LOAD_TIMEOUT });
 }

@@ -5,7 +5,7 @@
  * Mocks only external boundaries: Tauri IPC (bindings) and Tauri events.
  */
 
-import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 
 // =============================================================================
@@ -44,6 +44,7 @@ vi.mock('@/services/logger', () => ({
 import { commands } from '@/bindings';
 import { listen } from '@tauri-apps/api/event';
 import { useSourceMonitor } from './useSourceMonitor';
+import { DESKTOP_RUNTIME_TEST_FLAG } from '@/services/runtimeEnvironment';
 
 // =============================================================================
 // Test Data
@@ -67,10 +68,15 @@ function makeDto(overrides?: Record<string, unknown>) {
 describe('useSourceMonitor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    globalThis[DESKTOP_RUNTIME_TEST_FLAG] = true;
     (commands.getSourceState as Mock).mockResolvedValue({
       status: 'ok',
       data: makeDto(),
     });
+  });
+
+  afterEach(() => {
+    globalThis[DESKTOP_RUNTIME_TEST_FLAG] = undefined;
   });
 
   it('should initialize with empty state and fetch from backend', async () => {

@@ -20,6 +20,7 @@ import type {
   BatchRenderCompleteEvent,
 } from '@/components/features/export/types';
 import { createLogger } from '@/services/logger';
+import { isDesktopRuntimeAvailable } from '@/services/runtimeEnvironment';
 
 // =============================================================================
 // Types
@@ -87,6 +88,7 @@ export function useRenderQueue({
   const [useRange, setUseRange] = useState(false);
   const [inPoint, setInPoint] = useState(0);
   const [outPoint, setOutPoint] = useState(10);
+  const desktopRuntimeAvailable = isDesktopRuntimeAvailable();
 
   // ===========================================================================
   // Refs
@@ -108,6 +110,10 @@ export function useRenderQueue({
   // Event Listeners
   // ===========================================================================
   useEffect(() => {
+    if (!desktopRuntimeAvailable) {
+      return;
+    }
+
     let isDisposed = false;
 
     const setupListeners = async (): Promise<void> => {
@@ -192,7 +198,7 @@ export function useRenderQueue({
       }
       unlistenRefs.current = [];
     };
-  }, []);
+  }, [desktopRuntimeAvailable]);
 
   // ===========================================================================
   // Queue Management

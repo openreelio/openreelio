@@ -5,12 +5,13 @@
  * state aligned with backend responses.
  */
 
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
 import { useRenderQueue } from './useRenderQueue';
+import { DESKTOP_RUNTIME_TEST_FLAG } from '@/services/runtimeEnvironment';
 
 vi.mock('@tauri-apps/plugin-dialog', () => ({
   save: vi.fn(),
@@ -24,6 +25,7 @@ describe('useRenderQueue', () => {
   beforeEach(() => {
     handlers.clear();
     vi.clearAllMocks();
+    globalThis[DESKTOP_RUNTIME_TEST_FLAG] = true;
     vi.mocked(save).mockResolvedValue('/tmp/out.mp4');
     vi.mocked(listen).mockImplementation(async (event, handler) => {
       handlers.set(String(event), handler as EventHandler);
@@ -31,6 +33,10 @@ describe('useRenderQueue', () => {
         handlers.delete(String(event));
       };
     });
+  });
+
+  afterEach(() => {
+    globalThis[DESKTOP_RUNTIME_TEST_FLAG] = undefined;
   });
 
   it('should subscribe to batch events before a batch starts', () => {

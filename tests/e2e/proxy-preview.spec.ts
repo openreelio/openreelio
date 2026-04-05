@@ -26,6 +26,7 @@ async function seedProxyPreviewState(page: Page): Promise<void> {
   await page.evaluate(async (baseUrl) => {
     const { useProjectStore } = await import('../../src/stores/projectStore.ts');
     const { usePlaybackStore } = await import('../../src/stores/playbackStore.ts');
+    const { useWorkspaceLayoutStore } = await import('../../src/stores/workspaceLayoutStore.ts');
 
     const now = new Date().toISOString();
     const fixtureBase = `${baseUrl}/tests/e2e/fixtures`;
@@ -137,6 +138,8 @@ async function seedProxyPreviewState(page: Page): Promise<void> {
       loop: false,
       syncWithTimeline: true,
     });
+
+    useWorkspaceLayoutStore.getState().setActivePanel('center-top', 'program-monitor');
   }, origin);
 }
 
@@ -156,7 +159,7 @@ test.describe('Proxy Preview QA', () => {
       pageErrors.push(error.message);
     });
 
-    await page.goto('/');
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
     await page.waitForLoadState('domcontentloaded');
     await dismissBlockingFFmpegWarning(page);
     await seedProxyPreviewState(page);

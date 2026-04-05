@@ -32,6 +32,12 @@ let nextTreeRefreshRequestId = 0;
 let latestTreeRefreshRequestId = 0;
 let scheduledTreeRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
+function isTauriRuntime(): boolean {
+  return (
+    typeof (globalThis as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined'
+  );
+}
+
 // =============================================================================
 // Types
 // =============================================================================
@@ -292,6 +298,12 @@ let unlistenFunctions: UnlistenFn[] = [];
 export async function setupWorkspaceEventListeners(): Promise<void> {
   // Clean up any existing listeners
   await cleanupWorkspaceEventListeners();
+
+  if (!isTauriRuntime()) {
+    logger.debug('Skipping workspace event listeners in non-Tauri environment');
+    useWorkspaceStore.setState({ isWatching: false, error: null });
+    return;
+  }
 
   const scopedUnlisteners: UnlistenFn[] = [];
 
