@@ -16,9 +16,14 @@ use tauri::State;
 use walkdir::{DirEntry, WalkDir};
 
 use crate::core::assets::AssetKind;
-use crate::core::workspace::service::{FileTreeEntry, WorkspaceService};
+use crate::core::workspace::{
+    ignore::IgnoreRules,
+    service::{FileTreeEntry, WorkspaceService},
+    watcher::{WorkspaceEvent, WorkspaceWatcher},
+};
 use crate::core::CoreError;
 use crate::AppState;
+use tauri::{Emitter, Manager};
 
 // =============================================================================
 // Response Types
@@ -99,49 +104,242 @@ const MAX_DOCUMENT_LIST_LIMIT: usize = 2_000;
 // IPC Commands
 // =============================================================================
 
-/// Scan the project workspace for media files and auto-register them as assets
+/// Scan the project workspace for media files and auto-register them as assets.
+/// Also starts (or restarts) the live filesystem watcher for this project.
 #[tauri::command]
 #[specta::specta]
 pub async fn scan_workspace(state: State<'_, AppState>) -> Result<WorkspaceScanResultDto, String> {
-    let mut guard = state.project.lock().await;
-    let project = guard
-        .as_mut()
-        .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
+    // Collect everything we need while holding the project lock, then release it
+    // before starting the watcher (the watcher event loop also locks the project).
+    let project_root;
+    let dto;
 
-    let project_root = project.path.clone();
-    let service = WorkspaceService::open(project_root.clone()).map_err(|e| e.to_ipc_error())?;
+    {
+        let mut guard = state.project.lock().await;
+        let project = guard
+            .as_mut()
+            .ok_or_else(|| CoreError::NoProjectOpen.to_ipc_error())?;
 
-    let result = service.initial_scan().map_err(|e| e.to_ipc_error())?;
+        project_root = project.path.clone();
+        let service = WorkspaceService::open(project_root.clone()).map_err(|e| e.to_ipc_error())?;
 
-    // Auto-register all discovered files as project assets
-    let auto_registered = service
-        .auto_register_discovered_files(&mut project.state, &project_root)
-        .map_err(|e| e.to_ipc_error())?;
+        let result = service.initial_scan().map_err(|e| e.to_ipc_error())?;
 
-    // Allow the asset protocol to serve newly registered files
-    for asset in project.state.assets.values() {
-        if asset.workspace_managed {
-            let resolved_path = std::path::PathBuf::from(&asset.uri);
-            state.allow_asset_protocol_file(&resolved_path);
+        // Auto-register all discovered files as project assets
+        let auto_registered = service
+            .auto_register_discovered_files(&mut project.state, &project_root)
+            .map_err(|e| e.to_ipc_error())?;
+
+        // Allow the asset protocol to serve newly registered files
+        for asset in project.state.assets.values() {
+            if asset.workspace_managed {
+                let resolved_path = std::path::PathBuf::from(&asset.uri);
+                state.allow_asset_protocol_file(&resolved_path);
+            }
         }
+
+        tracing::info!(
+            total = result.total_files,
+            new = result.new_files,
+            removed = result.removed_files,
+            registered = result.registered_files,
+            auto_registered = auto_registered,
+            "Workspace scan completed"
+        );
+
+        dto = WorkspaceScanResultDto {
+            total_files: result.total_files,
+            new_files: result.new_files,
+            removed_files: result.removed_files,
+            registered_files: result.registered_files,
+            auto_registered_files: auto_registered,
+        };
+    } // project lock released here
+
+    // Start (or restart) the live workspace watcher now that the scan is done.
+    if let Err(e) = start_workspace_watcher(project_root, &state).await {
+        // Non-fatal: the scan result is valid; live watching just won't work.
+        tracing::warn!(error = %e, "Could not start workspace file watcher");
+    }
+
+    Ok(dto)
+}
+
+/// Start (or restart) the workspace filesystem watcher for the given project.
+///
+/// Stops any previously running watcher and event-processing loop, then
+/// creates fresh ones. The event loop:
+///   1. Updates the on-disk workspace index for each change
+///   2. Updates the in-memory project state (marks assets missing / reconnects them)
+///   3. Auto-registers newly discovered files as project assets
+///   4. Emits `workspace:file-added`, `workspace:file-removed`, or
+///      `workspace:file-modified` Tauri events so the frontend refreshes its tree
+async fn start_workspace_watcher(project_root: PathBuf, state: &AppState) -> Result<(), String> {
+    use std::sync::Arc;
+
+    // --- Stop any running event-loop task ---
+    {
+        let mut loop_guard = state.workspace_event_loop.lock().await;
+        if let Some(handle) = loop_guard.take() {
+            handle.abort();
+        }
+    }
+    // --- Drop any existing watcher (signals its background thread to stop) ---
+    {
+        let mut watcher_guard = state.workspace_watcher.lock().await;
+        watcher_guard.take();
+    }
+
+    // --- Create the new watcher ---
+    let ignore_rules = Arc::new(IgnoreRules::load(&project_root));
+    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<WorkspaceEvent>();
+
+    let watcher =
+        WorkspaceWatcher::start(project_root.clone(), Arc::clone(&ignore_rules), event_tx)
+            .map_err(|e| format!("Failed to start workspace watcher: {e}"))?;
+
+    {
+        let mut watcher_guard = state.workspace_watcher.lock().await;
+        *watcher_guard = Some(watcher);
+    }
+
+    // --- Obtain the AppHandle needed by the event loop ---
+    let Some(app_handle) = state.app_handle.get().cloned() else {
+        return Err("AppHandle not yet initialized; cannot start workspace watcher".to_string());
+    };
+
+    // --- Spawn the event-processing loop ---
+    let project_root_for_loop = project_root.clone();
+
+    let loop_handle = tokio::spawn(async move {
+        // Keep one WorkspaceService (= one SQLite connection) open for the
+        // lifetime of the loop rather than reopening it on every event.
+        let service = match WorkspaceService::open(project_root_for_loop.clone()) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Workspace watcher event loop: could not open service; loop aborted"
+                );
+                return;
+            }
+        };
+
+        let mut rx = event_rx;
+        while let Some(event) = rx.recv().await {
+            // 1. Update the on-disk workspace index
+            if let Err(e) = service.handle_event(&event) {
+                tracing::warn!(error = %e, "Workspace watcher: failed to update index");
+            }
+
+            // 2. Update the in-memory project state + auto-register
+            {
+                let app_state = app_handle.state::<crate::AppState>();
+                let mut guard = app_state.project.lock().await;
+                if let Some(project) = guard.as_mut() {
+                    match &event {
+                        WorkspaceEvent::FileRemoved(rel_path) => {
+                            for asset in project.state.assets.values_mut() {
+                                if asset.relative_path.as_deref() == Some(rel_path.as_str()) {
+                                    asset.missing = true;
+                                    tracing::info!(
+                                        path = %rel_path,
+                                        "Asset marked missing (file removed externally)"
+                                    );
+                                }
+                            }
+                        }
+                        WorkspaceEvent::FileAdded(rel_path)
+                        | WorkspaceEvent::FileModified(rel_path) => {
+                            // Reconnect previously missing assets at this path
+                            for asset in project.state.assets.values_mut() {
+                                if asset.missing
+                                    && asset.relative_path.as_deref() == Some(rel_path.as_str())
+                                {
+                                    asset.missing = false;
+                                    tracing::info!(
+                                        path = %rel_path,
+                                        "Asset reconnected (file re-appeared)"
+                                    );
+                                }
+                            }
+                            // Auto-register any brand-new files
+                            if let Err(e) = service.auto_register_discovered_files(
+                                &mut project.state,
+                                &project_root_for_loop,
+                            ) {
+                                tracing::warn!(
+                                    error = %e,
+                                    "Workspace watcher: failed to auto-register files"
+                                );
+                            }
+                            // Allow asset-protocol access for all managed assets
+                            for asset in project.state.assets.values() {
+                                if asset.workspace_managed {
+                                    let path = PathBuf::from(&asset.uri);
+                                    app_state.allow_asset_protocol_file(&path);
+                                }
+                            }
+                        }
+                    }
+                }
+            } // project lock released here
+
+            // 3. Notify the frontend
+            let (event_name, rel_path) = match &event {
+                WorkspaceEvent::FileAdded(p) => ("workspace:file-added", p.clone()),
+                WorkspaceEvent::FileRemoved(p) => ("workspace:file-removed", p.clone()),
+                WorkspaceEvent::FileModified(p) => ("workspace:file-modified", p.clone()),
+            };
+
+            let kind = kind_string_for_path(&rel_path);
+            let payload = serde_json::json!({
+                "relativePath": rel_path,
+                "kind": kind,
+            });
+
+            if let Err(e) = app_handle.emit(event_name, payload) {
+                tracing::warn!(
+                    event = event_name,
+                    error = %e,
+                    "Workspace watcher: failed to emit event"
+                );
+            }
+        }
+
+        tracing::debug!("Workspace watcher event loop ended");
+    });
+
+    {
+        let mut loop_guard = state.workspace_event_loop.lock().await;
+        *loop_guard = Some(loop_handle);
     }
 
     tracing::info!(
-        total = result.total_files,
-        new = result.new_files,
-        removed = result.removed_files,
-        registered = result.registered_files,
-        auto_registered = auto_registered,
-        "Workspace scan completed"
+        project = %project_root.display(),
+        "Workspace file watcher started"
     );
 
-    Ok(WorkspaceScanResultDto {
-        total_files: result.total_files,
-        new_files: result.new_files,
-        removed_files: result.removed_files,
-        registered_files: result.registered_files,
-        auto_registered_files: auto_registered,
-    })
+    Ok(())
+}
+
+/// Returns the lowercase media-kind string for a relative path, or `None` for
+/// non-media files.  Used to populate `WorkspaceFileEvent.kind` payloads.
+fn kind_string_for_path(relative_path: &str) -> Option<String> {
+    let ext = std::path::Path::new(relative_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    let kind = match ext.to_lowercase().as_str() {
+        "mp4" | "mov" | "avi" | "mkv" | "webm" | "m4v" | "wmv" | "flv" => "video",
+        "mp3" | "wav" | "aac" | "ogg" | "flac" | "m4a" | "wma" => "audio",
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "webp" | "tiff" | "svg" => "image",
+        "srt" | "vtt" | "ass" | "ssa" | "sub" => "subtitle",
+        "ttf" | "otf" | "woff" | "woff2" => "font",
+        _ => return None,
+    };
+    Some(kind.to_string())
 }
 
 /// Get the workspace file tree with asset_id populated from project state

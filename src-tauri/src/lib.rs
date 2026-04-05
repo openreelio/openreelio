@@ -41,6 +41,7 @@ use crate::core::{
     jobs::WorkerPool,
     performance::memory::{CacheManager, MemoryPool},
     search::meilisearch::SearchService,
+    workspace::watcher::WorkspaceWatcher,
 };
 
 // =============================================================================
@@ -807,6 +808,18 @@ pub struct AppState {
     /// This is runtime-only UI state (not persisted in project files).
     /// Tracks which asset is loaded, In/Out points, and source playhead position.
     pub source_monitor: Mutex<SourceMonitorState>,
+
+    /// Active workspace file watcher (monitors the project directory for changes).
+    ///
+    /// Dropping the inner `WorkspaceWatcher` signals its background thread to stop.
+    /// Replaced whenever a new project is scanned.
+    pub workspace_watcher: Mutex<Option<WorkspaceWatcher>>,
+
+    /// Background task handle for the workspace watcher event-processing loop.
+    ///
+    /// The loop reads `WorkspaceEvent`s from the watcher channel, updates the
+    /// asset index and project state, then emits Tauri events to the frontend.
+    pub workspace_event_loop: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 /// Runtime source monitor state for dual-viewer workflow.
@@ -932,6 +945,8 @@ impl AppState {
             credential_vault: Mutex::new(None),
             playback_sync: Mutex::new(PlaybackSyncState::default()),
             source_monitor: Mutex::new(SourceMonitorState::default()),
+            workspace_watcher: Mutex::new(None),
+            workspace_event_loop: Mutex::new(None),
         }
     }
 
